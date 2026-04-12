@@ -1,0 +1,33 @@
+{
+  "name": "r-data-dashboard",
+  "version": "1.0.0",
+  "description": "Electron + React desktop app with R Plumber backend",
+  "main": "main.js",
+  "scripts": {
+    "dev": "powershell -ExecutionPolicy Bypass -File ./launch.ps1",
+    "vite": "vite",
+    "electron-start": "wait-on http://localhost:5173 && electron .",
+    "build": "vite build",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "better-sqlite3": "^12.8.0",
+    "lucide-react": "^1.0.1",
+    "plotly.js-dist-min": "^3.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-plotly.js": "^2.6.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.1.0",
+    "electron": "^34.0.0",
+    "electron-rebuild": "^3.2.9",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.2",
+    "vite": "^6.2.0",
+    "wait-on": "^8.0.0"
+  }
+}
