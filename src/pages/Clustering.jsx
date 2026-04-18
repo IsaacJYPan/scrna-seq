@@ -42,6 +42,12 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
     }
   }, [datasetInfo, pipelineState?.pca, result, running, runClustering, hasHydrated]);
 
+  // Reset hydration flag when callApi identity changes (i.e., when rSessionId loads)
+  // so that we can retry if the first attempt was a no-op due to missing session ID.
+  useEffect(() => {
+    setHasHydrated(false);
+  }, [callApi]);
+
   if (!datasetInfo) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">

@@ -7,6 +7,13 @@ library(Seurat)
 library(dplyr)
 library(Matrix)
 
+# ── Session ID ────────────────────────────────────────────────────
+# Generated fresh on every R process start. Used by the frontend to
+# detect restarts so cached pipeline steps are re-executed in R.
+r_session_id <- paste0(format(Sys.time(), "%Y%m%d%H%M%S"), "-",
+                       paste0(sample(c(letters, 0:9), 8, replace = TRUE), collapse = ""))
+cat("[R] Session ID:", r_session_id, "\n")
+
 # ── In-memory data store ──────────────────────────────────────────
 # Holds the physical Seurat object for stateful processing
 global_obj <- NULL
@@ -47,6 +54,12 @@ function(req, res) {
 #* @get /health
 function() {
   list(status = "ok", timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"), mode = "scRNA-seq Seurat Real")
+}
+
+#* Return the R process session ID (changes on every restart)
+#* @get /session-id
+function() {
+  list(sessionId = r_session_id)
 }
 
 #* Get real QC distribution data from the loaded Seurat object
@@ -227,41 +240,46 @@ function(npcs = 50) {
 
   script <- paste0(
     "# Scale the data\n",
-    "obj <- ScaleData(obj, features = VariableFeatures(object = obj))\n",
+    "obj <- ScaleData(obj, features = rownames(object = obj))\n",
     "# Run PCA\n",
     "obj <- RunPCA(obj, features = VariableFeatures(object = obj), npcs = ", npcs, ")\n"
   )
 
   if (is.null(global_obj)) return(list(error="No object"))
   
-  global_obj <<- ScaleData(global_obj, features = VariableFeatures(object = global_obj))
-  global_obj <<- RunPCA(global_obj, features = VariableFeatures(object = global_obj), npcs = npcs, verbose=FALSE)
+  tryCatch({
+    global_obj <<- ScaleData(global_obj, features = rownames(global_obj))
+    set.seed(42)
+    global_obj <<- RunPCA(global_obj, features = VariableFeatures(object = global_obj), npcs = npcs, verbose=FALSE)
 
-  # Extract true standard deviations
-  stdevs <- global_obj[["pca"]]@stdev[1:npcs]
-  
-  # Extract top 5 positive and top 5 negative gene loadings for top 5 PCs
-  ld <- Loadings(global_obj, "pca")
-  loadings <- list()
-  for (i in 1:min(5, npcs)) {
-    pc_name <- paste0("PC_", i)
-    srt_pos <- sort(ld[, pc_name], decreasing=TRUE)
-    srt_neg <- sort(ld[, pc_name], decreasing=FALSE)
-    top_genes <- c(names(srt_pos)[1:5], names(srt_neg)[1:5])
-    loadings[[paste0("PC", i)]] <- top_genes
-  }
+    # Extract true standard deviations
+    stdevs <- global_obj[["pca"]]@stdev[1:npcs]
+    
+    # Extract top 5 positive and top 5 negative gene loadings for top 5 PCs
+    ld <- Loadings(global_obj, "pca")
+    loadings <- list()
+    for (i in 1:min(5, npcs)) {
+      pc_name <- paste0("PC_", i)
+      srt_pos <- sort(ld[, pc_name], decreasing=TRUE)
+      srt_neg <- sort(ld[, pc_name], decreasing=FALSE)
+      top_genes <- c(names(srt_pos)[1:5], names(srt_neg)[1:5])
+      loadings[[paste0("PC", i)]] <- top_genes
+    }
 
-  make_provenance(
-    result = list(
-      message = paste0("PCA completed with ", npcs, " components."),
-      npcs = npcs,
-      stdevs = stdevs,
-      gene_loadings = loadings
-    ),
-    script_text = script,
-    operation = "pca",
-    parameters = list(npcs = npcs)
-  )
+    make_provenance(
+      result = list(
+        message = paste0("PCA completed with ", npcs, " components."),
+        npcs = npcs,
+        stdevs = stdevs,
+        gene_loadings = loadings
+      ),
+      script_text = script,
+      operation = "pca",
+      parameters = list(npcs = npcs)
+    )
+  }, error = function(e) {
+    list(error = paste("PCA failed:", e$message))
+  })
 }
 
 # ──────────────────────────────────────────────────────────────────
@@ -317,46 +335,66 @@ function(dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3) {
   n_components <- as.integer(n_components)
   n_neighbors <- as.integer(n_neighbors)
   min_dist <- as.numeric(min_dist)
-  
-  script <- paste0(
-    "# Run UMAP\n",
-    "obj <- RunUMAP(obj, dims = 1:", dims, ", n.components = ", n_components, "L",
-    ", n.neighbors = ", n_neighbors, ", min.dist = ", min_dist, ")\n"
-  )
 
-  if (is.null(global_obj)) return(list(error="No object"))
-  global_obj <<- RunUMAP(global_obj, dims = 1:dims, n.components = n_components,
-                         n.neighbors = n_neighbors, min.dist = min_dist)
+  # Null-check BEFORE accessing any slots on global_obj
+  if (is.null(global_obj)) return(list(error = "No object loaded. Please reload and rerun the pipeline."))
 
-  # Extract true coordinates mapped to clusters
-  emb <- Embeddings(global_obj, "umap")
-  clusts <- global_obj$seurat_clusters
-  
-  trace_data <- lapply(levels(clusts), function(cl) {
-    idx <- which(clusts == cl)
-    el <- list(
-      name = paste("Cluster", cl),
-      x = as.numeric(emb[idx, 1]),
-      y = as.numeric(emb[idx, 2])
-    )
-    if (n_components >= 3) {
-      el$z = as.numeric(emb[idx, 3])
+  cat("[DEBUG] reductions on global_obj:", paste(names(global_obj@reductions), collapse=", "), "\n")
+
+  tryCatch({
+    # Verify the 'pca' reduction actually exists
+    if (!"pca" %in% names(global_obj@reductions)) {
+      return(list(error = "PCA reduction not found. Please re-run the PCA step before computing UMAP."))
     }
-    return(el)
-  })
 
-  make_provenance(
-    result = list(
-      message = paste0("UMAP computed (", n_components, "D)."),
-      n_components = n_components,
-      n_neighbors = n_neighbors,
-      min_dist = min_dist,
-      trace_data = trace_data
-    ),
-    script_text = script,
-    operation = "umap",
-    parameters = list(dims = dims, n_components = n_components, n_neighbors = n_neighbors, min_dist = min_dist)
-  )
+    # Clamp dims to the number of PCs that were actually computed
+    available_pcs <- ncol(Embeddings(global_obj, "pca"))
+    if (dims > available_pcs) {
+      cat("[WARN] Requested", dims, "PC dims but only", available_pcs, "available. Clamping.\n")
+      dims <- available_pcs
+    }
+
+    script <- paste0(
+      "# Run UMAP\n",
+      "obj <- RunUMAP(obj, reduction = 'pca', dims = 1:", dims, ", n.components = ", n_components, "L",
+      ", n.neighbors = ", n_neighbors, ", min.dist = ", min_dist, ")\n"
+    )
+
+    global_obj <<- RunUMAP(global_obj, reduction = "pca", dims = 1:dims,
+                           n.components = n_components,
+                           n.neighbors = n_neighbors, min.dist = min_dist)
+
+    emb <- Embeddings(global_obj, "umap")
+    clusts <- global_obj$seurat_clusters
+
+    trace_data <- lapply(levels(clusts), function(cl) {
+      idx <- which(clusts == cl)
+      el <- list(
+        name = paste("Cluster", cl),
+        x = as.numeric(emb[idx, 1]),
+        y = as.numeric(emb[idx, 2])
+      )
+      if (n_components >= 3) {
+        el$z = as.numeric(emb[idx, 3])
+      }
+      return(el)
+    })
+
+    make_provenance(
+      result = list(
+        message = paste0("UMAP computed (", n_components, "D)."),
+        n_components = n_components,
+        n_neighbors = n_neighbors,
+        min_dist = min_dist,
+        trace_data = trace_data
+      ),
+      script_text = script,
+      operation = "umap",
+      parameters = list(dims = dims, n_components = n_components, n_neighbors = n_neighbors, min_dist = min_dist)
+    )
+  }, error = function(e) {
+    list(error = paste("UMAP failed:", e$message))
+  })
 }
 
 # ──────────────────────────────────────────────────────────────────

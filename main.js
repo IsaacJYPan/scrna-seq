@@ -87,8 +87,10 @@ function createWindow() {
   const isDev = !app.isPackaged;
   if (isDev) {
     mainWindow.loadURL(VITE_DEV_URL);
+    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
+    
   }
 }
 
