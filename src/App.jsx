@@ -143,6 +143,9 @@ export default function App() {
   const [provenanceRecords, setProvenanceRecords] = useState([]);
   const [drawerProvId, setDrawerProvId] = useState(null);
   const [drawerChain, setDrawerChain] = useState(null);
+  // R process session ID — changes on every restart, busting the pipeline cache
+  // so that all stateful steps re-execute in R and rebuild global_obj.
+  const [rSessionId, setRSessionId] = useState(null);
 
   useEffect(() => {
     loadPersistedProvenance().then(records => {
@@ -152,6 +155,16 @@ export default function App() {
       .then(r => r.json())
       .then(data => setApiStatus(`Connected (${data.mode})`))
       .catch(() => setApiStatus('Disconnected'));
+    // Fetch R session ID so we can detect restarts and bust the pipeline cache
+    fetch(`${API}/session-id`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.sessionId) {
+          console.log('[App] R session ID:', data.sessionId);
+          setRSessionId(data.sessionId);
+        }
+      })
+      .catch(e => console.warn('[App] Could not fetch R session ID:', e));
   }, []);
 
   const updateActiveWorkspace = (updates) => {
@@ -180,6 +193,7 @@ export default function App() {
   }, []);
 
   const callApi = useCallback(async (path, options = {}, {
+    
     operation = '',
     step = '',
     parentIds = [],
@@ -189,12 +203,19 @@ export default function App() {
   } = {}) => {
     // Ignore React SyntheticEvents (which are truthy) passed accidentally via onClick
     const forceOnlyIfCached = typeof onlyIfCached === 'boolean' ? onlyIfCached : false;
+    console.log('[callApi]', path, 'onlyIfCached:', onlyIfCached, 'dataVersion:', currentWs.dataVersion);
 
     if (forceOnlyIfCached) return null;
 
+    // ── Cache key includes the R session ID so a fresh R process always
+    // misses the cache and re-runs pipeline steps to rebuild global_obj.
+    const effectiveCacheParams = (useCache && cacheParams && rSessionId)
+      ? { ...cacheParams, _rSession: rSessionId }
+      : cacheParams;
+
     // 1. Check Cache First
-    if (useCache && cacheParams) {
-      const key = await makeCacheKey(operation, cacheParams, currentWs.dataVersion);
+    if (useCache && effectiveCacheParams) {
+      const key = await makeCacheKey(operation, effectiveCacheParams, currentWs.dataVersion);
       const cached = await getCachedResult(key);
       if (cached) {
         const prov = await (window.electronAPI?.getProvenance?.(cached.provenanceId));
@@ -249,8 +270,8 @@ export default function App() {
           markPipelineStep(step, extraState);
         }
 
-        if (useCache && cacheParams) {
-          const key = await makeCacheKey(operation, cacheParams, currentWs.dataVersion);
+        if (useCache && effectiveCacheParams) {
+          const key = await makeCacheKey(operation, effectiveCacheParams, currentWs.dataVersion);
           await setCachedResult(key, data.provenance.id, data.result);
         }
       }
@@ -259,7 +280,7 @@ export default function App() {
       console.error(err);
       return null;
     }
-  }, [activeWsIndex, workspaces, markPipelineStep, currentWs, updateActiveWorkspace]);
+  }, [activeWsIndex, workspaces, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId]);
 
   const openProvenance = async (provId) => {
     const chain = await getProvenanceChain(provId);
