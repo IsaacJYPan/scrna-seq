@@ -1,15 +1,19 @@
 import React, { useState } from 'react';
 import { Sparkles, AlertTriangle } from 'lucide-react';
+import { useTabParams } from '../hooks/useTabParams';
 
-export default function Normalization({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState }) {
+export default function Normalization({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, sessionReady, userEmail, objectId }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
-  // Parameters
-  const [method, setMethod] = useState('LogNormalize');
-  const [scaleFactor, setScaleFactor] = useState(10000);
-  const [nFeatures, setNFeatures] = useState(2000);
+  // Persisted parameters
+  const [params, setParam] = useTabParams('normalize', userEmail, objectId, {
+    method: 'LogNormalize',
+    scaleFactor: 10000,
+    nFeatures: 2000,
+  });
+  const { method, scaleFactor, nFeatures } = params;
 
   if (!datasetInfo) {
     return (
@@ -42,7 +46,8 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
       operation: 'normalize',
       step: 'normalize',
       parentIds: currentProvId ? [currentProvId] : [],
-      useCache: false
+      useCache: true,
+      cacheParams: { type: 'normalization', method, scale_factor: scaleFactor, nfeatures: nFeatures }
     });
 
     if (!data) {
@@ -104,7 +109,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Method</label>
               <select
                 value={method}
-                onChange={e => setMethod(e.target.value)}
+                onChange={e => setParam('method', e.target.value)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               >
                 <option value="LogNormalize">LogNormalize</option>
@@ -116,7 +121,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Scale Factor</label>
               <input
                 type="number" value={scaleFactor}
-                onChange={e => setScaleFactor(e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+                onChange={e => setParam('scaleFactor', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
                 disabled={method === 'SCTransform'}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary disabled:opacity-40"
               />
@@ -126,7 +131,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Variable Features</label>
               <input
                 type="number" value={nFeatures}
-                onChange={e => setNFeatures(e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+                onChange={e => setParam('nFeatures', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
               <p className="text-[10px] text-slate-500 mt-1">Number of HVGs to select</p>

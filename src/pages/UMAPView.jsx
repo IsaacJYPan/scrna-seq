@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Layers, ListFilter, AlertTriangle } from 'lucide-react';
 import Plot from 'react-plotly.js';
+import { useTabParams } from '../hooks/useTabParams';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
@@ -43,44 +44,55 @@ function generate3DData(nClusters) {
   return traces;
 }
 
-export default function UMAPView({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState }) {
+export default function UMAPView({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
-  const [plotData, setPlotData] = useState([]);
   const [error, setError] = useState(null);
   const [hasHydrated, setHasHydrated] = useState(false);
 
-  // Parameters
-  const [nComponents, setNComponents] = useState(2);
-  const [nNeighbors, setNNeighbors] = useState(30);
-  const [minDist, setMinDist] = useState(0.3);
-  const [dims, setDims] = useState(15);
+  // Persisted parameters
+  const [params, setParam] = useTabParams('umap', userEmail, objectId, {
+    nComponents: 2,
+    nNeighbors: 30,
+    minDist: 0.3,
+  });
+  const { nComponents, nNeighbors, minDist } = params;
+  // dims defaults to the PC count used for clustering (from pipelineState)
+  const [dims, setDims] = useState(pipelineState?.clusterDims || 15);
 
-  const runUMAP = useCallback(async (isInitial = false) => {
+  // Track which n_components was actually computed last — persisted so hydration
+  // attempts the right cache key on reload (e.g. if user last ran 3D UMAP).
+  const [params2, setParam2] = useTabParams('umap_meta', userEmail, objectId, { resultNComponents: null });
+  const savedResultNComponents = params2.resultNComponents;
+
+  // resultNComponents: in-session state that mirrors savedResultNComponents
+  // We initialize from the persisted value so traces render correctly after hydration.
+  const [resultNComponents, setResultNComponents] = useState(() => savedResultNComponents);
+
+  // Keep dims in sync if the user re-clusters with different dims (before running UMAP)
+  useEffect(() => {
+    if (pipelineState?.clusterDims && !result) {
+      setDims(pipelineState.clusterDims);
+    }
+  }, [pipelineState?.clusterDims]);
+
+  const runUMAP = useCallback(async (isInitial = false, nComponentsOverride = null) => {
     setRunning(true);
     setError(null);
-    const data = await callApi(`/umap?dims=${dims}&n_components=${nComponents}&n_neighbors=${nNeighbors}&min_dist=${minDist}`, {}, {
+    const nc = nComponentsOverride ?? nComponents;
+    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}`, {}, {
       operation: 'umap',
       step: 'umap',
       parentIds: currentProvId ? [currentProvId] : [],
       useCache: true,
-      cacheParams: { type: 'umap', dims, nComponents, nNeighbors, minDist },
+      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist },
       onlyIfCached: isInitial
     });
 
     if (data && data.result) {
-      const traces = data.result.trace_data.map((trace, i) => ({
-        x: trace.x,
-        y: trace.y,
-        z: trace.z,
-        mode: 'markers',
-        type: nComponents === 2 ? 'scatter' : 'scatter3d',
-        name: trace.name,
-        marker: { size: nComponents === 2 ? 4 : 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
-        hovertemplate: `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
-      }));
-      setPlotData(traces);
       setResult(data);
+      setResultNComponents(nc);
+      setParam2('resultNComponents', nc);  // persist for hydration on reload
     } else if (data && data.error && !isInitial) {
       setError(data.error);
     } else if (!data && !isInitial) {
@@ -89,18 +101,40 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
     setRunning(false);
   }, [callApi, currentProvId, dims, nComponents, nNeighbors, minDist, pipelineState?.clusterCount]);
 
-  useEffect(() => {
-    if (datasetInfo && pipelineState?.cluster && !result && !running && !hasHydrated) {
-      setHasHydrated(true);
-      runUMAP(true);
-    }
-  }, [datasetInfo, pipelineState?.cluster, result, running, runUMAP, hasHydrated]);
+  // Derive Plotly traces from stored result + current nComponents.
+  // This means switching 2D ⇔ 3D re-renders immediately without re-running UMAP.
+  const traces = result?.result?.trace_data
+    ? result.result.trace_data.map((trace, i) => ({
+        x: trace.x,
+        y: trace.y,
+        z: resultNComponents === 3 ? trace.z : undefined,
+        mode: 'markers',
+        type: resultNComponents === 2 ? 'scatter' : 'scatter3d',
+        name: trace.name,
+        marker: { size: resultNComponents === 2 ? 4 : 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
+        hovertemplate: resultNComponents === 2
+          ? `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
+          : `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
+      }))
+    : [];
 
-  // Reset hydration flag when callApi identity changes (i.e., when rSessionId loads)
-  // so that we can retry if the first attempt was a no-op due to missing session ID.
+  // Hydration: use the last-computed nComponents (from localStorage) so that
+  // e.g. a previously-computed 3D UMAP cache key is matched correctly.
+  useEffect(() => {
+    if (datasetInfo && pipelineState?.cluster && !result && !running && !hasHydrated && sessionReady) {
+      setHasHydrated(true);
+      // Pass in the saved resultNComponents so we hit the right cache key.
+      // If null (no prior run), falls back to current nComponents.
+      runUMAP(true, savedResultNComponents ?? undefined);
+    }
+  }, [datasetInfo, pipelineState?.cluster, result, running, runUMAP, hasHydrated, sessionReady, savedResultNComponents]);
+
+  // Reset hydration flag when the R session ID changes (new R process started)
+  // so that we re-run the step in R to rebuild global_obj.
+  // Watch rSessionId directly — NOT callApi, which changes on every workspace update.
   useEffect(() => {
     setHasHydrated(false);
-  }, [callApi]);
+  }, [rSessionId]);
 
   if (!datasetInfo) {
     return (
@@ -168,10 +202,16 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
           <button
             onClick={() => runUMAP()}
             disabled={running}
-            className={`btn ${result ? 'btn-secondary border-primary text-primary' : 'btn-primary'} flex items-center gap-2`}
+            className={`btn ${
+              result && resultNComponents === nComponents
+                ? 'btn-secondary border-primary text-primary'
+                : 'btn-primary'
+            } flex items-center gap-2`}
           >
             {running && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
-            {result ? 'Re-compute UMAP' : 'Run UMAP'}
+            {result && resultNComponents === nComponents
+              ? 'Re-compute UMAP'
+              : `Run ${nComponents}D UMAP`}
           </button>
         </div>
       </div>
@@ -190,11 +230,11 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
             <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Dimensions</label>
             <div className="flex bg-slate-800 rounded-lg p-0.5 border border-border">
               <button
-                onClick={() => setNComponents(2)}
+                onClick={() => setParam('nComponents', 2)}
                 className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 2 ? 'bg-primary text-white shadow' : 'text-slate-500'}`}
               >2D</button>
               <button
-                onClick={() => setNComponents(3)}
+                onClick={() => setParam('nComponents', 3)}
                 className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-primary text-white shadow' : 'text-slate-500'}`}
               >3D</button>
             </div>
@@ -204,7 +244,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
             <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">n_neighbors</label>
             <input
               type="number" value={nNeighbors} min={5} max={100}
-              onChange={e => setNNeighbors(parseInt(e.target.value))}
+              onChange={e => setParam('nNeighbors', parseInt(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
             />
             <p className="text-[10px] text-slate-500 mt-1">Local vs global structure</p>
@@ -213,7 +253,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
             <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">min_dist</label>
             <input
               type="number" value={minDist} min={0.01} max={1} step={0.05}
-              onChange={e => setMinDist(parseFloat(e.target.value))}
+              onChange={e => setParam('minDist', parseFloat(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
             />
             <p className="text-[10px] text-slate-500 mt-1">Packing density</p>
@@ -253,7 +293,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
 
           {result && (
             <Plot
-              data={plotData}
+              data={traces}
               layout={is2D ? layout2D : layout3D}
               useResizeHandler
               className="w-full h-full"
@@ -270,7 +310,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
                 <ListFilter size={14} className="inline text-primary mr-2" />Clusters
               </h4>
               <div className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar">
-                {plotData.map((trace, i) => (
+                {traces.map((trace, i) => (
                   <div key={i} className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-white/5">
                     <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: trace.marker?.color || CLUSTER_COLORS[i] }}></div>
                     <span className="text-slate-300">{trace.name}</span>

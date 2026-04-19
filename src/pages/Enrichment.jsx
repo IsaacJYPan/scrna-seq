@@ -1,11 +1,70 @@
-import React, { useState } from 'react';
-import { Microscope, Activity, ChevronRight, AlertTriangle, Download } from 'lucide-react';
+import React, { useState, useCallback, useEffect } from 'react';
+import { Microscope, Activity, ChevronRight, AlertTriangle, RefreshCw, BarChart2, Zap } from 'lucide-react';
 import Plot from 'react-plotly.js';
+import { useTabParams } from '../hooks/useTabParams';
 
-export default function Enrichment({ callApi, datasetInfo, currentProvId, openProvenance }) {
+const DB_OPTIONS = [
+  { value: 'GO_BP', label: 'GO Biological Process', desc: 'Gene Ontology — biological processes' },
+  { value: 'GO_MF', label: 'GO Molecular Function', desc: 'Gene Ontology — molecular functions' },
+  { value: 'KEGG',  label: 'KEGG Pathways',         desc: 'Kyoto Encyclopedia of Genes and Genomes' },
+  { value: 'Reactome', label: 'Reactome',            desc: 'Reactome pathway database (requires ReactomePA)' },
+];
+
+export default function Enrichment({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   const [computing, setComputing] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const [viewMode, setViewMode] = useState('bar'); // 'bar' | 'bubble'
+
+  // Persisted parameters
+  const [params, setParam] = useTabParams('enrichment', userEmail, objectId, {
+    database: 'GO_BP',
+    pvalCutoff: 0.05,
+    logfcThreshold: 0.25,
+    topN: 20,
+  });
+  const { database, pvalCutoff, logfcThreshold, topN } = params;
+
+  const runEnrichment = useCallback(async (isInitial = false) => {
+    setComputing(true);
+    setError(null);
+
+    const data = await callApi(
+      `/enrichment?database=${database}&pval_cutoff=${pvalCutoff}&logfc_threshold=${logfcThreshold}&top_n=${topN}`,
+      {},
+      {
+        operation: 'enrichment',
+        step: 'enrichment',
+        parentIds: currentProvId ? [currentProvId] : [],
+        useCache: true,
+        cacheParams: { type: 'enrichment', database, pval_cutoff: pvalCutoff, logfc_threshold: logfcThreshold, top_n: topN },
+        onlyIfCached: isInitial,
+      }
+    );
+
+    if (data && data.result) {
+      setResult(data);
+    } else if (data && data.error && !isInitial) {
+      setError(data.error);
+    } else if (!data && !isInitial) {
+      setError('R backend error. Check the R console for details.');
+    }
+    setComputing(false);
+  }, [callApi, currentProvId, database, pvalCutoff, logfcThreshold, topN]);
+
+  // Hydration from cache — gated by sessionReady
+  useEffect(() => {
+    if (datasetInfo && pipelineState?.cluster && !result && !computing && !hasHydrated && sessionReady) {
+      setHasHydrated(true);
+      runEnrichment(true);
+    }
+  }, [datasetInfo, pipelineState?.cluster, result, computing, hasHydrated, runEnrichment, sessionReady]);
+
+  // Reset hydration when R session changes
+  useEffect(() => {
+    setHasHydrated(false);
+  }, [rSessionId]);
 
   if (!datasetInfo) {
     return (
@@ -13,159 +72,293 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
         <div className="text-center max-w-sm">
           <Microscope size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
+          <p className="text-textMuted">Load a dataset in the Workspace first.</p>
         </div>
       </div>
     );
   }
 
-  const runGSEA = async () => {
-    setComputing(true);
-    setError(null);
-
-    const data = await callApi('/enrichment', {}, {
-      operation: 'enrichment',
-      step: 'enrichment',
-      parentIds: currentProvId ? [currentProvId] : [],
-      useCache: false
-    });
-
-    if (!data) {
-      setError('R backend error: Enrichment analysis failed. Check the R console for details.');
-      setComputing(false);
-      return;
-    }
-    if (data.error) {
-      setError(data.error);
-      setComputing(false);
-      return;
-    }
-
-    setResult(data);
-    setComputing(false);
-  };
+  if (!pipelineState?.cluster) {
+    return (
+      <div className="h-full flex items-center justify-center p-8 bg-background">
+        <div className="text-center max-w-sm">
+          <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
+          <h2 className="text-xl font-bold text-white mb-2">Clustering Required</h2>
+          <p className="text-textMuted">Complete the Clustering step before pathway enrichment. DEGs are used as the gene universe for ORA.</p>
+        </div>
+      </div>
+    );
+  }
 
   const pathways = result?.result?.top_pathways || [];
+  // Use a smaller minimum height if there are very few pathways, so the single bar isn't huge
+  const plotHeight = pathways.length <= 3 ? 200 : Math.max(380, pathways.length * 30);
 
-  const chartData = [{
+  // ── Bar chart ──────────────────────────────────────────────────
+  const barData = [{
     type: 'bar',
     orientation: 'h',
     x: pathways.map(p => -Math.log10(p.p_adj)),
-    y: pathways.map(p => p.name),
+    y: pathways.map(p => p.name.length > 48 ? p.name.slice(0, 45) + '…' : p.name),
     marker: {
-      color: ['#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#f43f5e'],
-      opacity: 0.85
+      color: pathways.map(p => -Math.log10(p.p_adj)),
+      colorscale: [
+        [0, '#6366f1'],
+        [0.5, '#a855f7'],
+        [1, '#ec4899'],
+      ],
+      showscale: true,
+      colorbar: { title: { text: '-log10(p-adj)', side: 'right' }, thickness: 12, len: 0.6, x: 1.01 }
     },
-    hovertemplate: '<b>%{y}</b><br>-log10(p-adj): %{x:.1f}<extra></extra>'
+    hovertemplate: '<b>%{y}</b><br>-log10(p-adj): %{x:.2f}<extra></extra>'
   }];
 
-  const layout = {
-    autosize: true, margin: { l: 150, r: 20, t: 30, b: 50 },
+  const barLayout = {
+    height: plotHeight,
+    margin: { l: 280, r: 100, t: 20, b: 50 },
+    bargap: pathways.length <= 3 ? 0.6 : 0.2,
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    font: { color: '#94a3b8', size: 11 },
-    xaxis: { title: '-log10(p-adj)', gridcolor: '#334155', zeroline: false },
-    yaxis: { gridcolor: '#334155' },
+    font: { color: '#94a3b8', size: 10 },
+    xaxis: { title: '-log10(adjusted p-value)', gridcolor: '#334155', zeroline: false },
+    yaxis: { gridcolor: '#334155', autorange: 'reversed', tickfont: { size: 10 } },
+    hoverlabel: { bgcolor: '#1e293b', bordercolor: '#475569', font: { color: '#e2e8f0', size: 12 } }
+  };
+
+  // ── Bubble chart ───────────────────────────────────────────────
+  const bubbleData = pathways.length ? [{
+    type: 'scatter',
+    mode: 'markers',
+    x: pathways.map(p => p.gene_ratio_num ?? parseFloat((p.ratio || '0').split('/')[0]) / (parseFloat((p.ratio || '1').split('/')[1]) || 1)),
+    y: pathways.map(p => p.name.length > 48 ? p.name.slice(0, 45) + '…' : p.name),
+    marker: {
+      size: pathways.map(p => Math.max(8, Math.min(30, (p.count || 1) * 2.5))),
+      color: pathways.map(p => -Math.log10(p.p_adj)),
+      colorscale: [[0, '#6366f1'], [0.5, '#a855f7'], [1, '#ec4899']],
+      showscale: true,
+      colorbar: { title: { text: '-log10(p-adj)', side: 'right' }, thickness: 12, len: 0.6, x: 1.01 },
+      opacity: 0.85,
+      line: { color: 'rgba(255,255,255,0.2)', width: 1 }
+    },
+    hovertemplate: '<b>%{y}</b><br>Gene Ratio: %{x:.3f}<br>Count: %{marker.size}<extra></extra>'
+  }] : [];
+
+  const bubbleLayout = {
+    height: plotHeight,
+    margin: { l: 280, r: 100, t: 20, b: 50 },
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    font: { color: '#94a3b8', size: 10 },
+    xaxis: { title: 'Gene Ratio', gridcolor: '#334155', zeroline: false },
+    yaxis: { gridcolor: '#334155', autorange: 'reversed', tickfont: { size: 10 } },
     hoverlabel: { bgcolor: '#1e293b', bordercolor: '#475569', font: { color: '#e2e8f0', size: 12 } }
   };
 
   return (
     <div className="h-full w-full flex flex-col bg-background p-8 overflow-y-auto custom-scrollbar">
-      <div className="flex justify-between items-center mb-8">
+      {/* Header */}
+      <div className="flex justify-between items-center mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Pathway Enrichment (GSEA)</h2>
-          <p className="text-textMuted">Identify biological processes over-represented in your marker genes via Reactome/KEGG.</p>
+          <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Pathway Enrichment (ORA)</h2>
+          <p className="text-textMuted text-sm">Over-representation analysis against {DB_OPTIONS.find(d => d.value === database)?.desc ?? database}.</p>
         </div>
         <div className="flex gap-3">
           {result && (
-            <button 
-              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
-              onClick={() => openProvenance(result.provenance.id)}
-            >📝 View Step Script</button>
+            <>
+              <button
+                className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
+                onClick={() => openProvenance(result.provenance.id)}
+              >📝 View Script</button>
+              <button
+                onClick={() => { setResult(null); setHasHydrated(false); }}
+                className="btn btn-ghost border border-slate-700 text-slate-400 hover:text-white text-sm flex items-center gap-2"
+              >
+                <RefreshCw size={14} /> Re-run
+              </button>
+            </>
           )}
-          <button 
-            onClick={runGSEA}
+          <button
+            onClick={() => runEnrichment()}
             disabled={computing || !!result}
             className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center gap-2`}
           >
-            {computing ? <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span> : <Activity size={18} />}
-            {result ? 'Analysis Complete' : 'Run GSEA / ORA'}
+            {computing ? <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4" /> : <Activity size={18} />}
+            {result ? 'Analysis Complete' : 'Run ORA'}
           </button>
         </div>
       </div>
 
+      {/* Parameter panel */}
+      {!result && !computing && (
+        <div className="card p-6 mb-6 border-l-4 border-l-primary">
+          <h3 className="font-bold flex items-center gap-2 text-white mb-5">
+            <Zap size={16} className="text-primary" /> Enrichment Parameters
+          </h3>
+          <div className="grid grid-cols-4 gap-5">
+            <div>
+              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Database</label>
+              <select
+                value={database}
+                onChange={e => setParam('database', e.target.value)}
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              >
+                {DB_OPTIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+              </select>
+              <p className="text-[10px] text-slate-500 mt-1">Reference pathway database</p>
+            </div>
+            <div>
+              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">p-value cutoff</label>
+              <input
+                type="number" value={pvalCutoff} min={0.001} max={0.2} step={0.01}
+                onChange={e => setParam('pvalCutoff', parseFloat(e.target.value))}
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              />
+              <p className="text-[10px] text-slate-500 mt-1">Adjusted p-value threshold (BH)</p>
+            </div>
+            <div>
+              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">logFC threshold</label>
+              <input
+                type="number" value={logfcThreshold} min={0.1} max={2} step={0.05}
+                onChange={e => setParam('logfcThreshold', parseFloat(e.target.value))}
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              />
+              <p className="text-[10px] text-slate-500 mt-1">Min log2FC for DEGs entering ORA</p>
+            </div>
+            <div>
+              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Top N pathways</label>
+              <input
+                type="number" value={topN} min={5} max={50} step={1}
+                onChange={e => setParam('topN', parseInt(e.target.value))}
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              />
+              <p className="text-[10px] text-slate-500 mt-1">Maximum pathways shown</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
-        <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger flex items-center gap-3">
-          <AlertTriangle size={18} />
-          <span className="text-sm font-medium">{error}</span>
+        <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger flex items-start gap-3">
+          <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold mb-1">Enrichment Failed</p>
+            <p className="text-xs opacity-80 whitespace-pre-wrap">{error}</p>
+            <p className="text-[10px] text-danger/60 mt-2">
+              Make sure clusterProfiler, org.Hs.eg.db, and ReactomePA are installed:<br />
+              <code className="font-mono">BiocManager::install(c("clusterProfiler", "org.Hs.eg.db", "ReactomePA"))</code>
+            </p>
+          </div>
         </div>
       )}
 
       {!result && !computing && !error && (
         <div className="card p-12 text-center flex flex-col items-center justify-center flex-1 bg-black/10 border-dashed border-2">
-           <Microscope size={56} className="text-primary opacity-40 mb-4" />
-           <p className="text-slate-400 max-w-sm mb-6">Requires DEGs to have been computed. Transforms marker gene lists into biological pathway insights.</p>
-           <div className="flex gap-4">
-              <div className="px-3 py-1.5 bg-surface border border-border rounded text-xs text-textMuted">Database: Reactome</div>
-              <div className="px-3 py-1.5 bg-surface border border-border rounded text-xs text-textMuted">Species: H. sapiens</div>
-           </div>
+          <Microscope size={56} className="text-primary opacity-40 mb-4" />
+          <p className="text-slate-400 max-w-sm mb-6">
+            Requires DEGs (Clustering + FindAllMarkers). Runs clusterProfiler ORA against the selected pathway database.
+          </p>
+          <div className="flex gap-3 flex-wrap justify-center">
+            {DB_OPTIONS.map(d => (
+              <div key={d.value} className={`px-3 py-1.5 rounded text-xs border transition cursor-pointer ${database === d.value ? 'bg-primary/20 border-primary text-primary' : 'bg-surface border-border text-textMuted hover:border-slate-600'}`}
+                onClick={() => setParam('database', d.value)}>
+                {d.label}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
       {computing && (
         <div className="flex flex-col items-center justify-center flex-1">
           <div className="flex gap-2 mb-4">
-            <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '0ms' }}></div>
-            <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '150ms' }}></div>
-            <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '300ms' }}></div>
+            <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '0ms' }} />
+            <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '150ms' }} />
+            <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '300ms' }} />
           </div>
-          <span className="text-xs uppercase tracking-widest font-black text-primary animate-pulse">Running clusterProfiler Algorithm...</span>
+          <span className="text-xs uppercase tracking-widest font-black text-primary animate-pulse">
+            Running clusterProfiler ORA ({database})…
+          </span>
         </div>
       )}
 
       {result && (
-        <div className="grid grid-cols-12 gap-8 flex-1">
-          <div className="col-span-12 card p-6 h-[400px]">
-             <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-4 flex items-center gap-2">
-               <div className="w-1.5 h-1.5 rounded-full bg-primary"></div> Pathway Over-Representation
-             </h3>
-             <div className="flex-1 w-full min-h-0">
-                <Plot 
-                  data={chartData} 
-                  layout={layout} 
-                  config={{ displayModeBar: false, responsive: true }} 
-                  className="w-full h-full"
-                  useResizeHandler
-                />
-             </div>
+        <div className="space-y-6 flex-1">
+          {/* Summary bar */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {result._fromCache && (
+                <span className="text-[10px] bg-primary/20 text-primary px-2 py-0.5 rounded font-bold">CACHED</span>
+              )}
+              <span className="text-sm text-slate-400">
+                <span className="text-white font-bold">{pathways.length}</span> pathways enriched
+                {result.result?.gene_universe_size && (
+                  <> from <span className="text-white font-bold">{result.result.gene_universe_size}</span> gene universe</>
+                )}
+              </span>
+              <span className="text-[10px] px-2 py-0.5 bg-slate-800 rounded border border-border text-textMuted">{database}</span>
+            </div>
+            {/* View toggle */}
+            <div className="flex bg-slate-800 rounded-lg p-1 border border-border">
+              <button
+                onClick={() => setViewMode('bar')}
+                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 ${viewMode === 'bar' ? 'bg-primary text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+              >
+                <BarChart2 size={12} /> Bar
+              </button>
+              <button
+                onClick={() => setViewMode('bubble')}
+                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 ${viewMode === 'bubble' ? 'bg-primary text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+              >
+                ◉ Bubble
+              </button>
+            </div>
           </div>
 
-          <div className="col-span-12 card">
+          {/* Chart */}
+          <div className="card p-6">
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3 flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-primary" />
+              {viewMode === 'bar' ? 'Pathway Over-Representation' : 'Gene Ratio Bubble Plot'}
+            </h3>
+            <Plot
+              data={viewMode === 'bar' ? barData : bubbleData}
+              layout={viewMode === 'bar' ? barLayout : bubbleLayout}
+              config={{ displayModeBar: false, responsive: true }}
+              style={{ width: '100%' }}
+            />
+          </div>
+
+          {/* Table */}
+          <div className="card overflow-hidden">
             <div className="p-4 border-b border-border bg-slate-800/40 flex justify-between items-center">
-               <h4 className="font-bold text-white text-xs uppercase tracking-widest">Enrichment Table</h4>
+              <h4 className="font-bold text-white text-xs uppercase tracking-widest">Enrichment Table</h4>
+              <span className="text-[10px] text-textMuted">{pathways.length} terms</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                 <thead className="bg-black/20 text-textMuted font-bold uppercase border-b border-border">
-                   <tr>
-                     <th className="p-4">Pathway Name</th>
-                     <th className="p-4 text-center">Count</th>
-                     <th className="p-4 text-center">Gene Ratio</th>
-                     <th className="p-4 text-center">p-adj (BH)</th>
-                     <th className="p-4">Leading Edge Genes</th>
-                   </tr>
-                 </thead>
-                 <tbody className="divide-y divide-border/30">
-                   {pathways.map((row, i) => (
-                      <tr key={i} className="hover:bg-white/5 transition-colors">
-                         <td className="p-4 font-bold text-white flex items-center gap-2">
-                           <ChevronRight size={14} className="text-primary" /> {row.name}
-                         </td>
-                         <td className="p-4 text-center">{row.count}</td>
-                         <td className="p-4 text-center font-mono opacity-60 text-[10px]">{row.ratio}</td>
-                         <td className="p-4 text-center text-success font-mono">{row.p_adj.toExponential(2)}</td>
-                         <td className="p-4 text-slate-400 italic truncate max-w-[200px]">{row.genes}</td>
-                      </tr>
-                    ))}
-                 </tbody>
+                <thead className="bg-black/20 text-textMuted font-bold uppercase border-b border-border">
+                  <tr>
+                    <th className="p-3">Pathway / Term</th>
+                    <th className="p-3 text-center">Count</th>
+                    <th className="p-3 text-center">Gene Ratio</th>
+                    <th className="p-3 text-center">p-adj (BH)</th>
+                    <th className="p-3">Genes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/30">
+                  {pathways.map((row, i) => (
+                    <tr key={i} className="hover:bg-white/5 transition-colors">
+                      <td className="p-3 font-bold text-white flex items-center gap-2">
+                        <ChevronRight size={12} className="text-primary flex-shrink-0" />
+                        <span>{row.name}</span>
+                      </td>
+                      <td className="p-3 text-center font-mono">{row.count}</td>
+                      <td className="p-3 text-center font-mono opacity-60">{row.ratio}</td>
+                      <td className="p-3 text-center text-success font-mono">
+                        {typeof row.p_adj === 'number' ? row.p_adj.toExponential(2) : row.p_adj}
+                      </td>
+                      <td className="p-3 text-slate-400 italic truncate max-w-[220px]">{row.genes}</td>
+                    </tr>
+                  ))}
+                </tbody>
               </table>
             </div>
           </div>

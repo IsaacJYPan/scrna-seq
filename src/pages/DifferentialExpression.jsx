@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { FileText, Download, Play, LayoutGrid, Table } from 'lucide-react';
 import Plot from 'react-plotly.js';
 
-export default function DifferentialExpression({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState }) {
+export default function DifferentialExpression({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady }) {
   const [computing, setComputing] = useState(false);
   const [degResult, setDegResult] = useState(null);
   const [viewMode, setViewMode] = useState('table');
@@ -10,8 +10,11 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
   const [selectedCluster, setSelectedCluster] = useState(null);
   const [visibleCount, setVisibleCount] = useState(10);
 
+  const [error, setError] = useState(null);
+
   const runDEGs = useCallback(async (isInitial = false) => {
     setComputing(true);
+    setError(null);
     const data = await callApi('/deg', {}, {
       operation: 'deg',
       parentIds: currentProvId ? [currentProvId] : [],
@@ -24,18 +27,25 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
       setDegResult(data);
       setSelectedCluster(null);
       setVisibleCount(10);
-    } else {
-      console.log('[DEG] callApi returned:', JSON.stringify(data));
+    } else if (data && data.error && !isInitial) {
+      setError(data.error);
+    } else if (!data && !isInitial) {
+      setError('R backend error. Check the console for details.');
     }
     setComputing(false);
   }, [callApi, currentProvId]);
 
   useEffect(() => {
-    if (datasetInfo && pipelineState?.cluster && !degResult && !computing && !hasHydrated) {
+    if (datasetInfo && pipelineState?.cluster && !degResult && !computing && !hasHydrated && sessionReady) {
       setHasHydrated(true);
       runDEGs(true);
     }
-  }, [datasetInfo, pipelineState?.cluster, degResult, computing, runDEGs, hasHydrated]);
+  }, [datasetInfo, pipelineState?.cluster, degResult, computing, runDEGs, hasHydrated, sessionReady]);
+
+  // Reset hydration when session is restored, so it checks SQLite cache again
+  useEffect(() => {
+    setHasHydrated(false);
+  }, [rSessionId]);
 
   if (!datasetInfo) {
     return (
@@ -127,6 +137,12 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
 
       {!degResult && !computing && (
         <div className="card p-12 text-center flex flex-col items-center justify-center flex-1">
+          {error && (
+            <div className="bg-rose-500/10 text-rose-400 p-4 rounded-lg mb-6 max-w-lg border border-rose-500/20">
+              <p className="font-bold mb-1">Error</p>
+              <p className="text-sm">{error}</p>
+            </div>
+          )}
           <FileText size={48} className="text-primary opacity-50 mb-4" />
           <p className="text-textMuted max-w-sm text-lg">
             Requires a clustered Seurat Object. Computes <code className="text-primary bg-primary/10 px-1 rounded">FindAllMarkers()</code> to rank genes structurally significant to each single-cell subcluster.

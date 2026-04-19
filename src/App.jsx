@@ -98,14 +98,22 @@ export default function App() {
   }, [theme]);
 
   // Pipeline state tracking
+  const [pipelineStateId, setPipelineStateId] = useState(null);
   const [pipelineState, setPipelineState] = useState({
     qc: false,
     normalize: false,
     pca: false,
     cluster: false,
     umap: false,
-    clusterCount: 0 // track for UMAP mock data
+    clusterCount: 0,
+    clusterDims: 15  // default dims; updated when clustering runs
   });
+
+  // Gate that blocks per-page cache hydration until after the R session
+  // restore attempt completes (success or no saved session). Without this
+  // gate the pages fire onlyIfCached calls with the wrong (new) session ID
+  // and always miss the SQLite cache.
+  const [sessionReady, setSessionReady] = useState(false);
 
   // Collaborative Multi-Workspace Management
   const [workspaces, setWorkspaces] = useState([
@@ -146,6 +154,9 @@ export default function App() {
   // R process session ID — changes on every restart, busting the pipeline cache
   // so that all stateful steps re-execute in R and rebuild global_obj.
   const [rSessionId, setRSessionId] = useState(null);
+  // Mutable ref always pointing to the current user+object RDS path.
+  // Used inside callApi (which is a stale closure) to avoid dependency issues.
+  const sessionPathRef = React.useRef(null);
 
   useEffect(() => {
     loadPersistedProvenance().then(records => {
@@ -192,6 +203,35 @@ export default function App() {
     });
   }, []);
 
+  /**
+   * Reset pipeline after subsetting: QC metadata is per-cell and preserved in the
+   * subset (standard Seurat practice), so qc stays true. Everything else resets.
+   */
+  const resetPipelineState = useCallback(() => {
+    console.log('[Session] Resetting pipeline state due to session loss.');
+    setPipelineState({
+      qc: false,
+      normalize: false,
+      pca: false,
+      cluster: false,
+      umap: false,
+      clusterCount: 0,
+      clusterDims: 15,
+    });
+  }, []);
+
+  const resetPipelineAfterSubset = useCallback(() => {
+    setPipelineState({
+      qc: true,
+      normalize: false,
+      pca: false,
+      cluster: false,
+      umap: false,
+      clusterCount: 0,
+      clusterDims: 15,
+    });
+  }, []);
+
   const callApi = useCallback(async (path, options = {}, {
     
     operation = '',
@@ -203,10 +243,6 @@ export default function App() {
   } = {}) => {
     // Ignore React SyntheticEvents (which are truthy) passed accidentally via onClick
     const forceOnlyIfCached = typeof onlyIfCached === 'boolean' ? onlyIfCached : false;
-    console.log('[callApi]', path, 'onlyIfCached:', onlyIfCached, 'dataVersion:', currentWs.dataVersion);
-
-    if (forceOnlyIfCached) return null;
-
     // ── Cache key includes the R session ID so a fresh R process always
     // misses the cache and re-runs pipeline steps to rebuild global_obj.
     const effectiveCacheParams = (useCache && cacheParams && rSessionId)
@@ -223,10 +259,19 @@ export default function App() {
           // [PATCH] Update pipeline state even for cached results
           if (step) {
             const extraState = {};
-            if (step === 'cluster' && cached.result?.n_clusters) {
-              extraState.clusterCount = cached.result.n_clusters;
+            if (step === 'cluster') {
+              if (cached.result?.n_clusters) extraState.clusterCount = cached.result.n_clusters;
+              if (cached.result?.dims_used)  extraState.clusterDims  = cached.result.dims_used;
             }
             markPipelineStep(step, extraState);
+            // QC: update workspace object cell count to post-filter value
+            if (step === 'qc' && cached.result?.post_filter_cells) {
+              updateActiveWorkspace({
+                objects: currentWs.objects.map((obj, i) =>
+                  i === 0 ? { ...obj, cells: cached.result.post_filter_cells } : obj
+                )
+              });
+            }
           }
           return {
             provenance: { ...prov, parentIds: prov.parentIds || parentIds },
@@ -264,10 +309,28 @@ export default function App() {
 
         if (step) {
           const extraState = {};
-          if (step === 'cluster' && data.result?.n_clusters) {
-            extraState.clusterCount = data.result.n_clusters;
+          if (step === 'cluster') {
+            if (data.result?.n_clusters) extraState.clusterCount = data.result.n_clusters;
+            if (data.result?.dims_used)  extraState.clusterDims  = data.result.dims_used;
           }
           markPipelineStep(step, extraState);
+          // QC: update workspace object cell count to post-filter value
+          if (step === 'qc' && data.result?.post_filter_cells) {
+            updateActiveWorkspace({
+              objects: currentWs.objects.map((obj, idx) =>
+                currentWs.selectedObjectIds?.includes(obj.id) && idx === 0
+                  ? { ...obj, cells: data.result.post_filter_cells }
+                  : obj
+              )
+            });
+          }
+          // Immediately persist the R object so a session restore finds it.
+          // Firing here (inside callApi, not a useEffect) means the save is
+          // in-flight before any UI re-render and can't be raced by app-close.
+          if (sessionPathRef.current) {
+            fetch(`${API}/save-session?path=${encodeURIComponent(sessionPathRef.current)}`)
+              .catch(e => console.warn('[Session] Auto-save failed:', e));
+          }
         }
 
         if (useCache && effectiveCacheParams) {
@@ -278,7 +341,7 @@ export default function App() {
       return data;
     } catch (err) {
       console.error(err);
-      return null;
+      return { error: err.message };
     }
   }, [activeWsIndex, workspaces, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId]);
 
@@ -295,6 +358,153 @@ export default function App() {
     setUser(null);
   };
 
+  // ── Workspace Persistence ───────────────────────────────────────
+  // Save/restore the objects array (workspace card metadata) between sessions.
+  // The R session is stateless across restarts so the user still needs to
+  // re-run the pipeline, but the workspace card (name, cells, features) persists.
+  const wsStorageKey = user?.email ? `benchone_ws_${user.email}` : null;
+
+  // Restore on login
+  useEffect(() => {
+    if (!wsStorageKey) return;
+    try {
+      const saved = localStorage.getItem(wsStorageKey);
+      if (saved) {
+        const parsed = JSON.parse(saved); // array of {objects, selectedObjectIds}
+        setWorkspaces(prev =>
+          prev.map((ws, i) => ({
+            ...ws,
+            objects:           parsed[i]?.objects           ?? ws.objects,
+            selectedObjectIds: parsed[i]?.selectedObjectIds ?? ws.selectedObjectIds,
+          }))
+        );
+      }
+    } catch (e) {
+      console.warn('[App] Failed to restore workspaces:', e);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsStorageKey]);
+
+  // Save on any workspace change
+  useEffect(() => {
+    if (!wsStorageKey) return;
+    try {
+      const toSave = workspaces.map(ws => ({
+        objects: ws.objects,
+        selectedObjectIds: ws.selectedObjectIds,
+      }));
+      localStorage.setItem(wsStorageKey, JSON.stringify(toSave));
+    } catch (e) {
+      console.warn('[App] Failed to save workspaces:', e);
+    }
+  }, [workspaces, wsStorageKey]);
+  // ────────────────────────────────────────────────────────────────
+
+  // ── R Session / Pipeline Persistence ─────────────────────────────
+  // Strategy: after each pipeline step R saves global_obj as an RDS.
+  // The companion JSON stores the session ID. On next login, we restore
+  // the RDS *and* the session ID, so the SQLite result cache remains
+  // valid and all pipeline tabs hydrate from cache (no re-running needed).
+
+  const sanitizeEmail = (email) => email.replace(/[^a-zA-Z0-9]/g, '_');
+  const getSessionPath = (email, objId) =>
+    email && objId ? `sessions/${sanitizeEmail(email)}/${objId}.rds` : null;
+
+  // Track which object IDs we've already attempted restore for (avoid re-firing)
+  const restoredObjectsRef = React.useRef(new Set());
+
+  // 0. Keep sessionPathRef in sync so callApi can always find the save path
+  useEffect(() => {
+    sessionPathRef.current = user?.email && datasetInfo?.id
+      ? getSessionPath(user.email, datasetInfo.id)
+      : null;
+  }); // runs every render — cheap, keeps ref always fresh
+
+  // 0.5 Hydrate pipeline state from localStorage ONCE per object, synchronously, 
+  // before the async R-session restore finishes, to prevent overwriting.
+  useEffect(() => {
+    if (!user?.email || !datasetInfo?.id) return;
+    if (pipelineStateId !== datasetInfo.id) {
+      const psKey = `benchone_ps_${user.email}_${datasetInfo.id}`;
+      const savedPS = localStorage.getItem(psKey);
+      if (savedPS) {
+        try {
+          const ps = JSON.parse(savedPS);
+          console.log('[Session] Loaded pipeline state:', ps);
+          setPipelineState(ps);
+        } catch (e) {
+          console.warn('[Session] Failed to parse pipeline state:', e);
+        }
+      } else {
+        console.log('[Session] No local pipeline state found, initializing defaults.');
+        setPipelineState({ qc: false, normalize: false, pca: false, cluster: false, umap: false, clusterCount: 0, clusterDims: 15 });
+      }
+      setPipelineStateId(datasetInfo.id);
+    }
+  }, [user?.email, datasetInfo?.id, pipelineStateId]);
+
+  // 1. Auto-restore on login + active object available
+  useEffect(() => {
+    if (!user?.email || !datasetInfo?.id) {
+      // No object yet — nothing to restore, unblock hydration immediately
+      setSessionReady(true);
+      return;
+    }
+    if (restoredObjectsRef.current.has(datasetInfo.id)) return;
+    restoredObjectsRef.current.add(datasetInfo.id);
+
+    // Block hydration until this async restore resolves
+    setSessionReady(false);
+
+    const path = getSessionPath(user.email, datasetInfo.id);
+    if (!path) { setSessionReady(true); return; }
+
+    console.log('[Session] Checking for saved session:', path);
+    fetch(`${API}/check-session?path=${encodeURIComponent(path)}`)
+      .then(r => r.json())
+      .then(d => {
+        if (!d.exists) {
+          console.log('[Session] No saved session found — resetting pipeline status.');
+          resetPipelineState();
+          return null;
+        }
+        console.log('[Session] Found saved session, restoring…');
+        return fetch(`${API}/restore-session?path=${encodeURIComponent(path)}`).then(r => r.json());
+      })
+      .then(d => {
+        if (d?.success) {
+          console.log('[Session] ✅ Restored:', d.cells, 'cells, reductions:', d.reductions?.join(', '));
+          // Adopt the original session ID → SQLite cache keys remain valid
+          if (d.session_id) {
+            console.log('[Session] Restoring session ID:', d.session_id);
+            setRSessionId(d.session_id);
+          }
+        } else if (d?.error) {
+          console.warn('[Session] Session restore failed, resetting pipeline status.');
+          resetPipelineState();
+        }
+      })
+      .catch(e => {
+        console.warn('[Session] Restore failed:', e);
+        resetPipelineState();
+      })
+      .finally(() => {
+        // Always unblock page hydration — even if restore failed
+        console.log('[Session] sessionReady = true');
+        setSessionReady(true);
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.email, datasetInfo?.id]);
+
+  // 2. Persist pipeline state per user + object (so restore can reapply it)
+  useEffect(() => {
+    if (!user?.email || !datasetInfo?.id) return;
+    if (pipelineStateId !== datasetInfo.id) return; // Prevent overwriting with mismatched state!
+    const psKey = `benchone_ps_${user.email}_${datasetInfo.id}`;
+    try { localStorage.setItem(psKey, JSON.stringify(pipelineState)); } catch (e) {}
+  }, [pipelineState, user?.email, datasetInfo?.id, pipelineStateId]);
+  // ────────────────────────────────────────────────────────────────
+
   if (!isLoggedIn) return <Login onLogin={(u) => setUser(u || { email: 'researcher@lab.edu', displayName: 'Researcher' })} />;
 
   const handleDataVersionChange = (fn) => {
@@ -302,6 +512,7 @@ export default function App() {
   };
 
   const renderContent = () => {
+    const objKey = datasetInfo?.id ?? 'none';
     const props = {
       callApi,
       datasetInfo,
@@ -311,7 +522,13 @@ export default function App() {
       currentWs,
       updateActiveWorkspace,
       pipelineState,
-      theme
+      theme,
+      rSessionId,          // let components watch session changes directly
+      sessionReady,        // gate: true only after R session restore completes
+      resetPipelineAfterSubset,
+      // For per-object parameter persistence
+      userEmail: user?.email ?? null,
+      objectId: datasetInfo?.id ?? null,
     };
 
     return (
@@ -328,14 +545,14 @@ export default function App() {
             />
           </TabContent>
           <TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} /></TabContent>
-          <TabContent id="qc" activeTab={activeTab}><QualityControl {...props} /></TabContent>
-          <TabContent id="normalize" activeTab={activeTab}><Normalization {...props} /></TabContent>
-          <TabContent id="pca" activeTab={activeTab}><PCA {...props} /></TabContent>
-          <TabContent id="cluster" activeTab={activeTab}><Clustering {...props} /></TabContent>
-          <TabContent id="umap" activeTab={activeTab}><UMAPView {...props} /></TabContent>
-          <TabContent id="geneviewer" activeTab={activeTab}><GeneViewer datasetInfo={datasetInfo} /></TabContent>
-          <TabContent id="deg" activeTab={activeTab}><DifferentialExpression {...props} /></TabContent>
-          <TabContent id="enrichment" activeTab={activeTab}><Enrichment {...props} /></TabContent>
+          <TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent>
+          <TabContent id="normalize" activeTab={activeTab}><Normalization key={objKey} {...props} /></TabContent>
+          <TabContent id="pca" activeTab={activeTab}><PCA key={objKey} {...props} /></TabContent>
+          <TabContent id="cluster" activeTab={activeTab}><Clustering key={objKey} {...props} /></TabContent>
+          <TabContent id="umap" activeTab={activeTab}><UMAPView key={objKey} {...props} /></TabContent>
+          <TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} datasetInfo={datasetInfo} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent>
+          <TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent>
+          <TabContent id="enrichment" activeTab={activeTab}><Enrichment key={objKey} {...props} /></TabContent>
           <TabContent id="cellchat" activeTab={activeTab}><CellChat {...props} /></TabContent>
           <TabContent id="multimodal" activeTab={activeTab}><BatchIntegration datasetInfo={datasetInfo} /></TabContent>
           <TabContent id="publication" activeTab={activeTab}><Publication {...props} /></TabContent>

@@ -117,6 +117,33 @@ function registerIPC() {
     return filePaths[0];
   });
 
+  // Directory picker (10X Genomics format)
+  ipcMain.handle('open-directory-dialog', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select 10X Data Directory (contains barcodes.tsv, features.tsv, matrix.mtx)',
+      properties: ['openDirectory']
+    });
+    if (canceled || filePaths.length === 0) return null;
+    return filePaths[0];
+  });
+
+  // Generic data file picker — type: 'h5' | 'rds' | 'csv'
+  ipcMain.handle('open-data-file-dialog', async (event, type) => {
+    const filterMap = {
+      h5:  [{ name: 'HDF5 / AnnData Files', extensions: ['h5', 'h5ad', 'h5seurat'] }],
+      rds: [{ name: 'Seurat RDS Files',     extensions: ['rds', 'RDS'] }],
+      csv: [{ name: 'Metadata / CSV Files', extensions: ['csv', 'tsv', 'txt'] }],
+    };
+    const filters = filterMap[type] || filterMap.csv;
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Data File',
+      filters,
+      properties: ['openFile']
+    });
+    if (canceled || filePaths.length === 0) return null;
+    return filePaths[0];
+  });
+
   ipcMain.handle('save-script-dialog', async (event, defaultName) => {
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Script',
