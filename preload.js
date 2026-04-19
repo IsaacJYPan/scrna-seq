@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File dialogs
   openCsvDialog: () => ipcRenderer.invoke('open-csv-dialog'),
+  openDirectoryDialog: () => ipcRenderer.invoke('open-directory-dialog'),
+  openDataFileDialog: (type) => ipcRenderer.invoke('open-data-file-dialog', type),
   saveScriptDialog: (defaultName) => ipcRenderer.invoke('save-script-dialog', defaultName),
   saveFile: (filePath, content) => ipcRenderer.invoke('save-file', filePath, content),
 

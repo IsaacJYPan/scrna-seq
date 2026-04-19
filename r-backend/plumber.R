@@ -141,9 +141,296 @@ function(min_cells = 3, min_features = 200) {
   })
 }
 
-# ──────────────────────────────────────────────────────────────────
-# PIPELINE STEP 1: Quality Control
-# ──────────────────────────────────────────────────────────────────
+#* Load a local 10X directory (barcodes / features / matrix)
+#* @get /load-local-10x
+function(path, min_cells = 3, min_features = 200) {
+  min_cells <- as.integer(min_cells)
+  min_features <- as.integer(min_features)
+  tryCatch({
+    if (!dir.exists(path)) stop(paste("Directory not found:", path))
+    mat <- Read10X(data.dir = path)
+    global_obj <<- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
+    global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^MT-")
+    nnz <- length(mat@x)
+    total_el <- as.numeric(nrow(mat)) * as.numeric(ncol(mat))
+    density_val <- (nnz / total_el) * 100
+    make_provenance(
+      result = list(
+        message = "Local 10X matrix loaded.",
+        cells = ncol(global_obj), features = nrow(global_obj), genes = nrow(global_obj),
+        sparsity = round(100 - density_val, 2), density = round(density_val, 2),
+        source = "local-10x"
+      ),
+      script_text = paste0(
+        "mat <- Read10X(data.dir = '", path, "')\n",
+        "obj <- CreateSeuratObject(counts = mat, min.cells = ", min_cells,
+        ", min.features = ", min_features, ")"
+      ),
+      operation = "load",
+      parameters = list(path = path, min_cells = min_cells, min_features = min_features)
+    )
+  }, error = function(e) { list(error = paste("10X load failed:", e$message)) })
+}
+
+#* Load a Seurat RDS object from a local file
+#* @get /load-rds
+function(path) {
+  tryCatch({
+    if (!file.exists(path)) stop(paste("File not found:", path))
+    obj <- readRDS(path)
+    if (!inherits(obj, "Seurat")) stop("RDS file does not contain a Seurat object.")
+    global_obj <<- obj
+    if (!"percent.mt" %in% colnames(global_obj@meta.data)) {
+      global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^MT-")
+    }
+    nnz <- tryCatch(length(GetAssayData(global_obj, layer = "counts")@x), error = function(e) NA)
+    total <- as.numeric(nrow(global_obj)) * as.numeric(ncol(global_obj))
+    density_val <- if (!is.na(nnz)) (nnz / total) * 100 else NA
+    make_provenance(
+      result = list(
+        message = "Seurat RDS loaded.",
+        cells = ncol(global_obj), features = nrow(global_obj), genes = nrow(global_obj),
+        sparsity = if (!is.na(density_val)) round(100 - density_val, 2) else NULL,
+        density = if (!is.na(density_val)) round(density_val, 2) else NULL,
+        source = "rds",
+        existing_reductions = names(global_obj@reductions)
+      ),
+      script_text = paste0("obj <- readRDS('", path, "')"),
+      operation = "load",
+      parameters = list(path = path)
+    )
+  }, error = function(e) { list(error = paste("RDS load failed:", e$message)) })
+}
+
+#* Load an H5AD / H5Seurat file (requires SeuratDisk)
+#* @get /load-h5ad
+function(path) {
+  tryCatch({
+    if (!file.exists(path)) stop(paste("File not found:", path))
+    if (!requireNamespace("SeuratDisk", quietly = TRUE)) {
+      stop("SeuratDisk is required for H5AD files. Install with: remotes::install_github('mojaveazure/seurat-disk')")
+    }
+    library(SeuratDisk)
+    ext <- tolower(tools::file_ext(path))
+    if (ext == "h5ad") {
+      h5seurat_path <- sub("\\.h5ad$", ".h5seurat", path)
+      Convert(path, dest = "h5seurat", overwrite = TRUE)
+      global_obj <<- LoadH5Seurat(h5seurat_path)
+    } else {
+      global_obj <<- LoadH5Seurat(path)
+    }
+    if (!"percent.mt" %in% colnames(global_obj@meta.data)) {
+      global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^MT-")
+    }
+    make_provenance(
+      result = list(
+        message = "H5AD/H5Seurat loaded.",
+        cells = ncol(global_obj), features = nrow(global_obj), genes = nrow(global_obj),
+        source = "h5ad",
+        existing_reductions = names(global_obj@reductions)
+      ),
+      script_text = paste0("obj <- LoadH5Seurat('", path, "')"),
+      operation = "load",
+      parameters = list(path = path)
+    )
+  }, error = function(e) { list(error = paste("H5AD load failed:", e$message)) })
+}
+
+#* Inspect the current Seurat object — metadata, reductions, assays
+#* @get /object-info
+function() {
+  if (is.null(global_obj)) return(list(error = "No object loaded"))
+  tryCatch({
+    meta <- global_obj@meta.data
+    meta_cols <- lapply(colnames(meta), function(col) {
+      vals <- meta[[col]]
+      if (is.numeric(vals)) {
+        list(name = col, type = "numeric", n_unique = length(unique(vals)),
+             min = round(min(vals, na.rm = TRUE), 4),
+             max = round(max(vals, na.rm = TRUE), 4),
+             mean = round(mean(vals, na.rm = TRUE), 4),
+             preview = NULL)
+      } else {
+        top <- head(names(sort(table(as.character(vals)), decreasing = TRUE)), 5)
+        list(name = col, type = if (is.factor(vals)) "factor" else "character",
+             n_unique = length(unique(vals)),
+             min = NULL, max = NULL, mean = NULL, preview = top)
+      }
+    })
+    list(
+      n_cells = ncol(global_obj),
+      n_features = nrow(global_obj),
+      active_assay = DefaultAssay(global_obj),
+      assays = Assays(global_obj),
+      reductions = names(global_obj@reductions),
+      meta_cols = meta_cols
+    )
+  }, error = function(e) { list(error = paste("object-info failed:", e$message)) })
+}
+
+#* Get all unique values (with counts) for a metadata column
+#* @get /meta-values
+function(column) {
+  if (is.null(global_obj)) return(list(error = "No object loaded"))
+  if (!column %in% colnames(global_obj@meta.data)) return(list(error = paste("Column not found:", column)))
+  vals <- as.character(global_obj@meta.data[[column]])
+  counts_tbl <- sort(table(vals), decreasing = TRUE)
+  list(
+    column = column,
+    n_unique = length(counts_tbl),
+    values = lapply(names(counts_tbl), function(v) list(value = v, count = as.integer(counts_tbl[v])))
+  )
+}
+
+#* Read column names from a local CSV (for the metadata import UI)
+#* @get /csv-columns
+function(path) {
+  tryCatch({
+    if (!file.exists(path)) stop(paste("File not found:", path))
+    sep <- if (grepl("\\.tsv$", path, ignore.case = TRUE)) "\t" else ","
+    df <- read.table(path, sep = sep, header = TRUE, nrows = 1, check.names = FALSE)
+    list(columns = colnames(df))
+  }, error = function(e) { list(error = paste("CSV read failed:", e$message)) })
+}
+
+#* Import metadata from a local CSV and join to the Seurat object by barcode
+#* @get /add-metadata
+function(csv_path, key_column = "barcode", value_columns = "") {
+  if (is.null(global_obj)) return(list(error = "No object loaded"))
+  tryCatch({
+    if (!file.exists(csv_path)) stop(paste("CSV not found:", csv_path))
+    sep <- if (grepl("\\.tsv$", csv_path, ignore.case = TRUE)) "\t" else ","
+    meta_df <- read.table(csv_path, sep = sep, header = TRUE, stringsAsFactors = FALSE, check.names = FALSE)
+    if (!key_column %in% colnames(meta_df)) {
+      stop(paste0("Key column '", key_column, "' not in CSV. Columns: ", paste(colnames(meta_df), collapse = ", ")))
+    }
+    cols_to_add <- if (nchar(trimws(value_columns)) == 0) {
+      setdiff(colnames(meta_df), key_column)
+    } else {
+      trimws(strsplit(value_columns, ",")[[1]])
+    }
+    missing_cols <- setdiff(cols_to_add, colnames(meta_df))
+    if (length(missing_cols) > 0) stop(paste("Columns not found in CSV:", paste(missing_cols, collapse = ", ")))
+
+    rownames(meta_df) <- trimws(as.character(meta_df[[key_column]]))
+    cell_barcodes <- colnames(global_obj)
+    n_matched <- sum(cell_barcodes %in% rownames(meta_df))
+
+    for (col in cols_to_add) {
+      vals <- meta_df[cell_barcodes, col]
+      global_obj[[col]] <<- vals
+    }
+    list(
+      message = paste0("Added ", length(cols_to_add), " column(s) to ", n_matched, "/", length(cell_barcodes), " cells."),
+      added_columns = cols_to_add,
+      n_cells_matched = n_matched
+    )
+  }, error = function(e) { list(error = paste("Add metadata failed:", e$message)) })
+}
+
+#* Subset the Seurat object by a metadata column and selected values
+#* @get /subset
+function(column, values, new_name = "Subset") {
+  if (is.null(global_obj)) return(list(error = "No object loaded"))
+  tryCatch({
+    if (!column %in% colnames(global_obj@meta.data)) stop(paste("Column not found:", column))
+    vals_vec <- trimws(strsplit(values, ",")[[1]])
+    cell_meta_char <- as.character(global_obj@meta.data[[column]])
+    cells_keep <- rownames(global_obj@meta.data)[cell_meta_char %in% vals_vec]
+    if (length(cells_keep) == 0) stop("No cells match the specified criteria.")
+
+    # Standard Seurat practice: retain raw counts + QC meta.data, reset processed slots
+    sub_obj <- subset(global_obj, cells = cells_keep)
+    global_obj <<- sub_obj
+
+    make_provenance(
+      result = list(
+        message = paste0("Subset: ", length(cells_keep), " cells retained (", column,
+                         " \u2208 {", paste(vals_vec, collapse = ", "), "})."),
+        cells = ncol(global_obj),
+        features = nrow(global_obj),
+        genes = nrow(global_obj),
+        # Density not recomputed to save time; marked as unknown
+        source = "subset",
+        subset_column = column,
+        subset_values = vals_vec
+      ),
+      script_text = paste0(
+        "cells.keep <- rownames(obj@meta.data)[obj@meta.data[['", column, "']] %in% c(",
+        paste0("'", vals_vec, "'", collapse = ", "), ")]\n",
+        "obj <- subset(obj, cells = cells.keep)"
+      ),
+      operation = "subset",
+      parameters = list(column = column, values = vals_vec, new_name = new_name)
+    )
+  }, error = function(e) { list(error = paste("Subset failed:", e$message)) })
+}
+
+# ── Session Persistence ────────────────────────────────────────────────────────
+# Save global_obj as an RDS file so the next app session can restore it without
+# re-running the pipeline. A companion JSON stores the original session ID so
+# the SQLite result cache (UMAP coords, PCA variance, etc.) remains valid.
+
+#* Save current Seurat object to a local RDS file
+#* @get /save-session
+function(path) {
+  if (is.null(global_obj)) return(list(error = "No object to save"))
+  tryCatch({
+    dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(global_obj, file = path)
+    # Companion metadata: session ID + basic stats (used on restore)
+    meta <- list(
+      session_id = r_session_id,
+      cells      = ncol(global_obj),
+      features   = nrow(global_obj),
+      reductions = names(global_obj@reductions),
+      saved_at   = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z")
+    )
+    meta_path <- paste0(sub("\\.rds$", "", path, ignore.case = TRUE), ".meta.json")
+    writeLines(jsonlite::toJSON(meta, auto_unbox = TRUE), con = meta_path)
+    list(success = TRUE, path = path, cells = ncol(global_obj))
+  }, error = function(e) { list(error = paste("Save-session failed:", e$message)) })
+}
+
+#* Check whether a session RDS file exists
+#* @get /check-session
+function(path) {
+  list(exists = file.exists(path), path = path)
+}
+
+#* Restore global_obj from a saved session RDS
+#* @get /restore-session
+function(path) {
+  tryCatch({
+    if (!file.exists(path)) stop(paste("Session file not found:", path))
+    obj <- readRDS(path)
+    if (!inherits(obj, "Seurat")) stop("File does not contain a Seurat object")
+    global_obj <<- obj
+
+    # Restore original session ID so the frontend's SQLite cache keys still match
+    meta_path <- paste0(sub("\\.rds$", "", path, ignore.case = TRUE), ".meta.json")
+    restored_session_id <- r_session_id   # fallback to current
+    if (file.exists(meta_path)) {
+      tryCatch({
+        meta <- jsonlite::fromJSON(paste(readLines(meta_path, warn = FALSE), collapse = ""))
+        if (!is.null(meta$session_id) && nchar(meta$session_id) > 0) {
+          r_session_id <<- meta$session_id
+          restored_session_id <- meta$session_id
+        }
+      }, error = function(e) invisible(NULL))
+    }
+
+    list(
+      success      = TRUE,
+      session_id   = restored_session_id,
+      cells        = ncol(global_obj),
+      features     = nrow(global_obj),
+      reductions   = names(global_obj@reductions),
+      n_meta_cols  = ncol(global_obj@meta.data)
+    )
+  }, error = function(e) { list(error = paste("Restore-session failed:", e$message)) })
+}
+# ──────────────────────────────────────────────────────────────────────────────
 
 #* Perform Quality Control (percent.mt, filtering)
 #* @get /qc
@@ -451,110 +738,253 @@ function() {
 function() {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   
+  if (length(levels(Idents(global_obj))) < 2) {
+    return(list(error = "Cannot find markers: Dataset only has one identity group. Please run Clustering first."))
+  }
+
   script <- "markers <- FindAllMarkers(global_obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)"
   
-  # Execute
-  markers <- FindAllMarkers(global_obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
-  
-  # Format markers for frontend table
-  marker_list <- lapply(1:nrow(markers), function(i) {
-    list(
-      gene = as.character(markers$gene[i]),
-      cluster = as.character(markers$cluster[i]),
-      p_val = markers$p_val_adj[i],
-      log2FC = round(markers$avg_log2FC[i], 2),
-      pct1 = markers$pct.1[i],
-      pct2 = markers$pct.2[i]
-    )
-  })
-  
-  # Prep Heatmap Data (Top 5 per cluster for visual clarity)
-  suppressMessages({
-    library(dplyr)
-    top5 <- markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
-    unique_genes <- unique(top5$gene)
+  tryCatch({
+    # Execute
+    markers <- FindAllMarkers(global_obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
     
-    avg_expr <- AverageExpression(global_obj, features = unique_genes, group.by = "seurat_clusters", assays = "RNA")$RNA
-    
-    # Convert matrix to row-major list for Plotly heatmap (z-attribute)
-    heatmap_z <- lapply(1:nrow(avg_expr), function(i) as.numeric(avg_expr[i,]))
-    heatmap_genes <- rownames(avg_expr)
-    heatmap_clusters <- colnames(avg_expr)
-  })
-
-  make_provenance(
-    result = list(
-      message = "Differential expression identification complete.",
-      total_markers = nrow(markers),
-      markers = marker_list,
-      heatmap = list(
-        genes = heatmap_genes,
-        clusters = heatmap_clusters,
-        z = heatmap_z
-      )
-    ),
-    script_text = script,
-    operation = "deg"
-  )
-}
-
-#* Pathway Enrichment (ORA)
-#* @get /enrichment
-function() {
-  if (is.null(global_obj)) return(list(error = "No object loaded"))
-  
-  # Enrichment ideally needs markers as input
-  # We'll run a quick FindAllMarkers if not already cached or just use the current one
-  # For this demo/tool, we'll assume we want enrichment for the top marker genes of each cluster
-  
-  script <- "markers <- FindAllMarkers(global_obj, only.pos = TRUE, logfc.threshold = 0.5)\n# Enrichment via enrichR or clusterProfiler"
-  
-  # For simplicity and speed in this environment, we'll implement a 'Real-Looking' ORA 
-  # based on the actual markers found in the PBMC dataset.
-  # In a full production app, this would call: enrichr(markers$gene, databases = 'Reactome_2022')
-  
-  markers <- FindAllMarkers(global_obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.5)
-  if (nrow(markers) == 0) return(list(error = "No markers found for enrichment"))
-  
-  # We will simulate the ORA results by mapping the real markers to known PBMC pathways
-  # to ensure the UI shows 'Real' biological context even if heavy R libraries are missing.
-  top_genes <- unique(markers$gene)
-  
-  # Real-world biological mapping for PBMC 3k
-  pathways <- list(
-    list(name = "T Cell Receptor Signaling", genes = c("CD3D", "CD3E", "CD3G", "CD247", "ZAP70", "LCK", "FYN")),
-    list(name = "B Cell Activation", genes = c("CD79A", "CD79B", "MS4A1", "CD19", "BANK1")),
-    list(name = "MHC Class II Antigen Presentation", genes = c("HLA-DRA", "HLA-DRB1", "HLA-DPA1", "CD74")),
-    list(name = "Chemokine Signaling Pathway", genes = c("CCL5", "GZMB", "PRF1", "GNLY", "NKG7")),
-    list(name = "Interferon Gamma Signaling", genes = c("STAT1", "IRF1", "IFNGR1", "IFNGR2")),
-    list(name = "Cell Cycle (G1/S Phase)", genes = c("MKI67", "TOP2A", "PCNA", "STMN1"))
-  )
-  
-  results <- lapply(pathways, function(p) {
-    overlap <- intersect(top_genes, p$genes)
-    if (length(overlap) > 0) {
-      list(
-        name = p$name,
-        count = length(overlap),
-        ratio = paste0(length(overlap), "/", length(p$genes)),
-        p_adj = 10^-(2 + length(overlap) * 1.5), # Simulated but deterministic based on markers
-        genes = paste(overlap, collapse = ", ")
-      )
-    } else {
-      NULL
+    # Format markers for frontend table safely (seq_len avoids 1:0 looping)
+    marker_list <- list()
+    if (!is.null(markers) && nrow(markers) > 0) {
+      marker_list <- lapply(seq_len(nrow(markers)), function(i) {
+        list(
+          gene = as.character(markers$gene[i]),
+          cluster = as.character(markers$cluster[i]),
+          p_val = markers$p_val_adj[i],
+          log2FC = round(markers$avg_log2FC[i], 2),
+          pct1 = markers$pct.1[i],
+          pct2 = markers$pct.2[i]
+        )
+      })
     }
+    
+    # Prep Heatmap Data (Top 5 per cluster for visual clarity)
+    heatmap_genes <- character(0)
+    heatmap_clusters <- character(0)
+    heatmap_z <- list()
+    
+    if (!is.null(markers) && nrow(markers) > 0) {
+      suppressMessages({
+        library(dplyr)
+        top5 <- as.data.frame(markers) %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
+        unique_genes <- unique(top5$gene)
+        
+        avg_expr <- AverageExpression(global_obj, features = unique_genes, group.by = "seurat_clusters", assays = "RNA")$RNA
+        
+        # Convert matrix to row-major list for Plotly heatmap (z-attribute)
+        heatmap_z <- lapply(1:nrow(avg_expr), function(i) as.numeric(avg_expr[i,]))
+        heatmap_genes <- rownames(avg_expr)
+        heatmap_clusters <- colnames(avg_expr)
+      })
+    }
+    
+    make_provenance(
+      result = list(
+        message = "Differential expression identification complete.",
+        total_markers = if(is.null(markers)) 0 else nrow(markers),
+        markers = marker_list,
+        heatmap = list(
+          genes = heatmap_genes,
+          clusters = heatmap_clusters,
+          z = heatmap_z
+        )
+      ),
+      script_text = script,
+      operation = "deg"
+    )
+  }, error = function(e) {
+    list(error = paste("DEG failed:", e$message))
   })
-  results <- results[!sapply(results, is.null)]
-  
-  make_provenance(
-    result = list(
-      message = "Pathway enrichment complete.",
-      top_pathways = results
-    ),
-    script_text = script,
-    operation = "enrichment"
-  )
 }
+
+#* Pathway Enrichment using clusterProfiler (ORA)
+#* @get /enrichment
+function(database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n = 20) {
+  pval_cutoff    <- as.numeric(pval_cutoff)
+  logfc_threshold <- as.numeric(logfc_threshold)
+  top_n          <- as.integer(top_n)
+
+  if (is.null(global_obj)) return(list(error = "No object loaded"))
+
+  if (length(levels(Idents(global_obj))) < 2) {
+    return(list(error = "Dataset only has one identity group. Please run Clustering first."))
+  }
+
+  # ── Package availability checks ──────────────────────────────
+  missing_pkgs <- character(0)
+  if (!requireNamespace("clusterProfiler", quietly = TRUE)) missing_pkgs <- c(missing_pkgs, "clusterProfiler")
+  if (!requireNamespace("org.Hs.eg.db",   quietly = TRUE)) missing_pkgs <- c(missing_pkgs, "org.Hs.eg.db")
+  if (database == "Reactome" && !requireNamespace("ReactomePA", quietly = TRUE)) missing_pkgs <- c(missing_pkgs, "ReactomePA")
+
+  if (length(missing_pkgs) > 0) {
+    install_cmd <- paste0('BiocManager::install(c("', paste(missing_pkgs, collapse = '", "'), '"))')
+    return(list(error = paste0(
+      "Required Bioconductor packages not installed: ", paste(missing_pkgs, collapse = ", "),
+      ".\nInstall with:\n  if (!requireNamespace('BiocManager', quietly=TRUE)) install.packages('BiocManager')\n  ", install_cmd
+    )))
+  }
+
+  tryCatch({
+    suppressMessages({
+      library(clusterProfiler)
+      library(org.Hs.eg.db)
+      if (database == "Reactome") library(ReactomePA)
+    })
+
+    # ── Step 1: Find marker genes ────────────────────────────
+    cat("[Enrichment] Running FindAllMarkers (logfc.threshold =", logfc_threshold, ")...\n")
+    markers <- FindAllMarkers(
+      global_obj,
+      only.pos      = TRUE,
+      min.pct       = 0.1,
+      logfc.threshold = logfc_threshold,
+      verbose       = FALSE
+    )
+
+    if (is.null(markers) || nrow(markers) == 0) {
+      return(list(error = "No marker genes found. Try lowering logfc.threshold or running Clustering first."))
+    }
+
+    # Deduplicated top marker genes (sorted by avg_log2FC)
+    markers_sorted <- markers[order(-markers$avg_log2FC), ]
+    gene_symbols   <- unique(markers_sorted$gene)
+    cat("[Enrichment] Using", length(gene_symbols), "unique marker genes as input.\n")
+
+    # ── Step 2: Symbol → Entrez ID mapping ──────────────────
+    entrez_map <- suppressMessages(
+      bitr(gene_symbols,
+           fromType = "SYMBOL",
+           toType   = "ENTREZID",
+           OrgDb    = org.Hs.eg.db)
+    )
+    if (nrow(entrez_map) == 0) {
+      return(list(error = "Could not map any gene symbols to Entrez IDs. Check that genes follow HGNC nomenclature."))
+    }
+    entrez_ids <- unique(entrez_map$ENTREZID)
+
+    # Universe = all genes in the object mapped to Entrez
+    universe_map <- suppressMessages(
+      bitr(rownames(global_obj),
+           fromType = "SYMBOL",
+           toType   = "ENTREZID",
+           OrgDb    = org.Hs.eg.db)
+    )
+    entrez_universe <- unique(universe_map$ENTREZID)
+    cat("[Enrichment] Mapped", length(entrez_ids), "/", length(gene_symbols), "genes to Entrez IDs.\n")
+
+    # ── Step 3: ORA dispatch ──────────────────────────────────
+    script_text <- paste0(
+      "markers <- FindAllMarkers(obj, only.pos=TRUE, logfc.threshold=", logfc_threshold, ")\n",
+      "entrez  <- bitr(unique(markers$gene), fromType='SYMBOL', toType='ENTREZID', OrgDb=org.Hs.eg.db)\n"
+    )
+
+    ora_result <- NULL
+
+    if (database == "Reactome") {
+      script_text <- paste0(script_text,
+                            "ora <- enrichPathway(entrez$ENTREZID, organism='human', pvalueCutoff=", pval_cutoff, ")\n")
+      cat("[Enrichment] Running ReactomePA::enrichPathway...\n")
+      ora_result <- suppressMessages(
+        ReactomePA::enrichPathway(
+          gene          = entrez_ids,
+          universe      = entrez_universe,
+          organism      = "human",
+          pvalueCutoff  = pval_cutoff,
+          pAdjustMethod = "BH",
+          readable      = TRUE
+        )
+      )
+
+    } else if (database == "KEGG") {
+      script_text <- paste0(script_text,
+                            "ora <- enrichKEGG(entrez$ENTREZID, organism='hsa', pvalueCutoff=", pval_cutoff, ")\n")
+      cat("[Enrichment] Running clusterProfiler::enrichKEGG...\n")
+      ora_result <- suppressMessages(
+        enrichKEGG(
+          gene          = entrez_ids,
+          universe      = entrez_universe,
+          organism      = "hsa",
+          pvalueCutoff  = pval_cutoff,
+          pAdjustMethod = "BH"
+        )
+      )
+
+    } else {
+      # GO_BP or GO_MF
+      ont <- if (database == "GO_MF") "MF" else "BP"
+      script_text <- paste0(script_text,
+                            "ora <- enrichGO(entrez$ENTREZID, OrgDb=org.Hs.eg.db, ont='", ont, "', pvalueCutoff=", pval_cutoff, ")\n")
+      cat("[Enrichment] Running clusterProfiler::enrichGO (ont=", ont, ")...\n")
+      ora_result <- suppressMessages(
+        enrichGO(
+          gene          = entrez_ids,
+          universe      = entrez_universe,
+          OrgDb         = org.Hs.eg.db,
+          ont           = ont,
+          pvalueCutoff  = pval_cutoff,
+          pAdjustMethod = "BH",
+          readable      = TRUE,
+          minGSSize     = 5,
+          maxGSSize     = 500
+        )
+      )
+    }
+
+    # ── Step 4: Format results ───────────────────────────────
+    if (is.null(ora_result) || nrow(as.data.frame(ora_result)) == 0) {
+      return(list(error = paste0(
+        "No significant pathways found in ", database,
+        " at p-adj < ", pval_cutoff,
+        ". Try increasing pval_cutoff, lowering logfc_threshold, or choosing a different database."
+      )))
+    }
+
+    df <- as.data.frame(ora_result)
+    df <- df[order(df$p.adjust), ]
+    if (nrow(df) > top_n) df <- df[1:top_n, ]
+
+    top_pathways <- lapply(seq_len(nrow(df)), function(i) {
+      ratio_str   <- as.character(df$GeneRatio[i])
+      ratio_parts <- strsplit(ratio_str, "/")[[1]]
+      ratio_num   <- if (length(ratio_parts) == 2) as.numeric(ratio_parts[1]) / as.numeric(ratio_parts[2]) else NA
+
+      list(
+        name          = as.character(df$Description[i]),
+        id            = as.character(df$ID[i]),
+        count         = as.integer(df$Count[i]),
+        ratio         = ratio_str,
+        gene_ratio_num = round(ratio_num, 4),
+        p_adj         = as.numeric(df$p.adjust[i]),
+        database      = database,
+        genes         = as.character(df$geneID[i])  # "/" separated in clusterProfiler
+      )
+    })
+
+    make_provenance(
+      result = list(
+        message           = paste0("ORA complete: ", length(top_pathways), " pathways enriched (", database, ")."),
+        top_pathways      = top_pathways,
+        gene_universe_size = length(entrez_universe),
+        n_input_genes     = length(entrez_ids),
+        database          = database
+      ),
+      script_text = script_text,
+      operation   = "enrichment",
+      packages_used = c("Seurat", "clusterProfiler", "org.Hs.eg.db"),
+      parameters  = list(database = database, pval_cutoff = pval_cutoff,
+                         logfc_threshold = logfc_threshold, top_n = top_n)
+    )
+
+  }, error = function(e) {
+    list(error = paste("Enrichment failed:", e$message))
+  })
+}
+
 
 #* Publication-Ready Figure Generation
 #* @get /publication

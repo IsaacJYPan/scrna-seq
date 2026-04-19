@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info } from 'lucide-react';
 import Plot from 'react-plotly.js';
+import { useTabParams } from '../hooks/useTabParams';
 
 // Shared dark-themed hover template style
 const hoverStyle = {
@@ -17,7 +18,7 @@ const PLOT_TABS = [
   { id: 'stats', label: 'Distribution Summary' },
 ];
 
-export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme }) {
+export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, objectId }) {
   const [filtering, setFiltering] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -41,11 +42,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const [distributions, setDistributions] = useState(null);
   const [loadingDist, setLoadingDist] = useState(false);
 
-  // Manual threshold state
-  const [mtCutoff, setMtCutoff] = useState(5);
-  const [minFeatures, setMinFeatures] = useState(200);
-  const [maxFeatures, setMaxFeatures] = useState(5000);
-  const [minCounts, setMinCounts] = useState(500);
+  // Persisted threshold state
+  const [params, setParam] = useTabParams('qc', userEmail, objectId, {
+    mtCutoff: 5,
+    minFeatures: 200,
+    maxFeatures: 5000,
+    minCounts: 500,
+  });
+  const { mtCutoff, minFeatures, maxFeatures, minCounts } = params;
 
   // Fetch real distributions when data is loaded
   const [showPoints, setShowPoints] = useState({ mt: true, features: true, counts: true });
@@ -54,9 +58,13 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const [scatterX, setScatterX] = useState('nCount_RNA');
   const [scatterY, setScatterY] = useState('percent.mt');
 
+
   useEffect(() => {
-    if (datasetInfo && !distributions && !loadingDist) {
+    if (datasetInfo && !loadingDist) {
+      // Re-fetch distributions when the R session changes (e.g. after session restore)
+      // so a failed early fetch (before session restore) doesn't persist.
       setLoadingDist(true);
+      setDistributions(null);
       fetch('http://localhost:8000/qc-distributions')
         .then(r => r.json())
         .then(data => {
@@ -64,6 +72,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             setError(data.error);
           } else {
             setDistributions(data);
+            setError(null); // clear any previous 'no object' error
           }
           setLoadingDist(false);
         })
@@ -72,7 +81,9 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           setLoadingDist(false);
         });
     }
-  }, [datasetInfo]);
+  // rSessionId triggers re-fetch when session is restored
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetInfo, rSessionId]);
 
   if (!datasetInfo) {
     return (
@@ -94,7 +105,8 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       operation: 'quality-control',
       step: 'qc',
       parentIds: currentProvId ? [currentProvId] : [],
-      useCache: false
+      useCache: true,
+      cacheParams: { type: 'quality-control', mt_threshold: mtCutoff, min_features: minFeatures, max_features: maxFeatures }
     });
 
     if (!data) {
@@ -279,13 +291,13 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           )}
           <button
             onClick={runFiltering}
-            disabled={filtering || !!result || !distributions}
-            className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center gap-2`}
+            disabled={filtering || !!result || pipelineState?.qc || !distributions}
+            className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center gap-2`}
           >
             {filtering && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
-            {!filtering && result && <ShieldCheck size={18} />}
-            {!filtering && !result && <SlidersHorizontal size={18} />}
-            {result ? 'QC Applied' : 'Apply QC Filters'}
+            {!filtering && (result || pipelineState?.qc) && <ShieldCheck size={18} />}
+            {!filtering && !result && !pipelineState?.qc && <SlidersHorizontal size={18} />}
+            {(result || pipelineState?.qc) ? 'QC Applied' : 'Apply QC Filters'}
           </button>
         </div>
       </div>
@@ -297,8 +309,8 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         </div>
       )}
 
-      {/* Manual Threshold Controls */}
-      {!result && (
+      {/* Manual Threshold Controls — hidden when QC already applied (current run or restored) */}
+      {!result && !pipelineState?.qc && (
         <div className="card p-6 mb-8 border-l-4 border-l-primary">
           <div className="flex items-center justify-between mb-5">
             <h3 className="font-bold flex items-center gap-2 text-text">
@@ -310,31 +322,45 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Max MT %</label>
               <input type="number" step="0.5" value={mtCutoff}
-                onChange={e => setMtCutoff(parseFloat(e.target.value) || 0)}
+                onChange={e => setParam('mtCutoff', parseFloat(e.target.value) || 0)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
               <p className="text-[10px] text-slate-500 mt-1">Cells above this % are removed</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Min Features</label>
               <input type="number" value={minFeatures}
-                onChange={e => setMinFeatures(parseInt(e.target.value) || 0)}
+                onChange={e => setParam('minFeatures', parseInt(e.target.value) || 0)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
               <p className="text-[10px] text-slate-500 mt-1">nFeature_RNA lower bound</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Max Features</label>
               <input type="number" value={maxFeatures}
-                onChange={e => setMaxFeatures(parseInt(e.target.value) || 0)}
+                onChange={e => setParam('maxFeatures', parseInt(e.target.value) || 0)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
               <p className="text-[10px] text-slate-500 mt-1">nFeature_RNA upper bound</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Min Counts</label>
               <input type="number" value={minCounts}
-                onChange={e => setMinCounts(parseInt(e.target.value) || 0)}
+                onChange={e => setParam('minCounts', parseInt(e.target.value) || 0)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
               <p className="text-[10px] text-slate-500 mt-1">nCount_RNA lower bound</p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Restored-session notice when pipelineState says QC is done but result obj not in memory */}
+      {!result && pipelineState?.qc && (
+        <div className="card p-4 mb-6 border-t-4 border-t-success/60 bg-success/5 flex items-center gap-3">
+          <ShieldCheck size={18} className="text-success flex-shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-success">QC Applied (restored session)</p>
+            <p className="text-xs text-textMuted mt-0.5">
+              {datasetInfo?.cells?.toLocaleString() ?? '—'} cells remaining after filtering.
+              Re-run QC only if you want to change thresholds.
+            </p>
           </div>
         </div>
       )}

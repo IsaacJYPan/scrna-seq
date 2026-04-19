@@ -1,12 +1,15 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { BarChart3, AlertTriangle } from 'lucide-react';
 import Plot from 'react-plotly.js';
+import { useTabParams } from '../hooks/useTabParams';
 
-export default function PCA({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState }) {
+export default function PCA({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
-  const [npcs, setNpcs] = useState(50);
+  const [params, setParam] = useTabParams('pca', userEmail, objectId, { npcs: 50 });
+  const npcs = params.npcs;
+  const setNpcs = (v) => setParam('npcs', v);
   const [activeView, setActiveView] = useState('elbow');
   const [hasHydrated, setHasHydrated] = useState(false);
 
@@ -33,17 +36,18 @@ export default function PCA({ callApi, datasetInfo, currentProvId, openProvenanc
   }, [callApi, currentProvId, npcs]);
 
   useEffect(() => {
-    if (datasetInfo && pipelineState?.normalize && !result && !running && !hasHydrated) {
+    if (datasetInfo && pipelineState?.normalize && !result && !running && !hasHydrated && sessionReady) {
       setHasHydrated(true);
       runPCA(true);
     }
-  }, [datasetInfo, pipelineState?.normalize, result, running, runPCA, hasHydrated]);
+  }, [datasetInfo, pipelineState?.normalize, result, running, runPCA, hasHydrated, sessionReady]);
 
-  // Reset hydration flag when callApi identity changes (i.e., when rSessionId loads)
-  // so that we can retry if the first attempt was a no-op due to missing session ID.
+  // Reset hydration flag when the R session ID changes (new R process started)
+  // so that we re-run the step in R to rebuild global_obj.
+  // Watch rSessionId directly — NOT callApi, which changes on every workspace update.
   useEffect(() => {
     setHasHydrated(false);
-  }, [callApi]);
+  }, [rSessionId]);
 
   if (!datasetInfo) {
     return (

@@ -29,3 +29,13 @@ Thumbs.db
 
 # Vite
 .vite/
+
+# R session objects (RDS + companion JSON) — too large and user-specific
+r-backend/sessions/
+
+# SQLite database files (results cache, user auth)
+*.sqlite
+*.db
+
+# R library cache
+r-backend/renv/

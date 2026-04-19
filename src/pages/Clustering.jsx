@@ -1,16 +1,20 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Network, AlertTriangle } from 'lucide-react';
 import Plot from 'react-plotly.js';
+import { useTabParams } from '../hooks/useTabParams';
 
-export default function Clustering({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState }) {
+export default function Clustering({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
-  // Parameters
-  const [algorithm, setAlgorithm] = useState(1); // 4=Leiden, 1=Louvain
-  const [resolution, setResolution] = useState(0.8);
-  const [dims, setDims] = useState(15);
+  // Persisted parameters
+  const [params, setParam] = useTabParams('cluster', userEmail, objectId, {
+    algorithm: 1,
+    resolution: 0.8,
+    dims: 15,
+  });
+  const { algorithm, resolution, dims } = params;
   const [hasHydrated, setHasHydrated] = useState(false);
 
   const runClustering = useCallback(async (isInitial = false) => {
@@ -36,17 +40,18 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
   }, [callApi, currentProvId, dims, resolution, algorithm]);
 
   useEffect(() => {
-    if (datasetInfo && pipelineState?.pca && !result && !running && !hasHydrated) {
+    if (datasetInfo && pipelineState?.pca && !result && !running && !hasHydrated && sessionReady) {
       setHasHydrated(true);
       runClustering(true);
     }
-  }, [datasetInfo, pipelineState?.pca, result, running, runClustering, hasHydrated]);
+  }, [datasetInfo, pipelineState?.pca, result, running, runClustering, hasHydrated, sessionReady]);
 
-  // Reset hydration flag when callApi identity changes (i.e., when rSessionId loads)
-  // so that we can retry if the first attempt was a no-op due to missing session ID.
+  // Reset hydration flag when the R session ID changes (new R process started)
+  // so that we re-run the step in R to rebuild global_obj.
+  // Watch rSessionId directly — NOT callApi, which changes on every workspace update.
   useEffect(() => {
     setHasHydrated(false);
-  }, [callApi]);
+  }, [rSessionId]);
 
   if (!datasetInfo) {
     return (
@@ -140,7 +145,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
             <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Algorithm</label>
             <select
               value={algorithm}
-              onChange={e => setAlgorithm(parseInt(e.target.value))}
+              onChange={e => setParam('algorithm', parseInt(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
             >
               <option value={4}>Leiden</option>
@@ -153,7 +158,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
             <div className="flex items-center gap-3">
               <input
                 type="range" min="0.1" max="2.0" step="0.05" value={resolution}
-                onChange={e => setResolution(parseFloat(e.target.value))}
+                onChange={e => setParam('resolution', parseFloat(e.target.value))}
                 className="flex-1 accent-primary"
               />
               <span className="text-sm font-mono text-primary font-bold w-10 text-right">{resolution}</span>
@@ -164,7 +169,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
             <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">PC Dimensions</label>
             <input
               type="number" value={dims} min={5} max={50}
-              onChange={e => setDims(parseInt(e.target.value))}
+              onChange={e => setParam('dims', parseInt(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
             />
             <p className="text-[10px] text-slate-500 mt-1">Use elbow plot to determine cutoff</p>
