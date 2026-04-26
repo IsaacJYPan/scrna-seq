@@ -652,12 +652,13 @@ function(dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3) {
                            n.neighbors = n_neighbors, min.dist = min_dist)
 
     emb <- Embeddings(global_obj, "umap")
-    clusts <- global_obj$seurat_clusters
+    clusts <- Idents(global_obj)
 
     trace_data <- lapply(levels(clusts), function(cl) {
       idx <- which(clusts == cl)
+      name_val <- if (grepl("^[0-9]+$", as.character(cl))) paste("Cluster", cl) else as.character(cl)
       el <- list(
-        name = paste("Cluster", cl),
+        name = name_val,
         x = as.numeric(emb[idx, 1]),
         y = as.numeric(emb[idx, 2])
       )
@@ -684,6 +685,49 @@ function(dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3) {
   })
 }
 
+#* Annotate clusters with biological cell types
+#* @post /annotate-clusters
+function(req) {
+  if (is.null(global_obj)) return(list(error = "No object loaded."))
+  
+  tryCatch({
+    body <- jsonlite::fromJSON(req$postBody)
+    mappings <- body$mappings
+    
+    if (is.null(mappings) || length(mappings) == 0) {
+      stop("No mappings provided.")
+    }
+    
+    if (!"seurat_clusters" %in% colnames(global_obj@meta.data)) {
+      stop("Dataset has not been clustered (missing seurat_clusters).")
+    }
+    
+    new_ids <- as.character(mappings)
+    names(new_ids) <- names(mappings)
+    
+    script <- paste0(
+      "# Rename cluster identities\n",
+      "new_ids <- c(", paste(paste0('"', names(mappings), '"="', mappings, '"'), collapse=", "), ")\n",
+      "obj <- RenameIdents(obj, new_ids)\n",
+      "obj$cell_type <- Idents(obj)\n"
+    )
+    
+    global_obj <<- RenameIdents(global_obj, new_ids)
+    global_obj$cell_type <<- Idents(global_obj)
+    
+    make_provenance(
+      result = list(
+        message = "Clusters successfully annotated.",
+        annotations = mappings
+      ),
+      script_text = script,
+      operation = "annotate"
+    )
+  }, error = function(e) {
+    list(error = paste("Annotation failed:", e$message))
+  })
+}
+
 # ──────────────────────────────────────────────────────────────────
 # ANALYSIS: Gene list
 # ──────────────────────────────────────────────────────────────────
@@ -705,14 +749,15 @@ function(gene) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   if (!(gene %in% rownames(global_obj))) return(list(error = "Gene not found in dataset"))
   
-  # Fetch expression and necessary metadata
-  expr_data <- FetchData(global_obj, vars = c(gene, "seurat_clusters"))
+  # Fetch expression
+  expr_data <- FetchData(global_obj, vars = gene)
+  expr_data$ident <- Idents(global_obj)
   umap_coords <- tryCatch(Embeddings(global_obj, "umap"), error = function(e) NULL)
   
   res <- list(
     gene = gene,
     expression = as.numeric(expr_data[[gene]]),
-    clusters = as.character(expr_data$seurat_clusters)
+    clusters = as.character(expr_data$ident)
   )
   
   if (!is.null(umap_coords)) {

@@ -98,10 +98,10 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
   const barData = [{
     type: 'bar',
     orientation: 'h',
-    x: pathways.map(p => -Math.log10(p.p_adj)),
-    y: pathways.map(p => p.name.length > 48 ? p.name.slice(0, 45) + '…' : p.name),
+    x: pathways.map(p => -Math.log10(Math.max(p.p_adj, 1e-300))),
+    y: pathways.map(p => (p.name.length > 40 ? p.name.slice(0, 37) + '… ' : p.name + ' ') + `(${p.id})`),
     marker: {
-      color: pathways.map(p => -Math.log10(p.p_adj)),
+      color: pathways.map(p => -Math.log10(Math.max(p.p_adj, 1e-300))),
       colorscale: [
         [0, '#6366f1'],
         [0.5, '#a855f7'],
@@ -129,10 +129,10 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
     type: 'scatter',
     mode: 'markers',
     x: pathways.map(p => p.gene_ratio_num ?? parseFloat((p.ratio || '0').split('/')[0]) / (parseFloat((p.ratio || '1').split('/')[1]) || 1)),
-    y: pathways.map(p => p.name.length > 48 ? p.name.slice(0, 45) + '…' : p.name),
+    y: pathways.map(p => (p.name.length > 40 ? p.name.slice(0, 37) + '… ' : p.name + ' ') + `(${p.id})`),
     marker: {
       size: pathways.map(p => Math.max(8, Math.min(30, (p.count || 1) * 2.5))),
-      color: pathways.map(p => -Math.log10(p.p_adj)),
+      color: pathways.map(p => -Math.log10(Math.max(p.p_adj, 1e-300))),
       colorscale: [[0, '#6366f1'], [0.5, '#a855f7'], [1, '#ec4899']],
       showscale: true,
       colorbar: { title: { text: '-log10(p-adj)', side: 'right' }, thickness: 12, len: 0.6, x: 1.01 },

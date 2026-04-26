@@ -76,6 +76,13 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
     }
   }, [pipelineState?.clusterDims]);
 
+  // In-memory UI cache dictionary to enable zero-latency dimension toggling
+  const [cachedDims, setCachedDims] = useState({});
+  useEffect(() => {
+    // Drop in-memory UI cache if clustering parameters change
+    setCachedDims({});
+  }, [pipelineState?.clusterDims, pipelineState?.clusterCount]);
+
   const runUMAP = useCallback(async (isInitial = false, nComponentsOverride = null) => {
     setRunning(true);
     setError(null);
@@ -91,7 +98,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
 
     if (data && data.result) {
       setResult(data);
-      setResultNComponents(nc);
+      setCachedDims(prev => ({ ...prev, [nc]: data }));
       setParam2('resultNComponents', nc);  // persist for hydration on reload
     } else if (data && data.error && !isInitial) {
       setError(data.error);
@@ -103,19 +110,24 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
 
   // Derive Plotly traces from stored result + current nComponents.
   // This means switching 2D ⇔ 3D re-renders immediately without re-running UMAP.
+  const computedDims = Number(result?.result?.n_components || nComponents);
+
   const traces = result?.result?.trace_data
-    ? result.result.trace_data.map((trace, i) => ({
-        x: trace.x,
-        y: trace.y,
-        z: resultNComponents === 3 ? trace.z : undefined,
-        mode: 'markers',
-        type: resultNComponents === 2 ? 'scatter' : 'scatter3d',
-        name: trace.name,
-        marker: { size: resultNComponents === 2 ? 4 : 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
-        hovertemplate: resultNComponents === 2
-          ? `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
-          : `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
-      }))
+    ? result.result.trace_data.map((trace, i) => {
+        const tr = {
+          x: trace.x,
+          y: trace.y,
+          mode: 'markers',
+          type: computedDims === 2 ? 'scatter' : 'scatter3d',
+          name: trace.name,
+          marker: { size: computedDims === 2 ? 4 : 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
+          hovertemplate: computedDims === 2
+            ? `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
+            : `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
+        };
+        if (computedDims === 3) tr.z = trace.z;
+        return tr;
+      })
     : [];
 
   // Hydration: use the last-computed nComponents (from localStorage) so that
@@ -135,6 +147,21 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
   useEffect(() => {
     setHasHydrated(false);
   }, [rSessionId]);
+
+  // When the user toggles the dimension in the UI, clear the stale result
+  // and eagerly try to load the required dimension from the local cache.
+  const [prevNComponents, setPrevNComponents] = useState(nComponents);
+  useEffect(() => {
+    if (nComponents !== prevNComponents && hasHydrated && sessionReady) {
+      setPrevNComponents(nComponents);
+      if (cachedDims[nComponents]) {
+        setResult(cachedDims[nComponents]); // Instant UI switch from memory
+      } else {
+        setResult(null);             // Instantly clear the plot to prevent "visible on both tabs"
+        runUMAP(true, nComponents);  // Try to load cached data for this specific dimension
+      }
+    }
+  }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP]);
 
   if (!datasetInfo) {
     return (
@@ -163,6 +190,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
 
   const layout2D = {
     autosize: true,
+    uirevision: 'true',
     margin: { l: 50, r: 20, t: 10, b: 50 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: '#94a3b8' },
@@ -174,6 +202,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
 
   const layout3D = {
     autosize: true,
+    uirevision: 'true',
     margin: { l: 0, r: 0, b: 0, t: 0 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     scene: {
@@ -293,6 +322,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
 
           {result && (
             <Plot
+              key={`umap-${is2D ? '2d' : '3d'}`}
               data={traces}
               layout={is2D ? layout2D : layout3D}
               useResizeHandler

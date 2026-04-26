@@ -45,6 +45,7 @@ export default function Sidebar({
   const analysisItems = [
     { id: 'geneviewer', label: 'Gene Expression', icon: BarChart3 },
     { id: 'deg', label: 'Differential Expression', icon: FileText },
+    { id: 'annotate', label: 'Cell Annotation', icon: Sparkles },
     { id: 'enrichment', label: 'Pathway Enrichment', icon: Microscope },
     { id: 'cellchat', label: 'CellChat', icon: MessageSquare },
     { id: 'multimodal', label: 'Batch Integration', icon: ShieldCheck },
