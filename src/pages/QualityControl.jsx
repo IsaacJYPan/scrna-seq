@@ -105,8 +105,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       operation: 'quality-control',
       step: 'qc',
       parentIds: currentProvId ? [currentProvId] : [],
-      useCache: true,
-      cacheParams: { type: 'quality-control', mt_threshold: mtCutoff, min_features: minFeatures, max_features: maxFeatures }
+      useCache: false
     });
 
     if (!data) {

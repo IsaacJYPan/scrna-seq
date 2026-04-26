@@ -46,8 +46,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
       operation: 'normalize',
       step: 'normalize',
       parentIds: currentProvId ? [currentProvId] : [],
-      useCache: true,
-      cacheParams: { type: 'normalization', method, scale_factor: scaleFactor, nfeatures: nFeatures }
+      useCache: false
     });
 
     if (!data) {

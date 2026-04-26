@@ -9,6 +9,7 @@ import Clustering from './pages/Clustering';
 import UMAPView from './pages/UMAPView';
 import GeneViewer from './pages/GeneViewer';
 import DifferentialExpression from './pages/DifferentialExpression';
+import Annotation from './pages/Annotation';
 import Enrichment from './pages/Enrichment';
 import CellChat from './pages/CellChat';
 import Publication from './pages/Publication';
@@ -30,7 +31,7 @@ import {
 const API = 'http://localhost:8000';
 
 // Pipeline step ordering — used for downstream invalidation
-const PIPELINE_ORDER = ['qc', 'normalize', 'pca', 'cluster', 'umap'];
+const PIPELINE_ORDER = ['qc', 'normalize', 'pca', 'cluster', 'annotate', 'umap'];
 
 // Error boundary to prevent full-app crashes from individual page errors
 class ErrorBoundary extends React.Component {
@@ -104,6 +105,7 @@ export default function App() {
     normalize: false,
     pca: false,
     cluster: false,
+    annotate: false,
     umap: false,
     clusterCount: 0,
     clusterDims: 15  // default dims; updated when clustering runs
@@ -113,7 +115,7 @@ export default function App() {
   // restore attempt completes (success or no saved session). Without this
   // gate the pages fire onlyIfCached calls with the wrong (new) session ID
   // and always miss the SQLite cache.
-  const [sessionReady, setSessionReady] = useState(false);
+  const [sessionCheckDone, setSessionCheckDone] = useState(false);
 
   // Collaborative Multi-Workspace Management
   const [workspaces, setWorkspaces] = useState([
@@ -154,6 +156,7 @@ export default function App() {
   // R process session ID — changes on every restart, busting the pipeline cache
   // so that all stateful steps re-execute in R and rebuild global_obj.
   const [rSessionId, setRSessionId] = useState(null);
+  const sessionReady = sessionCheckDone && !!rSessionId;
   // Mutable ref always pointing to the current user+object RDS path.
   // Used inside callApi (which is a stale closure) to avoid dependency issues.
   const sessionPathRef = React.useRef(null);
@@ -214,6 +217,7 @@ export default function App() {
       normalize: false,
       pca: false,
       cluster: false,
+      annotate: false,
       umap: false,
       clusterCount: 0,
       clusterDims: 15,
@@ -226,6 +230,7 @@ export default function App() {
       normalize: false,
       pca: false,
       cluster: false,
+      annotate: false,
       umap: false,
       clusterCount: 0,
       clusterDims: 15,
@@ -245,9 +250,14 @@ export default function App() {
     const forceOnlyIfCached = typeof onlyIfCached === 'boolean' ? onlyIfCached : false;
     // ── Cache key includes the R session ID so a fresh R process always
     // misses the cache and re-runs pipeline steps to rebuild global_obj.
-    const effectiveCacheParams = (useCache && cacheParams && rSessionId)
-      ? { ...cacheParams, _rSession: rSessionId }
-      : cacheParams;
+    // We also include the object ID to strictly partition the cache when switching
+    // or replacing datasets in the workspace.
+    let effectiveCacheParams = cacheParams;
+    if (useCache && cacheParams) {
+      effectiveCacheParams = { ...cacheParams };
+      if (rSessionId) effectiveCacheParams._rSession = rSessionId;
+      if (datasetInfo?.id) effectiveCacheParams._objectId = datasetInfo.id;
+    }
 
     // 1. Check Cache First
     if (useCache && effectiveCacheParams) {
@@ -437,7 +447,7 @@ export default function App() {
         }
       } else {
         console.log('[Session] No local pipeline state found, initializing defaults.');
-        setPipelineState({ qc: false, normalize: false, pca: false, cluster: false, umap: false, clusterCount: 0, clusterDims: 15 });
+        setPipelineState({ qc: false, normalize: false, pca: false, cluster: false, annotate: false, umap: false, clusterCount: 0, clusterDims: 15 });
       }
       setPipelineStateId(datasetInfo.id);
     }
@@ -447,17 +457,17 @@ export default function App() {
   useEffect(() => {
     if (!user?.email || !datasetInfo?.id) {
       // No object yet — nothing to restore, unblock hydration immediately
-      setSessionReady(true);
+      setSessionCheckDone(true);
       return;
     }
     if (restoredObjectsRef.current.has(datasetInfo.id)) return;
     restoredObjectsRef.current.add(datasetInfo.id);
 
     // Block hydration until this async restore resolves
-    setSessionReady(false);
+    setSessionCheckDone(false);
 
     const path = getSessionPath(user.email, datasetInfo.id);
-    if (!path) { setSessionReady(true); return; }
+    if (!path) { setSessionCheckDone(true); return; }
 
     console.log('[Session] Checking for saved session:', path);
     fetch(`${API}/check-session?path=${encodeURIComponent(path)}`)
@@ -490,8 +500,8 @@ export default function App() {
       })
       .finally(() => {
         // Always unblock page hydration — even if restore failed
-        console.log('[Session] sessionReady = true');
-        setSessionReady(true);
+        console.log('[Session] sessionCheckDone = true');
+        setSessionCheckDone(true);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.email, datasetInfo?.id]);
@@ -552,6 +562,7 @@ export default function App() {
           <TabContent id="umap" activeTab={activeTab}><UMAPView key={objKey} {...props} /></TabContent>
           <TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} datasetInfo={datasetInfo} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent>
           <TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent>
+          <TabContent id="annotate" activeTab={activeTab}><Annotation key={objKey} {...props} /></TabContent>
           <TabContent id="enrichment" activeTab={activeTab}><Enrichment key={objKey} {...props} /></TabContent>
           <TabContent id="cellchat" activeTab={activeTab}><CellChat {...props} /></TabContent>
           <TabContent id="multimodal" activeTab={activeTab}><BatchIntegration datasetInfo={datasetInfo} /></TabContent>
