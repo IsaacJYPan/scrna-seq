@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { FileText, Download, Play, LayoutGrid, Table } from 'lucide-react';
 import Plot from 'react-plotly.js';
 
-export default function DifferentialExpression({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady }) {
+export default function DifferentialExpression({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, currentWs }) {
   const [computing, setComputing] = useState(false);
   const [degResult, setDegResult] = useState(null);
   const [viewMode, setViewMode] = useState('table');
@@ -72,9 +72,11 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
   const activeCluster = selectedCluster ?? clusterKeys[0] ?? null;
   const activeMarkers = activeCluster ? (clusterMap[activeCluster] || []) : [];
 
+  const activeAnnotations = currentWs?.annotations || {};
+
   const heatmapData = heatmap ? [{
     z: heatmap.z,
-    x: heatmap.clusters,
+    x: heatmap.clusters.map(c => activeAnnotations[c] || `Cluster ${c}`),
     y: heatmap.genes,
     type: 'heatmap',
     colorscale: 'YlGnBu',
@@ -189,7 +191,7 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
                   className="bg-surface border border-border rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-primary"
                 >
                   {clusterKeys.map(k => (
-                    <option key={k} value={k}>Cluster {k}</option>
+                    <option key={k} value={k}>{activeAnnotations[k] || `Cluster ${k}`}</option>
                   ))}
                 </select>
 

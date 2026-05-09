@@ -278,12 +278,13 @@ function AddMetadataTab({ onMetaAdded }) {
   );
 }
 
-function SubsetTab({ info, onSubsetCreated }) {
+function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
   const [column, setColumn] = useState('');
   const [valuesData, setValuesData] = useState([]);
   const [selected, setSelected] = useState([]);
   const [newName, setNewName] = useState('Subset');
   const [subsetting, setSubsetting] = useState(false);
+  const [savingParent, setSavingParent] = useState(false);
   const [error, setError] = useState(null);
   const [loadingVals, setLoadingVals] = useState(false);
 
@@ -309,6 +310,28 @@ function SubsetTab({ info, onSubsetCreated }) {
     if (!column || selected.length === 0) return;
     setSubsetting(true);
     setError(null);
+
+    // ── Save parent before subsetting ─────────────────────────────
+    // The /subset endpoint replaces global_obj in R. We save the parent RDS
+    // first so the user can restore it by clicking the parent card later.
+    if (parentSessionPath) {
+      setSavingParent(true);
+      try {
+        const saveRes = await fetch(`${API}/save-session?path=${encodeURIComponent(parentSessionPath)}`);
+        const saveData = await saveRes.json();
+        if (saveData.error) {
+          console.warn('[Subset] Parent save failed (non-blocking):', saveData.error);
+        } else {
+          console.log('[Subset] Parent saved to', parentSessionPath);
+        }
+      } catch (e) {
+        console.warn('[Subset] Parent save request failed (non-blocking):', e);
+      } finally {
+        setSavingParent(false);
+      }
+    }
+    // ──────────────────────────────────────────────────────────────
+
     try {
       const params = new URLSearchParams({
         column,
@@ -330,11 +353,16 @@ function SubsetTab({ info, onSubsetCreated }) {
     .filter(v => selected.includes(v.value))
     .reduce((sum, v) => sum + (v.count || 0), 0);
 
+  const isWorking = subsetting || savingParent;
+
   return (
     <div className="space-y-5">
       <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl p-3 text-xs text-amber-400 leading-relaxed">
         <strong>Standard practice:</strong> subsetting creates a new child object in your workspace.
         QC metrics are preserved (per-cell). Re-run from <strong>Normalization</strong> onward on the subset.
+        {parentSessionPath && (
+          <span className="block mt-1 text-amber-600">The parent object will be saved to disk before subsetting so you can restore it later.</span>
+        )}
       </div>
 
       <div>
@@ -425,11 +453,16 @@ function SubsetTab({ info, onSubsetCreated }) {
 
       <button
         onClick={doSubset}
-        disabled={subsetting || selected.length === 0 || !column}
+        disabled={isWorking || selected.length === 0 || !column}
         className="w-full btn btn-primary flex items-center justify-center gap-2"
       >
-        {subsetting ? <Spinner /> : <Scissors size={15} />}
-        Create Subset Object ({selected.length} value{selected.length !== 1 ? 's' : ''})
+        {savingParent ? (
+          <><Spinner /> Saving parent…</>
+        ) : subsetting ? (
+          <><Spinner /> Creating subset…</>
+        ) : (
+          <><Scissors size={15} /> Create Subset Object ({selected.length} value{selected.length !== 1 ? 's' : ''})</>
+        )}
       </button>
     </div>
   );
@@ -444,7 +477,7 @@ const TABS = [
   { id: 'subset',    label: 'Subset',       icon: <Scissors size={13} /> },
 ];
 
-export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaAdded }) {
+export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaAdded, parentSessionPath }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -543,7 +576,7 @@ export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaA
                 <AddMetadataTab onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} />
               )}
               {activeTab === 'subset' && (
-                <SubsetTab info={info} onSubsetCreated={onSubsetCreated} />
+                <SubsetTab info={info} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} />
               )}
             </>
           )}

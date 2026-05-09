@@ -201,6 +201,14 @@ export default function Workspace({
   resetPipelineAfterSubset,
   userEmail,
 }) {
+  // Derive the RDS save path for the currently active object.
+  // Mirrors the getSessionPath logic in App.jsx so they stay in sync.
+  const sanitizeEmail = (email) => email?.replace(/[^a-zA-Z0-9]/g, '_') ?? '';
+  const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
+  const activeObj = selectedObjects[0] || currentWs.objects[0] || null;
+  const parentSessionPath = userEmail && activeObj?.id
+    ? `sessions/${sanitizeEmail(userEmail)}/${activeObj.id}.rds`
+    : null;
   const [showLoadModal, setShowLoadModal] = useState(false);
   const [loadingId, setLoadingId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -284,6 +292,7 @@ export default function Workspace({
       ...data.result,
       timestamp: new Date().toISOString(),
       isSubset: true,
+      parentObjId: activeObj?.id ?? null,  // link back to the parent for future restore
     };
     updateActiveWorkspace({
       objects: [...currentWs.objects, newObj],
@@ -294,7 +303,6 @@ export default function Workspace({
     setInspectingObj(null);
   };
 
-  const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
   const activeCount = selectedObjects.length;
   const displayObject = selectedObjects[0] || currentWs.objects[0];
 
@@ -545,6 +553,7 @@ export default function Workspace({
           onClose={() => setInspectingObj(null)}
           onSubsetCreated={handleSubsetCreated}
           onMetaAdded={() => {/* inspector refreshes itself */}}
+          parentSessionPath={parentSessionPath}
         />
       )}
     </div>

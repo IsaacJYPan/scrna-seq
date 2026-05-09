@@ -44,7 +44,7 @@ function generate3DData(nClusters) {
   return traces;
 }
 
-export default function UMAPView({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
+export default function UMAPView({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -62,8 +62,19 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
 
   // Track which n_components was actually computed last — persisted so hydration
   // attempts the right cache key on reload (e.g. if user last ran 3D UMAP).
-  const [params2, setParam2] = useTabParams('umap_meta', userEmail, objectId, { resultNComponents: null });
+  const [params2, setParam2] = useTabParams('umap_meta', userEmail, objectId, { resultNComponents: null, camera3D: null });
   const savedResultNComponents = params2.resultNComponents;
+
+  // Bug A fix: keep the debounce timer in its own ref (not on cameraRef itself).
+  // cameraRef holds the latest camera position for the debounce closure.
+  const cameraRef = React.useRef(params2.camera3D || null);
+  const debounceRef = React.useRef(null);
+
+  // The initial camera is set ONCE from localStorage and never changes during the session.
+  // Plotly's uirevision then owns the camera state — we never feed it back in.
+  // This prevents both the jitter (no re-renders during drag) and the 2D↔3D toggle
+  // angle shift (Plotly keeps its own state while the div stays mounted).
+  const initialCamera3D = React.useRef(params2.camera3D || null);
 
   // resultNComponents: in-session state that mirrors savedResultNComponents
   // We initialize from the persisted value so traces render correctly after hydration.
@@ -108,38 +119,73 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
     setRunning(false);
   }, [callApi, currentProvId, dims, nComponents, nNeighbors, minDist, pipelineState?.clusterCount]);
 
-  // Derive Plotly traces from stored result + current nComponents.
-  // This means switching 2D ⇔ 3D re-renders immediately without re-running UMAP.
-  const computedDims = Number(result?.result?.n_components || nComponents);
+  // Silent cache-only prefetch — populates cachedDims without touching running/error state.
+  // Used to warm the other dimension during hydration so 2D↔3D toggle is instant.
+  const prefetchDim = useCallback(async (nc) => {
+    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}`, {}, {
+      operation: 'umap',
+      step: 'umap',
+      parentIds: currentProvId ? [currentProvId] : [],
+      useCache: true,
+      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist },
+      onlyIfCached: true  // never triggers a real R computation
+    });
+    if (data?.result) {
+      setCachedDims(prev => ({ ...prev, [nc]: data }));
+    }
+  }, [callApi, currentProvId, dims, nNeighbors, minDist]);
 
-  const traces = result?.result?.trace_data
-    ? result.result.trace_data.map((trace, i) => {
-        const tr = {
-          x: trace.x,
-          y: trace.y,
-          mode: 'markers',
-          type: computedDims === 2 ? 'scatter' : 'scatter3d',
-          name: trace.name,
-          marker: { size: computedDims === 2 ? 4 : 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
-          hovertemplate: computedDims === 2
-            ? `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
-            : `<b>${trace.name}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
-        };
-        if (computedDims === 3) tr.z = trace.z;
-        return tr;
-      })
-    : [];
+  const is2D = nComponents === 2;
+
+  // Derive Plotly traces from cached results.
+  const activeAnnotations = currentWs?.annotations || {};
+
+  const buildTraces = (dataObj, targetDims) => {
+    return dataObj?.result?.trace_data
+      ? dataObj.result.trace_data.map((trace, i) => {
+          const safeName = String(trace.name || '');
+          const originalId = safeName.replace('Cluster ', '');
+          const newName = activeAnnotations[originalId] || trace.name;
+          const tr = {
+            x: trace.x,
+            y: trace.y,
+            mode: 'markers',
+            type: targetDims === 2 ? 'scatter' : 'scatter3d',
+            name: newName,
+            marker: { size: targetDims === 2 ? 4 : 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
+            hovertemplate: targetDims === 2
+              ? `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
+              : `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
+          };
+          if (targetDims === 3) tr.z = trace.z;
+          return tr;
+        })
+      : [];
+  };
+
+  const traces2D = buildTraces(cachedDims[2], 2);
+  const traces3D = buildTraces(cachedDims[3], 3);
+  
+  // Traces corresponding to the actively viewed dimension
+  const activeTraces = is2D ? traces2D : traces3D;
 
   // Hydration: use the last-computed nComponents (from localStorage) so that
   // e.g. a previously-computed 3D UMAP cache key is matched correctly.
   useEffect(() => {
     if (datasetInfo && pipelineState?.cluster && !result && !running && !hasHydrated && sessionReady) {
       setHasHydrated(true);
-      // Pass in the saved resultNComponents so we hit the right cache key.
-      // If null (no prior run), falls back to current nComponents.
-      runUMAP(true, savedResultNComponents ?? undefined);
+      const savedNC = savedResultNComponents ?? null;
+      const activeNC = nComponents; // dimension currently shown in the UI
+      // Hydrate the active view first, then silently prefetch the other dimension
+      // so toggling 2D↔3D is instant without an extra network round-trip.
+      ;(async () => {
+        await runUMAP(true, activeNC);
+        if (savedNC && savedNC !== activeNC) {
+          await prefetchDim(savedNC);  // silent — no spinner, no error state
+        }
+      })();
     }
-  }, [datasetInfo, pipelineState?.cluster, result, running, runUMAP, hasHydrated, sessionReady, savedResultNComponents]);
+  }, [datasetInfo, pipelineState?.cluster, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents]);
 
   // Reset hydration flag when the R session ID changes (new R process started)
   // so that we re-run the step in R to rebuild global_obj.
@@ -163,6 +209,40 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
     }
   }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP]);
 
+  // layout2D is simple and doesn't have camera state, so we just declare it inline
+  const layout2D = {
+    autosize: true,
+    uirevision: 'true',
+    margin: { l: 50, r: 20, t: 10, b: 50 },
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    font: { color: '#94a3b8' },
+    xaxis: { title: 'UMAP 1', showgrid: false, zeroline: false },
+    yaxis: { title: 'UMAP 2', showgrid: false, zeroline: false },
+    showlegend: false,
+    hovermode: 'closest'
+  };
+
+  // layout3D is memoized with no dependencies so the object reference never changes.
+  // A stable layout is the key to letting Plotly's uirevision own the 3D camera:
+  // Plotly only re-applies scene.camera when the layout object itself changes.
+  // With a stable object, the initial camera is applied once and never overwritten.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const layout3D = React.useMemo(() => ({
+    autosize: true,
+    uirevision: 'umap-3d',  // stable string — Plotly never resets camera across re-renders
+    margin: { l: 0, r: 0, b: 0, t: 0 },
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    scene: {
+      // Set once from localStorage; after first render Plotly owns this via uirevision
+      camera: initialCamera3D.current,
+      xaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
+      yaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
+      zaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
+      bgcolor: 'transparent'
+    },
+    showlegend: false
+  }), []); // intentionally empty deps — layout must be stable for uirevision to work
+
   if (!datasetInfo) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
@@ -185,34 +265,6 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
       </div>
     );
   }
-
-  const is2D = nComponents === 2;
-
-  const layout2D = {
-    autosize: true,
-    uirevision: 'true',
-    margin: { l: 50, r: 20, t: 10, b: 50 },
-    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    font: { color: '#94a3b8' },
-    xaxis: { title: 'UMAP 1', showgrid: false, zeroline: false },
-    yaxis: { title: 'UMAP 2', showgrid: false, zeroline: false },
-    showlegend: false,
-    hovermode: 'closest'
-  };
-
-  const layout3D = {
-    autosize: true,
-    uirevision: 'true',
-    margin: { l: 0, r: 0, b: 0, t: 0 },
-    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    scene: {
-      xaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
-      yaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
-      zaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
-      bgcolor: 'transparent'
-    },
-    showlegend: false
-  };
 
   return (
     <div className="h-full w-full flex flex-col bg-background p-6">
@@ -320,16 +372,45 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
             </div>
           )}
 
-          {result && (
+          {/* Parallel Mounting strictly protects 3D Camera Angles and avoids graph-lines visual glitches */}
+          <div className={`w-full h-full absolute inset-0 ${is2D && cachedDims[2] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
             <Plot
-              key={`umap-${is2D ? '2d' : '3d'}`}
-              data={traces}
-              layout={is2D ? layout2D : layout3D}
+              data={traces2D}
+              layout={layout2D}
               useResizeHandler
               className="w-full h-full"
               config={{ displayModeBar: true, displaylogo: false, responsive: true }}
             />
-          )}
+          </div>
+          <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+            <Plot
+              data={traces3D}
+              layout={layout3D}
+              useResizeHandler
+              className="w-full h-full"
+              config={{ displayModeBar: true, displaylogo: false, responsive: true }}
+              onRelayout={(e) => {
+                let updated = false;
+                let newCamera = cameraRef.current ? { ...cameraRef.current } : {};
+
+                // Merge partial camera fragments that Plotly emits during drag
+                if (e['scene.camera'])        { newCamera = { ...e['scene.camera'] }; updated = true; }
+                if (e['scene.camera.eye'])    { newCamera = { ...newCamera, eye:    e['scene.camera.eye'] };    updated = true; }
+                if (e['scene.camera.center']) { newCamera = { ...newCamera, center: e['scene.camera.center'] }; updated = true; }
+                if (e['scene.camera.up'])     { newCamera = { ...newCamera, up:     e['scene.camera.up'] };     updated = true; }
+
+                if (updated) {
+                  // Update the ref only — no React state update, no re-render, no jitter.
+                  // Plotly owns the live camera; we only persist it to localStorage.
+                  cameraRef.current = newCamera;
+                  if (debounceRef.current) clearTimeout(debounceRef.current);
+                  debounceRef.current = setTimeout(() => {
+                    setParam2('camera3D', cameraRef.current);
+                  }, 1500);
+                }
+              }}
+            />
+          </div>
         </div>
 
         {/* Cluster legend sidebar */}
@@ -340,7 +421,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
                 <ListFilter size={14} className="inline text-primary mr-2" />Clusters
               </h4>
               <div className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar">
-                {traces.map((trace, i) => (
+                {activeTraces.map((trace, i) => (
                   <div key={i} className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-white/5">
                     <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: trace.marker?.color || CLUSTER_COLORS[i] }}></div>
                     <span className="text-slate-300">{trace.name}</span>

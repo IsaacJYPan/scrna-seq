@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Sparkles, AlertTriangle } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 
-export default function Normalization({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, sessionReady, userEmail, objectId }) {
+export default function Normalization({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -14,6 +14,41 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
     nFeatures: 2000,
   });
   const { method, scaleFactor, nFeatures } = params;
+  const [hasHydrated, setHasHydrated] = useState(false);
+
+  const runNormalization = useCallback(async (isInitial = false) => {
+    setRunning(true);
+    setError(null);
+    const data = await callApi(`/normalize?method=${method}&scale_factor=${scaleFactor}&nfeatures=${nFeatures}`, {}, {
+      operation: 'normalize',
+      step: 'normalize',
+      parentIds: currentProvId ? [currentProvId] : [],
+      useCache: true,
+      cacheParams: { type: 'normalize', method, scale_factor: scaleFactor, nfeatures: nFeatures },
+      onlyIfCached: isInitial,
+    });
+    if (data?.result) {
+      setResult(data);
+    } else if (data?.error && !isInitial) {
+      setError(data.error);
+    } else if (!data && !isInitial) {
+      setError('R backend error. Check the console for details.');
+    }
+    setRunning(false);
+  }, [callApi, currentProvId, method, scaleFactor, nFeatures]);
+
+  // Auto-hydrate from cache on session restore (same pattern as PCA/Clustering/UMAP)
+  useEffect(() => {
+    if (datasetInfo && pipelineState?.qc && !result && !running && !hasHydrated && sessionReady) {
+      setHasHydrated(true);
+      runNormalization(true);
+    }
+  }, [datasetInfo, pipelineState?.qc, result, running, runNormalization, hasHydrated, sessionReady]);
+
+  // Reset hydration flag when R session changes so steps re-run to rebuild global_obj
+  useEffect(() => {
+    setHasHydrated(false);
+  }, [rSessionId]);
 
   if (!datasetInfo) {
     return (
@@ -39,31 +74,6 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
     );
   }
 
-  const runNormalization = async () => {
-    setRunning(true);
-    setError(null);
-    const data = await callApi(`/normalize?method=${method}&scale_factor=${scaleFactor}&nfeatures=${nFeatures}`, {}, {
-      operation: 'normalize',
-      step: 'normalize',
-      parentIds: currentProvId ? [currentProvId] : [],
-      useCache: false
-    });
-
-    if (!data) {
-      setError('R backend error. Check the console for details.');
-      setRunning(false);
-      return;
-    }
-    if (data.error) {
-      setError(data.error);
-      setRunning(false);
-      return;
-    }
-
-    setResult(data);
-    setRunning(false);
-  };
-
   return (
     <div className="h-full w-full p-8 overflow-y-auto bg-background custom-scrollbar">
       <div className="flex justify-between items-center mb-8">
@@ -79,7 +89,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
             >📝 View Step Script</button>
           )}
           <button
-            onClick={runNormalization}
+            onClick={() => runNormalization(false)}
             disabled={running}
             className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center gap-2`}
           >

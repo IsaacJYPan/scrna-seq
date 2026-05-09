@@ -706,12 +706,14 @@ function(req) {
     names(new_ids) <- names(mappings)
     
     script <- paste0(
-      "# Rename cluster identities\n",
+      "# Reset and rename cluster identities\n",
+      "Idents(obj) <- obj$seurat_clusters\n",
       "new_ids <- c(", paste(paste0('"', names(mappings), '"="', mappings, '"'), collapse=", "), ")\n",
       "obj <- RenameIdents(obj, new_ids)\n",
       "obj$cell_type <- Idents(obj)\n"
     )
     
+    Idents(global_obj) <<- global_obj$seurat_clusters
     global_obj <<- RenameIdents(global_obj, new_ids)
     global_obj$cell_type <<- Idents(global_obj)
     
@@ -849,10 +851,11 @@ function() {
 
 #* Pathway Enrichment using clusterProfiler (ORA)
 #* @get /enrichment
-function(database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n = 20) {
+function(database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n = 20, target_cluster = "all", exclude_artifacts = "true") {
   pval_cutoff    <- as.numeric(pval_cutoff)
   logfc_threshold <- as.numeric(logfc_threshold)
   top_n          <- as.integer(top_n)
+  exclude_artifacts <- as.logical(exclude_artifacts)
 
   if (is.null(global_obj)) return(list(error = "No object loaded"))
 
@@ -882,17 +885,43 @@ function(database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n =
     })
 
     # ── Step 1: Find marker genes ────────────────────────────
-    cat("[Enrichment] Running FindAllMarkers (logfc.threshold =", logfc_threshold, ")...\n")
-    markers <- FindAllMarkers(
-      global_obj,
-      only.pos      = TRUE,
-      min.pct       = 0.1,
-      logfc.threshold = logfc_threshold,
-      verbose       = FALSE
-    )
+    if (!is.null(target_cluster) && target_cluster != "all") {
+      cat("[Enrichment] Running FindMarkers for cluster", target_cluster, "(logfc.threshold =", logfc_threshold, ")...\n")
+      if (!target_cluster %in% levels(Idents(global_obj))) {
+        return(list(error = paste("Cluster", target_cluster, "not found.")))
+      }
+      markers <- FindMarkers(
+        global_obj,
+        ident.1       = target_cluster,
+        only.pos      = TRUE,
+        min.pct       = 0.1,
+        logfc.threshold = logfc_threshold,
+        verbose       = FALSE
+      )
+      if (!is.null(markers) && nrow(markers) > 0) {
+        markers$gene <- rownames(markers)
+      }
+    } else {
+      cat("[Enrichment] Running FindAllMarkers (logfc.threshold =", logfc_threshold, ")...\n")
+      markers <- FindAllMarkers(
+        global_obj,
+        only.pos      = TRUE,
+        min.pct       = 0.1,
+        logfc.threshold = logfc_threshold,
+        verbose       = FALSE
+      )
+    }
 
     if (is.null(markers) || nrow(markers) == 0) {
       return(list(error = "No marker genes found. Try lowering logfc.threshold or running Clustering first."))
+    }
+
+    if (isTRUE(exclude_artifacts)) {
+      cat("[Enrichment] Excluding MT- and RPL/RPS artifact genes...\n")
+      markers <- markers[!grepl("^(MT-|RPL|RPS)", markers$gene, ignore.case = TRUE), ]
+      if (nrow(markers) == 0) {
+        return(list(error = "No marker genes left after excluding mitochondrial and ribosomal genes."))
+      }
     }
 
     # Deduplicated top marker genes (sorted by avg_log2FC)

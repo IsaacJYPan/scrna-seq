@@ -31,5 +31,6 @@ api_file <- file.path(script_dir, "plumber.R")
 options(plumber.autoreload = TRUE)
 pr <- plumber::plumb(api_file)
 
-cat("Plumber API running on http://0.0.0.0:8000\n")
-pr$run(host = "0.0.0.0", port = 8000)
+cat("Plumber API running on http://127.0.0.1:8000\n")
+pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE))
+pr$run(host = "127.0.0.1", port = 8000)

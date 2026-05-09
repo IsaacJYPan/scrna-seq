@@ -31,7 +31,7 @@ import {
 const API = 'http://localhost:8000';
 
 // Pipeline step ordering — used for downstream invalidation
-const PIPELINE_ORDER = ['qc', 'normalize', 'pca', 'cluster', 'annotate', 'umap'];
+const PIPELINE_ORDER = ['qc', 'normalize', 'pca', 'cluster', 'umap'];
 
 // Error boundary to prevent full-app crashes from individual page errors
 class ErrorBoundary extends React.Component {
@@ -128,7 +128,8 @@ export default function App() {
       branches: { 'main': null },
       collaborators: ['me@lab.edu'],
       type: 'personal',
-      dataVersion: 0
+      dataVersion: 0,
+      annotVersion: 0
     },
     {
       id: 'ws-shared-1',
@@ -139,7 +140,8 @@ export default function App() {
       branches: { 'main': null },
       collaborators: ['researcher@lab.edu', 'pi@lab.edu'],
       type: 'shared',
-      dataVersion: 0
+      dataVersion: 0,
+      annotVersion: 0
     }
   ]);
   const [activeWsIndex, setActiveWsIndex] = useState(0);
@@ -169,16 +171,6 @@ export default function App() {
       .then(r => r.json())
       .then(data => setApiStatus(`Connected (${data.mode})`))
       .catch(() => setApiStatus('Disconnected'));
-    // Fetch R session ID so we can detect restarts and bust the pipeline cache
-    fetch(`${API}/session-id`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.sessionId) {
-          console.log('[App] R session ID:', data.sessionId);
-          setRSessionId(data.sessionId);
-        }
-      })
-      .catch(e => console.warn('[App] Could not fetch R session ID:', e));
   }, []);
 
   const updateActiveWorkspace = (updates) => {
@@ -380,12 +372,14 @@ export default function App() {
     try {
       const saved = localStorage.getItem(wsStorageKey);
       if (saved) {
-        const parsed = JSON.parse(saved); // array of {objects, selectedObjectIds}
+        const parsed = JSON.parse(saved); // array of {objects, selectedObjectIds, branches, dataVersion}
         setWorkspaces(prev =>
           prev.map((ws, i) => ({
             ...ws,
             objects:           parsed[i]?.objects           ?? ws.objects,
             selectedObjectIds: parsed[i]?.selectedObjectIds ?? ws.selectedObjectIds,
+            branches:          parsed[i]?.branches          ?? ws.branches,
+            dataVersion:       parsed[i]?.dataVersion       ?? ws.dataVersion,
           }))
         );
       }
@@ -400,8 +394,10 @@ export default function App() {
     if (!wsStorageKey) return;
     try {
       const toSave = workspaces.map(ws => ({
-        objects: ws.objects,
+        objects:           ws.objects,
         selectedObjectIds: ws.selectedObjectIds,
+        branches:          ws.branches,
+        dataVersion:       ws.dataVersion,
       }));
       localStorage.setItem(wsStorageKey, JSON.stringify(toSave));
     } catch (e) {
@@ -475,28 +471,50 @@ export default function App() {
       .then(d => {
         if (!d.exists) {
           console.log('[Session] No saved session found — resetting pipeline status.');
-          resetPipelineState();
-          return null;
+          return fetch(`${API}/session-id`).then(r => r.json()).then(data => {
+            if (data.sessionId) setRSessionId(data.sessionId);
+            resetPipelineState();
+          });
         }
         console.log('[Session] Found saved session, restoring…');
-        return fetch(`${API}/restore-session?path=${encodeURIComponent(path)}`).then(r => r.json());
-      })
-      .then(d => {
-        if (d?.success) {
-          console.log('[Session] ✅ Restored:', d.cells, 'cells, reductions:', d.reductions?.join(', '));
-          // Adopt the original session ID → SQLite cache keys remain valid
-          if (d.session_id) {
-            console.log('[Session] Restoring session ID:', d.session_id);
-            setRSessionId(d.session_id);
-          }
-        } else if (d?.error) {
-          console.warn('[Session] Session restore failed, resetting pipeline status.');
-          resetPipelineState();
-        }
+        return fetch(`${API}/restore-session?path=${encodeURIComponent(path)}`)
+          .then(r => r.json())
+          .then(d2 => {
+            if (d2?.success) {
+              console.log('[Session] ✅ Restored:', d2.cells, 'cells, reductions:', d2.reductions?.join(', '));
+              if (d2.session_id) {
+                console.log('[Session] Restoring session ID:', d2.session_id);
+                setRSessionId(d2.session_id);
+              } else {
+                // .meta.json absent or session_id blank — fetch current ID so
+                // sessionReady unblocks. Cache will miss (new session), tabs will
+                // show empty, but user can re-run steps; Seurat object IS restored.
+                console.warn('[Session] No session_id in restore response — fetching current session ID.');
+                return fetch(`${API}/session-id`).then(r => r.json()).then(data => {
+                  if (data.sessionId) setRSessionId(data.sessionId);
+                });
+              }
+            } else if (d2?.error) {
+              console.warn('[Session] Session restore failed:', d2.error);
+              return fetch(`${API}/session-id`).then(r => r.json()).then(data => {
+                if (data.sessionId) setRSessionId(data.sessionId);
+                resetPipelineState();
+              });
+            } else {
+              // Unexpected response shape — unblock anyway
+              console.warn('[Session] Unexpected restore response, unblocking with fresh session ID.');
+              return fetch(`${API}/session-id`).then(r => r.json()).then(data => {
+                if (data.sessionId) setRSessionId(data.sessionId);
+              });
+            }
+          });
       })
       .catch(e => {
-        console.warn('[Session] Restore failed:', e);
-        resetPipelineState();
+        console.warn('[Session] Restore/Check failed:', e);
+        return fetch(`${API}/session-id`).then(r => r.json()).then(data => {
+          if (data.sessionId) setRSessionId(data.sessionId);
+          resetPipelineState();
+        }).catch(() => resetPipelineState());
       })
       .finally(() => {
         // Always unblock page hydration — even if restore failed
@@ -543,33 +561,31 @@ export default function App() {
 
     return (
       <div className="relative w-full h-full bg-background">
-        <ErrorBoundary>
-          <TabContent id="workspace" activeTab={activeTab}>
-            <Workspace
-              {...props}
-              setDataVersion={handleDataVersionChange}
-              workspaces={workspaces}
-              setWorkspaces={setWorkspaces}
-              activeWsIndex={activeWsIndex}
-              setActiveWsIndex={setActiveWsIndex}
-            />
-          </TabContent>
-          <TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} /></TabContent>
-          <TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent>
-          <TabContent id="normalize" activeTab={activeTab}><Normalization key={objKey} {...props} /></TabContent>
-          <TabContent id="pca" activeTab={activeTab}><PCA key={objKey} {...props} /></TabContent>
-          <TabContent id="cluster" activeTab={activeTab}><Clustering key={objKey} {...props} /></TabContent>
-          <TabContent id="umap" activeTab={activeTab}><UMAPView key={objKey} {...props} /></TabContent>
-          <TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} datasetInfo={datasetInfo} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent>
-          <TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent>
-          <TabContent id="annotate" activeTab={activeTab}><Annotation key={objKey} {...props} /></TabContent>
-          <TabContent id="enrichment" activeTab={activeTab}><Enrichment key={objKey} {...props} /></TabContent>
-          <TabContent id="cellchat" activeTab={activeTab}><CellChat {...props} /></TabContent>
-          <TabContent id="multimodal" activeTab={activeTab}><BatchIntegration datasetInfo={datasetInfo} /></TabContent>
-          <TabContent id="publication" activeTab={activeTab}><Publication {...props} /></TabContent>
-          <TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent>
-          <TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent>
-        </ErrorBoundary>
+        <ErrorBoundary key="workspace"><TabContent id="workspace" activeTab={activeTab}>
+          <Workspace
+            {...props}
+            setDataVersion={handleDataVersionChange}
+            workspaces={workspaces}
+            setWorkspaces={setWorkspaces}
+            activeWsIndex={activeWsIndex}
+            setActiveWsIndex={setActiveWsIndex}
+          />
+        </TabContent></ErrorBoundary>
+        <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="normalize"><TabContent id="normalize" activeTab={activeTab}><Normalization key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="pca"><TabContent id="pca" activeTab={activeTab}><PCA key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cluster"><TabContent id="cluster" activeTab={activeTab}><Clustering key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="umap"><TabContent id="umap" activeTab={activeTab}><UMAPView key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} datasetInfo={datasetInfo} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><Annotation key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><Enrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><CellChat {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="multimodal"><TabContent id="multimodal" activeTab={activeTab}><BatchIntegration datasetInfo={datasetInfo} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="team"><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
       </div>
     );
   };
