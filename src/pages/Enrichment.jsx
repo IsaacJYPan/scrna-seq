@@ -23,22 +23,24 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
     pvalCutoff: 0.05,
     logfcThreshold: 0.25,
     topN: 20,
+    targetCluster: 'all',
+    excludeArtifacts: true,
   });
-  const { database, pvalCutoff, logfcThreshold, topN } = params;
+  const { database, pvalCutoff, logfcThreshold, topN, targetCluster, excludeArtifacts } = params;
 
   const runEnrichment = useCallback(async (isInitial = false) => {
     setComputing(true);
     setError(null);
 
     const data = await callApi(
-      `/enrichment?database=${database}&pval_cutoff=${pvalCutoff}&logfc_threshold=${logfcThreshold}&top_n=${topN}`,
+      `/enrichment?database=${database}&pval_cutoff=${pvalCutoff}&logfc_threshold=${logfcThreshold}&top_n=${topN}&target_cluster=${encodeURIComponent(targetCluster)}&exclude_artifacts=${excludeArtifacts}`,
       {},
       {
         operation: 'enrichment',
         step: 'enrichment',
         parentIds: currentProvId ? [currentProvId] : [],
         useCache: true,
-        cacheParams: { type: 'enrichment', database, pval_cutoff: pvalCutoff, logfc_threshold: logfcThreshold, top_n: topN },
+        cacheParams: { type: 'enrichment', database, pval_cutoff: pvalCutoff, logfc_threshold: logfcThreshold, top_n: topN, target_cluster: targetCluster, exclude_artifacts: excludeArtifacts },
         onlyIfCached: isInitial,
       }
     );
@@ -51,7 +53,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
       setError('R backend error. Check the R console for details.');
     }
     setComputing(false);
-  }, [callApi, currentProvId, database, pvalCutoff, logfcThreshold, topN]);
+  }, [callApi, currentProvId, database, pvalCutoff, logfcThreshold, topN, targetCluster, excludeArtifacts]);
 
   // Hydration from cache — gated by sessionReady
   useEffect(() => {
@@ -91,6 +93,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
   }
 
   const pathways = result?.result?.top_pathways || [];
+
   // Use a smaller minimum height if there are very few pathways, so the single bar isn't huge
   const plotHeight = pathways.length <= 3 ? 200 : Math.max(380, pathways.length * 30);
 
@@ -99,7 +102,11 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
     type: 'bar',
     orientation: 'h',
     x: pathways.map(p => -Math.log10(Math.max(p.p_adj, 1e-300))),
-    y: pathways.map(p => (p.name.length > 40 ? p.name.slice(0, 37) + '… ' : p.name + ' ') + `(${p.id})`),
+    y: pathways.map(p => {
+      const name = String(p.name || '');
+      const id = String(p.id || '');
+      return (name.length > 40 ? name.slice(0, 37) + '… ' : name + ' ') + `(${id})`;
+    }),
     marker: {
       color: pathways.map(p => -Math.log10(Math.max(p.p_adj, 1e-300))),
       colorscale: [
@@ -128,8 +135,17 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
   const bubbleData = pathways.length ? [{
     type: 'scatter',
     mode: 'markers',
-    x: pathways.map(p => p.gene_ratio_num ?? parseFloat((p.ratio || '0').split('/')[0]) / (parseFloat((p.ratio || '1').split('/')[1]) || 1)),
-    y: pathways.map(p => (p.name.length > 40 ? p.name.slice(0, 37) + '… ' : p.name + ' ') + `(${p.id})`),
+    x: pathways.map(p => {
+      const r_num = p.gene_ratio_num;
+      const ratio_str = String(p.ratio || '0/1');
+      return r_num ?? (parseFloat(ratio_str.split('/')[0]) / (parseFloat(ratio_str.split('/')[1]) || 1));
+    }),
+    y: pathways.map(p => {
+      const name = String(p.name || '');
+      const id = String(p.id || '');
+      return (name.length > 40 ? name.slice(0, 37) + '… ' : name + ' ') + `(${id})`;
+    }),
+    customdata: pathways.map(p => p.count),
     marker: {
       size: pathways.map(p => Math.max(8, Math.min(30, (p.count || 1) * 2.5))),
       color: pathways.map(p => -Math.log10(Math.max(p.p_adj, 1e-300))),
@@ -139,7 +155,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
       opacity: 0.85,
       line: { color: 'rgba(255,255,255,0.2)', width: 1 }
     },
-    hovertemplate: '<b>%{y}</b><br>Gene Ratio: %{x:.3f}<br>Count: %{marker.size}<extra></extra>'
+    hovertemplate: '<b>%{y}</b><br>Gene Ratio: %{x:.3f}<br>Genes in term: <b>%{customdata}</b><extra></extra>'
   }] : [];
 
   const bubbleLayout = {
@@ -192,7 +208,21 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
           <h3 className="font-bold flex items-center gap-2 text-white mb-5">
             <Zap size={16} className="text-primary" /> Enrichment Parameters
           </h3>
-          <div className="grid grid-cols-4 gap-5">
+          <div className="grid grid-cols-3 lg:grid-cols-6 gap-5">
+            <div>
+              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Target Cluster</label>
+              <select
+                value={targetCluster}
+                onChange={e => setParam('targetCluster', e.target.value)}
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              >
+                <option value="all">All Clusters (Global)</option>
+                {Array.from({ length: pipelineState?.clusterCount || 0 }).map((_, i) => (
+                  <option key={i} value={i.toString()}>Cluster {i}</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-slate-500 mt-1">Cluster to analyze</p>
+            </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Database</label>
               <select
@@ -220,7 +250,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                 onChange={e => setParam('logfcThreshold', parseFloat(e.target.value))}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-500 mt-1">Min log2FC for DEGs entering ORA</p>
+              <p className="text-[10px] text-slate-500 mt-1">Min log2FC for DEGs</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Top N pathways</label>
@@ -230,6 +260,25 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
               <p className="text-[10px] text-slate-500 mt-1">Maximum pathways shown</p>
+            </div>
+            <div>
+              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Clean Artifacts</label>
+              <div className="flex items-center h-[42px]">
+                <label className="flex items-center cursor-pointer">
+                  <div className="relative">
+                    <input 
+                      type="checkbox" 
+                      className="sr-only" 
+                      checked={excludeArtifacts}
+                      onChange={e => setParam('excludeArtifacts', e.target.checked)}
+                    />
+                    <div className={`block w-10 h-6 rounded-full transition-colors ${excludeArtifacts ? 'bg-primary' : 'bg-slate-700'}`}></div>
+                    <div className={`dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform ${excludeArtifacts ? 'transform translate-x-4' : ''}`}></div>
+                  </div>
+                  <span className="ml-3 text-sm text-white font-medium">Exclude MT/Ribo</span>
+                </label>
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">Drop MT-, RPL, RPS genes</p>
             </div>
           </div>
         </div>
@@ -344,20 +393,30 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/30">
-                  {pathways.map((row, i) => (
-                    <tr key={i} className="hover:bg-white/5 transition-colors">
-                      <td className="p-3 font-bold text-white flex items-center gap-2">
-                        <ChevronRight size={12} className="text-primary flex-shrink-0" />
-                        <span>{row.name}</span>
-                      </td>
-                      <td className="p-3 text-center font-mono">{row.count}</td>
-                      <td className="p-3 text-center font-mono opacity-60">{row.ratio}</td>
-                      <td className="p-3 text-center text-success font-mono">
-                        {typeof row.p_adj === 'number' ? row.p_adj.toExponential(2) : row.p_adj}
-                      </td>
-                      <td className="p-3 text-slate-400 italic truncate max-w-[220px]">{row.genes}</td>
-                    </tr>
-                  ))}
+                  {pathways.map((row, i) => {
+                    // genes is a genuine multi-element array from R (geneID column) — handle both formats
+                    const genesDisplay = Array.isArray(row.genes)
+                      ? row.genes.join(', ')
+                      : typeof row.genes === 'string'
+                        ? row.genes.split('/').join(', ')
+                        : String(row.genes ?? '');
+                    return (
+                      <tr key={i} className="hover:bg-white/5 transition-colors">
+                        <td className="p-3 font-bold text-white flex items-center gap-2">
+                          <ChevronRight size={12} className="text-primary flex-shrink-0" />
+                          <span>{row.name}</span>
+                        </td>
+                        <td className="p-3 text-center font-mono">{row.count}</td>
+                        <td className="p-3 text-center font-mono opacity-60">{row.ratio}</td>
+                        <td className="p-3 text-center text-success font-mono">
+                          {typeof row.p_adj === 'number' ? row.p_adj.toExponential(2) : row.p_adj}
+                        </td>
+                        <td className="p-3 text-slate-400 italic truncate max-w-[220px]" title={genesDisplay}>
+                          {genesDisplay}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

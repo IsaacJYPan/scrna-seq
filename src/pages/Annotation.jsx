@@ -4,7 +4,7 @@ import { useTabParams } from '../hooks/useTabParams';
 
 const API = 'http://localhost:8000';
 
-export default function Annotation({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
+export default function Annotation({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, updateActiveWorkspace }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -90,7 +90,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
 
     if (data && data.result) {
       setResult(data);
-      // Optionally notify user
+      updateActiveWorkspace({ annotations: currentMappings });
     } else if (data && data.error) {
       setError(data.error);
     } else if (!data) {
