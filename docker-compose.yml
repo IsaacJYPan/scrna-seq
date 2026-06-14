@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  r-backend:
+    build: 
+      context: ./r-backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./exports:/app/exports
+      - ./r-backend/vault:/app/vault
+    environment:
+      - PORT=8000
+    restart: unless-stopped

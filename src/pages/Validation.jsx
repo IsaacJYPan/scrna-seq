@@ -9,7 +9,7 @@ export default function Validation({ callApi, datasetInfo, currentWs }) {
   if (!datasetInfo) return (
      <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center opacity-40 max-w-sm">
-           <ShieldCheck size={64} className="mx-auto text-slate-600 mb-6" />
+           <ShieldCheck size={64} className="mx-auto text-slate-400 mb-6" />
            <p className="text-lg font-bold text-white mb-2 tracking-tighter uppercase">Validation Offline</p>
            <p className="text-xs text-textMuted uppercase font-black tracking-widest leading-loose">Load a dataset to validate pipeline state.</p>
         </div>
@@ -41,7 +41,7 @@ export default function Validation({ callApi, datasetInfo, currentWs }) {
   };
 
   const pipelineCheck = (has, label) => (
-    <span className={`px-2 py-0.5 rounded text-[8px] font-black tracking-widest border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+    <span className={`px-2 py-0.5 rounded text-[8px] font-black tracking-widest border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
       {has ? '✓ DONE' : 'PENDING'}
     </span>
   );
@@ -83,7 +83,7 @@ export default function Validation({ callApi, datasetInfo, currentWs }) {
                 <div key={i} className="card p-6 border-l-4 border-l-primary bg-slate-800/30">
                    <stat.icon className="text-primary mb-3 opacity-60" size={24} />
                    <div className="text-2xl font-black text-white mb-1 tracking-tight">{stat.value ?? '—'}</div>
-                   <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{stat.label}</div>
+                   <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{stat.label}</div>
                 </div>
               ))}
            </div>
@@ -116,7 +116,7 @@ export default function Validation({ callApi, datasetInfo, currentWs }) {
                          <tr key={i} className="hover:bg-primary/5 transition-all">
                             <td className="p-4 font-bold text-slate-300">{row.metric}</td>
                             <td className="p-4 font-mono text-primary font-bold">{row.value ?? '—'}</td>
-                            <td className="p-4 text-slate-500 font-mono text-[10px]">{row.source}</td>
+                            <td className="p-4 text-slate-400 font-mono text-[10px]">{row.source}</td>
                          </tr>
                        ))}
                     </tbody>
@@ -130,35 +130,35 @@ export default function Validation({ callApi, datasetInfo, currentWs }) {
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    <span className="font-mono text-primary font-bold">load</span>
-                   <span className="text-slate-600">→</span>
+                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_normalized, 'normalize')}
                    <span className="font-mono">normalize</span>
-                   <span className="text-slate-600">→</span>
+                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_pca, 'pca')}
                    <span className="font-mono">pca</span>
-                   <span className="text-slate-600">→</span>
+                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_clusters, 'cluster')}
                    <span className="font-mono">cluster</span>
-                   <span className="text-slate-600">→</span>
+                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_umap, 'umap')}
                    <span className="font-mono">umap</span>
                 </div>
               </div>
-              <p className="text-xs text-slate-500 mt-3">Completed steps: <span className="text-primary font-mono">{metrics.pipeline_steps}</span></p>
+              <p className="text-xs text-slate-400 mt-3">Completed steps: <span className="text-primary font-mono">{metrics.pipeline_steps}</span></p>
            </div>
         </div>
       ) : (
-        <div className="flex-1 flex flex-col items-center justify-center opacity-30 select-none pointer-events-none">
+        <div className="flex-1 flex flex-col items-center justify-center  select-none pointer-events-none">
            <ClipboardList size={128} className="mb-8" />
-           <p className="text-2xl font-black text-white tracking-tighter">Click "Run Validation" to inspect Seurat state</p>
+           <p className="text-2xl font-black text-slate-300 tracking-tighter">Click "Run Validation" to inspect Seurat state</p>
         </div>
       )}
     </div>

@@ -2,8 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { Tag, AlertTriangle, Save, Play } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 
-const API = 'http://localhost:8000';
-
+// Removed API constant
 export default function Annotation({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, updateActiveWorkspace }) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
@@ -20,8 +19,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
   const fetchClusters = useCallback(async () => {
     setLoadingClusters(true);
     try {
-      const res = await fetch(`${API}/meta-values?column=seurat_clusters`);
-      const data = await res.json();
+      const data = await window.electronAPI.apiRequest('/meta-values?column=seurat_clusters');
       if (data.error) {
         // usually means missing or not clustered
         setClusters([]);
@@ -103,7 +101,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <Tag size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <Tag size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
         </div>
       </div>
@@ -186,7 +184,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
               <span className="animate-pulse text-textMuted">Loading clusters...</span>
             </div>
           ) : clusters.length === 0 ? (
-            <div className="h-48 flex items-center justify-center text-slate-500 border-2 border-dashed border-border rounded-xl">
+            <div className="h-48 flex items-center justify-center text-slate-400 border-2 border-dashed border-border rounded-xl">
               No clusters found. Ensure clustering was successful.
             </div>
           ) : (

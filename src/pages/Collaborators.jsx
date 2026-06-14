@@ -25,9 +25,9 @@ export default function Collaborators({ currentWs, workspaces, setWorkspaces, ac
   if (currentWs.type !== 'shared') {
     return (
       <div className="h-full flex flex-col items-center justify-center p-8 bg-background">
-        <Users size={64} className="text-slate-600 mb-6 opacity-30" />
+        <Users size={64} className="text-slate-400 mb-6 opacity-30" />
         <h2 className="text-xl font-bold text-slate-300 mb-2">Personal Workspace</h2>
-        <p className="text-slate-500 max-w-sm text-center">Collaborators are only available in shared workspaces. Create or switch to a Shared Workspace to invite team members.</p>
+        <p className="text-slate-400 max-w-sm text-center">Collaborators are only available in shared workspaces. Create or switch to a Shared Workspace to invite team members.</p>
       </div>
     );
   }
@@ -36,7 +36,10 @@ export default function Collaborators({ currentWs, workspaces, setWorkspaces, ac
     <div className="h-full w-full flex flex-col bg-background p-8 overflow-y-auto custom-scrollbar">
        <div className="flex justify-between items-center mb-12 border-b border-border pb-6">
          <div>
-            <h2 className="text-3xl font-black text-white mb-2 tracking-tighter">Team Collaborators</h2>
+            <div className="flex items-center gap-3 mb-2">
+              <h2 className="text-3xl font-black text-white tracking-tighter">Team Collaborators</h2>
+              <span className="bg-yellow-500/20 text-yellow-500 text-[10px] px-2 py-1 rounded border border-yellow-500/30 uppercase tracking-widest font-black">UI Mockup</span>
+            </div>
             <p className="text-slate-400 text-lg">Manage workspace access and sync analysis branches across your research unit.</p>
          </div>
        </div>
@@ -56,13 +59,13 @@ export default function Collaborators({ currentWs, workspaces, setWorkspaces, ac
                             </div>
                             <div className="flex-1">
                                <div className="text-white text-[15px] font-bold tracking-tight">{email}</div>
-                               <div className="text-[10px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Researcher</div>
+                               <div className="text-[10px] text-slate-400 uppercase font-black tracking-widest mt-0.5">Researcher</div>
                             </div>
                             <div className="text-[9px] text-success font-black border border-success/30 px-3 py-1 rounded-full uppercase tracking-wider bg-success/5 shadow-[0_0_10px_rgba(34,197,94,0.1)]">Online</div>
                          </div>
                       )) : (
-                        <div className="p-12 text-center text-slate-500 border-2 border-dashed border-slate-700/50 rounded-2xl bg-black/10">
-                          <Users size={32} className="mx-auto mb-4 opacity-50 text-slate-600" />
+                        <div className="p-12 text-center text-slate-400 border-2 border-dashed border-slate-700/50 rounded-2xl bg-black/10">
+                          <Users size={32} className="mx-auto mb-4 opacity-50 text-slate-400" />
                           <div className="font-bold text-slate-400">No external collaborators yet.</div>
                           <div className="text-sm mt-1">Invite a researcher to begin sharing this workspace!</div>
                         </div>
@@ -80,12 +83,12 @@ export default function Collaborators({ currentWs, workspaces, setWorkspaces, ac
                             <input 
                               type="email"
                               required
-                              className="w-full bg-slate-900/80 border border-slate-700 rounded-lg py-3 pl-4 pr-10 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-primary transition-all shadow-inner"
+                              className="w-full bg-slate-900/80 border border-slate-700 rounded-lg py-3 pl-4 pr-10 text-sm text-white placeholder:text-slate-400 focus:outline-none focus:border-primary transition-all shadow-inner"
                               placeholder="researcher@lab.edu"
                               value={inviteEmail}
                               onChange={e => setInviteEmail(e.target.value)}
                             />
-                            <UserPlus size={18} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-600" />
+                            <UserPlus size={18} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" />
                          </div>
                          <button type="submit" disabled={inviting || !inviteEmail} className="btn btn-primary w-full py-3 text-[13px] uppercase tracking-wider font-bold flex items-center justify-center gap-2 shadow-lg shadow-primary/20 hover:scale-[1.02] transition-transform">
                             {inviting ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : 'Send Invite'}

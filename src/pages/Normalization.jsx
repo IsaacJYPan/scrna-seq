@@ -1,60 +1,37 @@
-import React, { useState, useCallback, useEffect } from 'react';
 import { Sparkles, AlertTriangle } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
+import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function Normalization({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-
+export default function Normalization({ callApi, datasetInfo, currentProvId, qcProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   // Persisted parameters
   const [params, setParam] = useTabParams('normalize', userEmail, objectId, {
     method: 'LogNormalize',
     scaleFactor: 10000,
     nFeatures: 2000,
   });
-  const { method, scaleFactor, nFeatures } = params;
-  const [hasHydrated, setHasHydrated] = useState(false);
+  const { method, scaleFactor, nFeatures, varsToRegress } = params;
+  const endpoint = `/normalize?method=${method}&scale_factor=${scaleFactor}&nfeatures=${nFeatures}${varsToRegress ? `&vars_to_regress=${encodeURIComponent(varsToRegress)}` : ''}`;
 
-  const runNormalization = useCallback(async (isInitial = false) => {
-    setRunning(true);
-    setError(null);
-    const data = await callApi(`/normalize?method=${method}&scale_factor=${scaleFactor}&nfeatures=${nFeatures}`, {}, {
+  const { running, result, error, runStep: runNormalization } = usePipelineStep({
+    callApi,
+    endpoint,
+    ipcContext: {
       operation: 'normalize',
       step: 'normalize',
-      parentIds: currentProvId ? [currentProvId] : [],
+      parentIds: qcProvId ? [qcProvId] : [],
       useCache: true,
-      cacheParams: { type: 'normalize', method, scale_factor: scaleFactor, nfeatures: nFeatures },
-      onlyIfCached: isInitial,
-    });
-    if (data?.result) {
-      setResult(data);
-    } else if (data?.error && !isInitial) {
-      setError(data.error);
-    } else if (!data && !isInitial) {
-      setError('R backend error. Check the console for details.');
-    }
-    setRunning(false);
-  }, [callApi, currentProvId, method, scaleFactor, nFeatures]);
-
-  // Auto-hydrate from cache on session restore (same pattern as PCA/Clustering/UMAP)
-  useEffect(() => {
-    if (datasetInfo && pipelineState?.qc && !result && !running && !hasHydrated && sessionReady) {
-      setHasHydrated(true);
-      runNormalization(true);
-    }
-  }, [datasetInfo, pipelineState?.qc, result, running, runNormalization, hasHydrated, sessionReady]);
-
-  // Reset hydration flag when R session changes so steps re-run to rebuild global_obj
-  useEffect(() => {
-    setHasHydrated(false);
-  }, [rSessionId]);
+      cacheParams: { type: 'normalize', method, scale_factor: scaleFactor, nfeatures: nFeatures, varsToRegress }
+    },
+    readyToHydrate: !!(datasetInfo && (pipelineState?.qc || pipelineState?.isSubset)),
+    sessionReady,
+    rSessionId
+  });
 
   if (!datasetInfo) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <Sparkles size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <Sparkles size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
           <p className="text-textMuted">Load a dataset in the Workspace first.</p>
         </div>
@@ -62,7 +39,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
     );
   }
 
-  if (!pipelineState?.qc) {
+  if (!pipelineState?.qc && !pipelineState?.isSubset) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
@@ -107,6 +84,15 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
         </div>
       )}
 
+      {pipelineState?.isSubset && !pipelineState?.qc && (
+        <div className="card p-4 mb-6 bg-sky-500/10 border border-sky-500/30 text-sky-300 flex items-center gap-3">
+          <span className="text-lg">ℹ️</span>
+          <span className="text-sm">
+            <strong>Subset detected.</strong> QC metrics from the parent object are preserved in this subset — you can normalize directly, or run QC first to apply additional filters.
+          </span>
+        </div>
+      )}
+
       {/* Parameters */}
       {!result && (
         <div className="card p-6 mb-8 border-l-4 border-l-primary">
@@ -115,8 +101,9 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
           </h3>
           <div className="grid grid-cols-3 gap-6">
             <div>
-              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Method</label>
+              <label htmlFor="norm-method" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Method</label>
               <select
+                id="norm-method"
                 value={method}
                 onChange={e => setParam('method', e.target.value)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
@@ -124,28 +111,51 @@ export default function Normalization({ callApi, datasetInfo, currentProvId, ope
                 <option value="LogNormalize">LogNormalize</option>
                 <option value="SCTransform">SCTransform (v2)</option>
               </select>
-              <p className="text-[10px] text-slate-500 mt-1">SCTransform handles depth variance better</p>
+              <p className="text-[10px] text-slate-400 mt-1">SCTransform handles depth variance better</p>
             </div>
             <div>
-              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Scale Factor</label>
+              <label htmlFor="norm-scale-factor" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Scale Factor</label>
               <input
+                id="norm-scale-factor"
                 type="number" value={scaleFactor}
                 onChange={e => setParam('scaleFactor', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
                 disabled={method === 'SCTransform'}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary disabled:opacity-40"
               />
-              <p className="text-[10px] text-slate-500 mt-1">{method === 'SCTransform' ? 'Not used with SCTransform' : 'Global scaling factor'}</p>
+              <p className="text-[10px] text-slate-400 mt-1">{method === 'SCTransform' ? 'Not used with SCTransform' : 'Global scaling factor'}</p>
             </div>
             <div>
-              <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Variable Features</label>
+              <label htmlFor="norm-n-features" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Variable Features</label>
               <input
+                id="norm-n-features"
                 type="number" value={nFeatures}
                 onChange={e => setParam('nFeatures', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-500 mt-1">Number of HVGs to select</p>
+              <p className="text-[10px] text-slate-400 mt-1">Number of HVGs to select</p>
             </div>
           </div>
+
+          <details className="mt-6 border-t border-border/50 pt-4 group">
+            <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
+              <span className="text-primary group-open:rotate-90 transition-transform">▶</span>
+              ⚙️ Advanced Options
+            </summary>
+            <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-2 gap-6">
+              <div>
+                <label htmlFor="norm-regress" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Vars to Regress</label>
+                <input
+                  id="norm-regress"
+                  type="text" 
+                  value={params.varsToRegress || ''}
+                  onChange={e => setParam('varsToRegress', e.target.value)}
+                  placeholder="e.g. percent.mt, percent.rb, nCount_RNA"
+                  className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">Comma-separated metadata columns to regress out</p>
+              </div>
+            </div>
+          </details>
         </div>
       )}
 

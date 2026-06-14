@@ -89,17 +89,29 @@ export async function getProvenanceChain(id) {
   return prov ? [prov] : [];
 }
 
+/**
+ * Delete a provenance record by ID (from SQLite and in-memory).
+ */
+export async function deleteProvenance(id) {
+  if (memStore.has(id)) {
+    memStore.delete(id);
+  }
+  if (api?.deleteProvenance) {
+    await api.deleteProvenance(id);
+  }
+}
+
 // ── Caching ──────────────────────────────────────────────────────
 
 /**
  * Generate a cache key for an operation.
  */
-export async function makeCacheKey(operation, params, dataVersion) {
+export async function makeCacheKey(operation, params, dataVersion, parentIds = []) {
   if (api?.makeCacheKey) {
-    return await api.makeCacheKey(operation, params, dataVersion);
+    return await api.makeCacheKey(operation, params, dataVersion, parentIds);
   }
   // Fallback: simple string hash
-  return `${operation}-${JSON.stringify(params)}-${dataVersion}`;
+  return `${operation}-${JSON.stringify(params)}-${dataVersion}-${JSON.stringify(parentIds)}`;
 }
 
 /**

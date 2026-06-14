@@ -2,62 +2,39 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { Network, AlertTriangle } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
+import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function Clustering({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-
+export default function Clustering({ callApi, datasetInfo, currentProvId, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed }) {
   // Persisted parameters
   const [params, setParam] = useTabParams('cluster', userEmail, objectId, {
     algorithm: 1,
     resolution: 0.8,
     dims: 15,
+    kParam: 20,
+    nStart: 10
   });
-  const { algorithm, resolution, dims } = params;
-  const [hasHydrated, setHasHydrated] = useState(false);
+  const { algorithm, resolution, dims, kParam, nStart } = params;
 
-  const runClustering = useCallback(async (isInitial = false) => {
-    setRunning(true);
-    setError(null);
-    const data = await callApi(`/cluster?dims=${dims}&resolution=${resolution}&algorithm=${algorithm}`, {}, {
+  const { running, result, error, runStep: runClustering } = usePipelineStep({
+    callApi,
+    endpoint: `/cluster?dims=${dims}&resolution=${resolution}&algorithm=${algorithm}&seed=${activeProjectSeed || ''}&k_param=${kParam}&n_start=${nStart}`,
+    ipcContext: {
       operation: 'cluster',
       step: 'cluster',
-      parentIds: currentProvId ? [currentProvId] : [],
+      parentIds: pcaProvId ? [pcaProvId] : [],
       useCache: true,
-      cacheParams: { type: 'cluster', dims, resolution, algorithm },
-      onlyIfCached: isInitial
-    });
-
-    if (data && data.result) {
-      setResult(data);
-    } else if (data && data.error && !isInitial) {
-      setError(data.error);
-    } else if (!data && !isInitial) {
-      setError('R backend error. Check the console for details.');
-    }
-    setRunning(false);
-  }, [callApi, currentProvId, dims, resolution, algorithm]);
-
-  useEffect(() => {
-    if (datasetInfo && pipelineState?.pca && !result && !running && !hasHydrated && sessionReady) {
-      setHasHydrated(true);
-      runClustering(true);
-    }
-  }, [datasetInfo, pipelineState?.pca, result, running, runClustering, hasHydrated, sessionReady]);
-
-  // Reset hydration flag when the R session ID changes (new R process started)
-  // so that we re-run the step in R to rebuild global_obj.
-  // Watch rSessionId directly — NOT callApi, which changes on every workspace update.
-  useEffect(() => {
-    setHasHydrated(false);
-  }, [rSessionId]);
+      cacheParams: { type: 'cluster', dims, resolution, algorithm, seed: activeProjectSeed || 'random', kParam, nStart }
+    },
+    readyToHydrate: !!(datasetInfo && pipelineState?.pca),
+    sessionReady,
+    rSessionId
+  });
 
   if (!datasetInfo) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <Network size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <Network size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
         </div>
       </div>
@@ -76,8 +53,10 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
     );
   }
 
-  const clusterNames = result?.result?.cluster_names || [];
-  const clusterSizes = result?.result?.cluster_sizes || [];
+  const clusterNames = Array.isArray(result?.result?.cluster_names) ? result.result.cluster_names : 
+                      (result?.result?.cluster_names ? [result.result.cluster_names] : []);
+  const clusterSizes = Array.isArray(result?.result?.cluster_sizes) ? result.result.cluster_sizes : 
+                      (result?.result?.cluster_sizes ? [result.result.cluster_sizes] : []);
   const algoName = algorithm === 4 ? 'Leiden' : 'Louvain';
 
   const barData = [{
@@ -142,8 +121,9 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
         </h3>
         <div className="grid grid-cols-3 gap-6">
           <div>
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Algorithm</label>
+            <label htmlFor="cluster-algo" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Algorithm</label>
             <select
+              id="cluster-algo"
               value={algorithm}
               onChange={e => setParam('algorithm', parseInt(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
@@ -151,30 +131,61 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, openPr
               <option value={4}>Leiden</option>
               <option value={1}>Louvain</option>
             </select>
-            <p className="text-[10px] text-slate-500 mt-1">Leiden is generally preferred</p>
+            <p className="text-[10px] text-slate-400 mt-1">Leiden is generally preferred</p>
           </div>
           <div>
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Resolution</label>
+            <label htmlFor="cluster-res" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Resolution</label>
             <div className="flex items-center gap-3">
               <input
+                id="cluster-res"
                 type="range" min="0.1" max="2.0" step="0.05" value={resolution}
                 onChange={e => setParam('resolution', parseFloat(e.target.value))}
                 className="flex-1 accent-primary"
               />
               <span className="text-sm font-mono text-primary font-bold w-10 text-right">{resolution}</span>
             </div>
-            <p className="text-[10px] text-slate-500 mt-1">Higher = more clusters. 0.4–1.2 typical range.</p>
+            <p className="text-[10px] text-slate-400 mt-1">Higher = more clusters. 0.4–1.2 typical range.</p>
           </div>
           <div>
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">PC Dimensions</label>
+            <label htmlFor="cluster-dims" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">PC Dimensions</label>
             <input
+              id="cluster-dims"
               type="number" value={dims} min={5} max={50}
               onChange={e => setParam('dims', parseInt(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
             />
-            <p className="text-[10px] text-slate-500 mt-1">Use elbow plot to determine cutoff</p>
+            <p className="text-[10px] text-slate-400 mt-1">Use elbow plot to determine cutoff</p>
           </div>
         </div>
+
+        <details className="mt-6 border-t border-border/50 pt-4 group">
+          <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
+            <span className="text-primary group-open:rotate-90 transition-transform">▶</span>
+            ⚙️ Advanced Options
+          </summary>
+          <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-2 gap-6">
+            <div>
+              <label htmlFor="cluster-k" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">k Neighbors (KNN)</label>
+              <input
+                id="cluster-k"
+                type="number" value={kParam} min={5} max={100}
+                onChange={e => setParam('kParam', parseInt(e.target.value))}
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">Number of nearest neighbors to find (default: 20)</p>
+            </div>
+            <div>
+              <label htmlFor="cluster-nstart" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of Starts</label>
+              <input
+                id="cluster-nstart"
+                type="number" value={nStart} min={1} max={100}
+                onChange={e => setParam('nStart', parseInt(e.target.value))}
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">Random starts for algorithm optimization (default: 10)</p>
+            </div>
+          </div>
+        </details>
       </div>
 
       {running && (

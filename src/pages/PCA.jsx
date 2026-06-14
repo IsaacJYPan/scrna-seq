@@ -1,59 +1,37 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState } from 'react';
 import { BarChart3, AlertTriangle } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
+import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function PCA({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
+export default function PCA({ callApi, datasetInfo, currentProvId, normProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed }) {
   const [params, setParam] = useTabParams('pca', userEmail, objectId, { npcs: 50 });
   const npcs = params.npcs;
   const setNpcs = (v) => setParam('npcs', v);
+  // Separate local state for the input so every keystroke doesn't change ipcContext/endpoint
+  const [inputNpcs, setInputNpcs] = React.useState(npcs);
   const [activeView, setActiveView] = useState('elbow');
-  const [hasHydrated, setHasHydrated] = useState(false);
 
-  const runPCA = useCallback(async (isInitial = false) => {
-    setRunning(true);
-    setError(null);
-    const data = await callApi(`/pca?npcs=${npcs}`, {}, {
+  const { running, result, error, runStep: runPCA } = usePipelineStep({
+    callApi,
+    endpoint: `/pca?npcs=${npcs}&seed=${activeProjectSeed || ''}`,
+    ipcContext: {
       operation: 'pca',
       step: 'pca',
-      parentIds: currentProvId ? [currentProvId] : [],
+      parentIds: normProvId ? [normProvId] : [],
       useCache: true,
-      cacheParams: { type: 'pca', npcs },
-      onlyIfCached: isInitial
-    });
-
-    if (data && data.result) {
-      setResult(data);
-    } else if (data && data.error && !isInitial) {
-      setError(data.error);
-    } else if (!data && !isInitial) {
-      setError('R backend error. Check the console for details.');
-    }
-    setRunning(false);
-  }, [callApi, currentProvId, npcs]);
-
-  useEffect(() => {
-    if (datasetInfo && pipelineState?.normalize && !result && !running && !hasHydrated && sessionReady) {
-      setHasHydrated(true);
-      runPCA(true);
-    }
-  }, [datasetInfo, pipelineState?.normalize, result, running, runPCA, hasHydrated, sessionReady]);
-
-  // Reset hydration flag when the R session ID changes (new R process started)
-  // so that we re-run the step in R to rebuild global_obj.
-  // Watch rSessionId directly — NOT callApi, which changes on every workspace update.
-  useEffect(() => {
-    setHasHydrated(false);
-  }, [rSessionId]);
+      cacheParams: { type: 'pca', npcs, seed: activeProjectSeed || 'random' }
+    },
+    readyToHydrate: !!(datasetInfo && pipelineState?.normalize),
+    sessionReady,
+    rSessionId
+  });
 
   if (!datasetInfo) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <BarChart3 size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <BarChart3 size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
         </div>
       </div>
@@ -76,7 +54,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId, openProvenanc
   const loadings = result?.result?.gene_loadings || {};
 
   const elbowData = [{
-    type: 'scatter',
+    type: 'scattergl',
     mode: 'lines+markers',
     x: stdevs.map((_, i) => i + 1),
     y: stdevs,
@@ -139,13 +117,19 @@ export default function PCA({ callApi, datasetInfo, currentProvId, openProvenanc
             <BarChart3 size={18} className="text-primary" /> PCA Parameters
           </h3>
           <div className="max-w-xs">
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of PCs</label>
+            <label htmlFor="pca-npcs" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of PCs</label>
             <input
-              type="number" value={npcs} min={5} max={100}
-              onChange={e => setNpcs(e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+              id="pca-npcs"
+              type="number" value={inputNpcs} min={5} max={100}
+              onChange={e => setInputNpcs(e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+              onBlur={e => {
+                const v = parseInt(e.target.value) || 50;
+                setInputNpcs(v);
+                setNpcs(v);
+              }}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
             />
-            <p className="text-[10px] text-slate-500 mt-1">Standard: 50. Use elbow plot to determine how many to keep downstream.</p>
+            <p className="text-[10px] text-slate-400 mt-1">Standard: 50. Use elbow plot to determine how many to keep downstream.</p>
           </div>
         </div>
       )}
@@ -185,7 +169,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId, openProvenanc
               <button
                 key={tab.id}
                 onClick={() => setActiveView(tab.id)}
-                className={`px-5 py-2 rounded-md text-xs font-bold transition-all ${activeView === tab.id ? 'bg-primary text-text shadow' : 'text-slate-500 hover:text-text'}`}
+                className={`px-5 py-2 rounded-md text-xs font-bold transition-all ${activeView === tab.id ? 'bg-primary text-text shadow' : 'text-slate-400 hover:text-text'}`}
               >
                 {tab.label}
               </button>
@@ -228,7 +212,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId, openProvenanc
                   <tbody className="divide-y divide-border/30">
                     {Array.from({ length: 10 }).map((_, rank) => (
                       <tr key={rank} className="hover:bg-white/5">
-                        <td className="p-3 font-mono text-slate-500">{rank + 1}</td>
+                        <td className="p-3 font-mono text-slate-400">{rank + 1}</td>
                         {Object.values(loadings).map((genes, pi) => (
                           <td key={pi} className="p-3 text-center font-mono text-text text-[11px]">
                             {genes[rank] || '—'}

@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #3b82f6;
+  --color-primary: #3371e3;
   --color-background: #0f172a;
   --color-surface: #1e293b;
   --color-border: #334155;
   --color-text: #f8fafc;
   --color-textMuted: #94a3b8;
-  --color-success: #22c55e;
+  --color-success: #4ade80;
   --color-danger: #ef4444;
 }
 
@@ -56,3 +56,46 @@
     @apply bg-border;
   }
 }
+
+/* React Flow Controls & MiniMap Styling for Dark/Light Mode compatibility */
+.react-flow__controls {
+  background-color: var(--color-surface) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: 8px !important;
+  overflow: hidden !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3) !important;
+}
+
+.react-flow__controls-button {
+  background-color: var(--color-surface) !important;
+  border-bottom: 1px solid var(--color-border) !important;
+  color: var(--color-textMuted) !important;
+  fill: var(--color-textMuted) !important;
+  transition: all 0.2s ease !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+  color: var(--color-text) !important;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor !important;
+}
+
+.react-flow__minimap {
+  background-color: var(--color-surface) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3) !important;
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(15, 23, 42, 0.6) !important;
+}
+
+.react-flow__minimap-node {
+  fill: var(--color-primary) !important;
+  rx: 4px !important;
+}
+
