@@ -31,6 +31,21 @@ api_file <- file.path(script_dir, "plumber.R")
 options(plumber.autoreload = TRUE)
 pr <- plumber::plumb(api_file)
 
-cat("Plumber API running on http://127.0.0.1:8000\n")
+# Allow port override via env var (used by integration tests to avoid conflicts)
+plumber_port <- as.integer(Sys.getenv("PLUMBER_PORT", unset = "8000"))
+cat("Plumber API running on http://127.0.0.1:", plumber_port, "\n", sep = "")
 pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE))
-pr$run(host = "127.0.0.1", port = 8000)
+
+# Centralized Global Error Handler
+# Efficiently catches unhandled errors from any endpoint and prevents server crashes
+pr$setErrorHandler(function(req, res, err) {
+  cat("\n[API ERROR in", req$PATH_INFO, "]", err$message, "\n")
+  
+  # Ensure any graphics devices opened by failed plots are closed
+  if (dev.cur() > 1) dev.off()
+  
+  # The frontend expects 200 OK with an { error: "..." } JSON payload
+  res$status <- 200
+  return(list(error = paste("Backend Exception:", err$message)))
+})
+pr$run(host = "127.0.0.1", port = plumber_port)

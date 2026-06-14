@@ -1,57 +1,42 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { FileText, Download, Play, LayoutGrid, Table } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import { usePipelineStep } from '../hooks/usePipelineStep';
+import { useTabParams } from '../hooks/useTabParams';
 
-export default function DifferentialExpression({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, currentWs }) {
-  const [computing, setComputing] = useState(false);
-  const [degResult, setDegResult] = useState(null);
+export default function DifferentialExpression({ callApi, datasetInfo, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, currentWs, userEmail, objectId }) {
   const [viewMode, setViewMode] = useState('table');
-  const [hasHydrated, setHasHydrated] = useState(false);
   const [selectedCluster, setSelectedCluster] = useState(null);
   const [visibleCount, setVisibleCount] = useState(10);
 
-  const [error, setError] = useState(null);
+  const [params, setParam] = useTabParams('deg', userEmail, objectId, {
+    testUse: 'wilcox',
+    latentVars: ''
+  });
+  const { testUse, latentVars } = params;
 
-  const runDEGs = useCallback(async (isInitial = false) => {
-    setComputing(true);
-    setError(null);
-    const data = await callApi('/deg', {}, {
+  const { running: computing, result: degResult, error, runStep: runDEGs } = usePipelineStep({
+    callApi,
+    endpoint: `/deg?test_use=${testUse}${latentVars ? `&latent_vars=${encodeURIComponent(latentVars)}` : ''}`,
+    ipcContext: {
       operation: 'deg',
-      parentIds: currentProvId ? [currentProvId] : [],
+      parentIds: clusterProvId ? [clusterProvId] : [],
       useCache: true,
-      cacheParams: { type: 'deg' },
-      onlyIfCached: isInitial
-    });
-
-    if (data && data.result) {
-      setDegResult(data);
+      cacheParams: { type: 'deg', testUse, latentVars }
+    },
+    readyToHydrate: !!(datasetInfo && pipelineState?.cluster),
+    sessionReady,
+    rSessionId,
+    onSuccess: () => {
       setSelectedCluster(null);
       setVisibleCount(10);
-    } else if (data && data.error && !isInitial) {
-      setError(data.error);
-    } else if (!data && !isInitial) {
-      setError('R backend error. Check the console for details.');
     }
-    setComputing(false);
-  }, [callApi, currentProvId]);
-
-  useEffect(() => {
-    if (datasetInfo && pipelineState?.cluster && !degResult && !computing && !hasHydrated && sessionReady) {
-      setHasHydrated(true);
-      runDEGs(true);
-    }
-  }, [datasetInfo, pipelineState?.cluster, degResult, computing, runDEGs, hasHydrated, sessionReady]);
-
-  // Reset hydration when session is restored, so it checks SQLite cache again
-  useEffect(() => {
-    setHasHydrated(false);
-  }, [rSessionId]);
+  });
 
   if (!datasetInfo) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background text-center">
         <div className="max-w-sm">
-          <FileText size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <FileText size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
         </div>
       </div>
@@ -138,17 +123,59 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
       </div>
 
       {!degResult && !computing && (
-        <div className="card p-12 text-center flex flex-col items-center justify-center flex-1">
-          {error && (
-            <div className="bg-rose-500/10 text-rose-400 p-4 rounded-lg mb-6 max-w-lg border border-rose-500/20">
-              <p className="font-bold mb-1">Error</p>
-              <p className="text-sm">{error}</p>
+        <div className="flex flex-col gap-6 flex-1">
+          <details className="card p-6 border-l-4 border-l-primary group">
+            <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
+              <span className="text-primary group-open:rotate-90 transition-transform">▶</span>
+              ⚙️ Advanced Options
+            </summary>
+            <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-2 gap-6">
+              <div>
+                <label htmlFor="deg-test" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Statistical Test</label>
+                <select
+                  id="deg-test"
+                  value={testUse}
+                  onChange={e => setParam('testUse', e.target.value)}
+                  className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+                >
+                  <option value="wilcox">Wilcoxon Rank Sum (Default)</option>
+                  <option value="bimod">Likelihood-ratio test</option>
+                  <option value="roc">ROC Analysis</option>
+                  <option value="t">Student's t-test</option>
+                  <option value="poisson">Poisson GLM</option>
+                  <option value="negbinom">Negative Binomial GLM</option>
+                  <option value="MAST">MAST</option>
+                  <option value="DESeq2">DESeq2</option>
+                </select>
+                <p className="text-[10px] text-slate-400 mt-1">Backend for computing differential expression</p>
+              </div>
+              <div>
+                <label htmlFor="deg-latent" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Latent Vars (Covariates)</label>
+                <input
+                  id="deg-latent"
+                  type="text" 
+                  value={latentVars || ''}
+                  onChange={e => setParam('latentVars', e.target.value)}
+                  placeholder="e.g. batch, age, sex"
+                  className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">Comma-separated variables to test for regression</p>
+              </div>
             </div>
-          )}
-          <FileText size={48} className="text-primary opacity-50 mb-4" />
-          <p className="text-textMuted max-w-sm text-lg">
-            Requires a clustered Seurat Object. Computes <code className="text-primary bg-primary/10 px-1 rounded">FindAllMarkers()</code> to rank genes structurally significant to each single-cell subcluster.
-          </p>
+          </details>
+
+          <div className="card p-12 text-center flex flex-col items-center justify-center flex-1">
+            {error && (
+              <div className="bg-rose-500/10 text-rose-400 p-4 rounded-lg mb-6 max-w-lg border border-rose-500/20">
+                <p className="font-bold mb-1">Error</p>
+                <p className="text-sm">{error}</p>
+              </div>
+            )}
+            <FileText size={48} className="text-primary opacity-50 mb-4" />
+            <p className="text-textMuted max-w-sm text-lg">
+              Requires a clustered Seurat Object. Computes <code className="text-blue-400 bg-blue-400/10 px-1 rounded">FindAllMarkers()</code> to rank genes structurally significant to each single-cell subcluster.
+            </p>
+          </div>
         </div>
       )}
 
@@ -204,7 +231,7 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
                   className="w-7 h-7 flex items-center justify-center rounded border border-border text-slate-400 hover:text-white hover:border-primary disabled:opacity-30 transition"
                 >›</button>
 
-                <span className="text-xs text-slate-500 ml-2">
+                <span className="text-xs text-slate-400 ml-2">
                   Showing {Math.min(visibleCount, activeMarkers.length)} of {activeMarkers.length} markers
                 </span>
               </div>
@@ -227,11 +254,11 @@ export default function DifferentialExpression({ callApi, datasetInfo, currentPr
                       <td className="p-4 font-mono text-slate-400 text-xs">
                         {typeof m.p_val === 'number' ? m.p_val.toExponential(2) : (m.p_val || '0')}
                       </td>
-                      <td className="p-4 font-mono text-success font-bold">
-                        {typeof m.log2FC === 'number' ? `+${m.log2FC.toFixed(2)}` : (m.log2FC || '0')}
+                      <td className={`p-4 font-mono font-bold ${typeof m.log2FC === 'number' && m.log2FC < 0 ? 'text-rose-400' : 'text-success'}`}>
+                        {typeof m.log2FC === 'number' ? (m.log2FC > 0 ? `+${m.log2FC.toFixed(2)}` : m.log2FC.toFixed(2)) : (m.log2FC || '0')}
                       </td>
-                      <td className="p-4 text-slate-500 font-mono text-[10px]">{m.pct1 || '0'}</td>
-                      <td className="p-4 text-slate-500 font-mono text-[10px]">{m.pct2 || '0'}</td>
+                      <td className="p-4 text-slate-400 font-mono text-[10px]">{m.pct1 || '0'}</td>
+                      <td className="p-4 text-slate-400 font-mono text-[10px]">{m.pct2 || '0'}</td>
                     </tr>
                   ))}
                 </tbody>

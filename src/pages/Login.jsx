@@ -88,13 +88,13 @@ export default function Login({ onLogin }) {
           <div className="flex bg-black/30 rounded-lg p-1 mb-6">
             <button
               onClick={() => { setMode('login'); setError(''); setSuccess(''); }}
-              className={`flex-1 py-2 rounded-md text-xs font-bold uppercase tracking-widest transition-all ${mode === 'login' ? 'bg-primary text-white shadow' : 'text-slate-500 hover:text-white'}`}
+              className={`flex-1 py-2 rounded-md text-xs font-bold uppercase tracking-widest transition-all ${mode === 'login' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
             >
               Log In
             </button>
             <button
               onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
-              className={`flex-1 py-2 rounded-md text-xs font-bold uppercase tracking-widest transition-all ${mode === 'signup' ? 'bg-primary text-white shadow' : 'text-slate-500 hover:text-white'}`}
+              className={`flex-1 py-2 rounded-md text-xs font-bold uppercase tracking-widest transition-all ${mode === 'signup' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
             >
               Sign Up
             </button>
@@ -105,12 +105,12 @@ export default function Login({ onLogin }) {
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Full Name</label>
                 <div className="relative group">
-                   <UserPlus className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-primary transition-colors" size={16} />
+                   <UserPlus className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary transition-colors" size={16} />
                    <input 
                      type="text"
                      value={displayName}
                      onChange={e => setDisplayName(e.target.value)}
-                     className="w-full bg-black/40 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-sm text-white focus:outline-none focus:border-primary transition-all placeholder:text-slate-600"
+                     className="w-full bg-black/40 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-sm text-white focus:outline-none focus:border-primary transition-all placeholder:text-slate-400"
                      placeholder="Dr. Jane Doe"
                    />
                 </div>
@@ -120,13 +120,13 @@ export default function Login({ onLogin }) {
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Email</label>
               <div className="relative group">
-                 <Fingerprint className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-primary transition-colors" size={16} />
+                 <Fingerprint className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary transition-colors" size={16} />
                  <input 
                    type="email" 
                    required
                    value={email}
                    onChange={e => setEmail(e.target.value)}
-                   className={`w-full bg-black/40 border rounded-xl py-3 pl-10 pr-4 text-sm text-white focus:outline-none transition-all placeholder:text-slate-600 ${email && !emailValid ? 'border-danger' : 'border-slate-700 focus:border-primary'}`}
+                   className={`w-full bg-black/40 border rounded-xl py-3 pl-10 pr-4 text-sm text-white focus:outline-none transition-all placeholder:text-slate-400 ${email && !emailValid ? 'border-danger' : 'border-slate-700 focus:border-primary'}`}
                    placeholder="researcher@lab.edu"
                  />
                  {email && emailValid && <CheckCircle size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-success" />}
@@ -136,19 +136,19 @@ export default function Login({ onLogin }) {
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Password</label>
               <div className="relative group">
-                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-primary transition-colors" size={16} />
+                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary transition-colors" size={16} />
                  <input 
                    type={showPassword ? 'text' : 'password'} 
                    required
                    value={password}
                    onChange={e => setPassword(e.target.value)}
-                   className={`w-full bg-black/40 border rounded-xl py-3 pl-10 pr-10 text-sm text-white focus:outline-none transition-all placeholder:text-slate-600 ${(mode === 'signup' && password && !passwordStrong) ? 'border-danger' : 'border-slate-700 focus:border-primary'}`}
+                   className={`w-full bg-black/40 border rounded-xl py-3 pl-10 pr-10 text-sm text-white focus:outline-none transition-all placeholder:text-slate-400 ${(mode === 'signup' && password && !passwordStrong) ? 'border-danger' : 'border-slate-700 focus:border-primary'}`}
                    placeholder="••••••••••••"
                  />
                  <button 
                    type="button"
                    onClick={() => setShowPassword(!showPassword)}
-                   className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                   className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
                  >
                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
                  </button>
@@ -160,7 +160,7 @@ export default function Login({ onLogin }) {
                     <div className={`h-1 flex-1 rounded-full transition-colors ${password.length >= 8 ? 'bg-yellow-500' : 'bg-slate-700'}`} />
                     <div className={`h-1 flex-1 rounded-full transition-colors ${password.length >= 12 ? 'bg-success' : 'bg-slate-700'}`} />
                   </div>
-                  <span className={`text-[9px] font-bold uppercase ${passwordStrong ? 'text-success' : 'text-slate-500'}`}>
+                  <span className={`text-[9px] font-bold uppercase ${passwordStrong ? 'text-success' : 'text-slate-400'}`}>
                     {password.length < 4 ? 'Weak' : password.length < 8 ? 'Short' : password.length < 12 ? 'Good' : 'Strong'}
                   </span>
                 </div>
@@ -195,7 +195,7 @@ export default function Login({ onLogin }) {
           </form>
 
           <div className="mt-6 pt-4 border-t border-slate-700/50 text-center">
-             <p className="text-[10px] text-slate-500 uppercase font-bold tracking-[0.15em]">
+             <p className="text-[10px] text-slate-400 uppercase font-bold tracking-[0.15em]">
                {mode === 'login' 
                  ? 'Credentials verified via PBKDF2-SHA512' 
                  : 'Passwords hashed with 100k PBKDF2 iterations'}
@@ -203,7 +203,7 @@ export default function Login({ onLogin }) {
           </div>
         </div>
         
-        <p className="text-center mt-6 text-slate-600 text-[10px] uppercase tracking-widest font-bold">
+        <p className="text-center mt-6 text-slate-400 text-[10px] uppercase tracking-widest font-bold">
           BenchOne v2.4 &mdash; Local Research Workbench
         </p>
       </div>

@@ -19,11 +19,10 @@ function localStorageAuth() {
         return { error: 'An account with this email already exists.' };
       }
       const user = {
-        id: Date.now(),
+        id: crypto.randomUUID(),
         email: normalizedEmail,
         displayName: displayName.trim(),
-        // In dev fallback, we store password as-is (NOT for production)
-        _pw: password,
+        _pw: await hashMock(password),
         createdAt: new Date().toISOString()
       };
       users.push(user);
@@ -35,10 +34,16 @@ function localStorageAuth() {
       const normalizedEmail = email.trim().toLowerCase();
       const user = users.find(u => u.email === normalizedEmail);
       if (!user) return { error: 'No account found with this email.' };
-      if (user._pw !== password) return { error: 'Incorrect password.' };
+      const hp = await hashMock(password);
+      if (user._pw !== hp) return { error: 'Incorrect password.' };
       return { id: user.id, email: user.email, displayName: user.displayName };
     }
   };
+}
+
+async function hashMock(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // --- Electron IPC auth ---

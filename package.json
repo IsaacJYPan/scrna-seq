@@ -4,30 +4,50 @@
   "description": "Electron + React desktop app with R Plumber backend",
   "main": "main.js",
   "scripts": {
-    "dev": "powershell -ExecutionPolicy Bypass -File ./launch.ps1",
+    "dev": "concurrently \"npm run vite\" \"node server.js\"",
     "vite": "vite",
-    "electron-start": "wait-on http://localhost:5173 && electron .",
     "build": "vite build",
-    "start": "electron ."
+    "start": "node server.js",
+    "test:unit": "node scripts/run_unit_tests.js",
+    "test:integration": "node scripts/run_integration_tests.js",
+    "test:tutorial": "node scripts/test_pbmc3k_tutorial.js",
+    "test:frontend": "vitest run src/",
+    "test:backend": "vitest run backend/ --environment node",
+    "test:visual": "node scripts/test_visual_ux.js",
+    "test:visual:update": "node scripts/test_visual_ux.js --update-snapshots",
+    "test": "npm run test:backend && npm run test:frontend && npm run test:unit && npm run test:integration && npm run test:tutorial"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.2.2",
+    "@xyflow/react": "^12.10.2",
     "better-sqlite3": "^12.8.0",
+    "cors": "^2.8.6",
+    "dagre": "^0.8.5",
+    "express": "^5.2.1",
+    "http-proxy-middleware": "^4.0.0",
     "lucide-react": "^1.0.1",
+    "multer": "^2.1.1",
+    "playwright": "^1.60.0",
     "plotly.js-dist-min": "^3.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-plotly.js": "^2.6.0"
+    "react-plotly.js": "^2.6.0",
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.11.3",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.27",
     "concurrently": "^9.1.0",
     "electron": "^34.0.0",
     "electron-rebuild": "^3.2.9",
+    "jsdom": "^29.1.1",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
     "vite": "^6.2.0",
+    "vitest": "^4.1.7",
     "wait-on": "^8.0.0"
   }
 }

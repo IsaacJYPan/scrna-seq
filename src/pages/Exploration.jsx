@@ -44,7 +44,7 @@ export default function Exploration({ callApi, datasetInfo, selectedObjects, cur
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <Layers size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <Layers size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
         </div>
       </div>

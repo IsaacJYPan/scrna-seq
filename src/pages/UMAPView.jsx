@@ -1,7 +1,9 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Layers, ListFilter, AlertTriangle } from 'lucide-react';
+import { Layers, ListFilter, AlertTriangle, ImageDown } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
+import { usePipelineStep } from '../hooks/usePipelineStep';
+import FigureSavePanel from '../components/FigureSavePanel';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
@@ -15,7 +17,7 @@ function generate2DData(nClusters) {
       x: Array.from({ length: n }, () => cx + (Math.random() - 0.5) * 4),
       y: Array.from({ length: n }, () => cy + (Math.random() - 0.5) * 4),
       mode: 'markers',
-      type: 'scatter',
+      type: 'scattergl',
       name: `Cluster ${i}`,
       marker: { size: 4, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 0.7 },
       hovertemplate: `<b>Cluster ${i}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
@@ -44,11 +46,9 @@ function generate3DData(nClusters) {
   return traces;
 }
 
-export default function UMAPView({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs }) {
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-  const [hasHydrated, setHasHydrated] = useState(false);
+export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed }) {
+
+  const [savePanelOpen, setSavePanelOpen] = useState(false);
 
   // Persisted parameters
   const [params, setParam] = useTabParams('umap', userEmail, objectId, {
@@ -58,7 +58,28 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
   });
   const { nComponents, nNeighbors, minDist } = params;
   // dims defaults to the PC count used for clustering (from pipelineState)
-  const [dims, setDims] = useState(pipelineState?.clusterDims || 15);
+  const [clusterParams] = useTabParams('cluster', userEmail, objectId, { dims: 15 });
+  const [dims, setDims] = useState(clusterParams.dims);
+  const [base64Image, setBase64Image] = useState(null);
+  const [loadingBase64, setLoadingBase64] = useState(false);
+  const isHighPerfMode = datasetInfo?.cells > 50000;
+
+  // Pipeline step hook for state and cache-checking
+  const { running, result, error, setResult, hasHydrated, setHasHydrated, runStep } = usePipelineStep({
+    callApi,
+    endpoint: `/umap?dims=${dims}&n_components=${nComponents}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`,
+    ipcContext: {
+      operation: 'umap',
+      step: 'umap',
+      parentIds: pcaProvId ? [pcaProvId] : [],
+      useCache: true,
+      cacheParams: { type: 'umap', dims, n_components: nComponents, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
+    },
+    readyToHydrate: !!(datasetInfo && pipelineState?.pca),
+    sessionReady,
+    rSessionId,
+    autoHydrate: false // Manages its own complex hydration sequence
+  });
 
   // Track which n_components was actually computed last — persisted so hydration
   // attempts the right cache key on reload (e.g. if user last ran 3D UMAP).
@@ -80,9 +101,9 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
   // We initialize from the persisted value so traces render correctly after hydration.
   const [resultNComponents, setResultNComponents] = useState(() => savedResultNComponents);
 
-  // Keep dims in sync if the user re-clusters with different dims (before running UMAP)
+  // Keep dims in sync if the user re-clusters with different dims
   useEffect(() => {
-    if (pipelineState?.clusterDims && !result) {
+    if (pipelineState?.clusterDims) {
       setDims(pipelineState.clusterDims);
     }
   }, [pipelineState?.clusterDims]);
@@ -95,104 +116,106 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
   }, [pipelineState?.clusterDims, pipelineState?.clusterCount]);
 
   const runUMAP = useCallback(async (isInitial = false, nComponentsOverride = null) => {
-    setRunning(true);
-    setError(null);
     const nc = nComponentsOverride ?? nComponents;
-    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}`, {}, {
+    const ep = `/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`;
+    const ipc = {
       operation: 'umap',
       step: 'umap',
-      parentIds: currentProvId ? [currentProvId] : [],
+      parentIds: pcaProvId ? [pcaProvId] : [],
       useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist },
-      onlyIfCached: isInitial
-    });
+      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
+    };
 
-    if (data && data.result) {
-      setResult(data);
+    const data = await runStep(isInitial, ep, ipc);
+
+    if (data?.result) {
       setCachedDims(prev => ({ ...prev, [nc]: data }));
       setParam2('resultNComponents', nc);  // persist for hydration on reload
-    } else if (data && data.error && !isInitial) {
-      setError(data.error);
-    } else if (!data && !isInitial) {
-      setError('R backend error. Check the console for details.');
     }
-    setRunning(false);
-  }, [callApi, currentProvId, dims, nComponents, nNeighbors, minDist, pipelineState?.clusterCount]);
+  }, [runStep, dims, nComponents, nNeighbors, minDist, setParam2, pcaProvId]);
 
   // Silent cache-only prefetch — populates cachedDims without touching running/error state.
   // Used to warm the other dimension during hydration so 2D↔3D toggle is instant.
   const prefetchDim = useCallback(async (nc) => {
-    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}`, {}, {
+    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`, {}, {
       operation: 'umap',
       step: 'umap',
-      parentIds: currentProvId ? [currentProvId] : [],
+      parentIds: pcaProvId ? [pcaProvId] : [],
       useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist },
+      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' },
       onlyIfCached: true  // never triggers a real R computation
     });
     if (data?.result) {
       setCachedDims(prev => ({ ...prev, [nc]: data }));
     }
-  }, [callApi, currentProvId, dims, nNeighbors, minDist]);
+  }, [callApi, pcaProvId, dims, nNeighbors, minDist, activeProjectSeed]);
 
   const is2D = nComponents === 2;
 
-  // Derive Plotly traces from cached results.
-  const activeAnnotations = currentWs?.annotations || {};
+  // Derive Plotly traces from cached results (memoized to prevent jitter on state updates)
+  const annotationsStr = JSON.stringify(currentWs?.annotations || {});
+  const activeAnnotations = React.useMemo(() => JSON.parse(annotationsStr), [annotationsStr]);
 
-  const buildTraces = (dataObj, targetDims) => {
+  const traces2D = React.useMemo(() => {
+    const dataObj = cachedDims[2];
     return dataObj?.result?.trace_data
       ? dataObj.result.trace_data.map((trace, i) => {
-          const safeName = String(trace.name || '');
-          const originalId = safeName.replace('Cluster ', '');
-          const newName = activeAnnotations[originalId] || trace.name;
-          const tr = {
-            x: trace.x,
-            y: trace.y,
-            mode: 'markers',
-            type: targetDims === 2 ? 'scatter' : 'scatter3d',
-            name: newName,
-            marker: { size: targetDims === 2 ? 4 : 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
-            hovertemplate: targetDims === 2
-              ? `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
-              : `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
-          };
-          if (targetDims === 3) tr.z = trace.z;
-          return tr;
-        })
+        const safeName = String(trace.name || '');
+        const originalId = safeName.replace('Cluster ', '');
+        const newName = activeAnnotations[originalId] || trace.name;
+        return {
+          x: trace.x,
+          y: trace.y,
+          mode: 'markers',
+          type: 'scattergl',
+          name: newName,
+          marker: { size: 4, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
+          hovertemplate: `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`,
+        };
+      })
       : [];
-  };
+  }, [cachedDims, activeAnnotations]);
 
-  const traces2D = buildTraces(cachedDims[2], 2);
-  const traces3D = buildTraces(cachedDims[3], 3);
-  
+  const traces3D = React.useMemo(() => {
+    const dataObj = cachedDims[3];
+    return dataObj?.result?.trace_data
+      ? dataObj.result.trace_data.map((trace, i) => {
+        const safeName = String(trace.name || '');
+        const originalId = safeName.replace('Cluster ', '');
+        const newName = activeAnnotations[originalId] || trace.name;
+        return {
+          x: trace.x,
+          y: trace.y,
+          z: trace.z,
+          mode: 'markers',
+          type: 'scatter3d',
+          name: newName,
+          marker: { size: 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
+          hovertemplate: `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
+        };
+      })
+      : [];
+  }, [cachedDims, activeAnnotations]);
+
   // Traces corresponding to the actively viewed dimension
   const activeTraces = is2D ? traces2D : traces3D;
 
-  // Hydration: use the last-computed nComponents (from localStorage) so that
-  // e.g. a previously-computed 3D UMAP cache key is matched correctly.
+  // Hydration effect is intact because it uses async IIFE to prefetch
   useEffect(() => {
-    if (datasetInfo && pipelineState?.cluster && !result && !running && !hasHydrated && sessionReady) {
+    if (datasetInfo && pipelineState?.pca && !result && !running && !hasHydrated && sessionReady) {
       setHasHydrated(true);
       const savedNC = savedResultNComponents ?? null;
       const activeNC = nComponents; // dimension currently shown in the UI
       // Hydrate the active view first, then silently prefetch the other dimension
       // so toggling 2D↔3D is instant without an extra network round-trip.
-      ;(async () => {
+      ; (async () => {
         await runUMAP(true, activeNC);
         if (savedNC && savedNC !== activeNC) {
           await prefetchDim(savedNC);  // silent — no spinner, no error state
         }
       })();
     }
-  }, [datasetInfo, pipelineState?.cluster, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents]);
-
-  // Reset hydration flag when the R session ID changes (new R process started)
-  // so that we re-run the step in R to rebuild global_obj.
-  // Watch rSessionId directly — NOT callApi, which changes on every workspace update.
-  useEffect(() => {
-    setHasHydrated(false);
-  }, [rSessionId]);
+  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated]);
 
   // When the user toggles the dimension in the UI, clear the stale result
   // and eagerly try to load the required dimension from the local cache.
@@ -209,8 +232,24 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
     }
   }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP]);
 
-  // layout2D is simple and doesn't have camera state, so we just declare it inline
-  const layout2D = {
+  // Fetch base64 fallback for large datasets
+  useEffect(() => {
+    if (result && isHighPerfMode && nComponents === 2) {
+      setLoadingBase64(true);
+      window.electronAPI.apiRequest('/render-plot-base64', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plot_type: 'UMAP', width: 8, height: 6, res: 200 })
+      })
+      .then(data => {
+        if (data.result?.base64) setBase64Image(data.result.base64);
+        setLoadingBase64(false);
+      })
+      .catch(() => setLoadingBase64(false));
+    }
+  }, [result, isHighPerfMode, nComponents]);
+
+  const layout2D = React.useMemo(() => ({
     autosize: true,
     uirevision: 'true',
     margin: { l: 50, r: 20, t: 10, b: 50 },
@@ -220,20 +259,19 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
     yaxis: { title: 'UMAP 2', showgrid: false, zeroline: false },
     showlegend: false,
     hovermode: 'closest'
-  };
+  }), []);
 
-  // layout3D is memoized with no dependencies so the object reference never changes.
-  // A stable layout is the key to letting Plotly's uirevision own the 3D camera:
-  // Plotly only re-applies scene.camera when the layout object itself changes.
-  // With a stable object, the initial camera is applied once and never overwritten.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // layout3D is memoized with NO dependencies to ensure perfect stability.
+  // By keeping this object reference the same for the entire life of the mount,
+  // we let Plotly's uirevision own the camera state without any "fights" from React.
+  // The camera is set ONCE from localStorage at mount; subsequent state saves 
+  // do not trigger a layout prop update, eliminating the "rubber-band" jump.
   const layout3D = React.useMemo(() => ({
     autosize: true,
-    uirevision: 'umap-3d',  // stable string — Plotly never resets camera across re-renders
+    uirevision: 'umap-3d',
     margin: { l: 0, r: 0, b: 0, t: 0 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     scene: {
-      // Set once from localStorage; after first render Plotly owns this via uirevision
       camera: initialCamera3D.current,
       xaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
       yaxis: { showgrid: false, zeroline: false, showticklabels: false, title: '' },
@@ -241,26 +279,28 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
       bgcolor: 'transparent'
     },
     showlegend: false
-  }), []); // intentionally empty deps — layout must be stable for uirevision to work
+  }), []); // intentionally empty deps — layout must be perfectly stable
+
+  const plotConfig = React.useMemo(() => ({ displayModeBar: true, displaylogo: false, responsive: true }), []);
 
   if (!datasetInfo) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <Layers size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <Layers size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
         </div>
       </div>
     );
   }
 
-  if (!pipelineState?.cluster) {
+  if (!pipelineState?.pca) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
           <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
           <h2 className="text-xl font-bold text-white mb-2">Clustering Required</h2>
-          <p className="text-textMuted">Complete the Clustering step before computing UMAP. UMAP colors cells by cluster identity.</p>
+          <p className="opacity-80">UMAP requires Principal Component Analysis (PCA) to be completed.</p>
         </div>
       </div>
     );
@@ -274,20 +314,23 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
           <p className="text-textMuted">Uniform Manifold Approximation and Projection for visualization.</p>
         </div>
         <div className="flex gap-3">
+          <button
+              className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
+              onClick={() => setSavePanelOpen(true)}
+            ><ImageDown size={15} /> Save Figure</button>
           {result && (
             <button
-              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
+              className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
             >📝 View Step Script</button>
           )}
           <button
             onClick={() => runUMAP()}
             disabled={running}
-            className={`btn ${
-              result && resultNComponents === nComponents
+            className={`btn ${result && resultNComponents === nComponents
                 ? 'btn-secondary border-primary text-primary'
                 : 'btn-primary'
-            } flex items-center gap-2`}
+              } flex items-center gap-2`}
           >
             {running && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
             {result && resultNComponents === nComponents
@@ -312,41 +355,44 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
             <div className="flex bg-slate-800 rounded-lg p-0.5 border border-border">
               <button
                 onClick={() => setParam('nComponents', 2)}
-                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 2 ? 'bg-primary text-white shadow' : 'text-slate-500'}`}
+                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 2 ? 'bg-primary text-white shadow' : 'text-slate-400'}`}
               >2D</button>
               <button
                 onClick={() => setParam('nComponents', 3)}
-                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-primary text-white shadow' : 'text-slate-500'}`}
+                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-slate-300'}`}
               >3D</button>
             </div>
-            <p className="text-[10px] text-slate-500 mt-1">2D for publications</p>
+            <p className="text-[10px] text-slate-400 mt-1">2D for publications</p>
           </div>
           <div>
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">n_neighbors</label>
+            <label htmlFor="umap-neighbors" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of Neighbors</label>
             <input
+              id="umap-neighbors"
               type="number" value={nNeighbors} min={5} max={100}
-              onChange={e => setParam('nNeighbors', parseInt(e.target.value))}
-              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              onChange={e => setParam2('nNeighbors', parseInt(e.target.value))}
+              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-slate-500 mt-1">Local vs global structure</p>
+            <p className="text-[10px] text-slate-400 mt-1">Local vs global structure</p>
           </div>
           <div>
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">min_dist</label>
+            <label htmlFor="umap-dist" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Minimum Distance</label>
             <input
-              type="number" value={minDist} min={0.01} max={1} step={0.05}
-              onChange={e => setParam('minDist', parseFloat(e.target.value))}
-              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              id="umap-dist"
+              type="number" value={minDist} min={0.01} max={1.0} step={0.05}
+              onChange={e => setParam2('minDist', parseFloat(e.target.value))}
+              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-slate-500 mt-1">Packing density</p>
+            <p className="text-[10px] text-slate-400 mt-1">Packing density</p>
           </div>
           <div>
-            <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">PC Dims</label>
+            <label htmlFor="umap-dims" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Input Dimensions (PCs)</label>
             <input
-              type="number" value={dims} min={5} max={50}
+              id="umap-dims"
+              type="number" value={dims} min={5} max={100}
               onChange={e => setDims(parseInt(e.target.value))}
-              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-slate-500 mt-1">From PCA</p>
+            <p className="text-[10px] text-slate-400 mt-1">From PCA</p>
           </div>
         </div>
       </div>
@@ -355,8 +401,8 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
       <div className="flex-1 flex gap-5 min-h-0">
         <div className="flex-1 bg-surface border border-border rounded-lg relative overflow-hidden flex items-center justify-center">
           {!result && !running && (
-            <div className="text-center p-8 opacity-40">
-              <Layers size={48} className="mx-auto mb-4" />
+            <div className="text-center p-8">
+              <Layers size={48} className="mx-auto mb-4 text-slate-600" />
               <p className="text-slate-400">Configure parameters and click "Run UMAP".</p>
             </div>
           )}
@@ -373,44 +419,67 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
           )}
 
           {/* Parallel Mounting strictly protects 3D Camera Angles and avoids graph-lines visual glitches */}
-          <div className={`w-full h-full absolute inset-0 ${is2D && cachedDims[2] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-            <Plot
-              data={traces2D}
-              layout={layout2D}
-              useResizeHandler
-              className="w-full h-full"
-              config={{ displayModeBar: true, displaylogo: false, responsive: true }}
-            />
-          </div>
-          <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-            <Plot
-              data={traces3D}
-              layout={layout3D}
-              useResizeHandler
-              className="w-full h-full"
-              config={{ displayModeBar: true, displaylogo: false, responsive: true }}
-              onRelayout={(e) => {
-                let updated = false;
-                let newCamera = cameraRef.current ? { ...cameraRef.current } : {};
-
-                // Merge partial camera fragments that Plotly emits during drag
-                if (e['scene.camera'])        { newCamera = { ...e['scene.camera'] }; updated = true; }
-                if (e['scene.camera.eye'])    { newCamera = { ...newCamera, eye:    e['scene.camera.eye'] };    updated = true; }
-                if (e['scene.camera.center']) { newCamera = { ...newCamera, center: e['scene.camera.center'] }; updated = true; }
-                if (e['scene.camera.up'])     { newCamera = { ...newCamera, up:     e['scene.camera.up'] };     updated = true; }
-
-                if (updated) {
-                  // Update the ref only — no React state update, no re-render, no jitter.
-                  // Plotly owns the live camera; we only persist it to localStorage.
-                  cameraRef.current = newCamera;
-                  if (debounceRef.current) clearTimeout(debounceRef.current);
-                  debounceRef.current = setTimeout(() => {
-                    setParam2('camera3D', cameraRef.current);
-                  }, 1500);
-                }
-              }}
-            />
-          </div>
+          {isHighPerfMode && nComponents === 2 ? (
+            <div className={`w-full h-full absolute inset-0 z-10 flex items-center justify-center bg-slate-900/50 ${result ? 'opacity-100' : 'opacity-0'}`}>
+              {loadingBase64 ? (
+                <div className="flex flex-col items-center">
+                  <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
+                  <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">Rendering High-Res PNG...</p>
+                </div>
+              ) : base64Image ? (
+                <>
+                  <img src={base64Image} className="max-w-full max-h-full object-contain p-2" />
+                  <div className="absolute top-4 right-4 bg-primary/20 text-primary border border-primary/40 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase">
+                    High-Performance View
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ) : (
+            <>
+              <div className={`w-full h-full absolute inset-0 ${is2D && cachedDims[2] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                <Plot
+                  data={traces2D}
+                  layout={layout2D}
+                  useResizeHandler
+                  className="w-full h-full"
+                  config={plotConfig}
+                />
+              </div>
+              <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                <Plot
+                  data={traces3D}
+                  layout={layout3D}
+                  useResizeHandler
+                  className="w-full h-full"
+                  config={plotConfig}
+                  onRelayout={(e) => {
+                    let updated = false;
+                    let newCamera = cameraRef.current ? { ...cameraRef.current } : {};
+    
+                    // Merge partial camera fragments that Plotly emits during drag
+                    if (e['scene.camera']) { newCamera = { ...e['scene.camera'] }; updated = true; }
+                    if (e['scene.camera.eye']) { newCamera = { ...newCamera, eye: e['scene.camera.eye'] }; updated = true; }
+                    if (e['scene.camera.center']) { newCamera = { ...newCamera, center: e['scene.camera.center'] }; updated = true; }
+                    if (e['scene.camera.up']) { newCamera = { ...newCamera, up: e['scene.camera.up'] }; updated = true; }
+    
+                    if (updated) {
+                      // Update the ref only — no React state update, no re-render, no jitter.
+                      // Plotly owns the live camera; we only persist it to localStorage.
+                      cameraRef.current = newCamera;
+                      if (debounceRef.current) clearTimeout(debounceRef.current);
+                      debounceRef.current = setTimeout(() => {
+                        // Only save if we have a reasonably complete camera object
+                        if (cameraRef.current?.eye) {
+                          setParam2('camera3D', cameraRef.current);
+                        }
+                      }, 1000); // 1000ms provides a safer buffer to avoid saving mid-interaction
+                    }
+                  }}
+                />
+              </div>
+            </>
+          )}
         </div>
 
         {/* Cluster legend sidebar */}
@@ -425,7 +494,7 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
                   <div key={i} className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-white/5">
                     <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: trace.marker?.color || CLUSTER_COLORS[i] }}></div>
                     <span className="text-slate-300">{trace.name}</span>
-                    <span className="ml-auto text-slate-500 font-mono">{trace.x?.length}</span>
+                    <span className="ml-auto text-slate-400 font-mono">{trace.x?.length}</span>
                   </div>
                 ))}
               </div>
@@ -433,6 +502,14 @@ export default function UMAPView({ callApi, datasetInfo, currentProvId, openProv
           </div>
         )}
       </div>
+      <FigureSavePanel
+        isOpen={savePanelOpen}
+        onClose={() => setSavePanelOpen(false)}
+        plotType="UMAP"
+        baseParams={{ features: [], groupBy: 'seurat_clusters' }}
+        userEmail={userEmail || ''}
+        objectId={objectId || ''}
+      />
     </div>
   );
 }

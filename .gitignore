@@ -9,8 +9,14 @@ r-backend/.Rhistory
 r-backend/.RData
 r-backend/*.Rout
 
-# Data — never commit raw sequencing data
+# Data — never commit raw sequencing data or large binary matrices
 data/
+*.h5
+*.h5ad
+*.h5seurat
+*.mtx
+*.mtx.gz
+*.loom
 
 # Electron
 out/
@@ -30,12 +36,41 @@ Thumbs.db
 # Vite
 .vite/
 
-# R session objects (RDS + companion JSON) — too large and user-specific
+# R session objects — RDS files are large user-specific binary blobs
 r-backend/sessions/
+r-backend/vault/
+*.rds
+*.RDS
+*.meta.json
 
-# SQLite database files (results cache, user auth)
+# SQLite database files (results cache, user auth) — user-specific
 *.sqlite
 *.db
 
 # R library cache
-r-backend/renv/
+r-backend/renv/
+
+# Generated exports — SVG/PDF plot files produced at runtime
+exports/
+
+# Playwright test artifacts — screenshots, reports (regeneratable)
+playwright/report/
+playwright/snapshots/
+playwright-report/
+test-results/
+
+# Scratch / temporary R scripts — one-off debugging files
+scratch/
+
+# Generated reference metrics — produced by generate_reference_pbmc3k.R
+scripts/reference_metrics.json
+
+# npm lock file — large, frequently changes, regeneratable with `npm install`
+# Uncomment the next line only if you intentionally omit lock files
+# package-lock.json
+
+# Large token-expensive generated files
+visual_test.js
+
+# Generated Guides (Beginner Full-Stack Course)
+docs/guide/

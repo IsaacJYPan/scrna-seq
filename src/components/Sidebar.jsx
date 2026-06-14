@@ -4,7 +4,7 @@ import {
   Microscope, Clock as History, 
   LayoutPanelTop, Clipboard as ClipboardList, ChevronDown,
   Users, ChevronLeft, Menu, LogOut, BarChart3, Sparkles, Network, Layers, ShieldCheck,
-  CheckCircle2, Circle, Moon, Sun
+  CheckCircle2, Circle, Moon, Sun, Search, ScatterChart, Grid3x3, CircleDot, ImageIcon, Wrench, Lock, Loader2, Terminal
 } from 'lucide-react';
 
 export default function Sidebar({ 
@@ -23,7 +23,8 @@ export default function Sidebar({
   onLogout,
   pipelineState,
   theme,
-  setTheme
+  setTheme,
+  figuresCount
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
 
@@ -34,11 +35,19 @@ export default function Sidebar({
 
   // Pipeline steps — ordered, gated
   const pipelineItems = [
-    { id: 'qc', label: 'Quality Control', icon: Activity, done: pipelineState?.qc },
-    { id: 'normalize', label: 'Normalization', icon: Sparkles, done: pipelineState?.normalize },
-    { id: 'pca', label: 'PCA', icon: BarChart3, done: pipelineState?.pca },
-    { id: 'cluster', label: 'Clustering', icon: Network, done: pipelineState?.cluster },
-    { id: 'umap', label: 'UMAP', icon: Layers, done: pipelineState?.umap },
+    { id: 'qc',        label: 'Quality Control', icon: Activity, done: pipelineState?.qc },
+    { id: 'normalize', label: 'Normalization',   icon: Sparkles, done: pipelineState?.normalize },
+    { id: 'integrate', label: 'Integration',     icon: Layers,   done: pipelineState?.integrate },
+    { id: 'pca',       label: 'PCA',             icon: BarChart3, done: pipelineState?.pca },
+    { id: 'cluster',   label: 'Clustering',      icon: Network,  done: pipelineState?.cluster },
+  ];
+
+  // Plot modules — require UMAP / clustering
+  const plotItems = [
+    { id: 'umap',        label: 'UMAP',          icon: Layers,      done: pipelineState?.umap },
+    { id: 'featureplot', label: 'Feature Plot',  icon: ScatterChart },
+    { id: 'heatmap',     label: 'Heatmap',       icon: Grid3x3 },
+    { id: 'dotplot',     label: 'Dot Plot',      icon: CircleDot },
   ];
 
   // Analysis modules
@@ -48,7 +57,7 @@ export default function Sidebar({
     { id: 'annotate', label: 'Cell Annotation', icon: Sparkles },
     { id: 'enrichment', label: 'Pathway Enrichment', icon: Microscope },
     { id: 'cellchat', label: 'CellChat', icon: MessageSquare },
-    { id: 'multimodal', label: 'Batch Integration', icon: ShieldCheck },
+    { id: 'customscript', label: 'Custom Script', icon: Terminal },
   ];
 
   // Output modules
@@ -61,7 +70,8 @@ export default function Sidebar({
     if (!setWorkspaces) return;
     const newWs = {
       id: `ws-${Date.now()}`,
-      name: `New Project ${workspaces.length}`,
+      name: `New Workspace ${workspaces.length}`,
+      projects: [{ id: `proj-${Date.now()}`, name: 'Default Project' }],
       objects: [],
       selectedObjectIds: [],
       activeBranch: 'main',
@@ -89,13 +99,14 @@ export default function Sidebar({
           }
         `}
       >
-        <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-500'} group-hover:text-slate-200 flex-shrink-0`} />
+        <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-slate-200 flex-shrink-0`} />
         <span className="truncate flex-1 text-left">{item.label}</span>
-        {item.done !== undefined && (
-          item.done 
-            ? <CheckCircle2 size={14} className="text-success flex-shrink-0" />
-            : <Circle size={14} className="text-slate-700 flex-shrink-0" />
+        {item.id === 'publication' && figuresCount > 0 && (
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-blue-700 dark:text-blue-300 bg-blue-500/10 border border-blue-500/20">
+            {figuresCount}
+          </span>
         )}
+        {item.done && <CheckCircle2 size={14} className="text-success flex-shrink-0" />}
       </button>
     );
   };
@@ -120,7 +131,7 @@ export default function Sidebar({
                 <div className={`absolute left-0 w-[4px] bg-white rounded-r-lg transition-all duration-300 ${isActive ? 'h-10 top-1' : 'h-0 top-6 group-hover:h-5 group-hover:top-3.5'}`}></div>
                 <button 
                   onClick={() => { setActiveWsIndex(i); setIsCollapsed(false); }}
-                  className={`w-12 h-12 flex items-center justify-center text-[15px] font-bold transition-all duration-200 relative group-hover:rounded-[16px] group-hover:bg-primary group-hover:text-white
+                  className={`w-12 h-12 flex items-center justify-center text-[15px] font-black transition-all duration-200 relative group-hover:rounded-[16px] group-hover:bg-primary group-hover:text-white
                     ${isActive ? 'rounded-[16px] bg-primary text-white shadow-lg' : 'rounded-[24px] bg-black/5 dark:bg-slate-800 text-text'}
                   `}
                 >
@@ -141,8 +152,8 @@ export default function Sidebar({
                 <div className={`absolute left-0 w-[4px] bg-white rounded-r-lg transition-all duration-300 ${isActive ? 'h-10 top-1' : 'h-0 top-6 group-hover:h-5 group-hover:top-3.5'}`}></div>
                 <button 
                   onClick={() => { setActiveWsIndex(i); setIsCollapsed(false); }}
-                  className={`w-12 h-12 flex items-center justify-center text-[15px] font-bold transition-all duration-200 relative group-hover:rounded-[16px] group-hover:bg-primary group-hover:text-white
-                    ${isActive ? 'rounded-[16px] bg-primary text-white shadow-lg' : 'rounded-[24px] bg-black/5 dark:bg-slate-800 text-success'}
+                  className={`w-12 h-12 flex items-center justify-center text-[15px] font-black transition-all duration-200 relative group-hover:rounded-[16px] group-hover:bg-primary group-hover:text-white
+                    ${isActive ? 'rounded-[16px] bg-primary text-white shadow-lg' : 'rounded-[24px] bg-black/5 dark:bg-slate-800 text-text'}
                   `}
                 >
                   {initials}
@@ -155,6 +166,7 @@ export default function Sidebar({
           <div className="relative group w-full flex justify-center mt-2">
             <button 
               onClick={handleAddWorkspace}
+              aria-label="Create new workspace"
               className="w-12 h-12 rounded-[24px] bg-black/5 dark:bg-slate-800 flex items-center justify-center text-success hover:bg-success hover:text-white hover:rounded-[16px] transition-all duration-200 shadow-sm"
               title="Create Workspace"
             >
@@ -165,7 +177,8 @@ export default function Sidebar({
 
         {user && (
           <div className="mt-auto mb-2 w-full flex flex-col items-center gap-2 group relative">
-            <button 
+          <button 
+               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
                className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-slate-700 hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-white"
                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
                title={theme === 'dark' ? "Switch to Light Mode" : "Switch to Dark Mode"}
@@ -173,6 +186,7 @@ export default function Sidebar({
                {theme === 'dark' ? <Moon size={20} /> : <Sun size={20} />}
             </button>
             <button 
+               aria-label="Log out"
                className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-danger hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-white"
                onClick={onLogout}
                title="Log Out"
@@ -195,12 +209,15 @@ export default function Sidebar({
           {/* Top-level nav */}
           <div className="space-y-[2px]">
             <NavButton item={{ id: 'workspace', label: 'Workspace', icon: Database }} />
+            <div className="py-3">
+              <NavButton item={{ id: 'inspect', label: 'Inspect', icon: Search }} disabled={!hasData} />
+            </div>
           </div>
 
           {/* Pipeline section */}
           <div className="space-y-[2px]">
             <div className="px-2 mb-1">
-              <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+              <h3 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                 <ChevronDown size={12} className="opacity-70" />
                 Core Preprocessing
               </h3>
@@ -210,10 +227,23 @@ export default function Sidebar({
             ))}
           </div>
 
+          {/* Plots section */}
+          <div className="space-y-[2px]">
+            <div className="px-2 mb-1">
+              <h3 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                <ChevronDown size={12} className="opacity-70" />
+                Plots
+              </h3>
+            </div>
+            {plotItems.map(item => (
+              <NavButton key={item.id} item={item} disabled={!hasData} />
+            ))}
+          </div>
+
           {/* Analysis section */}
           <div className="space-y-[2px]">
             <div className="px-2 mb-1">
-              <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+              <h3 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                 <ChevronDown size={12} className="opacity-70" />
                 Downstream Analysis
               </h3>
@@ -226,7 +256,7 @@ export default function Sidebar({
           {/* Output section */}
           <div className="space-y-[2px]">
             <div className="px-2 mb-1">
-              <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+              <h3 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                 <ChevronDown size={12} className="opacity-70" />
                 Output
               </h3>
@@ -246,7 +276,11 @@ export default function Sidebar({
         </div>
 
         {/* Engine Status */}
-        <div className="h-14 bg-black/5 dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0">
+        <div 
+          className="h-14 bg-black/5 dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-slate-800 transition-colors"
+          onClick={() => setActiveTab('diagnostics')}
+          title="Open Diagnostics & Environment"
+        >
           <div className="flex flex-col justify-center min-w-0 pr-2 pb-0.5 flex-1">
              <div className="flex items-center gap-1.5 mb-[2px]">
                 <div className={`w-2.5 h-2.5 rounded-full border border-black dark:border-white shadow-sm ${apiStatus && apiStatus.includes('Connected') ? 'bg-success' : 'animate-pulse bg-danger'}`}></div>
@@ -254,6 +288,7 @@ export default function Sidebar({
              </div>
              <span className="text-[11px] text-slate-400 truncate leading-none">{apiStatus || "Connection lost"}</span>
           </div>
+          <Wrench size={16} className="text-slate-400" />
         </div>
       </aside>
       

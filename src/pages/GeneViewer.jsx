@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Search, BarChart3, Play, Layers, ChevronDown, ChevronRight } from 'lucide-react';
+import { Search, BarChart3, Play, Layers, ChevronDown, ChevronRight, ImageDown } from 'lucide-react';
 import Plot from 'react-plotly.js';
+import FigureSavePanel from '../components/FigureSavePanel';
 
 const GENE_CATEGORIES = {
   'T-Cell': ['CD3E','CD3D','CD3G','CD4','CD8A','CD8B','IL7R','CCR7','TCF7','LEF1','CD2','CD27','CD28','ICOS','CTLA4','PDCD1','IL2RA','IFNG','TNF','GZMA','GZMB','GZMK','PRF1'],
@@ -48,7 +49,7 @@ function formatFeaturePlot(data) {
   const { expression, u1, u2 } = data;
   
   return [{
-    type: 'scatter',
+    type: 'scattergl',
     mode: 'markers',
     x: u1,
     y: u2,
@@ -63,7 +64,8 @@ function formatFeaturePlot(data) {
   }];
 }
 
-export default function GeneViewer({ datasetInfo }) {
+export default function GeneViewer({ datasetInfo, userEmail, objectId }) {
+  const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeGene, setActiveGene] = useState(null);
   const [geneData, setGeneData] = useState(null);
@@ -80,7 +82,7 @@ export default function GeneViewer({ datasetInfo }) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <BarChart3 size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <BarChart3 size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
         </div>
       </div>
@@ -91,8 +93,7 @@ export default function GeneViewer({ datasetInfo }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/gene-expression?gene=${gene}`);
-      const data = await res.json();
+      const data = await window.electronAPI.apiRequest(`/gene-expression?gene=${encodeURIComponent(gene)}`);
       if (data.error) {
         setError(data.error);
       } else {
@@ -140,13 +141,13 @@ export default function GeneViewer({ datasetInfo }) {
         <div className="p-4 border-b border-border">
           <h3 className="text-sm font-bold text-white mb-3">Gene Browser</h3>
           <form onSubmit={handleSearch} className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input 
               type="text"
               value={query}
               onChange={e => handleQueryChange(e.target.value)}
               placeholder="Search gene (CD3E, LYZ...)"
-              className="w-full bg-background border border-border rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-primary placeholder:text-slate-600"
+              className="w-full bg-background border border-border rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-primary placeholder:text-slate-400"
             />
             {suggestions.length > 0 && (
               <div className="absolute top-full mt-1 left-0 right-0 bg-slate-800 border border-border rounded-lg overflow-hidden z-20 shadow-xl">
@@ -172,7 +173,7 @@ export default function GeneViewer({ datasetInfo }) {
               >
                 {expandedCats[cat] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 <span className="uppercase tracking-wider">{cat}</span>
-                <span className="ml-auto text-slate-600 font-mono text-[10px]">{genes.length}</span>
+                <span className="ml-auto text-slate-400 font-mono text-[10px]">{genes.length}</span>
               </button>
               {expandedCats[cat] && (
                 <div className="flex flex-wrap gap-1 px-2 pb-2 pt-1">
@@ -183,7 +184,7 @@ export default function GeneViewer({ datasetInfo }) {
                       className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider transition-all border
                         ${activeGene === g 
                           ? 'bg-primary/20 border-primary text-primary' 
-                          : 'bg-slate-800 border-border text-slate-500 hover:border-slate-600 hover:text-slate-300'}`}
+                          : 'bg-slate-800 border-border text-slate-400 hover:border-slate-600 hover:text-slate-300'}`}
                     >{g}</button>
                   ))}
                 </div>
@@ -192,7 +193,7 @@ export default function GeneViewer({ datasetInfo }) {
           ))}
         </div>
 
-        <div className="p-3 border-t border-border text-[10px] text-slate-500 text-center">
+        <div className="p-3 border-t border-border text-[10px] text-slate-400 text-center">
           {allGenes.length} genes available
         </div>
       </div>
@@ -205,18 +206,26 @@ export default function GeneViewer({ datasetInfo }) {
             <p className="text-textMuted text-sm">Visualize per-cluster expression profiles via VlnPlot and FeaturePlot.</p>
           </div>
           {activeGene && (
-            <div className="flex bg-slate-800 rounded-lg p-1 border border-border">
-              <button 
-                onClick={() => setViewMode('violin')}
-                className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'violin' ? 'bg-primary text-white shadow' : 'text-slate-500 hover:text-white'}`}
+            <div className="flex items-center gap-3">
+              <div className="flex bg-slate-800 rounded-lg p-1 border border-border">
+                <button 
+                  onClick={() => setViewMode('violin')}
+                  className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'violin' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <BarChart3 size={14} /> VlnPlot
+                </button>
+                <button 
+                  onClick={() => setViewMode('feature')}
+                  className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'feature' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  <Layers size={14} /> FeaturePlot
+                </button>
+              </div>
+              <button
+                onClick={() => setSavePanelOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-primary/50 text-primary hover:bg-primary/10 transition-colors text-xs font-bold"
               >
-                <BarChart3 size={14} /> VlnPlot
-              </button>
-              <button 
-                onClick={() => setViewMode('feature')}
-                className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'feature' ? 'bg-primary text-white shadow' : 'text-slate-500 hover:text-white'}`}
-              >
-                <Layers size={14} /> FeaturePlot
+                <ImageDown size={14} /> Save Figure
               </button>
             </div>
           )}
@@ -240,10 +249,10 @@ export default function GeneViewer({ datasetInfo }) {
             </div>
           </div>
         ) : !activeGene ? (
-          <div className="flex-1 flex items-center justify-center opacity-30">
+          <div className="flex-1 flex items-center justify-center ">
             <div className="text-center">
               <BarChart3 size={64} className="mx-auto mb-4" />
-              <p className="text-xl font-black text-white tracking-tight">Select a gene to visualize</p>
+              <p className="text-xl font-black text-slate-300 tracking-tight">Select a gene to visualize</p>
               <p className="text-sm text-slate-400 mt-2">Browse categories on the left or search by symbol.</p>
             </div>
           </div>
@@ -285,6 +294,14 @@ export default function GeneViewer({ datasetInfo }) {
           </div>
         )}
       </div>
+      <FigureSavePanel
+        isOpen={savePanelOpen}
+        onClose={() => setSavePanelOpen(false)}
+        plotType={viewMode === 'violin' ? 'Violin' : 'FeaturePlot'}
+        baseParams={{ features: activeGene ? [activeGene] : [], groupBy: 'seurat_clusters' }}
+        userEmail={userEmail || ''}
+        objectId={objectId || ''}
+      />
     </div>
   );
 }

@@ -31,6 +31,7 @@ function initDatabase(dbPath) {
       script TEXT NOT NULL,
       parameters TEXT DEFAULT '{}',
       parent_ids TEXT DEFAULT '[]',
+      operation TEXT DEFAULT 'unknown',
       created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -54,7 +55,28 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_prov_timestamp ON provenance(timestamp);
     CREATE INDEX IF NOT EXISTS idx_cache_prov ON results_cache(provenance_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+    CREATE TABLE IF NOT EXISTS figure_collection (
+      id TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      object_id TEXT,
+      plot_type TEXT NOT NULL,
+      title TEXT DEFAULT '',
+      params_json TEXT NOT NULL DEFAULT '{}',
+      file_path TEXT DEFAULT '',
+      file_format TEXT DEFAULT 'png',
+      thumbnail_b64 TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_figures_user ON figure_collection(user_email);
   `);
+
+  // ── Schema migration: add 'operation' column if missing (for pre-existing DBs) ──
+  const cols = db.prepare("PRAGMA table_info(provenance)").all().map(c => c.name);
+  if (!cols.includes('operation')) {
+    db.exec("ALTER TABLE provenance ADD COLUMN operation TEXT DEFAULT 'unknown'");
+    console.log('[DB] Migrated: added operation column to provenance table');
+  }
 
   console.log('[DB] Database initialized at', dbPath);
   return db;
@@ -64,9 +86,9 @@ function initDatabase(dbPath) {
 
 const _insertProv = () => db.prepare(`
   INSERT OR REPLACE INTO provenance
-    (id, timestamp, language, language_version, packages, script, parameters, parent_ids)
+    (id, timestamp, language, language_version, packages, script, parameters, parent_ids, operation)
   VALUES
-    (@id, @timestamp, @language, @languageVersion, @packages, @script, @parameters, @parentIds)
+    (@id, @timestamp, @language, @languageVersion, @packages, @script, @parameters, @parentIds, @operation)
 `);
 
 function saveProvenance(envelope) {
@@ -79,7 +101,8 @@ function saveProvenance(envelope) {
     packages: JSON.stringify(prov.packages || []),
     script: String(prov.script || ''),
     parameters: JSON.stringify(prov.parameters || {}),
-    parentIds: JSON.stringify(prov.parentIds || [])
+    parentIds: JSON.stringify(prov.parentIds || []),
+    operation: String(prov.operation || 'unknown')
   });
   return prov.id;
 }
@@ -104,7 +127,8 @@ function rowToProvenance(row) {
     packages: JSON.parse(row.packages),
     script: row.script,
     parameters: JSON.parse(row.parameters),
-    parentIds: JSON.parse(row.parent_ids)
+    parentIds: JSON.parse(row.parent_ids),
+    operation: row.operation || 'unknown'
   };
 }
 
@@ -176,10 +200,8 @@ function deleteDownstreamProvenance(operationNames) {
   // Find records by checking if the parameters JSON contains the operation field
   // Since we store operation in the envelope, we search by the script/parameters
   const rows = db.prepare(
-    `SELECT id FROM provenance WHERE id IN (
-      SELECT id FROM provenance WHERE id LIKE 'prov-%'
-    )`
-  ).all();
+    `SELECT id FROM provenance WHERE operation IN (${placeholders})`
+  ).all(...operationNames);
   
   return rows.map(r => r.id);
 }
@@ -187,10 +209,10 @@ function deleteDownstreamProvenance(operationNames) {
 // ── Results Cache ────────────────────────────────────────────────
 
 /**
- * Generate a cache key from operation name + parameters + data version.
+ * Generate a cache key from operation name + parameters + data version + parent dependencies.
  */
-function makeCacheKey(operation, params, dataVersion) {
-  const payload = JSON.stringify({ operation, params, dataVersion });
+function makeCacheKey(operation, params, dataVersion, parentIds = []) {
+  const payload = JSON.stringify({ operation, params, dataVersion, parentIds });
   return crypto.createHash('sha256').update(payload).digest('hex').substring(0, 16);
 }
 
@@ -217,8 +239,11 @@ function clearCache() {
 
 // ── User Authentication ─────────────────────────────────────────
 
+const PBKDF2_ITERATIONS = 600000;
+
 function hashPassword(password, salt) {
-  return crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, PBKDF2_ITERATIONS, 64, 'sha512').toString('hex');
+  return `$pbkdf2-sha512$i=${PBKDF2_ITERATIONS}$${salt}$${hash}`;
 }
 
 function createUser(email, password, displayName) {
@@ -253,8 +278,24 @@ function verifyUser(email, password) {
     return { error: 'No account found with this email.' };
   }
 
-  const hash = hashPassword(password, user.salt);
-  if (hash !== user.password_hash) {
+  // Parse the stored hash to see if it uses the new format or fallback to old format
+  let storedHash = user.password_hash;
+  let isMatch = false;
+  
+  if (storedHash.startsWith('$pbkdf2-sha512$')) {
+    const parts = storedHash.split('$');
+    const iters = parseInt(parts[2].split('=')[1], 10);
+    const salt = parts[3];
+    const hashData = parts[4];
+    const attemptHash = crypto.pbkdf2Sync(password, salt, iters, 64, 'sha512').toString('hex');
+    isMatch = (attemptHash === hashData);
+  } else {
+    // Old legacy hash format
+    const attemptHash = crypto.pbkdf2Sync(password, user.salt, 100000, 64, 'sha512').toString('hex');
+    isMatch = (attemptHash === storedHash);
+  }
+
+  if (!isMatch) {
     return { error: 'Incorrect password.' };
   }
 
@@ -270,6 +311,51 @@ function getUserByEmail(email) {
   const row = db.prepare('SELECT id, email, display_name, created_at FROM users WHERE email = ?').get(email.trim().toLowerCase());
   if (!row) return null;
   return { id: row.id, email: row.email, displayName: row.display_name, createdAt: row.created_at };
+}
+
+// ── Figure Collection ───────────────────────────────────────────
+
+function saveFigure(record) {
+  db.prepare(`
+    INSERT OR REPLACE INTO figure_collection
+      (id, user_email, object_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64)
+    VALUES
+      (@id, @userEmail, @objectId, @plotType, @title, @paramsJson, @filePath, @fileFormat, @thumbnailB64)
+  `).run({
+    id: record.id,
+    userEmail: record.userEmail || '',
+    objectId: record.objectId || '',
+    plotType: record.plotType || 'Unknown',
+    title: record.title || '',
+    paramsJson: JSON.stringify(record.params || {}),
+    filePath: record.filePath || '',
+    fileFormat: record.fileFormat || 'png',
+    thumbnailB64: record.thumbnailB64 || ''
+  });
+  return record.id;
+}
+
+function getFiguresByUser(email) {
+  const rows = db.prepare(
+    'SELECT * FROM figure_collection WHERE user_email = ? ORDER BY created_at DESC'
+  ).all(email.trim().toLowerCase());
+  return rows.map(r => ({
+    id: r.id,
+    userEmail: r.user_email,
+    objectId: r.object_id,
+    plotType: r.plot_type,
+    title: r.title,
+    params: JSON.parse(r.params_json || '{}'),
+    filePath: r.file_path,
+    fileFormat: r.file_format,
+    thumbnailB64: r.thumbnail_b64,
+    createdAt: r.created_at
+  }));
+}
+
+function deleteFigure(id) {
+  db.prepare('DELETE FROM figure_collection WHERE id = ?').run(id);
+  return true;
 }
 
 // ── Cleanup ──────────────────────────────────────────────────────
@@ -296,6 +382,9 @@ module.exports = {
   clearCache,
   createUser,
   verifyUser,
-  getUserByEmail
+  getUserByEmail,
+  saveFigure,
+  getFiguresByUser,
+  deleteFigure
 };
 

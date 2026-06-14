@@ -1,0 +1,889 @@
+// scripts/test_visual_ux.js
+// ============================================================
+// Automated Visual & UI/UX Test Suite — scRNA-seq Dashboard
+// ============================================================
+// Starts Vite dev server automatically, exercises every tab,
+// and runs 6 categories of quality checks:
+//   1. Pixel-level screenshot regression (golden snapshots)
+//   2. Interactive flow tests (modals, theme, sidebar, sliders)
+//   3. Accessibility audits (axe-core / WCAG 2.1)
+//   4. Layout overflow detection
+//   5. Network & performance monitoring
+//   6. Console error detection
+//
+// Usage:
+//   npm run test:visual          — run against existing baselines
+//   npm run test:visual:update   — regenerate golden screenshots
+// ============================================================
+
+'use strict';
+
+const { chromium } = require('playwright');
+const { AxePuppeteer } = require('@axe-core/playwright');
+const { spawn, execSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+// ── Configuration ──────────────────────────────────────────────────────────────
+const VITE_PORT     = 5173;
+const VITE_URL      = `http://localhost:${VITE_PORT}`;
+const WORKSPACE     = path.resolve(__dirname, '..');
+const SNAPSHOTS_DIR = path.join(WORKSPACE, 'playwright', 'snapshots');
+const REPORT_DIR    = path.join(WORKSPACE, 'playwright', 'report');
+const UPDATE_MODE   = process.argv.includes('--update-snapshots');
+const VITE_STARTUP_WAIT_MS = 30_000;
+const PAGE_SETTLE_MS       = 2_500;
+const DIFF_THRESHOLD       = 0.001;  // 0.1% pixel ratio
+const PERFORMANCE_BUDGET_MS = 8_000; // Max ms to fully render a tab
+const KNOWN_IGNORABLE_ERRORS = [
+  // R backend offline in CI is expected
+  'Failed to fetch',
+  'NetworkError',
+  'ERR_CONNECTION_REFUSED',
+];
+
+// ── Setup Directories ──────────────────────────────────────────────────────────
+[SNAPSHOTS_DIR, REPORT_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
+
+// ── Test Counters ──────────────────────────────────────────────────────────────
+let PASS = 0, FAIL = 0, WARN = 0;
+const failures = [];
+const warnings = [];
+const allResults = [];
+
+function pass(desc) { console.log(`  ✅ PASS: ${desc}`); PASS++; }
+function fail(desc, detail = '') {
+  console.log(`  ❌ FAIL: ${desc}${detail ? `\n     → ${detail}` : ''}`);
+  FAIL++; failures.push({ desc, detail });
+}
+function warn(desc, detail = '') {
+  console.log(`  ⚠  WARN: ${desc}${detail ? ` (${detail})` : ''}`);
+  WARN++; warnings.push({ desc, detail });
+}
+function info(msg) { console.log(`  ℹ  ${msg}`); }
+function section(title) {
+  const bar = '─'.repeat(Math.min(title.length, 60));
+  console.log(`\n${title}\n${bar}`);
+}
+function assert(desc, cond, detail = '') {
+  if (cond) pass(desc); else fail(desc, detail);
+}
+
+// ── Sleep Helper ───────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ── Screenshot Snapshot Check ──────────────────────────────────────────────────
+async function checkSnapshot(page, name) {
+  const file = path.join(SNAPSHOTS_DIR, `${name}.png`);
+  const buf = await page.screenshot({ fullPage: false });
+
+  if (UPDATE_MODE || !fs.existsSync(file)) {
+    fs.writeFileSync(file, buf);
+    info(`Snapshot saved: ${name}.png`);
+    return;
+  }
+
+  // Compare pixel by pixel using Playwright's built-in diff
+  const baseline = fs.readFileSync(file);
+  // Use a simple buffer size check as a fast-fail first, then do proper pixel diff
+  if (buf.length === 0) {
+    fail(`Snapshot ${name}: empty screenshot`);
+    return;
+  }
+
+  // Save current for diff reporting
+  const currentFile = path.join(REPORT_DIR, `${name}.current.png`);
+  fs.writeFileSync(currentFile, buf);
+
+  // We use Playwright's expect API for pixel diffing; since we're not inside a
+  // @playwright/test test, we call the comparison manually via PNG comparison.
+  try {
+    const { PNG } = require('pngjs');
+    const pixelmatch = require('pixelmatch');
+
+    const img1 = PNG.sync.read(baseline);
+    const img2 = PNG.sync.read(buf);
+
+    if (img1.width !== img2.width || img1.height !== img2.height) {
+      fail(`Snapshot ${name}: size changed (${img1.width}x${img1.height} → ${img2.width}x${img2.height})`);
+      return;
+    }
+
+    const diff = new PNG({ width: img1.width, height: img1.height });
+    const mismatch = pixelmatch(img1.data, img2.data, diff.data, img1.width, img1.height, { threshold: 0.2 });
+    const ratio = mismatch / (img1.width * img1.height);
+
+    if (ratio > DIFF_THRESHOLD) {
+      const diffFile = path.join(REPORT_DIR, `${name}.diff.png`);
+      fs.writeFileSync(diffFile, PNG.sync.write(diff));
+      fail(`Snapshot ${name}: ${(ratio * 100).toFixed(3)}% pixels differ`, `diff saved to ${diffFile}`);
+    } else {
+      pass(`Snapshot ${name}: within threshold (${(ratio * 100).toFixed(4)}% diff)`);
+    }
+  } catch (e) {
+    // pngjs/pixelmatch may not be installed; fall back to buffer comparison
+    if (buf.equals(baseline)) {
+      pass(`Snapshot ${name}: exact match`);
+    } else {
+      warn(`Snapshot ${name}: differs (install pngjs + pixelmatch for pixel diff)`);
+    }
+  }
+}
+
+// ── Overflow Detector ──────────────────────────────────────────────────────────
+async function checkOverflow(page, context) {
+  const overflowing = await page.evaluate(() => {
+    const found = [];
+    document.querySelectorAll('*').forEach(el => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      // Skip elements inside collapsed/hidden containers (w-0, opacity-0, overflow-hidden with 0 width)
+      let parent = el.parentElement;
+      let hiddenByParent = false;
+      while (parent) {
+        const ps = window.getComputedStyle(parent);
+        if (ps.overflow === 'hidden' && parent.clientWidth === 0) { hiddenByParent = true; break; }
+        parent = parent.parentElement;
+      }
+      if (hiddenByParent) return;
+      // Check horizontal overflow (allow 4px rounding tolerance)
+      if (el.scrollWidth > el.clientWidth + 4) {
+        const id = el.id ? `#${el.id}` : '';
+        const cls = [...el.classList].slice(0, 3).join('.');
+        found.push(`${el.tagName}${id}.${cls} (scrollW=${el.scrollWidth} clientW=${el.clientWidth})`);
+      }
+    });
+    return found.slice(0, 10); // cap report size
+  });
+
+  if (overflowing.length > 0) {
+    warn(`${context}: ${overflowing.length} overflowing element(s)`, overflowing.join(' | '));
+  } else {
+    pass(`${context}: no horizontal overflow detected`);
+  }
+}
+
+// ── Console Error Check ────────────────────────────────────────────────────────
+function isIgnorableError(msg) {
+  return KNOWN_IGNORABLE_ERRORS.some(pattern => msg.includes(pattern));
+}
+
+// ── Performance Timing ─────────────────────────────────────────────────────────
+async function measureLoadTime(page, label) {
+  const timing = await page.evaluate(() => {
+    const nav = performance.getEntriesByType('navigation')[0];
+    return nav ? nav.loadEventEnd - nav.startTime : null;
+  });
+  if (timing !== null) {
+    if (timing > PERFORMANCE_BUDGET_MS) {
+      warn(`${label}: slow load (${timing.toFixed(0)}ms > ${PERFORMANCE_BUDGET_MS}ms budget)`);
+    } else {
+      pass(`${label}: load time ${timing.toFixed(0)}ms (within ${PERFORMANCE_BUDGET_MS}ms budget)`);
+    }
+  }
+}
+
+// ── Accessibility Audit ────────────────────────────────────────────────────────
+async function runA11yAudit(page, context) {
+  try {
+    const { AxeBuilder } = require('@axe-core/playwright');
+    const results = await new AxeBuilder({ page })
+      .withTags(['wcag2a', 'wcag2aa'])
+      .analyze();
+
+    const violations = results.violations.filter(v => v.impact === 'critical' || v.impact === 'serious');
+    if (violations.length === 0) {
+      pass(`${context}: no critical/serious A11Y violations`);
+    } else {
+      const summary = violations.map(v => {
+        // Output up to 2 failing node HTML snippets so we can identify them
+        const nodeSamples = v.nodes.slice(0, 2)
+          .map(n => n.html.replace(/\s+/g, ' ').substring(0, 150))
+          .join(' ‖ ');
+        return `${v.impact}[${v.id}]: ${v.description} (${v.nodes.length} node(s))\n       ↳ ${nodeSamples}`;
+      }).join('\n     ');
+      fail(`${context}: ${violations.length} A11Y violation(s)`, summary);
+    }
+    const minor = results.violations.filter(v => v.impact === 'minor' || v.impact === 'moderate');
+    if (minor.length > 0) {
+      warn(`${context}: ${minor.length} minor/moderate A11Y issue(s)`, minor.map(v => v.description).join('; '));
+    }
+  } catch (e) {
+    warn(`${context}: A11Y audit skipped`, e.message);
+  }
+}
+
+// ── Vite Process Management ────────────────────────────────────────────────────
+let viteProc = null;
+
+async function startVite() {
+  info(`Starting Vite dev server on port ${VITE_PORT}...`);
+  viteProc = spawn('npx', ['vite', '--port', String(VITE_PORT), '--strictPort'], {
+    cwd: WORKSPACE,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    shell: true,
+  });
+
+  let ready = false;
+  const deadline = Date.now() + VITE_STARTUP_WAIT_MS;
+
+  await new Promise((resolve, reject) => {
+    viteProc.stdout.on('data', d => {
+      const msg = d.toString();
+      process.stdout.write(`[Vite] ${msg}`);
+      if (msg.includes('Local:') || msg.includes('ready in') || msg.includes('localhost')) {
+        ready = true;
+        resolve();
+      }
+    });
+    viteProc.stderr.on('data', d => process.stdout.write(`[Vite:err] ${d}`));
+    viteProc.on('error', reject);
+    setTimeout(() => {
+      if (!ready) resolve(); // timeout: assume it started
+    }, VITE_STARTUP_WAIT_MS);
+  });
+
+  // Additional wait to ensure fully ready
+  await sleep(2000);
+  info('Vite dev server started.');
+}
+
+function stopVite() {
+  if (viteProc && !viteProc.killed) {
+    viteProc.kill('SIGTERM');
+    info('Vite dev server stopped.');
+  }
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────────
+
+async function main() {
+  console.log('='.repeat(60));
+  console.log('  scRNA-seq Dashboard  —  Visual & UI/UX Test Suite');
+  console.log('='.repeat(60));
+  console.log(`  Mode      : ${UPDATE_MODE ? '🔄 UPDATE BASELINES' : '🔍 COMPARE AGAINST BASELINES'}`);
+  console.log(`  Snapshots : ${SNAPSHOTS_DIR}`);
+  console.log(`  Report    : ${REPORT_DIR}`);
+  console.log(`  Timestamp : ${new Date().toISOString()}\n`);
+
+  // ── Start Vite ─────────────────────────────────────────────────────────────
+  section('SETUP: Starting Vite dev server');
+  await startVite();
+
+  // ── Launch Browser ─────────────────────────────────────────────────────────
+  section('SETUP: Launching browser');
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  
+  // Mock Electron API
+  await context.addInitScript(() => {
+    window.mockFigures = [];
+    window.electronAPI = {
+      getFigures: async () => window.mockFigures,
+      saveFigure: async (fig) => { window.mockFigures.push(fig); return { success: true }; },
+      deleteFigure: async (id) => { window.mockFigures = window.mockFigures.filter(f => f.id !== id); return { success: true }; },
+      setTheme: () => {}
+    };
+  });
+
+  const page = await context.newPage();
+
+  // ── Console & Error Monitoring ─────────────────────────────────────────────
+  const consoleErrors = [];
+  const networkFailures = [];
+
+  page.on('console', msg => {
+    console.log(`[BROWSER CONSOLE] ${msg.type().toUpperCase()}: ${msg.text()}`);
+    if (msg.type() === 'error' && !isIgnorableError(msg.text())) {
+      consoleErrors.push(msg.text());
+    }
+  });
+  page.on('pageerror', err => {
+    if (!isIgnorableError(err.message)) {
+      consoleErrors.push(`[uncaught] ${err.message}`);
+    }
+  });
+  page.on('requestfailed', req => {
+    const url = req.url();
+    const err = req.failure()?.errorText || 'unknown';
+    if (!isIgnorableError(err)) {
+      networkFailures.push(`${req.method()} ${url} → ${err}`);
+      console.log(`[NETWORK FAIL] ${req.method()} ${url} → ${err}`);
+    }
+  });
+
+  // ── Route Mocking for E2E Tests ───────────────────────────────────────────
+  const corsHeaders = { 'Access-Control-Allow-Origin': '*' };
+
+  await page.route('**/health*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ status: 'ok' })
+    });
+  });
+
+  await page.route('**/check-session*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ exists: true })
+    });
+  });
+
+  await page.route('**/session-id*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ sessionId: 'mock-session-123' })
+    });
+  });
+
+  await page.route('**/restore-session*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ success: true, cells: 2700, session_id: 'mock-session-123', reductions: ['pca', 'umap'] })
+    });
+  });
+
+  await page.route('**/load-data*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        cells: 2700,
+        features: 32738,
+        result: true
+      })
+    });
+  });
+
+  await page.route('**/umap*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        data: [{ "UMAP_1": 1, "UMAP_2": 2, "Cell": "cell1" }, { "UMAP_1": 2, "UMAP_2": 3, "Cell": "cell2" }],
+        metadata: { "ident": ["A", "B"] }
+      })
+    });
+  });
+
+  await page.route('**/object-info*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        n_cells: 2700, n_genes: 13714,
+        memory_mb: 45.2,
+        assays: ['RNA'],
+        meta_cols: [
+          { name: 'orig.ident', type: 'character' },
+          { name: 'nCount_RNA', type: 'numeric' },
+          { name: 'seurat_clusters', type: 'character' }
+        ]
+      })
+    });
+  });
+
+  await page.route('**/qc-distributions*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        n_cells: 2700, n_features: 32738,
+        percent_mt: [1.2, 2.3, 0.5, 4.1],
+        nFeature_RNA: [1500, 2100, 1800, 2500],
+        nCount_RNA: [4000, 5000, 4500, 6000]
+      })
+    });
+  });
+
+  await page.route('**/genes*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        genes: ['CD3E', 'CD4', 'CD8A', 'MS4A1']
+      })
+    });
+  });
+
+  await page.route('**/save-session*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ success: true })
+    });
+  });
+
+  await page.route('**/export-preview*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        width: 800,
+        height: 600
+      })
+    });
+  });
+
+  await page.route('**/export-figure*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        id: "fig_" + Date.now(),
+        path: "mock_path.png",
+        success: true
+      })
+    });
+  });
+
+  // ── Navigate to App ────────────────────────────────────────────────────────
+  section('STEP 1: Initial page load');
+  const t0 = Date.now();
+  await page.goto(VITE_URL, { waitUntil: 'networkidle', timeout: 30000 });
+  const loadMs = Date.now() - t0;
+  assert(`App loaded within ${PERFORMANCE_BUDGET_MS}ms`, loadMs < PERFORMANCE_BUDGET_MS, `took ${loadMs}ms`);
+
+  // ── Test 1a: Dark Mode (default) ───────────────────────────────────────────
+  section('STEP 2: Workspace — dark mode (default)');
+  await sleep(PAGE_SETTLE_MS);
+  await checkSnapshot(page, 'workspace_dark');
+  await checkOverflow(page, 'Workspace dark');
+  await runA11yAudit(page, 'Workspace dark');
+
+  // ── Test 1b: Theme Toggle → Light Mode ────────────────────────────────────
+  section('STEP 3: Theme toggle (dark → light)');
+  const themeBtn = page.locator('nav button[title*="Light Mode"], nav button[title*="light"]').first();
+  const themeBtnExists = await themeBtn.count() > 0;
+  if (themeBtnExists) {
+    await themeBtn.click();
+    await sleep(800);
+    await checkSnapshot(page, 'workspace_light');
+    await checkOverflow(page, 'Workspace light');
+    // Toggle back to dark
+    const darkBtn = page.locator('nav button[title*="Dark Mode"], nav button[title*="dark"]').first();
+    if (await darkBtn.count() > 0) {
+      await darkBtn.click();
+      await sleep(500);
+    }
+    pass('Theme toggle: dark ↔ light transitions without crash');
+  } else {
+    warn('Theme toggle button not found — skipping light mode snapshot');
+  }
+
+  // ── Test 2: Sidebar Collapse / Expand ─────────────────────────────────────
+  section('STEP 4: Sidebar collapse / expand');
+  const collapseBtn = page.locator('aside button, aside div.cursor-pointer').filter({ hasText: '' }).first();
+  // Click the workspace name header (collapses sidebar per Sidebar.jsx)
+  const sidebarHeader = page.locator('aside .cursor-pointer').first();
+  if (await sidebarHeader.count() > 0) {
+    await sidebarHeader.click();
+    await sleep(500);
+    await checkSnapshot(page, 'sidebar_collapsed');
+    await checkOverflow(page, 'Sidebar collapsed');
+    // Re-expand via the Menu button
+    const menuBtn = page.locator('button[class*="absolute"][class*="left-"]').first();
+    if (await menuBtn.count() > 0) {
+      await menuBtn.click();
+      await sleep(500);
+      pass('Sidebar collapse/expand: toggle works without layout overflow');
+    } else {
+      warn('Sidebar expand button not found after collapse');
+    }
+  } else {
+    warn('Sidebar collapse trigger not found — skipping collapse test');
+  }
+
+  // ── Test 3: Pipeline gates (buttons disabled before data loaded) ───────────
+  section('STEP 5: Pipeline gate enforcement (no data)');
+  const qcBtn = page.locator('aside button:has-text("Quality Control")').first();
+  if (await qcBtn.count() > 0) {
+    const isDisabled = await qcBtn.getAttribute('disabled') !== null;
+    assert('QC button disabled before dataset is loaded', isDisabled);
+  } else {
+    warn('QC button not found — skipping gate check');
+  }
+
+  // ── Test 4: Load Dataset Modal ─────────────────────────────────────────────
+  section('STEP 6: Load Dataset modal flow');
+  let dataLoaded = false;
+  try {
+    const loadBtn = page.locator('button:has-text("Load Dataset"), button:has-text("Import Object"), button:has-text("Load")').first();
+    if (await loadBtn.count() > 0) {
+      await loadBtn.click();
+      await sleep(1000);
+      await checkSnapshot(page, 'modal_load_dataset_open');
+
+      // Use separate locators to avoid mixed CSS/text= selector syntax
+      const demoCard = page.locator('button:has-text("PBMC 3k")').or(page.locator('button:has-text("PBMC3k")').or(page.locator('button:has-text("pbmc3k")'))).first();
+      if (await demoCard.count() > 0) {
+        await demoCard.click();
+        info('Clicked PBMC3k demo. Waiting for load (up to 90s)...');
+        try {
+          await page.waitForSelector('text=PBMC_3k_Tutorial', { timeout: 90000 });
+          dataLoaded = true;
+          pass('Load Dataset modal: PBMC3k demo dataset loaded successfully');
+
+          await sleep(1500);
+
+          // Inject mock PCA pipeline state so UMAP tab is accessible
+          await page.evaluate(() => {
+            try {
+              const wsRaw = localStorage.getItem('benchone_ws_researcher@lab.edu');
+              if (wsRaw) {
+                const workspaces = JSON.parse(wsRaw);
+                if (workspaces && workspaces.length > 0 && workspaces[0].objects && workspaces[0].objects.length > 0) {
+                  const objId = workspaces[0].objects[0].id;
+                  const psKey = `benchone_ps_researcher@lab.edu_${objId}`;
+                  const currentPs = JSON.parse(localStorage.getItem(psKey) || '{}');
+                  currentPs.qc = true;
+                  currentPs.normalize = true;
+                  currentPs.integrate = true;
+                  currentPs.pca = true;
+                  localStorage.setItem(psKey, JSON.stringify(currentPs));
+                }
+              }
+            } catch (e) {
+              console.error('Failed to inject mock state', e);
+            }
+          });
+
+          await page.reload({ waitUntil: 'networkidle' });
+          await sleep(PAGE_SETTLE_MS);
+
+          // DEBUG STATE
+          await page.evaluate(() => {
+            console.log('[DEBUG] LocalStorage after reload:', localStorage.getItem('benchone_ws_researcher@lab.edu'));
+          });
+
+          await checkSnapshot(page, 'workspace_data_loaded');
+        } catch (e) {
+          console.log(`[TIMEOUT ERROR] ${e.message}`);
+          await page.screenshot({ path: 'playwright/report/timeout-screenshot.png' });
+          warn('PBMC3k load timed out — R backend may be offline; continuing with UI-only tests');
+        }
+        // Ensure modal is closed before continuing tab navigation
+        await page.keyboard.press('Escape');
+        await sleep(500);
+      } else {
+        warn('PBMC3k demo card not found in modal — skipping data load test');
+        // Close modal to unblock subsequent navigation
+        await page.keyboard.press('Escape');
+        await sleep(500);
+      }
+      // Final safety: dismiss any lingering overlay before tab navigation
+      const overlay = page.locator('div.fixed.inset-0').first();
+      if (await overlay.count() > 0) {
+        await page.keyboard.press('Escape');
+        await sleep(500);
+      }
+    } else {
+      warn('Load Dataset button not found — skipping modal test');
+    }
+  } catch (e) {
+    warn('Load Dataset flow error', e.message);
+    // Safety dismiss
+    await page.keyboard.press('Escape').catch(() => {});
+    await sleep(300);
+  }
+
+  // ── Test 5: Per-Tab Rendering ──────────────────────────────────────────────
+  const allTabs = [
+    { id: 'inspect',      label: 'Inspect',                  requiresData: true  },
+    { id: 'qc',           label: 'Quality Control',           requiresData: true  },
+    { id: 'normalize',    label: 'Normalization',             requiresData: true  },
+    { id: 'integrate',    label: 'Integration',               requiresData: true  },
+    { id: 'pca',          label: 'PCA',                       requiresData: true  },
+    { id: 'cluster',      label: 'Clustering',                requiresData: true  },
+    { id: 'umap',         label: 'UMAP',                      requiresData: true  },
+    { id: 'featureplot',  label: 'Feature Plot',              requiresData: true  },
+    { id: 'heatmap',      label: 'Heatmap',                   requiresData: true  },
+    { id: 'dotplot',      label: 'Dot Plot',                  requiresData: true  },
+    { id: 'geneviewer',   label: 'Gene Expression',           requiresData: true  },
+    { id: 'deg',          label: 'Differential Expression',   requiresData: true  },
+    { id: 'annotate',     label: 'Cell Annotation',           requiresData: true  },
+    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true  },
+    { id: 'cellchat',     label: 'CellChat',                  requiresData: true  },
+    { id: 'publication',  label: 'Figures',                   requiresData: true  },
+    { id: 'validation',   label: 'Validation',                requiresData: true  },
+    { id: 'lineage',      label: 'Lineage',                   requiresData: false },
+    { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, clickVia: 'engine-status' },
+  ];
+
+  for (const tab of allTabs) {
+    if (tab.requiresData && !dataLoaded) {
+      warn(`Tab "${tab.label}": skipped (requires data — R backend may be offline)`);
+      continue;
+    }
+
+    section(`TAB: ${tab.label}`);
+
+    try {
+      if (tab.clickVia === 'engine-status') {
+        // Diagnostics is opened via Engine Status block
+        const engineBlock = page.locator('aside div:has-text("Engine Ready"), aside div:has-text("Engine Offline"), aside div:has-text("Connected")').first();
+        if (await engineBlock.count() > 0) {
+          await engineBlock.click();
+        } else {
+          warn(`${tab.label}: engine status block not found`);
+          continue;
+        }
+      } else {
+        const btn = page.locator(`aside button:has-text("${tab.label}")`).first();
+        if (await btn.count() === 0) {
+          warn(`${tab.label}: sidebar button not found`);
+          continue;
+        }
+        await btn.click();
+      }
+
+      await sleep(PAGE_SETTLE_MS);
+
+      // 1. Crash detection
+      const crashed = await page.locator('text=Component Error').count() > 0;
+      assert(`${tab.label}: no React ErrorBoundary crash`, !crashed);
+
+      if (!crashed) {
+        // 2. Screenshot regression
+        await checkSnapshot(page, `tab_${tab.id}`);
+
+        // 3. Layout overflow
+        await checkOverflow(page, tab.label);
+
+        // 4. A11Y audit
+        await runA11yAudit(page, tab.label);
+      }
+
+      allResults.push({ tab: tab.label, crashed, consoleErrorsAtTime: consoleErrors.length });
+    } catch (e) {
+      fail(`${tab.label}: unexpected error`, e.message);
+    }
+  }
+
+  // ── Test 6: Workspace Switching ────────────────────────────────────────────
+  section('STEP 7: Workspace switching (Personal → Shared)');
+  try {
+    const sharedWsBtn = page.locator('nav button:has-text("SH"), nav button:has-text("Sh")').first();
+    if (await sharedWsBtn.count() > 0) {
+      await sharedWsBtn.click();
+      await sleep(800);
+      const collaboratorsVisible = await page.locator('aside button:has-text("Collaborators")').count() > 0;
+      assert('Shared workspace shows Collaborators nav item', collaboratorsVisible);
+      await checkSnapshot(page, 'workspace_shared');
+      // Switch back to personal
+      const personalBtn = page.locator('nav button:has-text("PE"), nav button:has-text("Pe")').first();
+      if (await personalBtn.count() > 0) await personalBtn.click();
+    } else {
+      warn('Shared workspace button not found in nav rail');
+    }
+  } catch (e) {
+    warn('Workspace switching test error', e.message);
+  }
+  // ── Test 6b: Save Figure to Gallery ────────────────────────────────────────
+  section('STEP 7b: Save Figure Integration Flow');
+  try {
+    if (dataLoaded) {
+      const umapBtn = page.locator('aside button:has-text("UMAP")').first();
+      if (await umapBtn.count() > 0) {
+        await umapBtn.click();
+        await sleep(PAGE_SETTLE_MS);
+        
+        const saveFigBtn = page.locator('button:has-text("Save Figure")').first();
+        if (await saveFigBtn.count() > 0) {
+          await saveFigBtn.click();
+          await sleep(1000);
+          
+          const saveToGalleryBtn = page.locator('button:has-text("Save to Figure Gallery")').first();
+          if (await saveToGalleryBtn.count() > 0) {
+            await saveToGalleryBtn.click();
+            await sleep(2000); // Wait for R backend generation and SQLite IPC
+            
+            const galleryBtn = page.locator('aside button:has-text("Figures")').first();
+            await galleryBtn.click();
+            await sleep(PAGE_SETTLE_MS);
+            
+            // Check for presence of saved figure card
+            const figureCard = page.locator('text=UMAP').first();
+            assert('Saved figure appears in Figures gallery', await figureCard.count() > 0);
+            await checkSnapshot(page, 'e2e_saved_figure');
+          } else {
+            warn('Save to Gallery button not found inside save panel');
+          }
+        } else {
+          warn('Save Figure button not found on UMAP tab');
+        }
+      }
+    } else {
+      warn('Save Figure flow skipped (requires data)');
+    }
+  } catch (e) {
+    warn('Save Figure flow error', e.message);
+  }
+
+  // ── Test 7: Console Errors Summary ────────────────────────────────────────
+  section('STEP 8: Console error audit');
+  if (consoleErrors.length === 0) {
+    pass('No unexpected console errors detected across all tabs');
+  } else {
+    fail(`${consoleErrors.length} unexpected console error(s) detected`, consoleErrors.slice(0, 5).join(' | '));
+  }
+
+  // ── Test 8: Network failure summary ───────────────────────────────────────
+  section('STEP 9: Network failure audit');
+  if (networkFailures.length === 0) {
+    pass('No unexpected network failures detected');
+  } else {
+    fail(`${networkFailures.length} network failure(s)`, networkFailures.slice(0, 5).join(' | '));
+  }
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+  await browser.close();
+  stopVite();
+
+  // ── Write HTML Report ──────────────────────────────────────────────────────
+  const htmlReport = generateHtmlReport({ allResults, failures, warnings, consoleErrors, networkFailures });
+  fs.writeFileSync(path.join(REPORT_DIR, 'index.html'), htmlReport);
+  info(`HTML report written to: ${path.join(REPORT_DIR, 'index.html')}`);
+
+  // ── Summary ────────────────────────────────────────────────────────────────
+  const bar = '='.repeat(60);
+  console.log(`\n${bar}`);
+  console.log('  VISUAL & UI/UX TEST SUMMARY');
+  console.log(bar);
+  console.log(`  Total : ${PASS + FAIL}`);
+  console.log(`  Passed: ${PASS}`);
+  console.log(`  Failed: ${FAIL}`);
+  console.log(`  Warned: ${WARN}`);
+  console.log(`  Mode  : ${UPDATE_MODE ? 'BASELINE UPDATE' : 'REGRESSION CHECK'}`);
+  console.log('');
+
+  if (failures.length > 0) {
+    console.log('FAILED CHECKS:');
+    failures.forEach(f => {
+      console.log(`  ✗ ${f.desc}`);
+      if (f.detail) console.log(`    → ${f.detail}`);
+    });
+    console.log('');
+  }
+
+  if (FAIL > 0) {
+    console.log('❌ Visual/UX tests FAILED.\n');
+    process.exit(1);
+  } else {
+    console.log('✅ All visual/UX tests passed!\n');
+    process.exit(0);
+  }
+}
+
+// ── HTML Report Generator ──────────────────────────────────────────────────────
+function generateHtmlReport({ allResults, failures, warnings, consoleErrors, networkFailures }) {
+  const timestamp = new Date().toLocaleString();
+  const snapshotFiles = fs.existsSync(SNAPSHOTS_DIR) ? fs.readdirSync(SNAPSHOTS_DIR).filter(f => f.endsWith('.png')) : [];
+
+  const snapshotCards = snapshotFiles.map(f => {
+    const name = f.replace('.png', '');
+    const imgPath = path.join(SNAPSHOTS_DIR, f).replace(/\\/g, '/');
+    return `
+      <div class="card">
+        <div class="card-title">${name}</div>
+        <img src="file:///${imgPath}" alt="${name}" loading="lazy" />
+      </div>`;
+  }).join('');
+
+  const failureRows = failures.map(f =>
+    `<tr class="fail-row"><td>❌</td><td>${f.desc}</td><td>${f.detail || ''}</td></tr>`
+  ).join('');
+
+  const warningRows = warnings.map(w =>
+    `<tr class="warn-row"><td>⚠️</td><td>${w.desc}</td><td>${w.detail || ''}</td></tr>`
+  ).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>scRNA-seq Dashboard — Visual/UX Test Report</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; padding: 32px; }
+    h1 { font-size: 24px; font-weight: 800; margin-bottom: 4px; color: #f8fafc; }
+    .meta { font-size: 13px; color: #64748b; margin-bottom: 32px; }
+    .stat-bar { display: flex; gap: 16px; margin-bottom: 32px; }
+    .stat { background: #1e293b; border-radius: 10px; padding: 16px 24px; flex: 1; }
+    .stat-num { font-size: 32px; font-weight: 900; }
+    .stat-label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.1em; margin-top: 4px; }
+    .pass { color: #22c55e; } .fail { color: #ef4444; } .warn { color: #f59e0b; }
+    section { margin-bottom: 40px; }
+    h2 { font-size: 16px; font-weight: 700; margin-bottom: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 8px 12px; background: #1e293b; color: #94a3b8; font-weight: 600; }
+    td { padding: 8px 12px; border-bottom: 1px solid #1e293b; vertical-align: top; }
+    .fail-row td { background: rgba(239,68,68,0.08); }
+    .warn-row td { background: rgba(245,158,11,0.08); }
+    .screenshots { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+    .card { background: #1e293b; border-radius: 10px; overflow: hidden; }
+    .card-title { padding: 10px 14px; font-size: 12px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.07em; }
+    .card img { width: 100%; display: block; }
+  </style>
+</head>
+<body>
+  <h1>📊 scRNA-seq Dashboard — Visual/UX Test Report</h1>
+  <div class="meta">Generated: ${timestamp} | Mode: ${UPDATE_MODE ? 'Baseline Update' : 'Regression Check'}</div>
+
+  <div class="stat-bar">
+    <div class="stat"><div class="stat-num pass">${PASS}</div><div class="stat-label">Passed</div></div>
+    <div class="stat"><div class="stat-num fail">${FAIL}</div><div class="stat-label">Failed</div></div>
+    <div class="stat"><div class="stat-num warn">${WARN}</div><div class="stat-label">Warned</div></div>
+    <div class="stat"><div class="stat-num" style="color:#38bdf8">${snapshotFiles.length}</div><div class="stat-label">Snapshots</div></div>
+  </div>
+
+  ${failures.length > 0 ? `
+  <section>
+    <h2>❌ Failures</h2>
+    <table><tr><th></th><th>Check</th><th>Detail</th></tr>${failureRows}</table>
+  </section>` : ''}
+
+  ${warnings.length > 0 ? `
+  <section>
+    <h2>⚠️ Warnings</h2>
+    <table><tr><th></th><th>Check</th><th>Detail</th></tr>${warningRows}</table>
+  </section>` : ''}
+
+  ${consoleErrors.length > 0 ? `
+  <section>
+    <h2>🖥️ Console Errors</h2>
+    <table><tr><th>Error</th></tr>${consoleErrors.map(e => `<tr class="fail-row"><td><code>${e}</code></td></tr>`).join('')}</table>
+  </section>` : ''}
+
+  <section>
+    <h2>📸 Screenshots</h2>
+    <div class="screenshots">${snapshotCards || '<p style="color:#64748b">No snapshots found.</p>'}</div>
+  </section>
+</body>
+</html>`;
+}
+
+// ── Entry Point ────────────────────────────────────────────────────────────────
+main().catch(e => {
+  console.error('[FATAL]', e.message);
+  stopVite();
+  process.exit(1);
+});

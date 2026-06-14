@@ -9,7 +9,7 @@ export default function SmartInsights({ callApi, datasetInfo, currentProvId }) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <BrainCircuit size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <BrainCircuit size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
           <p className="text-textMuted text-sm">Please upload or select a research dataset in the Workspace first.</p>
         </div>
@@ -94,7 +94,7 @@ export default function SmartInsights({ callApi, datasetInfo, currentProvId }) {
                     <div key={idx} className="p-4 flex items-center justify-between hover:bg-white/5 transition-colors">
                        <div className="flex items-center gap-4">
                          <div className="text-xs font-mono text-textMuted w-20">Cluster {item.id}</div>
-                         <ArrowRight size={14} className="text-slate-600" />
+                         <ArrowRight size={14} className="text-slate-400" />
                          <div className="font-bold text-white">{item.label}</div>
                        </div>
                        <div className="flex items-center gap-3">

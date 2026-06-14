@@ -2,19 +2,18 @@ import React, { useState, useEffect } from 'react';
 import {
   X, Database, Tag, Layers, Scissors, FileSpreadsheet,
   ChevronDown, RefreshCw, CheckSquare, Square, AlertTriangle,
-  Check, Plus, Cpu, BarChart3
+  Check, Plus, Cpu, BarChart3, Search
 } from 'lucide-react';
 
-const API = 'http://localhost:8000';
-
+// Removed API constant
 // ── Helpers ────────────────────────────────────────────────────────
 
 function Badge({ children, color = 'primary' }) {
   const palette = {
-    primary: 'bg-primary/15 text-primary border-primary/30',
+    primary: 'bg-primary/15 text-blue-400 border-blue-400/30',
     green:   'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
     amber:   'bg-amber-500/15 text-amber-400 border-amber-500/30',
-    slate:   'bg-slate-700 text-slate-400 border-slate-600',
+    slate:   'bg-slate-800 text-slate-300 border-slate-600',
   };
   return (
     <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wide ${palette[color]}`}>
@@ -27,6 +26,13 @@ function Spinner() {
   return <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />;
 }
 
+function forceArray(val) {
+  if (val == null) return [];
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'object') return []; // ignore {} empty lists from R jsonlite
+  return [val];
+}
+
 // ── Tab components ─────────────────────────────────────────────────
 
 function OverviewTab({ info }) {
@@ -35,6 +41,9 @@ function OverviewTab({ info }) {
     if (r === 'umap') return 'green';
     return 'slate';
   };
+
+  const assays = forceArray(info.assays).filter(v => typeof v === 'string');
+  const reductions = forceArray(info.reductions).filter(v => typeof v === 'string');
 
   return (
     <div className="space-y-6">
@@ -46,7 +55,7 @@ function OverviewTab({ info }) {
           { label: 'Metadata Cols', value: info.meta_cols?.length, icon: <Tag size={14} /> },
         ].map((s, i) => (
           <div key={i} className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/50">
-            <div className="flex items-center gap-1.5 text-slate-500 mb-2 text-[10px] font-bold uppercase tracking-wide">
+            <div className="flex items-center gap-1.5 text-slate-400 mb-2 text-[10px] font-bold uppercase tracking-wide">
               {s.icon} {s.label}
             </div>
             <div className="text-lg font-black text-white">{s.value ?? '—'}</div>
@@ -55,11 +64,11 @@ function OverviewTab({ info }) {
       </div>
 
       {/* Assays */}
-      {info.assays?.length > 0 && (
+      {assays.length > 0 && (
         <div>
-          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Assays</div>
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Assays</div>
           <div className="flex flex-wrap gap-2">
-            {info.assays.map(a => (
+            {assays.map(a => (
               <Badge key={a} color={a === info.active_assay ? 'primary' : 'slate'}>{a}</Badge>
             ))}
           </div>
@@ -68,15 +77,15 @@ function OverviewTab({ info }) {
 
       {/* Reductions */}
       <div>
-        <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Reductions</div>
-        {info.reductions?.length > 0 ? (
+        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Reductions</div>
+        {reductions.length > 0 ? (
           <div className="flex flex-wrap gap-2">
-            {info.reductions.map(r => (
+            {reductions.map(r => (
               <Badge key={r} color={reductionColor(r)}>{r.toUpperCase()} ✓</Badge>
             ))}
           </div>
         ) : (
-          <p className="text-xs text-slate-500 italic">No reductions computed yet.</p>
+          <p className="text-xs text-slate-400 italic">No reductions computed yet.</p>
         )}
       </div>
     </div>
@@ -111,31 +120,34 @@ function MetadataTab({ info }) {
             <div className="text-[11px] text-slate-400">
               {toStr(col.type) === 'numeric' ? (
                 <span>
-                  <span className="text-slate-500">min </span><span className="text-slate-300">{col.min}</span>
-                  <span className="text-slate-500 mx-2">·</span>
-                  <span className="text-slate-500">mean </span><span className="text-slate-300">{col.mean}</span>
-                  <span className="text-slate-500 mx-2">·</span>
-                  <span className="text-slate-500">max </span><span className="text-slate-300">{col.max}</span>
+                  <span className="text-slate-400">min </span><span className="text-slate-300">{col.min}</span>
+                  <span className="text-slate-400 mx-2">·</span>
+                  <span className="text-slate-400">mean </span><span className="text-slate-300">{col.mean}</span>
+                  <span className="text-slate-400 mx-2">·</span>
+                  <span className="text-slate-400">max </span><span className="text-slate-300">{col.max}</span>
                 </span>
               ) : (
                 <span>
-                  <span className="text-slate-500">{col.n_unique} unique — </span>
-                  {col.preview?.join(', ')}
-                  {col.n_unique > 5 && <span className="text-slate-600"> …</span>}
+                  <span className="text-slate-400">{col.n_unique} unique — </span>
+                  {forceArray(col.preview).join(', ')}
+                  {col.n_unique > 5 && <span className="text-slate-400"> …</span>}
                 </span>
               )}
             </div>
           </div>
         ))}
         {cols.length === 0 && (
-          <p className="text-slate-500 text-sm text-center py-8">No metadata columns found.</p>
+          <p className="text-slate-400 text-sm text-center py-8">No metadata columns found.</p>
         )}
       </div>
     </div>
   );
 }
 
-function AddMetadataTab({ onMetaAdded }) {
+function AddMetadataTab({ onMetaAdded, info }) {
+  const [mode, setMode] = useState('csv'); // 'csv' or 'map'
+  
+  // ── CSV Mode State ──
   const [csvPath, setCsvPath] = useState(null);
   const [columns, setColumns] = useState([]);
   const [keyColumn, setKeyColumn] = useState('');
@@ -144,14 +156,36 @@ function AddMetadataTab({ onMetaAdded }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
+  // ── Map Mode State ──
+  const [sourceCol, setSourceCol] = useState('');
+  const [newCol, setNewCol] = useState('');
+  const [sourceVals, setSourceVals] = useState([]);
+  const [mapping, setMapping] = useState({});
+  const [loadingVals, setLoadingVals] = useState(false);
+  const [mappingSubmitting, setMappingSubmitting] = useState(false);
+
+  // Fetch values when source column changes
+  useEffect(() => {
+    if (!sourceCol) { setSourceVals([]); setMapping({}); return; }
+    setLoadingVals(true);
+    window.electronAPI.apiRequest(`/meta-values?column=${encodeURIComponent(sourceCol)}`)
+      .then(data => {
+        setSourceVals(data.values || []);
+        const initialMap = {};
+        (data.values || []).forEach(v => { initialMap[v.value] = ''; });
+        setMapping(initialMap);
+        setLoadingVals(false);
+      })
+      .catch(() => setLoadingVals(false));
+  }, [sourceCol]);
+
   const pickCsv = async () => {
     const path = await window.electronAPI?.openDataFileDialog('csv');
     if (!path) return;
     setCsvPath(path);
     setResult(null);
     setError(null);
-    const res = await fetch(`${API}/csv-columns?path=${encodeURIComponent(path)}`);
-    const data = await res.json();
+    const data = await window.electronAPI.apiRequest(`/csv-columns?path=${encodeURIComponent(path)}`);
     if (data.error) { setError(data.error); return; }
     setColumns(data.columns || []);
     setKeyColumn(data.columns?.[0] || '');
@@ -174,9 +208,8 @@ function AddMetadataTab({ onMetaAdded }) {
         key_column: keyColumn,
         value_columns: selectedCols.join(','),
       });
-      const res = await fetch(`${API}/add-metadata?${params}`);
-      const data = await res.json();
-      if (data.error) setError(data.error);
+      const data = await window.electronAPI.apiRequest(`/add-metadata?${params}`);
+      if (data.error) throw new Error(data.error);
       else { setResult(data); onMetaAdded?.(); }
     } catch (e) {
       setError(e.message);
@@ -184,12 +217,56 @@ function AddMetadataTab({ onMetaAdded }) {
     setImporting(false);
   };
 
+  const doMap = async () => {
+    if (!sourceCol || !newCol.trim()) return;
+    setMappingSubmitting(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.apiRequest('/add-meta-mapping', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_col: sourceCol,
+          new_col: newCol.trim(),
+          mapping: mapping,
+        }),
+      });
+      if (data.error) throw new Error(data.error);
+      else { setResult(data); onMetaAdded?.(); }
+    } catch (e) {
+      setError(e.message);
+    }
+    setMappingSubmitting(false);
+  };
+
   return (
     <div className="space-y-5">
-      <p className="text-xs text-slate-400 leading-relaxed">
-        Import a CSV/TSV file and join its columns to the Seurat object by cell barcode.
-        The key column must contain barcodes exactly matching those in the object.
-      </p>
+      {/* Mode Selector */}
+      <div className="flex bg-slate-800/60 p-1 rounded-xl">
+        <button
+          onClick={() => { setMode('csv'); setResult(null); setError(null); }}
+          className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all ${
+            mode === 'csv' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
+          }`}
+        >
+          Import CSV
+        </button>
+        <button
+          onClick={() => { setMode('map'); setResult(null); setError(null); }}
+          className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all ${
+            mode === 'map' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
+          }`}
+        >
+          Map from Column
+        </button>
+      </div>
+
+      {mode === 'csv' && (
+        <>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            Import a CSV/TSV file and join its columns to the Seurat object by cell barcode.
+            The key column must contain barcodes exactly matching those in the object.
+          </p>
 
       {/* File picker */}
       <div>
@@ -197,11 +274,11 @@ function AddMetadataTab({ onMetaAdded }) {
           onClick={pickCsv}
           className="w-full border-2 border-dashed border-slate-700 hover:border-primary/50 rounded-xl p-5 text-center transition-all group"
         >
-          <FileSpreadsheet size={24} className="mx-auto mb-2 text-slate-600 group-hover:text-primary transition-colors" />
+          <FileSpreadsheet size={24} className="mx-auto mb-2 text-slate-400 group-hover:text-primary transition-colors" />
           <div className="text-sm font-bold text-slate-400 group-hover:text-white transition-colors">
             {csvPath ? csvPath.split(/[/\\]/).pop() : 'Click to select CSV / TSV'}
           </div>
-          {csvPath && <div className="text-[10px] text-slate-600 mt-1 truncate">{csvPath}</div>}
+          {csvPath && <div className="text-[10px] text-slate-400 mt-1 truncate">{csvPath}</div>}
         </button>
       </div>
 
@@ -216,7 +293,7 @@ function AddMetadataTab({ onMetaAdded }) {
         <>
           {/* Key column */}
           <div>
-            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
+            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
               Barcode / Key Column
             </label>
             <select
@@ -230,7 +307,7 @@ function AddMetadataTab({ onMetaAdded }) {
 
           {/* Value columns */}
           <div>
-            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">
+            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
               Columns to Import
             </label>
             <div className="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar">
@@ -244,7 +321,7 @@ function AddMetadataTab({ onMetaAdded }) {
                   >
                     {checked
                       ? <CheckSquare size={14} className="text-primary flex-shrink-0" />
-                      : <Square size={14} className="text-slate-600 flex-shrink-0" />}
+                      : <Square size={14} className="text-slate-400 flex-shrink-0" />}
                     <span className="text-sm text-white font-mono">{col}</span>
                   </button>
                 );
@@ -262,6 +339,86 @@ function AddMetadataTab({ onMetaAdded }) {
           </button>
         </>
       )}
+      </>
+      )}
+      
+      {mode === 'map' && (
+        <div className="space-y-4">
+          <p className="text-xs text-slate-400 leading-relaxed">
+            Create a new metadata column by mapping values from an existing categorical column (like sample ID or cluster).
+          </p>
+
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+                Source Column
+              </label>
+              <select
+                value={sourceCol}
+                onChange={e => setSourceCol(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-primary"
+              >
+                <option value="">— select source column —</option>
+                {(info?.meta_cols || []).filter(c => c.type !== 'numeric').map(c => (
+                  <option key={c.name} value={c.name}>{c.name} ({c.n_unique} unique)</option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="flex-1">
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+                New Column Name
+              </label>
+              <input
+                type="text"
+                value={newCol}
+                onChange={e => setNewCol(e.target.value)}
+                placeholder="e.g. Genotype"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-primary"
+              />
+            </div>
+          </div>
+
+          {sourceCol && (
+            <div>
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+                Value Mapping
+              </label>
+              {loadingVals ? (
+                <div className="flex justify-center py-4"><Spinner /></div>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar pr-1">
+                  {sourceVals.map(({ value, count }) => (
+                    <div key={value} className="flex items-center gap-3 bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
+                      <div className="w-1/2 flex items-center justify-between px-2">
+                        <span className="text-sm font-mono text-white truncate" title={value}>{value}</span>
+                        <span className="text-[10px] text-slate-400">{count?.toLocaleString()} cells</span>
+                      </div>
+                      <div className="text-slate-400">→</div>
+                      <input
+                        type="text"
+                        value={mapping[value] ?? ''}
+                        onChange={e => setMapping({ ...mapping, [value]: e.target.value })}
+                        placeholder="Mapped value"
+                        className="flex-1 bg-slate-900 border border-slate-700 rounded-md px-2 py-1.5 text-sm text-white focus:outline-none focus:border-primary"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={doMap}
+            disabled={mappingSubmitting || !sourceCol || !newCol.trim()}
+            className="w-full btn btn-primary flex items-center justify-center gap-2"
+          >
+            {mappingSubmitting ? <Spinner /> : <Plus size={15} />}
+            Create Mapped Column
+          </button>
+        </div>
+      )}
 
       {result && (
         <div className="flex items-start gap-2 text-emerald-400 text-xs bg-emerald-900/20 border border-emerald-900/40 rounded-lg p-3">
@@ -269,7 +426,7 @@ function AddMetadataTab({ onMetaAdded }) {
           <div>
             <div className="font-bold">{result.message}</div>
             <div className="text-emerald-600 mt-0.5">
-              Added: {result.added_columns?.join(', ')}
+              {result.added_columns ? `Added: ${result.added_columns.join(', ')}` : `${result.mapped_cells?.toLocaleString()} cells mapped.`}
             </div>
           </div>
         </div>
@@ -278,7 +435,7 @@ function AddMetadataTab({ onMetaAdded }) {
   );
 }
 
-function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
+function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObjects, userEmail }) {
   const [column, setColumn] = useState('');
   const [valuesData, setValuesData] = useState([]);
   const [selected, setSelected] = useState([]);
@@ -292,8 +449,7 @@ function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
   useEffect(() => {
     if (!column) { setValuesData([]); setSelected([]); return; }
     setLoadingVals(true);
-    fetch(`${API}/meta-values?column=${encodeURIComponent(column)}`)
-      .then(r => r.json())
+    window.electronAPI.apiRequest(`/meta-values?column=${encodeURIComponent(column)}`)
       .then(data => {
         setValuesData(data.values || []);
         setSelected([]);
@@ -308,40 +464,40 @@ function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
 
   const doSubset = async () => {
     if (!column || selected.length === 0) return;
+    
+    const finalName = newName.trim();
+    if (!finalName) {
+      setError('Please provide a name for the new object.');
+      return;
+    }
+    
+    const existingNames = workspaceObjects.filter(o => o.projectId === obj.projectId).map(o => o.name);
+    if (existingNames.includes(finalName)) {
+      setError(`An object named "${finalName}" already exists in this project. Please choose a different name.`);
+      return;
+    }
+    
     setSubsetting(true);
     setError(null);
 
-    // ── Save parent before subsetting ─────────────────────────────
-    // The /subset endpoint replaces global_obj in R. We save the parent RDS
-    // first so the user can restore it by clicking the parent card later.
-    if (parentSessionPath) {
-      setSavingParent(true);
-      try {
-        const saveRes = await fetch(`${API}/save-session?path=${encodeURIComponent(parentSessionPath)}`);
-        const saveData = await saveRes.json();
-        if (saveData.error) {
-          console.warn('[Subset] Parent save failed (non-blocking):', saveData.error);
-        } else {
-          console.log('[Subset] Parent saved to', parentSessionPath);
-        }
-      } catch (e) {
-        console.warn('[Subset] Parent save request failed (non-blocking):', e);
-      } finally {
-        setSavingParent(false);
-      }
-    }
-    // ──────────────────────────────────────────────────────────────
+    // ── Non-destructive Subsetting ────────────────────────────────
+    // We pass the child's save path directly to R. R saves the subset
+    // to that path but LEAVES the parent in memory. This is fast and
+    // allows multiple subsets without repeated parent saves.
+    const newId = `obj-${Date.now()}`;
+    const sanitizedEmail = (userEmail || '').replace(/[^a-zA-Z0-9]/g, '_');
+    const childPath = `vault/${sanitizedEmail}/${newId}.rds`;
 
     try {
       const params = new URLSearchParams({
         column,
         values: selected.join(','),
         new_name: newName,
+        path: childPath
       });
-      const res = await fetch(`${API}/subset?${params}`);
-      const data = await res.json();
-      if (data.error) { setError(data.error); setSubsetting(false); return; }
-      onSubsetCreated?.(data, newName);
+      const data = await window.electronAPI.apiRequest(`/subset?${params}`);
+      if (data.error) throw new Error(data.error);
+      onSubsetCreated?.({ ...data, newId }, newName);
     } catch (e) {
       setError(e.message);
       setSubsetting(false);
@@ -366,7 +522,7 @@ function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
       </div>
 
       <div>
-        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
+        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
           Subset by Column
         </label>
         <select
@@ -382,7 +538,7 @@ function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
       {column && (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
               Select Values
             </label>
             {selected.length > 0 && (
@@ -410,7 +566,7 @@ function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
                   >
                     {checked
                       ? <CheckSquare size={14} className="text-primary flex-shrink-0" />
-                      : <Square size={14} className="text-slate-600 flex-shrink-0" />}
+                      : <Square size={14} className="text-slate-400 flex-shrink-0" />}
                     <span className="flex-1 text-sm font-mono text-white">{value}</span>
                     <div className="flex items-center gap-2 text-[10px]">
                       <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
@@ -419,7 +575,7 @@ function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
                           style={{ width: `${pct}%` }}
                         />
                       </div>
-                      <span className="text-slate-500 w-12 text-right">
+                      <span className="text-slate-400 w-12 text-right">
                         {count?.toLocaleString()}
                       </span>
                     </div>
@@ -432,7 +588,7 @@ function SubsetTab({ info, onSubsetCreated, parentSessionPath }) {
       )}
 
       <div>
-        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
+        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
           New Object Name
         </label>
         <input
@@ -477,7 +633,7 @@ const TABS = [
   { id: 'subset',    label: 'Subset',       icon: <Scissors size={13} /> },
 ];
 
-export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaAdded, parentSessionPath }) {
+export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, parentSessionPath, workspaceObjects = [], userEmail }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -486,8 +642,7 @@ export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaA
   const fetchInfo = () => {
     setLoading(true);
     setError(null);
-    fetch(`${API}/object-info`)
-      .then(r => r.json())
+    window.electronAPI.apiRequest('/object-info')
       .then(data => {
         if (data.error) setError(data.error);
         else setInfo(data);
@@ -496,23 +651,37 @@ export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaA
       .catch(e => { setError(e.message); setLoading(false); });
   };
 
-  useEffect(() => { fetchInfo(); }, []);
+  useEffect(() => {
+    if (globalTab === 'inspect') {
+      fetchInfo();
+    }
+  }, [obj?.id, globalTab]); // Re-fetch if object changes or tab is opened
+
+  if (!obj) {
+    return (
+      <div className="flex-1 w-full h-full flex flex-col items-center justify-center bg-background">
+        <Database size={40} className="text-slate-400 mb-4 opacity-50" />
+        <h4 className="text-text font-bold mb-2">No Active Object</h4>
+        <p className="text-sm text-textMuted text-center max-w-sm">
+          Select an object in the Workspace to inspect its contents.
+        </p>
+      </div>
+    );
+  }
 
   return (
-    <>
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
-        onClick={onClose}
-      />
-
-      {/* Panel */}
-      <div className="fixed right-0 top-0 h-full w-[480px] bg-slate-900 border-l border-slate-700/80 z-50 flex flex-col shadow-2xl animate-in slide-in-from-right duration-300">
+    <div className="flex-1 w-full h-full flex flex-col bg-background overflow-hidden relative">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-slate-800">
+        <div className="flex items-center justify-between px-8 pt-8 pb-4 border-b border-slate-800 bg-slate-800/10">
           <div>
-            <h3 className="text-base font-bold text-white">{obj?.name || 'Object Inspector'}</h3>
-            <p className="text-[11px] text-slate-500 mt-0.5">
+            <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-[.25em] mb-2">
+              <Search size={12} className="text-primary" />
+              Object Inspector
+            </div>
+            <h2 className="text-2xl font-black text-white tracking-tighter flex items-center gap-3">
+              {obj.name}
+            </h2>
+            <p className="text-[12px] font-bold text-slate-400 mt-1 uppercase tracking-widest">
               {info && !loading
                 ? `${info.n_cells?.toLocaleString()} cells · ${info.n_features?.toLocaleString()} features · ${info.meta_cols?.length} metadata columns`
                 : 'Loading…'}
@@ -521,30 +690,25 @@ export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaA
           <div className="flex items-center gap-2">
             <button
               onClick={fetchInfo}
-              className="p-2 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-white transition"
+              className="btn btn-ghost border border-slate-700 flex items-center gap-2 text-sm text-slate-400 hover:text-white"
               title="Refresh"
             >
               <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-            </button>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-white transition"
-            >
-              <X size={16} />
+              Refresh
             </button>
           </div>
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-slate-800 px-2">
+        <div className="flex border-b border-slate-800 px-6">
           {TABS.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-1.5 px-4 py-3 text-[11px] font-bold uppercase tracking-wide border-b-2 transition-all ${
+              className={`flex items-center gap-2 px-6 py-4 text-xs font-bold uppercase tracking-widest border-b-2 transition-all ${
                 activeTab === tab.id
-                  ? 'border-primary text-primary'
-                  : 'border-transparent text-slate-500 hover:text-slate-300'
+                  ? 'border-blue-400 text-blue-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
               }`}
             >
               {tab.icon} {tab.label}
@@ -553,35 +717,36 @@ export default function ObjectInspector({ obj, onClose, onSubsetCreated, onMetaA
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
-          {loading && (
-            <div className="flex flex-col items-center justify-center h-40 gap-3">
-              <Spinner />
-              <p className="text-xs text-slate-500">Fetching object info…</p>
-            </div>
-          )}
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
+          <div className="max-w-4xl mx-auto">
+            {loading && (
+              <div className="flex flex-col items-center justify-center h-40 gap-3">
+                <Spinner />
+                <p className="text-xs text-slate-400">Fetching object info…</p>
+              </div>
+            )}
 
-          {!loading && error && (
-            <div className="flex items-start gap-2 text-red-400 text-sm bg-red-900/20 border border-red-900/40 rounded-xl p-4">
-              <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
-              {error}
-            </div>
-          )}
+            {!loading && error && (
+              <div className="flex items-start gap-2 text-red-400 text-sm bg-red-900/20 border border-red-900/40 rounded-xl p-4">
+                <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+                {error}
+              </div>
+            )}
 
-          {!loading && !error && info && (
-            <>
-              {activeTab === 'overview'  && <OverviewTab info={info} />}
-              {activeTab === 'metadata'  && <MetadataTab info={info} />}
-              {activeTab === 'add-meta'  && (
-                <AddMetadataTab onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} />
-              )}
-              {activeTab === 'subset' && (
-                <SubsetTab info={info} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} />
-              )}
-            </>
-          )}
+            {!loading && !error && info && (
+              <>
+                {activeTab === 'overview'  && <OverviewTab info={info} />}
+                {activeTab === 'metadata'  && <MetadataTab info={info} />}
+                {activeTab === 'add-meta'  && (
+                  <AddMetadataTab info={info} onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} />
+                )}
+                {activeTab === 'subset' && (
+                  <SubsetTab info={info} obj={obj} workspaceObjects={workspaceObjects} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} userEmail={userEmail} />
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
-    </>
   );
 }

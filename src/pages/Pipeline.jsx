@@ -15,7 +15,7 @@ export default function Pipeline({ datasetInfo }) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <Settings size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <Settings size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
         </div>
       </div>
@@ -99,7 +99,7 @@ export default function Pipeline({ datasetInfo }) {
                  <label className="block text-xs text-textMuted mb-1 uppercase tracking-wide">Scale Factor</label>
                  <input type="number" 
                    value={10000} 
-                   className="w-full bg-surface border border-border rounded p-2 text-sm text-slate-500 focus:outline-none" 
+                   className="w-full bg-surface border border-border rounded p-2 text-sm text-slate-400 focus:outline-none" 
                    readOnly 
                  />
                </div>

@@ -10,7 +10,7 @@ const DB_OPTIONS = [
   { value: 'Reactome', label: 'Reactome',            desc: 'Reactome pathway database (requires ReactomePA)' },
 ];
 
-export default function Enrichment({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
+export default function Enrichment({ callApi, datasetInfo, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   const [computing, setComputing] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -38,7 +38,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
       {
         operation: 'enrichment',
         step: 'enrichment',
-        parentIds: currentProvId ? [currentProvId] : [],
+        parentIds: clusterProvId ? [clusterProvId] : [],
         useCache: true,
         cacheParams: { type: 'enrichment', database, pval_cutoff: pvalCutoff, logfc_threshold: logfcThreshold, top_n: topN, target_cluster: targetCluster, exclude_artifacts: excludeArtifacts },
         onlyIfCached: isInitial,
@@ -52,8 +52,9 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
     } else if (!data && !isInitial) {
       setError('R backend error. Check the R console for details.');
     }
+
     setComputing(false);
-  }, [callApi, currentProvId, database, pvalCutoff, logfcThreshold, topN, targetCluster, excludeArtifacts]);
+  }, [callApi, clusterProvId, database, pvalCutoff, logfcThreshold, topN, targetCluster, excludeArtifacts]);
 
   // Hydration from cache — gated by sessionReady
   useEffect(() => {
@@ -72,7 +73,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
-          <Microscope size={48} className="mx-auto text-slate-600 mb-4 opacity-50" />
+          <Microscope size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
           <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
           <p className="text-textMuted">Load a dataset in the Workspace first.</p>
         </div>
@@ -133,7 +134,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
 
   // ── Bubble chart ───────────────────────────────────────────────
   const bubbleData = pathways.length ? [{
-    type: 'scatter',
+    type: 'scattergl',
     mode: 'markers',
     x: pathways.map(p => {
       const r_num = p.gene_ratio_num;
@@ -221,7 +222,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                   <option key={i} value={i.toString()}>Cluster {i}</option>
                 ))}
               </select>
-              <p className="text-[10px] text-slate-500 mt-1">Cluster to analyze</p>
+              <p className="text-[10px] text-slate-400 mt-1">Cluster to analyze</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Database</label>
@@ -232,7 +233,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
               >
                 {DB_OPTIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
               </select>
-              <p className="text-[10px] text-slate-500 mt-1">Reference pathway database</p>
+              <p className="text-[10px] text-slate-400 mt-1">Reference pathway database</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">p-value cutoff</label>
@@ -241,7 +242,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                 onChange={e => setParam('pvalCutoff', parseFloat(e.target.value))}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-500 mt-1">Adjusted p-value threshold (BH)</p>
+              <p className="text-[10px] text-slate-400 mt-1">Adjusted p-value threshold (BH)</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">logFC threshold</label>
@@ -250,7 +251,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                 onChange={e => setParam('logfcThreshold', parseFloat(e.target.value))}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-500 mt-1">Min log2FC for DEGs</p>
+              <p className="text-[10px] text-slate-400 mt-1">Min log2FC for DEGs</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Top N pathways</label>
@@ -259,7 +260,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                 onChange={e => setParam('topN', parseInt(e.target.value))}
                 className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
               />
-              <p className="text-[10px] text-slate-500 mt-1">Maximum pathways shown</p>
+              <p className="text-[10px] text-slate-400 mt-1">Maximum pathways shown</p>
             </div>
             <div>
               <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Clean Artifacts</label>
@@ -278,7 +279,7 @@ export default function Enrichment({ callApi, datasetInfo, currentProvId, openPr
                   <span className="ml-3 text-sm text-white font-medium">Exclude MT/Ribo</span>
                 </label>
               </div>
-              <p className="text-[10px] text-slate-500 mt-1">Drop MT-, RPL, RPS genes</p>
+              <p className="text-[10px] text-slate-400 mt-1">Drop MT-, RPL, RPS genes</p>
             </div>
           </div>
         </div>
