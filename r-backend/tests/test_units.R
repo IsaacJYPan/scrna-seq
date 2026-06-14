@@ -11,6 +11,7 @@
 library(Seurat)
 library(dplyr)
 library(Matrix)
+library(ggplot2)
 
 # Fix for headless Linux environments (GitHub Actions) where X11 is not available
 options(bitmapType = "cairo")
