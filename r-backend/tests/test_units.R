@@ -82,7 +82,7 @@ colnames(raw_counts) <- paste0("Cell", seq_len(N_CELLS))
 # Add a handful of fake mitochondrial genes
 rownames(raw_counts)[1:5] <- paste0("MT-Gene", 1:5)
 
-MOCK_OBJ <- CreateSeuratObject(counts = raw_counts, project = "UnitTest",
+MOCK_OBJ <- CreateSeuratObject(counts = as(raw_counts, "dgCMatrix"), project = "UnitTest",
                                 min.cells = 1, min.features = 10)
 MOCK_OBJ[["percent.mt"]] <- PercentageFeatureSet(MOCK_OBJ, pattern = "^MT-")
 MOCK_OBJ$batch <- c(rep("batch1", N_BATCH1), rep("batch2", N_BATCH2))
@@ -228,8 +228,8 @@ run_test("Full single-sample pipeline on synthetic data", function() {
 
   # ── UMAP 2D
   set.seed(42)
-  obj <- RunUMAP(obj, reduction = "pca", dims = 1:dims_use,
-                 n.components = 2L, verbose = FALSE)
+  obj <- suppressWarnings(RunUMAP(obj, reduction = "pca", dims = 1:dims_use,
+                 n.components = 2L, verbose = FALSE))
   assert("UMAP 2D reduction exists", "umap" %in% names(obj@reductions))
   emb <- Embeddings(obj, "umap")
   assert("UMAP has 2 columns", ncol(emb) == 2)
@@ -238,8 +238,8 @@ run_test("Full single-sample pipeline on synthetic data", function() {
 
   # ── UMAP 3D
   set.seed(42)
-  obj3d <- RunUMAP(obj, reduction = "pca", dims = 1:dims_use,
-                   n.components = 3L, verbose = FALSE)
+  obj3d <- suppressWarnings(RunUMAP(obj, reduction = "pca", dims = 1:dims_use,
+                   n.components = 3L, verbose = FALSE))
   emb3d <- Embeddings(obj3d, "umap")
   assert("UMAP 3D has 3 columns", ncol(emb3d) == 3)
 
@@ -316,7 +316,7 @@ run_test("Figure export (PDF, SVG, PNG) for all 4 plot types", function() {
   # DotPlot
   for (fmt in c("pdf", "svg", "png")) {
     test_render("DotPlot", fmt, function()
-      print(DotPlot(obj, features = top_genes) + RotatedAxis()))
+      suppressWarnings(print(DotPlot(obj, features = top_genes) + RotatedAxis())))
   }
 
   # Heatmap
