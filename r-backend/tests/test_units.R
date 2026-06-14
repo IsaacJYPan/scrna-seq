@@ -12,6 +12,9 @@ library(Seurat)
 library(dplyr)
 library(Matrix)
 
+# Fix for headless Linux environments (GitHub Actions) where X11 is not available
+options(bitmapType = "cairo")
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 PASS <- 0L
