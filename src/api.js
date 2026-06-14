@@ -72,7 +72,7 @@ export const electronAPI = {
   // Diagnostics (Dummy for web)
   getRScriptPath: async () => '/usr/bin/Rscript',
   setRScriptPath: async () => true,
-  checkREnv: async () => ({ version: 'R 4.5.1', packages: { Seurat: TRUE } }),
+  checkREnv: async () => ({ version: 'R 4.5.1', packages: { Seurat: true } }),
   restartPlumber: () => {},
   runRInstaller: () => {},
   onRInstallerOutput: () => () => {},
