@@ -142,7 +142,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId, pcaPro
                 onChange={e => setParam('resolution', parseFloat(e.target.value))}
                 className="flex-1 accent-primary"
               />
-              <span className="text-sm font-mono text-primary font-bold w-10 text-right">{resolution}</span>
+              <span className="text-sm font-mono text-white font-bold w-10 text-right">{resolution}</span>
             </div>
             <p className="text-[10px] text-slate-400 mt-1">Higher = more clusters. 0.4–1.2 typical range.</p>
           </div>
