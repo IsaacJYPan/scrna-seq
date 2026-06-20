@@ -4,7 +4,7 @@ import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 
 // Removed API constant
-export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId }) {
+export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [dotData, setDotData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -18,7 +18,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
 
   useEffect(() => {
     if (!sessionReady || !datasetInfo) return;
-    window.electronAPI.apiRequest('/genes')
+    callApi('/genes', {}, { useCache: false })
       .then(d => { if (d.genes) setGeneList(d.genes); })
       .catch(() => {});
   }, [sessionReady, datasetInfo]);
@@ -46,7 +46,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     setLoading(true);
     setError(null);
     try {
-      const data = await window.electronAPI.apiRequest(`/dot-plot?genes=${encodeURIComponent(genes.join(','))}`);
+      const data = await callApi(`/dot-plot?genes=${encodeURIComponent(genes.join(','))}`, {}, { useCache: false });
       if (data.error) throw new Error(data.error);
       setDotData(data);
     } catch (e) {

@@ -19,7 +19,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
   const fetchClusters = useCallback(async () => {
     setLoadingClusters(true);
     try {
-      const data = await window.electronAPI.apiRequest('/meta-values?column=seurat_clusters');
+      const data = await callApi('/meta-values?column=seurat_clusters');
       if (data.error) {
         // usually means missing or not clustered
         setClusters([]);

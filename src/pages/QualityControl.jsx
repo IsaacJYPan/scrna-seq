@@ -51,7 +51,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       // so a failed early fetch (before session restore) doesn't persist.
       setLoadingDist(true);
       setDistributions(null);
-      window.electronAPI.apiRequest('/qc-distributions')
+      callApi('/qc-distributions', {}, { useCache: false })
         .then(data => {
           if (data.error) {
             setError(data.error);

@@ -34,6 +34,9 @@ RUN Rscript -e "remotes::install_github('mojaveazure/seurat-disk')"
 WORKDIR /app
 COPY . /app/
 
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
+
 # Expose the Plumber port
 EXPOSE 8000
 

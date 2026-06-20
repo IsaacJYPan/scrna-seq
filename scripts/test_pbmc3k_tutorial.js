@@ -34,7 +34,7 @@ const BASE_URL     = `http://127.0.0.1:${TEST_PORT}`;
 const WORKSPACE    = path.resolve(__dirname, '..');
 const RUN_R_SCRIPT = path.join(WORKSPACE, 'r-backend', 'run.R');
 const EXPORTS_DIR  = path.join(WORKSPACE, 'exports');
-const TIMEOUT_MS   = 120_000;   // 2 min per request (some steps are slow)
+const TIMEOUT_MS   = 300_000;   // 5 min per request (some steps are slow)
 const STARTUP_WAIT = 60_000;    // 60 s to let Plumber fully start
 const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
 

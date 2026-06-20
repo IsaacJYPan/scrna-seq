@@ -27,10 +27,19 @@ export const electronAPI = {
       
       const res = await fetch(`${BASE_URL}/api/r${endpoint}`, options);
       const contentType = res.headers.get('content-type');
+      let data;
       if (contentType && contentType.includes('application/json')) {
-        return await res.json();
+        data = await res.json();
+      } else {
+        data = await res.text();
       }
-      return await res.text();
+      
+      if (!res.ok) {
+        if (typeof data === 'object' && data.error) return data;
+        return { error: typeof data === 'string' ? data : res.statusText };
+      }
+      
+      return data;
     } catch (e) {
       return { error: e.message };
     }

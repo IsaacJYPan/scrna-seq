@@ -16,31 +16,6 @@ class GlobalErrorBoundary extends React.Component {
   }
 }
 
-// Globally intercept fetch to use IPC for Plumber backend
-const originalFetch = window.fetch;
-window.fetch = async (resource, config = {}) => {
-  if (typeof resource === 'string' && (resource.startsWith('http://localhost:8000') || resource.startsWith('/'))) {
-    if (window.electronAPI?.apiRequest) {
-      const endpoint = resource.replace('http://localhost:8000', '');
-      const responseData = await window.electronAPI.apiRequest(endpoint, config);
-      if (responseData && responseData.error) {
-        return {
-          ok: false,
-          json: async () => responseData,
-          text: async () => JSON.stringify(responseData),
-          headers: new Headers({ 'content-type': 'application/json' })
-        };
-      }
-      return {
-        ok: true,
-        json: async () => responseData,
-        text: async () => typeof responseData === 'string' ? responseData : JSON.stringify(responseData),
-        headers: new Headers({ 'content-type': 'application/json' })
-      };
-    }
-  }
-  return originalFetch(resource, config);
-};
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

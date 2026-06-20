@@ -68,7 +68,7 @@ export default function BatchIntegration({
     setColsLoading(true);
     setColsError(null);
     try {
-      const data = await window.electronAPI.apiRequest('/object-info');
+      const data = await callApi('/object-info');
       if (data.error) throw new Error(data.error);
 
       // Filter to categorical/factor columns with ≥2 unique values
@@ -100,7 +100,7 @@ export default function BatchIntegration({
   const fetchBatchPreview = useCallback(async (col) => {
     if (!col || !sessionReady) return;
     try {
-      const data = await window.electronAPI.apiRequest(`/meta-values?column=${encodeURIComponent(col)}`);
+      const data = await callApi(`/meta-values?column=${encodeURIComponent(col)}`);
       if (data.error) throw new Error(data.error);
       setBatchPreview(data);
     } catch (_) {}

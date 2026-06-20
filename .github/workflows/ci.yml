@@ -49,5 +49,14 @@ jobs:
       - name: Run Unit Tests
         run: npm run test:unit
 
+      - name: Run Frontend Tests
+        run: npm run test:frontend
+
+      - name: Run Backend Tests
+        run: npm run test:backend
+
       - name: Run Visual/UX Tests
         run: npm run test:visual
+
+      - name: Build Application
+        run: npm run build
