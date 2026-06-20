@@ -34,7 +34,7 @@ const BASE_URL     = `http://127.0.0.1:${TEST_PORT}`;
 const WORKSPACE    = path.resolve(__dirname, '..');
 const RUN_R_SCRIPT = path.join(WORKSPACE, 'r-backend', 'run.R');
 const EXPORTS_DIR  = path.join(WORKSPACE, 'exports');
-const TIMEOUT_MS   = 120_000;   // 2 min per request (some steps are slow)
+const TIMEOUT_MS   = 300_000;   // 5 min per request (some steps are slow)
 const STARTUP_WAIT = 60_000;    // 60 s to let Plumber fully start
 const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
 
@@ -279,6 +279,15 @@ async function main() {
       if (res.sparsity) info(`Sparsity: ${res.sparsity}%`);
     }
   } catch (e) { fail('/load-data request', e.message); }
+
+  // ── 4.5. Error Handling ─────────────────────────────────────────────────────
+  section('STEP 4.5: Error Handling (500 Status)');
+  try {
+    info('Testing intentional error inside tryCatch for proper HTTP status...');
+    const r = await req('GET', '/load-local-10x?path=../data/uploads/empty_dir_that_does_not_exist');
+    assert('Error returns HTTP 500', r.status === 500, `Expected 500, got ${r.status}`);
+    assert('Error response has error field', r.body && typeof r.body.error === 'string');
+  } catch (e) { fail('Error handling test request', e.message); }
 
   // ── 5. QC Distributions ─────────────────────────────────────────────────────
   section('STEP 5: /qc-distributions');

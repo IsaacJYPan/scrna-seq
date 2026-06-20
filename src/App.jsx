@@ -102,7 +102,7 @@ export default function App() {
   }, [theme]);
 
   // Pipeline state tracking
-  const [pipelineStateId, setPipelineStateId] = useState(null);
+
   const [pipelineState, setPipelineState] = useState({
     qc: false,
     normalize: false,
@@ -230,13 +230,13 @@ export default function App() {
       .catch(() => setApiStatus('Disconnected'));
   }, []);
 
-  const updateActiveWorkspace = (updates) => {
+  const updateActiveWorkspace = useCallback((updates) => {
     setWorkspaces(prev => {
       const copy = [...prev];
       copy[activeWsIndex] = { ...copy[activeWsIndex], ...updates };
       return copy;
     });
-  };
+  }, [activeWsIndex]);
 
   /**
    * Mark a pipeline step as complete and invalidate downstream steps if re-running.
@@ -341,7 +341,6 @@ export default function App() {
     }
 
     // 2. Persist the "subset-ready" pipeline state immediately.
-    const psKey = `benchone_ps_${user.email}_${newObj.id}`;
     const initialSubsetPS = {
       qc: true,
       isSubset: true,
@@ -355,9 +354,7 @@ export default function App() {
       clusterCount: 0,
       clusterDims: 15,
     };
-    localStorage.setItem(psKey, JSON.stringify(initialSubsetPS));
     setPipelineState(initialSubsetPS);
-    setPipelineStateId(newObj.id);
 
     // 3. No need to call /save-session here anymore because the /subset call 
     // already persisted the child to disk non-destructively.
@@ -502,40 +499,7 @@ export default function App() {
   // re-run the pipeline, but the workspace card (name, cells, features) persists.
   const wsStorageKey = user?.email ? `benchone_ws_${user.email}` : null;
 
-  // Restore on login
-  useEffect(() => {
-    if (!wsStorageKey) return;
-    try {
-      const saved = localStorage.getItem(wsStorageKey);
-      if (saved) {
-        const parsed = JSON.parse(saved); // array of {projects, objects, selectedObjectIds, branches, dataVersion}
-        if (!Array.isArray(parsed)) throw new Error('Invalid workspace data format');
-        setWorkspaces(prev =>
-          prev.map((ws, i) => {
-            // Backward compatibility for old workspaces:
-            const loadedProjects = parsed[i]?.projects ?? [{ id: 'proj-default', name: 'Default Project' }];
-            const loadedObjects = (parsed[i]?.objects ?? ws.objects).map(obj => ({
-              ...obj,
-              projectId: obj.projectId || loadedProjects[0]?.id || 'proj-default'
-            }));
 
-            return {
-              ...ws,
-              projects:          loadedProjects,
-              objects:           loadedObjects,
-              selectedObjectIds: parsed[i]?.selectedObjectIds ?? ws.selectedObjectIds,
-              branches:          parsed[i]?.branches          ?? ws.branches,
-              dataVersion:       parsed[i]?.dataVersion       ?? ws.dataVersion,
-              lastSelectedByProject: parsed[i]?.lastSelectedByProject ?? ws.lastSelectedByProject,
-            };
-          })
-        );
-      }
-    } catch (e) {
-      console.warn('[App] Failed to restore workspaces:', e);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsStorageKey]);
 
   // Save on any workspace change
   useEffect(() => {
@@ -576,28 +540,7 @@ export default function App() {
       : null;
   }); // runs every render — cheap, keeps ref always fresh
 
-  // 0.5 Hydrate pipeline state from localStorage ONCE per object, synchronously, 
-  // before the async R-session restore finishes, to prevent overwriting.
-  useEffect(() => {
-    if (!user?.email || !datasetInfo?.id) return;
-    if (pipelineStateId !== datasetInfo.id) {
-      const psKey = `benchone_ps_${user.email}_${datasetInfo.id}`;
-      const savedPS = localStorage.getItem(psKey);
-      if (savedPS) {
-        try {
-          const ps = JSON.parse(savedPS);
-          console.log('[Session] Loaded pipeline state:', ps);
-          setPipelineState(ps);
-        } catch (e) {
-          console.warn('[Session] Failed to parse pipeline state:', e);
-        }
-      } else {
-        console.log('[Session] No local pipeline state found, initializing defaults.');
-        setPipelineState({ qc: false, normalize: false, integrate: false, pca: false, cluster: false, annotate: false, umap: false, clusterCount: 0, clusterDims: 15 });
-      }
-      setPipelineStateId(datasetInfo.id);
-    }
-  }, [user?.email, datasetInfo?.id, pipelineStateId]);
+
 
   // 1. Auto-restore on login + active object available
   useEffect(() => {
@@ -670,13 +613,7 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.email, datasetInfo?.id]);
 
-  // 2. Persist pipeline state per user + object (so restore can reapply it)
-  useEffect(() => {
-    if (!user?.email || !datasetInfo?.id) return;
-    if (pipelineStateId !== datasetInfo.id) return; // Prevent overwriting with mismatched state!
-    const psKey = `benchone_ps_${user.email}_${datasetInfo.id}`;
-    try { localStorage.setItem(psKey, JSON.stringify(pipelineState)); } catch (e) {}
-  }, [pipelineState, user?.email, datasetInfo?.id, pipelineStateId]);
+
 
   // 3. Recalculate pipeline state when active node (currentProvId) changes
   useEffect(() => {
@@ -791,17 +728,17 @@ export default function App() {
             setActiveTab={setActiveTab}
           />
         </TabContent></ErrorBoundary>
-        <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={user?.email && datasetInfo?.id ? `vault/${user.email.replace(/[^a-zA-Z0-9]/g, '_')}/${datasetInfo.id}.rds` : null} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={user?.email && datasetInfo?.id ? `vault/${user.email.replace(/[^a-zA-Z0-9]/g, '_')}/${datasetInfo.id}.rds` : null} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="normalize"><TabContent id="normalize" activeTab={activeTab}><Normalization key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="pca"><TabContent id="pca" activeTab={activeTab}><PCA key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cluster"><TabContent id="cluster" activeTab={activeTab}><Clustering key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="umap"><TabContent id="umap" activeTab={activeTab}><UMAPView key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="featureplot"><TabContent id="featureplot" activeTab={activeTab}><FeaturePlot key={objKey} datasetInfo={datasetInfo} pipelineState={pipelineState} sessionReady={sessionReady} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="heatmap"><TabContent id="heatmap" activeTab={activeTab}><HeatmapPlot key={objKey} datasetInfo={datasetInfo} pipelineState={pipelineState} sessionReady={sessionReady} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} datasetInfo={datasetInfo} pipelineState={pipelineState} sessionReady={sessionReady} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} datasetInfo={datasetInfo} userEmail={user?.email} objectId={datasetInfo?.id} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="featureplot"><TabContent id="featureplot" activeTab={activeTab}><FeaturePlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="heatmap"><TabContent id="heatmap" activeTab={activeTab}><HeatmapPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><Annotation key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><Enrichment key={objKey} {...props} /></TabContent></ErrorBoundary>

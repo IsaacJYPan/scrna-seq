@@ -144,7 +144,7 @@ function MetadataTab({ info }) {
   );
 }
 
-function AddMetadataTab({ onMetaAdded, info }) {
+function AddMetadataTab({ onMetaAdded, info, callApi }) {
   const [mode, setMode] = useState('csv'); // 'csv' or 'map'
   
   // ── CSV Mode State ──
@@ -168,7 +168,7 @@ function AddMetadataTab({ onMetaAdded, info }) {
   useEffect(() => {
     if (!sourceCol) { setSourceVals([]); setMapping({}); return; }
     setLoadingVals(true);
-    window.electronAPI.apiRequest(`/meta-values?column=${encodeURIComponent(sourceCol)}`)
+    callApi(`/meta-values?column=${encodeURIComponent(sourceCol)}`)
       .then(data => {
         setSourceVals(data.values || []);
         const initialMap = {};
@@ -185,7 +185,7 @@ function AddMetadataTab({ onMetaAdded, info }) {
     setCsvPath(path);
     setResult(null);
     setError(null);
-    const data = await window.electronAPI.apiRequest(`/csv-columns?path=${encodeURIComponent(path)}`);
+    const data = await callApi(`/csv-columns?path=${encodeURIComponent(path)}`);
     if (data.error) { setError(data.error); return; }
     setColumns(data.columns || []);
     setKeyColumn(data.columns?.[0] || '');
@@ -208,7 +208,8 @@ function AddMetadataTab({ onMetaAdded, info }) {
         key_column: keyColumn,
         value_columns: selectedCols.join(','),
       });
-      const data = await window.electronAPI.apiRequest(`/add-metadata?${params}`);
+      const checkData = await callApi(`/check-session`);
+      const data = await callApi(`/add-metadata?${params}`);
       if (data.error) throw new Error(data.error);
       else { setResult(data); onMetaAdded?.(); }
     } catch (e) {
@@ -222,7 +223,7 @@ function AddMetadataTab({ onMetaAdded, info }) {
     setMappingSubmitting(true);
     setError(null);
     try {
-      const data = await window.electronAPI.apiRequest('/add-meta-mapping', {
+      const data = await callApi('/add-meta-mapping', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -435,7 +436,7 @@ function AddMetadataTab({ onMetaAdded, info }) {
   );
 }
 
-function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObjects, userEmail }) {
+function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObjects, userEmail, callApi }) {
   const [column, setColumn] = useState('');
   const [valuesData, setValuesData] = useState([]);
   const [selected, setSelected] = useState([]);
@@ -449,7 +450,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
   useEffect(() => {
     if (!column) { setValuesData([]); setSelected([]); return; }
     setLoadingVals(true);
-    window.electronAPI.apiRequest(`/meta-values?column=${encodeURIComponent(column)}`)
+    callApi(`/meta-values?column=${encodeURIComponent(column)}`)
       .then(data => {
         setValuesData(data.values || []);
         setSelected([]);
@@ -495,7 +496,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
         new_name: newName,
         path: childPath
       });
-      const data = await window.electronAPI.apiRequest(`/subset?${params}`);
+      const data = await callApi(`/subset?${params}`, {}, { useCache: false });
       if (data.error) throw new Error(data.error);
       onSubsetCreated?.({ ...data, newId }, newName);
     } catch (e) {
@@ -633,7 +634,7 @@ const TABS = [
   { id: 'subset',    label: 'Subset',       icon: <Scissors size={13} /> },
 ];
 
-export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, parentSessionPath, workspaceObjects = [], userEmail }) {
+export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, parentSessionPath, workspaceObjects = [], userEmail, callApi }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -642,7 +643,7 @@ export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, 
   const fetchInfo = () => {
     setLoading(true);
     setError(null);
-    window.electronAPI.apiRequest('/object-info')
+    callApi('/object-info', {}, { useCache: false })
       .then(data => {
         if (data.error) setError(data.error);
         else setInfo(data);
@@ -737,12 +738,8 @@ export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, 
               <>
                 {activeTab === 'overview'  && <OverviewTab info={info} />}
                 {activeTab === 'metadata'  && <MetadataTab info={info} />}
-                {activeTab === 'add-meta'  && (
-                  <AddMetadataTab info={info} onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} />
-                )}
-                {activeTab === 'subset' && (
-                  <SubsetTab info={info} obj={obj} workspaceObjects={workspaceObjects} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} userEmail={userEmail} />
-                )}
+                {activeTab === 'add-meta' && <AddMetadataTab info={info} onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} callApi={callApi} />}
+                {activeTab === 'subset' && <SubsetTab info={info} obj={obj} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} workspaceObjects={workspaceObjects} userEmail={userEmail} callApi={callApi} />}
               </>
             )}
           </div>

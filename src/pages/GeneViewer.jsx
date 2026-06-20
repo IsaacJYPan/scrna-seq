@@ -64,7 +64,7 @@ function formatFeaturePlot(data) {
   }];
 }
 
-export default function GeneViewer({ datasetInfo, userEmail, objectId }) {
+export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeGene, setActiveGene] = useState(null);
@@ -93,7 +93,7 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId }) {
     setLoading(true);
     setError(null);
     try {
-      const data = await window.electronAPI.apiRequest(`/gene-expression?gene=${encodeURIComponent(gene)}`);
+      const data = await callApi(`/gene-expression?gene=${encodeURIComponent(gene)}`, {}, { useCache: false });
       if (data.error) {
         setError(data.error);
       } else {

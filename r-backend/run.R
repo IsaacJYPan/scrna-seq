@@ -28,7 +28,7 @@ cat("Sample CSV:", csv_path, "\n")
 
 # Plumb the API file and start
 api_file <- file.path(script_dir, "plumber.R")
-options(plumber.autoreload = TRUE)
+options(plumber.autoreload = FALSE)
 pr <- plumber::plumb(api_file)
 
 # Allow port override via env var (used by integration tests to avoid conflicts)
@@ -44,8 +44,8 @@ pr$setErrorHandler(function(req, res, err) {
   # Ensure any graphics devices opened by failed plots are closed
   if (dev.cur() > 1) dev.off()
   
-  # The frontend expects 200 OK with an { error: "..." } JSON payload
-  res$status <- 200
+  # The frontend expects JSON payload, but with a correct HTTP error code
+  res$status <- 500
   return(list(error = paste("Backend Exception:", err$message)))
 })
 pr$run(host = "127.0.0.1", port = plumber_port)

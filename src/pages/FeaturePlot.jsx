@@ -16,7 +16,7 @@ const DARK_COLORSCALE = [
 // Light mode: standard Blues scale (white → dark blue) — common in scRNA-seq publications
 const LIGHT_COLORSCALE = 'Blues';
 
-export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId }) {
+export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [gene, setGene] = useState('');
   const [geneInput, setGeneInput] = useState('');
@@ -29,7 +29,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
 
   useEffect(() => {
     if (!sessionReady || !datasetInfo) return;
-    window.electronAPI.apiRequest('/genes')
+    callApi('/genes', {}, { useCache: false })
       .then(d => { if (d.genes) setGeneList(d.genes); })
       .catch(() => {});
   }, [sessionReady, datasetInfo]);
@@ -51,7 +51,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
     setPlotData(null);
     setSuggestions([]);
     try {
-      const data = await window.electronAPI.apiRequest(`/feature-values?gene=${encodeURIComponent(target)}`);
+      const data = await callApi(`/feature-values?gene=${encodeURIComponent(target)}`, {}, { useCache: false });
       if (data.error) throw new Error(data.error);
       setPlotData(data);
       setGene(target);

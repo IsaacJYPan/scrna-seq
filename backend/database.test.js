@@ -1,19 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-
-vi.mock('better-sqlite3', () => {
-  return {
-    default: vi.fn().mockImplementation(() => ({
-      pragma: vi.fn(),
-      exec: vi.fn(),
-      prepare: vi.fn().mockReturnValue({
-        run: vi.fn(),
-        get: vi.fn().mockReturnValue(null),
-        all: vi.fn().mockReturnValue([])
-      }),
-      close: vi.fn()
-    }))
-  };
-});
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 const { 
   initDatabase, closeDatabase, saveProvenance, getProvenance, 
@@ -31,21 +16,23 @@ describe('database.js tests', () => {
   });
 
   it('should initialize the database and create tables', () => {
-    // If initDatabase didn't throw, we assume tables are created successfully.
-    // We can verify by inserting a dummy figure record.
     expect(() => {
       saveFigure({
         id: 'test-init-id',
-        user_email: 'test@example.com',
-        object_id: 'obj-1',
-        plot_type: 'UMAP',
+        userEmail: 'test@example.com',
+        objectId: 'obj-1',
+        plotType: 'UMAP',
         title: 'Test UMAP',
-        params_json: '{}',
-        file_path: '/tmp/test.png',
-        file_format: 'png',
-        thumbnail_b64: 'base64str'
+        params: {},
+        filePath: '/tmp/test.png',
+        fileFormat: 'png',
+        thumbnailB64: 'base64str'
       });
     }).not.toThrow();
+
+    const figures = getFiguresByUser('test@example.com');
+    expect(figures.length).toBe(1);
+    expect(figures[0].id).toBe('test-init-id');
   });
 
   it('should save and retrieve a provenance record', () => {
@@ -53,41 +40,54 @@ describe('database.js tests', () => {
       id: 'prov-1',
       timestamp: new Date().toISOString(),
       language: 'R',
-      language_version: '4.3.0',
+      languageVersion: '4.3.0',
       packages: ['Seurat', 'dplyr'],
       operation: 'RunUMAP',
       parameters: { dims: [1, 10] },
       script: 'obj <- RunUMAP(obj, dims = 1:10)',
       results: ['umap_coords.csv'],
       environment: { os: 'Windows' },
-      previous_id: 'prov-0',
+      parentIds: ['prov-0'],
       user_id: 'user-1'
     };
 
-    // We mock getProvenance
-    // But since the DB is mocked, we need to bypass or just assert that it ran without throwing.
-    saveProvenance({ provenance: record });
-    expect(true).toBe(true);
+    const insertedId = saveProvenance({ provenance: record, result: { message: "success" } });
+    expect(insertedId).toBe('prov-1');
+
+    const retrieved = getProvenance('prov-1');
+    expect(retrieved).not.toBeNull();
+    expect(retrieved.id).toBe('prov-1');
+    expect(retrieved.operation).toEqual('RunUMAP');
+    expect(retrieved.parameters).toEqual({ dims: [1, 10] });
+    // Note: getProvenance does not return the result (that goes to cache)
   });
 
   it('should perform CRUD on the figure gallery', () => {
     const figure = {
       id: 'fig-1',
-      user_email: 'test2@example.com',
-      object_id: 'obj-1',
-      plot_type: 'FeaturePlot',
+      userEmail: 'test2@example.com',
+      objectId: 'obj-1',
+      plotType: 'FeaturePlot',
       title: 'CD8A Expression',
-      params_json: JSON.stringify({ features: ['CD8A'] }),
-      file_path: '/tmp/cd8a.pdf',
-      file_format: 'pdf',
-      thumbnail_b64: 'thumbnail_base64'
+      params: { features: ['CD8A'] },
+      filePath: '/tmp/cd8a.pdf',
+      fileFormat: 'pdf',
+      thumbnailB64: 'thumbnail_base64'
     };
 
     // Create
     saveFigure(figure);
+    
+    // Read
+    let figures = getFiguresByUser('test2@example.com', 'obj-1');
+    expect(figures.length).toBe(1);
+    expect(figures[0].plotType).toBe('FeaturePlot');
+
     // Delete
     deleteFigure('fig-1');
     
-    expect(true).toBe(true);
+    // Verify Delete
+    figures = getFiguresByUser('test2@example.com', 'obj-1');
+    expect(figures.length).toBe(0);
   });
 });

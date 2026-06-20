@@ -23,9 +23,8 @@ if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 db.initDatabase(path.join(DB_DIR, 'dashboard.db'));
 
 // Middleware
-app.use(cors());
-app.use(express.json());
-
+app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
+// Do not use express.json() globally, as it consumes the body stream and breaks http-proxy-middleware for POST requests.
 // Session Middleware (Dummy single-user session for now, or multi-user if clients send a header)
 app.use((req, res, next) => {
   // Real app: verify JWT and get user ID.
@@ -35,7 +34,18 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── Auth Endpoints ────────────────────────────────────────────────────────
+app.use('/api/auth', express.json());
+app.post('/api/auth/signup', (req, res) => {
+  res.json({ success: true, user: { email: req.body.email, displayName: req.body.displayName } });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  res.json({ success: true, token: 'dummy-jwt-token' });
+});
+
 // ── Database API Endpoints ──────────────────────────────────────────────
+app.use('/api/db', express.json());
 
 app.get('/api/db/provenance', (req, res) => {
   res.json(db.getAllProvenance());
@@ -105,7 +115,7 @@ app.delete('/api/db/cache', (req, res) => {
 // ── File Upload API (Replacing Desktop Dialogs) ─────────────────────────
 // For a cloud app, the user cannot pick a local path and send it to R.
 // They must upload the file to the Node.js server, which places it somewhere R can read.
-const upload = multer({ dest: 'data/uploads/' });
+const upload = multer({ dest: 'data/uploads/', limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
 
 app.post('/api/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });

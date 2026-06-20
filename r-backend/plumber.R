@@ -49,6 +49,13 @@ validate_path <- function(user_path, safe_dir = "vault") {
   return(real_path)
 }
 
+validate_absolute_path <- function(user_path) {
+  if (grepl("(^|[/\\\\])\\.\\.(|[/\\\\]|$)", user_path)) stop("Access denied: path traversal attempt using '..'")
+  is_absolute <- grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)
+  if (!is_absolute) stop("Access denied: path must be absolute")
+  return(user_path)
+}
+
 # ── Session Management ──────────────────────────────────────────────
 active_sessions <- new.env(parent = emptyenv())
 
@@ -104,7 +111,7 @@ function(req, res) {
   # In a production app you might restrict this further, but the Auth token provides the real security
   res$setHeader("Access-Control-Allow-Origin", "http://localhost:5173")
   res$setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-  res$setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
+  res$setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Token, X-Object-ID")
   if (req$REQUEST_METHOD == "OPTIONS") {
     res$status <- 200
     return(list())
@@ -114,19 +121,19 @@ function(req, res) {
 
 #* Health check
 #* @get /health
-function() {
+function(res) {
   list(status = "ok", timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"), mode = "scRNA-seq Seurat Real")
 }
 
 #* Return the R process session ID (changes on every restart)
 #* @get /session-id
-function() {
+function(res) {
   list(sessionId = r_session_id)
 }
 
 #* Get real QC distribution data from the loaded Seurat object
 #* @get /qc-distributions
-function() {
+function(res) {
   if (is.null(global_obj)) return(list(error = "No object loaded. Load data first."))
   
   tryCatch({
@@ -145,8 +152,7 @@ function() {
       nCount_RNA = count_vals,
       n_cells = length(mt_vals)
     )
-  }, error = function(e) {
-    list(error = paste("Failed to compute QC distributions:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("Failed to compute QC distributions:", e$message))
   })
 }
 
@@ -156,7 +162,7 @@ function() {
 
 #* Load dataset into memory
 #* @get /load-data
-function(min_cells = 3, min_features = 200) {
+function(res, min_cells = 3, min_features = 200) {
   min_cells <- as.integer(min_cells)
   min_features <- as.integer(min_features)
 
@@ -199,17 +205,17 @@ function(min_cells = 3, min_features = 200) {
       operation = "load",
       parameters = list(file = "pbmc3k", engine = "Seurat")
     )
-  }, error = function(e) {
-    list(error = paste("R Error:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("R Error:", e$message))
   })
 }
 
 #* Load a local 10X directory (barcodes / features / matrix)
 #* @get /load-local-10x
-function(path, min_cells = 3, min_features = 200) {
+function(res, path, min_cells = 3, min_features = 200) {
   min_cells <- as.integer(min_cells)
   min_features <- as.integer(min_features)
   tryCatch({
+    path <- validate_absolute_path(path)
     if (!dir.exists(path)) stop(paste("Directory not found:", path))
     mat <- Read10X(data.dir = path)
     global_obj <<- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
@@ -233,13 +239,13 @@ function(path, min_cells = 3, min_features = 200) {
       operation = "load",
       parameters = list(path = path, min_cells = min_cells, min_features = min_features)
     )
-  }, error = function(e) { list(error = paste("10X load failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("10X load failed:", e$message)) })
 }
 
 #* Load and merge multiple 10X Cell Ranger directories into one Seurat object
 #* @post /load-multi-10x
 #* @parser json
-function(req) {
+function(res, req) {
   body        <- req$body
   paths       <- as.character(body$paths)
   sample_names <- as.character(body$sample_names)
@@ -358,16 +364,16 @@ function(req) {
       parameters    = list(paths = as.list(paths), sample_names = as.list(sample_names),
                            meta_col = meta_col, min_cells = min_cells, min_features = min_features)
     )
-  }, error = function(e) { list(error = paste("Multi-10X load failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Multi-10X load failed:", e$message)) })
 }
 
 
 #* Load a Seurat RDS object from a local file
 #* @post /load-rds
 #* @parser json
-function(req) {
-  path <- req$body$path
+function(res, req) {
   tryCatch({
+    path <- validate_absolute_path(req$body$path)
     # Note: RDS deserialization can execute arbitrary code in R.
     # Validate the class immediately to mitigate some risk.
     if (!file.exists(path)) stop(paste("File not found:", path))
@@ -394,13 +400,14 @@ function(req) {
       operation = "load",
       parameters = list(path = path)
     )
-  }, error = function(e) { list(error = paste("RDS load failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("RDS load failed:", e$message)) })
 }
 
 #* Load an H5AD / H5Seurat file (requires SeuratDisk)
 #* @get /load-h5ad
-function(path) {
+function(res, path) {
   tryCatch({
+    path <- validate_absolute_path(path)
     if (!file.exists(path)) stop(paste("File not found:", path))
     if (!requireNamespace("SeuratDisk", quietly = TRUE)) {
       stop("SeuratDisk is required for H5AD files. Install with: remotes::install_github('mojaveazure/seurat-disk')")
@@ -428,12 +435,12 @@ function(path) {
       operation = "load",
       parameters = list(path = path)
     )
-  }, error = function(e) { list(error = paste("H5AD load failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("H5AD load failed:", e$message)) })
 }
 
 #* Inspect the current Seurat object — metadata, reductions, assays
 #* @get /object-info
-function() {
+function(res) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   tryCatch({
     meta <- global_obj@meta.data
@@ -462,12 +469,12 @@ function() {
       reductions = names(global_obj@reductions),
       meta_cols = meta_cols
     )
-  }, error = function(e) { list(error = paste("object-info failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("object-info failed:", e$message)) })
 }
 
 #* Get all unique values (with counts) for a metadata column
 #* @get /meta-values
-function(column) {
+function(res, column) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   if (!column %in% colnames(global_obj@meta.data)) return(list(error = paste("Column not found:", column)))
   vals <- as.character(global_obj@meta.data[[column]])
@@ -481,19 +488,21 @@ function(column) {
 
 #* Read column names from a local CSV (for the metadata import UI)
 #* @get /csv-columns
-function(path) {
+function(res, path) {
+  path <- validate_path(path, "vault")
   tryCatch({
     if (!file.exists(path)) stop(paste("File not found:", path))
     sep <- if (grepl("\\.tsv$", path, ignore.case = TRUE)) "\t" else ","
     df <- read.table(path, sep = sep, header = TRUE, nrows = 1, check.names = FALSE)
     list(columns = colnames(df))
-  }, error = function(e) { list(error = paste("CSV read failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("CSV read failed:", e$message)) })
 }
 
 #* Import metadata from a local CSV and join to the Seurat object by barcode
 #* @get /add-metadata
-function(csv_path, key_column = "barcode", value_columns = "") {
+function(res, csv_path, key_column = "barcode", value_columns = "") {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
+  csv_path <- validate_path(csv_path, "vault")
   tryCatch({
     if (!file.exists(csv_path)) stop(paste("CSV not found:", csv_path))
     sep <- if (grepl("\\.tsv$", csv_path, ignore.case = TRUE)) "\t" else ","
@@ -522,13 +531,13 @@ function(csv_path, key_column = "barcode", value_columns = "") {
       added_columns = cols_to_add,
       n_cells_matched = n_matched
     )
-  }, error = function(e) { list(error = paste("Add metadata failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Add metadata failed:", e$message)) })
 }
 
 #* Add a new metadata column by mapping values from an existing column
 #* @post /add-meta-mapping
 #* @parser json
-function(req) {
+function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   
   body <- req$body
@@ -562,14 +571,14 @@ function(req) {
       message = paste0("Successfully added new metadata column: ", new_col),
       mapped_cells = sum(!is.na(mapped_vals))
     )
-  }, error = function(e) { list(error = paste("Add meta mapping failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Add meta mapping failed:", e$message)) })
 }
 
 
 #* Subset the Seurat object by a metadata column and selected values
 #* @post /subset
 #* @parser json
-function(req) {
+function(res, req) {
   body <- req$body
   column <- body$column
   values <- body$values
@@ -596,7 +605,8 @@ function(req) {
 
     if (!is.null(path) && path != "") {
       # Non-destructive mode: Save child to disk
-      saveRDS(bundle, path)
+      safe_path <- validate_path(path, "vault")
+      saveRDS(bundle, safe_path)
     }
 
     make_provenance(
@@ -619,7 +629,7 @@ function(req) {
       operation = "subset",
       parameters = list(column = column, values = vals_vec, new_name = new_name)
     )
-  }, error = function(e) { list(error = paste("Subset failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Subset failed:", e$message)) })
 }
 
 # ── Session Persistence ────────────────────────────────────────────────────────
@@ -630,7 +640,7 @@ function(req) {
 #* Save current Seurat object to a local RDS file
 #* @post /save-session
 #* @parser json
-function(req) {
+function(res, req) {
   path <- req$body$path
   if (is.null(global_obj)) return(list(error = "No object to save"))
   tryCatch({
@@ -650,24 +660,24 @@ function(req) {
     meta_path <- paste0(sub("\\.rds$", "", safe_path, ignore.case = TRUE), ".meta.json")
     writeLines(jsonlite::toJSON(meta, auto_unbox = TRUE), con = meta_path)
     list(success = TRUE, path = safe_path, cells = ncol(global_obj))
-  }, error = function(e) { list(error = paste("Save-session failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Save-session failed:", e$message)) })
 }
 
 #* Check whether a session RDS file exists
 #* @post /check-session
 #* @parser json
-function(req) {
+function(res, req) {
   path <- req$body$path
   tryCatch({
     safe_path <- validate_path(path, "vault")
     list(exists = file.exists(safe_path), path = safe_path)
-  }, error = function(e) { list(error = paste("Check-session failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Check-session failed:", e$message)) })
 }
 
 #* Restore global_obj from a saved session RDS
 #* @post /restore-session
 #* @parser json
-function(req) {
+function(res, req) {
   path <- req$body$path
   tryCatch({
     safe_path <- validate_path(path, "vault")
@@ -706,13 +716,13 @@ function(req) {
       reductions   = names(global_obj@reductions),
       n_meta_cols  = ncol(global_obj@meta.data)
     )
-  }, error = function(e) { list(error = paste("Restore-session failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Restore-session failed:", e$message)) })
 }
 
 #* Delete a session RDS file and its metadata
 #* @post /delete-session
 #* @parser json
-function(req) {
+function(res, req) {
   path <- req$body$path
   tryCatch({
     safe_path <- validate_path(path, "vault")
@@ -720,14 +730,14 @@ function(req) {
     meta_path <- paste0(sub("\\.rds$", "", safe_path, ignore.case = TRUE), ".meta.json")
     if (file.exists(meta_path)) file.remove(meta_path)
     list(success = TRUE, path = safe_path)
-  }, error = function(e) { list(error = paste("Delete-session failed:", e$message)) })
+  }, error = function(e) { res$status <- 500; list(error = paste("Delete-session failed:", e$message)) })
 }
 # ──────────────────────────────────────────────────────────────────────────────
 
 #* Perform Quality Control (percent.mt, filtering)
 #* @post /qc
 #* @parser json
-function(req) {
+function(res, req) {
   body <- req$body
   mt_threshold <- body$mt_threshold
   min_features <- body$min_features
@@ -818,7 +828,7 @@ function(req) {
 
 #* Normalize data and find variable features
 #* @get /normalize
-function(method = "LogNormalize", scale_factor = 10000, nfeatures = 2000) {
+function(res, method = "LogNormalize", scale_factor = 10000, nfeatures = 2000) {
   scale_factor <- as.numeric(scale_factor)
   nfeatures <- as.numeric(nfeatures)
 
@@ -860,7 +870,7 @@ function(method = "LogNormalize", scale_factor = 10000, nfeatures = 2000) {
 
 #* Batch integration using Harmony or Seurat CCA
 #* @get /integrate
-function(method = "harmony", batch_col = "orig.ident", seed = "") {
+function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
   if (is.null(global_obj)) return(list(error = "No object loaded. Please run Normalization first."))
   if (!batch_col %in% colnames(global_obj@meta.data)) {
     return(list(error = paste0("Batch column '", batch_col, "' not found in metadata. Available columns: ",
@@ -992,8 +1002,7 @@ function(method = "harmony", batch_col = "orig.ident", seed = "") {
     } else {
       list(error = paste0("Unknown integration method: '", method, "'. Use 'harmony' or 'cca'."))
     }
-  }, error = function(e) {
-    list(error = paste("Integration failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("Integration failed:", e$message))
   })
 }
 
@@ -1003,7 +1012,7 @@ function(method = "harmony", batch_col = "orig.ident", seed = "") {
 
 #* Run PCA on scaled data
 #* @get /pca
-function(npcs = 50, seed = "") {
+function(res, npcs = 50, seed = "") {
   npcs <- as.integer(npcs)
 
   if (is.null(global_obj)) return(list(error="No object"))
@@ -1058,8 +1067,7 @@ function(npcs = 50, seed = "") {
       operation = "pca",
       parameters = list(npcs = npcs, seed = used_seed)
     )
-  }, error = function(e) {
-    list(error = paste("PCA failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("PCA failed:", e$message))
   })
 }
 
@@ -1069,7 +1077,7 @@ function(npcs = 50, seed = "") {
 
 #* Find neighbors and cluster cells
 #* @get /cluster
-function(dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
+function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
   dims <- as.integer(dims)
   resolution <- as.numeric(resolution)
   algorithm <- as.integer(algorithm)
@@ -1145,7 +1153,7 @@ function(dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
 
 #* Run UMAP dimensionality reduction
 #* @get /umap
-function(dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, seed = "") {
+function(res, dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, seed = "") {
   dims <- as.integer(dims)
   n_components <- as.integer(n_components)
   n_neighbors <- as.integer(n_neighbors)
@@ -1222,14 +1230,13 @@ function(dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, seed = "
       operation = "umap",
       parameters = list(dims = dims, n_components = n_components, n_neighbors = n_neighbors, min_dist = min_dist, seed = used_seed)
     )
-  }, error = function(e) {
-    list(error = paste("UMAP failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("UMAP failed:", e$message))
   })
 }
 
 #* Annotate clusters with biological cell types
 #* @post /annotate-clusters
-function(req) {
+function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded."))
   
   tryCatch({
@@ -1267,8 +1274,7 @@ function(req) {
       script_text = script,
       operation = "annotate"
     )
-  }, error = function(e) {
-    list(error = paste("Annotation failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("Annotation failed:", e$message))
   })
 }
 
@@ -1278,7 +1284,7 @@ function(req) {
 
 #* Get full gene list from the Seurat object
 #* @get /genes
-function() {
+function(res) {
   if (is.null(global_obj)) {
     genes <- c("CD3E","CD4","CD8A","MS4A1","LYZ") 
   } else {
@@ -1289,7 +1295,7 @@ function() {
 
 #* Get expression data for a specific gene
 #* @get /gene-expression
-function(gene) {
+function(res, gene) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   if (!(gene %in% rownames(global_obj))) return(list(error = "Gene not found in dataset"))
   
@@ -1314,7 +1320,7 @@ function(gene) {
 
 #* Feature values for a gene overlaid on UMAP
 #* @get /feature-values
-function(gene) {
+function(res, gene) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   if (!(gene %in% rownames(global_obj))) return(list(error = paste("Gene not found:", gene)))
   umap_coords <- tryCatch(Embeddings(global_obj, "umap"), error = function(e) NULL)
@@ -1330,7 +1336,7 @@ function(gene) {
 
 #* Top marker gene heatmap data (avg expression per cluster)
 #* @get /heatmap
-function(top_n = 5) {
+function(res, top_n = 5) {
   top_n <- as.integer(top_n)
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   if (length(levels(Idents(global_obj))) < 2) return(list(error = "Clustering required"))
@@ -1354,7 +1360,7 @@ function(top_n = 5) {
 
 #* Dot plot data — pct expressing and avg expression per cluster per gene
 #* @get /dot-plot
-function(genes = "") {
+function(res, genes = "") {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   if (length(levels(Idents(global_obj))) < 2) return(list(error = "Clustering required"))
   gene_vec <- trimws(strsplit(genes, ",")[[1]])
@@ -1385,13 +1391,13 @@ function(genes = "") {
 
 #* Infer Cell-Cell Communication (CellChat)
 #* @get /cellchat
-function() {
+function(res) {
   make_provenance(result = list(active_pathways=c("WNT")), script_text="Mock", operation="cellchat")
 }
 
 #* Find cluster marker genes (DEG)
 #* @get /deg
-function() {
+function(res) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   
   if (length(levels(Idents(global_obj))) < 2) {
@@ -1454,14 +1460,13 @@ function() {
       script_text = script,
       operation = "deg"
     )
-  }, error = function(e) {
-    list(error = paste("DEG failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("DEG failed:", e$message))
   })
 }
 
 #* Pathway Enrichment using clusterProfiler (ORA)
 #* @get /enrichment
-function(database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n = 20, target_cluster = "all", exclude_artifacts = "true") {
+function(res, database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n = 20, target_cluster = "all", exclude_artifacts = "true") {
   pval_cutoff    <- as.numeric(pval_cutoff)
   logfc_threshold <- as.numeric(logfc_threshold)
   top_n          <- as.integer(top_n)
@@ -1670,8 +1675,7 @@ function(database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n =
                          logfc_threshold = logfc_threshold, top_n = top_n)
     )
 
-  }, error = function(e) {
-    list(error = paste("Enrichment failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("Enrichment failed:", e$message))
   })
 }
 # ──────────────────────────────────────────────────────────────────
@@ -1681,7 +1685,7 @@ function(database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, top_n =
 #* Run CellChat inference on the current Seurat object
 #* @post /cellchat-infer
 #* @parser json
-function(req) {
+function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   
   body <- req$body
@@ -1822,8 +1826,7 @@ function(req) {
       parameters = list(group_by = group_by, database = database)
     )
     
-  }, error = function(e) {
-    list(error = paste("CellChat inference failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("CellChat inference failed:", e$message))
   })
 }
 
@@ -2003,7 +2006,7 @@ build_pub_plot <- function(params) {
 #* Export a publication-ready figure to disk
 #* @post /export-figure
 #* @parser json
-function(req) {
+function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
 
   body <- req$body
@@ -2088,7 +2091,7 @@ function(req) {
 #* Fast preview render — returns 150dpi JPEG base64 only (no file saved, no provenance)
 #* @post /export-preview
 #* @parser json
-function(req) {
+function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
 
   body <- req$body
@@ -2125,7 +2128,7 @@ function(req) {
 
 #* @post /render-plot-base64
 #* @parser json
-function(req) {
+function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
 
   body       <- req$body
@@ -2184,7 +2187,7 @@ function(req) {
 
 #* Bit-Accurate Validation & Sanity Checks
 #* @get /validate
-function() {
+function(res) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
   
   tryCatch({
@@ -2259,8 +2262,7 @@ function() {
       script_text = "# Validation: extract bit-accurate metrics from current Seurat object",
       operation = "validation"
     )
-  }, error = function(e) {
-    list(error = paste("Validation failed:", e$message))
+  }, error = function(e) { res$status <- 500; list(error = paste("Validation failed:", e$message))
   })
 }
 

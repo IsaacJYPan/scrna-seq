@@ -4,7 +4,7 @@ import { Grid3x3, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 
 // Removed API constant
-export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId }) {
+export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi }) {
   const [heatmapData, setHeatmapData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -17,7 +17,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
     setLoading(true);
     setError(null);
     try {
-      const data = await window.electronAPI.apiRequest(`/heatmap?top_n=${topN}`);
+      const data = await callApi(`/heatmap?top_n=${topN}`, {}, { useCache: false });
       if (data.error) throw new Error(data.error);
       setHeatmapData(data);
     } catch (e) {

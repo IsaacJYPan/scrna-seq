@@ -236,7 +236,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
   useEffect(() => {
     if (result && isHighPerfMode && nComponents === 2) {
       setLoadingBase64(true);
-      window.electronAPI.apiRequest('/render-plot-base64', {
+      callApi('/render-plot-base64', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plot_type: 'UMAP', width: 8, height: 6, res: 200 })
