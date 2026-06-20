@@ -773,15 +773,13 @@ function(res, req) {
   removed_feature_count <- sum(raw_features <= feat_min | (feat_max < 1e9 & raw_features >= feat_max))
   removed_count_count   <- sum(raw_counts <= count_min)
   
-  # Performance-optimized Seurat subsetting
-  # We use the renamed variables (feat_min, etc.) to ensure Seurat looks at our local variables
-  # rather than attempting to find columns with those exact names.
+  keep_cells <- raw_features > feat_min &
+                raw_features < feat_max &
+                raw_mt < mt_limit &
+                raw_counts > count_min
+
   tryCatch({
-    temp_obj <- subset(target_base, 
-                          subset = nFeature_RNA > feat_min & 
-                                   nFeature_RNA < feat_max & 
-                                   percent.mt < mt_limit &
-                                   nCount_RNA > count_min)
+    temp_obj <- target_base[, keep_cells, drop = FALSE]
     if (ncol(temp_obj) == 0) {
       stop("No cells passed the selected QC thresholds. Please loosen your filters.")
     }

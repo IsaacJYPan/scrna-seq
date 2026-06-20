@@ -138,6 +138,13 @@ app.use('/api/r', createProxyMiddleware({
       
       // Pass the session ID to isolate users in R
       proxyReq.setHeader('X-Object-ID', req.session.id);
+
+      if (req.body && Object.keys(req.body).length > 0) {
+        const bodyData = JSON.stringify(req.body);
+        proxyReq.setHeader('Content-Type', 'application/json');
+        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+        proxyReq.write(bodyData);
+      }
     }
   }
 }));

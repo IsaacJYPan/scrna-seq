@@ -87,13 +87,24 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const maxFeatNum = parseInt(maxFeatures) || 0;
   const minCountsNum = parseInt(minCounts) || 0;
 
-  const endpoint = `/qc?mt_threshold=${mtCutoffNum}&min_features=${minFeatNum}&max_features=${maxFeatNum}&min_counts=${minCountsNum}` + 
-    (removeDoublets ? `&remove_doublets=true` : '') + 
-    (filterFeatures ? `&filter_features=${encodeURIComponent(filterFeatures)}` : '');
+  const endpoint = '/qc';
+  const qcPayload = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mt_threshold: mtCutoffNum,
+      min_features: minFeatNum,
+      max_features: maxFeatNum,
+      min_counts: minCountsNum,
+      remove_doublets: removeDoublets,
+      filter_features: filterFeatures
+    })
+  };
 
   const { running: filtering, result, error, setError, runStep: runFiltering } = usePipelineStep({
     callApi,
     endpoint,
+    payload: qcPayload,
     ipcContext: {
       operation: 'quality-control',
       step: 'qc',
