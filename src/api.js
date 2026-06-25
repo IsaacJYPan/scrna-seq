@@ -31,6 +31,70 @@ function attachAuthHeader(headers) {
   if (token) headers.Authorization = `Bearer ${token}`;
 }
 
+function pickFiles({ accept = '', directory = false, multiple = false } = {}) {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.multiple = multiple || directory;
+    if (directory) {
+      input.webkitdirectory = true;
+      input.directory = true;
+    }
+    input.style.display = 'none';
+    input.addEventListener('change', () => {
+      resolve(Array.from(input.files || []));
+      input.remove();
+    }, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+async function uploadSingleFile(file) {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  const headers = {};
+  attachAuthHeader(headers);
+
+  const res = await fetch(`${BASE_URL}/api/upload`, { method: 'POST', headers, body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data.path;
+}
+
+async function uploadDirectory(files) {
+  const form = new FormData();
+  files.forEach((file) => {
+    form.append('files', file, file.name);
+    form.append('relativePaths', file.webkitRelativePath || file.name);
+  });
+  const headers = {};
+  attachAuthHeader(headers);
+
+  const res = await fetch(`${BASE_URL}/api/upload-directory`, { method: 'POST', headers, body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data.path;
+}
+
+async function pickAndUploadFile(kind = '') {
+  const accepts = {
+    csv: '.csv,.tsv,.txt',
+    rds: '.rds',
+    h5: '.h5,.h5ad,.h5seurat'
+  };
+  const files = await pickFiles({ accept: accepts[kind] || '', multiple: false });
+  if (!files[0]) return null;
+  return uploadSingleFile(files[0]);
+}
+
+async function pickAndUploadDirectory() {
+  const files = await pickFiles({ directory: true });
+  if (files.length === 0) return null;
+  return uploadDirectory(files);
+}
+
 function formatRequestError(error) {
   try {
     const parsed = JSON.parse(error.message);
@@ -106,25 +170,36 @@ export const electronAPI = {
   },
   
   // Figures
-  getFigures: async (email) => req(`/api/db/figures?email=${encodeURIComponent(email)}`),
+  getFigures: async () => req('/api/db/figures'),
   saveFigure: async (record) => req('/api/db/figures', { method: 'POST', body: JSON.stringify(record) }),
   deleteFigure: async (id) => req(`/api/db/figures/${id}`, { method: 'DELETE' }),
 
   // Provenance
+  saveProvenance: async (envelope) => req('/api/db/provenance', { method: 'POST', body: JSON.stringify(envelope) }),
   dbSaveProvenance: async (envelope) => req('/api/db/provenance', { method: 'POST', body: JSON.stringify(envelope) }),
   getProvenance: async (id) => req(`/api/db/provenance/${id}`),
   dbGetProvenance: async (id) => req(`/api/db/provenance/${id}`),
+  getAllProvenance: async () => req('/api/db/provenance'),
   dbGetAllProvenance: async () => req('/api/db/provenance'),
+  getProvenanceChain: async (id) => req(`/api/db/provenance-chain/${id}`),
   dbGetProvenanceChain: async (id) => req(`/api/db/provenance-chain/${id}`),
+  deleteProvenance: async (id) => req(`/api/db/provenance/${id}`, { method: 'DELETE' }),
   dbDeleteProvenance: async (id) => req(`/api/db/provenance/${id}`, { method: 'DELETE' }),
 
   // Cache
+  makeCacheKey: async (op, params, ver, pids) => {
+    const res = await req('/api/db/cache-key', { method: 'POST', body: JSON.stringify({ operation: op, params, dataVersion: ver, parentIds: pids }) });
+    return res.key;
+  },
   dbMakeCacheKey: async (op, params, ver, pids) => {
     const res = await req('/api/db/cache-key', { method: 'POST', body: JSON.stringify({ operation: op, params, dataVersion: ver, parentIds: pids }) });
     return res.key;
   },
+  getCachedResult: async (key) => req(`/api/db/cache/${key}`),
   dbGetCachedResult: async (key) => req(`/api/db/cache/${key}`),
+  setCachedResult: async (key, pid, data) => req(`/api/db/cache/${key}`, { method: 'POST', body: JSON.stringify({ provenanceId: pid, resultData: data }) }),
   dbSetCachedResult: async (key, pid, data) => req(`/api/db/cache/${key}`, { method: 'POST', body: JSON.stringify({ provenanceId: pid, resultData: data }) }),
+  clearCache: async () => req('/api/db/cache', { method: 'DELETE' }),
   dbClearCache: async () => req('/api/db/cache', { method: 'DELETE' }),
 
   // Theme
@@ -140,10 +215,13 @@ export const electronAPI = {
   onRInstallerDone: () => () => {},
 
   // Dialogs (Mocked or unsupported in web)
-  openCsvDialog: async () => { alert("File dialogs are not supported in web mode yet."); return null; },
-  openDirectoryDialog: async () => { alert("File dialogs are not supported in web mode yet."); return null; },
-  openMultiDirectoryDialog: async () => { alert("File dialogs are not supported in web mode yet."); return []; },
-  openDataFileDialog: async () => { alert("File dialogs are not supported in web mode yet."); return null; },
+  openCsvDialog: async () => pickAndUploadFile('csv'),
+  openDirectoryDialog: async () => pickAndUploadDirectory(),
+  openMultiDirectoryDialog: async () => {
+    const path = await pickAndUploadDirectory();
+    return path ? [path] : [];
+  },
+  openDataFileDialog: async (kind) => pickAndUploadFile(kind),
   saveScriptDialog: async () => { alert("File dialogs are not supported in web mode yet."); return null; },
   openExportsFolder: async () => { alert("Cannot open local folders from web mode."); return false; },
   scan10xRoot: async () => { return { root: null, found: [] }; }

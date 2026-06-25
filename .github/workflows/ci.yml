@@ -55,6 +55,9 @@ jobs:
       - name: Run Backend Tests
         run: npm run test:backend
 
+      - name: Run Security Tests
+        run: npx vitest run backend/security.test.js backend/server-security.test.js --environment node
+
       - name: Run Visual/UX Tests
         run: npm run test:visual
 

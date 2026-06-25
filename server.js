@@ -126,23 +126,88 @@ function isInsidePath(childPath, parentPath) {
   return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function sanitizeVaultSegment(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+function getUserVaultDir(user) {
+  const segment = sanitizeVaultSegment(user?.email);
+  if (!segment) throw new Error('Authenticated user email is required.');
+  return path.join(VAULT_DIR, segment);
+}
+
 function isUnsafeUserPath(value) {
   if (typeof value !== 'string' || value.trim() === '') return true;
   const normalized = path.normalize(value);
   return path.isAbsolute(value) || normalized.split(/[\\/]+/).includes('..');
 }
 
-function resolveVaultPath(userPath) {
+function resolveVaultPath(userPath, user) {
   if (isUnsafeUserPath(userPath)) {
     throw new Error('Path must be a relative vault path.');
   }
 
   const absolutePath = path.resolve(process.cwd(), userPath);
-  if (!isInsidePath(absolutePath, VAULT_DIR)) {
-    throw new Error('Path must stay within the application vault.');
+  if (!isInsidePath(absolutePath, getUserVaultDir(user))) {
+    throw new Error('Path must stay within the authenticated user vault.');
   }
 
   return path.relative(process.cwd(), absolutePath);
+}
+
+function toPosixPath(value) {
+  return value.split(path.sep).join('/');
+}
+
+function getSafeRelativeSegments(relativePath) {
+  const rawSegments = String(relativePath || '').split(/[\\/]+/).filter(Boolean);
+  const safeSegments = rawSegments.map(segment => segment.replace(/[^a-zA-Z0-9._-]/g, '_'));
+  if (safeSegments.length === 0 || safeSegments.some(segment => !segment || segment === '.' || segment === '..')) {
+    throw new Error('Invalid upload path.');
+  }
+  return safeSegments;
+}
+
+function moveUploadIntoUserVault(file, user, relativePath = file.originalname) {
+  const batchId = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+  const segments = getSafeRelativeSegments(relativePath);
+  const destinationRoot = path.join(getUserVaultDir(user), 'uploads', batchId);
+  const destination = path.join(destinationRoot, ...segments);
+
+  if (!isInsidePath(destination, destinationRoot) || !isInsidePath(destination, getUserVaultDir(user))) {
+    throw new Error('Invalid upload destination.');
+  }
+
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.renameSync(file.path, destination);
+  return toPosixPath(path.relative(process.cwd(), destination));
+}
+
+function moveDirectoryUploadIntoUserVault(files, user, relativePaths = []) {
+  if (!files || files.length === 0) throw new Error('No files uploaded.');
+
+  const batchId = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+  const destinationRoot = path.join(getUserVaultDir(user), 'uploads', batchId);
+  const uploadedRelPaths = [];
+
+  files.forEach((file, index) => {
+    const relativePath = Array.isArray(relativePaths) ? relativePaths[index] : relativePaths;
+    const segments = getSafeRelativeSegments(relativePath || file.originalname);
+    const destination = path.join(destinationRoot, ...segments);
+    if (!isInsidePath(destination, destinationRoot) || !isInsidePath(destination, getUserVaultDir(user))) {
+      throw new Error('Invalid upload destination.');
+    }
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.renameSync(file.path, destination);
+    uploadedRelPaths.push(toPosixPath(path.relative(destinationRoot, destination)));
+  });
+
+  const firstSegments = uploadedRelPaths.map(p => p.split('/')[0]).filter(Boolean);
+  const commonTop = firstSegments.length > 0 && firstSegments.every(segment => segment === firstSegments[0])
+    ? firstSegments[0]
+    : '';
+  const root = commonTop ? path.join(destinationRoot, commonTop) : destinationRoot;
+  return toPosixPath(path.relative(process.cwd(), root));
 }
 
 function validateRProxyPaths(req, res, next) {
@@ -156,10 +221,10 @@ function validateRProxyPaths(req, res, next) {
     if (typeof body.csv_path === 'string') values.push(body.csv_path);
     if (Array.isArray(body.paths)) values.push(...body.paths.filter(v => typeof v === 'string'));
 
-    for (const value of values) resolveVaultPath(value);
+    for (const value of values) resolveVaultPath(value, req.user);
 
     if (req.path === '/load-rds') {
-      const safePath = resolveVaultPath(body.path);
+      const safePath = resolveVaultPath(body.path, req.user);
       if (path.extname(safePath).toLowerCase() !== '.rds') {
         return res.status(400).json({ error: 'Only RDS files in the application vault can be loaded.' });
       }
@@ -213,11 +278,11 @@ app.use('/api/db', express.json());
 app.use('/api/db', requireAuth);
 
 app.get('/api/db/provenance', (req, res) => {
-  res.json(db.getAllProvenance());
+  res.json(db.getAllProvenance(req.user.email));
 });
 
 app.post('/api/db/provenance', (req, res) => {
-  const env = req.body;
+  const env = { ...req.body, userEmail: req.user.email };
   try {
     const id = db.saveProvenance(env);
     res.json({ id });
@@ -227,15 +292,15 @@ app.post('/api/db/provenance', (req, res) => {
 });
 
 app.get('/api/db/provenance/:id', (req, res) => {
-  res.json(db.getProvenance(req.params.id));
+  res.json(db.getProvenance(req.params.id, req.user.email));
 });
 
 app.get('/api/db/provenance-chain/:id', (req, res) => {
-  res.json(db.getProvenanceChain(req.params.id));
+  res.json(db.getProvenanceChain(req.params.id, req.user.email));
 });
 
 app.delete('/api/db/provenance/:id', (req, res) => {
-  res.json({ success: db.deleteProvenance(req.params.id) });
+  res.json({ success: db.deleteProvenance(req.params.id, req.user.email) });
 });
 
 app.get('/api/db/figures', (req, res) => {
@@ -252,26 +317,31 @@ app.post('/api/db/figures', (req, res) => {
 });
 
 app.delete('/api/db/figures/:id', (req, res) => {
-  res.json({ success: db.deleteFigure(req.params.id) });
+  res.json({ success: db.deleteFigure(req.params.id, req.user.email) });
 });
 
 // Cache Endpoints
 app.post('/api/db/cache-key', (req, res) => {
   const { operation, params, dataVersion, parentIds } = req.body;
-  res.json({ key: db.makeCacheKey(operation, params, dataVersion, parentIds) });
+  res.json({ key: db.makeCacheKey(operation, params, dataVersion, parentIds, req.user.email) });
 });
 
 app.get('/api/db/cache/:key', (req, res) => {
-  res.json(db.getCachedResult(req.params.key));
+  res.json(db.getCachedResult(req.params.key, req.user.email));
 });
 
 app.post('/api/db/cache/:key', (req, res) => {
   const { provenanceId, resultData } = req.body;
-  res.json({ success: db.setCachedResult(req.params.key, provenanceId, resultData) });
+  try {
+    db.setCachedResult(req.params.key, provenanceId, resultData, req.user.email);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(403).json({ error: e.message });
+  }
 });
 
 app.delete('/api/db/cache', (req, res) => {
-  db.clearCache();
+  db.clearCache(req.user.email);
   res.json({ success: true });
 });
 
@@ -280,9 +350,10 @@ app.delete('/api/db/cache', (req, res) => {
 // They must upload the file to the Node.js server, which places it somewhere R can read.
 const upload = multer({
   dest: UPLOAD_DIR,
+  preservePath: true,
   limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 512 * 1024 * 1024) },
   fileFilter: (req, file, cb) => {
-    const allowed = new Set(['.csv', '.tsv', '.txt', '.mtx', '.gz', '.h5', '.h5ad', '.h5seurat']);
+    const allowed = new Set(['.csv', '.tsv', '.txt', '.mtx', '.gz', '.h5', '.h5ad', '.h5seurat', '.rds']);
     const ext = path.extname(file.originalname || '').toLowerCase();
     if (!allowed.has(ext)) {
       return cb(new Error('Unsupported upload file type'));
@@ -291,9 +362,45 @@ const upload = multer({
   }
 });
 
-app.post('/api/upload', requireAuth, upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  res.json({ fileId: req.file.filename, originalName: req.file.originalname });
+function cleanupUploadedFiles(files) {
+  for (const file of files.filter(Boolean)) {
+    try {
+      if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    } catch (err) {
+      console.warn('[Upload] Failed to clean up temporary file:', err.message);
+    }
+  }
+}
+
+app.post('/api/upload', requireAuth, (req, res) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    try {
+      const safePath = moveUploadIntoUserVault(req.file, req.user);
+      res.json({ path: safePath, originalName: req.file.originalname });
+    } catch (e) {
+      cleanupUploadedFiles([req.file]);
+      res.status(400).json({ error: e.message });
+    }
+  });
+});
+
+app.post('/api/upload-directory', requireAuth, (req, res) => {
+  upload.array('files', Number(process.env.MAX_UPLOAD_FILES || 10000))(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
+
+    try {
+      const relativePaths = req.body.relativePaths || [];
+      const safeRoot = moveDirectoryUploadIntoUserVault(req.files, req.user, relativePaths);
+      res.json({ path: safeRoot, count: req.files.length });
+    } catch (e) {
+      cleanupUploadedFiles(req.files || []);
+      res.status(400).json({ error: e.message });
+    }
+  });
 });
 
 // ── R Plumber Proxy ─────────────────────────────────────────────────────
@@ -370,8 +477,18 @@ function startPlumber() {
 }
 
 // Start Server
-app.listen(PORT, () => {
-  console.log(`Node.js Web Server running on http://localhost:${PORT}`);
-  console.log(`Starting local R Plumber backend...`);
-  startPlumber();
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Node.js Web Server running on http://localhost:${PORT}`);
+    console.log(`Starting local R Plumber backend...`);
+    startPlumber();
+  });
+}
+
+module.exports = {
+  app,
+  resolveVaultPath,
+  sanitizeVaultSegment,
+  getUserVaultDir,
+  isInsidePath
+};

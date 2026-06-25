@@ -9,10 +9,11 @@ suppressPackageStartupMessages({
   library(dplyr)
   library(Matrix)
   library(jsonlite)
-  library(clusterProfiler)
-  library(org.Hs.eg.db)
-  library(CellChat)
 })
+
+has_enrichment <- requireNamespace("clusterProfiler", quietly = TRUE) &&
+  requireNamespace("org.Hs.eg.db", quietly = TRUE)
+has_cellchat <- requireNamespace("CellChat", quietly = TRUE)
 
 out_file <- "reference_metrics.json"
 
@@ -74,78 +75,98 @@ metrics$cluster <- list(
 
 # 6. Pathway Enrichment
 cat("[6/8] Pathway Enrichment (GO_BP)...\n")
-markers <- FindAllMarkers(obj, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25, verbose = FALSE)
-markers <- markers[!grepl("^(MT-|RPL|RPS)", markers$gene, ignore.case = TRUE), ]
-markers_sorted <- markers[order(-markers$avg_log2FC), ]
-gene_symbols <- unique(markers_sorted$gene)
+if (has_enrichment) {
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
 
-entrez_map <- suppressMessages(bitr(gene_symbols, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db))
-entrez_ids <- unique(entrez_map$ENTREZID)
+  markers <- FindAllMarkers(obj, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25, verbose = FALSE)
+  markers <- markers[!grepl("^(MT-|RPL|RPS)", markers$gene, ignore.case = TRUE), ]
+  markers_sorted <- markers[order(-markers$avg_log2FC), ]
+  gene_symbols <- unique(markers_sorted$gene)
 
-universe_map <- suppressMessages(bitr(rownames(obj), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db))
-entrez_universe <- unique(universe_map$ENTREZID)
+  entrez_map <- suppressMessages(bitr(gene_symbols, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db))
+  entrez_ids <- unique(entrez_map$ENTREZID)
 
-ora_result <- suppressMessages(
-  enrichGO(
-    gene = entrez_ids,
-    universe = entrez_universe,
-    OrgDb = org.Hs.eg.db,
-    ont = "BP",
-    pvalueCutoff = 0.05,
-    pAdjustMethod = "BH",
-    readable = TRUE,
-    minGSSize = 5,
-    maxGSSize = 500
+  universe_map <- suppressMessages(bitr(rownames(obj), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db))
+  entrez_universe <- unique(universe_map$ENTREZID)
+
+  ora_result <- suppressMessages(
+    enrichGO(
+      gene = entrez_ids,
+      universe = entrez_universe,
+      OrgDb = org.Hs.eg.db,
+      ont = "BP",
+      pvalueCutoff = 0.05,
+      pAdjustMethod = "BH",
+      readable = TRUE,
+      minGSSize = 5,
+      maxGSSize = 500
+    )
   )
-)
-df <- as.data.frame(ora_result)
-df <- df[order(df$p.adjust), ]
-if (nrow(df) > 20) df <- df[1:20, ] # top 20 limit as in plumber.R
+  df <- as.data.frame(ora_result)
+  df <- df[order(df$p.adjust), ]
+  if (nrow(df) > 20) df <- df[1:20, ] # top 20 limit as in plumber.R
 
-metrics$enrichment <- list(
-  n_pathways = nrow(df)
-)
+  metrics$enrichment <- list(
+    n_pathways = nrow(df)
+  )
+} else {
+  cat("  Skipping enrichment reference: clusterProfiler/org.Hs.eg.db not installed.\n")
+  metrics$enrichment <- list(
+    n_pathways = NA
+  )
+}
 
 # 7. CellChat Inference
 cat("[7/8] CellChat Inference...\n")
-data.input <- GetAssayData(obj, assay = "RNA", layer = "data") # Seurat v5
-meta <- obj@meta.data
+if (has_cellchat) {
+  library(CellChat)
 
-orig_labels <- as.character(meta$seurat_clusters)
-unique_orig <- sort(unique(orig_labels))
-label_needs_remap <- any(grepl("^0$|^[0-9]+$", unique_orig))
-if (label_needs_remap) {
-  label_map <- setNames(paste0("Cluster", seq_along(unique_orig)), unique_orig)
-  meta$seurat_clusters <- factor(label_map[orig_labels], levels = label_map)
-} else {
-  meta$seurat_clusters <- as.factor(meta$seurat_clusters)
-}
+  data.input <- GetAssayData(obj, assay = "RNA", layer = "data") # Seurat v5
+  meta <- obj@meta.data
 
-cellchat <- createCellChat(object = data.input, meta = meta, group.by = "seurat_clusters")
-cellchat@DB <- CellChatDB.human
-cellchat <- subsetData(cellchat)
-cellchat <- identifyOverExpressedGenes(cellchat)
-cellchat <- identifyOverExpressedInteractions(cellchat)
-cellchat <- computeCommunProb(cellchat, raw.use = TRUE, population.size = TRUE)
-cellchat <- filterCommunication(cellchat, min.cells = 10)
-cellchat <- computeCommunProbPathway(cellchat)
-cellchat <- aggregateNet(cellchat)
+  orig_labels <- as.character(meta$seurat_clusters)
+  unique_orig <- sort(unique(orig_labels))
+  label_needs_remap <- any(grepl("^0$|^[0-9]+$", unique_orig))
+  if (label_needs_remap) {
+    label_map <- setNames(paste0("Cluster", seq_along(unique_orig)), unique_orig)
+    meta$seurat_clusters <- factor(label_map[orig_labels], levels = label_map)
+  } else {
+    meta$seurat_clusters <- as.factor(meta$seurat_clusters)
+  }
 
-net_weight <- cellchat@net$weight
-nodes_count <- if (is.null(net_weight) || length(net_weight) == 0) 0 else length(rownames(net_weight))
-edges_count <- 0
-if (nodes_count > 0) {
-  for (i in 1:nodes_count) {
-    for (j in 1:nodes_count) {
-      if (net_weight[i, j] > 0) edges_count <- edges_count + 1
+  cellchat <- createCellChat(object = data.input, meta = meta, group.by = "seurat_clusters")
+  cellchat@DB <- CellChatDB.human
+  cellchat <- subsetData(cellchat)
+  cellchat <- identifyOverExpressedGenes(cellchat)
+  cellchat <- identifyOverExpressedInteractions(cellchat)
+  cellchat <- computeCommunProb(cellchat, raw.use = TRUE, population.size = TRUE)
+  cellchat <- filterCommunication(cellchat, min.cells = 10)
+  cellchat <- computeCommunProbPathway(cellchat)
+  cellchat <- aggregateNet(cellchat)
+
+  net_weight <- cellchat@net$weight
+  nodes_count <- if (is.null(net_weight) || length(net_weight) == 0) 0 else length(rownames(net_weight))
+  edges_count <- 0
+  if (nodes_count > 0) {
+    for (i in 1:nodes_count) {
+      for (j in 1:nodes_count) {
+        if (net_weight[i, j] > 0) edges_count <- edges_count + 1
+      }
     }
   }
-}
 
-metrics$cellchat <- list(
-  n_nodes = nodes_count,
-  n_edges = edges_count
-)
+  metrics$cellchat <- list(
+    n_nodes = nodes_count,
+    n_edges = edges_count
+  )
+} else {
+  cat("  Skipping CellChat reference: CellChat not installed.\n")
+  metrics$cellchat <- list(
+    n_nodes = NA,
+    n_edges = NA
+  )
+}
 
 # 8. Save Metrics
 cat("[8/8] Saving metrics to", out_file, "...\n")

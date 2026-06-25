@@ -24,6 +24,7 @@ function initDatabase(dbPath) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS provenance (
       id TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL DEFAULT '',
       timestamp TEXT NOT NULL,
       language TEXT NOT NULL,
       language_version TEXT,
@@ -37,6 +38,7 @@ function initDatabase(dbPath) {
 
     CREATE TABLE IF NOT EXISTS results_cache (
       cache_key TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL DEFAULT '',
       provenance_id TEXT NOT NULL,
       result_data TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now')),
@@ -77,6 +79,21 @@ function initDatabase(dbPath) {
     db.exec("ALTER TABLE provenance ADD COLUMN operation TEXT DEFAULT 'unknown'");
     console.log('[DB] Migrated: added operation column to provenance table');
   }
+  if (!cols.includes('user_email')) {
+    db.exec("ALTER TABLE provenance ADD COLUMN user_email TEXT NOT NULL DEFAULT ''");
+    console.log('[DB] Migrated: added user_email column to provenance table');
+  }
+
+  const cacheCols = db.prepare("PRAGMA table_info(results_cache)").all().map(c => c.name);
+  if (!cacheCols.includes('user_email')) {
+    db.exec("ALTER TABLE results_cache ADD COLUMN user_email TEXT NOT NULL DEFAULT ''");
+    console.log('[DB] Migrated: added user_email column to results_cache table');
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_prov_user ON provenance(user_email);
+    CREATE INDEX IF NOT EXISTS idx_cache_user ON results_cache(user_email);
+  `);
 
   console.log('[DB] Database initialized at', dbPath);
   return db;
@@ -86,15 +103,20 @@ function initDatabase(dbPath) {
 
 const _insertProv = () => db.prepare(`
   INSERT OR REPLACE INTO provenance
-    (id, timestamp, language, language_version, packages, script, parameters, parent_ids, operation)
+    (id, user_email, timestamp, language, language_version, packages, script, parameters, parent_ids, operation)
   VALUES
-    (@id, @timestamp, @language, @languageVersion, @packages, @script, @parameters, @parentIds, @operation)
+    (@id, @userEmail, @timestamp, @language, @languageVersion, @packages, @script, @parameters, @parentIds, @operation)
 `);
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
 
 function saveProvenance(envelope) {
   const prov = envelope.provenance;
   _insertProv().run({
     id: String(prov.id || ''),
+    userEmail: normalizeEmail(envelope.userEmail || prov.userEmail),
     timestamp: String(prov.timestamp || ''),
     language: String(prov.language || ''),
     languageVersion: String(prov.languageVersion || ''),
@@ -107,20 +129,25 @@ function saveProvenance(envelope) {
   return prov.id;
 }
 
-function getProvenance(id) {
-  const row = db.prepare('SELECT * FROM provenance WHERE id = ?').get(id);
+function getProvenance(id, userEmail = null) {
+  const row = userEmail
+    ? db.prepare('SELECT * FROM provenance WHERE id = ? AND user_email = ?').get(id, normalizeEmail(userEmail))
+    : db.prepare('SELECT * FROM provenance WHERE id = ?').get(id);
   if (!row) return null;
   return rowToProvenance(row);
 }
 
-function getAllProvenance() {
-  const rows = db.prepare('SELECT * FROM provenance ORDER BY created_at DESC').all();
+function getAllProvenance(userEmail = null) {
+  const rows = userEmail
+    ? db.prepare('SELECT * FROM provenance WHERE user_email = ? ORDER BY created_at DESC').all(normalizeEmail(userEmail))
+    : db.prepare('SELECT * FROM provenance ORDER BY created_at DESC').all();
   return rows.map(rowToProvenance);
 }
 
 function rowToProvenance(row) {
   return {
     id: row.id,
+    userEmail: row.user_email,
     timestamp: row.timestamp,
     language: row.language,
     languageVersion: row.language_version,
@@ -139,7 +166,7 @@ function rowToProvenance(row) {
  * Returns all ancestor provenance records in topological order
  * (dependencies first), with shared ancestors deduplicated.
  */
-function getProvenanceChain(id) {
+function getProvenanceChain(id, userEmail = null) {
   const visited = new Set();
   const ordered = [];
 
@@ -147,7 +174,7 @@ function getProvenanceChain(id) {
     if (visited.has(currentId)) return;
     visited.add(currentId);
 
-    const prov = getProvenance(currentId);
+    const prov = getProvenance(currentId, userEmail);
     if (!prov) return;
 
     // Walk parents first (depth-first, dependencies before dependents)
@@ -164,10 +191,17 @@ function getProvenanceChain(id) {
 /**
  * Delete a single provenance record by ID.
  */
-function deleteProvenance(id) {
-  db.prepare('DELETE FROM provenance WHERE id = ?').run(id);
+function deleteProvenance(id, userEmail = null) {
+  const result = userEmail
+    ? db.prepare('DELETE FROM provenance WHERE id = ? AND user_email = ?').run(id, normalizeEmail(userEmail))
+    : db.prepare('DELETE FROM provenance WHERE id = ?').run(id);
   // Also clean up any cache entries referencing this provenance
-  db.prepare('DELETE FROM results_cache WHERE provenance_id = ?').run(id);
+  if (userEmail) {
+    db.prepare('DELETE FROM results_cache WHERE provenance_id = ? AND user_email = ?').run(id, normalizeEmail(userEmail));
+  } else {
+    db.prepare('DELETE FROM results_cache WHERE provenance_id = ?').run(id);
+  }
+  return result.changes > 0;
 }
 
 /**
@@ -211,13 +245,15 @@ function deleteDownstreamProvenance(operationNames) {
 /**
  * Generate a cache key from operation name + parameters + data version + parent dependencies.
  */
-function makeCacheKey(operation, params, dataVersion, parentIds = []) {
-  const payload = JSON.stringify({ operation, params, dataVersion, parentIds });
+function makeCacheKey(operation, params, dataVersion, parentIds = [], userEmail = '') {
+  const payload = JSON.stringify({ operation, params, dataVersion, parentIds, userEmail: normalizeEmail(userEmail) });
   return crypto.createHash('sha256').update(payload).digest('hex').substring(0, 16);
 }
 
-function getCachedResult(cacheKey) {
-  const row = db.prepare('SELECT * FROM results_cache WHERE cache_key = ?').get(cacheKey);
+function getCachedResult(cacheKey, userEmail = null) {
+  const row = userEmail
+    ? db.prepare('SELECT * FROM results_cache WHERE cache_key = ? AND user_email = ?').get(cacheKey, normalizeEmail(userEmail))
+    : db.prepare('SELECT * FROM results_cache WHERE cache_key = ?').get(cacheKey);
   if (!row) return null;
   return {
     cacheKey: row.cache_key,
@@ -226,14 +262,23 @@ function getCachedResult(cacheKey) {
   };
 }
 
-function setCachedResult(cacheKey, provenanceId, resultData) {
+function setCachedResult(cacheKey, provenanceId, resultData, userEmail = '') {
+  const normalizedEmail = normalizeEmail(userEmail);
+  if (normalizedEmail) {
+    const owner = db.prepare('SELECT id FROM provenance WHERE id = ? AND user_email = ?').get(provenanceId, normalizedEmail);
+    if (!owner) throw new Error('Cannot cache result for provenance owned by another user.');
+  }
   db.prepare(`
-    INSERT OR REPLACE INTO results_cache (cache_key, provenance_id, result_data)
-    VALUES (?, ?, ?)
-  `).run(cacheKey, provenanceId, JSON.stringify(resultData));
+    INSERT OR REPLACE INTO results_cache (cache_key, user_email, provenance_id, result_data)
+    VALUES (?, ?, ?, ?)
+  `).run(cacheKey, normalizedEmail, provenanceId, JSON.stringify(resultData));
 }
 
-function clearCache() {
+function clearCache(userEmail = null) {
+  if (userEmail) {
+    db.prepare('DELETE FROM results_cache WHERE user_email = ?').run(normalizeEmail(userEmail));
+    return;
+  }
   db.prepare('DELETE FROM results_cache').run();
 }
 
@@ -316,6 +361,14 @@ function getUserByEmail(email) {
 // ── Figure Collection ───────────────────────────────────────────
 
 function saveFigure(record) {
+  const userEmail = normalizeEmail(record.userEmail);
+  if (!userEmail) throw new Error('Figure user email is required.');
+
+  const existing = db.prepare('SELECT user_email FROM figure_collection WHERE id = ?').get(record.id);
+  if (existing && normalizeEmail(existing.user_email) !== userEmail) {
+    throw new Error('Cannot replace a figure owned by another user.');
+  }
+
   db.prepare(`
     INSERT OR REPLACE INTO figure_collection
       (id, user_email, object_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64)
@@ -323,7 +376,7 @@ function saveFigure(record) {
       (@id, @userEmail, @objectId, @plotType, @title, @paramsJson, @filePath, @fileFormat, @thumbnailB64)
   `).run({
     id: record.id,
-    userEmail: record.userEmail || '',
+    userEmail,
     objectId: record.objectId || '',
     plotType: record.plotType || 'Unknown',
     title: record.title || '',
@@ -338,7 +391,7 @@ function saveFigure(record) {
 function getFiguresByUser(email) {
   const rows = db.prepare(
     'SELECT * FROM figure_collection WHERE user_email = ? ORDER BY created_at DESC'
-  ).all(email.trim().toLowerCase());
+  ).all(normalizeEmail(email));
   return rows.map(r => ({
     id: r.id,
     userEmail: r.user_email,
@@ -353,9 +406,11 @@ function getFiguresByUser(email) {
   }));
 }
 
-function deleteFigure(id) {
-  db.prepare('DELETE FROM figure_collection WHERE id = ?').run(id);
-  return true;
+function deleteFigure(id, userEmail = null) {
+  const result = userEmail
+    ? db.prepare('DELETE FROM figure_collection WHERE id = ? AND user_email = ?').run(id, normalizeEmail(userEmail))
+    : db.prepare('DELETE FROM figure_collection WHERE id = ?').run(id);
+  return result.changes > 0;
 }
 
 // ── Cleanup ──────────────────────────────────────────────────────
