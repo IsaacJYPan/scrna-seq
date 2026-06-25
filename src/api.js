@@ -4,11 +4,47 @@
 const BASE_URL = 'http://localhost:3000'; // Or rely on relative path if served from same origin
 const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).substr(2, 9);
 localStorage.setItem('client_id', CLIENT_ID);
+const AUTH_TOKEN_KEY = 'benchone_auth_token';
+const AUTH_USER_KEY = 'benchone_auth_user';
+
+function getAuthToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+function getCurrentUser() {
+  try {
+    return JSON.parse(localStorage.getItem(AUTH_USER_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function persistAuthResponse(data) {
+  if (!data?.token || !data?.user) return data;
+  localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+  localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
+  return { ...data.user, token: data.token };
+}
+
+function attachAuthHeader(headers) {
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+}
+
+function formatRequestError(error) {
+  try {
+    const parsed = JSON.parse(error.message);
+    return parsed?.error || error.message;
+  } catch {
+    return error.message;
+  }
+}
 
 async function req(endpoint, options = {}) {
   options.headers = options.headers || {};
   options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
   options.headers['X-Client-ID'] = CLIENT_ID;
+  attachAuthHeader(options.headers);
   
   const res = await fetch(`${BASE_URL}${endpoint}`, options);
   if (!res.ok) {
@@ -24,6 +60,7 @@ export const electronAPI = {
     try {
       options.headers = options.headers || {};
       options.headers['X-Client-ID'] = CLIENT_ID;
+      attachAuthHeader(options.headers);
       
       const res = await fetch(`${BASE_URL}/api/r${endpoint}`, options);
       const contentType = res.headers.get('content-type');
@@ -47,10 +84,25 @@ export const electronAPI = {
 
   // Auth / DB calls
   signup: async (email, password, displayName) => {
-    return req('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email, password, displayName }) });
+    try {
+      const data = await req('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email, password, displayName }) });
+      return persistAuthResponse(data);
+    } catch (error) {
+      return { error: formatRequestError(error) };
+    }
   },
   login: async (email, password) => {
-    return req('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+    try {
+      const data = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+      return persistAuthResponse(data);
+    } catch (error) {
+      return { error: formatRequestError(error) };
+    }
+  },
+  getCurrentUser,
+  logout: async () => {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_USER_KEY);
   },
   
   // Figures

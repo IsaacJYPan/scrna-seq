@@ -3,8 +3,6 @@
  * Uses Electron IPC when available, falls back to localStorage for dev server.
  */
 
-const isElectron = !!window.electronAPI?.signup;
-
 // --- localStorage fallback for dev (vite-only, no Electron) ---
 function localStorageAuth() {
   const USERS_KEY = '__benchone_users__';
@@ -46,18 +44,21 @@ async function hashMock(str) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// --- Electron IPC auth ---
-function electronAuth() {
-  return {
-    async signup(email, password, displayName) {
+const fallbackAuth = localStorageAuth();
+
+const auth = {
+  async signup(email, password, displayName) {
+    if (typeof window !== 'undefined' && window.electronAPI?.signup) {
       return window.electronAPI.signup(email, password, displayName);
-    },
-    async login(email, password) {
+    }
+    return fallbackAuth.signup(email, password, displayName);
+  },
+  async login(email, password) {
+    if (typeof window !== 'undefined' && window.electronAPI?.login) {
       return window.electronAPI.login(email, password);
     }
-  };
-}
-
-const auth = isElectron ? electronAuth() : localStorageAuth();
+    return fallbackAuth.login(email, password);
+  }
+};
 
 export default auth;
