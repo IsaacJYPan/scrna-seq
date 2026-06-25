@@ -29,7 +29,7 @@ const RSCRIPT_CANDIDATES = [
   'Rscript',                   // relies on PATH
 ].filter(Boolean);
 
-const TEST_PORT    = 8001;
+const TEST_PORT    = Number(process.env.TEST_PORT || 18001);
 const BASE_URL     = `http://127.0.0.1:${TEST_PORT}`;
 const WORKSPACE    = path.resolve(__dirname, '..');
 const RUN_R_SCRIPT = path.join(WORKSPACE, 'r-backend', 'run.R');
@@ -37,6 +37,9 @@ const EXPORTS_DIR  = path.join(WORKSPACE, 'exports');
 const TIMEOUT_MS   = 300_000;   // 5 min per request (some steps are slow)
 const STARTUP_WAIT = 60_000;    // 60 s to let Plumber fully start
 const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
+const TEST_EMAIL   = `integration-${Date.now()}@example.com`;
+const TEST_PASSWORD = 'IntegrationTest123!';
+let authToken = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -84,6 +87,9 @@ async function req(method, path, body = null, unauth = false) {
       'X-Client-ID': 'test-runner-client-123',
       ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {})
     };
+    if (authToken && !unauth) {
+      headers.Authorization = `Bearer ${authToken}`;
+    }
     
     // Unauth test: omit Client ID
     if (unauth) {
@@ -121,6 +127,37 @@ async function req(method, path, body = null, unauth = false) {
   });
 }
 
+function sanitizeVaultSegment(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+async function ensureAuth() {
+  if (authToken) return true;
+
+  const signup = await req('POST', '/api/auth/signup', {
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD,
+    displayName: 'Integration Test'
+  }, true);
+
+  if (signup.status === 201 && signup.body && signup.body.token) {
+    authToken = signup.body.token;
+    return true;
+  }
+
+  const login = await req('POST', '/api/auth/login', {
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD
+  }, true);
+
+  if (login.status === 200 && login.body && login.body.token) {
+    authToken = login.body.token;
+    return true;
+  }
+
+  return false;
+}
+
 /** Assert a condition; record pass/fail. */
 function assert(desc, cond, detail = '') {
   if (cond) pass(desc);
@@ -146,6 +183,7 @@ async function waitForHealth(maxMs) {
   const deadline = Date.now() + maxMs;
   while (Date.now() < deadline) {
     try {
+      await ensureAuth();
       const { status } = await req('GET', '/health');
       if (status === 200) return true;
     } catch (_) { /* not ready yet */ }
@@ -204,7 +242,7 @@ async function main() {
 
   // Spawn Node Express server instead of Plumber directly
   const SERVER_SCRIPT = path.join(WORKSPACE, 'server.js');
-  const PLUMBER_TEST_PORT = TEST_PORT + 1;
+  const PLUMBER_TEST_PORT = Number(process.env.PLUMBER_TEST_PORT || TEST_PORT + 1);
   const rProc = spawn('node', [SERVER_SCRIPT], {
     env: {
       ...process.env,
@@ -284,7 +322,8 @@ async function main() {
   section('STEP 4.5: Error Handling (500 Status)');
   try {
     info('Testing intentional error inside tryCatch for proper HTTP status...');
-    const r = await req('GET', '/load-local-10x?path=../data/uploads/empty_dir_that_does_not_exist');
+    const missingVaultPath = `vault/${sanitizeVaultSegment(TEST_EMAIL)}/empty_dir_that_does_not_exist`;
+    const r = await req('GET', `/load-local-10x?path=${encodeURIComponent(missingVaultPath)}`);
     assert('Error returns HTTP 500', r.status === 500, `Expected 500, got ${r.status}`);
     assert('Error response has error field', r.body && typeof r.body.error === 'string');
   } catch (e) { fail('Error handling test request', e.message); }
