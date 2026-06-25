@@ -225,7 +225,7 @@ function(res, path, min_cells = 3, min_features = 200) {
   min_cells <- as.integer(min_cells)
   min_features <- as.integer(min_features)
   tryCatch({
-    path <- validate_absolute_path(path)
+    path <- validate_path(path, "vault")
     if (!dir.exists(path)) stop(paste("Directory not found:", path))
     mat <- Read10X(data.dir = path)
     global_obj <<- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
@@ -270,6 +270,7 @@ function(res, req) {
   }
 
   tryCatch({
+    paths <- vapply(paths, validate_path, character(1), safe_dir = "vault")
     # Validate all directories exist before starting
     missing_dirs <- paths[!dir.exists(paths)]
     if (length(missing_dirs) > 0) {
@@ -420,7 +421,10 @@ function(res, req) {
 #* @get /load-h5ad
 function(res, path) {
   tryCatch({
-    path <- validate_absolute_path(path)
+    path <- validate_path(path, "vault")
+    if (!grepl("\\.(h5|h5ad|h5seurat)$", path, ignore.case = TRUE)) {
+      stop("Only H5, H5AD, or H5Seurat files in the vault can be loaded.")
+    }
     if (!file.exists(path)) stop(paste("File not found:", path))
     if (!requireNamespace("SeuratDisk", quietly = TRUE)) {
       stop("SeuratDisk is required for H5AD files. Install with: remotes::install_github('mojaveazure/seurat-disk')")
