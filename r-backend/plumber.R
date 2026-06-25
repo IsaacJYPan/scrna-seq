@@ -40,10 +40,20 @@ make_provenance <- function(result, script_text, operation = "unknown",
 
 # ── Validation Helpers ──────────────────────────────────────────────
 validate_path <- function(user_path, safe_dir = "vault") {
+  if (is.null(user_path) || !is.character(user_path) || length(user_path) != 1 || nchar(trimws(user_path)) == 0) {
+    stop("Access denied: path is required.")
+  }
+  if (grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)) {
+    stop("Access denied: absolute paths are not accepted.")
+  }
+  if (grepl("(^|[/\\\\])\\.\\.($|[/\\\\])", user_path)) {
+    stop("Access denied: path traversal attempt using '..'.")
+  }
   dir.create(safe_dir, recursive = TRUE, showWarnings = FALSE)
-  real_path <- normalizePath(user_path, mustWork = FALSE)
-  safe_real <- normalizePath(safe_dir, mustWork = TRUE)
-  if (!startsWith(real_path, safe_real)) {
+  real_path <- normalizePath(user_path, winslash = "/", mustWork = FALSE)
+  safe_real <- normalizePath(safe_dir, winslash = "/", mustWork = TRUE)
+  safe_prefix <- paste0(safe_real, "/")
+  if (!(real_path == safe_real || startsWith(real_path, safe_prefix))) {
     stop("Access denied: path traversal attempt. Path must be within the vault.")
   }
   return(real_path)
@@ -373,7 +383,10 @@ function(res, req) {
 #* @parser json
 function(res, req) {
   tryCatch({
-    path <- validate_absolute_path(req$body$path)
+    path <- validate_path(req$body$path, "vault")
+    if (!grepl("\\.rds$", path, ignore.case = TRUE)) {
+      stop("Only RDS files in the vault can be loaded.")
+    }
     # Note: RDS deserialization can execute arbitrary code in R.
     # Validate the class immediately to mitigate some risk.
     if (!file.exists(path)) stop(paste("File not found:", path))
