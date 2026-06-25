@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import path from 'path';
 import serverModule from '../server.js';
 
 const {
@@ -23,8 +24,9 @@ describe('server vault path authorization', () => {
 
   it('rejects traversal and absolute paths before they reach R', () => {
     const user = { email: 'alice@example.com' };
+    const absolutePath = path.join(path.parse(process.cwd()).root, 'tmp', 'obj-1.rds');
 
     expect(() => resolveVaultPath('../vault/alice_example_com/obj-1.rds', user)).toThrow(/relative vault path/i);
-    expect(() => resolveVaultPath('C:\\Users\\alice\\obj-1.rds', user)).toThrow(/relative vault path/i);
+    expect(() => resolveVaultPath(absolutePath, user)).toThrow(/relative vault path/i);
   });
 });
