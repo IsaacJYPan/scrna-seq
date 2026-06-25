@@ -121,7 +121,7 @@ export default function App() {
   // and always miss the SQLite cache.
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
 
-  const [user, setUser] = useState({ email: 'researcher@lab.edu', displayName: 'Researcher' });
+  const [user, setUser] = useState(() => window.electronAPI?.getCurrentUser?.() || null);
   const isLoggedIn = !!user;
 
   const [figuresCount, setFiguresCount] = useState(0);
@@ -216,6 +216,8 @@ export default function App() {
   const sessionPathRef = React.useRef(null);
 
   useEffect(() => {
+    if (!user?.email) return;
+
     loadPersistedProvenance()
       .then(records => {
         if (records && records.length > 0) {
@@ -228,7 +230,7 @@ export default function App() {
     window.electronAPI.apiRequest('/health')
       .then(data => setApiStatus(`Connected (${data.mode})`))
       .catch(() => setApiStatus('Disconnected'));
-  }, []);
+  }, [user?.email]);
 
   const updateActiveWorkspace = useCallback((updates) => {
     setWorkspaces(prev => {
@@ -676,7 +678,7 @@ export default function App() {
   }, [currentProvId, provenanceRecords]);
   // ────────────────────────────────────────────────────────────────
 
-  if (!isLoggedIn) return <Login onLogin={(u) => setUser(u || { email: 'researcher@lab.edu', displayName: 'Researcher' })} />;
+  if (!isLoggedIn) return <Login onLogin={(u) => setUser(u || null)} />;
 
   const handleDataVersionChange = (fn) => {
     updateActiveWorkspace({ dataVersion: (typeof fn === 'function' ? fn(currentWs.dataVersion) : fn) });
