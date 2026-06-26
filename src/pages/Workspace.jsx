@@ -534,6 +534,7 @@ export default function Workspace({
   activeWsIndex,
   setActiveWsIndex,
   resetPipelineAfterSubset,
+  setActiveTab,
   userEmail,
 }) {
   // Derive the RDS save path for the currently active object.

@@ -39,6 +39,15 @@ make_provenance <- function(result, script_text, operation = "unknown",
 }
 
 # ── Validation Helpers ──────────────────────────────────────────────
+resolve_analysis_path <- function(user_path) {
+  if (grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)) {
+    return(user_path)
+  }
+
+  analysis_root <- Sys.getenv("ANALYSIS_ROOT", unset = getwd())
+  file.path(analysis_root, user_path)
+}
+
 validate_path <- function(user_path, safe_dir = "vault") {
   if (is.null(user_path) || !is.character(user_path) || length(user_path) != 1 || nchar(trimws(user_path)) == 0) {
     stop("Access denied: path is required.")
@@ -49,9 +58,10 @@ validate_path <- function(user_path, safe_dir = "vault") {
   if (grepl("(^|[/\\\\])\\.\\.($|[/\\\\])", user_path)) {
     stop("Access denied: path traversal attempt using '..'.")
   }
-  dir.create(safe_dir, recursive = TRUE, showWarnings = FALSE)
-  real_path <- normalizePath(user_path, winslash = "/", mustWork = FALSE)
-  safe_real <- normalizePath(safe_dir, winslash = "/", mustWork = TRUE)
+  safe_dir_abs <- resolve_analysis_path(safe_dir)
+  dir.create(safe_dir_abs, recursive = TRUE, showWarnings = FALSE)
+  real_path <- normalizePath(resolve_analysis_path(user_path), winslash = "/", mustWork = FALSE)
+  safe_real <- normalizePath(safe_dir_abs, winslash = "/", mustWork = TRUE)
   safe_prefix <- paste0(safe_real, "/")
   if (!(real_path == safe_real || startsWith(real_path, safe_prefix))) {
     stop("Access denied: path traversal attempt. Path must be within the vault.")
@@ -139,6 +149,30 @@ function(res) {
 #* @get /session-id
 function(res) {
   list(sessionId = r_session_id)
+}
+
+#* Test-only diagnostic for R session key isolation
+#* @get /__test/session-state
+function(req, res) {
+  diagnostics_enabled <- identical(Sys.getenv("ENABLE_R_TEST_DIAGNOSTICS"), "true") &&
+    !identical(Sys.getenv("NODE_ENV"), "production")
+
+  if (!diagnostics_enabled) {
+    res$status <- 404
+    return(list(error = "Not found"))
+  }
+
+  sid <- req$HTTP_X_OBJECT_ID
+  if (is.null(sid) || nchar(sid) == 0) sid <- "DEFAULT"
+
+  list(
+    x_object_id = sid,
+    has_global_obj = !is.null(global_obj),
+    n_cells = if (!is.null(global_obj)) ncol(global_obj) else NULL,
+    n_features = if (!is.null(global_obj)) nrow(global_obj) else NULL,
+    reductions = if (!is.null(global_obj)) names(global_obj@reductions) else list(),
+    active_session_keys = as.list(ls(envir = active_sessions, all.names = TRUE))
+  )
 }
 
 #* Get real QC distribution data from the loaded Seurat object
