@@ -11,11 +11,12 @@
     "test:unit": "node scripts/run_unit_tests.js",
     "test:integration": "node scripts/run_integration_tests.js",
     "test:tutorial": "node scripts/test_pbmc3k_tutorial.js",
+    "test:r-state-proxy": "node scripts/verify_r_state_proxy.js",
     "test:frontend": "vitest run src/",
     "test:backend": "vitest run backend/ --environment node",
     "test:visual": "node scripts/test_visual_ux.js",
     "test:visual:update": "node scripts/test_visual_ux.js --update-snapshots",
-    "test": "npm run test:backend && npm run test:frontend && npm run test:unit && npm run test:integration && npm run test:tutorial",
+    "test": "npm run test:backend && npm run test:frontend && npm run test:unit && npm run test:integration && npm run test:tutorial && npm run test:r-state-proxy",
     "lint": "eslint .",
     "check": "npm run test:backend && npm run test:frontend && npm run lint && npm run build"
   },
