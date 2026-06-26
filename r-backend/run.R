@@ -14,8 +14,13 @@ if (length(file_arg) > 0) {
   script_dir <- normalizePath(".", winslash = "/")
 }
 
-# Set root path (one level up from r-backend)
-root_dir <- normalizePath(file.path(script_dir, ".."), winslash = "/")
+# Set root path. In local dev this file lives in r-backend/, while the Docker
+# image copies r-backend contents directly into /app.
+root_dir <- if (basename(script_dir) == "r-backend") {
+  normalizePath(file.path(script_dir, ".."), winslash = "/")
+} else {
+  normalizePath(script_dir, winslash = "/")
+}
 Sys.setenv(ANALYSIS_ROOT = root_dir)
 
 # Set sample CSV path as environment variable so plumber.R can read it

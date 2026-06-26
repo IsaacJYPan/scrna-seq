@@ -130,6 +130,34 @@ function sanitizeVaultSegment(value) {
   return String(value || '').replace(/[^a-zA-Z0-9]/g, '_');
 }
 
+// ── R state keying ──────────────────────────────────────────────────────
+// The R Plumber backend stores the live Seurat object per "X-Object-ID".
+// We MUST namespace that key by the authenticated user id (server-controlled,
+// never client-supplied) so one user can never read or clobber another user's
+// R state. Within a single user, we additionally separate state by an
+// object/workspace id that the client may supply (the frontend already sends
+// the active dataset id as X-Object-ID), so that two concurrent analyses by
+// the same user do not collide on one shared global object.
+//
+// Security boundary: the `user-${id}` prefix is derived from the verified
+// session, so a forged/guessed object id can only ever sub-partition the
+// caller's OWN namespace — it can never reach another user's state.
+// When no object id is supplied, the key is exactly `user-${id}`, preserving
+// the previous behavior.
+function sanitizeObjectIdSegment(value) {
+  const cleaned = String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
+  return cleaned.replace(/^[._-]+/, '');
+}
+
+function deriveRStateKey(user, clientObjectId) {
+  if (!user || (user.id === undefined || user.id === null)) {
+    throw new Error('Authenticated user is required to derive an R state key.');
+  }
+  const base = `user-${user.id}`;
+  const objectSegment = sanitizeObjectIdSegment(clientObjectId);
+  return objectSegment ? `${base}:obj-${objectSegment}` : base;
+}
+
 function getUserVaultDir(user) {
   const segment = sanitizeVaultSegment(user?.email);
   if (!segment) throw new Error('Authenticated user email is required.');
@@ -419,8 +447,11 @@ app.use('/api/r', createProxyMiddleware({
       // Inject required headers for Plumber
       proxyReq.setHeader('X-API-Token', API_TOKEN);
       
-      // Pass the session ID to isolate users in R
-      proxyReq.setHeader('X-Object-ID', req.session.id);
+      // Pass a per-user, per-object state key to isolate R state.
+      // The user prefix is server-controlled (from the verified session); the
+      // optional object id comes from the client's X-Object-ID header and only
+      // sub-partitions the caller's own namespace. See deriveRStateKey().
+      proxyReq.setHeader('X-Object-ID', deriveRStateKey(req.user, req.headers['x-object-id']));
 
       if (req.body && Object.keys(req.body).length > 0) {
         const bodyData = JSON.stringify(req.body);
@@ -490,5 +521,7 @@ module.exports = {
   resolveVaultPath,
   sanitizeVaultSegment,
   getUserVaultDir,
-  isInsidePath
+  isInsidePath,
+  deriveRStateKey,
+  sanitizeObjectIdSegment
 };
