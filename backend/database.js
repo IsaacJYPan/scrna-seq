@@ -75,6 +75,35 @@ function initDatabase(dbPath) {
       created_at TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_figures_user ON figure_collection(user_email);
+
+    -- ── Analysis Objects & Lineage ────────────────────────────────
+    -- A durable, ownership-scoped record for each analysis object (Seurat
+    -- object, SCE, matrix, etc.). The R proxy verifies that a client-supplied
+    -- object id maps to a real row owned by the authenticated user *before*
+    -- deriving an R state key, so object ids can no longer be a client-
+    -- controlled path into another user's R session state.
+    CREATE TABLE IF NOT EXISTS analysis_objects (
+      id TEXT PRIMARY KEY,
+      owner_user_id INTEGER NOT NULL,
+      dataset_id TEXT,
+      parent_object_id TEXT,
+      lineage_root_id TEXT,
+      object_type TEXT NOT NULL,
+      display_name TEXT,
+      storage_uri TEXT,
+      object_hash TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_by_provenance_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (owner_user_id) REFERENCES users(id),
+      FOREIGN KEY (parent_object_id) REFERENCES analysis_objects(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ao_owner ON analysis_objects(owner_user_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_dataset ON analysis_objects(dataset_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_parent ON analysis_objects(parent_object_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_lineage_root ON analysis_objects(lineage_root_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_prov ON analysis_objects(created_by_provenance_id);
   `);
 
   // ── Schema migration: add 'operation' column if missing (for pre-existing DBs) ──
@@ -390,6 +419,153 @@ function deleteFigure(id, userEmail = null) {
   return result.changes > 0;
 }
 
+// ── Analysis Objects & Lineage ───────────────────────────────────
+//
+// Object identity is server-owned. Callers never choose object ids and
+// never assert ownership: `owner_user_id` is always taken from the
+// authenticated identity by the route layer and passed in here. Every read
+// helper is owner-scoped so a row owned by another user is indistinguishable
+// from a row that does not exist.
+
+const ALLOWED_OBJECT_TYPES = new Set([
+  'seurat', 'sce', 'anndata', 'matrix', 'assay', 'reduction', 'generic'
+]);
+
+function isValidObjectType(objectType) {
+  return ALLOWED_OBJECT_TYPES.has(objectType);
+}
+
+function generateAnalysisObjectId() {
+  // Server-generated, R-header-safe by construction: `ao_` + lowercase hex.
+  return `ao_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function codedError(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  return e;
+}
+
+function rowToAnalysisObject(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerUserId: row.owner_user_id,
+    datasetId: row.dataset_id,
+    parentObjectId: row.parent_object_id,
+    lineageRootId: row.lineage_root_id,
+    objectType: row.object_type,
+    displayName: row.display_name,
+    storageUri: row.storage_uri,
+    objectHash: row.object_hash,
+    metadata: JSON.parse(row.metadata_json || '{}'),
+    createdByProvenanceId: row.created_by_provenance_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function getAnalysisObjectForUser(id, ownerUserId) {
+  const row = db.prepare(
+    'SELECT * FROM analysis_objects WHERE id = ? AND owner_user_id = ?'
+  ).get(String(id), Number(ownerUserId));
+  return rowToAnalysisObject(row);
+}
+
+/**
+ * Returns true only if `objectId` is a real persisted analysis object owned by
+ * `ownerUserId`. This is the gate the R proxy calls before deriving a state key.
+ */
+function verifyAnalysisObjectOwner(ownerUserId, objectId) {
+  if (typeof objectId !== 'string' || objectId === '') return false;
+  const row = db.prepare(
+    'SELECT 1 FROM analysis_objects WHERE id = ? AND owner_user_id = ?'
+  ).get(objectId, Number(ownerUserId));
+  return !!row;
+}
+
+function listAnalysisObjectsForUser(ownerUserId, filters = {}) {
+  const clauses = ['owner_user_id = ?'];
+  const params = [Number(ownerUserId)];
+
+  if (filters.datasetId) { clauses.push('dataset_id = ?'); params.push(String(filters.datasetId)); }
+  if (filters.parentObjectId) { clauses.push('parent_object_id = ?'); params.push(String(filters.parentObjectId)); }
+  if (filters.lineageRootId) { clauses.push('lineage_root_id = ?'); params.push(String(filters.lineageRootId)); }
+  if (filters.objectType) { clauses.push('object_type = ?'); params.push(String(filters.objectType)); }
+
+  const rows = db.prepare(
+    `SELECT * FROM analysis_objects WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(...params);
+  return rows.map(rowToAnalysisObject);
+}
+
+/**
+ * Create an analysis object owned by `ownerUserId`.
+ *
+ * The id is always server-generated. Parent ownership is enforced here as a
+ * second line of defense even though the route also validates it. Throws a
+ * coded Error (`INVALID_OBJECT_TYPE`, `INVALID_METADATA`, `INVALID_OWNER`,
+ * `PARENT_NOT_FOUND`) so the route can map to the right HTTP status.
+ */
+function createAnalysisObjectForUser(ownerUserId, input = {}) {
+  const owner = Number(ownerUserId);
+  if (!Number.isInteger(owner) || owner <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid authenticated user is required.');
+  }
+
+  const objectType = typeof input.objectType === 'string' ? input.objectType.trim() : '';
+  if (!isValidObjectType(objectType)) {
+    throw codedError('INVALID_OBJECT_TYPE',
+      `Invalid objectType. Allowed: ${[...ALLOWED_OBJECT_TYPES].join(', ')}.`);
+  }
+
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  const parentObjectId = input.parentObjectId ? String(input.parentObjectId) : null;
+  let lineageRootId = null;
+  if (parentObjectId) {
+    const parent = getAnalysisObjectForUser(parentObjectId, owner);
+    if (!parent) {
+      throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    }
+    // Inherit the parent's lineage root, or adopt the parent itself as root.
+    lineageRootId = parent.lineageRootId || parent.id;
+  }
+
+  const id = generateAnalysisObjectId();
+  db.prepare(`
+    INSERT INTO analysis_objects
+      (id, owner_user_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+       display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+    VALUES
+      (@id, @owner, @datasetId, @parentObjectId, @lineageRootId, @objectType,
+       @displayName, @storageUri, @objectHash, @metadataJson, @createdByProvenanceId)
+  `).run({
+    id,
+    owner,
+    datasetId: input.datasetId ? String(input.datasetId) : null,
+    parentObjectId,
+    lineageRootId,
+    objectType,
+    displayName: input.displayName != null ? String(input.displayName) : null,
+    storageUri: input.storageUri != null ? String(input.storageUri) : null,
+    objectHash: input.objectHash != null ? String(input.objectHash) : null,
+    metadataJson: JSON.stringify(metadata),
+    createdByProvenanceId: input.createdByProvenanceId ? String(input.createdByProvenanceId) : null
+  });
+
+  // A root object with no parent is its own lineage root. Done as a second
+  // step because the id is only known after insert.
+  if (!parentObjectId) {
+    db.prepare('UPDATE analysis_objects SET lineage_root_id = id WHERE id = ?').run(id);
+  }
+
+  return getAnalysisObjectForUser(id, owner);
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────
 
 function closeDatabase() {
@@ -416,6 +592,13 @@ module.exports = {
   getUserByEmail,
   saveFigure,
   getFiguresByUser,
-  deleteFigure
+  deleteFigure,
+  // Analysis objects & lineage
+  isValidObjectType,
+  generateAnalysisObjectId,
+  createAnalysisObjectForUser,
+  listAnalysisObjectsForUser,
+  getAnalysisObjectForUser,
+  verifyAnalysisObjectOwner
 };
 
