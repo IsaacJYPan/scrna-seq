@@ -274,6 +274,52 @@ function validateRProxyPaths(req, res, next) {
   }
 }
 
+// ── R Object Ownership Verification ─────────────────────────────────────
+// A client may name a specific analysis object via the X-Object-ID header so
+// the R backend keeps that object's session state separate. The id is treated
+// as untrusted: it must match a real analysis_objects row owned by the
+// authenticated user before we let it influence the R state key. The R state
+// key itself is then derived server-side by deriveRStateKey() (above), so the
+// client never controls the `user-{id}` prefix and cannot reach another user's
+// R state.
+const OBJECT_ID_PATTERN = /^[A-Za-z0-9_-]{3,128}$/;
+
+function isValidObjectIdFormat(value) {
+  return typeof value === 'string' && OBJECT_ID_PATTERN.test(value);
+}
+
+// Middleware: verify any client-supplied X-Object-ID against the DB before it
+// reaches R. Sanitizing the string (deriveRStateKey) is not enough on its own:
+// the id must be a real persisted analysis_objects.id owned by req.user. On
+// success the verified canonical id is stashed on req.verifiedObjectId, and the
+// proxy derives the R state key from it. With no X-Object-ID, the request falls
+// through to the legacy user-scoped key.
+function verifyRObjectOwnership(req, res, next) {
+  const rawObjectId = req.headers['x-object-id'];
+
+  if (rawObjectId === undefined || rawObjectId === null || String(rawObjectId).trim() === '') {
+    return next();
+  }
+
+  const objectId = String(rawObjectId).trim();
+  if (!isValidObjectIdFormat(objectId)) {
+    return res.status(400).json({ error: 'Malformed object ID.' });
+  }
+
+  // Mandatory DB ownership check — rejected before the request can reach R.
+  if (!db.verifyAnalysisObjectOwner(req.user.id, objectId)) {
+    // 404 (not 403) so we never reveal that another user's object exists.
+    return res.status(404).json({ error: 'Analysis object not found.' });
+  }
+
+  req.verifiedObjectId = objectId;
+  next();
+}
+
+function rTestDiagnosticsEnabled() {
+  return process.env.ENABLE_R_TEST_DIAGNOSTICS === 'true' && process.env.NODE_ENV !== 'production';
+}
+
 // Middleware
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 // Do not use express.json() globally, as it consumes the body stream and breaks http-proxy-middleware for POST requests.
@@ -381,6 +427,82 @@ app.delete('/api/db/cache', (req, res) => {
   res.json({ success: true });
 });
 
+// ── Analysis Objects API ────────────────────────────────────────────────
+// Durable, ownership-scoped analysis object identity. Object ids are issued by
+// the server; clients may never choose an id or assert ownership.
+app.use('/api/analysis-objects', express.json());
+app.use('/api/analysis-objects', requireAuth);
+
+const REJECTED_OWNER_FIELDS = ['userId', 'user_id', 'ownerUserId', 'owner_user_id'];
+
+app.post('/api/analysis-objects', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+  // Object ids are server-issued. Reject any client attempt to choose one.
+  if (body.id !== undefined) {
+    return res.status(400).json({ error: 'Object id is server-assigned and must not be provided.' });
+  }
+  // Ownership is derived from the session only — never from the request body.
+  for (const field of REJECTED_OWNER_FIELDS) {
+    if (body[field] !== undefined) {
+      return res.status(400).json({ error: `Field '${field}' is not allowed; ownership is derived from the session.` });
+    }
+  }
+
+  // Validate linked-resource ownership before creating anything. 404 (not 403)
+  // so we never reveal that another user's resource exists.
+  if (body.parentObjectId !== undefined && body.parentObjectId !== null) {
+    if (typeof body.parentObjectId !== 'string' || !db.getAnalysisObjectForUser(body.parentObjectId, req.user.id)) {
+      return res.status(404).json({ error: 'Parent analysis object not found.' });
+    }
+  }
+  if (body.createdByProvenanceId !== undefined && body.createdByProvenanceId !== null) {
+    if (typeof body.createdByProvenanceId !== 'string' || !db.getProvenance(body.createdByProvenanceId, req.user.email)) {
+      return res.status(404).json({ error: 'Provenance record not found.' });
+    }
+  }
+  // NOTE: there is no durable datasets table yet, so datasetId is accepted as
+  // an opaque nullable tag. Dataset ownership will be enforced once a datasets
+  // model lands (see docs/architecture.md).
+
+  try {
+    const created = db.createAnalysisObjectForUser(req.user.id, {
+      datasetId: body.datasetId,
+      parentObjectId: body.parentObjectId,
+      objectType: body.objectType,
+      displayName: body.displayName,
+      storageUri: body.storageUri,
+      objectHash: body.objectHash,
+      metadata: body.metadata,
+      createdByProvenanceId: body.createdByProvenanceId
+    });
+    res.status(201).json(created);
+  } catch (e) {
+    if (e.code === 'PARENT_NOT_FOUND') return res.status(404).json({ error: e.message });
+    if (['INVALID_OBJECT_TYPE', 'INVALID_METADATA', 'INVALID_OWNER'].includes(e.code)) {
+      return res.status(400).json({ error: e.message });
+    }
+    console.error('[AnalysisObjects] Create failed:', e);
+    res.status(500).json({ error: 'Failed to create analysis object.' });
+  }
+});
+
+app.get('/api/analysis-objects', (req, res) => {
+  const filters = {
+    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
+    parentObjectId: typeof req.query.parentObjectId === 'string' ? req.query.parentObjectId : undefined,
+    lineageRootId: typeof req.query.lineageRootId === 'string' ? req.query.lineageRootId : undefined,
+    objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
+  };
+  res.json(db.listAnalysisObjectsForUser(req.user.id, filters));
+});
+
+app.get('/api/analysis-objects/:id', (req, res) => {
+  const obj = db.getAnalysisObjectForUser(req.params.id, req.user.id);
+  if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
+  res.json(obj);
+});
+
 // ── File Upload API (Replacing Desktop Dialogs) ─────────────────────────
 // For a cloud app, the user cannot pick a local path and send it to R.
 // They must upload the file to the Node.js server, which places it somewhere R can read.
@@ -443,7 +565,33 @@ app.post('/api/upload-directory', requireAuth, (req, res) => {
 // Forward all /api/r/* requests to localhost:8000/*
 app.use('/api/r', requireAuth);
 app.use('/api/r', express.json({ limit: '10mb', type: ['application/json', 'application/*+json'] }));
+
+// Gate test-only diagnostic endpoints. They must return 404 in production (or
+// whenever diagnostics are disabled) BEFORE the request can reach the proxy/R.
+app.use('/api/r', (req, res, next) => {
+  if (req.path.startsWith('/__test')) {
+    if (!rTestDiagnosticsEnabled()) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+  }
+  next();
+});
+
 app.use('/api/r', validateRProxyPaths);
+// Verify any client-supplied X-Object-ID against the DB BEFORE proxying to R,
+// so unknown/not-owned/malformed object ids never reach the R backend.
+app.use('/api/r', verifyRObjectOwnership);
+
+// Test-only diagnostic: returns the server-derived R state key without
+// contacting R, so object-ownership behavior can be asserted without a live R
+// backend. Gated above (404 in production / when diagnostics are disabled).
+app.get('/api/r/__test/state-key', (req, res) => {
+  res.json({
+    stateKey: deriveRStateKey(req.user, req.verifiedObjectId),
+    objectId: req.verifiedObjectId || null
+  });
+});
+
 app.use('/api/r', createProxyMiddleware({
   target: `http://127.0.0.1:${PLUMBER_PORT}`,
   changeOrigin: true,
@@ -454,12 +602,13 @@ app.use('/api/r', createProxyMiddleware({
     proxyReq: (proxyReq, req, res) => {
       // Inject required headers for Plumber
       proxyReq.setHeader('X-API-Token', API_TOKEN);
-      
-      // Pass a per-user, per-object state key to isolate R state.
-      // The user prefix is server-controlled (from the verified session); the
-      // optional object id comes from the client's X-Object-ID header and only
-      // sub-partitions the caller's own namespace. See deriveRStateKey().
-      proxyReq.setHeader('X-Object-ID', deriveRStateKey(req.user, req.headers['x-object-id']));
+
+      // Forward only the server-derived R state key. The user prefix is
+      // server-controlled (from the verified session); the optional object
+      // segment comes from req.verifiedObjectId, which verifyRObjectOwnership
+      // has already confirmed is a DB-backed object owned by this user. A raw,
+      // unverified client X-Object-ID never reaches R. See deriveRStateKey().
+      proxyReq.setHeader('X-Object-ID', deriveRStateKey(req.user, req.verifiedObjectId));
 
       if (req.body && Object.keys(req.body).length > 0) {
         const bodyData = JSON.stringify(req.body);
@@ -532,5 +681,9 @@ module.exports = {
   isInsidePath,
   deriveRStateKey,
   sanitizeObjectIdSegment,
-  isProductionDiagnosticRProxyPath
+  isProductionDiagnosticRProxyPath,
+  // Exposed for tests + R proxy ownership verification
+  issueSession,
+  isValidObjectIdFormat,
+  verifyRObjectOwnership
 };
