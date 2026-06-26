@@ -1,7 +1,17 @@
 // src/api.js
 // Replaces the window.electronAPI object with standard fetch calls to our Express server.
 
-const BASE_URL = 'http://localhost:3000'; // Or rely on relative path if served from same origin
+// API base URL is configured via Vite env (VITE_API_BASE_URL).
+// When unset, fall back to same-origin relative requests (empty base),
+// which is the correct default for a single-origin deployment where the
+// Express server also serves the built frontend.
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+export function apiUrl(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE_URL}${normalizedPath}`;
+}
+
 const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).substr(2, 9);
 localStorage.setItem('client_id', CLIENT_ID);
 const AUTH_TOKEN_KEY = 'benchone_auth_token';
@@ -57,7 +67,7 @@ async function uploadSingleFile(file) {
   const headers = {};
   attachAuthHeader(headers);
 
-  const res = await fetch(`${BASE_URL}/api/upload`, { method: 'POST', headers, body: form });
+  const res = await fetch(apiUrl('/api/upload'), { method: 'POST', headers, body: form });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data.path;
@@ -72,7 +82,7 @@ async function uploadDirectory(files) {
   const headers = {};
   attachAuthHeader(headers);
 
-  const res = await fetch(`${BASE_URL}/api/upload-directory`, { method: 'POST', headers, body: form });
+  const res = await fetch(apiUrl('/api/upload-directory'), { method: 'POST', headers, body: form });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data.path;
@@ -110,7 +120,7 @@ async function req(endpoint, options = {}) {
   options.headers['X-Client-ID'] = CLIENT_ID;
   attachAuthHeader(options.headers);
   
-  const res = await fetch(`${BASE_URL}${endpoint}`, options);
+  const res = await fetch(apiUrl(endpoint), options);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || res.statusText);
@@ -126,7 +136,7 @@ export const electronAPI = {
       options.headers['X-Client-ID'] = CLIENT_ID;
       attachAuthHeader(options.headers);
       
-      const res = await fetch(`${BASE_URL}/api/r${endpoint}`, options);
+      const res = await fetch(apiUrl(`/api/r${endpoint}`), options);
       const contentType = res.headers.get('content-type');
       let data;
       if (contentType && contentType.includes('application/json')) {

@@ -1,0 +1,275 @@
+#!/usr/bin/env node
+'use strict';
+
+const { spawn, spawnSync } = require('child_process');
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const WORKSPACE = path.resolve(__dirname, '..');
+const PORT = Number(process.env.TEST_PORT || 18121);
+const PLUMBER_PORT = Number(process.env.PLUMBER_TEST_PORT || 18122);
+const BASE_URL = `http://127.0.0.1:${PORT}`;
+const TEST_EMAIL = `r-state-${Date.now()}@example.com`;
+const TEST_PASSWORD = 'RStateProxy123!';
+const OBJECT_A = 'objectA';
+const OBJECT_B = 'objectB';
+const OBJECT_C = 'objectC';
+const MALICIOUS_OBJECT_ID = 'user-999:obj-objectA/../../<script>';
+
+let passCount = 0;
+
+function sanitizeVaultSegment(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+function sanitizeObjectIdSegment(value) {
+  const cleaned = String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
+  return cleaned.replace(/^[._-]+/, '');
+}
+
+function expectedKey(userId, clientObjectId) {
+  const base = `user-${userId}`;
+  const segment = sanitizeObjectIdSegment(clientObjectId);
+  return segment ? `${base}:obj-${segment}` : base;
+}
+
+function toPosix(value) {
+  return value.split(path.sep).join('/');
+}
+
+function assert(condition, message, detail = '') {
+  if (!condition) {
+    throw new Error(`${message}${detail ? `: ${detail}` : ''}`);
+  }
+  passCount += 1;
+  console.log(`PASS ${message}`);
+}
+
+function request(method, requestPath, { token, objectId, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const bodyText = body ? JSON.stringify(body) : null;
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(bodyText ? { 'Content-Length': Buffer.byteLength(bodyText) } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(objectId ? { 'X-Object-ID': objectId } : {}),
+    };
+
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: PORT,
+      path: requestPath,
+      method,
+      headers,
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        let parsed = data;
+        try {
+          parsed = data ? JSON.parse(data) : null;
+        } catch (_) {}
+        resolve({ status: res.statusCode, body: parsed });
+      });
+    });
+
+    req.on('error', reject);
+    if (bodyText) req.write(bodyText);
+    req.end();
+  });
+}
+
+async function retry(fn, timeoutMs, intervalMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const result = await fn();
+      if (result) return result;
+    } catch (err) {
+      lastError = err;
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+  if (lastError) throw lastError;
+  throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
+function stopProcessTree(child) {
+  if (!child || child.killed) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+  } else {
+    child.kill('SIGTERM');
+  }
+}
+
+function createTinyRdsFixtures(objectAPath, objectBPath) {
+  fs.mkdirSync(path.dirname(objectAPath), { recursive: true });
+
+  const script = `
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Matrix)
+})
+
+make_obj <- function(output_path, project, n_cells, n_genes) {
+  set.seed(n_cells + n_genes)
+  mat <- matrix(rpois(n_cells * n_genes, lambda = 5), nrow = n_genes, ncol = n_cells)
+  rownames(mat) <- c(paste0("MT-G", seq_len(2)), paste0(project, "-Gene", seq_len(n_genes - 2)))
+  colnames(mat) <- paste0(project, "-Cell", seq_len(n_cells))
+  obj <- CreateSeuratObject(counts = as(mat, "dgCMatrix"), project = project, min.cells = 0, min.features = 0)
+  obj[["source_label"]] <- project
+  saveRDS(obj, output_path)
+}
+
+make_obj("${toPosix(objectAPath)}", "ObjectA", 12, 30)
+make_obj("${toPosix(objectBPath)}", "ObjectB", 16, 34)
+`;
+
+  const tmpScript = path.join(os.tmpdir(), `make-r-state-fixtures-${Date.now()}.R`);
+  fs.writeFileSync(tmpScript, script);
+  const result = spawnSync('Rscript', [tmpScript], { cwd: WORKSPACE, encoding: 'utf8' });
+  fs.rmSync(tmpScript, { force: true });
+  if (result.status !== 0) {
+    throw new Error(`Failed to create RDS fixtures\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
+  }
+}
+
+function resultPayload(body) {
+  return body && body.result ? body.result : body;
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value === null || value === undefined) return [];
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'object') return Object.values(value);
+  return [];
+}
+
+async function main() {
+  const safeEmail = sanitizeVaultSegment(TEST_EMAIL);
+  const fixtureDir = path.join(WORKSPACE, 'vault', safeEmail, 'state-proxy-smoke');
+  const objectAPath = path.join(fixtureDir, 'objectA.rds');
+  const objectBPath = path.join(fixtureDir, 'objectB.rds');
+  const sessionPath = path.join(fixtureDir, 'objectA-session.rds');
+  createTinyRdsFixtures(objectAPath, objectBPath);
+
+  const relObjectA = toPosix(path.relative(WORKSPACE, objectAPath));
+  const relObjectB = toPosix(path.relative(WORKSPACE, objectBPath));
+  const relSession = toPosix(path.relative(WORKSPACE, sessionPath));
+
+  const server = spawn('node', ['server.js'], {
+    cwd: WORKSPACE,
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      PLUMBER_PORT: String(PLUMBER_PORT),
+      ENABLE_R_TEST_DIAGNOSTICS: 'true',
+      NODE_ENV: 'test',
+      SESSION_SECRET: 'r-state-proxy-test-secret',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let serverOutput = '';
+  server.stdout.on('data', chunk => { serverOutput += chunk.toString(); });
+  server.stderr.on('data', chunk => { serverOutput += chunk.toString(); });
+
+  try {
+    const signup = await retry(async () => {
+      const response = await request('POST', '/api/auth/signup', {
+        body: { email: TEST_EMAIL, password: TEST_PASSWORD, displayName: 'R State Proxy Test' },
+      });
+      if (response.status === 201) return response;
+      return false;
+    }, 60000);
+
+    const token = signup.body.token;
+    const userId = signup.body.user.id;
+    assert(Boolean(token), 'created authenticated test user');
+    assert(Number.isInteger(userId), 'test user has numeric id', JSON.stringify(signup.body.user));
+
+    const unauth = await request('GET', '/api/r/health');
+    assert(unauth.status === 401 || unauth.status === 403, 'unauthenticated /api/r request is rejected', `HTTP ${unauth.status}`);
+
+    await retry(async () => {
+      const health = await request('GET', '/api/r/health', { token });
+      return health.status === 200 ? health : false;
+    }, 60000);
+    console.log(`INFO Express ${BASE_URL} -> Plumber ${PLUMBER_PORT} is healthy`);
+
+    const noObject = await request('GET', '/api/r/__test/session-state', { token });
+    assert(noObject.status === 200, 'authenticated diagnostic request without object id reaches R', `HTTP ${noObject.status}`);
+    assert(noObject.body.x_object_id === expectedKey(userId), 'no X-Object-ID maps to user-scoped key', noObject.body.x_object_id);
+
+    const malicious = await request('GET', '/api/r/__test/session-state', { token, objectId: MALICIOUS_OBJECT_ID });
+    const expectedMaliciousKey = expectedKey(userId, MALICIOUS_OBJECT_ID);
+    assert(malicious.body.x_object_id === expectedMaliciousKey, 'malicious object id is sanitized before R sees it', malicious.body.x_object_id);
+    assert(!malicious.body.x_object_id.includes('/') && !malicious.body.x_object_id.includes('<') && !malicious.body.x_object_id.includes('>'), 'sanitized R key removes unsafe path/html characters');
+    assert(malicious.body.x_object_id.startsWith(`user-${userId}:obj-`), 'client cannot override server-controlled user prefix', malicious.body.x_object_id);
+
+    const loadA = await request('POST', '/api/r/load-rds', { token, objectId: OBJECT_A, body: { path: relObjectA } });
+    assert(loadA.status === 200 && !loadA.body.error, 'objectA loads through authenticated proxy', JSON.stringify(loadA.body));
+    const infoA = resultPayload((await request('GET', '/api/r/object-info', { token, objectId: OBJECT_A })).body);
+    assert(infoA.n_cells === 12, 'objectA inspect reports 12 cells', JSON.stringify(infoA));
+    const qcA = await request('GET', '/api/r/qc-distributions', { token, objectId: OBJECT_A });
+    assert(qcA.status === 200 && qcA.body.n_cells === 12, 'objectA QC distributions report 12 cells', JSON.stringify(qcA.body));
+
+    const normA = await request('GET', '/api/r/normalize?nfeatures=10', { token, objectId: OBJECT_A });
+    assert(normA.status === 200 && !normA.body.error, 'objectA normalization succeeds', JSON.stringify(normA.body));
+    const pcaA = await request('GET', '/api/r/pca?npcs=5&seed=123', { token, objectId: OBJECT_A });
+    assert(pcaA.status === 200 && !pcaA.body.error, 'objectA PCA succeeds', JSON.stringify(pcaA.body));
+
+    const beforeB = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_B });
+    assert(beforeB.body.x_object_id === expectedKey(userId, OBJECT_B), 'objectB maps to distinct user/object key', beforeB.body.x_object_id);
+    assert(beforeB.body.has_global_obj === false, 'objectB starts with no R object before load');
+
+    const loadB = await request('POST', '/api/r/load-rds', { token, objectId: OBJECT_B, body: { path: relObjectB } });
+    assert(loadB.status === 200 && !loadB.body.error, 'objectB loads through authenticated proxy', JSON.stringify(loadB.body));
+    const infoB = resultPayload((await request('GET', '/api/r/object-info', { token, objectId: OBJECT_B })).body);
+    assert(infoB.n_cells === 16, 'objectB inspect reports 16 cells', JSON.stringify(infoB));
+    const normB = await request('GET', '/api/r/normalize?nfeatures=10', { token, objectId: OBJECT_B });
+    assert(normB.status === 200 && !normB.body.error, 'objectB normalization succeeds', JSON.stringify(normB.body));
+
+    const stateB = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_B });
+    const reductionsB = asArray(stateB.body.reductions);
+    assert(stateB.body.has_global_obj === true && stateB.body.n_cells === 16, 'objectB retains its own loaded state', JSON.stringify(stateB.body));
+    assert(!reductionsB.includes('pca'), 'objectB does not inherit objectA PCA state', JSON.stringify(stateB.body.reductions));
+
+    const stateA = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_A });
+    const reductionsA = asArray(stateA.body.reductions);
+    assert(stateA.body.has_global_obj === true && stateA.body.n_cells === 12, 'objectA still has its own loaded state after objectB operations', JSON.stringify(stateA.body));
+    assert(reductionsA.includes('pca'), 'objectA keeps PCA state after objectB operations', JSON.stringify(stateA.body.reductions));
+
+    const saveA = await request('POST', '/api/r/save-session', { token, objectId: OBJECT_A, body: { path: relSession } });
+    assert(saveA.status === 200 && saveA.body.success === true, 'objectA save-session succeeds', JSON.stringify(saveA.body));
+    const restoreC = await request('POST', '/api/r/restore-session', { token, objectId: OBJECT_C, body: { path: relSession } });
+    assert(restoreC.status === 200 && restoreC.body.success === true, 'objectC restore-session from objectA succeeds', JSON.stringify(restoreC.body));
+    const stateC = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_C });
+    assert(stateC.body.n_cells === 12 && asArray(stateC.body.reductions).includes('pca'), 'restored objectC has objectA cells and PCA state', JSON.stringify(stateC.body));
+
+    const defaultLoad = await request('POST', '/api/r/load-rds', { token, body: { path: relObjectA } });
+    assert(defaultLoad.status === 200 && !defaultLoad.body.error, 'single-object behavior without X-Object-ID still loads', JSON.stringify(defaultLoad.body));
+    const defaultState = await request('GET', '/api/r/__test/session-state', { token });
+    assert(defaultState.body.x_object_id === expectedKey(userId), 'single-object behavior uses base user key', defaultState.body.x_object_id);
+    assert(defaultState.body.n_cells === 12, 'single-object behavior keeps its own base-key state', JSON.stringify(defaultState.body));
+
+    console.log(`SUMMARY passed=${passCount} userId=${userId} objectAKey=${expectedKey(userId, OBJECT_A)} objectBKey=${expectedKey(userId, OBJECT_B)}`);
+  } catch (err) {
+    console.error('\nVERIFY_R_STATE_PROXY_FAILED');
+    console.error(err.stack || err.message);
+    console.error('\nSERVER_OUTPUT');
+    console.error(serverOutput);
+    process.exitCode = 1;
+  } finally {
+    stopProcessTree(server);
+  }
+}
+
+main().then(() => {
+  process.exit(process.exitCode || 0);
+});
