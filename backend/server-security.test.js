@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { afterEach } from 'vitest';
 import path from 'path';
 import serverModule from '../server.js';
 
 const {
   resolveVaultPath,
   sanitizeVaultSegment,
-  deriveRStateKey
+  deriveRStateKey,
+  isProductionDiagnosticRProxyPath
 } = serverModule;
 
 describe('server vault path authorization', () => {
@@ -60,5 +62,27 @@ describe('R state key derivation', () => {
   it('requires an authenticated user', () => {
     expect(() => deriveRStateKey(null, 'x')).toThrow(/authenticated user/i);
     expect(() => deriveRStateKey({}, 'x')).toThrow(/authenticated user/i);
+  });
+});
+
+describe('R diagnostic proxy gating', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+  });
+
+  it('blocks diagnostic proxy paths in production', () => {
+    process.env.NODE_ENV = 'production';
+
+    expect(isProductionDiagnosticRProxyPath('/__test')).toBe(true);
+    expect(isProductionDiagnosticRProxyPath('/__test/session-state')).toBe(true);
+    expect(isProductionDiagnosticRProxyPath('/load-rds')).toBe(false);
+  });
+
+  it('does not block diagnostic proxy paths outside production', () => {
+    process.env.NODE_ENV = 'test';
+
+    expect(isProductionDiagnosticRProxyPath('/__test/session-state')).toBe(false);
   });
 });

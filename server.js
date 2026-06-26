@@ -158,6 +158,10 @@ function deriveRStateKey(user, clientObjectId) {
   return objectSegment ? `${base}:obj-${objectSegment}` : base;
 }
 
+function isProductionDiagnosticRProxyPath(reqPath) {
+  return process.env.NODE_ENV === 'production' && (reqPath === '/__test' || reqPath.startsWith('/__test/'));
+}
+
 function getUserVaultDir(user) {
   const segment = sanitizeVaultSegment(user?.email);
   if (!segment) throw new Error('Authenticated user email is required.');
@@ -240,6 +244,10 @@ function moveDirectoryUploadIntoUserVault(files, user, relativePaths = []) {
 
 function validateRProxyPaths(req, res, next) {
   try {
+    if (isProductionDiagnosticRProxyPath(req.path)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
     const values = [];
     if (typeof req.query.path === 'string') values.push(req.query.path);
     if (typeof req.query.csv_path === 'string') values.push(req.query.csv_path);
@@ -523,5 +531,6 @@ module.exports = {
   getUserVaultDir,
   isInsidePath,
   deriveRStateKey,
-  sanitizeObjectIdSegment
+  sanitizeObjectIdSegment,
+  isProductionDiagnosticRProxyPath
 };
