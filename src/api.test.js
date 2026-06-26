@@ -1,5 +1,47 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { electronAPI } from './api';
+import { electronAPI, apiUrl } from './api';
+
+describe('apiUrl (VITE_API_BASE_URL resolution)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  async function loadApiUrlWith(envValue) {
+    if (envValue === undefined) {
+      vi.stubEnv('VITE_API_BASE_URL', '');
+    } else {
+      vi.stubEnv('VITE_API_BASE_URL', envValue);
+    }
+    vi.resetModules();
+    const mod = await import('./api');
+    return mod.apiUrl;
+  }
+
+  it('returns a same-origin relative path when the env is empty', async () => {
+    const url = await loadApiUrlWith('');
+    expect(url('/api/auth/login')).toBe('/api/auth/login');
+  });
+
+  it('prefixes an absolute base with no trailing slash', async () => {
+    const url = await loadApiUrlWith('https://example.com');
+    expect(url('/api/auth/login')).toBe('https://example.com/api/auth/login');
+  });
+
+  it('strips a trailing slash on the base to avoid double slashes', async () => {
+    const url = await loadApiUrlWith('https://example.com/');
+    expect(url('/api/auth/login')).toBe('https://example.com/api/auth/login');
+  });
+
+  it('normalizes a path that is missing a leading slash', async () => {
+    const url = await loadApiUrlWith('https://example.com');
+    expect(url('api/db/figures')).toBe('https://example.com/api/db/figures');
+  });
+
+  it('is importable as a named export from the live module', () => {
+    expect(typeof apiUrl).toBe('function');
+  });
+});
 
 describe('API Client (electronAPI)', () => {
   const originalFetch = global.fetch;
@@ -63,8 +105,20 @@ describe('API Client (electronAPI)', () => {
     });
 
     const result = await electronAPI.apiRequest('/test-error-text');
-    
+
     expect(result).toHaveProperty('error');
     expect(result.error).toContain('Plain text error message');
+  });
+
+  it('routes db methods to their expected endpoint path (same-origin default)', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => [],
+    });
+
+    await electronAPI.getFigures();
+    expect(global.fetch).toHaveBeenCalledWith('/api/db/figures', expect.any(Object));
   });
 });

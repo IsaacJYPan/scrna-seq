@@ -1,8 +1,12 @@
 /**
- * SQLite Database Module (runs in Electron main process)
- * 
- * Stores provenance records and cached results persistently.
- * Uses better-sqlite3 for synchronous, fast SQLite access.
+ * SQLite Database Module (loaded by the Express server in server.js)
+ *
+ * Stores users, provenance records, cached results, and figure metadata
+ * persistently. Uses better-sqlite3 for synchronous, fast SQLite access.
+ *
+ * All read/write helpers that touch user-owned data take a `userEmail`
+ * argument and scope their SQL with `AND user_email = ?`. See
+ * backend/security.test.js for the per-user isolation contract.
  */
 
 const Database = require('better-sqlite3');
@@ -204,41 +208,14 @@ function deleteProvenance(id, userEmail = null) {
   return result.changes > 0;
 }
 
-/**
- * Delete all provenance records created after a given timestamp.
- * Used for cascade invalidation when re-running a pipeline step.
- */
-function deleteProvenanceAfter(timestamp) {
-  // Get IDs to delete (for cache cleanup)
-  const rows = db.prepare('SELECT id FROM provenance WHERE created_at > ?').all(timestamp);
-  const ids = rows.map(r => r.id);
-  
-  if (ids.length > 0) {
-    // Delete cache entries
-    const placeholders = ids.map(() => '?').join(',');
-    db.prepare(`DELETE FROM results_cache WHERE provenance_id IN (${placeholders})`).run(...ids);
-    // Delete provenance records
-    db.prepare(`DELETE FROM provenance WHERE created_at > ?`).run(timestamp);
-  }
-  return ids;
-}
-
-/**
- * Delete provenance records by operation names that come after a given step.
- * E.g., if re-running 'normalize', delete 'pca', 'cluster', 'umap' records.
- */
-function deleteDownstreamProvenance(operationNames) {
-  if (!operationNames || operationNames.length === 0) return [];
-  const placeholders = operationNames.map(() => '?').join(',');
-  
-  // Find records by checking if the parameters JSON contains the operation field
-  // Since we store operation in the envelope, we search by the script/parameters
-  const rows = db.prepare(
-    `SELECT id FROM provenance WHERE operation IN (${placeholders})`
-  ).all(...operationNames);
-  
-  return rows.map(r => r.id);
-}
+// NOTE: Cross-user cascade-delete helpers (formerly `deleteProvenanceAfter`
+// and `deleteDownstreamProvenance`) were removed in the production-hardening
+// pass. They issued unscoped `DELETE ... WHERE created_at > ?` / `WHERE
+// operation IN (...)` statements with no `user_email` predicate, so wiring
+// them into any route would have let one user wipe another user's provenance.
+// They were never routed. If cascade invalidation is reintroduced, it must be
+// user-scoped (take `userEmail`, add `AND user_email = ?`) and covered by an
+// isolation test in backend/security.test.js, mirroring `deleteProvenance`.
 
 // ── Results Cache ────────────────────────────────────────────────
 
@@ -430,7 +407,6 @@ module.exports = {
   getAllProvenance,
   getProvenanceChain,
   deleteProvenance,
-  deleteProvenanceAfter,
   makeCacheKey,
   getCachedResult,
   setCachedResult,
