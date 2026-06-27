@@ -205,4 +205,38 @@ describe('analysis-objects API', () => {
     expect(res.status).toBe(201);
     expect(res.data.datasetId).toBe('dataset-abc');
   });
+
+  // ── Finding 9: datasetId caveat ───────────────────────────────────────────
+  // There is intentionally NO datasets table in this branch, so datasetId is an
+  // unverified opaque string. This test pins the CURRENT behavior: two users
+  // may carry the SAME datasetId, and datasetId-filtered listing is still
+  // owner-scoped (Alice never sees Bob's object even though the tag matches).
+  //
+  // TODO(datasets-model): once a durable datasets table exists, datasetId MUST
+  // be ownership-verified at creation/use the way parentObjectId and
+  // createdByProvenanceId already are — a cross-owner datasetId must return 404
+  // (no enumeration), not be silently accepted. When that lands, add a test
+  // asserting Alice cannot create/list against Bob's datasetId, and tighten or
+  // replace this test. See docs/architecture.md ("dataset_id ... opaque
+  // nullable tag until a durable datasets/projects model lands").
+  it('does not leak objects across users that share the same opaque datasetId', async () => {
+    const { alice, bob } = users();
+    const shared = 'dataset-shared-tag';
+
+    await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: shared }
+    });
+    await api(server, '/api/analysis-objects', {
+      method: 'POST', token: bob.token, body: { objectType: 'matrix', datasetId: shared }
+    });
+
+    const aliceByDataset = await api(server, `/api/analysis-objects?datasetId=${shared}`, { token: alice.token });
+    expect(aliceByDataset.data).toHaveLength(1);
+    expect(aliceByDataset.data[0].ownerUserId).toBe(alice.user.id);
+    expect(aliceByDataset.data[0].objectType).toBe('seurat');
+
+    const bobByDataset = await api(server, `/api/analysis-objects?datasetId=${shared}`, { token: bob.token });
+    expect(bobByDataset.data).toHaveLength(1);
+    expect(bobByDataset.data[0].ownerUserId).toBe(bob.user.id);
+  });
 });

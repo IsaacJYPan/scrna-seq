@@ -158,8 +158,27 @@ function deriveRStateKey(user, clientObjectId) {
   return objectSegment ? `${base}:obj-${objectSegment}` : base;
 }
 
+// Normalize a proxy sub-path (the part after the /api/r mount) before deciding
+// whether it targets a test-only diagnostic endpoint. A raw
+// `req.path.startsWith('/__test')` check is bypassable with double slashes
+// (`//__test`) or an encoded slash (`%2F__test`), either of which would slip
+// past the gate and reach the proxy/R. This decodes once, folds backslashes to
+// forward slashes, and collapses repeated slashes so every spelling of the
+// diagnostic prefix is recognized.
+function isDiagnosticRProxyPath(rawPath) {
+  let p = String(rawPath || '');
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    // Malformed percent-encoding: fall back to the raw value rather than throw.
+  }
+  p = p.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  if (!p.startsWith('/')) p = `/${p}`;
+  return p === '/__test' || p.startsWith('/__test/');
+}
+
 function isProductionDiagnosticRProxyPath(reqPath) {
-  return process.env.NODE_ENV === 'production' && (reqPath === '/__test' || reqPath.startsWith('/__test/'));
+  return process.env.NODE_ENV === 'production' && isDiagnosticRProxyPath(reqPath);
 }
 
 function getUserVaultDir(user) {
@@ -248,13 +267,15 @@ function validateRProxyPaths(req, res, next) {
       return res.status(404).json({ error: 'Not found' });
     }
 
-    const values = [];
-    if (typeof req.query.path === 'string') values.push(req.query.path);
-    if (typeof req.query.csv_path === 'string') values.push(req.query.csv_path);
-
     const body = req.body && typeof req.body === 'object' ? req.body : {};
-    if (typeof body.path === 'string') values.push(body.path);
-    if (typeof body.csv_path === 'string') values.push(body.csv_path);
+    const values = [];
+    // Scalar path fields from query string and JSON body (see allowlist above).
+    for (const field of R_PROXY_VALIDATED_PATH_FIELDS) {
+      if (field === 'paths') continue; // array field, handled below
+      if (typeof req.query[field] === 'string') values.push(req.query[field]);
+      if (typeof body[field] === 'string') values.push(body[field]);
+    }
+    // Array path field.
     if (Array.isArray(body.paths)) values.push(...body.paths.filter(v => typeof v === 'string'));
 
     for (const value of values) resolveVaultPath(value, req.user);
@@ -320,12 +341,69 @@ function rTestDiagnosticsEnabled() {
   return process.env.ENABLE_R_TEST_DIAGNOSTICS === 'true' && process.env.NODE_ENV !== 'production';
 }
 
+// ── Auth rate limiting ──────────────────────────────────────────────────────
+// Defense-in-depth against credential stuffing / signup abuse. A small,
+// dependency-free fixed-window limiter keyed by client IP is sufficient for
+// this single-node app; a multi-node deployment would swap this for a shared
+// store (e.g. Redis). The window/limit are read per-request from the
+// environment so tests can tighten them deterministically without re-importing
+// the module, and each limiter exposes reset() so tests can clear state between
+// cases (preventing rate-limit leakage across tests).
+function authRateLimitWindowMs() {
+  return Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+}
+function authRateLimitMax() {
+  return Number(process.env.AUTH_RATE_LIMIT_MAX || 10);
+}
+
+function createRateLimiter() {
+  const hits = new Map(); // ip -> { count, resetAt }
+
+  function middleware(req, res, next) {
+    if (process.env.DISABLE_RATE_LIMIT === 'true') return next();
+
+    const windowMs = authRateLimitWindowMs();
+    const max = authRateLimitMax();
+    const key = req.ip || req.socket?.remoteAddress || 'unknown';
+    const now = Date.now();
+
+    let entry = hits.get(key);
+    if (!entry || now >= entry.resetAt) {
+      entry = { count: 0, resetAt: now + windowMs };
+      hits.set(key, entry);
+    }
+    entry.count += 1;
+
+    if (entry.count > max) {
+      const retryAfterSec = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSec));
+      return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+    }
+    next();
+  }
+
+  middleware.reset = () => hits.clear();
+  return middleware;
+}
+
+// Separate limiters per endpoint so login attempts and signup attempts do not
+// share (or exhaust) one another's budget.
+const loginRateLimiter = createRateLimiter();
+const signupRateLimiter = createRateLimiter();
+
+// ── R proxy path-field validation allowlist ─────────────────────────────────
+// Single source of truth for which request fields validateRProxyPaths treats as
+// vault paths before proxying to R. backend/r-path-drift.test.js asserts that
+// every field feeding R's validate_path() in r-backend/plumber.R is covered
+// here, so a new R path-like field can't silently bypass Node-side validation.
+const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths'];
+
 // Middleware
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 // Do not use express.json() globally, as it consumes the body stream and breaks http-proxy-middleware for POST requests.
 // ── Auth Endpoints ────────────────────────────────────────────────────────
 app.use('/api/auth', express.json());
-app.post('/api/auth/signup', (req, res) => {
+app.post('/api/auth/signup', signupRateLimiter, (req, res) => {
   const validated = validateSignupBody(req.body || {});
   if (validated.error) return res.status(400).json({ error: validated.error });
 
@@ -340,7 +418,7 @@ app.post('/api/auth/signup', (req, res) => {
   }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', loginRateLimiter, (req, res) => {
   const validated = validateLoginBody(req.body || {});
   if (validated.error) return res.status(400).json({ error: validated.error });
 
@@ -646,7 +724,9 @@ app.use('/api/r', express.json({ limit: '10mb', type: ['application/json', 'appl
 // Gate test-only diagnostic endpoints. They must return 404 in production (or
 // whenever diagnostics are disabled) BEFORE the request can reach the proxy/R.
 app.use('/api/r', (req, res, next) => {
-  if (req.path.startsWith('/__test')) {
+  // Use the normalized check so //__test, /%2F__test, etc. cannot slip past the
+  // gate and reach the proxy when diagnostics are disabled / in production.
+  if (isDiagnosticRProxyPath(req.path)) {
     if (!rTestDiagnosticsEnabled()) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -759,8 +839,13 @@ module.exports = {
   deriveRStateKey,
   sanitizeObjectIdSegment,
   isProductionDiagnosticRProxyPath,
+  isDiagnosticRProxyPath,
   // Exposed for tests + R proxy ownership verification
   issueSession,
   isValidObjectIdFormat,
-  verifyRObjectOwnership
+  verifyRObjectOwnership,
+  // Exposed for tests: auth rate limiting + R path-field drift guard
+  loginRateLimiter,
+  signupRateLimiter,
+  R_PROXY_VALIDATED_PATH_FIELDS
 };

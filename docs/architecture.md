@@ -128,6 +128,32 @@ graph TD
   `http://127.0.0.1:8000` via `http-proxy-middleware`, stripping the `/api/r`
   prefix. It injects the Plumber `X-API-Token` (a per-process random secret) and
   a server-derived `X-Object-ID` state key.
+- **R is not user-facing.** The R Plumber backend performs no user
+  authentication; it trusts the `X-API-Token` and server-derived `X-Object-ID`
+  injected by Express. It must only be reachable from the Express tier (bind to
+  `127.0.0.1` / a private network) and must **not** trust any client-supplied
+  user/path/export header. Example: `/export-figure` derives its export
+  subdirectory only from the server-injected `X-Object-ID`, never from the
+  request body, and appends a random suffix so concurrent same-second exports by
+  different users cannot collide or overwrite each other.
+- **Node-side path-field validation + drift guard.** `validateRProxyPaths` only
+  validates a fixed allowlist of request fields
+  (`R_PROXY_VALIDATED_PATH_FIELDS` in `server.js`: `path`, `csv_path`, `paths`)
+  before proxying. R independently re-validates with `validate_path()`, but to
+  keep the two in sync `backend/r-path-drift.test.js` statically scans every
+  `validate_path()` call site in `plumber.R` and fails if a new path-like
+  request field isn't also covered by the Node allowlist. It is a pragmatic
+  scanner (not a full R parser) and fails loudly on any argument shape it can't
+  resolve, prompting a human to extend it.
+  - **Proposal (not yet implemented): per-user vault root in R.** Today R's
+    `validate_path()` constrains paths to a single shared `vault/` directory,
+    while Express separately resolves each path to the *authenticated user's*
+    `vault/<segment>/`. A low-risk hardening would have Express inject a trusted
+    `X-Vault-Root` header (derived from the session, like `X-Object-ID`) and
+    have R use it as `validate_path()`'s `safe_dir`, so per-user vault-root
+    enforcement also exists in R. This is deferred to keep this cleanup small;
+    it must reuse the same server-injected-and-overridden header pattern (never
+    trust a client-supplied vault root).
 - **How R state is keyed today.** The R process holds a single live `global_obj`
   (plus `raw_obj`) and saves/restores it per `X-Object-ID` into an
   `active_sessions` environment (filter `session_loader` in `plumber.R`).

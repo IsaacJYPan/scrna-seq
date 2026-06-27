@@ -2074,13 +2074,31 @@ function(res, req) {
       body$features <- as.character(unlist(features_raw))
     }
 
-    # Create exports directory
-    export_dir <- file.path(getwd(), "..", "exports")
+    # ── Collision-resistant, user/object-scoped export destination ──────────
+    # SECURITY: the export directory segment is derived ONLY from the
+    # server-injected X-Object-ID header. Express sets that header to a
+    # server-derived state key (`user-<id>[:obj-<id>]`) on every proxied
+    # request and OVERRIDES any client-supplied value, so it is trusted here.
+    # R must NOT trust any client-supplied user/path/export header for this:
+    # do not read an export dir, user id, or filename from the request body.
+    # The segment is still sanitized as defense-in-depth.
+    object_seg <- req$HTTP_X_OBJECT_ID
+    if (is.null(object_seg) || nchar(object_seg) == 0) object_seg <- "DEFAULT"
+    object_seg <- gsub("[^A-Za-z0-9._-]", "_", object_seg)
+
+    export_dir <- file.path(getwd(), "..", "exports", object_seg)
     if (!dir.exists(export_dir)) dir.create(export_dir, recursive = TRUE)
 
-    timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    # plot_type is client-supplied — sanitize it to a safe filename segment.
     plot_type <- body$plot_type %||% "Plot"
-    file_name <- paste0(plot_type, "_", timestamp, ".", format)
+    plot_type_safe <- gsub("[^A-Za-z0-9._-]", "_", plot_type)
+
+    # A timestamp alone collides when two users (or one user firing twice)
+    # export the same plot type within the same second. Append a random suffix
+    # so concurrent same-second exports cannot overwrite each other.
+    timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    rand_suffix <- paste0(sample(c(letters, 0:9), 16, replace = TRUE), collapse = "")
+    file_name <- paste0(plot_type_safe, "_", timestamp, "_", rand_suffix, ".", format)
     file_path <- file.path(export_dir, file_name)
     file_path <- normalizePath(file_path, mustWork = FALSE)
 
