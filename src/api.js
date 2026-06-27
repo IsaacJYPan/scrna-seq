@@ -218,6 +218,19 @@ export const electronAPI = {
   getJobLogs: async (id) => req(`/api/jobs/${id}/logs`),
   cancelJob: async (id) => req(`/api/jobs/${id}/cancel`, { method: 'POST' }),
 
+  // Organizations & Projects (membership + authorization foundation)
+  createOrganization: async (payload) => req('/api/organizations', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listOrganizations: async () => req('/api/organizations'),
+  getOrganization: async (id) => req(`/api/organizations/${id}`),
+  createProject: async (payload) => req('/api/projects', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listProjects: async () => req('/api/projects'),
+  getProject: async (id) => req(`/api/projects/${id}`),
+  updateProject: async (id, payload) => req(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(payload || {}) }),
+  listProjectMembers: async (id) => req(`/api/projects/${id}/members`),
+  addProjectMember: async (id, email, role) => req(`/api/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
+  updateProjectMemberRole: async (id, userId, role) => req(`/api/projects/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+  removeProjectMember: async (id, userId) => req(`/api/projects/${id}/members/${userId}`, { method: 'DELETE' }),
+
   // Cache
   makeCacheKey: async (op, params, ver, pids) => {
     const res = await req('/api/db/cache-key', { method: 'POST', body: JSON.stringify({ operation: op, params, dataVersion: ver, parentIds: pids }) });
