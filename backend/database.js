@@ -104,6 +104,42 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_ao_parent ON analysis_objects(parent_object_id);
     CREATE INDEX IF NOT EXISTS idx_ao_lineage_root ON analysis_objects(lineage_root_id);
     CREATE INDEX IF NOT EXISTS idx_ao_prov ON analysis_objects(created_by_provenance_id);
+
+    -- ── Jobs / Task Execution ─────────────────────────────────────
+    -- A durable, ownership-scoped record for a unit of long-running analysis
+    -- work (normalize, cluster, etc.). This is the foundation for moving
+    -- long R/Seurat computation off the browser request/response path: a job
+    -- has an owner, an optional target analysis object, an explicit status,
+    -- the parameters it was created with, an append-only log, an optional
+    -- structured error, and an optional result analysis object. Ownership is
+    -- always taken from the authenticated session by the route layer; the id
+    -- is server-generated. NOTE: this branch adds the durable record + API
+    -- only — there is no worker/queue draining jobs yet (see docs/architecture.md).
+    CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      owner_user_id INTEGER NOT NULL,
+      analysis_object_id TEXT,
+      result_analysis_object_id TEXT,
+      job_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      parameters_json TEXT NOT NULL DEFAULT '{}',
+      logs_json TEXT NOT NULL DEFAULT '[]',
+      error_json TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT,
+      canceled_at TEXT,
+      FOREIGN KEY (owner_user_id) REFERENCES users(id),
+      FOREIGN KEY (analysis_object_id) REFERENCES analysis_objects(id),
+      FOREIGN KEY (result_analysis_object_id) REFERENCES analysis_objects(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_user_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_analysis_object ON jobs(analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_result_object ON jobs(result_analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(job_type);
+    CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
   `);
 
   // ── Schema migration: add 'operation' column if missing (for pre-existing DBs) ──
@@ -566,6 +602,287 @@ function createAnalysisObjectForUser(ownerUserId, input = {}) {
   return getAnalysisObjectForUser(id, owner);
 }
 
+// ── Jobs / Task Execution ────────────────────────────────────────
+//
+// Durable, ownership-scoped records for long-running analysis work. Like
+// analysis objects, job identity is server-owned: callers never choose a job
+// id and never assert ownership — `owner_user_id` is always supplied by the
+// route layer from the authenticated identity. Every read/write helper is
+// owner-scoped so a job owned by another user is indistinguishable from one
+// that does not exist. Status is server-managed and only ever changes through
+// `validateJobTransition`; clients cannot set an arbitrary status.
+
+const ALLOWED_JOB_TYPES = new Set([
+  'normalize', 'qc_filter', 'pca', 'cluster', 'umap', 'find_markers', 'integrate', 'generic'
+]);
+
+const JOB_STATUSES = new Set([
+  'created', 'queued', 'running', 'waiting_for_user', 'completed', 'failed', 'canceled'
+]);
+
+// completed / failed / canceled are terminal: no outgoing transitions.
+const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed', 'canceled']);
+
+// Explicit allow-list of state-machine edges. Anything not listed is rejected.
+const JOB_TRANSITIONS = {
+  created: new Set(['queued', 'canceled']),
+  queued: new Set(['running', 'canceled']),
+  running: new Set(['completed', 'failed', 'waiting_for_user', 'canceled']),
+  waiting_for_user: new Set(['queued', 'running', 'canceled']),
+  completed: new Set(),
+  failed: new Set(),
+  canceled: new Set()
+};
+
+// Jobs are created already queued: the record is durable and "ready to run",
+// even though no worker drains the queue yet (see docs/architecture.md).
+const INITIAL_JOB_STATUS = 'queued';
+
+function isValidJobType(jobType) {
+  return ALLOWED_JOB_TYPES.has(jobType);
+}
+
+function isValidJobStatus(status) {
+  return JOB_STATUSES.has(status);
+}
+
+function validateJobTransition(fromStatus, toStatus) {
+  if (!JOB_STATUSES.has(fromStatus) || !JOB_STATUSES.has(toStatus)) return false;
+  return JOB_TRANSITIONS[fromStatus].has(toStatus);
+}
+
+function generateJobId() {
+  // Server-generated, header-safe by construction: `job_` + lowercase hex.
+  return `job_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function normalizeJobLogEntry(entry) {
+  const ts = new Date().toISOString();
+  if (typeof entry === 'string') return { ts, level: 'info', message: entry };
+  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+    return {
+      ts,
+      level: typeof entry.level === 'string' ? entry.level : 'info',
+      message: entry.message !== undefined ? String(entry.message) : ''
+    };
+  }
+  return { ts, level: 'info', message: String(entry == null ? '' : entry) };
+}
+
+function normalizeJobError(error) {
+  if (error === null || error === undefined) return null;
+  if (typeof error === 'string') return { message: error };
+  if (typeof error === 'object' && !Array.isArray(error)) {
+    const normalized = { message: error.message !== undefined ? String(error.message) : '' };
+    if (error.code !== undefined) normalized.code = String(error.code);
+    if (error.details !== undefined) normalized.details = error.details;
+    return normalized;
+  }
+  return { message: String(error) };
+}
+
+function rowToJob(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerUserId: row.owner_user_id,
+    analysisObjectId: row.analysis_object_id,
+    resultAnalysisObjectId: row.result_analysis_object_id,
+    jobType: row.job_type,
+    status: row.status,
+    parameters: JSON.parse(row.parameters_json || '{}'),
+    logs: JSON.parse(row.logs_json || '[]'),
+    error: row.error_json ? JSON.parse(row.error_json) : null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    canceledAt: row.canceled_at
+  };
+}
+
+function getJobForUser(id, ownerUserId) {
+  const row = db.prepare(
+    'SELECT * FROM jobs WHERE id = ? AND owner_user_id = ?'
+  ).get(String(id), Number(ownerUserId));
+  return rowToJob(row);
+}
+
+/**
+ * Returns true only if `jobId` is a real persisted job owned by `ownerUserId`.
+ * Mirrors `verifyAnalysisObjectOwner` so a job id can never be a client-
+ * controlled path into another user's work.
+ */
+function verifyJobOwner(ownerUserId, jobId) {
+  if (typeof jobId !== 'string' || jobId === '') return false;
+  const row = db.prepare(
+    'SELECT 1 FROM jobs WHERE id = ? AND owner_user_id = ?'
+  ).get(jobId, Number(ownerUserId));
+  return !!row;
+}
+
+function listJobsForUser(ownerUserId, filters = {}) {
+  const clauses = ['owner_user_id = ?'];
+  const params = [Number(ownerUserId)];
+
+  if (filters.status) { clauses.push('status = ?'); params.push(String(filters.status)); }
+  if (filters.jobType) { clauses.push('job_type = ?'); params.push(String(filters.jobType)); }
+  if (filters.analysisObjectId) { clauses.push('analysis_object_id = ?'); params.push(String(filters.analysisObjectId)); }
+  if (filters.resultAnalysisObjectId) { clauses.push('result_analysis_object_id = ?'); params.push(String(filters.resultAnalysisObjectId)); }
+
+  const rows = db.prepare(
+    `SELECT * FROM jobs WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(...params);
+  return rows.map(rowToJob);
+}
+
+/**
+ * Create a job owned by `ownerUserId`.
+ *
+ * The id is always server-generated and the job starts in INITIAL_JOB_STATUS.
+ * A supplied `analysisObjectId` must be a real object owned by the same user.
+ * Throws a coded Error (`INVALID_OWNER`, `INVALID_JOB_TYPE`,
+ * `INVALID_PARAMETERS`, `ANALYSIS_OBJECT_NOT_FOUND`) so the route can map to the
+ * right HTTP status.
+ */
+function createJobForUser(ownerUserId, input = {}) {
+  const owner = Number(ownerUserId);
+  if (!Number.isInteger(owner) || owner <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid authenticated user is required.');
+  }
+
+  const jobType = typeof input.jobType === 'string' ? input.jobType.trim() : '';
+  if (!isValidJobType(jobType)) {
+    throw codedError('INVALID_JOB_TYPE',
+      `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
+  }
+
+  const parameters = input.parameters === undefined ? {} : input.parameters;
+  if (parameters === null || typeof parameters !== 'object' || Array.isArray(parameters)) {
+    throw codedError('INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
+  }
+
+  let analysisObjectId = null;
+  if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
+    if (typeof input.analysisObjectId !== 'string' ||
+        !getAnalysisObjectForUser(input.analysisObjectId, owner)) {
+      // 404-style coded error: never reveal that another user's object exists.
+      throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+    }
+    analysisObjectId = input.analysisObjectId;
+  }
+
+  const id = generateJobId();
+  db.prepare(`
+    INSERT INTO jobs
+      (id, owner_user_id, analysis_object_id, job_type, status, parameters_json)
+    VALUES
+      (@id, @owner, @analysisObjectId, @jobType, @status, @parametersJson)
+  `).run({
+    id,
+    owner,
+    analysisObjectId,
+    jobType,
+    status: INITIAL_JOB_STATUS,
+    parametersJson: JSON.stringify(parameters)
+  });
+
+  return getJobForUser(id, owner);
+}
+
+/**
+ * Move an owned job to `nextStatus`, enforcing the transition allow-list and
+ * stamping the matching timestamp. Optionally attaches a structured error,
+ * links a result analysis object (ownership-verified), and/or appends a log
+ * entry — all in one atomic update. Throws coded errors (`JOB_NOT_FOUND`,
+ * `INVALID_STATUS`, `INVALID_TRANSITION`, `RESULT_OBJECT_NOT_FOUND`).
+ *
+ * This is the only path that mutates job status, so the client can never set an
+ * arbitrary status: routes call cancel (below); a future worker calls this.
+ */
+function updateJobStatusForUser(ownerUserId, jobId, nextStatus, opts = {}) {
+  const owner = Number(ownerUserId);
+  const job = getJobForUser(jobId, owner);
+  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+
+  if (!isValidJobStatus(nextStatus)) {
+    throw codedError('INVALID_STATUS', `Invalid job status: ${nextStatus}.`);
+  }
+  if (!validateJobTransition(job.status, nextStatus)) {
+    throw codedError('INVALID_TRANSITION',
+      `Cannot transition job from '${job.status}' to '${nextStatus}'.`);
+  }
+
+  let resultId = job.resultAnalysisObjectId;
+  if (opts.resultAnalysisObjectId !== undefined && opts.resultAnalysisObjectId !== null) {
+    if (typeof opts.resultAnalysisObjectId !== 'string' ||
+        !getAnalysisObjectForUser(opts.resultAnalysisObjectId, owner)) {
+      throw codedError('RESULT_OBJECT_NOT_FOUND', 'Result analysis object not found.');
+    }
+    resultId = opts.resultAnalysisObjectId;
+  }
+
+  const logs = opts.log !== undefined ? [...job.logs, normalizeJobLogEntry(opts.log)] : job.logs;
+  const errorJson = opts.error !== undefined
+    ? (opts.error === null ? null : JSON.stringify(normalizeJobError(opts.error)))
+    : (job.error === null ? null : JSON.stringify(job.error));
+
+  // All timestamp columns are stamped by SQLite so their format matches the
+  // created_at default. started_at is set once (first entry into 'running');
+  // completed_at covers both completed and failed; canceled_at covers cancel.
+  db.prepare(`
+    UPDATE jobs SET
+      status = @status,
+      result_analysis_object_id = @resultId,
+      logs_json = @logsJson,
+      error_json = @errorJson,
+      updated_at = datetime('now'),
+      started_at = CASE WHEN @status = 'running' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+      completed_at = CASE WHEN @status IN ('completed', 'failed') THEN datetime('now') ELSE completed_at END,
+      canceled_at = CASE WHEN @status = 'canceled' THEN datetime('now') ELSE canceled_at END
+    WHERE id = @id AND owner_user_id = @owner
+  `).run({
+    id: jobId,
+    owner,
+    status: nextStatus,
+    resultId,
+    logsJson: JSON.stringify(logs),
+    errorJson
+  });
+
+  return getJobForUser(jobId, owner);
+}
+
+/**
+ * Cancel an owned, non-terminal job. Throws `JOB_NOT_FOUND` (unknown/not-owned)
+ * or `JOB_NOT_CANCELABLE` (already completed/failed/canceled) so the route can
+ * return 404 / 409 respectively. Does NOT touch any R process — there is no
+ * execution abstraction to interrupt in this branch.
+ */
+function cancelJobForUser(ownerUserId, jobId) {
+  const owner = Number(ownerUserId);
+  const job = getJobForUser(jobId, owner);
+  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (TERMINAL_JOB_STATUSES.has(job.status)) {
+    throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
+  }
+  return updateJobStatusForUser(owner, jobId, 'canceled', {
+    log: { level: 'info', message: 'Job canceled by owner.' }
+  });
+}
+
+/** Append a single log entry to an owned job without changing its status. */
+function appendJobLogForUser(ownerUserId, jobId, entry) {
+  const owner = Number(ownerUserId);
+  const job = getJobForUser(jobId, owner);
+  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  const logs = [...job.logs, normalizeJobLogEntry(entry)];
+  db.prepare(
+    "UPDATE jobs SET logs_json = ?, updated_at = datetime('now') WHERE id = ? AND owner_user_id = ?"
+  ).run(JSON.stringify(logs), jobId, owner);
+  return getJobForUser(jobId, owner);
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────
 
 function closeDatabase() {
@@ -599,6 +916,18 @@ module.exports = {
   createAnalysisObjectForUser,
   listAnalysisObjectsForUser,
   getAnalysisObjectForUser,
-  verifyAnalysisObjectOwner
+  verifyAnalysisObjectOwner,
+  // Jobs / task execution
+  isValidJobType,
+  isValidJobStatus,
+  validateJobTransition,
+  generateJobId,
+  createJobForUser,
+  listJobsForUser,
+  getJobForUser,
+  verifyJobOwner,
+  updateJobStatusForUser,
+  cancelJobForUser,
+  appendJobLogForUser
 };
 

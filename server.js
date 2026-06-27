@@ -503,6 +503,83 @@ app.get('/api/analysis-objects/:id', (req, res) => {
   res.json(obj);
 });
 
+// ── Jobs API ────────────────────────────────────────────────────────────
+// Durable, ownership-scoped records for long-running analysis work. Job ids
+// and status are server-managed; clients may never choose an id, assert
+// ownership, or set a status. This is the foundation for backgrounding R work
+// — there is no worker draining jobs yet (see docs/architecture.md).
+app.use('/api/jobs', express.json());
+app.use('/api/jobs', requireAuth);
+
+app.post('/api/jobs', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+  // Job ids are server-issued. Reject any client attempt to choose one.
+  if (body.id !== undefined) {
+    return res.status(400).json({ error: 'Job id is server-assigned and must not be provided.' });
+  }
+  // Ownership is derived from the session only — never from the request body.
+  for (const field of REJECTED_OWNER_FIELDS) {
+    if (body[field] !== undefined) {
+      return res.status(400).json({ error: `Field '${field}' is not allowed; ownership is derived from the session.` });
+    }
+  }
+  // Status is server-managed; a client cannot pick the initial status.
+  if (body.status !== undefined) {
+    return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
+  }
+
+  try {
+    const created = db.createJobForUser(req.user.id, {
+      analysisObjectId: body.analysisObjectId,
+      jobType: body.jobType,
+      parameters: body.parameters
+    });
+    res.status(201).json(created);
+  } catch (e) {
+    if (e.code === 'ANALYSIS_OBJECT_NOT_FOUND') return res.status(404).json({ error: e.message });
+    if (['INVALID_JOB_TYPE', 'INVALID_PARAMETERS', 'INVALID_OWNER'].includes(e.code)) {
+      return res.status(400).json({ error: e.message });
+    }
+    console.error('[Jobs] Create failed:', e);
+    res.status(500).json({ error: 'Failed to create job.' });
+  }
+});
+
+app.get('/api/jobs', (req, res) => {
+  const filters = {
+    status: typeof req.query.status === 'string' ? req.query.status : undefined,
+    jobType: typeof req.query.jobType === 'string' ? req.query.jobType : undefined,
+    analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
+    resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined
+  };
+  res.json(db.listJobsForUser(req.user.id, filters));
+});
+
+app.get('/api/jobs/:id', (req, res) => {
+  const job = db.getJobForUser(req.params.id, req.user.id);
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  res.json(job);
+});
+
+app.get('/api/jobs/:id/logs', (req, res) => {
+  const job = db.getJobForUser(req.params.id, req.user.id);
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
+});
+
+app.post('/api/jobs/:id/cancel', (req, res) => {
+  try {
+    const job = db.cancelJobForUser(req.user.id, req.params.id);
+    res.json(job);
+  } catch (e) {
+    if (e.code === 'JOB_NOT_FOUND') return res.status(404).json({ error: e.message });
+    if (e.code === 'JOB_NOT_CANCELABLE') return res.status(409).json({ error: e.message });
+    console.error('[Jobs] Cancel failed:', e);
+    res.status(500).json({ error: 'Failed to cancel job.' });
+  }
+});
+
 // ── File Upload API (Replacing Desktop Dialogs) ─────────────────────────
 // For a cloud app, the user cannot pick a local path and send it to R.
 // They must upload the file to the Node.js server, which places it somewhere R can read.
