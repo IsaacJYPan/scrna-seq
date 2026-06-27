@@ -51,10 +51,11 @@ describe('database.js tests', () => {
       user_id: 'user-1'
     };
 
-    const insertedId = saveProvenance({ provenance: record, result: { message: "success" } });
+    // user-owned helpers now require an owner email (see finding 6).
+    const insertedId = saveProvenance({ userEmail: 'owner@example.com', provenance: record, result: { message: "success" } });
     expect(insertedId).toBe('prov-1');
 
-    const retrieved = getProvenance('prov-1');
+    const retrieved = getProvenance('prov-1', 'owner@example.com');
     expect(retrieved).not.toBeNull();
     expect(retrieved.id).toBe('prov-1');
     expect(retrieved.operation).toEqual('RunUMAP');
@@ -83,8 +84,8 @@ describe('database.js tests', () => {
     expect(figures.length).toBe(1);
     expect(figures[0].plotType).toBe('FeaturePlot');
 
-    // Delete
-    deleteFigure('fig-1');
+    // Delete (user-owned helper now requires an owner email — see finding 6)
+    deleteFigure('fig-1', 'test2@example.com');
     
     // Verify Delete
     figures = getFiguresByUser('test2@example.com', 'obj-1');

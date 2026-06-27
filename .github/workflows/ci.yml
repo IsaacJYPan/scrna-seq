@@ -64,7 +64,17 @@ jobs:
         # status-machine enforcement. These guard the regression where a stale
         # pre-rebase branch reintroduced unscoped cross-user deletes and
         # client-controlled R state keys.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js --environment node
+        #
+        # Also runs the pre-collaboration security cleanup regressions:
+        #   auth-ratelimit      (finding 1: 429 on rapid login/signup)
+        #   r-diagnostic-gate   (finding 2: //__test, %2F__test gated to 404)
+        #   r-path-drift        (finding 4: R validate_path fields vs Node allowlist)
+        #   auth-credentials    (finding 7: generic 401, no user-enumeration message)
+        #   security/analysis-objects (findings 5, 6, 9: figure path, owner-required helpers, datasetId caveat)
+        # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
+        # step (npm run test:backend); this step names the security-critical
+        # suites explicitly so the regression coverage is auditable.
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
