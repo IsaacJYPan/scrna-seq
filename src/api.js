@@ -196,6 +196,16 @@ export const electronAPI = {
   deleteProvenance: async (id) => req(`/api/db/provenance/${id}`, { method: 'DELETE' }),
   dbDeleteProvenance: async (id) => req(`/api/db/provenance/${id}`, { method: 'DELETE' }),
 
+  // Analysis Objects (durable, ownership-scoped object identity)
+  createAnalysisObject: async (payload) => req('/api/analysis-objects', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listAnalysisObjects: async (filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/analysis-objects${qs ? `?${qs}` : ''}`);
+  },
+  getAnalysisObject: async (id) => req(`/api/analysis-objects/${id}`),
+
   // Cache
   makeCacheKey: async (op, params, ver, pids) => {
     const res = await req('/api/db/cache-key', { method: 'POST', body: JSON.stringify({ operation: op, params, dataVersion: ver, parentIds: pids }) });

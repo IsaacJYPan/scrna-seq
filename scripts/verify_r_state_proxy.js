@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 
+// Live integration check for per-user / per-object R session isolation.
+//
+// This drives a real Express server + real R Plumber backend and proves that
+// object-specific R sessions ONLY work for database-backed analysis objects
+// owned by the authenticated user. Object ids are no longer arbitrary client
+// strings: each X-Object-ID used below is first created through the
+// authenticated POST /api/analysis-objects route, and the server issues the id.
+//
+// It additionally proves that malformed, unknown, and cross-user object ids are
+// rejected by Express *before* the request can reach R. (The same ownership
+// rejection logic is unit-covered, without R, in backend/r-proxy-ownership.test.js.)
+
 const { spawn, spawnSync } = require('child_process');
 const http = require('http');
 const fs = require('fs');
@@ -12,11 +24,10 @@ const PORT = Number(process.env.TEST_PORT || 18121);
 const PLUMBER_PORT = Number(process.env.PLUMBER_TEST_PORT || 18122);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const TEST_EMAIL = `r-state-${Date.now()}@example.com`;
+const OTHER_EMAIL = `r-state-other-${Date.now()}@example.com`;
 const TEST_PASSWORD = 'RStateProxy123!';
-const OBJECT_A = 'objectA';
-const OBJECT_B = 'objectB';
-const OBJECT_C = 'objectC';
 const MALICIOUS_OBJECT_ID = 'user-999:obj-objectA/../../<script>';
+const UNKNOWN_OBJECT_ID = 'ao_deadbeefdeadbeef';
 
 let passCount = 0;
 
@@ -29,6 +40,7 @@ function sanitizeObjectIdSegment(value) {
   return cleaned.replace(/^[._-]+/, '');
 }
 
+// Mirror of server.js deriveRStateKey for the verified-id case.
 function expectedKey(userId, clientObjectId) {
   const base = `user-${userId}`;
   const segment = sanitizeObjectIdSegment(clientObjectId);
@@ -150,6 +162,23 @@ function asArray(value) {
   return [];
 }
 
+async function signup(email) {
+  const res = await retry(async () => {
+    const response = await request('POST', '/api/auth/signup', {
+      body: { email, password: TEST_PASSWORD, displayName: 'R State Proxy Test' },
+    });
+    if (response.status === 201) return response;
+    return false;
+  }, 60000);
+  return { token: res.body.token, userId: res.body.user.id };
+}
+
+async function createAnalysisObject(token) {
+  const res = await request('POST', '/api/analysis-objects', { token, body: { objectType: 'seurat' } });
+  if (res.status !== 201) throw new Error(`create analysis object failed: ${JSON.stringify(res.body)}`);
+  return res.body.id;
+}
+
 async function main() {
   const safeEmail = sanitizeVaultSegment(TEST_EMAIL);
   const fixtureDir = path.join(WORKSPACE, 'vault', safeEmail, 'state-proxy-smoke');
@@ -180,18 +209,21 @@ async function main() {
   server.stderr.on('data', chunk => { serverOutput += chunk.toString(); });
 
   try {
-    const signup = await retry(async () => {
-      const response = await request('POST', '/api/auth/signup', {
-        body: { email: TEST_EMAIL, password: TEST_PASSWORD, displayName: 'R State Proxy Test' },
-      });
-      if (response.status === 201) return response;
-      return false;
-    }, 60000);
-
-    const token = signup.body.token;
-    const userId = signup.body.user.id;
+    const { token, userId } = await signup(TEST_EMAIL);
     assert(Boolean(token), 'created authenticated test user');
-    assert(Number.isInteger(userId), 'test user has numeric id', JSON.stringify(signup.body.user));
+    assert(Number.isInteger(userId), 'test user has numeric id', String(userId));
+
+    // A second user, used to prove cross-user object ids are rejected.
+    const other = await signup(OTHER_EMAIL);
+    const otherObjectId = await createAnalysisObject(other.token);
+
+    // Object ids are created through the authenticated API and issued by the
+    // server. These DB-backed ids are what we use as X-Object-ID below.
+    const objectA = await createAnalysisObject(token);
+    const objectB = await createAnalysisObject(token);
+    const objectC = await createAnalysisObject(token);
+    assert(/^ao_[0-9a-f]+$/.test(objectA), 'server issued DB-backed object id A', objectA);
+    assert(objectA !== objectB && objectB !== objectC, 'distinct DB-backed object ids', `${objectA},${objectB},${objectC}`);
 
     const unauth = await request('GET', '/api/r/health');
     assert(unauth.status === 401 || unauth.status === 403, 'unauthenticated /api/r request is rejected', `HTTP ${unauth.status}`);
@@ -202,54 +234,60 @@ async function main() {
     }, 60000);
     console.log(`INFO Express ${BASE_URL} -> Plumber ${PLUMBER_PORT} is healthy`);
 
+    // ── Ownership rejection: these never reach R ──────────────────────────
+    const malicious = await request('GET', '/api/r/__test/session-state', { token, objectId: MALICIOUS_OBJECT_ID });
+    assert(malicious.status === 400, 'malformed object id is rejected before reaching R', `HTTP ${malicious.status}`);
+
+    const unknown = await request('GET', '/api/r/__test/session-state', { token, objectId: UNKNOWN_OBJECT_ID });
+    assert(unknown.status === 404, 'unknown (non-DB) object id is rejected before reaching R', `HTTP ${unknown.status}`);
+
+    const crossUser = await request('GET', '/api/r/__test/session-state', { token, objectId: otherObjectId });
+    assert(crossUser.status === 404, 'another user object id is rejected before reaching R', `HTTP ${crossUser.status}`);
+
+    // ── No X-Object-ID: legacy user-scoped key ────────────────────────────
     const noObject = await request('GET', '/api/r/__test/session-state', { token });
     assert(noObject.status === 200, 'authenticated diagnostic request without object id reaches R', `HTTP ${noObject.status}`);
     assert(noObject.body.x_object_id === expectedKey(userId), 'no X-Object-ID maps to user-scoped key', noObject.body.x_object_id);
 
-    const malicious = await request('GET', '/api/r/__test/session-state', { token, objectId: MALICIOUS_OBJECT_ID });
-    const expectedMaliciousKey = expectedKey(userId, MALICIOUS_OBJECT_ID);
-    assert(malicious.body.x_object_id === expectedMaliciousKey, 'malicious object id is sanitized before R sees it', malicious.body.x_object_id);
-    assert(!malicious.body.x_object_id.includes('/') && !malicious.body.x_object_id.includes('<') && !malicious.body.x_object_id.includes('>'), 'sanitized R key removes unsafe path/html characters');
-    assert(malicious.body.x_object_id.startsWith(`user-${userId}:obj-`), 'client cannot override server-controlled user prefix', malicious.body.x_object_id);
-
-    const loadA = await request('POST', '/api/r/load-rds', { token, objectId: OBJECT_A, body: { path: relObjectA } });
+    // ── Per-object isolation across two DB-backed objects ─────────────────
+    const loadA = await request('POST', '/api/r/load-rds', { token, objectId: objectA, body: { path: relObjectA } });
     assert(loadA.status === 200 && !loadA.body.error, 'objectA loads through authenticated proxy', JSON.stringify(loadA.body));
-    const infoA = resultPayload((await request('GET', '/api/r/object-info', { token, objectId: OBJECT_A })).body);
+    const infoA = resultPayload((await request('GET', '/api/r/object-info', { token, objectId: objectA })).body);
     assert(infoA.n_cells === 12, 'objectA inspect reports 12 cells', JSON.stringify(infoA));
-    const qcA = await request('GET', '/api/r/qc-distributions', { token, objectId: OBJECT_A });
+    const qcA = await request('GET', '/api/r/qc-distributions', { token, objectId: objectA });
     assert(qcA.status === 200 && qcA.body.n_cells === 12, 'objectA QC distributions report 12 cells', JSON.stringify(qcA.body));
 
-    const normA = await request('GET', '/api/r/normalize?nfeatures=10', { token, objectId: OBJECT_A });
+    const normA = await request('GET', '/api/r/normalize?nfeatures=10', { token, objectId: objectA });
     assert(normA.status === 200 && !normA.body.error, 'objectA normalization succeeds', JSON.stringify(normA.body));
-    const pcaA = await request('GET', '/api/r/pca?npcs=5&seed=123', { token, objectId: OBJECT_A });
+    const pcaA = await request('GET', '/api/r/pca?npcs=5&seed=123', { token, objectId: objectA });
     assert(pcaA.status === 200 && !pcaA.body.error, 'objectA PCA succeeds', JSON.stringify(pcaA.body));
 
-    const beforeB = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_B });
-    assert(beforeB.body.x_object_id === expectedKey(userId, OBJECT_B), 'objectB maps to distinct user/object key', beforeB.body.x_object_id);
+    const beforeB = await request('GET', '/api/r/__test/session-state', { token, objectId: objectB });
+    assert(beforeB.body.x_object_id === expectedKey(userId, objectB), 'objectB maps to distinct user/object key', beforeB.body.x_object_id);
     assert(beforeB.body.has_global_obj === false, 'objectB starts with no R object before load');
 
-    const loadB = await request('POST', '/api/r/load-rds', { token, objectId: OBJECT_B, body: { path: relObjectB } });
+    const loadB = await request('POST', '/api/r/load-rds', { token, objectId: objectB, body: { path: relObjectB } });
     assert(loadB.status === 200 && !loadB.body.error, 'objectB loads through authenticated proxy', JSON.stringify(loadB.body));
-    const infoB = resultPayload((await request('GET', '/api/r/object-info', { token, objectId: OBJECT_B })).body);
+    const infoB = resultPayload((await request('GET', '/api/r/object-info', { token, objectId: objectB })).body);
     assert(infoB.n_cells === 16, 'objectB inspect reports 16 cells', JSON.stringify(infoB));
-    const normB = await request('GET', '/api/r/normalize?nfeatures=10', { token, objectId: OBJECT_B });
+    const normB = await request('GET', '/api/r/normalize?nfeatures=10', { token, objectId: objectB });
     assert(normB.status === 200 && !normB.body.error, 'objectB normalization succeeds', JSON.stringify(normB.body));
 
-    const stateB = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_B });
+    const stateB = await request('GET', '/api/r/__test/session-state', { token, objectId: objectB });
     const reductionsB = asArray(stateB.body.reductions);
     assert(stateB.body.has_global_obj === true && stateB.body.n_cells === 16, 'objectB retains its own loaded state', JSON.stringify(stateB.body));
     assert(!reductionsB.includes('pca'), 'objectB does not inherit objectA PCA state', JSON.stringify(stateB.body.reductions));
 
-    const stateA = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_A });
+    const stateA = await request('GET', '/api/r/__test/session-state', { token, objectId: objectA });
     const reductionsA = asArray(stateA.body.reductions);
     assert(stateA.body.has_global_obj === true && stateA.body.n_cells === 12, 'objectA still has its own loaded state after objectB operations', JSON.stringify(stateA.body));
     assert(reductionsA.includes('pca'), 'objectA keeps PCA state after objectB operations', JSON.stringify(stateA.body.reductions));
 
-    const saveA = await request('POST', '/api/r/save-session', { token, objectId: OBJECT_A, body: { path: relSession } });
+    const saveA = await request('POST', '/api/r/save-session', { token, objectId: objectA, body: { path: relSession } });
     assert(saveA.status === 200 && saveA.body.success === true, 'objectA save-session succeeds', JSON.stringify(saveA.body));
-    const restoreC = await request('POST', '/api/r/restore-session', { token, objectId: OBJECT_C, body: { path: relSession } });
+    const restoreC = await request('POST', '/api/r/restore-session', { token, objectId: objectC, body: { path: relSession } });
     assert(restoreC.status === 200 && restoreC.body.success === true, 'objectC restore-session from objectA succeeds', JSON.stringify(restoreC.body));
-    const stateC = await request('GET', '/api/r/__test/session-state', { token, objectId: OBJECT_C });
+    const stateC = await request('GET', '/api/r/__test/session-state', { token, objectId: objectC });
     assert(stateC.body.n_cells === 12 && asArray(stateC.body.reductions).includes('pca'), 'restored objectC has objectA cells and PCA state', JSON.stringify(stateC.body));
 
     const defaultLoad = await request('POST', '/api/r/load-rds', { token, body: { path: relObjectA } });
@@ -258,7 +296,7 @@ async function main() {
     assert(defaultState.body.x_object_id === expectedKey(userId), 'single-object behavior uses base user key', defaultState.body.x_object_id);
     assert(defaultState.body.n_cells === 12, 'single-object behavior keeps its own base-key state', JSON.stringify(defaultState.body));
 
-    console.log(`SUMMARY passed=${passCount} userId=${userId} objectAKey=${expectedKey(userId, OBJECT_A)} objectBKey=${expectedKey(userId, OBJECT_B)}`);
+    console.log(`SUMMARY passed=${passCount} userId=${userId} objectAKey=${expectedKey(userId, objectA)} objectBKey=${expectedKey(userId, objectB)}`);
   } catch (err) {
     console.error('\nVERIFY_R_STATE_PROXY_FAILED');
     console.error(err.stack || err.message);

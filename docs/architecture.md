@@ -124,38 +124,60 @@ graph TD
 
 ## R Execution Model
 - **Proxying.** `app.use('/api/r', ...)` authenticates, parses JSON, validates
-  vault paths, and proxies to `http://127.0.0.1:8000` via
-  `http-proxy-middleware`, stripping the `/api/r` prefix. It injects the Plumber
-  `X-API-Token` (a per-process random secret) and an `X-Object-ID` state key.
+  vault paths, verifies analysis-object ownership, and proxies to
+  `http://127.0.0.1:8000` via `http-proxy-middleware`, stripping the `/api/r`
+  prefix. It injects the Plumber `X-API-Token` (a per-process random secret) and
+  a server-derived `X-Object-ID` state key.
 - **How R state is keyed today.** The R process holds a single live `global_obj`
   (plus `raw_obj`) and saves/restores it per `X-Object-ID` into an
   `active_sessions` environment (filter `session_loader` in `plumber.R`).
-  The Express proxy derives that key with `deriveRStateKey(req.user, X-Object-ID)`:
+  The Express proxy derives that key with `deriveRStateKey(req.user, objectId)`:
   - The **prefix is always `user-${user.id}`**, taken from the verified session.
     It is never client-controlled, so one user can never address another user's R
     state.
-  - If the client supplies an object/dataset id (the frontend already sends the
-    active dataset id as `X-Object-ID`), it is sanitized and appended as
-    `:obj-<id>`, so two concurrent objects for the *same* user no longer collide
-    on one shared `global_obj`. With no object id the key is exactly `user-${id}`,
-    preserving prior behavior.
-  - Covered by the `deriveRStateKey` tests in `backend/server-security.test.js`.
+  - If the client supplies an `X-Object-ID`, it is **verified against the
+    `analysis_objects` table** by `verifyRObjectOwnership` *before* the request
+    reaches R: it must be a real object id owned by the authenticated user.
+    Malformed ids are rejected with 400; unknown or not-owned ids with 404. Only
+    the verified canonical id is then appended as `:obj-<id>`, so two concurrent
+    objects for the *same* user no longer collide on one shared `global_obj`.
+    With no object id the key is exactly `user-${id}`, preserving prior behavior.
+  - Covered by `deriveRStateKey` tests in `backend/server-security.test.js`,
+    object-ownership tests in `backend/r-proxy-ownership.test.js`, and the live
+    `scripts/verify_r_state_proxy.js` smoke test.
+
+### Analysis Object Identity & Lineage (`analysis_objects`)
+Object identity is durable and ownership-scoped, so an `X-Object-ID` can no
+longer be an arbitrary client string that selects R session state:
+- The `analysis_objects` table (`backend/database.js`) records each object with a
+  server-generated `id` (`ao_<random>`), its integer `owner_user_id`, lineage
+  links (`parent_object_id`, `lineage_root_id`), and optional `dataset_id`,
+  `created_by_provenance_id`, `object_type`, and JSON `metadata`. It is indexed by
+  owner, dataset, parent, lineage root, and provenance.
+- Object ids are **server-issued only**. `POST /api/analysis-objects` rejects any
+  client-supplied `id` or owner field (`userId`, `owner_user_id`, …); ownership
+  always comes from `req.user`.
+- Linked references are ownership-checked at creation: a `parentObjectId` or
+  `createdByProvenanceId` not owned by the caller is rejected (404). Lineage root
+  is inherited from the parent, or set to the object's own id for a root object.
+- Routes (`POST` / `GET` / `GET /:id` under `/api/analysis-objects`) are
+  authenticated and owner-scoped; not-owned/unknown ids return 404. A test-only
+  `GET /api/r/__test/state-key` diagnostic exposes the derived key (gated by
+  `ENABLE_R_TEST_DIAGNOSTICS`, 404 in production / when disabled).
 
 ### R state — remaining design note (production blocker)
-`deriveRStateKey` removes the *same-user collision* risk for requests that carry
-a distinct object id, and it keeps cross-user isolation intact. It is **not** a
-complete fix:
-- The object id is a sub-partition of the user's own namespace, not an
-  authorization boundary. It is safe precisely because the user prefix is
-  server-controlled; the object id itself is **not** verified against an
-  ownership record because no such record exists yet.
+`deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
+now confirms any client object id is a real `analysis_objects` row owned by the
+caller before it can influence R state. That closes the *client-controlled object
+id* gap, but the R execution model is still **not** production-grade:
 - R state still lives in a single in-process environment in one R process. There
   is no durable per-object workspace, no job model, and no concurrency control —
   long-running steps still block and state is lost on R restart.
 
 **Prerequisites for the real fix:**
-1. An `analysis_objects` table (id, owner `user_email`, dataset lineage) so the
-   server can *verify* a requested object id belongs to the caller.
+1. ~~An `analysis_objects` table so the server can *verify* a requested object id
+   belongs to the caller.~~ **Done** (this branch — `analysis_objects` +
+   `verifyRObjectOwnership`).
 2. A `jobs` model + job queue so each long R computation is an addressable,
    resumable unit keyed by `job_id` (and so requests don't block).
 3. R state persisted/loaded per `(user, object|job)` from durable storage rather
@@ -176,16 +198,19 @@ complete fix:
 
 ## Remaining Blockers
 - **HTTP-level auth tests** — done (`backend/http-auth.test.js`).
+- **Analysis object identity + R object-ownership verification** — done
+  (`analysis_objects` table, `verifyRObjectOwnership`).
 - **R state keyed by object/job** — *partially* done. Same-user object
-  separation and cross-user isolation are in place via `deriveRStateKey`; durable
-  per-object/job workspaces + ownership verification remain (see prerequisites
+  separation, cross-user isolation, and DB-backed object-ownership verification
+  are in place; durable per-object/job workspaces remain (see prerequisites
   above).
 - **Job queue** for long R tasks — not implemented; long steps block the single R
   process.
 - **Secure session/cookie migration** — tokens are still stored in `localStorage`
   on the client; migrate to httpOnly secure cookies.
 - **Project/org membership model** — not implemented; authorization is per-user
-  only.
+  only. `dataset_id` on analysis objects is an opaque nullable tag until a
+  durable datasets/projects model lands.
 - **Deployment target** — not defined (no container/orchestration manifest for
   the full stack beyond the R `Dockerfile`).
 - **Object storage** — uploads/artifacts are on local disk (`vault/`).
@@ -200,3 +225,7 @@ complete fix:
 - **Lint debt** — `eslint .` passes with 0 errors but ~100 warnings (mostly
   `no-unused-vars` and `react-hooks/*`), including a real hooks-after-return issue
   in `src/pages/QualityControl.jsx` tracked for a follow-up.
+- **No durable jobs/queue model**, **no project/org collaboration authorization**,
+  **no full object-storage or durable R-worker execution model**, and **no
+  complete reproducibility artifact model** — analysis-object ownership is a
+  security fix, not a claim of production readiness.
