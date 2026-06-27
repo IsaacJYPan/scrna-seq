@@ -32,7 +32,7 @@ graph TD
         DBAPI["/api/db/* routes"]
         Upload["/api/upload* routes"]
         Proxy["/api/r/* proxy"]
-        DB[(SQLite: users, provenance, cache, figures)]
+        DB[(SQLite: users, provenance, cache, figures, analysis_objects, jobs)]
         Vault[(Per-user upload vault/)]
     end
 
@@ -60,7 +60,7 @@ graph TD
   Plumber process on startup (dev/local mode).
 - **SQLite (`backend/database.js`)** — `better-sqlite3`, opened by the Express
   process (not Electron). Tables: `users`, `provenance`, `results_cache`,
-  `figure_collection`.
+  `figure_collection`, `analysis_objects`, and `jobs`.
 - **R Plumber/Seurat backend (`r-backend/`)** — stateful R process exposing a
   REST API on `127.0.0.1:8000`, holding the live Seurat object in memory.
 
@@ -165,21 +165,58 @@ longer be an arbitrary client string that selects R session state:
   `GET /api/r/__test/state-key` diagnostic exposes the derived key (gated by
   `ENABLE_R_TEST_DIAGNOSTICS`, 404 in production / when disabled).
 
+### Jobs / Task Execution (`jobs`)
+Long-running analysis is no longer modeled as *only* a browser request/response.
+The `jobs` table (`backend/database.js`) gives each unit of work a durable,
+ownership-scoped record:
+- Each row has a server-generated `id` (`job_<random>`), an integer
+  `owner_user_id`, an optional target `analysis_object_id` and
+  `result_analysis_object_id`, a `job_type`, an explicit `status`, the
+  `parameters_json` it was created with, an append-only `logs_json`, an optional
+  structured `error_json`, and lifecycle timestamps (`created/updated/started/
+  completed/canceled_at`). Indexed by owner, analysis object, result object,
+  type, status, and creation time.
+- **Identity & ownership are server-owned.** `POST /api/jobs` rejects any
+  client-supplied `id`, owner field (`userId`, `owner_user_id`, …), or `status`;
+  ownership always comes from `req.user`. A supplied `analysisObjectId` must be a
+  real object owned by the caller (else 404, no enumeration).
+- **Status is a server-managed state machine.** Statuses are `created`,
+  `queued`, `running`, `waiting_for_user`, `completed`, `failed`, `canceled`.
+  Jobs are created `queued`. Transitions are an explicit allow-list
+  (`validateJobTransition`): `created→queued`, `queued→running`,
+  `running→{completed,failed,waiting_for_user}`, `waiting_for_user→{queued,
+  running}`, and any non-terminal status `→canceled`; `completed`/`failed`/
+  `canceled` are terminal. Clients cannot set an arbitrary status — they may only
+  create and cancel; all other transitions go through `updateJobStatusForUser`
+  (the path a future worker will use). A linked `resultAnalysisObjectId` is
+  ownership-verified the same way.
+- Routes (`POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/:id`,
+  `GET /api/jobs/:id/logs`, `POST /api/jobs/:id/cancel`) are authenticated and
+  owner-scoped; unknown/not-owned ids return 404, and canceling an already-
+  terminal job returns 409. Covered by `backend/jobs.test.js` (HTTP ownership +
+  the status-machine/helper layer).
+- **Scope of this branch.** This is the *durable record + API + ownership
+  boundary* only. There is **no worker or queue draining jobs yet**: nothing
+  advances a job past `queued`, and existing R proxy execution is unchanged and
+  still synchronous. Jobs are not yet wired into the R proxy (no `X-Job-ID`).
+
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
 now confirms any client object id is a real `analysis_objects` row owned by the
 caller before it can influence R state. That closes the *client-controlled object
 id* gap, but the R execution model is still **not** production-grade:
-- R state still lives in a single in-process environment in one R process. There
-  is no durable per-object workspace, no job model, and no concurrency control —
-  long-running steps still block and state is lost on R restart.
+- R state still lives in a single in-process environment in one R process. The
+  `jobs` table exists as a durable record, but no worker drains it and R work is
+  still synchronous with no concurrency control — long-running steps still block
+  and live R state is lost on R restart.
 
 **Prerequisites for the real fix:**
 1. ~~An `analysis_objects` table so the server can *verify* a requested object id
-   belongs to the caller.~~ **Done** (this branch — `analysis_objects` +
-   `verifyRObjectOwnership`).
+   belongs to the caller.~~ **Done** (`analysis_objects` + `verifyRObjectOwnership`).
 2. A `jobs` model + job queue so each long R computation is an addressable,
-   resumable unit keyed by `job_id` (and so requests don't block).
+   resumable unit keyed by `job_id` (and so requests don't block). **Partially
+   done** (this branch): the durable, owner-scoped `jobs` model + API exist; a
+   queue/worker that actually executes jobs and wires `job_id` into R does not.
 3. R state persisted/loaded per `(user, object|job)` from durable storage rather
    than a single mutable `global_obj`, ideally in per-object R workers/containers.
 
@@ -204,8 +241,12 @@ id* gap, but the R execution model is still **not** production-grade:
   separation, cross-user isolation, and DB-backed object-ownership verification
   are in place; durable per-object/job workspaces remain (see prerequisites
   above).
-- **Job queue** for long R tasks — not implemented; long steps block the single R
-  process.
+- **Jobs model** — done as a *durable record + owner-scoped API* (`jobs` table,
+  `/api/jobs`, server-managed status machine). It is the foundation for
+  backgrounding R work but is **not** an executor.
+- **Job queue / worker** for long R tasks — not implemented; nothing drains the
+  `jobs` queue, jobs are not wired into the R proxy, and long steps still block
+  the single R process.
 - **Secure session/cookie migration** — tokens are still stored in `localStorage`
   on the client; migrate to httpOnly secure cookies.
 - **Project/org membership model** — not implemented; authorization is per-user
@@ -225,7 +266,9 @@ id* gap, but the R execution model is still **not** production-grade:
 - **Lint debt** — `eslint .` passes with 0 errors but ~100 warnings (mostly
   `no-unused-vars` and `react-hooks/*`), including a real hooks-after-return issue
   in `src/pages/QualityControl.jsx` tracked for a follow-up.
-- **No durable jobs/queue model**, **no project/org collaboration authorization**,
-  **no full object-storage or durable R-worker execution model**, and **no
-  complete reproducibility artifact model** — analysis-object ownership is a
-  security fix, not a claim of production readiness.
+- **No queue/worker draining the `jobs` model** (the durable job record exists,
+  but execution is still synchronous and not job-backed), **no project/org
+  collaboration authorization**, **no full object-storage or durable R-worker
+  execution model**, and **no complete reproducibility artifact model** —
+  analysis-object ownership and the durable jobs model are security/foundation
+  work, not a claim of production-grade R execution.

@@ -59,11 +59,12 @@ jobs:
         run: npm run test:backend
 
       - name: Run Security Tests
-        # Per-user DB isolation + analysis-object identity/ownership and the
-        # R-proxy X-Object-ID ownership contract. These guard the regression
-        # where a stale pre-rebase branch reintroduced unscoped cross-user
-        # deletes and client-controlled R state keys.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js --environment node
+        # Per-user DB isolation + analysis-object identity/ownership, the
+        # R-proxy X-Object-ID ownership contract, and durable job ownership /
+        # status-machine enforcement. These guard the regression where a stale
+        # pre-rebase branch reintroduced unscoped cross-user deletes and
+        # client-controlled R state keys.
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
