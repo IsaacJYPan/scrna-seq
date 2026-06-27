@@ -1,12 +1,20 @@
+# Local/dev convenience: containerizes ONLY the R Plumber backend so you don't
+# have to install R/Seurat on the host. This is NOT a collaborator/production
+# deployment path. The R Plumber backend is NOT authenticated and must NOT be
+# the user-facing service — the Express server (server.js) is the auth/proxy
+# tier and all user traffic must go through it. The port below is therefore
+# bound to localhost only.
 version: '3.8'
 
 services:
   r-backend:
-    build: 
+    build:
       context: ./r-backend
       dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      # localhost-only: Express (on the host) proxies to this; users never
+      # connect to R Plumber directly.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
       - ./exports:/app/exports

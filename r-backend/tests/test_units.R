@@ -774,6 +774,61 @@ run_test("Figure export with advanced publication styling", function() {
 })
 
 # ═════════════════════════════════════════════════════════════════════════════
+# TEST 16b: Figure export path is collision-resistant & user/object-scoped
+# ═════════════════════════════════════════════════════════════════════════════
+# Regression for the shared exports/ collision risk (audit finding 3). Mirrors
+# the destination-derivation logic in plumber.R's /export-figure: the export
+# directory segment comes only from the server-injected X-Object-ID (sanitized),
+# plot_type is sanitized, and a random suffix is appended so two users (or one
+# user twice) exporting the same plot type in the same second cannot collide.
+
+run_test("Figure export paths do not collide across users/objects", function() {
+  `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0 && a != "") a else b
+
+  # Replicates plumber.R /export-figure destination derivation. Kept in sync
+  # with that endpoint; if the endpoint logic changes, update here too.
+  derive_export_path <- function(x_object_id, plot_type, format = "png", base = "/srv") {
+    object_seg <- if (is.null(x_object_id) || nchar(x_object_id) == 0) "DEFAULT" else x_object_id
+    object_seg <- gsub("[^A-Za-z0-9._-]", "_", object_seg)
+    plot_type_safe <- gsub("[^A-Za-z0-9._-]", "_", plot_type %||% "Plot")
+    timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    rand_suffix <- paste0(sample(c(letters, 0:9), 16, replace = TRUE), collapse = "")
+    file.path(base, "exports", object_seg,
+              paste0(plot_type_safe, "_", timestamp, "_", rand_suffix, ".", format))
+  }
+
+  set.seed(123)
+
+  # Two different users export the same plot type "at the same time": the
+  # server-derived X-Object-ID segment differs, so the directories differ and
+  # the full paths cannot overwrite each other.
+  p_user1 <- derive_export_path("user-1", "UMAP")
+  p_user2 <- derive_export_path("user-2", "UMAP")
+  assert("Two users land in different export directories", dirname(p_user1) != dirname(p_user2))
+  assert("Two users' export paths differ", p_user1 != p_user2)
+
+  # Same user, same plot type, same second: the random suffix still makes the
+  # filenames unique, so a rapid double-export does not overwrite.
+  p_same_a <- derive_export_path("user-1", "UMAP")
+  p_same_b <- derive_export_path("user-1", "UMAP")
+  assert("Same-user same-second exports get distinct filenames", p_same_a != p_same_b)
+
+  # A client-supplied plot_type with traversal/separator characters has its
+  # path separators stripped, so it stays a single filename and cannot escape
+  # the export directory. ('..' as a literal substring of one filename segment
+  # is harmless because there is no separator left to traverse on.)
+  p_evil <- derive_export_path("user-1", "../../etc/passwd")
+  assert("Malicious plot_type has separators stripped (single filename)",
+         !grepl("/", basename(p_evil)) && dirname(p_evil) == file.path("/srv", "exports", "user-1"))
+
+  # A client-style X-Object-ID with separators is sanitized to a single
+  # directory level (defense-in-depth; Express already controls this header).
+  p_inject <- derive_export_path("user-1/../user-2", "UMAP")
+  assert("Malicious object segment collapses to one directory level",
+         basename(dirname(p_inject)) == "user-1_.._user-2")
+})
+
+# ═════════════════════════════════════════════════════════════════════════════
 # TEST 17: AST Security Sandbox
 # ═════════════════════════════════════════════════════════════════════════════
 

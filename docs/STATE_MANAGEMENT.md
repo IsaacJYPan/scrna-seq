@@ -17,9 +17,9 @@ For configurations that should survive a page reload (e.g., the number of princi
 - **`useTabParams`:** A custom hook that synchronizes a state object with `localStorage`. Keys are scoped by `userEmail`, `objectId`, and `tabId` so that configurations for "Dataset A" don't leak into "Dataset B".
 - **Workspace State:** The array of active Seurat objects/projects is serialized to `localStorage` on every change and restored on login. Note: This only saves the metadata (name, cell count, file path), not the data itself.
 
-## 3. Provenance & SQLite Cache (The IPC Layer)
+## 3. Provenance & SQLite Cache (Express + SQLite)
 
-To prevent re-running heavy computations (like UMAP or Clustering) when the user navigates between tabs or restarts the app, the Electron layer maintains an SQLite database.
+To prevent re-running heavy computations (like UMAP or Clustering) when the user navigates between tabs or restarts the app, the Express server maintains an SQLite database (`better-sqlite3`, opened by `server.js` — not Electron; this app no longer has an Electron main process or IPC layer).
 
 ### Cache Keys
 Every mathematical pipeline step generates a deterministic cache key consisting of:
@@ -33,7 +33,7 @@ In earlier versions, if a user re-ran an upstream step (like QC) with different 
 
 ### Session Hydration (`hasHydrated`)
 When a component like `PCA.jsx` mounts, it checks if it has hydrated. If `sessionReady` is true and the previous pipeline step is complete, it triggers a `runStep(isInitial = true)`.
-This calls the API with `onlyIfCached: true`. The IPC layer checks the SQLite database; if a match is found, the component populates instantly without waking the R backend.
+This calls the API with `onlyIfCached: true`. The Express server checks the SQLite database; if a match is found, the component populates instantly without waking the R backend.
 
 ## State Sync Issues to Watch For
 - **Race Conditions on Restore:** If React components attempt to hydrate before the `rSessionId` is successfully restored from the `.meta.json` file, they will miss the cache. `App.jsx` handles this by blocking hydration until `sessionCheckDone` is true.
