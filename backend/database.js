@@ -181,11 +181,30 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+// User-owned helpers must never be called without an owner: a missing owner
+// previously meant "match every row" (e.g. getAllProvenance() returning every
+// user's provenance), which is a cross-user data-leak footgun. Every read/write
+// helper that scopes by user_email funnels its owner argument through here so an
+// absent owner fails loudly instead of silently widening the query. If an
+// admin-wide query is ever genuinely needed, add an explicitly named
+// admin-only helper rather than relaxing this.
+function requireOwnerEmail(userEmail) {
+  const normalized = normalizeEmail(userEmail);
+  if (!normalized) {
+    throw new Error('An owner email is required for this user-scoped operation.');
+  }
+  return normalized;
+}
+
 function saveProvenance(envelope) {
   const prov = envelope.provenance;
+  // Owner-scoped write: require an owner email like every other user-scoped
+  // helper (see requireOwnerEmail). A missing owner would persist a provenance
+  // row no user can ever read (reads are owner-scoped), an orphaning footgun.
+  const owner = requireOwnerEmail(envelope.userEmail || prov.userEmail);
   _insertProv().run({
     id: String(prov.id || ''),
-    userEmail: normalizeEmail(envelope.userEmail || prov.userEmail),
+    userEmail: owner,
     timestamp: String(prov.timestamp || ''),
     language: String(prov.language || ''),
     languageVersion: String(prov.languageVersion || ''),
@@ -198,18 +217,16 @@ function saveProvenance(envelope) {
   return prov.id;
 }
 
-function getProvenance(id, userEmail = null) {
-  const row = userEmail
-    ? db.prepare('SELECT * FROM provenance WHERE id = ? AND user_email = ?').get(id, normalizeEmail(userEmail))
-    : db.prepare('SELECT * FROM provenance WHERE id = ?').get(id);
+function getProvenance(id, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const row = db.prepare('SELECT * FROM provenance WHERE id = ? AND user_email = ?').get(id, owner);
   if (!row) return null;
   return rowToProvenance(row);
 }
 
-function getAllProvenance(userEmail = null) {
-  const rows = userEmail
-    ? db.prepare('SELECT * FROM provenance WHERE user_email = ? ORDER BY created_at DESC').all(normalizeEmail(userEmail))
-    : db.prepare('SELECT * FROM provenance ORDER BY created_at DESC').all();
+function getAllProvenance(userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const rows = db.prepare('SELECT * FROM provenance WHERE user_email = ? ORDER BY created_at DESC').all(owner);
   return rows.map(rowToProvenance);
 }
 
@@ -235,7 +252,8 @@ function rowToProvenance(row) {
  * Returns all ancestor provenance records in topological order
  * (dependencies first), with shared ancestors deduplicated.
  */
-function getProvenanceChain(id, userEmail = null) {
+function getProvenanceChain(id, userEmail) {
+  requireOwnerEmail(userEmail);
   const visited = new Set();
   const ordered = [];
 
@@ -260,16 +278,11 @@ function getProvenanceChain(id, userEmail = null) {
 /**
  * Delete a single provenance record by ID.
  */
-function deleteProvenance(id, userEmail = null) {
-  const result = userEmail
-    ? db.prepare('DELETE FROM provenance WHERE id = ? AND user_email = ?').run(id, normalizeEmail(userEmail))
-    : db.prepare('DELETE FROM provenance WHERE id = ?').run(id);
-  // Also clean up any cache entries referencing this provenance
-  if (userEmail) {
-    db.prepare('DELETE FROM results_cache WHERE provenance_id = ? AND user_email = ?').run(id, normalizeEmail(userEmail));
-  } else {
-    db.prepare('DELETE FROM results_cache WHERE provenance_id = ?').run(id);
-  }
+function deleteProvenance(id, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const result = db.prepare('DELETE FROM provenance WHERE id = ? AND user_email = ?').run(id, owner);
+  // Also clean up any cache entries referencing this provenance (owner-scoped).
+  db.prepare('DELETE FROM results_cache WHERE provenance_id = ? AND user_email = ?').run(id, owner);
   return result.changes > 0;
 }
 
@@ -292,10 +305,9 @@ function makeCacheKey(operation, params, dataVersion, parentIds = [], userEmail 
   return crypto.createHash('sha256').update(payload).digest('hex').substring(0, 16);
 }
 
-function getCachedResult(cacheKey, userEmail = null) {
-  const row = userEmail
-    ? db.prepare('SELECT * FROM results_cache WHERE cache_key = ? AND user_email = ?').get(cacheKey, normalizeEmail(userEmail))
-    : db.prepare('SELECT * FROM results_cache WHERE cache_key = ?').get(cacheKey);
+function getCachedResult(cacheKey, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const row = db.prepare('SELECT * FROM results_cache WHERE cache_key = ? AND user_email = ?').get(cacheKey, owner);
   if (!row) return null;
   return {
     cacheKey: row.cache_key,
@@ -304,33 +316,42 @@ function getCachedResult(cacheKey, userEmail = null) {
   };
 }
 
-function setCachedResult(cacheKey, provenanceId, resultData, userEmail = '') {
-  const normalizedEmail = normalizeEmail(userEmail);
-  if (normalizedEmail) {
-    const owner = db.prepare('SELECT id FROM provenance WHERE id = ? AND user_email = ?').get(provenanceId, normalizedEmail);
-    if (!owner) throw new Error('Cannot cache result for provenance owned by another user.');
-  }
+function setCachedResult(cacheKey, provenanceId, resultData, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const provOwner = db.prepare('SELECT id FROM provenance WHERE id = ? AND user_email = ?').get(provenanceId, owner);
+  if (!provOwner) throw new Error('Cannot cache result for provenance owned by another user.');
   db.prepare(`
     INSERT OR REPLACE INTO results_cache (cache_key, user_email, provenance_id, result_data)
     VALUES (?, ?, ?, ?)
-  `).run(cacheKey, normalizedEmail, provenanceId, JSON.stringify(resultData));
+  `).run(cacheKey, owner, provenanceId, JSON.stringify(resultData));
 }
 
-function clearCache(userEmail = null) {
-  if (userEmail) {
-    db.prepare('DELETE FROM results_cache WHERE user_email = ?').run(normalizeEmail(userEmail));
-    return;
-  }
-  db.prepare('DELETE FROM results_cache').run();
+function clearCache(userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  db.prepare('DELETE FROM results_cache WHERE user_email = ?').run(owner);
 }
 
 // ── User Authentication ─────────────────────────────────────────
 
 const PBKDF2_ITERATIONS = 600000;
+// Fixed salt used only to spend an equivalent amount of PBKDF2 work on the
+// "user not found" branch of verifyUser(). It never protects a real secret; its
+// sole purpose is to remove a user-enumeration timing oracle.
+const DUMMY_PBKDF2_SALT = '00000000000000000000000000000000';
 
 function hashPassword(password, salt) {
   const hash = crypto.pbkdf2Sync(password, salt, PBKDF2_ITERATIONS, 64, 'sha512').toString('hex');
   return `$pbkdf2-sha512$i=${PBKDF2_ITERATIONS}$${salt}$${hash}`;
+}
+
+// Constant-time comparison for two hex-encoded hashes of the same expected
+// length. Returns false (without an exception) on a length mismatch; the hashes
+// compared here are fixed-length, so a length difference reveals nothing useful.
+function timingSafeEqualHex(a, b) {
+  const bufA = Buffer.from(String(a), 'utf8');
+  const bufB = Buffer.from(String(b), 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 function createUser(email, password, displayName) {
@@ -357,33 +378,43 @@ function createUser(email, password, displayName) {
   };
 }
 
+// A single generic credential-failure message for BOTH "no such user" and
+// "wrong password". The caller (the /api/auth/login route) returns a generic
+// 401 regardless, but keeping the message identical here avoids leaking which
+// branch failed to any internal consumer.
+const GENERIC_CREDENTIAL_ERROR = 'Invalid email or password.';
+
 function verifyUser(email, password) {
   const normalizedEmail = email.trim().toLowerCase();
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail);
-  
+
   if (!user) {
-    return { error: 'No account found with this email.' };
+    // Defense-in-depth: spend roughly the same PBKDF2 work as a real
+    // verification so the not-found branch is not measurably faster, removing a
+    // user-enumeration timing oracle. The result is discarded.
+    crypto.pbkdf2Sync(String(password), DUMMY_PBKDF2_SALT, PBKDF2_ITERATIONS, 64, 'sha512');
+    return { error: GENERIC_CREDENTIAL_ERROR };
   }
 
   // Parse the stored hash to see if it uses the new format or fallback to old format
-  let storedHash = user.password_hash;
+  const storedHash = user.password_hash;
   let isMatch = false;
-  
+
   if (storedHash.startsWith('$pbkdf2-sha512$')) {
     const parts = storedHash.split('$');
     const iters = parseInt(parts[2].split('=')[1], 10);
     const salt = parts[3];
     const hashData = parts[4];
     const attemptHash = crypto.pbkdf2Sync(password, salt, iters, 64, 'sha512').toString('hex');
-    isMatch = (attemptHash === hashData);
+    isMatch = timingSafeEqualHex(attemptHash, hashData);
   } else {
     // Old legacy hash format
     const attemptHash = crypto.pbkdf2Sync(password, user.salt, 100000, 64, 'sha512').toString('hex');
-    isMatch = (attemptHash === storedHash);
+    isMatch = timingSafeEqualHex(attemptHash, storedHash);
   }
 
   if (!isMatch) {
-    return { error: 'Incorrect password.' };
+    return { error: GENERIC_CREDENTIAL_ERROR };
   }
 
   return {
@@ -402,9 +433,33 @@ function getUserByEmail(email) {
 
 // ── Figure Collection ───────────────────────────────────────────
 
+// Reject obviously unsafe figure file paths. `file_path` is stored verbatim as
+// a reference to a server-written export; it must never carry path-traversal
+// segments or NUL bytes. There is intentionally no download route, so this is
+// purely a stored-value hygiene guard against traversal-like input being
+// persisted (and later trusted by some future consumer). Both relative and
+// absolute paths are allowed (R legitimately returns an absolute export path);
+// only traversal / NUL / non-string values are rejected.
+function assertSafeFigureFilePath(filePath) {
+  if (filePath === undefined || filePath === null || filePath === '') return '';
+  if (typeof filePath !== 'string') {
+    throw new Error('Figure file path must be a string.');
+  }
+  if (filePath.includes('\0')) {
+    throw new Error('Figure file path is invalid.');
+  }
+  const segments = filePath.split(/[\\/]+/);
+  if (segments.includes('..')) {
+    throw new Error('Figure file path must not contain path traversal segments.');
+  }
+  return filePath;
+}
+
 function saveFigure(record) {
   const userEmail = normalizeEmail(record.userEmail);
   if (!userEmail) throw new Error('Figure user email is required.');
+
+  const safeFilePath = assertSafeFigureFilePath(record.filePath);
 
   const existing = db.prepare('SELECT user_email FROM figure_collection WHERE id = ?').get(record.id);
   if (existing && normalizeEmail(existing.user_email) !== userEmail) {
@@ -423,7 +478,7 @@ function saveFigure(record) {
     plotType: record.plotType || 'Unknown',
     title: record.title || '',
     paramsJson: JSON.stringify(record.params || {}),
-    filePath: record.filePath || '',
+    filePath: safeFilePath || '',
     fileFormat: record.fileFormat || 'png',
     thumbnailB64: record.thumbnailB64 || ''
   });
@@ -448,10 +503,9 @@ function getFiguresByUser(email) {
   }));
 }
 
-function deleteFigure(id, userEmail = null) {
-  const result = userEmail
-    ? db.prepare('DELETE FROM figure_collection WHERE id = ? AND user_email = ?').run(id, normalizeEmail(userEmail))
-    : db.prepare('DELETE FROM figure_collection WHERE id = ?').run(id);
+function deleteFigure(id, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const result = db.prepare('DELETE FROM figure_collection WHERE id = ? AND user_email = ?').run(id, owner);
   return result.changes > 0;
 }
 
@@ -908,6 +962,7 @@ module.exports = {
   verifyUser,
   getUserByEmail,
   saveFigure,
+  assertSafeFigureFilePath,
   getFiguresByUser,
   deleteFigure,
   // Analysis objects & lineage

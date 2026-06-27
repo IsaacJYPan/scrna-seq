@@ -39,6 +39,23 @@ make_provenance <- function(result, script_text, operation = "unknown",
 }
 
 # ── Validation Helpers ──────────────────────────────────────────────
+
+# Figure-export format whitelist. `format` is used as the output filename
+# extension in /export-figure, so it must be one of these exact values and must
+# never be coerced from arbitrary input — otherwise a value like
+# "png/../../tmp/evil" would inject a path component into the filename. This is
+# the single source of truth shared by the endpoint and its regression test.
+ALLOWED_EXPORT_FORMATS <- c("png", "pdf", "svg")
+
+is_allowed_export_format <- function(format) {
+  is.character(format) && length(format) == 1 && !is.na(format) && (format %in% ALLOWED_EXPORT_FORMATS)
+}
+
+unsupported_export_format_message <- function() {
+  paste0("Unsupported export format. Allowed formats: ",
+         paste(ALLOWED_EXPORT_FORMATS, collapse = ", "), ".")
+}
+
 resolve_analysis_path <- function(user_path) {
   if (grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)) {
     return(user_path)
@@ -2063,6 +2080,17 @@ function(res, req) {
   tryCatch({
     # Parse params
     format   <- body$format  %||% "png"
+    # SECURITY: `format` becomes the output filename extension below, so it must
+    # never be allowed to introduce a path component (`/`, `\`, `..`, NUL) or any
+    # other arbitrary value. Whitelist the known-safe formats and REJECT anything
+    # else with a clear error rather than silently coercing it — a coerced value
+    # would hide a malformed/hostile request instead of surfacing it. The check
+    # lives in is_allowed_export_format() (top of file) so the regression test
+    # exercises the SAME predicate the endpoint uses.
+    if (!is_allowed_export_format(format)) {
+      res$status <- 400
+      return(list(error = unsupported_export_format_message()))
+    }
     width    <- as.numeric(body$width  %||% 8)
     height   <- as.numeric(body$height %||% 6)
     dpi_val  <- as.integer(body$dpi   %||% 300)
@@ -2074,13 +2102,31 @@ function(res, req) {
       body$features <- as.character(unlist(features_raw))
     }
 
-    # Create exports directory
-    export_dir <- file.path(getwd(), "..", "exports")
+    # ── Collision-resistant, user/object-scoped export destination ──────────
+    # SECURITY: the export directory segment is derived ONLY from the
+    # server-injected X-Object-ID header. Express sets that header to a
+    # server-derived state key (`user-<id>[:obj-<id>]`) on every proxied
+    # request and OVERRIDES any client-supplied value, so it is trusted here.
+    # R must NOT trust any client-supplied user/path/export header for this:
+    # do not read an export dir, user id, or filename from the request body.
+    # The segment is still sanitized as defense-in-depth.
+    object_seg <- req$HTTP_X_OBJECT_ID
+    if (is.null(object_seg) || nchar(object_seg) == 0) object_seg <- "DEFAULT"
+    object_seg <- gsub("[^A-Za-z0-9._-]", "_", object_seg)
+
+    export_dir <- file.path(getwd(), "..", "exports", object_seg)
     if (!dir.exists(export_dir)) dir.create(export_dir, recursive = TRUE)
 
-    timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    # plot_type is client-supplied — sanitize it to a safe filename segment.
     plot_type <- body$plot_type %||% "Plot"
-    file_name <- paste0(plot_type, "_", timestamp, ".", format)
+    plot_type_safe <- gsub("[^A-Za-z0-9._-]", "_", plot_type)
+
+    # A timestamp alone collides when two users (or one user firing twice)
+    # export the same plot type within the same second. Append a random suffix
+    # so concurrent same-second exports cannot overwrite each other.
+    timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+    rand_suffix <- paste0(sample(c(letters, 0:9), 16, replace = TRUE), collapse = "")
+    file_name <- paste0(plot_type_safe, "_", timestamp, "_", rand_suffix, ".", format)
     file_path <- file.path(export_dir, file_name)
     file_path <- normalizePath(file_path, mustWork = FALSE)
 
