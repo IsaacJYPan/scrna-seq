@@ -198,9 +198,13 @@ function requireOwnerEmail(userEmail) {
 
 function saveProvenance(envelope) {
   const prov = envelope.provenance;
+  // Owner-scoped write: require an owner email like every other user-scoped
+  // helper (see requireOwnerEmail). A missing owner would persist a provenance
+  // row no user can ever read (reads are owner-scoped), an orphaning footgun.
+  const owner = requireOwnerEmail(envelope.userEmail || prov.userEmail);
   _insertProv().run({
     id: String(prov.id || ''),
-    userEmail: normalizeEmail(envelope.userEmail || prov.userEmail),
+    userEmail: owner,
     timestamp: String(prov.timestamp || ''),
     language: String(prov.language || ''),
     languageVersion: String(prov.languageVersion || ''),

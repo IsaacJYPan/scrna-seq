@@ -125,6 +125,13 @@ describe('security data isolation', () => {
     expect(() => clearCache()).toThrow(/owner email is required/i);
     expect(() => deleteFigure('fig-x')).toThrow(/owner email is required/i);
 
+    // saveProvenance is owner-scoped too: an owner-less write must fail loudly
+    // rather than persist an unreadable, orphaned row.
+    expect(() => saveProvenance({ provenance: provenance('prov-orphan') }))
+      .toThrow(/owner email is required/i);
+    expect(() => saveProvenance({ userEmail: '   ', provenance: provenance('prov-orphan') }))
+      .toThrow(/owner email is required/i);
+
     // With an owner, the same helpers still work and stay user-scoped.
     expect(getAllProvenance('alice@example.com').map(p => p.id)).toEqual(['prov-alice']);
   });

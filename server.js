@@ -349,18 +349,41 @@ function rTestDiagnosticsEnabled() {
 // environment so tests can tighten them deterministically without re-importing
 // the module, and each limiter exposes reset() so tests can clear state between
 // cases (preventing rate-limit leakage across tests).
+const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const DEFAULT_AUTH_RATE_LIMIT_MAX = 10;
+
+// Parse a positive-integer env override, falling back to a safe default. A
+// malformed value (non-numeric, NaN/Infinity, non-integer, or <= 0) must NEVER
+// silently disable the limiter — that would turn a typo into an open door — so
+// we fall CLOSED to the secure default instead of producing NaN (which would
+// make `count > NaN` always false and skip limiting entirely).
+function positiveIntFromEnv(rawValue, fallback) {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return fallback;
+  const n = Number(rawValue);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
 function authRateLimitWindowMs() {
-  return Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+  return positiveIntFromEnv(process.env.AUTH_RATE_LIMIT_WINDOW_MS, DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS);
 }
 function authRateLimitMax() {
-  return Number(process.env.AUTH_RATE_LIMIT_MAX || 10);
+  return positiveIntFromEnv(process.env.AUTH_RATE_LIMIT_MAX, DEFAULT_AUTH_RATE_LIMIT_MAX);
+}
+
+// The DISABLE_RATE_LIMIT escape hatch is for local/dev/test convenience only.
+// It must NEVER take effect in production: rate limiting is a security control
+// there, and a stray env var must not be able to silently remove credential-
+// stuffing / signup-abuse protection.
+function rateLimitDisabled() {
+  return process.env.DISABLE_RATE_LIMIT === 'true' && process.env.NODE_ENV !== 'production';
 }
 
 function createRateLimiter() {
   const hits = new Map(); // ip -> { count, resetAt }
 
   function middleware(req, res, next) {
-    if (process.env.DISABLE_RATE_LIMIT === 'true') return next();
+    if (rateLimitDisabled()) return next();
 
     const windowMs = authRateLimitWindowMs();
     const max = authRateLimitMax();
@@ -847,5 +870,8 @@ module.exports = {
   // Exposed for tests: auth rate limiting + R path-field drift guard
   loginRateLimiter,
   signupRateLimiter,
+  authRateLimitMax,
+  authRateLimitWindowMs,
+  rateLimitDisabled,
   R_PROXY_VALIDATED_PATH_FIELDS
 };

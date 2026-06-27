@@ -46,6 +46,28 @@ npm run dev      # Vite dev server + Express (which spawns local R Plumber)
 Requires a local R installation with Seurat (and the packages listed in
 `r-backend/`). See `docs/architecture.md` and `docs/R_BACKEND.md` for details.
 
+### Auth rate limiting & reverse proxies
+
+The auth endpoints (`/api/auth/login`, `/api/auth/signup`) have a simple,
+single-node, in-memory rate limiter keyed by client IP (`req.ip`). It is basic
+defense-in-depth against credential stuffing / signup abuse, **not** a
+distributed throttle.
+
+Express is **not** configured with `trust proxy`, so `req.ip` is the
+*direct* socket peer. This is correct when Express terminates client connections
+directly. If you put Express behind a reverse proxy / load balancer / CDN in a
+production deployment, you must configure trusted-proxy handling intentionally:
+
+- If you do **nothing**, every client appears as the proxy's IP, so all users
+  collapse into one rate-limit bucket (one abuser can lock everyone out).
+- If you enable `trust proxy` **carelessly** (e.g. trusting `X-Forwarded-For`
+  from an untrusted hop), clients can spoof their IP and bypass the limit.
+
+Only enable `trust proxy` with an explicit, correct trusted-hop configuration
+for your specific proxy. A multi-node deployment should additionally replace the
+in-memory limiter with a shared store (e.g. Redis). Do **not** casually turn
+`trust proxy` on.
+
 ## Docker (local R backend only)
 
 The provided `docker-compose.yml` containerizes **only the R Plumber backend**
