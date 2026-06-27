@@ -206,6 +206,18 @@ export const electronAPI = {
   },
   getAnalysisObject: async (id) => req(`/api/analysis-objects/${id}`),
 
+  // Jobs (durable, ownership-scoped long-running task records)
+  createJob: async (payload) => req('/api/jobs', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listJobs: async (filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/jobs${qs ? `?${qs}` : ''}`);
+  },
+  getJob: async (id) => req(`/api/jobs/${id}`),
+  getJobLogs: async (id) => req(`/api/jobs/${id}/logs`),
+  cancelJob: async (id) => req(`/api/jobs/${id}/cancel`, { method: 'POST' }),
+
   // Cache
   makeCacheKey: async (op, params, ver, pids) => {
     const res = await req('/api/db/cache-key', { method: 'POST', body: JSON.stringify({ operation: op, params, dataVersion: ver, parentIds: pids }) });
