@@ -39,6 +39,23 @@ make_provenance <- function(result, script_text, operation = "unknown",
 }
 
 # ── Validation Helpers ──────────────────────────────────────────────
+
+# Figure-export format whitelist. `format` is used as the output filename
+# extension in /export-figure, so it must be one of these exact values and must
+# never be coerced from arbitrary input — otherwise a value like
+# "png/../../tmp/evil" would inject a path component into the filename. This is
+# the single source of truth shared by the endpoint and its regression test.
+ALLOWED_EXPORT_FORMATS <- c("png", "pdf", "svg")
+
+is_allowed_export_format <- function(format) {
+  is.character(format) && length(format) == 1 && !is.na(format) && (format %in% ALLOWED_EXPORT_FORMATS)
+}
+
+unsupported_export_format_message <- function() {
+  paste0("Unsupported export format. Allowed formats: ",
+         paste(ALLOWED_EXPORT_FORMATS, collapse = ", "), ".")
+}
+
 resolve_analysis_path <- function(user_path) {
   if (grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)) {
     return(user_path)
@@ -2063,6 +2080,17 @@ function(res, req) {
   tryCatch({
     # Parse params
     format   <- body$format  %||% "png"
+    # SECURITY: `format` becomes the output filename extension below, so it must
+    # never be allowed to introduce a path component (`/`, `\`, `..`, NUL) or any
+    # other arbitrary value. Whitelist the known-safe formats and REJECT anything
+    # else with a clear error rather than silently coercing it — a coerced value
+    # would hide a malformed/hostile request instead of surfacing it. The check
+    # lives in is_allowed_export_format() (top of file) so the regression test
+    # exercises the SAME predicate the endpoint uses.
+    if (!is_allowed_export_format(format)) {
+      res$status <- 400
+      return(list(error = unsupported_export_format_message()))
+    }
     width    <- as.numeric(body$width  %||% 8)
     height   <- as.numeric(body$height %||% 6)
     dpi_val  <- as.integer(body$dpi   %||% 300)

@@ -829,6 +829,69 @@ run_test("Figure export paths do not collide across users/objects", function() {
 })
 
 # ═════════════════════════════════════════════════════════════════════════════
+# TEST 16c: /export-figure rejects unsafe `format` (real endpoint predicate)
+# ═════════════════════════════════════════════════════════════════════════════
+# Regression for the export `format` filename-injection (review HIGH finding):
+# `format` is used as the output filename extension, so an unwhitelisted value
+# such as "png/../../../../tmp/evil" would inject a path component and let an
+# authenticated caller write outside exports/. The endpoint now whitelists
+# png/pdf/svg via is_allowed_export_format(). This test SOURCES plumber.R and
+# calls that exact predicate (it does not reimplement the check), so the test
+# and the endpoint can never drift. Would fail before the fix (no whitelist
+# existed; `format` flowed straight into the filename).
+
+run_test("/export-figure rejects unsafe export formats", function() {
+  # Locate plumber.R relative to the repo root (how CI/npm runs this), the
+  # test's own directory, or the running script's path, then source it into an
+  # isolated environment so the rest of the suite is unaffected.
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- sub("^--file=", "", args[grep("^--file=", args)])
+  script_dir <- if (length(file_arg) > 0) dirname(normalizePath(file_arg)) else getwd()
+  candidates <- c(
+    file.path(getwd(), "r-backend", "plumber.R"),
+    file.path(getwd(), "..", "plumber.R"),
+    file.path(script_dir, "..", "plumber.R")
+  )
+  existing <- Filter(file.exists, candidates)
+  assert("plumber.R located for sourcing", length(existing) > 0)
+  plumber_path <- existing[1]
+
+  plumber_env <- new.env()
+  sys.source(plumber_path, envir = plumber_env)
+  is_allowed <- get("is_allowed_export_format", envir = plumber_env)
+
+  # Valid formats are accepted.
+  assert("png/pdf/svg are accepted", all(vapply(c("png", "pdf", "svg"), is_allowed, logical(1))))
+
+  # Malicious / unknown values are REJECTED (not silently coerced).
+  bad <- c(
+    "png/../../../../tmp/evil",  # forward-slash traversal
+    "../png",                    # leading traversal
+    "png\\..\\..",               # backslash traversal
+    "png.exe",                   # disallowed extension
+    "exe",                       # unknown format
+    "PNG",                       # wrong case (exact match required)
+    "png "                       # trailing space
+  )
+  for (b in bad) {
+    assert(paste0("rejects unsafe format: ", encodeString(b)), isFALSE(is_allowed(b)))
+  }
+
+  # Non-scalar / non-character inputs are rejected without error.
+  assert("rejects character vector of formats", isFALSE(is_allowed(c("png", "pdf"))))
+  assert("rejects NA format", isFALSE(is_allowed(NA_character_)))
+  assert("rejects numeric format", isFALSE(is_allowed(123)))
+  assert("rejects NULL format", isFALSE(is_allowed(NULL)))
+
+  # Defense check: every accepted format is a bare extension with no separator
+  # or traversal, so the constructed filename cannot escape the export dir.
+  allowed <- get("ALLOWED_EXPORT_FORMATS", envir = plumber_env)
+  fname <- paste0("UMAP_20260101_000000_abcd.", allowed)
+  assert("accepted formats yield single-segment filenames",
+         all(basename(fname) == fname) && !any(grepl("\\.\\.", fname)))
+})
+
+# ═════════════════════════════════════════════════════════════════════════════
 # TEST 17: AST Security Sandbox
 # ═════════════════════════════════════════════════════════════════════════════
 
