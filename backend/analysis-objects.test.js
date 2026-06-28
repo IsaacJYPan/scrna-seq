@@ -1,7 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 
-const { initDatabase, closeDatabase, saveProvenance } = require('./database');
+const {
+  initDatabase, closeDatabase, saveProvenance,
+  createOrganizationForUser, createProjectForUser, createDatasetForProject
+} = require('./database');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+
+// Create a project owned by `userId` plus a dataset in it, returning the dataset.
+// Used to exercise datasetId verification on analysis-object creation.
+function makeDataset(userId, fileType = 'seurat_rds') {
+  const org = createOrganizationForUser(userId, { name: 'Org' });
+  const proj = createProjectForUser(userId, { organizationId: org.id, name: 'Proj' });
+  return createDatasetForProject(userId, proj.id, { fileType });
+}
 
 let server;
 
@@ -196,47 +207,66 @@ describe('analysis-objects API', () => {
     expect(stolen.status).toBe(404);
   });
 
-  it('accepts datasetId as an opaque nullable tag (no datasets model yet)', async () => {
+  // ── datasetId is now verified against the durable datasets model ───────────
+  // datasetId remains optional/nullable, but if supplied it must reference a real
+  // dataset whose project the caller can write to (owner/admin/analyst).
+  it('accepts a null/absent datasetId (still optional)', async () => {
+    const { alice } = users();
+    const res = await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token, body: { objectType: 'seurat' }
+    });
+    expect(res.status).toBe(201);
+    expect(res.data.datasetId).toBeNull();
+  });
+
+  it('accepts a real, accessible datasetId and records it', async () => {
+    const { alice } = users();
+    const ds = makeDataset(alice.user.id);
+    const res = await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token,
+      body: { objectType: 'seurat', datasetId: ds.id }
+    });
+    expect(res.status).toBe(201);
+    expect(res.data.datasetId).toBe(ds.id);
+  });
+
+  it('rejects a malformed datasetId with 400', async () => {
     const { alice } = users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', datasetId: 'dataset-abc' }
     });
-    expect(res.status).toBe(201);
-    expect(res.data.datasetId).toBe('dataset-abc');
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/malformed dataset/i);
   });
 
-  // ── Finding 9: datasetId caveat ───────────────────────────────────────────
-  // There is intentionally NO datasets table in this branch, so datasetId is an
-  // unverified opaque string. This test pins the CURRENT behavior: two users
-  // may carry the SAME datasetId, and datasetId-filtered listing is still
-  // owner-scoped (Alice never sees Bob's object even though the tag matches).
-  //
-  // TODO(datasets-model): once a durable datasets table exists, datasetId MUST
-  // be ownership-verified at creation/use the way parentObjectId and
-  // createdByProvenanceId already are — a cross-owner datasetId must return 404
-  // (no enumeration), not be silently accepted. When that lands, add a test
-  // asserting Alice cannot create/list against Bob's datasetId, and tighten or
-  // replace this test. See docs/architecture.md ("dataset_id ... opaque
-  // nullable tag until a durable datasets/projects model lands").
-  it('does not leak objects across users that share the same opaque datasetId', async () => {
+  it('rejects a well-formed but unknown datasetId with 404', async () => {
+    const { alice } = users();
+    const res = await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token,
+      body: { objectType: 'seurat', datasetId: 'ds_deadbeefdeadbeefdeadbeef' }
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects a datasetId from another user\'s project with 404 (no leak)', async () => {
     const { alice, bob } = users();
-    const shared = 'dataset-shared-tag';
-
-    await api(server, '/api/analysis-objects', {
-      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: shared }
+    const bobDs = makeDataset(bob.user.id);
+    const res = await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token,
+      body: { objectType: 'seurat', datasetId: bobDs.id }
     });
+    expect(res.status).toBe(404);
+  });
+
+  it('keeps datasetId-filtered listing owner-scoped', async () => {
+    const { alice } = users();
+    const ds = makeDataset(alice.user.id);
     await api(server, '/api/analysis-objects', {
-      method: 'POST', token: bob.token, body: { objectType: 'matrix', datasetId: shared }
+      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: ds.id }
     });
-
-    const aliceByDataset = await api(server, `/api/analysis-objects?datasetId=${shared}`, { token: alice.token });
-    expect(aliceByDataset.data).toHaveLength(1);
-    expect(aliceByDataset.data[0].ownerUserId).toBe(alice.user.id);
-    expect(aliceByDataset.data[0].objectType).toBe('seurat');
-
-    const bobByDataset = await api(server, `/api/analysis-objects?datasetId=${shared}`, { token: bob.token });
-    expect(bobByDataset.data).toHaveLength(1);
-    expect(bobByDataset.data[0].ownerUserId).toBe(bob.user.id);
+    const byDataset = await api(server, `/api/analysis-objects?datasetId=${ds.id}`, { token: alice.token });
+    expect(byDataset.data).toHaveLength(1);
+    expect(byDataset.data[0].ownerUserId).toBe(alice.user.id);
   });
 });

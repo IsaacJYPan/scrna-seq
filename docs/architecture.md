@@ -194,6 +194,10 @@ longer be an arbitrary client string that selects R session state:
 - Linked references are ownership-checked at creation: a `parentObjectId` or
   `createdByProvenanceId` not owned by the caller is rejected (404). Lineage root
   is inherited from the parent, or set to the object's own id for a root object.
+- An optional `datasetId` is now **verified against the project-scoped `datasets`
+  model** (see *Datasets*): malformed → 400, unknown/inaccessible → 404, viewer of
+  the dataset's project → 403. It is no longer an opaque tag. The analysis object
+  itself remains user-scoped.
 - Routes (`POST` / `GET` / `GET /:id` under `/api/analysis-objects`) are
   authenticated and owner-scoped; not-owned/unknown ids return 404. A test-only
   `GET /api/r/__test/state-key` diagnostic exposes the derived key (gated by
@@ -213,7 +217,10 @@ ownership-scoped record:
 - **Identity & ownership are server-owned.** `POST /api/jobs` rejects any
   client-supplied `id`, owner field (`userId`, `owner_user_id`, …), or `status`;
   ownership always comes from `req.user`. A supplied `analysisObjectId` must be a
-  real object owned by the caller (else 404, no enumeration).
+  real object owned by the caller (else 404, no enumeration). An optional
+  `datasetId` (column `dataset_id`) is verified the same way as on analysis
+  objects — against the project-scoped `datasets` model (malformed → 400,
+  unknown/inaccessible → 404, viewer → 403); the job itself stays user-scoped.
 - **Status is a server-managed state machine.** Statuses are `created`,
   `queued`, `running`, `waiting_for_user`, `completed`, `failed`, `canceled`.
   Jobs are created `queued`. Transitions are an explicit allow-list
@@ -299,7 +306,91 @@ migrate any existing resource into project ownership.
   invitations, comments, audit logs, datasets table, public links, or
   project-scoped uploads**. This is not a claim of production-ready
   collaboration. Covered by `backend/organizations.test.js` (HTTP routes +
-  DB-helper layer).
+  DB-helper layer). (The *datasets* layer below — added in a later branch — is
+  the first resource to actually become project-scoped.)
+
+### Datasets (project-scoped) (`datasets`)
+The first durable, **project-scoped** resource. A dataset is an uploaded or
+registered data file that belongs to exactly one project; access is governed by
+the caller's `project_members` role, not by per-user ownership. This is also the
+branch that closes the long-standing `datasetId` gap: an opaque, unverified tag
+on analysis objects/jobs becomes a reference to a real, access-checked dataset.
+
+- **Table** (`backend/database.js`): `datasets` — server-generated `id`
+  (`ds_<random>`), `project_id`, `owner_user_id`, `created_by_user_id`,
+  `original_filename` (display-only), `internal_storage_key` (server-chosen),
+  `storage_uri`, `file_type`, `file_size_bytes`, `sha256`, `upload_status`,
+  `validation_status`, `validation_errors` (JSON), `metadata` (JSON), and
+  timestamps. Indexed by project, owner, creator, file type, upload/validation
+  status, creation time, and sha256.
+- **Project-scoped, role-checked access.** Every dataset helper authorizes
+  through the project role: `createDatasetForProject` / `updateDatasetForProject`
+  require **owner/admin/analyst**; `listDatasetsForProject` /
+  `getDatasetForProject` allow **any member (incl. viewer)** to read metadata.
+  `verifyDatasetProjectAccess(userId, datasetId, roles)` resolves a dataset by id
+  and authorizes the caller against the dataset's *own* project. As elsewhere, a
+  dataset in a project the caller cannot access returns **404** (no existence
+  leak, including cross-project/cross-user references); a known member lacking the
+  role returns **403**; a malformed `ds_...` id returns **400**.
+- **Identity & storage are server-owned.** Ids are server-generated. The
+  `POST`/`PATCH` routes reject any client-supplied `id`, owner/creator/project
+  field (`ownerUserId`, `createdByUserId`, `projectId`, `userId`, …), the storage
+  key/uri (`internalStorageKey`, `storageUri`), the computed `sha256`/
+  `fileSizeBytes`, and any raw path field (`path`, `filePath`, `storagePath`, …).
+  On a multipart upload the **server chooses the storage location** — under the
+  controlled vault root, keyed by the (server-generated) project + dataset ids and
+  a sanitized, display-only filename — and computes `sha256` + size from the
+  stored bytes. The supplied original filename is sanitized for display/metadata
+  only and is **never** used as a storage path. `internal_storage_key` is omitted
+  from all API responses so the server's storage layout is never disclosed.
+- **Constrained enums.** `file_type` ∈ {`tenx_zip`, `tenx_h5`, `seurat_rds`,
+  `h5seurat`, `h5ad`, `count_matrix_csv`, `count_matrix_tsv`, `metadata_csv`,
+  `metadata_tsv`}; `upload_status` ∈ {`pending`, `uploaded`, `failed`};
+  `validation_status` ∈ {`pending`, `valid`, `invalid`, `skipped`}. A value
+  outside the allow-list is rejected (400). **Validation here is metadata-level
+  only** — no deep biological/format parsing is performed or claimed.
+- **Honest upload state.** A registered-but-not-yet-stored dataset is `pending`;
+  a storage failure marks it `failed` (never a misleading `uploaded`). A dataset
+  can never be `validation_status = valid` unless `upload_status = uploaded`
+  (enforced on both create and update), so a pending/failed upload cannot be
+  represented as a valid dataset.
+- **Routes** (authenticated, under `/api/projects/:projectId/datasets`):
+  `POST` (JSON registration *or* multipart upload), `GET` (list, with
+  project-scoped `fileType`/`uploadStatus`/`validationStatus` filters that cannot
+  widen beyond the project), `GET /:datasetId`, `PATCH /:datasetId` (client-safe
+  fields only: statuses, validation errors, metadata, display filename). There
+  are intentionally **no dataset download/artifact routes** in this branch —
+  serving stored bytes adds extra path/authorization surface and is deferred.
+- **`datasetId` verification on existing resources.** `POST /api/analysis-objects`
+  and `POST /api/jobs` still accept an **optional** `datasetId`, but a supplied
+  value is now verified: malformed → **400**; unknown/inaccessible (including a
+  dataset in another user's/project's scope) → **404**; a member who is only a
+  `viewer` of the dataset's project → **403** (create/run-like actions require
+  owner/admin/analyst). `jobs` gained a `dataset_id` column for this.
+- **Scope of this branch.** Datasets are project-scoped, but **analysis objects
+  and jobs themselves remain user-scoped** (only their `datasetId` *reference* is
+  project-checked), and **R execution/state is still user/object-keyed** — there
+  is no project-shared R state. No dataset download routes, no invitations, no
+  comments, no public links. Covered by `backend/datasets.test.js` (HTTP routes +
+  DB-helper layer) with `backend/analysis-objects.test.js` / `backend/jobs.test.js`
+  covering the reference checks.
+- **Known limitations (storage / hashing).** These are acceptable under the
+  current upload size limit (`MAX_UPLOAD_BYTES`, default 512 MB) but should be
+  revisited before very large uploads or production-scale object storage:
+  - *In-memory hashing.* multer streams the upload to a temp file on disk, but
+    the sha256 is then computed by reading the whole file back into memory in one
+    buffer. This should become streaming hashing (hash a read stream) before the
+    upload limit is raised significantly.
+  - *Storage layout.* Dataset *metadata* is project-scoped, but the uploaded
+    *bytes* are currently stored under the existing per-user local vault layout
+    (keyed by the uploader). This is invisible today because there are no download
+    routes and `internal_storage_key` is never returned, but the project-scoped /
+    object-storage layout should be revisited **before** any dataset download or
+    artifact-serving route is added — not retrofitted afterward.
+  - *Cross-filesystem moves.* The temp-file → vault move uses `rename`, which
+    fails (`EXDEV`) if the temp dir and vault are on different filesystems; the
+    failure is handled honestly (the dataset is marked `failed`), but a
+    copy-then-unlink fallback is a future follow-up for such deployments.
 
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
@@ -356,9 +447,10 @@ id* gap, but the R execution model is still **not** production-grade:
   `analyst`/`viewer` roles; see *Organization & Project Authorization*). What
   remains: migrating existing resources (analysis objects, jobs, provenance,
   cache, figures) onto project scope, project-scoped R execution/state, and
-  invitations/comments/audit logs. Authorization for all *existing* resources is
-  still per-user only, and `dataset_id` on analysis objects remains an opaque
-  nullable tag until a durable datasets model lands.
+  invitations/comments/audit logs. The first project-scoped resource — the
+  durable `datasets` model (see *Datasets (project-scoped)*) — has landed, and
+  `datasetId` on analysis objects/jobs is now access-verified; but analysis
+  objects and jobs *themselves* are still per-user only.
 - **Deployment target** — not defined (no container/orchestration manifest for
   the full stack beyond the R `Dockerfile`).
 - **Object storage** — uploads/artifacts are on local disk (`vault/`).
