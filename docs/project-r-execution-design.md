@@ -1,13 +1,26 @@
 # Project / Job / R Execution — Implementation Design
 
-> **Status: design only.** This document is an implementation *design* for how
-> project-scoped collaboration, jobs, and R execution should fit together. It
-> describes intended semantics and a proposed build order. **No worker queue,
-> shared R execution, downloads, object storage, or production execution runtime
-> is implemented by this document or the branch that adds it.** Where it
-> describes future components (a worker, artifact storage, a reproducibility
-> bundle), those are *proposals*, not claims of existing behavior. The current
-> runtime behavior is described in [`architecture.md`](architecture.md),
+> **Status: design + landed worker-coordination contract.** This document is an
+> implementation *design* for how project-scoped collaboration, jobs, and R
+> execution should fit together. It describes intended semantics and a proposed
+> build order. **No worker queue, shared R execution, downloads, object storage,
+> or production execution runtime is implemented.** Where it describes future
+> components (a worker, artifact storage, a reproducibility bundle), those are
+> *proposals*, not claims of existing behavior.
+>
+> **Update — branch `job-worker-contract-and-schema` (this branch).** The
+> claim/lease/heartbeat **contract + database schema + helpers** described in
+> §3/§7/§10.A have now landed as code (`jobs` worker-coordination columns +
+> `claimNextJob`/`heartbeatJob`/`completeJobByWorker`/`failJobByWorker`/
+> `releaseJob`/`reapExpiredJobs`, tested in `backend/jobs-worker-contract.test.js`).
+> This is **contract + schema only**: there is still **no worker** — nothing in the
+> running server claims, drains, or executes jobs; R execution is unchanged and
+> still synchronous; cancellation still records intent only and does not kill R
+> work; R active state is still user/object-keyed; and there is no shared/mutable
+> project R state. The first actual worker remains the future
+> `worker-queue-drain-minimal` branch.
+>
+> The current runtime behavior is described in [`architecture.md`](architecture.md),
 > [`R_BACKEND.md`](R_BACKEND.md), and [`STATE_MANAGEMENT.md`](STATE_MANAGEMENT.md);
 > where this document and those disagree about *what exists today*, those
 > documents are authoritative.
@@ -186,7 +199,7 @@ code path**.
 ```
 created          → queued | canceled
 queued           → running | canceled
-running          → completed | failed | waiting_for_user | canceled
+running          → completed | failed | waiting_for_user | canceled | queued
 waiting_for_user → queued | running | canceled
 completed        → (terminal)
 failed           → (terminal)
@@ -194,11 +207,18 @@ canceled         → (terminal)
 ```
 
 The validation table is implemented (`validateJobTransition` rejects anything not
-listed), but **only the create edge (→ `queued`) and the cancel edge
-(→ `canceled`) are exercised by any current code path.** Clients can only
-*create* and *cancel*; every other edge must go through `updateJobStatusForUser`,
-which is the path the **future** worker will use — it is reachable in code today
-but nothing calls it to drive a job through `running`/`completed`/`failed`.
+listed). **Only the create edge (→ `queued`) and the cancel edge (→ `canceled`)
+are exercised by any current code path.** Clients can only *create* and *cancel*;
+every other edge must go through a server-tier helper. `updateJobStatusForUser` is
+the owner-scoped path the future worker may use for `running`/`completed`/`failed`;
+the worker-coordination helpers added in this branch (`claimNextJob`,
+`completeJobByWorker`, `failJobByWorker`, `releaseJob`, `reapExpiredJobs`) drive the
+same edges plus the **`running → queued`** edge. That edge is the **worker re-queue /
+lease-recovery** edge: `releaseJob` (a worker voluntarily hands a job back) and
+`reapExpiredJobs` (an expired lease with attempts remaining) return a claimed job to
+the queue. It is reachable in code today, but **nothing in the running server calls
+any of these** to actually drive a job through `running`/`completed`/`failed` — there
+is no worker.
 
 ### Answers
 
@@ -503,14 +523,19 @@ This section describes responsibilities and contracts; it implements nothing.
 
 ---
 
-## 9. Non-goals (this branch)
+## 9. Non-goals
 
-This branch produces documentation only. It explicitly does **not**:
+These remain non-goals through the `job-worker-contract-and-schema` branch. The
+contract + schema + DB helpers landed (see the status banner and §10.A), but that
+branch — and this document — explicitly does **not**:
 
-- implement a worker or job queue (nothing drains `jobs`);
+- implement a worker or job queue (nothing drains `jobs`; nothing calls the
+  coordination helpers in the running server);
+- execute jobs, background R work, or make any R execution asynchronous;
 - change R execution / the R proxy / the synchronous execution model;
 - introduce shared or mutable project R sessions, or any project-global R state;
 - change `deriveRStateKey`, `verifyRObjectOwnership`, or R proxy ownership;
+- make cancellation kill in-flight R work (cancel still records intent only);
 - add object storage;
 - add download routes (dataset, figure, or artifact);
 - add public links;
@@ -519,8 +544,8 @@ This branch produces documentation only. It explicitly does **not**:
 - do broad frontend / UI workflow work;
 - change production deployment;
 - implement secure-cookie sessions;
-- add database migrations (no schema change ships here; proposed future schema, if
-  any, lives in this doc only).
+- add a client-facing or worker HTTP route for coordination (claim/lease/heartbeat
+  are internal DB helpers only; no new public route ships).
 
 ---
 
@@ -529,7 +554,7 @@ This branch produces documentation only. It explicitly does **not**:
 A proposed sequence. Each entry states what it must **not** claim on completion —
 to keep the project honest about what is actually done.
 
-### A. `job-worker-contract-and-schema`
+### A. `job-worker-contract-and-schema` — **LANDED (contract + schema only)**
 - **Purpose.** Define the worker↔DB↔R contract concretely: how a job is claimed,
   how progress/logs are persisted, the (future) `X-Job-ID` header shape, the
   claim/lease/heartbeat fields, and any small schema needed to support claiming
@@ -543,6 +568,24 @@ to keep the project honest about what is actually done.
   ownership boundary is untouched.
 - **Must not claim after completion.** That jobs execute, that R is backgrounded,
   or that a worker exists. Only the *contract + schema* exist.
+- **What actually landed.** Idempotent, additive migration adding the
+  `worker_id` / `claim_token` / `lease_expires_at` / `heartbeat_at` / `locked_at` /
+  `attempts` / `max_attempts` / `priority` / `last_worker_error` columns +
+  `idx_jobs_claimable` / `idx_jobs_lease` / `idx_jobs_worker`; the server-tier
+  helpers `claimNextJob` (single-winner, guarded UPDATE inside an IMMEDIATE
+  transaction; ordered by `priority` desc then `created_at`), `heartbeatJob`,
+  `completeJobByWorker`, `failJobByWorker`, `releaseJob`, `reapExpiredJobs`,
+  `setJobScheduling`, all authorized by `worker_id` + a rotating `claim_token`
+  bearer capability that the read APIs never expose; the documented expired-lease
+  recovery contract (re-queue while `attempts < max_attempts`, else fail; default
+  `max_attempts = 1` is at-most-once); cancellation of a claimed job voiding the
+  claim so worker ops fail with `CLAIM_LOST`; and the `running → queued` re-queue
+  edge. Tests: `backend/jobs-worker-contract.test.js` (migration idempotency,
+  legacy-row readability, single-winner claim, ordering, terminal/canceled
+  non-claimability, lease expiry/recovery, attempts budget, heartbeat ownership,
+  complete/fail/release ownership, cancel interaction, transition allow-list, and
+  the preserved R/ownership boundary). **Still no worker; nothing calls these in
+  the running server.**
 
 ### B. `worker-queue-drain-minimal`
 - **Purpose.** A minimal worker that claims one `queued` job, runs **one** existing

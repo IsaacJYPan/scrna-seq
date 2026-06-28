@@ -91,10 +91,19 @@ jobs:
         #                        file_path/storage-key acceptance and no raw path in responses,
         #                        legacy NULL-project rows not leaked, and proof that referencing
         #                        an object in metadata does NOT widen R object/state ownership)
+        #   jobs-worker-contract (durable job-worker coordination contract/schema: idempotent
+        #                        additive migration + legacy-row readability, single-winner
+        #                        claim, priority/created_at ordering, terminal/canceled jobs
+        #                        unclaimable, lease expiry recovery (requeue vs fail by
+        #                        max_attempts), heartbeat/complete/fail/release restricted to the
+        #                        claim-token-holding worker, cancel voiding a live claim, the
+        #                        running→queued re-queue edge, claim_token never exposed by read
+        #                        APIs, and proof worker activity does NOT widen R object ownership;
+        #                        NO worker runs — contract + schema only)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
