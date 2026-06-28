@@ -1,0 +1,486 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+
+const {
+  initDatabase, closeDatabase,
+  createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
+  createDatasetForProject, verifyAnalysisObjectOwner, verifyJobOwner
+} = require('./database');
+const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+
+let server;
+
+beforeAll(async () => { server = await startServer(); });
+afterAll(() => { if (server) server.close(); });
+
+beforeEach(() => { initDatabase(':memory:'); });
+afterEach(() => { closeDatabase(); });
+
+function users() {
+  const alice = createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' }); // owner
+  const bob = createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
+  const carol = createUserWithToken({ email: 'carol@example.com', displayName: 'Carol' });
+  const dave = createUserWithToken({ email: 'dave@example.com', displayName: 'Dave' }); // non-member
+  const erin = createUserWithToken({ email: 'erin@example.com', displayName: 'Erin' });
+  return { alice, bob, carol, dave, erin };
+}
+
+// Seed an org + project owned by `ownerUserId` (seeded as project 'owner').
+function seedProject(ownerUserId, name = 'Project X') {
+  const org = createOrganizationForUser(ownerUserId, { name: 'Acme Labs' });
+  return createProjectForUser(ownerUserId, { organizationId: org.id, name });
+}
+
+function addMember(projectId, email, role) {
+  return addProjectMemberByEmail(projectId, email, role, 'owner');
+}
+
+function datasetIn(userId, projectId, fileType = 'seurat_rds') {
+  return createDatasetForProject(userId, projectId, { fileType });
+}
+
+// Create an analysis object through the project route, returning the parsed body.
+async function createAO(projectId, token, body = { objectType: 'seurat' }) {
+  return api(server, `/api/projects/${projectId}/analysis-objects`, { method: 'POST', token, body });
+}
+async function createJob(projectId, token, body = { jobType: 'normalize' }) {
+  return api(server, `/api/projects/${projectId}/jobs`, { method: 'POST', token, body });
+}
+
+// ── 1. Authentication ───────────────────────────────────────────────────────
+describe('project analysis resources — authentication', () => {
+  it('rejects unauthenticated access on every project analysis-object/job route', async () => {
+    const routes = [
+      ['GET', '/api/projects/proj_x/analysis-objects'],
+      ['POST', '/api/projects/proj_x/analysis-objects'],
+      ['GET', '/api/projects/proj_x/analysis-objects/ao_abc'],
+      ['GET', '/api/projects/proj_x/jobs'],
+      ['POST', '/api/projects/proj_x/jobs'],
+      ['GET', '/api/projects/proj_x/jobs/job_abc'],
+      ['GET', '/api/projects/proj_x/jobs/job_abc/logs'],
+      ['POST', '/api/projects/proj_x/jobs/job_abc/cancel']
+    ];
+    for (const [method, path] of routes) {
+      const res = await api(server, path, { method, body: method === 'POST' ? {} : undefined });
+      expect(res.status, `${method} ${path}`).toBe(401);
+    }
+  });
+});
+
+// ── 2–3. Non-member cannot list/read ────────────────────────────────────────
+describe('project analysis resources — non-member access (404, no leak)', () => {
+  it('non-member cannot list/read project analysis objects', async () => {
+    const { alice, dave } = users();
+    const proj = seedProject(alice.user.id);
+    const created = await createAO(proj.id, alice.token);
+    expect((await api(server, `/api/projects/${proj.id}/analysis-objects`, { token: dave.token })).status).toBe(404);
+    expect((await api(server, `/api/projects/${proj.id}/analysis-objects/${created.data.id}`, { token: dave.token })).status).toBe(404);
+  });
+
+  it('non-member cannot list/read project jobs', async () => {
+    const { alice, dave } = users();
+    const proj = seedProject(alice.user.id);
+    const created = await createJob(proj.id, alice.token);
+    expect((await api(server, `/api/projects/${proj.id}/jobs`, { token: dave.token })).status).toBe(404);
+    expect((await api(server, `/api/projects/${proj.id}/jobs/${created.data.id}`, { token: dave.token })).status).toBe(404);
+    expect((await api(server, `/api/projects/${proj.id}/jobs/${created.data.id}/logs`, { token: dave.token })).status).toBe(404);
+  });
+
+  it('non-member cannot create in a project (404, no existence leak)', async () => {
+    const { alice, dave } = users();
+    const proj = seedProject(alice.user.id);
+    expect((await createAO(proj.id, dave.token)).status).toBe(404);
+    expect((await createJob(proj.id, dave.token)).status).toBe(404);
+  });
+});
+
+// ── 4–5. Viewer read access ─────────────────────────────────────────────────
+describe('project analysis resources — viewer read access', () => {
+  it('viewer can list/read project analysis-object metadata', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'viewer');
+    const created = await createAO(proj.id, alice.token);
+
+    const list = await api(server, `/api/projects/${proj.id}/analysis-objects`, { token: bob.token });
+    expect(list.status).toBe(200);
+    expect(list.data).toHaveLength(1);
+
+    const read = await api(server, `/api/projects/${proj.id}/analysis-objects/${created.data.id}`, { token: bob.token });
+    expect(read.status).toBe(200);
+    expect(read.data.id).toBe(created.data.id);
+    expect(read.data.projectId).toBe(proj.id);
+  });
+
+  it('viewer can list/read project job metadata and logs', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'viewer');
+    const created = await createJob(proj.id, alice.token);
+
+    const list = await api(server, `/api/projects/${proj.id}/jobs`, { token: bob.token });
+    expect(list.status).toBe(200);
+    expect(list.data).toHaveLength(1);
+
+    const read = await api(server, `/api/projects/${proj.id}/jobs/${created.data.id}`, { token: bob.token });
+    expect(read.status).toBe(200);
+    expect(read.data.id).toBe(created.data.id);
+
+    const logs = await api(server, `/api/projects/${proj.id}/jobs/${created.data.id}/logs`, { token: bob.token });
+    expect(logs.status).toBe(200);
+    expect(Array.isArray(logs.data.logs)).toBe(true);
+  });
+});
+
+// ── 6–9. Create authorization by role ───────────────────────────────────────
+describe('project analysis resources — create authorization', () => {
+  it('viewer cannot create analysis objects (403)', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'viewer');
+    expect((await createAO(proj.id, bob.token)).status).toBe(403);
+  });
+
+  it('viewer cannot create jobs (403)', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'viewer');
+    expect((await createJob(proj.id, bob.token)).status).toBe(403);
+  });
+
+  it('owner/admin/analyst can create project analysis objects (201)', async () => {
+    const { alice, bob, carol } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'admin');
+    addMember(proj.id, 'carol@example.com', 'analyst');
+    for (const actor of [alice, bob, carol]) {
+      const res = await createAO(proj.id, actor.token);
+      expect(res.status, actor.user.email).toBe(201);
+      expect(res.data.projectId).toBe(proj.id);
+      expect(res.data.ownerUserId).toBe(actor.user.id);
+    }
+  });
+
+  it('owner/admin/analyst can create project jobs (201)', async () => {
+    const { alice, bob, carol } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'admin');
+    addMember(proj.id, 'carol@example.com', 'analyst');
+    for (const actor of [alice, bob, carol]) {
+      const res = await createJob(proj.id, actor.token);
+      expect(res.status, actor.user.email).toBe(201);
+      expect(res.data.projectId).toBe(proj.id);
+      expect(res.data.ownerUserId).toBe(actor.user.id);
+      expect(res.data.status).toBe('queued');
+    }
+  });
+});
+
+// ── 10–13. Server-controlled identity & rejected fields ─────────────────────
+describe('project analysis resources — server-controlled identity', () => {
+  it('server sets project_id from the route; body-provided project fields are rejected (400)', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+
+    const ao = await createAO(proj.id, alice.token);
+    expect(ao.data.projectId).toBe(proj.id);
+    const job = await createJob(proj.id, alice.token);
+    expect(job.data.projectId).toBe(proj.id);
+
+    for (const field of ['projectId', 'project_id']) {
+      expect((await createAO(proj.id, alice.token, { objectType: 'seurat', [field]: 'proj_other' })).status, `AO ${field}`).toBe(400);
+      expect((await createJob(proj.id, alice.token, { jobType: 'normalize', [field]: 'proj_other' })).status, `job ${field}`).toBe(400);
+    }
+  });
+
+  it('rejects a client-provided object/job id (400)', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    expect((await createAO(proj.id, alice.token, { objectType: 'seurat', id: 'ao_clientchosen' })).status).toBe(400);
+    expect((await createJob(proj.id, alice.token, { jobType: 'normalize', id: 'job_clientchosen' })).status).toBe(400);
+  });
+
+  it('rejects client-provided owner/user/creator fields (400)', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    const fields = ['userId', 'user_id', 'ownerUserId', 'owner_user_id', 'createdByUserId', 'created_by_user_id'];
+    for (const field of fields) {
+      expect((await createAO(proj.id, alice.token, { objectType: 'seurat', [field]: bob.user.id })).status, `AO ${field}`).toBe(400);
+      expect((await createJob(proj.id, alice.token, { jobType: 'normalize', [field]: bob.user.id })).status, `job ${field}`).toBe(400);
+    }
+  });
+
+  it('rejects a client-provided job status (400)', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    const res = await createJob(proj.id, alice.token, { jobType: 'normalize', status: 'completed' });
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/status is server-managed/i);
+  });
+});
+
+// ── 14–20. Cross-project reference confinement ──────────────────────────────
+describe('project analysis resources — references stay within the project', () => {
+  it('dataset must belong to the same project as the route (analysis object)', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+    const dsA = datasetIn(alice.user.id, projA.id);
+    const dsB = datasetIn(alice.user.id, projB.id);
+
+    // same-project dataset → 201
+    const ok = await createAO(projA.id, alice.token, { objectType: 'seurat', datasetId: dsA.id });
+    expect(ok.status).toBe(201);
+    expect(ok.data.datasetId).toBe(dsA.id);
+
+    // cross-project dataset → 404 (even though Alice owns both projects)
+    const cross = await createAO(projA.id, alice.token, { objectType: 'seurat', datasetId: dsB.id });
+    expect(cross.status).toBe(404);
+  });
+
+  it('dataset must belong to the same project as the route (job)', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+    const dsA = datasetIn(alice.user.id, projA.id);
+    const dsB = datasetIn(alice.user.id, projB.id);
+
+    const ok = await createJob(projA.id, alice.token, { jobType: 'normalize', datasetId: dsA.id });
+    expect(ok.status).toBe(201);
+    expect(ok.data.datasetId).toBe(dsA.id);
+
+    const cross = await createJob(projA.id, alice.token, { jobType: 'normalize', datasetId: dsB.id });
+    expect(cross.status).toBe(404);
+  });
+
+  it('parent analysis object must belong to the same project as the route', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+    const rootB = await createAO(projB.id, alice.token);
+
+    const cross = await createAO(projA.id, alice.token, { objectType: 'seurat', parentObjectId: rootB.data.id });
+    expect(cross.status).toBe(404);
+  });
+
+  it('child lineage root is inherited within the project and cannot cross projects', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+
+    // In-project lineage inheritance.
+    const root = await createAO(projA.id, alice.token);
+    expect(root.data.lineageRootId).toBe(root.data.id);
+    const child = await createAO(projA.id, alice.token, { objectType: 'seurat', parentObjectId: root.data.id });
+    expect(child.status).toBe(201);
+    expect(child.data.lineageRootId).toBe(root.data.id);
+    const grandchild = await createAO(projA.id, alice.token, { objectType: 'seurat', parentObjectId: child.data.id });
+    expect(grandchild.data.lineageRootId).toBe(root.data.id);
+
+    // A child in projB cannot adopt projA's object as a parent/lineage root.
+    const crossChild = await createAO(projB.id, alice.token, { objectType: 'seurat', parentObjectId: root.data.id });
+    expect(crossChild.status).toBe(404);
+  });
+
+  it('job analysisObjectId must belong to the same project as the route', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+    const aoA = await createAO(projA.id, alice.token);
+    const aoB = await createAO(projB.id, alice.token);
+
+    expect((await createJob(projA.id, alice.token, { jobType: 'normalize', analysisObjectId: aoA.data.id })).status).toBe(201);
+    expect((await createJob(projA.id, alice.token, { jobType: 'normalize', analysisObjectId: aoB.data.id })).status).toBe(404);
+  });
+
+  it('job resultAnalysisObjectId must belong to the same project as the route', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+    const aoA = await createAO(projA.id, alice.token);
+    const aoB = await createAO(projB.id, alice.token);
+
+    expect((await createJob(projA.id, alice.token, { jobType: 'normalize', resultAnalysisObjectId: aoA.data.id })).status).toBe(201);
+    expect((await createJob(projA.id, alice.token, { jobType: 'normalize', resultAnalysisObjectId: aoB.data.id })).status).toBe(404);
+  });
+
+  it('cross-project object/job reads return 404', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+    const aoB = await createAO(projB.id, alice.token);
+    const jobB = await createJob(projB.id, alice.token);
+
+    // projB resources are invisible through projA's route, even to the shared owner.
+    expect((await api(server, `/api/projects/${projA.id}/analysis-objects/${aoB.data.id}`, { token: alice.token })).status).toBe(404);
+    expect((await api(server, `/api/projects/${projA.id}/jobs/${jobB.data.id}`, { token: alice.token })).status).toBe(404);
+  });
+});
+
+// ── 21. Malformed ids → 400 ─────────────────────────────────────────────────
+describe('project analysis resources — malformed ids', () => {
+  it('returns 400 for malformed analysis object ids', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    for (const bad of ['not-an-id', 'ao_NOTHEX', 'ao_', 'job_abc']) {
+      const res = await api(server, `/api/projects/${proj.id}/analysis-objects/${bad}`, { token: alice.token });
+      expect(res.status, bad).toBe(400);
+    }
+    // Malformed reference ids in the create body are 400 too.
+    expect((await createAO(proj.id, alice.token, { objectType: 'seurat', parentObjectId: 'bad' })).status).toBe(400);
+    expect((await createAO(proj.id, alice.token, { objectType: 'seurat', datasetId: 'bad' })).status).toBe(400);
+  });
+
+  it('returns 400 for malformed job ids on every job sub-route', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    for (const bad of ['not-an-id', 'job_NOTHEX', 'job_', 'ao_abc']) {
+      expect((await api(server, `/api/projects/${proj.id}/jobs/${bad}`, { token: alice.token })).status, `GET ${bad}`).toBe(400);
+      expect((await api(server, `/api/projects/${proj.id}/jobs/${bad}/logs`, { token: alice.token })).status, `logs ${bad}`).toBe(400);
+      expect((await api(server, `/api/projects/${proj.id}/jobs/${bad}/cancel`, { method: 'POST', token: alice.token })).status, `cancel ${bad}`).toBe(400);
+    }
+    expect((await createJob(proj.id, alice.token, { jobType: 'normalize', analysisObjectId: 'bad' })).status).toBe(400);
+    expect((await createJob(proj.id, alice.token, { jobType: 'normalize', datasetId: 'bad' })).status).toBe(400);
+  });
+});
+
+// ── 22–26. Cancel policy ────────────────────────────────────────────────────
+describe('project analysis resources — cancel policy', () => {
+  function projectWithAnalysts() {
+    const u = users();
+    const proj = seedProject(u.alice.user.id);          // alice owner
+    addMember(proj.id, 'bob@example.com', 'admin');     // bob admin
+    addMember(proj.id, 'carol@example.com', 'analyst'); // carol analyst
+    addMember(proj.id, 'erin@example.com', 'analyst');  // erin analyst
+    return { ...u, proj };
+  }
+
+  it('analyst can cancel their own cancelable job (200)', async () => {
+    const { carol, proj } = projectWithAnalysts();
+    const job = await createJob(proj.id, carol.token);
+    const res = await api(server, `/api/projects/${proj.id}/jobs/${job.data.id}/cancel`, { method: 'POST', token: carol.token });
+    expect(res.status).toBe(200);
+    expect(res.data.status).toBe('canceled');
+    expect(res.data.canceledAt).toBeTruthy();
+  });
+
+  it("analyst cannot cancel another analyst's job (403)", async () => {
+    const { carol, erin, proj } = projectWithAnalysts();
+    const erinJob = await createJob(proj.id, erin.token);
+    const res = await api(server, `/api/projects/${proj.id}/jobs/${erinJob.data.id}/cancel`, { method: 'POST', token: carol.token });
+    expect(res.status).toBe(403);
+    // Erin's job is untouched.
+    const still = await api(server, `/api/projects/${proj.id}/jobs/${erinJob.data.id}`, { token: erin.token });
+    expect(still.data.status).toBe('queued');
+  });
+
+  it('owner and admin can cancel any cancelable project job (200)', async () => {
+    const { alice, bob, carol, erin, proj } = projectWithAnalysts();
+    const carolJob = await createJob(proj.id, carol.token);
+    const erinJob = await createJob(proj.id, erin.token);
+
+    // Owner cancels an analyst's job.
+    const byOwner = await api(server, `/api/projects/${proj.id}/jobs/${carolJob.data.id}/cancel`, { method: 'POST', token: alice.token });
+    expect(byOwner.status).toBe(200);
+    expect(byOwner.data.status).toBe('canceled');
+
+    // Admin cancels a different analyst's job.
+    const byAdmin = await api(server, `/api/projects/${proj.id}/jobs/${erinJob.data.id}/cancel`, { method: 'POST', token: bob.token });
+    expect(byAdmin.status).toBe(200);
+    expect(byAdmin.data.status).toBe('canceled');
+  });
+
+  it('viewer cannot cancel jobs (403)', async () => {
+    const { alice, dave } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'dave@example.com', 'viewer');
+    const job = await createJob(proj.id, alice.token);
+    const res = await api(server, `/api/projects/${proj.id}/jobs/${job.data.id}/cancel`, { method: 'POST', token: dave.token });
+    expect(res.status).toBe(403);
+  });
+
+  it('canceling an already-terminal job returns 409', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    const job = await createJob(proj.id, alice.token);
+    expect((await api(server, `/api/projects/${proj.id}/jobs/${job.data.id}/cancel`, { method: 'POST', token: alice.token })).status).toBe(200);
+    const again = await api(server, `/api/projects/${proj.id}/jobs/${job.data.id}/cancel`, { method: 'POST', token: alice.token });
+    expect(again.status).toBe(409);
+  });
+
+  it('canceling an unknown/cross-project job returns 404', async () => {
+    const { alice } = users();
+    const projA = seedProject(alice.user.id, 'A');
+    const projB = seedProject(alice.user.id, 'B');
+    const jobB = await createJob(projB.id, alice.token);
+    expect((await api(server, `/api/projects/${projA.id}/jobs/${jobB.data.id}/cancel`, { method: 'POST', token: alice.token })).status).toBe(404);
+    expect((await api(server, `/api/projects/${projA.id}/jobs/job_deadbeefdeadbeefdeadbeef/cancel`, { method: 'POST', token: alice.token })).status).toBe(404);
+  });
+});
+
+// ── 27–28. Existing owner-scoped routes still work ──────────────────────────
+describe('project analysis resources — owner-scoped routes unchanged', () => {
+  it('existing owner-scoped analysis-object routes still function', async () => {
+    const { alice } = users();
+    const created = await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'seurat' } });
+    expect(created.status).toBe(201);
+    expect(created.data.id).toMatch(/^ao_[0-9a-f]+$/);
+    expect(created.data.projectId).toBeNull(); // owner-scoped create leaves project_id NULL
+    const read = await api(server, `/api/analysis-objects/${created.data.id}`, { token: alice.token });
+    expect(read.status).toBe(200);
+  });
+
+  it('existing owner-scoped job routes still function', async () => {
+    const { alice } = users();
+    const created = await api(server, '/api/jobs', { method: 'POST', token: alice.token, body: { jobType: 'normalize' } });
+    expect(created.status).toBe(201);
+    expect(created.data.projectId).toBeNull();
+    expect((await api(server, `/api/jobs/${created.data.id}`, { token: alice.token })).status).toBe(200);
+    expect((await api(server, `/api/jobs/${created.data.id}/cancel`, { method: 'POST', token: alice.token })).status).toBe(200);
+  });
+});
+
+// ── 29. R state proxy / object ownership is UNCHANGED ────────────────────────
+// The most important constraint of this branch: project-scoped metadata
+// visibility must NOT widen R object/session ownership. A project member can see
+// an object's metadata but does NOT become an owner of its R state.
+describe('project analysis resources — R state/object ownership unchanged', () => {
+  it('project membership does not grant R object ownership', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'admin'); // even an admin member
+    const ao = await createAO(proj.id, alice.token);
+    const objId = ao.data.id;
+
+    // Bob can read the metadata via the project route…
+    const read = await api(server, `/api/projects/${proj.id}/analysis-objects/${objId}`, { token: bob.token });
+    expect(read.status).toBe(200);
+
+    // …but R object ownership is still creator-keyed, NOT project-member-keyed.
+    expect(verifyAnalysisObjectOwner(alice.user.id, objId)).toBe(true);
+    expect(verifyAnalysisObjectOwner(bob.user.id, objId)).toBe(false);
+  });
+
+  it('the R proxy object-ownership gate still rejects a project member (404 before reaching R)', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'analyst');
+    const ao = await createAO(proj.id, alice.token);
+
+    // Bob is a project member who can read the object's metadata, but supplying
+    // it as an X-Object-ID to the R proxy is rejected by verifyRObjectOwnership
+    // before the request can reach R — proving R state stays owner-verified.
+    const res = await api(server, '/api/r/health', { token: bob.token, headers: { 'X-Object-ID': ao.data.id } });
+    expect(res.status).toBe(404);
+  });
+
+  it('project jobs retain creator ownership for owner-scoped helpers', async () => {
+    const { alice, bob } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, 'bob@example.com', 'admin');
+    const job = await createJob(proj.id, alice.token);
+    // The owner-scoped job-ownership helper is unchanged: the creator owns it,
+    // a co-member does not.
+    expect(verifyJobOwner(alice.user.id, job.data.id)).toBe(true);
+    expect(verifyJobOwner(bob.user.id, job.data.id)).toBe(false);
+  });
+});

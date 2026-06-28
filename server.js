@@ -354,6 +354,19 @@ function isValidDatasetIdFormat(value) {
   return typeof value === 'string' && DATASET_ID_PATTERN.test(value);
 }
 
+// Analysis-object and job ids are server-generated as `ao_`/`job_` + lowercase
+// hex. A client supplying one (in a project route path, or as a reference field)
+// must match the shape, else the request is malformed (400) — distinct from a
+// well-formed id that simply does not resolve (404).
+const ANALYSIS_OBJECT_ID_PATTERN = /^ao_[0-9a-f]+$/;
+function isValidAnalysisObjectIdFormat(value) {
+  return typeof value === 'string' && ANALYSIS_OBJECT_ID_PATTERN.test(value);
+}
+const JOB_ID_PATTERN = /^job_[0-9a-f]+$/;
+function isValidJobIdFormat(value) {
+  return typeof value === 'string' && JOB_ID_PATTERN.test(value);
+}
+
 // Middleware: verify any client-supplied X-Object-ID against the DB before it
 // reaches R. Sanitizing the string (deriveRStateKey) is not enough on its own:
 // the id must be a real persisted analysis_objects.id owned by req.user. On
@@ -1163,6 +1176,228 @@ app.patch('/api/projects/:projectId/datasets/:datasetId', (req, res) => {
     res.json(db.toPublicDataset(updated));
   } catch (e) {
     sendDatasetError(res, e);
+  }
+});
+
+// ── Project-scoped Analysis Objects & Jobs API ──────────────────────────
+// Project association + project-member metadata/history visibility for analysis
+// objects and jobs. Access is governed by the caller's project role: owner/admin/
+// analyst may create; any member (incl. viewer) may list/read metadata/logs.
+// Identity and scope are server-controlled — clients may never supply an id, an
+// owner/creator field, a project field, or a job status; project_id comes from
+// the route project. Cross-project references (dataset, parent object, linked
+// objects) return 404. (`/api/projects` already has express.json + requireAuth
+// mounted above.)
+//
+// IMPORTANT: this is project-scoped METADATA only. It does NOT make R execution/
+// state project-shared — R state stays user/object-keyed (verifyRObjectOwnership
+// is unchanged and still owner-verified). A project member seeing an object's
+// metadata does NOT gain access to another user's live R session. There is no
+// worker draining jobs in this branch. See docs/architecture.md.
+
+// Map the coded errors thrown by the project-scoped analysis-object/job helpers
+// to HTTP statuses: 404 for unknown/not-accessible (no existence leak), 403 for a
+// known member lacking the role, 409 for a non-cancelable (terminal) job, 400 for
+// input validation.
+function sendProjectResourceError(res, e, context) {
+  switch (e.code) {
+    case 'NOT_FOUND':
+    case 'PARENT_NOT_FOUND':
+    case 'DATASET_NOT_FOUND':
+    case 'ANALYSIS_OBJECT_NOT_FOUND':
+    case 'RESULT_OBJECT_NOT_FOUND':
+    case 'JOB_NOT_FOUND':
+      return res.status(404).json({ error: e.message });
+    case 'FORBIDDEN':
+      return res.status(403).json({ error: e.message });
+    case 'JOB_NOT_CANCELABLE':
+      return res.status(409).json({ error: e.message });
+    case 'INVALID_OBJECT_TYPE':
+    case 'INVALID_METADATA':
+    case 'INVALID_JOB_TYPE':
+    case 'INVALID_PARAMETERS':
+    case 'INVALID_OWNER':
+      return res.status(400).json({ error: e.message });
+    default:
+      console.error(`[${context}]`, e);
+      return res.status(500).json({ error: 'Internal error.' });
+  }
+}
+
+// Reject any client attempt to set a server-controlled field on a project-scoped
+// analysis-object/job create. Returns true (and has sent a 400) when one is
+// present. project_id is taken from the route, never the body.
+function rejectProjectResourceFields(req, res, { extra = [] } = {}) {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (body.id !== undefined) {
+    res.status(400).json({ error: 'Id is server-assigned and must not be provided.' });
+    return true;
+  }
+  const forbidden = [
+    ...REJECTED_OWNER_FIELDS, ...REJECTED_CREATOR_FIELDS,
+    'projectId', 'project_id', ...extra
+  ];
+  for (const field of forbidden) {
+    if (body[field] !== undefined) {
+      res.status(400).json({ error: `Field '${field}' is not allowed; it is server-controlled.` });
+      return true;
+    }
+  }
+  return false;
+}
+
+app.post('/api/projects/:projectId/analysis-objects', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  // lineageRootId is server-derived; reject any client-supplied value alongside
+  // the id/owner/creator/project fields.
+  if (rejectProjectResourceFields(req, res, { extra: ['lineageRootId', 'lineage_root_id'] })) return;
+
+  // Validate reference id shapes → 400 before touching the DB.
+  if (body.parentObjectId !== undefined && body.parentObjectId !== null &&
+      !isValidAnalysisObjectIdFormat(body.parentObjectId)) {
+    return res.status(400).json({ error: 'Malformed parent object ID.' });
+  }
+  if (body.datasetId !== undefined && body.datasetId !== null &&
+      !isValidDatasetIdFormat(body.datasetId)) {
+    return res.status(400).json({ error: 'Malformed dataset ID.' });
+  }
+  // created-by provenance is user-scoped: the caller must own it (404 otherwise),
+  // exactly as the owner-scoped route enforces. Provenance has no project.
+  if (body.createdByProvenanceId !== undefined && body.createdByProvenanceId !== null) {
+    if (typeof body.createdByProvenanceId !== 'string' || !db.getProvenance(body.createdByProvenanceId, req.user.email)) {
+      return res.status(404).json({ error: 'Provenance record not found.' });
+    }
+  }
+
+  try {
+    const created = db.createProjectAnalysisObject(req.user.id, req.params.projectId, {
+      datasetId: body.datasetId,
+      parentObjectId: body.parentObjectId,
+      objectType: body.objectType,
+      displayName: body.displayName,
+      storageUri: body.storageUri,
+      objectHash: body.objectHash,
+      metadata: body.metadata,
+      createdByProvenanceId: body.createdByProvenanceId
+    });
+    res.status(201).json(created);
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
+  }
+});
+
+app.get('/api/projects/:projectId/analysis-objects', (req, res) => {
+  const filters = {
+    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
+    parentObjectId: typeof req.query.parentObjectId === 'string' ? req.query.parentObjectId : undefined,
+    lineageRootId: typeof req.query.lineageRootId === 'string' ? req.query.lineageRootId : undefined,
+    objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
+  };
+  try {
+    res.json(db.listProjectAnalysisObjects(req.user.id, req.params.projectId, filters));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
+  }
+});
+
+app.get('/api/projects/:projectId/analysis-objects/:objectId', (req, res) => {
+  if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  try {
+    const obj = db.getProjectAnalysisObject(req.user.id, req.params.projectId, req.params.objectId);
+    if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
+    res.json(obj);
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
+  }
+});
+
+app.post('/api/projects/:projectId/jobs', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  // Status is server-managed; a client cannot pick the initial status.
+  if (body.status !== undefined) {
+    return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
+  }
+  if (rejectProjectResourceFields(req, res)) return;
+
+  if (body.analysisObjectId !== undefined && body.analysisObjectId !== null &&
+      !isValidAnalysisObjectIdFormat(body.analysisObjectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  if (body.resultAnalysisObjectId !== undefined && body.resultAnalysisObjectId !== null &&
+      !isValidAnalysisObjectIdFormat(body.resultAnalysisObjectId)) {
+    return res.status(400).json({ error: 'Malformed result analysis object ID.' });
+  }
+  if (body.datasetId !== undefined && body.datasetId !== null &&
+      !isValidDatasetIdFormat(body.datasetId)) {
+    return res.status(400).json({ error: 'Malformed dataset ID.' });
+  }
+
+  try {
+    const created = db.createProjectJob(req.user.id, req.params.projectId, {
+      analysisObjectId: body.analysisObjectId,
+      resultAnalysisObjectId: body.resultAnalysisObjectId,
+      datasetId: body.datasetId,
+      jobType: body.jobType,
+      parameters: body.parameters
+    });
+    res.status(201).json(created);
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectJobs');
+  }
+});
+
+app.get('/api/projects/:projectId/jobs', (req, res) => {
+  const filters = {
+    status: typeof req.query.status === 'string' ? req.query.status : undefined,
+    jobType: typeof req.query.jobType === 'string' ? req.query.jobType : undefined,
+    analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
+    resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined,
+    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined
+  };
+  try {
+    res.json(db.listProjectJobs(req.user.id, req.params.projectId, filters));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectJobs');
+  }
+});
+
+app.get('/api/projects/:projectId/jobs/:jobId', (req, res) => {
+  if (!isValidJobIdFormat(req.params.jobId)) {
+    return res.status(400).json({ error: 'Malformed job ID.' });
+  }
+  try {
+    const job = db.getProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found.' });
+    res.json(job);
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectJobs');
+  }
+});
+
+app.get('/api/projects/:projectId/jobs/:jobId/logs', (req, res) => {
+  if (!isValidJobIdFormat(req.params.jobId)) {
+    return res.status(400).json({ error: 'Malformed job ID.' });
+  }
+  try {
+    const job = db.getProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found.' });
+    res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectJobs');
+  }
+});
+
+app.post('/api/projects/:projectId/jobs/:jobId/cancel', (req, res) => {
+  if (!isValidJobIdFormat(req.params.jobId)) {
+    return res.status(400).json({ error: 'Malformed job ID.' });
+  }
+  try {
+    const job = db.cancelProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    res.json(job);
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectJobs');
   }
 });
 
