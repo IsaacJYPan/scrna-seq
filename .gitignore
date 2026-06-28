@@ -78,4 +78,6 @@ scripts/reference_metrics.json
 visual_test.js
 
 # Generated Guides (Beginner Full-Stack Course)
-docs/guide/
+docs/guide/
+
+.project/
