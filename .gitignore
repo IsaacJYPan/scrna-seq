@@ -39,6 +39,8 @@ Thumbs.db
 # R session objects — RDS files are large user-specific binary blobs
 r-backend/sessions/
 r-backend/vault/
+# Runtime per-user vault (uploaded data files, R state, project dataset storage)
+vault/
 *.rds
 *.RDS
 *.meta.json

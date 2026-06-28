@@ -226,6 +226,31 @@ export const electronAPI = {
   listProjects: async () => req('/api/projects'),
   getProject: async (id) => req(`/api/projects/${id}`),
   updateProject: async (id, payload) => req(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(payload || {}) }),
+  // Datasets (project-scoped). Thin wrappers; ids/owner/storage are server-controlled.
+  createDataset: async (projectId, payload) => req(`/api/projects/${projectId}/datasets`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listDatasets: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/datasets${qs ? `?${qs}` : ''}`);
+  },
+  getDataset: async (projectId, datasetId) => req(`/api/projects/${projectId}/datasets/${datasetId}`),
+  updateDataset: async (projectId, datasetId, payload) => req(`/api/projects/${projectId}/datasets/${datasetId}`, { method: 'PATCH', body: JSON.stringify(payload || {}) }),
+  // Multipart dataset upload: the server chooses the storage location and records
+  // sha256/size. `metadata` (if given) is sent as a JSON string form field.
+  uploadDataset: async (projectId, file, metadata = {}, fileType) => {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    if (fileType) form.append('fileType', fileType);
+    if (metadata && Object.keys(metadata).length > 0) form.append('metadata', JSON.stringify(metadata));
+    const headers = {};
+    attachAuthHeader(headers);
+    const res = await fetch(apiUrl(`/api/projects/${projectId}/datasets`), { method: 'POST', headers, body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  },
+
   listProjectMembers: async (id) => req(`/api/projects/${id}/members`),
   addProjectMember: async (id, email, role) => req(`/api/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
   updateProjectMemberRole: async (id, userId, role) => req(`/api/projects/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
