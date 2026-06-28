@@ -1689,13 +1689,48 @@ function startPlumber() {
   process.on('exit', () => rProcess.kill());
 }
 
+// ── Job worker (conservative, opt-in) ────────────────────────────────────────
+// Disabled by default. The minimal drain loop only runs when ENABLE_JOB_WORKER is
+// explicitly set, so local/dev and tests stay worker-free unless they ask for it.
+// It processes only registered handlers (currently the safe `generic` noop) — NO
+// scientific pipeline execution. See backend/jobWorker.js and docs/architecture.md.
+let jobWorker = null;
+function startJobWorkerIfEnabled() {
+  if (process.env.ENABLE_JOB_WORKER !== 'true') return null;
+  const { createJobWorker } = require('./backend/jobWorker');
+  const worker = createJobWorker({
+    db,
+    pollIntervalMs: Number(process.env.JOB_WORKER_POLL_MS || 1000),
+    leaseSeconds: Number(process.env.JOB_WORKER_LEASE_SECONDS || 30),
+    logger: console,
+  });
+  worker.start();
+  console.log(`[worker] Job worker started (id=${worker.workerId}).`);
+  return worker;
+}
+
+function stopJobWorker() {
+  if (jobWorker) {
+    const stopping = jobWorker.stop();
+    jobWorker = null;
+    return stopping;
+  }
+  return undefined;
+}
+
 // Start Server
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Node.js Web Server running on http://localhost:${PORT}`);
     console.log(`Starting local R Plumber backend...`);
     startPlumber();
+    jobWorker = startJobWorkerIfEnabled();
   });
+
+  // Stop the worker cleanly on shutdown so no tick is left mid-claim.
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => { stopJobWorker(); process.exit(0); });
+  }
 }
 
 module.exports = {
@@ -1718,5 +1753,8 @@ module.exports = {
   authRateLimitMax,
   authRateLimitWindowMs,
   rateLimitDisabled,
-  R_PROXY_VALIDATED_PATH_FIELDS
+  R_PROXY_VALIDATED_PATH_FIELDS,
+  // Exposed for tests: opt-in job worker startup wiring
+  startJobWorkerIfEnabled,
+  stopJobWorker
 };
