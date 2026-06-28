@@ -84,10 +84,17 @@ jobs:
         #                        same-project dataset/parent/lineage/result references, cancel
         #                        policy by role, and proof that project membership does NOT
         #                        widen R object/state ownership)
+        #   project-provenance-figures (project-scoped provenance/figure metadata: role-checked
+        #                        append-only create + project-member reads, 404-vs-403 access
+        #                        rules, server-controlled ids/owner/project/actor, same-project
+        #                        dataset/object/job/result/provenance/parent references, NO figure
+        #                        file_path/storage-key acceptance and no raw path in responses,
+        #                        legacy NULL-project rows not leaked, and proof that referencing
+        #                        an object in metadata does NOT widen R object/state ownership)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
