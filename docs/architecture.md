@@ -554,6 +554,15 @@ id* gap, but the R execution model is still **not** production-grade:
 3. R state persisted/loaded per `(user, object|job)` from durable storage rather
    than a single mutable `global_obj`, ideally in per-object R workers/containers.
 
+The *semantics* for that fix — execution model, job lifecycle, checkpoint/
+branching, collaboration boundaries, the future worker architecture, and a
+reproducibility-artifact model — are specified ahead of implementation in
+[`project-r-execution-design.md`](project-r-execution-design.md). That document
+is **design only**: it preserves the current R ownership boundary
+(`deriveRStateKey` / `verifyRObjectOwnership` unchanged), recommends
+collaboration through durable checkpoints/artifacts rather than a shared mutable
+R session, and proposes the follow-up implementation branch sequence.
+
 ## Target Production Architecture
 - React/Vite frontend (unchanged shape).
 - Express API as the auth + orchestration tier.
