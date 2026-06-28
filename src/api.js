@@ -251,6 +251,32 @@ export const electronAPI = {
     return data;
   },
 
+  // Project-scoped analysis objects & jobs (project metadata/history; ids/owner/
+  // project/status are server-controlled). R execution/state is unchanged here —
+  // these are metadata APIs only.
+  createProjectAnalysisObject: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/analysis-objects`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listProjectAnalysisObjects: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/analysis-objects${qs ? `?${qs}` : ''}`);
+  },
+  getProjectAnalysisObject: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/analysis-objects/${objectId}`),
+  createProjectJob: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/jobs`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listProjectJobs: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/jobs${qs ? `?${qs}` : ''}`);
+  },
+  getProjectJob: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}`),
+  getProjectJobLogs: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}/logs`),
+  cancelProjectJob: async (projectId, jobId) =>
+    req(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: 'POST' }),
+
   listProjectMembers: async (id) => req(`/api/projects/${id}/members`),
   addProjectMember: async (id, email, role) => req(`/api/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
   updateProjectMemberRole: async (id, userId, role) => req(`/api/projects/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),

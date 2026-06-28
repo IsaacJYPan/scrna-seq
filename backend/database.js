@@ -82,9 +82,16 @@ function initDatabase(dbPath) {
     -- object id maps to a real row owned by the authenticated user *before*
     -- deriving an R state key, so object ids can no longer be a client-
     -- controlled path into another user's R session state.
+    --
+    -- project_id (nullable) associates the object's *metadata/history* with a
+    -- project so project members can list/read it by role; it does NOT change R
+    -- state keying (still user/object-keyed) and does NOT remove creator
+    -- ownership (owner_user_id). Legacy rows keep a NULL project_id; the new
+    -- project-scoped creation path always sets it. See docs/architecture.md.
     CREATE TABLE IF NOT EXISTS analysis_objects (
       id TEXT PRIMARY KEY,
       owner_user_id INTEGER NOT NULL,
+      project_id TEXT,
       dataset_id TEXT,
       parent_object_id TEXT,
       lineage_root_id TEXT,
@@ -113,11 +120,15 @@ function initDatabase(dbPath) {
     -- the parameters it was created with, an append-only log, an optional
     -- structured error, and an optional result analysis object. Ownership is
     -- always taken from the authenticated session by the route layer; the id
-    -- is server-generated. NOTE: this branch adds the durable record + API
-    -- only — there is no worker/queue draining jobs yet (see docs/architecture.md).
+    -- is server-generated. project_id (nullable) associates the job's metadata/
+    -- history with a project for project-member visibility by role; it does NOT
+    -- make R execution project-shared and does NOT remove creator ownership.
+    -- NOTE: this branch adds the durable record + project metadata/API only —
+    -- there is no worker/queue draining jobs yet (see docs/architecture.md).
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       owner_user_id INTEGER NOT NULL,
+      project_id TEXT,
       analysis_object_id TEXT,
       result_analysis_object_id TEXT,
       dataset_id TEXT,
@@ -274,6 +285,38 @@ function initDatabase(dbPath) {
   // Created here (not in the CREATE block above) so it runs only after the column
   // is guaranteed to exist on a pre-existing jobs table.
   db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_dataset ON jobs(dataset_id)');
+
+  // Add project_id to analysis_objects/jobs for pre-existing DBs (the column is
+  // part of the CREATE above for fresh DBs). Project scope is additive metadata:
+  // existing rows keep a NULL project_id (legacy user-scoped records that remain
+  // readable only through the owner-scoped routes), while the new project-scoped
+  // creation paths always set it. Idempotent — only ALTER when the column is
+  // absent. This does NOT touch R state keying or creator ownership.
+  const aoProjCols = db.prepare("PRAGMA table_info(analysis_objects)").all().map(c => c.name);
+  if (!aoProjCols.includes('project_id')) {
+    db.exec('ALTER TABLE analysis_objects ADD COLUMN project_id TEXT');
+    console.log('[DB] Migrated: added project_id column to analysis_objects table');
+  }
+  const jobProjCols = db.prepare("PRAGMA table_info(jobs)").all().map(c => c.name);
+  if (!jobProjCols.includes('project_id')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN project_id TEXT');
+    console.log('[DB] Migrated: added project_id column to jobs table');
+  }
+  // Created here (not in the CREATE block above) so the project_id composite
+  // indexes run only after the column is guaranteed to exist on a pre-existing
+  // analysis_objects / jobs table.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ao_project ON analysis_objects(project_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_project_dataset ON analysis_objects(project_id, dataset_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_project_parent ON analysis_objects(project_id, parent_object_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_project_lineage_root ON analysis_objects(project_id, lineage_root_id);
+    CREATE INDEX IF NOT EXISTS idx_ao_project_owner ON analysis_objects(project_id, owner_user_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_project_status ON jobs(project_id, status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_project_analysis_object ON jobs(project_id, analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_project_result_object ON jobs(project_id, result_analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
+  `);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_prov_user ON provenance(user_email);
@@ -657,6 +700,7 @@ function rowToAnalysisObject(row) {
   return {
     id: row.id,
     ownerUserId: row.owner_user_id,
+    projectId: row.project_id,
     datasetId: row.dataset_id,
     parentObjectId: row.parent_object_id,
     lineageRootId: row.lineage_root_id,
@@ -864,6 +908,7 @@ function rowToJob(row) {
   return {
     id: row.id,
     ownerUserId: row.owner_user_id,
+    projectId: row.project_id,
     analysisObjectId: row.analysis_object_id,
     resultAnalysisObjectId: row.result_analysis_object_id,
     datasetId: row.dataset_id,
@@ -1807,6 +1852,288 @@ function markDatasetUploadFailed(projectId, datasetId) {
   return getDatasetRow(datasetId, projectId);
 }
 
+// ── Project-scoped analysis objects & jobs ───────────────────────
+//
+// These helpers add a project_id association + project-member metadata
+// visibility on top of the existing user-scoped analysis_objects / jobs
+// records. They authorize through the caller's project_members role
+// (requireProjectRole), exactly like the datasets layer, so:
+//   - unknown / inaccessible project → NOT_FOUND (404; no existence leak),
+//   - known member lacking the role  → FORBIDDEN (403).
+// Create requires owner/admin/analyst; list/read metadata is allowed for any
+// member (incl. viewer). project_id is taken from the authorized route project,
+// never from client input, and every cross-resource reference (dataset, parent
+// object, lineage root, linked analysis objects) is confined to the SAME project
+// so lineage/links can never cross a project boundary.
+//
+// IMPORTANT (constraint of this branch): this is project-scoped *metadata/
+// history* only. It does NOT touch R execution/state, which stays user/object-
+// keyed (see verifyAnalysisObjectOwner / deriveRStateKey in server.js). A
+// project member seeing an object's metadata does NOT gain access to another
+// user's live R session. Creator ownership (owner_user_id) is retained.
+
+const ANALYSIS_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const ANALYSIS_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const PROJECT_JOB_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const PROJECT_JOB_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+
+// Low-level project-scoped row fetches (no auth — callers above have already
+// authorized via requireProjectRole). A row in another project is invisible.
+function getProjectAnalysisObjectRow(objectId, projectId) {
+  if (typeof objectId !== 'string' || objectId === '') return null;
+  const row = db.prepare('SELECT * FROM analysis_objects WHERE id = ? AND project_id = ?')
+    .get(objectId, String(projectId));
+  return rowToAnalysisObject(row);
+}
+
+function getProjectJobRow(jobId, projectId) {
+  if (typeof jobId !== 'string' || jobId === '') return null;
+  const row = db.prepare('SELECT * FROM jobs WHERE id = ? AND project_id = ?')
+    .get(jobId, String(projectId));
+  return rowToJob(row);
+}
+
+/**
+ * Create a project-scoped analysis object. Requires the caller to be an
+ * owner/admin/analyst of `projectId`. project_id is set from the route project,
+ * never the body. A supplied datasetId / parentObjectId must belong to the SAME
+ * project (else 404, no cross-project lineage or references). Lineage root is
+ * inherited from the parent within the project. Throws coded errors
+ * (`NOT_FOUND`, `FORBIDDEN`, `INVALID_OBJECT_TYPE`, `INVALID_METADATA`,
+ * `DATASET_NOT_FOUND`, `PARENT_NOT_FOUND`).
+ */
+function createProjectAnalysisObject(userId, projectId, input = {}) {
+  const membership = requireProjectRole(userId, projectId, ANALYSIS_WRITE_ROLES);
+  const owner = membership.userId;
+  const pid = String(projectId);
+
+  const objectType = typeof input.objectType === 'string' ? input.objectType.trim() : '';
+  if (!isValidObjectType(objectType)) {
+    throw codedError('INVALID_OBJECT_TYPE',
+      `Invalid objectType. Allowed: ${[...ALLOWED_OBJECT_TYPES].join(', ')}.`);
+  }
+
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  // A supplied datasetId must reference a dataset in THIS project. Looking it up
+  // by (id, project_id) enforces same-project: a dataset in another project (or
+  // unknown) is invisible → 404. The caller is already an authorized write-member
+  // of this project, so no separate dataset role check is needed.
+  let datasetId = null;
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (typeof input.datasetId !== 'string' || !getDatasetRow(input.datasetId, pid)) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    datasetId = input.datasetId;
+  }
+
+  // A supplied parentObjectId must be an analysis object in THIS project (created
+  // by any project member). Lineage root is inherited only within the project.
+  const parentObjectId = input.parentObjectId ? String(input.parentObjectId) : null;
+  let lineageRootId = null;
+  if (parentObjectId) {
+    const parent = getProjectAnalysisObjectRow(parentObjectId, pid);
+    if (!parent) {
+      throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    }
+    lineageRootId = parent.lineageRootId || parent.id;
+  }
+
+  const id = generateAnalysisObjectId();
+  db.prepare(`
+    INSERT INTO analysis_objects
+      (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+       display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+    VALUES
+      (@id, @owner, @projectId, @datasetId, @parentObjectId, @lineageRootId, @objectType,
+       @displayName, @storageUri, @objectHash, @metadataJson, @createdByProvenanceId)
+  `).run({
+    id,
+    owner,
+    projectId: pid,
+    datasetId,
+    parentObjectId,
+    lineageRootId,
+    objectType,
+    displayName: input.displayName != null ? String(input.displayName) : null,
+    storageUri: input.storageUri != null ? String(input.storageUri) : null,
+    objectHash: input.objectHash != null ? String(input.objectHash) : null,
+    metadataJson: JSON.stringify(metadata),
+    createdByProvenanceId: input.createdByProvenanceId ? String(input.createdByProvenanceId) : null
+  });
+
+  if (!parentObjectId) {
+    db.prepare('UPDATE analysis_objects SET lineage_root_id = id WHERE id = ?').run(id);
+  }
+
+  return getProjectAnalysisObjectRow(id, pid);
+}
+
+/** List a project's analysis objects (any member may read). Filters are all
+ * project-scoped, so a filter can never widen the query beyond the project. */
+function listProjectAnalysisObjects(userId, projectId, filters = {}) {
+  requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
+  const clauses = ['project_id = ?'];
+  const params = [String(projectId)];
+  if (filters.datasetId) { clauses.push('dataset_id = ?'); params.push(String(filters.datasetId)); }
+  if (filters.parentObjectId) { clauses.push('parent_object_id = ?'); params.push(String(filters.parentObjectId)); }
+  if (filters.lineageRootId) { clauses.push('lineage_root_id = ?'); params.push(String(filters.lineageRootId)); }
+  if (filters.objectType) { clauses.push('object_type = ?'); params.push(String(filters.objectType)); }
+  const rows = db.prepare(
+    `SELECT * FROM analysis_objects WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(...params);
+  return rows.map(rowToAnalysisObject);
+}
+
+/** Return a project analysis object only if the caller is a member and the
+ * object belongs to that project; otherwise null (route → 404). Any role reads. */
+function getProjectAnalysisObject(userId, projectId, objectId) {
+  requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
+  return getProjectAnalysisObjectRow(objectId, projectId);
+}
+
+/**
+ * Create a project-scoped job. Requires owner/admin/analyst of `projectId`.
+ * project_id and owner_user_id are server-set; status starts at INITIAL_JOB_STATUS
+ * (clients cannot choose a status). A supplied analysisObjectId /
+ * resultAnalysisObjectId / datasetId must belong to the SAME project (else 404).
+ * Throws coded errors (`NOT_FOUND`, `FORBIDDEN`, `INVALID_JOB_TYPE`,
+ * `INVALID_PARAMETERS`, `ANALYSIS_OBJECT_NOT_FOUND`, `RESULT_OBJECT_NOT_FOUND`,
+ * `DATASET_NOT_FOUND`).
+ */
+function createProjectJob(userId, projectId, input = {}) {
+  const membership = requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  const owner = membership.userId;
+  const pid = String(projectId);
+
+  const jobType = typeof input.jobType === 'string' ? input.jobType.trim() : '';
+  if (!isValidJobType(jobType)) {
+    throw codedError('INVALID_JOB_TYPE',
+      `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
+  }
+
+  const parameters = input.parameters === undefined ? {} : input.parameters;
+  if (parameters === null || typeof parameters !== 'object' || Array.isArray(parameters)) {
+    throw codedError('INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
+  }
+
+  let analysisObjectId = null;
+  if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
+    if (typeof input.analysisObjectId !== 'string' || !getProjectAnalysisObjectRow(input.analysisObjectId, pid)) {
+      throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+    }
+    analysisObjectId = input.analysisObjectId;
+  }
+
+  // An optional resultAnalysisObjectId pre-links a job to an already-existing
+  // result object in the SAME project (the status machine is the usual writer of
+  // this field; here it is metadata only). Cross-project / unknown → 404.
+  let resultAnalysisObjectId = null;
+  if (input.resultAnalysisObjectId !== undefined && input.resultAnalysisObjectId !== null) {
+    if (typeof input.resultAnalysisObjectId !== 'string' || !getProjectAnalysisObjectRow(input.resultAnalysisObjectId, pid)) {
+      throw codedError('RESULT_OBJECT_NOT_FOUND', 'Result analysis object not found.');
+    }
+    resultAnalysisObjectId = input.resultAnalysisObjectId;
+  }
+
+  let datasetId = null;
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (typeof input.datasetId !== 'string' || !getDatasetRow(input.datasetId, pid)) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    datasetId = input.datasetId;
+  }
+
+  const id = generateJobId();
+  db.prepare(`
+    INSERT INTO jobs
+      (id, owner_user_id, project_id, analysis_object_id, result_analysis_object_id, dataset_id,
+       job_type, status, parameters_json)
+    VALUES
+      (@id, @owner, @projectId, @analysisObjectId, @resultAnalysisObjectId, @datasetId,
+       @jobType, @status, @parametersJson)
+  `).run({
+    id,
+    owner,
+    projectId: pid,
+    analysisObjectId,
+    resultAnalysisObjectId,
+    datasetId,
+    jobType,
+    status: INITIAL_JOB_STATUS,
+    parametersJson: JSON.stringify(parameters)
+  });
+
+  return getProjectJobRow(id, pid);
+}
+
+/** List a project's jobs (any member may read). Filters are project-scoped. */
+function listProjectJobs(userId, projectId, filters = {}) {
+  requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
+  const clauses = ['project_id = ?'];
+  const params = [String(projectId)];
+  if (filters.status) { clauses.push('status = ?'); params.push(String(filters.status)); }
+  if (filters.jobType) { clauses.push('job_type = ?'); params.push(String(filters.jobType)); }
+  if (filters.analysisObjectId) { clauses.push('analysis_object_id = ?'); params.push(String(filters.analysisObjectId)); }
+  if (filters.resultAnalysisObjectId) { clauses.push('result_analysis_object_id = ?'); params.push(String(filters.resultAnalysisObjectId)); }
+  if (filters.datasetId) { clauses.push('dataset_id = ?'); params.push(String(filters.datasetId)); }
+  const rows = db.prepare(
+    `SELECT * FROM jobs WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(...params);
+  return rows.map(rowToJob);
+}
+
+/** Return a project job only if the caller is a member and the job belongs to
+ * that project; otherwise null (route → 404). Any role reads metadata/logs. */
+function getProjectJob(userId, projectId, jobId) {
+  requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
+  return getProjectJobRow(jobId, projectId);
+}
+
+/**
+ * Cancel a cancelable project job. Authorization:
+ *   - owner/admin may cancel any cancelable job in the project,
+ *   - analyst may cancel only their OWN cancelable jobs (else 403),
+ *   - viewer may not cancel (403; FORBIDDEN from requireProjectRole),
+ *   - non-member → 404 (NOT_FOUND from requireProjectRole).
+ * An unknown / cross-project job → `JOB_NOT_FOUND` (404). An already-terminal job
+ * → `JOB_NOT_CANCELABLE` (409). Does NOT touch any R process — there is no
+ * execution abstraction to interrupt in this branch.
+ */
+function cancelProjectJob(userId, projectId, jobId) {
+  const membership = requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  const pid = String(projectId);
+  const job = getProjectJobRow(jobId, pid);
+  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+
+  // An analyst may only cancel jobs they created. Checked before the terminal
+  // guard so an analyst acting on someone else's job always sees 403, not 409.
+  if (membership.role === 'analyst' && job.ownerUserId !== membership.userId) {
+    throw codedError('FORBIDDEN', 'Analysts can only cancel their own jobs.');
+  }
+  if (TERMINAL_JOB_STATUSES.has(job.status)) {
+    throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
+  }
+
+  // Project-scoped status mutation: keyed by (id, project_id) — NOT owner — so an
+  // owner/admin can cancel a job another member created. Only non-terminal →
+  // canceled reaches here, which is always a valid transition.
+  const logs = [...job.logs, normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' })];
+  db.prepare(`
+    UPDATE jobs SET
+      status = 'canceled',
+      logs_json = @logsJson,
+      updated_at = datetime('now'),
+      canceled_at = datetime('now')
+    WHERE id = @id AND project_id = @projectId
+  `).run({ id: String(jobId), projectId: pid, logsJson: JSON.stringify(logs) });
+
+  return getProjectJobRow(jobId, pid);
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────
 
 function closeDatabase() {
@@ -1889,6 +2216,15 @@ module.exports = {
   updateDatasetForProject,
   verifyDatasetProjectAccess,
   markDatasetUploaded,
-  markDatasetUploadFailed
+  markDatasetUploadFailed,
+  // Project-scoped analysis objects & jobs (project metadata/history + roles;
+  // R execution/state remains user/object-keyed — see notes above)
+  createProjectAnalysisObject,
+  listProjectAnalysisObjects,
+  getProjectAnalysisObject,
+  createProjectJob,
+  listProjectJobs,
+  getProjectJob,
+  cancelProjectJob
 };
 
