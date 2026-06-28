@@ -71,10 +71,13 @@ jobs:
         #   r-path-drift        (finding 4: R validate_path fields vs Node allowlist)
         #   auth-credentials    (finding 7: generic 401, no user-enumeration message)
         #   security/analysis-objects (findings 5, 6, 9: figure path, owner-required helpers, datasetId caveat)
+        #   organizations       (org/project membership + authorization foundation:
+        #                        404-vs-403 access rules, server-controlled ids/owner/role,
+        #                        last-owner invariant, owner/admin-only mutations)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/organizations.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
