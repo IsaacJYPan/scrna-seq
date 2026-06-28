@@ -250,9 +250,12 @@ ownership-scoped record:
   `queued`, `running`, `waiting_for_user`, `completed`, `failed`, `canceled`.
   Jobs are created `queued`. Transitions are an explicit allow-list
   (`validateJobTransition`): `created→queued`, `queued→running`,
-  `running→{completed,failed,waiting_for_user}`, `waiting_for_user→{queued,
+  `running→{completed,failed,waiting_for_user,queued}`, `waiting_for_user→{queued,
   running}`, and any non-terminal status `→canceled`; `completed`/`failed`/
-  `canceled` are terminal. Clients cannot set an arbitrary status — they may only
+  `canceled` are terminal. The `running→queued` edge is the **worker re-queue /
+  lease-recovery** edge (release or expired-lease recovery returns a claimed job
+  to the queue); it is driven only by the server-tier worker-coordination helpers,
+  never by a client. Clients cannot set an arbitrary status — they may only
   create and cancel; all other transitions go through `updateJobStatusForUser`
   (the path a future worker will use). A linked `resultAnalysisObjectId` is
   ownership-verified the same way.
@@ -261,10 +264,35 @@ ownership-scoped record:
   owner-scoped; unknown/not-owned ids return 404, and canceling an already-
   terminal job returns 409. Covered by `backend/jobs.test.js` (HTTP ownership +
   the status-machine/helper layer).
-- **Scope of this branch.** This is the *durable record + API + ownership
-  boundary* only. There is **no worker or queue draining jobs yet**: nothing
-  advances a job past `queued`, and existing R proxy execution is unchanged and
-  still synchronous. Jobs are not yet wired into the R proxy (no `X-Job-ID`).
+- **Worker coordination contract (schema + helpers only — no worker runs yet).**
+  The `jobs` table also carries a durable, versioned set of coordination columns —
+  `worker_id`, `claim_token`, `lease_expires_at`, `heartbeat_at`, `locked_at`,
+  `attempts` (default 0), `max_attempts` (default 1), `priority` (default 0),
+  `last_worker_error` — plus indexes `idx_jobs_claimable` / `idx_jobs_lease` /
+  `idx_jobs_worker`. They back a set of server-tier-internal helpers
+  (`claimNextJob`, `heartbeatJob`, `completeJobByWorker`, `failJobByWorker`,
+  `releaseJob`, `reapExpiredJobs`, `setJobScheduling`) that let a **future** worker
+  safely **claim** one queued job (single-winner, ordered by `priority` desc then
+  `created_at`), **lease** it, **heartbeat** to extend the lease, and **release**,
+  **complete**, or **fail** it — all authorized by a server-issued `worker_id` +
+  rotating `claim_token` bearer capability (never by a user token, and never
+  exposed through the owner/project read APIs). An expired lease is recovered by
+  `reapExpiredJobs`: re-queued while `attempts < max_attempts`, else moved to
+  `failed`, so an abandoned job is never stuck `running` or reclaimed forever. The
+  default `max_attempts = 1` is **at-most-once** — a crash is not silently retried.
+  Canceling a claimed job (owner or project route) clears the `claim_token`/lease
+  so the worker's next heartbeat/complete/fail fails deterministically
+  (`CLAIM_LOST`). Covered by `backend/jobs-worker-contract.test.js`.
+- **Scope of this branch.** This adds the *durable worker-coordination schema +
+  contract + helpers* on top of the existing record/API/ownership boundary. There
+  is still **no worker or queue draining jobs**: nothing calls these helpers in the
+  running server, nothing advances a job past `queued` on its own, cancellation
+  records intent only and does **not** kill any R work, and existing R proxy
+  execution is unchanged and still synchronous. Jobs are not yet wired into the R
+  proxy (no `X-Job-ID`). R active state remains user/object-keyed and owner-verified;
+  there is no shared/mutable project R state. The first actual worker is the future
+  `worker-queue-drain-minimal` branch; result artifacts/checkpoints are the future
+  `job-artifacts-and-checkpoints` branch.
 
 ### Organization & Project Authorization (`organizations`, `projects`)
 The first durable org/project authorization layer. This branch adds the
@@ -540,8 +568,9 @@ now confirms any client object id is a real `analysis_objects` row owned by the
 caller before it can influence R state. That closes the *client-controlled object
 id* gap, but the R execution model is still **not** production-grade:
 - R state still lives in a single in-process environment in one R process. The
-  `jobs` table exists as a durable record, but no worker drains it and R work is
-  still synchronous with no concurrency control — long-running steps still block
+  `jobs` table exists as a durable record with a worker-coordination contract
+  (claim/lease/heartbeat schema + helpers), but **no worker drains it** and R work
+  is still synchronous with no concurrency control — long-running steps still block
   and live R state is lost on R restart.
 
 **Prerequisites for the real fix:**
@@ -549,8 +578,11 @@ id* gap, but the R execution model is still **not** production-grade:
    belongs to the caller.~~ **Done** (`analysis_objects` + `verifyRObjectOwnership`).
 2. A `jobs` model + job queue so each long R computation is an addressable,
    resumable unit keyed by `job_id` (and so requests don't block). **Partially
-   done** (this branch): the durable, owner-scoped `jobs` model + API exist; a
-   queue/worker that actually executes jobs and wires `job_id` into R does not.
+   done**: the durable, owner-scoped `jobs` model + API exist, and a durable
+   worker-coordination **contract + schema + helpers** (claim/lease/heartbeat,
+   `backend/jobs-worker-contract.test.js`) now define how a worker will safely
+   claim and run jobs; the **worker itself** that drains the queue and wires
+   `job_id` into R still does not exist (future `worker-queue-drain-minimal`).
 3. R state persisted/loaded per `(user, object|job)` from durable storage rather
    than a single mutable `global_obj`, ideally in per-object R workers/containers.
 
@@ -587,9 +619,15 @@ R session, and proposes the follow-up implementation branch sequence.
 - **Jobs model** — done as a *durable record + owner-scoped API* (`jobs` table,
   `/api/jobs`, server-managed status machine). It is the foundation for
   backgrounding R work but is **not** an executor.
+- **Worker coordination contract** — done as *schema + helpers only* (claim/lease/
+  heartbeat columns, `claimNextJob`/`heartbeatJob`/`completeJobByWorker`/
+  `failJobByWorker`/`releaseJob`/`reapExpiredJobs`, `backend/jobs-worker-contract.test.js`).
+  It defines how a future worker safely claims/leases/heartbeats/fails jobs; it is
+  **not** a worker and nothing in the running server calls it.
 - **Job queue / worker** for long R tasks — not implemented; nothing drains the
   `jobs` queue, jobs are not wired into the R proxy, and long steps still block
-  the single R process.
+  the single R process. The coordination contract above is the scaffolding the
+  future `worker-queue-drain-minimal` branch will build the first worker against.
 - **Secure session/cookie migration** — tokens are still stored in `localStorage`
   on the client; migrate to httpOnly secure cookies.
 - **Project/org membership model** — *foundation done* (`organizations`,
@@ -611,8 +649,16 @@ R session, and proposes the follow-up implementation branch sequence.
 - **Deployment target** — not defined (no container/orchestration manifest for
   the full stack beyond the R `Dockerfile`).
 - **Object storage** — uploads/artifacts are on local disk (`vault/`).
-- **CI / lint / typecheck** — `npm run lint` and `npm run check` exist; no CI
-  pipeline wires them up yet, and the project is JS (no typecheck step).
+- **CI / lint / typecheck** — a CI pipeline (`.github/workflows/ci.yml`) runs on
+  every push/PR to `main`: it installs deps, runs `npm run lint`, sets up R +
+  Seurat, then runs the unit/frontend/backend suites, an explicitly-named
+  security-critical suite (per-user isolation, analysis-object/job ownership, the
+  R-proxy `X-Object-ID` contract, auth/rate-limit/credential and R path-drift
+  regressions, and the project authorization suites — including
+  `backend/jobs-worker-contract.test.js`), the live R-state-proxy isolation test,
+  the visual/UX tests, and finally `npm run build`. `npm run check`
+  (backend+frontend+lint+build) is the local equivalent minus the R-dependent
+  suites. The project is JS, so there is no typecheck step.
 
 ## Known Limitations & Technical Debt
 - **Monolithic `App.jsx`** handles routing, session management, and workspace
@@ -622,9 +668,10 @@ R session, and proposes the follow-up implementation branch sequence.
 - **Lint debt** — `eslint .` passes with 0 errors but ~100 warnings (mostly
   `no-unused-vars` and `react-hooks/*`), including a real hooks-after-return issue
   in `src/pages/QualityControl.jsx` tracked for a follow-up.
-- **No queue/worker draining the `jobs` model** (the durable job record exists,
-  but execution is still synchronous and not job-backed), **no full
-  object-storage or durable R-worker execution model**, and **no complete
+- **No queue/worker draining the `jobs` model** (the durable job record and a
+  worker-coordination contract — claim/lease/heartbeat schema + helpers — exist,
+  but nothing calls them: execution is still synchronous and not job-backed),
+  **no full object-storage or durable R-worker execution model**, and **no complete
   reproducibility artifact model** (provenance/figure metadata is now
   project-associated, but there is no artifact bundle, no dataset/figure
   download, and no raw figure file access surface). The org/project authorization
