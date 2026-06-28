@@ -60,7 +60,9 @@ graph TD
   Plumber process on startup (dev/local mode).
 - **SQLite (`backend/database.js`)** — `better-sqlite3`, opened by the Express
   process (not Electron). Tables: `users`, `provenance`, `results_cache`,
-  `figure_collection`, `analysis_objects`, and `jobs`.
+  `figure_collection`, `analysis_objects`, `jobs`, and the org/project
+  authorization tables `organizations`, `organization_members`, `projects`,
+  `project_members`.
 - **R Plumber/Seurat backend (`r-backend/`)** — stateful R process exposing a
   REST API on `127.0.0.1:8000`, holding the live Seurat object in memory.
 
@@ -98,10 +100,16 @@ graph TD
   `..` traversal, and any path that escapes the authenticated user's vault. The R
   backend independently re-validates paths against its vault. Covered by
   `backend/server-security.test.js`.
-- **Known limitation.** There is **no project/org membership model yet**.
-  Authorization is strictly per-individual-user; there is no sharing, no roles,
-  and no team-scoped data. Collaboration UI (e.g. the Collaborators page) is an
-  explicit mockup, not backed by a membership model.
+- **Organization / project authorization foundation.** There is now a durable
+  org/project membership + authorization layer (`organizations`,
+  `organization_members`, `projects`, `project_members`) with four roles
+  (`owner`, `admin`, `analyst`, `viewer`) and the `/api/organizations` +
+  `/api/projects` route family. See *Organization & Project Authorization*
+  below. **Important:** this is the *authorization primitive only*. It does **not**
+  yet make any existing resource project-scoped: analysis objects, jobs,
+  provenance, cache, and figures all remain strictly **user-scoped**, and R state
+  keying is unchanged. The collaboration UI remains a mockup until resources are
+  migrated onto these primitives in a later branch.
 
 ## Reproducibility / Provenance Model
 - **Provenance.** Each R endpoint wraps its result in a provenance envelope
@@ -226,6 +234,73 @@ ownership-scoped record:
   advances a job past `queued`, and existing R proxy execution is unchanged and
   still synchronous. Jobs are not yet wired into the R proxy (no `X-Job-ID`).
 
+### Organization & Project Authorization (`organizations`, `projects`)
+The first durable org/project authorization layer. This branch adds the
+*membership + authorization primitives only* — it deliberately does **not**
+migrate any existing resource into project ownership.
+
+- **Tables** (`backend/database.js`):
+  - `organizations` — server-generated id (`org_<random>`), `name`,
+    `owner_user_id`, timestamps.
+  - `organization_members` — `(organization_id, user_id)` PK, `role`, timestamps.
+  - `projects` — server-generated id (`proj_<random>`), `organization_id`,
+    `name`, `description`, `created_by_user_id`, timestamps.
+  - `project_members` — `(project_id, user_id)` PK, `role`, timestamps.
+- **Roles** (`owner`, `admin`, `analyst`, `viewer`):
+  - `owner` — full control over the org/project and its membership, including the
+    only role that may **grant the `owner` role** or **demote/remove an existing
+    `owner`**.
+  - `admin` — manage projects and `admin`/`analyst`/`viewer` members, but an admin
+    **cannot grant the `owner` role, and cannot demote or remove an existing
+    `owner`** (those operations are owner-only and return **403**). An admin
+    therefore cannot escalate itself to owner or evict an owner. The **last owner
+    of a project can never be removed or demoted** by anyone (409).
+  - `analyst` — read project + (intended) run/upload later; **no resource sharing
+    in this branch**, and cannot manage members.
+  - `viewer` — read-only project access.
+- **Identity is server-owned.** Org/project ids are server-generated; `POST`
+  routes reject any client-supplied `id`, owner/creator field (`ownerUserId`,
+  `owner_user_id`, `createdByUserId`, `created_by_user_id`, `userId`, `user_id`),
+  or `role`. Ownership always comes from `req.user`. The org/project creator is
+  seeded as `owner` in the same transaction as the row.
+- **Authorization helpers** (`backend/database.js`):
+  `verifyOrganizationMember` / `requireOrganizationRole`,
+  `verifyProjectMember` / `requireProjectRole`, plus
+  `listOrganizationsForUser` / `listProjectsForUser`, membership mutators
+  (`addOrganizationMember`, `addProjectMemberByEmail`,
+  `updateProjectMemberRole`, `removeProjectMember`), and the `countProjectOwners`
+  last-owner guard. The `require*Role` helpers distinguish **404** (not a member —
+  never reveal the resource exists) from **403** (a known member lacking the
+  required role).
+- **Routes** (all authenticated): `POST/GET /api/organizations`,
+  `GET /api/organizations/:id`, `POST/GET /api/projects`,
+  `GET/PATCH /api/projects/:id`, and the project-member family
+  `GET/POST /api/projects/:id/members`,
+  `PATCH/DELETE /api/projects/:id/members/:userId`. Creating a project requires
+  the caller to be `owner`/`admin` of the parent org. Member management requires
+  project `owner`/`admin`; viewing the member list is allowed for any member.
+  **Owner-role operations are owner-only:** the route passes the acting caller's
+  role into the DB helpers (`addProjectMemberByEmail` / `updateProjectMemberRole`
+  / `removeProjectMember`), which reject any non-owner attempt to grant, demote,
+  or remove an `owner` with **403** — so this cannot be bypassed even if a future
+  route forgets the check (the helpers fail closed on a missing acting role).
+- **Member management constraints.** Members are added by **exact email** of an
+  existing account — there is no invitation flow, no email sending, and no broad
+  user-search endpoint (co-members can see each other, which is not enumeration).
+  Only an `owner` may grant the `owner` role or demote/remove an `owner` (403 for
+  a non-owner); the **last owner of a project cannot be removed or demoted** (409).
+  Duplicate adds (409) and malformed roles (400) are rejected.
+- **Project membership is independent of org membership** in this branch: a user
+  can be a project member without an org-member row. This is intentional for the
+  narrow foundation; a later branch may tighten it.
+- **What this branch is NOT.** No resource is project-scoped yet (analysis
+  objects, jobs, provenance, cache, figures stay user-scoped); R state keying is
+  untouched; there is **no shared R execution state**; and there are **no
+  invitations, comments, audit logs, datasets table, public links, or
+  project-scoped uploads**. This is not a claim of production-ready
+  collaboration. Covered by `backend/organizations.test.js` (HTTP routes +
+  DB-helper layer).
+
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
 now confirms any client object id is a real `analysis_objects` row owned by the
@@ -275,9 +350,15 @@ id* gap, but the R execution model is still **not** production-grade:
   the single R process.
 - **Secure session/cookie migration** — tokens are still stored in `localStorage`
   on the client; migrate to httpOnly secure cookies.
-- **Project/org membership model** — not implemented; authorization is per-user
-  only. `dataset_id` on analysis objects is an opaque nullable tag until a
-  durable datasets/projects model lands.
+- **Project/org membership model** — *foundation done* (`organizations`,
+  `organization_members`, `projects`, `project_members` + the
+  `/api/organizations` and `/api/projects` route family with `owner`/`admin`/
+  `analyst`/`viewer` roles; see *Organization & Project Authorization*). What
+  remains: migrating existing resources (analysis objects, jobs, provenance,
+  cache, figures) onto project scope, project-scoped R execution/state, and
+  invitations/comments/audit logs. Authorization for all *existing* resources is
+  still per-user only, and `dataset_id` on analysis objects remains an opaque
+  nullable tag until a durable datasets model lands.
 - **Deployment target** — not defined (no container/orchestration manifest for
   the full stack beyond the R `Dockerfile`).
 - **Object storage** — uploads/artifacts are on local disk (`vault/`).
@@ -293,8 +374,11 @@ id* gap, but the R execution model is still **not** production-grade:
   `no-unused-vars` and `react-hooks/*`), including a real hooks-after-return issue
   in `src/pages/QualityControl.jsx` tracked for a follow-up.
 - **No queue/worker draining the `jobs` model** (the durable job record exists,
-  but execution is still synchronous and not job-backed), **no project/org
-  collaboration authorization**, **no full object-storage or durable R-worker
-  execution model**, and **no complete reproducibility artifact model** —
-  analysis-object ownership and the durable jobs model are security/foundation
-  work, not a claim of production-grade R execution.
+  but execution is still synchronous and not job-backed), **no full
+  object-storage or durable R-worker execution model**, and **no complete
+  reproducibility artifact model**. The org/project authorization layer exists as
+  a *foundation* (membership + roles + routes) but **no existing resource is
+  project-scoped yet and there is no shared R execution state** — analysis-object
+  ownership, the durable jobs model, and the org/project primitives are
+  security/foundation work, not a claim of production-grade collaboration or R
+  execution.

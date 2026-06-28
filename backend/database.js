@@ -140,6 +140,69 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(job_type);
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
     CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
+    -- ── Organizations & Projects (membership + authorization foundation) ──
+    -- The first durable org/project authorization model. This branch adds the
+    -- membership tables + authorization helpers only; it does NOT migrate any
+    -- existing user-scoped resource (analysis objects, jobs, provenance, cache,
+    -- figures) into project ownership, and it does NOT touch R state keying.
+    -- See docs/architecture.md. Org/project ids are server-generated
+    -- (org_... / proj_...); clients never supply ids, owner, or role fields.
+    CREATE TABLE IF NOT EXISTS organizations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      owner_user_id INTEGER NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (owner_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_orgs_owner ON organizations(owner_user_id);
+
+    -- One row per (organization, user) granting a role. The org creator gets an
+    -- 'owner' row here at creation time; membership — not the organizations row —
+    -- is the source of truth for "can this user see this org".
+    CREATE TABLE IF NOT EXISTS organization_members (
+      organization_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (organization_id, user_id),
+      FOREIGN KEY (organization_id) REFERENCES organizations(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_org_members_user ON organization_members(user_id);
+
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_by_user_id INTEGER NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (organization_id) REFERENCES organizations(id),
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(organization_id);
+    CREATE INDEX IF NOT EXISTS idx_projects_creator ON projects(created_by_user_id);
+
+    -- One row per (project, user) granting a role. The project creator gets an
+    -- 'owner' row at creation time. Project membership is independent of org
+    -- membership in this branch (a project member need not be an org member);
+    -- this is intentional for the narrow foundation and is documented in
+    -- docs/architecture.md.
+    CREATE TABLE IF NOT EXISTS project_members (
+      project_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, user_id),
+      FOREIGN KEY (project_id) REFERENCES projects(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id);
   `);
 
   // ── Schema migration: add 'operation' column if missing (for pre-existing DBs) ──
@@ -937,6 +1000,422 @@ function appendJobLogForUser(ownerUserId, jobId, entry) {
   return getJobForUser(jobId, owner);
 }
 
+// ── Organizations & Projects (membership + authorization) ────────
+//
+// The first durable org/project authorization layer. Identity is server-owned:
+// org/project ids are server-generated and clients never assert ownership or
+// role. Read helpers are membership-scoped so an org/project the caller cannot
+// access is indistinguishable from one that does not exist (the route layer
+// returns 404, reserving 403 for a known member who lacks the required role).
+//
+// SCOPE: this layer ONLY models membership + authorization. It deliberately does
+// not touch analysis objects, jobs, provenance, cache, figures, or R state —
+// those remain user-scoped (see docs/architecture.md).
+
+// The four roles, in descending privilege. Stored verbatim in the *_members
+// `role` column; any value outside this set is rejected before it is persisted.
+const ORG_PROJECT_ROLES = new Set(['owner', 'admin', 'analyst', 'viewer']);
+
+function isValidRole(role) {
+  return typeof role === 'string' && ORG_PROJECT_ROLES.has(role);
+}
+
+function generateOrganizationId() {
+  return `org_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function generateProjectId() {
+  return `proj_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+const MAX_NAME_LENGTH = 200;
+const MAX_DESCRIPTION_LENGTH = 2000;
+
+function normalizeName(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+// ── Organizations ────────────────────────────────────────────────
+
+/**
+ * Create an organization owned by `ownerUserId` and grant the creator an
+ * 'owner' membership row in the same transaction. The id is server-generated.
+ * Throws coded errors (`INVALID_OWNER`, `INVALID_NAME`) the route maps to 400.
+ */
+function createOrganizationForUser(ownerUserId, input = {}) {
+  const owner = Number(ownerUserId);
+  if (!Number.isInteger(owner) || owner <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid authenticated user is required.');
+  }
+  const name = normalizeName(input.name);
+  if (!name) throw codedError('INVALID_NAME', 'Organization name is required.');
+  if (name.length > MAX_NAME_LENGTH) {
+    throw codedError('INVALID_NAME', `Organization name must be at most ${MAX_NAME_LENGTH} characters.`);
+  }
+
+  const id = generateOrganizationId();
+  db.transaction(() => {
+    db.prepare('INSERT INTO organizations (id, name, owner_user_id) VALUES (?, ?, ?)').run(id, name, owner);
+    db.prepare("INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, 'owner')").run(id, owner);
+  })();
+
+  return getOrganizationForUser(id, owner);
+}
+
+/**
+ * Return an organization only if `userId` is a member; otherwise null. The
+ * caller's own role is included so the route never needs a second query.
+ */
+function getOrganizationForUser(organizationId, userId) {
+  if (typeof organizationId !== 'string' || organizationId === '') return null;
+  const row = db.prepare(`
+    SELECT o.id, o.name, o.owner_user_id, o.created_at, o.updated_at, m.role AS role
+    FROM organizations o
+    JOIN organization_members m ON m.organization_id = o.id
+    WHERE o.id = ? AND m.user_id = ?
+  `).get(organizationId, Number(userId));
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    ownerUserId: row.owner_user_id,
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+/** List every organization `userId` belongs to, with their role in each. */
+function listOrganizationsForUser(userId) {
+  const rows = db.prepare(`
+    SELECT o.id, o.name, o.owner_user_id, o.created_at, o.updated_at, m.role AS role
+    FROM organizations o
+    JOIN organization_members m ON m.organization_id = o.id
+    WHERE m.user_id = ?
+    ORDER BY o.created_at DESC, o.id DESC
+  `).all(Number(userId));
+  return rows.map(row => ({
+    id: row.id,
+    name: row.name,
+    ownerUserId: row.owner_user_id,
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+/**
+ * Return the caller's membership ({ organizationId, userId, role }) or null.
+ * This is the existence/access gate: a non-member is indistinguishable from a
+ * nonexistent org.
+ */
+function verifyOrganizationMember(userId, organizationId) {
+  if (typeof organizationId !== 'string' || organizationId === '') return null;
+  const row = db.prepare(
+    'SELECT organization_id, user_id, role FROM organization_members WHERE organization_id = ? AND user_id = ?'
+  ).get(organizationId, Number(userId));
+  if (!row) return null;
+  return { organizationId: row.organization_id, userId: row.user_id, role: row.role };
+}
+
+/**
+ * Assert `userId` is a member of `organizationId` AND holds one of
+ * `allowedRoles`. Throws `NOT_FOUND` (not a member → 404, no existence leak) or
+ * `FORBIDDEN` (member but wrong role → 403). Returns the membership on success.
+ */
+function requireOrganizationRole(userId, organizationId, allowedRoles) {
+  const membership = verifyOrganizationMember(userId, organizationId);
+  if (!membership) throw codedError('NOT_FOUND', 'Organization not found.');
+  const allowed = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+  if (!allowed.includes(membership.role)) {
+    throw codedError('FORBIDDEN', 'You do not have permission to perform this action.');
+  }
+  return membership;
+}
+
+/**
+ * Add an existing user to an organization with `role`. Validates the role and
+ * rejects duplicate membership. Throws `INVALID_ROLE`, `INVALID_OWNER` (bad user
+ * id), or `ALREADY_MEMBER`. There is no org-member management *route* in this
+ * branch — this is the building block a future route (and the test suite) uses;
+ * `createOrganizationForUser` seeds the creator's 'owner' row inline.
+ */
+function addOrganizationMember(organizationId, userId, role) {
+  if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
+  const uid = Number(userId);
+  if (!Number.isInteger(uid) || uid <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid user id is required.');
+  }
+  if (verifyOrganizationMember(uid, organizationId)) {
+    throw codedError('ALREADY_MEMBER', 'User is already a member of this organization.');
+  }
+  db.prepare('INSERT INTO organization_members (organization_id, user_id, role) VALUES (?, ?, ?)')
+    .run(String(organizationId), uid, role);
+  return { organizationId: String(organizationId), userId: uid, role };
+}
+
+// ── Projects ─────────────────────────────────────────────────────
+
+function rowToProjectWithRole(row) {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    name: row.name,
+    description: row.description,
+    createdByUserId: row.created_by_user_id,
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+/**
+ * Create a project in `organizationId` and grant the creator an 'owner'
+ * project membership in the same transaction. The caller must already be an
+ * owner/admin of the parent org (enforced here via requireOrganizationRole, so
+ * the DB layer is safe even if a future route forgets to check). The id is
+ * server-generated. Throws coded errors: `INVALID_OWNER`, `INVALID_ORG`,
+ * `NOT_FOUND`/`FORBIDDEN` (org access), `INVALID_NAME`, `INVALID_DESCRIPTION`.
+ */
+function createProjectForUser(userId, input = {}) {
+  const creator = Number(userId);
+  if (!Number.isInteger(creator) || creator <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid authenticated user is required.');
+  }
+  const organizationId = typeof input.organizationId === 'string' ? input.organizationId : '';
+  if (!organizationId) throw codedError('INVALID_ORG', 'organizationId is required.');
+
+  // Only org owners/admins may create projects. Not-a-member → NOT_FOUND (404).
+  requireOrganizationRole(creator, organizationId, ['owner', 'admin']);
+
+  const name = normalizeName(input.name);
+  if (!name) throw codedError('INVALID_NAME', 'Project name is required.');
+  if (name.length > MAX_NAME_LENGTH) {
+    throw codedError('INVALID_NAME', `Project name must be at most ${MAX_NAME_LENGTH} characters.`);
+  }
+  const description = input.description == null ? '' : String(input.description);
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw codedError('INVALID_DESCRIPTION', `Project description must be at most ${MAX_DESCRIPTION_LENGTH} characters.`);
+  }
+
+  const id = generateProjectId();
+  db.transaction(() => {
+    db.prepare(
+      'INSERT INTO projects (id, organization_id, name, description, created_by_user_id) VALUES (?, ?, ?, ?, ?)'
+    ).run(id, organizationId, name, description, creator);
+    db.prepare("INSERT INTO project_members (project_id, user_id, role) VALUES (?, ?, 'owner')").run(id, creator);
+  })();
+
+  return getProjectForUser(id, creator);
+}
+
+/** Return a project only if `userId` is a project member; otherwise null. */
+function getProjectForUser(projectId, userId) {
+  if (typeof projectId !== 'string' || projectId === '') return null;
+  const row = db.prepare(`
+    SELECT p.id, p.organization_id, p.name, p.description, p.created_by_user_id,
+           p.created_at, p.updated_at, m.role AS role
+    FROM projects p
+    JOIN project_members m ON m.project_id = p.id
+    WHERE p.id = ? AND m.user_id = ?
+  `).get(projectId, Number(userId));
+  if (!row) return null;
+  return rowToProjectWithRole(row);
+}
+
+/** List every project `userId` is a member of, with their role in each. */
+function listProjectsForUser(userId) {
+  const rows = db.prepare(`
+    SELECT p.id, p.organization_id, p.name, p.description, p.created_by_user_id,
+           p.created_at, p.updated_at, m.role AS role
+    FROM projects p
+    JOIN project_members m ON m.project_id = p.id
+    WHERE m.user_id = ?
+    ORDER BY p.created_at DESC, p.id DESC
+  `).all(Number(userId));
+  return rows.map(rowToProjectWithRole);
+}
+
+/** Return the caller's project membership ({ projectId, userId, role }) or null. */
+function verifyProjectMember(userId, projectId) {
+  if (typeof projectId !== 'string' || projectId === '') return null;
+  const row = db.prepare(
+    'SELECT project_id, user_id, role FROM project_members WHERE project_id = ? AND user_id = ?'
+  ).get(projectId, Number(userId));
+  if (!row) return null;
+  return { projectId: row.project_id, userId: row.user_id, role: row.role };
+}
+
+/**
+ * Assert `userId` is a project member AND holds one of `allowedRoles`. Throws
+ * `NOT_FOUND` (not a member → 404) or `FORBIDDEN` (member, wrong role → 403).
+ * Returns the membership on success.
+ */
+function requireProjectRole(userId, projectId, allowedRoles) {
+  const membership = verifyProjectMember(userId, projectId);
+  if (!membership) throw codedError('NOT_FOUND', 'Project not found.');
+  const allowed = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+  if (!allowed.includes(membership.role)) {
+    throw codedError('FORBIDDEN', 'You do not have permission to perform this action.');
+  }
+  return membership;
+}
+
+/**
+ * List a project's members (joined with the users table for email/displayName).
+ * The route restricts this to project members; co-members seeing each other is
+ * not user enumeration (there is no broad user-search endpoint).
+ */
+function listProjectMembers(projectId) {
+  const rows = db.prepare(`
+    SELECT pm.user_id, pm.role, pm.created_at, pm.updated_at, u.email, u.display_name
+    FROM project_members pm
+    JOIN users u ON u.id = pm.user_id
+    WHERE pm.project_id = ?
+    ORDER BY pm.created_at ASC, pm.user_id ASC
+  `).all(String(projectId));
+  return rows.map(r => ({
+    userId: r.user_id,
+    email: r.email,
+    displayName: r.display_name,
+    role: r.role,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at
+  }));
+}
+
+/**
+ * Update a project's mutable fields (name and/or description). Server-controlled
+ * columns (id, organization_id, created_by_user_id, role) are never touched.
+ * Throws `INVALID_NAME`, `INVALID_DESCRIPTION`, or `NO_FIELDS`. The caller is
+ * responsible for authorization (requireProjectRole) before calling this.
+ */
+function updateProject(projectId, input = {}) {
+  const sets = [];
+  const params = { id: String(projectId) };
+
+  if (input.name !== undefined) {
+    const name = normalizeName(input.name);
+    if (!name) throw codedError('INVALID_NAME', 'Project name is required.');
+    if (name.length > MAX_NAME_LENGTH) {
+      throw codedError('INVALID_NAME', `Project name must be at most ${MAX_NAME_LENGTH} characters.`);
+    }
+    sets.push('name = @name');
+    params.name = name;
+  }
+  if (input.description !== undefined) {
+    const description = input.description == null ? '' : String(input.description);
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      throw codedError('INVALID_DESCRIPTION', `Project description must be at most ${MAX_DESCRIPTION_LENGTH} characters.`);
+    }
+    sets.push('description = @description');
+    params.description = description;
+  }
+  if (sets.length === 0) throw codedError('NO_FIELDS', 'No updatable fields provided.');
+
+  sets.push("updated_at = datetime('now')");
+  db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = @id`).run(params);
+}
+
+// ── Project membership management ─────────────────────────────────
+
+function getProjectMember(projectId, userId) {
+  const row = db.prepare(
+    'SELECT project_id, user_id, role FROM project_members WHERE project_id = ? AND user_id = ?'
+  ).get(String(projectId), Number(userId));
+  if (!row) return null;
+  return { projectId: row.project_id, userId: row.user_id, role: row.role };
+}
+
+function countProjectOwners(projectId) {
+  const row = db.prepare(
+    "SELECT COUNT(*) AS n FROM project_members WHERE project_id = ? AND role = 'owner'"
+  ).get(String(projectId));
+  return row.n;
+}
+
+/**
+ * Add an existing user (looked up by exact, normalized email) to a project with
+ * `role`. There is no invitation flow and no broad user search in this branch;
+ * the target must already have an account. `actorRole` is the acting caller's
+ * project role: only an `owner` may grant the `owner` role, so any non-owner
+ * actor attempting to add an `owner` is rejected with `FORBIDDEN` (the helper
+ * fails closed — a missing/unknown `actorRole` is treated as non-owner). Throws
+ * `INVALID_ROLE`, `FORBIDDEN`, `INVALID_EMAIL`, `USER_NOT_FOUND`, or
+ * `ALREADY_MEMBER`. The caller is responsible for membership authorization
+ * (requireProjectRole) before calling this.
+ */
+function addProjectMemberByEmail(projectId, email, role, actorRole) {
+  if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
+  if (role === 'owner' && actorRole !== 'owner') {
+    throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
+  }
+  if (typeof email !== 'string' || !email.trim()) {
+    throw codedError('INVALID_EMAIL', 'A member email is required.');
+  }
+  const user = getUserByEmail(email);
+  if (!user) throw codedError('USER_NOT_FOUND', 'No user found with that email.');
+  if (getProjectMember(projectId, user.id)) {
+    throw codedError('ALREADY_MEMBER', 'User is already a member of this project.');
+  }
+  db.prepare('INSERT INTO project_members (project_id, user_id, role) VALUES (?, ?, ?)')
+    .run(String(projectId), user.id, role);
+  return { userId: user.id, email: user.email, displayName: user.displayName, role };
+}
+
+/**
+ * Change an existing project member's role. Owner-role operations are owner-only:
+ * `actorRole` must be `owner` both to grant the `owner` role (promote) and to
+ * demote an existing `owner`; a non-owner actor attempting either is rejected
+ * with `FORBIDDEN` (the helper fails closed — a missing/unknown `actorRole` is
+ * treated as non-owner). Refuses to demote the last owner (would orphan the
+ * project). Throws `INVALID_ROLE`, `MEMBER_NOT_FOUND`, `FORBIDDEN`, or
+ * `LAST_OWNER`. Membership authorization is the caller's responsibility.
+ */
+function updateProjectMemberRole(projectId, targetUserId, role, actorRole) {
+  if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
+  const member = getProjectMember(projectId, targetUserId);
+  if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
+  // Only an owner may grant the owner role (promote a non-owner to owner).
+  if (role === 'owner' && member.role !== 'owner' && actorRole !== 'owner') {
+    throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
+  }
+  // Only an owner may demote an existing owner. Checked before the last-owner
+  // guard so an admin demoting an owner always sees 403, never 409.
+  if (member.role === 'owner' && role !== 'owner' && actorRole !== 'owner') {
+    throw codedError('FORBIDDEN', 'Only an owner can demote an owner.');
+  }
+  if (member.role === 'owner' && role !== 'owner' && countProjectOwners(projectId) <= 1) {
+    throw codedError('LAST_OWNER', 'Cannot demote the last owner of the project.');
+  }
+  db.prepare("UPDATE project_members SET role = ?, updated_at = datetime('now') WHERE project_id = ? AND user_id = ?")
+    .run(role, String(projectId), Number(targetUserId));
+  return getProjectMember(projectId, targetUserId);
+}
+
+/**
+ * Remove a member from a project. Removing an existing `owner` is owner-only:
+ * `actorRole` must be `owner`, else `FORBIDDEN` (the helper fails closed — a
+ * missing/unknown `actorRole` is treated as non-owner). Refuses to remove the
+ * last owner. The owner-only check runs before the last-owner guard so an admin
+ * removing an owner always sees 403, never 409. Throws `MEMBER_NOT_FOUND`,
+ * `FORBIDDEN`, or `LAST_OWNER`. Membership authorization is the caller's
+ * responsibility.
+ */
+function removeProjectMember(projectId, targetUserId, actorRole) {
+  const member = getProjectMember(projectId, targetUserId);
+  if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
+  if (member.role === 'owner' && actorRole !== 'owner') {
+    throw codedError('FORBIDDEN', 'Only an owner can remove an owner.');
+  }
+  if (member.role === 'owner' && countProjectOwners(projectId) <= 1) {
+    throw codedError('LAST_OWNER', 'Cannot remove the last owner of the project.');
+  }
+  db.prepare('DELETE FROM project_members WHERE project_id = ? AND user_id = ?')
+    .run(String(projectId), Number(targetUserId));
+  return true;
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────
 
 function closeDatabase() {
@@ -983,6 +1462,28 @@ module.exports = {
   verifyJobOwner,
   updateJobStatusForUser,
   cancelJobForUser,
-  appendJobLogForUser
+  appendJobLogForUser,
+  // Organizations & projects (membership + authorization)
+  isValidRole,
+  generateOrganizationId,
+  generateProjectId,
+  createOrganizationForUser,
+  getOrganizationForUser,
+  listOrganizationsForUser,
+  verifyOrganizationMember,
+  requireOrganizationRole,
+  addOrganizationMember,
+  createProjectForUser,
+  getProjectForUser,
+  listProjectsForUser,
+  verifyProjectMember,
+  requireProjectRole,
+  listProjectMembers,
+  updateProject,
+  getProjectMember,
+  countProjectOwners,
+  addProjectMemberByEmail,
+  updateProjectMemberRole,
+  removeProjectMember
 };
 
