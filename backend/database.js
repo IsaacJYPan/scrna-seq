@@ -155,6 +155,16 @@ function initDatabase(dbPath) {
     -- make R execution project-shared and does NOT remove creator ownership.
     -- NOTE: this branch adds the durable record + project metadata/API only —
     -- there is no worker/queue draining jobs yet (see docs/architecture.md).
+    --
+    -- The worker_id / claim_token / *_at lease columns + attempts / max_attempts /
+    -- priority are the durable, versioned job-worker COORDINATION CONTRACT: they
+    -- let a FUTURE worker safely claim, lease, heartbeat, release, and fail a job
+    -- (see "Worker coordination" helpers below and
+    -- docs/project-r-execution-design.md §3/§7). They are coordination metadata
+    -- only — NO worker drains the queue in this branch, nothing sets status past
+    -- 'queued' on its own, R execution is unchanged and still synchronous, and
+    -- R active state remains user/object-keyed. claim_token is a bearer capability
+    -- and is NEVER returned by the owner/project read APIs (rowToJob omits it).
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       owner_user_id INTEGER NOT NULL,
@@ -172,6 +182,17 @@ function initDatabase(dbPath) {
       started_at TEXT,
       completed_at TEXT,
       canceled_at TEXT,
+      -- Worker coordination (claim / lease / heartbeat). All nullable / defaulted
+      -- so they are additive over legacy rows; see the idempotent migration below.
+      worker_id TEXT,                         -- which worker currently holds the claim (NULL = unclaimed)
+      claim_token TEXT,                       -- per-claim secret; heartbeat/complete/fail/release require a match
+      lease_expires_at TEXT,                  -- claim is valid until this instant; past it the job is recoverable
+      heartbeat_at TEXT,                      -- last heartbeat from the owning worker
+      locked_at TEXT,                         -- when the current claim was acquired
+      attempts INTEGER NOT NULL DEFAULT 0,    -- number of times this job has been claimed
+      max_attempts INTEGER NOT NULL DEFAULT 1,-- claim budget; default 1 = at-most-once (no silent retry on crash)
+      priority INTEGER NOT NULL DEFAULT 0,    -- higher is claimed first; default 0
+      last_worker_error TEXT,                 -- JSON: most recent worker-level diagnostic (lease loss, crash, etc.)
       FOREIGN KEY (owner_user_id) REFERENCES users(id),
       FOREIGN KEY (analysis_object_id) REFERENCES analysis_objects(id),
       FOREIGN KEY (result_analysis_object_id) REFERENCES analysis_objects(id)
@@ -346,6 +367,43 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_jobs_project_analysis_object ON jobs(project_id, analysis_object_id);
     CREATE INDEX IF NOT EXISTS idx_jobs_project_result_object ON jobs(project_id, result_analysis_object_id);
     CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
+  `);
+
+  // ── Worker coordination columns on jobs (durable claim/lease/heartbeat) ──────
+  // Part of the CREATE block above for fresh DBs; this migrates pre-existing DBs.
+  // Every column is nullable or NOT NULL with a DEFAULT, so the ALTERs are purely
+  // ADDITIVE: legacy job rows are left untouched and simply inherit the defaults
+  // (worker_id/claim_token/lease NULL, attempts 0, max_attempts 1, priority 0) —
+  // no old job is backfilled into 'running' or otherwise re-statused, and existing
+  // job IDs are unchanged. Idempotent: each column is only ALTERed when absent, so
+  // re-running initDatabase (and a fresh DB, where the column already exists) is a
+  // no-op. This does NOT add a worker, drain the queue, or change R execution.
+  const jobWorkerCols = db.prepare("PRAGMA table_info(jobs)").all().map(c => c.name);
+  for (const [col, ddl] of [
+    ['worker_id', 'ALTER TABLE jobs ADD COLUMN worker_id TEXT'],
+    ['claim_token', 'ALTER TABLE jobs ADD COLUMN claim_token TEXT'],
+    ['lease_expires_at', 'ALTER TABLE jobs ADD COLUMN lease_expires_at TEXT'],
+    ['heartbeat_at', 'ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT'],
+    ['locked_at', 'ALTER TABLE jobs ADD COLUMN locked_at TEXT'],
+    ['attempts', 'ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0'],
+    ['max_attempts', 'ALTER TABLE jobs ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1'],
+    ['priority', 'ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0'],
+    ['last_worker_error', 'ALTER TABLE jobs ADD COLUMN last_worker_error TEXT']
+  ]) {
+    if (!jobWorkerCols.includes(col)) {
+      db.exec(ddl);
+      console.log(`[DB] Migrated: added ${col} column to jobs table (worker coordination)`);
+    }
+  }
+  // Created here (not in the CREATE block above) so the worker-coordination indexes
+  // run only after the columns are guaranteed to exist on a pre-existing jobs table.
+  // idx_jobs_claimable backs the claim ordering (queued first, then priority desc,
+  // then oldest); idx_jobs_lease backs expired-lease recovery sweeps; idx_jobs_worker
+  // backs lookups of a given worker's jobs.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_jobs_claimable ON jobs(status, priority DESC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(lease_expires_at);
+    CREATE INDEX IF NOT EXISTS idx_jobs_worker ON jobs(worker_id);
   `);
 
   // Add the optional project-association columns to provenance / figure_collection
@@ -936,10 +994,16 @@ const JOB_STATUSES = new Set([
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed', 'canceled']);
 
 // Explicit allow-list of state-machine edges. Anything not listed is rejected.
+// `running → queued` is the worker re-queue / lease-recovery edge: a worker that
+// voluntarily releases a claim, and the expired-lease reaper when attempts remain,
+// return a job to the queue for another claim (see "Worker coordination" helpers).
+// Clients still cannot drive this edge — the client surface is only create
+// (→ queued) and cancel (→ canceled); every other edge goes through a server-tier
+// helper. Terminal statuses remain terminal (no outgoing edges).
 const JOB_TRANSITIONS = {
   created: new Set(['queued', 'canceled']),
   queued: new Set(['running', 'canceled']),
-  running: new Set(['completed', 'failed', 'waiting_for_user', 'canceled']),
+  running: new Set(['completed', 'failed', 'waiting_for_user', 'canceled', 'queued']),
   waiting_for_user: new Set(['queued', 'running', 'canceled']),
   completed: new Set(),
   failed: new Set(),
@@ -1155,6 +1219,12 @@ function updateJobStatusForUser(ownerUserId, jobId, nextStatus, opts = {}) {
   // All timestamp columns are stamped by SQLite so their format matches the
   // created_at default. started_at is set once (first entry into 'running');
   // completed_at covers both completed and failed; canceled_at covers cancel.
+  // Reaching a terminal status voids any live worker claim: the claim_token
+  // (a bearer capability) and lease_expires_at are cleared so a worker that was
+  // mid-flight on this job fails its next heartbeat/complete/fail deterministically
+  // (CLAIM_LOST) instead of acting on a now-terminal job. worker_id is retained as
+  // an audit trail of which worker last held it. This is how a user/owner cancel
+  // makes future worker behavior safe — see the "Worker coordination" helpers.
   db.prepare(`
     UPDATE jobs SET
       status = @status,
@@ -1164,7 +1234,9 @@ function updateJobStatusForUser(ownerUserId, jobId, nextStatus, opts = {}) {
       updated_at = datetime('now'),
       started_at = CASE WHEN @status = 'running' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
       completed_at = CASE WHEN @status IN ('completed', 'failed') THEN datetime('now') ELSE completed_at END,
-      canceled_at = CASE WHEN @status = 'canceled' THEN datetime('now') ELSE canceled_at END
+      canceled_at = CASE WHEN @status = 'canceled' THEN datetime('now') ELSE canceled_at END,
+      claim_token = CASE WHEN @status IN ('completed', 'failed', 'canceled') THEN NULL ELSE claim_token END,
+      lease_expires_at = CASE WHEN @status IN ('completed', 'failed', 'canceled') THEN NULL ELSE lease_expires_at END
     WHERE id = @id AND owner_user_id = @owner
   `).run({
     id: jobId,
@@ -1206,6 +1278,442 @@ function appendJobLogForUser(ownerUserId, jobId, entry) {
     "UPDATE jobs SET logs_json = ?, updated_at = datetime('now') WHERE id = ? AND owner_user_id = ?"
   ).run(JSON.stringify(logs), jobId, owner);
   return getJobForUser(jobId, owner);
+}
+
+// ── Worker coordination (claim / lease / heartbeat / release / fail) ─────────
+//
+// The durable, versioned contract a FUTURE worker will use to safely claim, lease,
+// heartbeat, release, complete, and fail jobs. This branch ships the contract +
+// schema + helpers ONLY: it does NOT add a worker loop, does NOT drain the queue,
+// does NOT call R, and does NOT make any execution asynchronous. Nothing in the
+// running server invokes these helpers yet — they exist for the worker branch that
+// comes next (`worker-queue-drain-minimal`), and for the tests that pin the
+// contract. R active state stays user/object-keyed and owner-verified; these
+// helpers never touch R, never read a client-supplied path, and never widen
+// ownership (claim is authorized by a server-issued worker id + claim token, which
+// is exactly how the trusted server tier already talks to R).
+//
+// Authorization model: worker operations are NOT user-scoped. A worker authorizes
+// by holding the job's current `claim_token` (a server-issued bearer capability)
+// together with its own `worker_id`. heartbeat/complete/fail/release succeed only
+// while the row still matches (worker_id, claim_token) AND status='running' AND the
+// lease has not expired. claim_token is rotated on every (re)claim and cleared when
+// a job reaches a terminal status or is canceled, so a stale worker can never act
+// on a job that was reclaimed, completed, failed, or canceled out from under it.
+//
+// Lease & recovery contract (documented + tested in jobs-worker-contract.test.js):
+//   - Claimable = status 'queued' AND attempts < max_attempts. claim picks one,
+//     ordered by priority DESC, then created_at ASC, then id ASC, and is a single
+//     winner (a guarded conditional UPDATE inside an IMMEDIATE transaction).
+//   - A claim sets status 'running', a fresh worker_id + claim_token, locked_at,
+//     heartbeat_at, lease_expires_at, and increments attempts.
+//   - A running job with an UNEXPIRED lease is owned: no other worker can claim it
+//     and only the holder can heartbeat/complete/fail/release it.
+//   - A running job with an EXPIRED lease is recovered by reapExpiredJobs(): if
+//     attempts < max_attempts it returns to 'queued' (running → queued) for another
+//     claim; if attempts >= max_attempts it is moved to 'failed' with a durable
+//     error, so an exhausted job is never reclaimed forever and never left stuck
+//     'running'.
+//   - max_attempts defaults to 1 (at-most-once: a crash is NOT silently retried).
+//     A voluntary releaseJob() refunds the attempt it relinquishes, so a graceful
+//     hand-back does not consume the budget.
+//   - now/leaseSeconds are injectable on every helper so lease timing is fully
+//     deterministic in tests; production callers omit them and use the DB clock.
+
+const DEFAULT_LEASE_SECONDS = 30;
+// Worker ids are server-issued by the future worker process and must be header-safe
+// (a server-controlled X-Worker-ID is part of the documented future contract).
+const WORKER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+const SQLITE_TS_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/** Per-claim bearer capability; `wct_` + hex so it is header-safe by construction. */
+function generateClaimToken() {
+  return `wct_${crypto.randomBytes(18).toString('hex')}`;
+}
+
+/** Current time in SQLite's canonical 'YYYY-MM-DD HH:MM:SS' UTC format. Using the
+ * DB clock keeps lease math and stored timestamps in one comparable format. */
+function dbNow() {
+  return db.prepare("SELECT datetime('now') AS t").get().t;
+}
+
+function isSqliteTimestamp(v) {
+  return typeof v === 'string' && SQLITE_TS_PATTERN.test(v);
+}
+
+// Worker helpers accept an optional opts.now (same canonical format) so tests can
+// drive lease expiry deterministically without sleeping; production omits it.
+function normalizeWorkerNow(opts) {
+  if (opts && opts.now !== undefined) {
+    if (!isSqliteTimestamp(opts.now)) {
+      throw codedError('INVALID_NOW', "opts.now must be a 'YYYY-MM-DD HH:MM:SS' UTC timestamp.");
+    }
+    return String(opts.now);
+  }
+  return dbNow();
+}
+
+function normalizeLeaseSeconds(v) {
+  if (v === undefined) return DEFAULT_LEASE_SECONDS;
+  if (!Number.isInteger(v) || v < 1) {
+    throw codedError('INVALID_LEASE', 'leaseSeconds must be a positive integer.');
+  }
+  return v;
+}
+
+function requireWorkerId(workerId) {
+  if (typeof workerId !== 'string' || !WORKER_ID_PATTERN.test(workerId)) {
+    throw codedError('INVALID_WORKER', 'A valid worker id (1–128 chars of [A-Za-z0-9_.:-]) is required.');
+  }
+  return workerId;
+}
+
+function requireClaimToken(token) {
+  if (typeof token !== 'string' || token === '') {
+    throw codedError('INVALID_CLAIM_TOKEN', 'A claim token is required.');
+  }
+  return token;
+}
+
+/** Raw job row by id (no owner/project scoping). Worker helpers authorize by
+ * (worker_id, claim_token), not by user ownership, so they look up by id alone. */
+function getJobRowById(id) {
+  if (typeof id !== 'string' || id === '') return null;
+  return db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) || null;
+}
+
+/**
+ * Worker-facing job view. Includes the coordination fields AND the claim_token,
+ * so it is only ever returned to the worker that holds the claim. The owner/project
+ * read APIs use rowToJob (above), which deliberately omits claim_token — the bearer
+ * capability must never leak through a normal user-facing job response.
+ */
+function rowToWorkerJob(row) {
+  if (!row) return null;
+  return {
+    ...rowToJob(row),
+    workerId: row.worker_id,
+    claimToken: row.claim_token,
+    leaseExpiresAt: row.lease_expires_at,
+    heartbeatAt: row.heartbeat_at,
+    lockedAt: row.locked_at,
+    attempts: row.attempts,
+    maxAttempts: row.max_attempts,
+    priority: row.priority,
+    lastWorkerError: row.last_worker_error ? JSON.parse(row.last_worker_error) : null
+  };
+}
+
+/** Server-tier-internal re-read of the worker-view of a job by id (includes the
+ * coordination fields + claim_token). Never wired to a client route — exactly like
+ * the claim/heartbeat return values, this is for the trusted worker/tests only. */
+function getWorkerJob(jobId) {
+  return rowToWorkerJob(getJobRowById(jobId));
+}
+
+/** True only if `row` is a running job whose live claim is held by exactly this
+ * (workerId, claimToken) and whose lease has not expired as of `now`. */
+function workerHoldsClaim(row, workerId, claimToken, now) {
+  return !!row
+    && row.status === 'running'
+    && row.worker_id === workerId
+    && typeof row.claim_token === 'string' && row.claim_token !== '' && row.claim_token === claimToken
+    && typeof row.lease_expires_at === 'string' && row.lease_expires_at > now;
+}
+
+/**
+ * Atomically claim one eligible queued job for `workerId`. Single winner: the
+ * candidate is selected and then updated with a guard repeating the eligibility
+ * predicate, inside an IMMEDIATE transaction, so two racing workers cannot both
+ * claim the same row (the loser sees 0 changed rows). Returns the claimed
+ * worker-job (including its fresh claim_token) or null if nothing is claimable.
+ * Throws `INVALID_WORKER` / `INVALID_NOW` / `INVALID_LEASE` on bad input.
+ */
+function claimNextJob(workerId, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const now = normalizeWorkerNow(opts);
+  const leaseSeconds = normalizeLeaseSeconds(opts.leaseSeconds);
+  const claimToken = generateClaimToken();
+
+  const claim = db.transaction(() => {
+    const candidate = db.prepare(`
+      SELECT id FROM jobs
+      WHERE status = 'queued' AND attempts < max_attempts
+      ORDER BY priority DESC, created_at ASC, id ASC
+      LIMIT 1
+    `).get();
+    if (!candidate) return null;
+    const info = db.prepare(`
+      UPDATE jobs SET
+        status = 'running',
+        worker_id = @wid,
+        claim_token = @claimToken,
+        attempts = attempts + 1,
+        locked_at = @now,
+        heartbeat_at = @now,
+        lease_expires_at = datetime(@now, '+' || @leaseSeconds || ' seconds'),
+        started_at = CASE WHEN started_at IS NULL THEN @now ELSE started_at END,
+        updated_at = @now
+      WHERE id = @id AND status = 'queued' AND attempts < max_attempts
+    `).run({ id: candidate.id, wid, claimToken, now, leaseSeconds });
+    return info.changes === 1 ? candidate.id : null;
+  });
+
+  const claimedId = claim.immediate();
+  return claimedId ? rowToWorkerJob(getJobRowById(claimedId)) : null;
+}
+
+/**
+ * Extend the lease and stamp heartbeat_at for the worker that holds the claim.
+ * Succeeds only while (worker_id, claim_token) match, status is 'running', and the
+ * lease has not already expired — a worker that let its lease lapse has lost the
+ * claim (CLAIM_LOST) and must stop. Throws `JOB_NOT_FOUND` / `CLAIM_LOST`.
+ */
+function heartbeatJob(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const leaseSeconds = normalizeLeaseSeconds(opts.leaseSeconds);
+  if (!getJobRowById(jobId)) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  const info = db.prepare(`
+    UPDATE jobs SET
+      heartbeat_at = @now,
+      lease_expires_at = datetime(@now, '+' || @leaseSeconds || ' seconds'),
+      updated_at = @now
+    WHERE id = @id AND worker_id = @wid AND claim_token = @token
+      AND status = 'running' AND lease_expires_at > @now
+  `).run({ id: String(jobId), wid, token, now, leaseSeconds });
+  if (info.changes !== 1) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return rowToWorkerJob(getJobRowById(jobId));
+}
+
+/**
+ * Complete a job the worker currently holds (running → completed), optionally
+ * linking a result analysis object (verified against the job's owner, mirroring
+ * updateJobStatusForUser) and appending a log. Clears the claim_token + lease on
+ * the now-terminal row. Throws `JOB_NOT_FOUND` / `CLAIM_LOST` / `INVALID_TRANSITION`
+ * / `RESULT_OBJECT_NOT_FOUND`.
+ */
+function completeJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  // The worker path honors the same transition allow-list as updateJobStatusForUser.
+  if (!validateJobTransition(row.status, 'completed')) {
+    throw codedError('INVALID_TRANSITION', `Cannot complete a job in status '${row.status}'.`);
+  }
+  let resultId = row.result_analysis_object_id;
+  if (opts.resultAnalysisObjectId !== undefined && opts.resultAnalysisObjectId !== null) {
+    if (typeof opts.resultAnalysisObjectId !== 'string' ||
+        !getAnalysisObjectForUser(opts.resultAnalysisObjectId, row.owner_user_id)) {
+      throw codedError('RESULT_OBJECT_NOT_FOUND', 'Result analysis object not found.');
+    }
+    resultId = opts.resultAnalysisObjectId;
+  }
+  const logs = opts.log !== undefined
+    ? [...JSON.parse(row.logs_json || '[]'), normalizeJobLogEntry(opts.log)]
+    : JSON.parse(row.logs_json || '[]');
+  const info = db.prepare(`
+    UPDATE jobs SET
+      status = 'completed',
+      result_analysis_object_id = @resultId,
+      logs_json = @logsJson,
+      completed_at = @now,
+      heartbeat_at = @now,
+      updated_at = @now,
+      claim_token = NULL,
+      lease_expires_at = NULL
+    WHERE id = @id AND worker_id = @wid AND claim_token = @token
+      AND status = 'running' AND lease_expires_at > @now
+  `).run({ id: String(jobId), wid, token, resultId: resultId == null ? null : String(resultId), logsJson: JSON.stringify(logs), now });
+  if (info.changes !== 1) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return rowToWorkerJob(getJobRowById(jobId));
+}
+
+/**
+ * Fail a job the worker currently holds (running → failed), recording durable error
+ * information in both error_json (the user-facing error) and last_worker_error (the
+ * worker diagnostic), and clearing the claim_token + lease. Throws `JOB_NOT_FOUND`
+ * / `CLAIM_LOST` / `INVALID_TRANSITION`.
+ */
+function failJobByWorker(jobId, workerId, claimToken, error, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (!validateJobTransition(row.status, 'failed')) {
+    throw codedError('INVALID_TRANSITION', `Cannot fail a job in status '${row.status}'.`);
+  }
+  // A failure must always carry durable error detail; default if none supplied.
+  const errObj = normalizeJobError(error === undefined || error === null ? { message: 'Job failed.' } : error);
+  const errJson = JSON.stringify(errObj);
+  const logs = opts.log !== undefined
+    ? [...JSON.parse(row.logs_json || '[]'), normalizeJobLogEntry(opts.log)]
+    : JSON.parse(row.logs_json || '[]');
+  const info = db.prepare(`
+    UPDATE jobs SET
+      status = 'failed',
+      error_json = @errJson,
+      last_worker_error = @errJson,
+      logs_json = @logsJson,
+      completed_at = @now,
+      heartbeat_at = @now,
+      updated_at = @now,
+      claim_token = NULL,
+      lease_expires_at = NULL
+    WHERE id = @id AND worker_id = @wid AND claim_token = @token
+      AND status = 'running' AND lease_expires_at > @now
+  `).run({ id: String(jobId), wid, token, errJson, logsJson: JSON.stringify(logs), now });
+  if (info.changes !== 1) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return rowToWorkerJob(getJobRowById(jobId));
+}
+
+/**
+ * Voluntarily relinquish a held claim (running → queued) so the job can be claimed
+ * again. Clears worker_id/claim_token/locked_at/lease and REFUNDS the attempt it is
+ * giving back (a graceful release neither ran to completion nor failed, so it does
+ * not consume the claim budget). Only the holding worker may release. Throws
+ * `JOB_NOT_FOUND` / `CLAIM_LOST` / `INVALID_TRANSITION`.
+ */
+function releaseJob(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (!validateJobTransition(row.status, 'queued')) {
+    throw codedError('INVALID_TRANSITION', `Cannot release a job in status '${row.status}'.`);
+  }
+  const logs = opts.log !== undefined
+    ? [...JSON.parse(row.logs_json || '[]'), normalizeJobLogEntry(opts.log)]
+    : JSON.parse(row.logs_json || '[]');
+  const info = db.prepare(`
+    UPDATE jobs SET
+      status = 'queued',
+      worker_id = NULL,
+      claim_token = NULL,
+      locked_at = NULL,
+      lease_expires_at = NULL,
+      heartbeat_at = @now,
+      attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+      logs_json = @logsJson,
+      updated_at = @now
+    WHERE id = @id AND worker_id = @wid AND claim_token = @token
+      AND status = 'running' AND lease_expires_at > @now
+  `).run({ id: String(jobId), wid, token, logsJson: JSON.stringify(logs), now });
+  if (info.changes !== 1) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return rowToWorkerJob(getJobRowById(jobId));
+}
+
+/**
+ * Recover running jobs whose lease has expired (a crashed/stalled worker). For each:
+ *   - attempts <  max_attempts → return to 'queued' (running → queued) for re-claim;
+ *   - attempts >= max_attempts → move to 'failed' with a durable LEASE_EXPIRED error.
+ * Each transition is a guarded conditional UPDATE, so a concurrent reaper/worker
+ * cannot double-process a row. Returns { requeued: [ids], failed: [ids] }. This is
+ * a helper for a future supervisor/worker; nothing calls it automatically here.
+ */
+function reapExpiredJobs(opts = {}) {
+  const now = normalizeWorkerNow(opts);
+  const expired = db.prepare(`
+    SELECT id, attempts, max_attempts FROM jobs
+    WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= @now
+  `).all({ now });
+  const requeued = [];
+  const failed = [];
+  for (const row of expired) {
+    if (row.attempts < row.max_attempts) {
+      const lastErr = JSON.stringify(normalizeJobError({
+        code: 'LEASE_EXPIRED',
+        message: 'Worker lease expired; job re-queued for another claim.'
+      }));
+      const info = db.prepare(`
+        UPDATE jobs SET
+          status = 'queued',
+          worker_id = NULL,
+          claim_token = NULL,
+          lease_expires_at = NULL,
+          last_worker_error = @lastErr,
+          updated_at = @now
+        WHERE id = @id AND status = 'running'
+          AND lease_expires_at IS NOT NULL AND lease_expires_at <= @now
+      `).run({ id: row.id, now, lastErr });
+      if (info.changes === 1) requeued.push(row.id);
+    } else {
+      const errJson = JSON.stringify(normalizeJobError({
+        code: 'LEASE_EXPIRED',
+        message: 'Worker lease expired and the claim budget (max_attempts) is exhausted; job failed.'
+      }));
+      const info = db.prepare(`
+        UPDATE jobs SET
+          status = 'failed',
+          error_json = @errJson,
+          last_worker_error = @errJson,
+          completed_at = @now,
+          claim_token = NULL,
+          lease_expires_at = NULL,
+          updated_at = @now
+        WHERE id = @id AND status = 'running'
+          AND lease_expires_at IS NOT NULL AND lease_expires_at <= @now
+      `).run({ id: row.id, now, errJson });
+      if (info.changes === 1) failed.push(row.id);
+    }
+  }
+  return { requeued, failed };
+}
+
+/**
+ * Server-tier scheduling/backfill helper: set a job's queue priority, claim budget
+ * (max_attempts), and/or re-stamp its enqueue time (created_at, which drives claim
+ * ordering among equal priorities). Not exposed to clients — priority/max_attempts
+ * are coordination fields, never accepted from a request body. Does not change
+ * status. Throws `JOB_NOT_FOUND` and the relevant `INVALID_*` on bad input.
+ */
+function setJobScheduling(jobId, opts = {}) {
+  const id = String(jobId);
+  const row = getJobRowById(id);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  const sets = [];
+  const params = { id };
+  if (opts.priority !== undefined) {
+    if (!Number.isInteger(opts.priority)) throw codedError('INVALID_PRIORITY', 'priority must be an integer.');
+    sets.push('priority = @priority'); params.priority = opts.priority;
+  }
+  if (opts.maxAttempts !== undefined) {
+    if (!Number.isInteger(opts.maxAttempts) || opts.maxAttempts < 1) {
+      throw codedError('INVALID_MAX_ATTEMPTS', 'maxAttempts must be a positive integer.');
+    }
+    sets.push('max_attempts = @maxAttempts'); params.maxAttempts = opts.maxAttempts;
+  }
+  if (opts.createdAt !== undefined) {
+    if (!isSqliteTimestamp(opts.createdAt)) {
+      throw codedError('INVALID_CREATED_AT', "createdAt must be a 'YYYY-MM-DD HH:MM:SS' timestamp.");
+    }
+    sets.push('created_at = @createdAt'); params.createdAt = String(opts.createdAt);
+  }
+  if (sets.length === 0) return rowToWorkerJob(row);
+  db.prepare(`UPDATE jobs SET ${sets.join(', ')}, updated_at = datetime('now') WHERE id = @id`).run(params);
+  return rowToWorkerJob(getJobRowById(id));
 }
 
 // ── Organizations & Projects (membership + authorization) ────────
@@ -2210,14 +2718,20 @@ function cancelProjectJob(userId, projectId, jobId) {
 
   // Project-scoped status mutation: keyed by (id, project_id) — NOT owner — so an
   // owner/admin can cancel a job another member created. Only non-terminal →
-  // canceled reaches here, which is always a valid transition.
+  // canceled reaches here, which is always a valid transition. Canceling voids any
+  // live worker claim (clear claim_token + lease_expires_at) exactly like the
+  // owner-scoped path, so a worker mid-flight on this job fails its next
+  // heartbeat/complete/fail deterministically (CLAIM_LOST); worker_id is retained
+  // for audit. No R process is touched — there is no executor to interrupt.
   const logs = [...job.logs, normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' })];
   db.prepare(`
     UPDATE jobs SET
       status = 'canceled',
       logs_json = @logsJson,
       updated_at = datetime('now'),
-      canceled_at = datetime('now')
+      canceled_at = datetime('now'),
+      claim_token = NULL,
+      lease_expires_at = NULL
     WHERE id = @id AND project_id = @projectId
   `).run({ id: String(jobId), projectId: pid, logsJson: JSON.stringify(logs) });
 
@@ -2581,6 +3095,17 @@ module.exports = {
   updateJobStatusForUser,
   cancelJobForUser,
   appendJobLogForUser,
+  // Worker coordination (durable claim/lease/heartbeat contract; no worker runs
+  // these yet — see "Worker coordination" above and docs/project-r-execution-design.md)
+  generateClaimToken,
+  getWorkerJob,
+  claimNextJob,
+  heartbeatJob,
+  completeJobByWorker,
+  failJobByWorker,
+  releaseJob,
+  reapExpiredJobs,
+  setJobScheduling,
   // Organizations & projects (membership + authorization)
   isValidRole,
   generateOrganizationId,
