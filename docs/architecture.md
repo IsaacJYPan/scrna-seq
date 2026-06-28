@@ -105,11 +105,16 @@ graph TD
   `organization_members`, `projects`, `project_members`) with four roles
   (`owner`, `admin`, `analyst`, `viewer`) and the `/api/organizations` +
   `/api/projects` route family. See *Organization & Project Authorization*
-  below. **Important:** this is the *authorization primitive only*. It does **not**
-  yet make any existing resource project-scoped: analysis objects, jobs,
-  provenance, cache, and figures all remain strictly **user-scoped**, and R state
-  keying is unchanged. The collaboration UI remains a mockup until resources are
-  migrated onto these primitives in a later branch.
+  below. Building on this foundation, **datasets** are project-scoped (see
+  *Datasets*) and **analysis objects and jobs now carry a project association for
+  project metadata/history** (see *Project-scoped analysis objects & jobs*).
+  **Important:** `provenance`, `cache`, and `figures` remain strictly
+  **user-scoped**, and — most importantly — **R execution/state keying is
+  unchanged and stays user/object-keyed**. Project membership grants visibility of
+  metadata/history by role; it does **not** grant access to another user's live R
+  session, and there is no shared mutable project R state. The collaboration UI
+  remains a mockup until execution is migrated onto these primitives in a later
+  branch.
 
 ## Reproducibility / Provenance Model
 - **Provenance.** Each R endpoint wraps its result in a provenance envelope
@@ -196,8 +201,12 @@ longer be an arbitrary client string that selects R session state:
   is inherited from the parent, or set to the object's own id for a root object.
 - An optional `datasetId` is now **verified against the project-scoped `datasets`
   model** (see *Datasets*): malformed → 400, unknown/inaccessible → 404, viewer of
-  the dataset's project → 403. It is no longer an opaque tag. The analysis object
-  itself remains user-scoped.
+  the dataset's project → 403. It is no longer an opaque tag.
+- Objects now also carry a nullable `project_id` for **project metadata/history**
+  (see *Project-scoped analysis objects & jobs* below). Legacy rows created
+  through the owner-scoped route keep a NULL `project_id`; creator ownership
+  (`owner_user_id`) is always retained. **Project association does not change R
+  state keying** — `verifyRObjectOwnership` is unchanged and still owner-verified.
 - Routes (`POST` / `GET` / `GET /:id` under `/api/analysis-objects`) are
   authenticated and owner-scoped; not-owned/unknown ids return 404. A test-only
   `GET /api/r/__test/state-key` diagnostic exposes the derived key (gated by
@@ -220,7 +229,10 @@ ownership-scoped record:
   real object owned by the caller (else 404, no enumeration). An optional
   `datasetId` (column `dataset_id`) is verified the same way as on analysis
   objects — against the project-scoped `datasets` model (malformed → 400,
-  unknown/inaccessible → 404, viewer → 403); the job itself stays user-scoped.
+  unknown/inaccessible → 404, viewer → 403). Jobs now also carry a nullable
+  `project_id` for project metadata/history (see *Project-scoped analysis objects
+  & jobs* below); creator ownership (`owner_user_id`) is always retained, and the
+  job is not made project-shared at the R-execution level.
 - **Status is a server-managed state machine.** Statuses are `created`,
   `queued`, `running`, `waiting_for_user`, `completed`, `failed`, `canceled`.
   Jobs are created `queued`. Transitions are an explicit allow-list
@@ -367,13 +379,15 @@ on analysis objects/jobs becomes a reference to a real, access-checked dataset.
   dataset in another user's/project's scope) → **404**; a member who is only a
   `viewer` of the dataset's project → **403** (create/run-like actions require
   owner/admin/analyst). `jobs` gained a `dataset_id` column for this.
-- **Scope of this branch.** Datasets are project-scoped, but **analysis objects
-  and jobs themselves remain user-scoped** (only their `datasetId` *reference* is
-  project-checked), and **R execution/state is still user/object-keyed** — there
-  is no project-shared R state. No dataset download routes, no invitations, no
-  comments, no public links. Covered by `backend/datasets.test.js` (HTTP routes +
-  DB-helper layer) with `backend/analysis-objects.test.js` / `backend/jobs.test.js`
-  covering the reference checks.
+- **Scope of the datasets branch.** Datasets were the first project-scoped
+  resource. A *later* branch (see *Project-scoped analysis objects & jobs* below)
+  then gave analysis objects and jobs their own `project_id` association and
+  project-member metadata APIs. In **both** branches **R execution/state remains
+  user/object-keyed** — there is no project-shared R state. No dataset download
+  routes, no invitations, no comments, no public links. Covered by
+  `backend/datasets.test.js` (HTTP routes + DB-helper layer) with
+  `backend/analysis-objects.test.js` / `backend/jobs.test.js` covering the
+  reference checks.
 - **Known limitations (storage / hashing).** These are acceptable under the
   current upload size limit (`MAX_UPLOAD_BYTES`, default 512 MB) but should be
   revisited before very large uploads or production-scale object storage:
@@ -391,6 +405,61 @@ on analysis objects/jobs becomes a reference to a real, access-checked dataset.
     fails (`EXDEV`) if the temp dir and vault are on different filesystems; the
     failure is handled honestly (the dataset is marked `failed`), but a
     copy-then-unlink fallback is a future follow-up for such deployments.
+
+### Project-scoped analysis objects & jobs (`analysis_objects.project_id`, `jobs.project_id`)
+Analysis objects and jobs now carry a nullable `project_id` so their **metadata
+and history** can be associated with a project and read by project members
+according to role. This is deliberately a *metadata/authorization* layer — it
+does **not** make R execution or live R state project-shared.
+
+- **Schema.** `analysis_objects` and `jobs` each gained a nullable `project_id`
+  (idempotent migration; existing rows keep `NULL` and remain reachable only
+  through the owner-scoped routes). Composite indexes were added for the project
+  list/filter paths: `analysis_objects(project_id[, dataset_id | parent_object_id
+  | lineage_root_id | owner_user_id])` and `jobs(project_id[, status |
+  analysis_object_id | result_analysis_object_id | dataset_id])`. **Both
+  `project_id` (which project owns this metadata) and `owner_user_id` (which user
+  created/is responsible) are kept** — project scope and creator ownership answer
+  different questions.
+- **Project-scoped, role-checked access** (helpers in `backend/database.js`):
+  `createProjectAnalysisObject` / `createProjectJob` require **owner/admin/
+  analyst**; `listProject*` / `getProject*` allow **any member (incl. viewer)** to
+  read metadata/logs. All authorize through `requireProjectRole`, so an
+  inaccessible project/object/job returns **404** (no existence leak), a known
+  member lacking the role returns **403**, and a malformed `ao_`/`job_` id returns
+  **400**.
+- **Identity & scope are server-owned.** `project_id` is taken from the route
+  project, never the body. The `POST` routes reject any client-supplied `id`,
+  owner/creator field (`ownerUserId`, `createdByUserId`, `userId`, …), `project_id`
+  field, server-derived `lineageRootId`, and (for jobs) any `status`. Object/job
+  ids and the initial `queued` status are server-generated.
+- **References cannot cross the project.** A supplied `datasetId`,
+  `parentObjectId`, `analysisObjectId`, or `resultAnalysisObjectId` must resolve
+  **within the same project** as the route (else 404). Child lineage root is
+  inherited only from an in-project parent, so **lineage can never cross a project
+  boundary**.
+- **Routes** (authenticated, under `/api/projects/:projectId`):
+  `POST/GET /analysis-objects`, `GET /analysis-objects/:objectId`,
+  `POST/GET /jobs`, `GET /jobs/:jobId`, `GET /jobs/:jobId/logs`,
+  `POST /jobs/:jobId/cancel`. The existing owner-scoped `/api/analysis-objects`
+  and `/api/jobs` routes are unchanged and still pass their suites.
+- **Cancel policy.** owner/admin may cancel any cancelable job in the project;
+  an **analyst may cancel only their own** cancelable jobs (else 403); a **viewer
+  may not cancel** (403); an already-terminal job returns **409**. Cancel is the
+  only project-scoped *mutation* in this branch and touches no R process.
+- **R execution/state is explicitly NOT project-shared.** A project member seeing
+  an object's metadata does **not** gain access to another user's live R session.
+  R state stays user/object-keyed: `verifyRObjectOwnership` still requires the
+  `X-Object-ID` to be an `analysis_objects` row **owned by the caller**, so a
+  project co-member supplying another member's object id to `/api/r/*` is rejected
+  (404) before the request reaches R. This is asserted directly in
+  `backend/project-analysis-resources.test.js`.
+- **Scope of this branch.** Project association of analysis-object/job *metadata*
+  only. **No shared/mutable project R state, no worker or queue draining jobs, no
+  download/object-storage/comment/invitation/audit-log/public-link features, and
+  no new scientific features.** This is **not** a claim of production-ready
+  collaboration. Covered by `backend/project-analysis-resources.test.js` (HTTP
+  routes + the R-ownership-unchanged assertions).
 
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
@@ -445,12 +514,15 @@ id* gap, but the R execution model is still **not** production-grade:
   `organization_members`, `projects`, `project_members` + the
   `/api/organizations` and `/api/projects` route family with `owner`/`admin`/
   `analyst`/`viewer` roles; see *Organization & Project Authorization*). What
-  remains: migrating existing resources (analysis objects, jobs, provenance,
-  cache, figures) onto project scope, project-scoped R execution/state, and
-  invitations/comments/audit logs. The first project-scoped resource — the
-  durable `datasets` model (see *Datasets (project-scoped)*) — has landed, and
-  `datasetId` on analysis objects/jobs is now access-verified; but analysis
-  objects and jobs *themselves* are still per-user only.
+  remains: migrating the remaining resources (provenance, cache, figures) onto
+  project scope, **project-scoped R execution/state**, and
+  invitations/comments/audit logs. Landed so far: the durable `datasets` model
+  (see *Datasets (project-scoped)*) with access-verified `datasetId` references,
+  and a **project association on analysis objects and jobs** for project-member
+  metadata/history (see *Project-scoped analysis objects & jobs*). What is
+  explicitly **not** done: analysis-object/job *R execution* is still
+  user/object-keyed — project metadata visibility does not imply shared or
+  continuable R sessions, and no worker drains the jobs queue.
 - **Deployment target** — not defined (no container/orchestration manifest for
   the full stack beyond the R `Dockerfile`).
 - **Object storage** — uploads/artifacts are on local disk (`vault/`).
@@ -468,9 +540,10 @@ id* gap, but the R execution model is still **not** production-grade:
 - **No queue/worker draining the `jobs` model** (the durable job record exists,
   but execution is still synchronous and not job-backed), **no full
   object-storage or durable R-worker execution model**, and **no complete
-  reproducibility artifact model**. The org/project authorization layer exists as
-  a *foundation* (membership + roles + routes) but **no existing resource is
-  project-scoped yet and there is no shared R execution state** — analysis-object
-  ownership, the durable jobs model, and the org/project primitives are
-  security/foundation work, not a claim of production-grade collaboration or R
-  execution.
+  reproducibility artifact model**. The org/project authorization layer
+  (membership + roles + routes) now backs project-scoped **datasets** and a
+  project association on **analysis-object/job metadata/history**, but **R
+  execution/state is still user/object-keyed and there is no shared mutable
+  project R state** — project members can see metadata/history by role, not use
+  another user's live R session. These remain security/foundation work, **not** a
+  claim of production-grade collaboration or R execution.
