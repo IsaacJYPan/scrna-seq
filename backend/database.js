@@ -25,6 +25,12 @@ function initDatabase(dbPath) {
   // Enable WAL mode for better concurrent read performance
   db.pragma('journal_mode = WAL');
 
+  // busy_timeout: when a write lock is briefly held (e.g. the job worker claiming
+  // while a request writes), block-and-retry for up to 5s instead of throwing
+  // SQLITE_BUSY immediately. A small, safe hardening for the single-process worker
+  // shipped on this branch; true multi-process contention hardening is a follow-up.
+  db.pragma('busy_timeout = 5000');
+
   db.exec(`
     -- Provenance records. Historically user-scoped (keyed by user_email). This
     -- branch adds an OPTIONAL project association so provenance created through a
@@ -1626,6 +1632,37 @@ function releaseJob(jobId, workerId, claimToken, opts = {}) {
 }
 
 /**
+ * Append a durable log entry to a running job the worker currently holds, WITHOUT
+ * changing its status. Guarded exactly like heartbeat/complete/fail: succeeds only
+ * while (worker_id, claim_token) match, status is 'running', and the lease is still
+ * live. This is the worker-side counterpart to appendJobLogForUser (which is owner-
+ * scoped); it lets the drain loop record "claimed" / "handler started" progress logs
+ * that are authorized by the claim rather than by user ownership. Throws
+ * `JOB_NOT_FOUND` / `CLAIM_LOST` so a worker that has lost its claim cannot keep
+ * writing to a job that was canceled/reaped out from under it.
+ */
+function appendJobLogByWorker(jobId, workerId, claimToken, entry, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  const logs = [...JSON.parse(row.logs_json || '[]'), normalizeJobLogEntry(entry)];
+  const info = db.prepare(`
+    UPDATE jobs SET logs_json = @logsJson, updated_at = @now
+    WHERE id = @id AND worker_id = @wid AND claim_token = @token
+      AND status = 'running' AND lease_expires_at > @now
+  `).run({ id: String(jobId), wid, token, logsJson: JSON.stringify(logs), now });
+  if (info.changes !== 1) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return rowToWorkerJob(getJobRowById(jobId));
+}
+
+/**
  * Recover running jobs whose lease has expired (a crashed/stalled worker). For each:
  *   - attempts <  max_attempts → return to 'queued' (running → queued) for re-claim;
  *   - attempts >= max_attempts → move to 'failed' with a durable LEASE_EXPIRED error.
@@ -3104,6 +3141,7 @@ module.exports = {
   completeJobByWorker,
   failJobByWorker,
   releaseJob,
+  appendJobLogByWorker,
   reapExpiredJobs,
   setJobScheduling,
   // Organizations & projects (membership + authorization)
