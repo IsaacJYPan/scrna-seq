@@ -261,6 +261,42 @@ function moveDirectoryUploadIntoUserVault(files, user, relativePaths = []) {
   return toPosixPath(path.relative(process.cwd(), root));
 }
 
+// Sanitize a server-generated id (proj_.../ds_...) into a single safe path
+// segment. The ids are already server-controlled and hex-suffixed, but we strip
+// anything non-alphanumeric/._- defensively before using them in a path.
+function sanitizeIdSegment(value) {
+  const seg = String(value || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!seg || seg === '.' || seg === '..') throw new Error('Invalid storage id segment.');
+  return seg;
+}
+
+// Store an uploaded dataset file under a SERVER-CHOSEN key inside the controlled
+// vault root. The client never influences the storage location: the path is
+// derived from the authenticated user's vault, the (server-generated) project and
+// dataset ids, and a sanitized, display-only filename. Returns the internal
+// storage key (vault-relative posix path) plus the computed sha256 and byte size.
+function storeDatasetFile(file, user, projectId, datasetId) {
+  const safeName = (db.sanitizeDatasetFilename(file.originalname) || 'upload.bin')
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+  const root = path.join(
+    getUserVaultDir(user), 'datasets',
+    sanitizeIdSegment(projectId), sanitizeIdSegment(datasetId)
+  );
+  const destination = path.join(root, safeName);
+  if (!isInsidePath(destination, root) || !isInsidePath(destination, getUserVaultDir(user))) {
+    throw new Error('Invalid dataset storage destination.');
+  }
+  fs.mkdirSync(root, { recursive: true });
+  const buf = fs.readFileSync(file.path);
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+  fs.renameSync(file.path, destination);
+  return {
+    internalStorageKey: toPosixPath(path.relative(process.cwd(), destination)),
+    sha256,
+    fileSizeBytes: buf.length
+  };
+}
+
 function validateRProxyPaths(req, res, next) {
   try {
     if (isProductionDiagnosticRProxyPath(req.path)) {
@@ -307,6 +343,15 @@ const OBJECT_ID_PATTERN = /^[A-Za-z0-9_-]{3,128}$/;
 
 function isValidObjectIdFormat(value) {
   return typeof value === 'string' && OBJECT_ID_PATTERN.test(value);
+}
+
+// Dataset ids are server-generated as `ds_` + lowercase hex. A client that
+// supplies a `datasetId` (on analysis-object/job creation, or in a dataset route
+// path) must match this shape, else the request is malformed (400) — distinct
+// from a well-formed id that simply does not resolve (404).
+const DATASET_ID_PATTERN = /^ds_[0-9a-f]+$/;
+function isValidDatasetIdFormat(value) {
+  return typeof value === 'string' && DATASET_ID_PATTERN.test(value);
 }
 
 // Middleware: verify any client-supplied X-Object-ID against the DB before it
@@ -562,9 +607,15 @@ app.post('/api/analysis-objects', (req, res) => {
       return res.status(404).json({ error: 'Provenance record not found.' });
     }
   }
-  // NOTE: there is no durable datasets table yet, so datasetId is accepted as
-  // an opaque nullable tag. Dataset ownership will be enforced once a datasets
-  // model lands (see docs/architecture.md).
+  // datasetId is now verified against the durable datasets model: if supplied it
+  // must be a real dataset whose project the caller can write to (owner/admin/
+  // analyst). A malformed id is rejected here (400); resolution + role enforcement
+  // happen in the DB layer (404 unknown/inaccessible, 403 viewer), mapped below.
+  if (body.datasetId !== undefined && body.datasetId !== null) {
+    if (!isValidDatasetIdFormat(body.datasetId)) {
+      return res.status(400).json({ error: 'Malformed dataset ID.' });
+    }
+  }
 
   try {
     const created = db.createAnalysisObjectForUser(req.user.id, {
@@ -579,7 +630,8 @@ app.post('/api/analysis-objects', (req, res) => {
     });
     res.status(201).json(created);
   } catch (e) {
-    if (e.code === 'PARENT_NOT_FOUND') return res.status(404).json({ error: e.message });
+    if (e.code === 'PARENT_NOT_FOUND' || e.code === 'DATASET_NOT_FOUND') return res.status(404).json({ error: e.message });
+    if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message });
     if (['INVALID_OBJECT_TYPE', 'INVALID_METADATA', 'INVALID_OWNER'].includes(e.code)) {
       return res.status(400).json({ error: e.message });
     }
@@ -629,16 +681,25 @@ app.post('/api/jobs', (req, res) => {
   if (body.status !== undefined) {
     return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
   }
+  // A supplied datasetId must be well-formed (else 400); resolution + role
+  // enforcement happen in the DB layer (404 unknown/inaccessible, 403 viewer).
+  if (body.datasetId !== undefined && body.datasetId !== null) {
+    if (!isValidDatasetIdFormat(body.datasetId)) {
+      return res.status(400).json({ error: 'Malformed dataset ID.' });
+    }
+  }
 
   try {
     const created = db.createJobForUser(req.user.id, {
       analysisObjectId: body.analysisObjectId,
+      datasetId: body.datasetId,
       jobType: body.jobType,
       parameters: body.parameters
     });
     res.status(201).json(created);
   } catch (e) {
-    if (e.code === 'ANALYSIS_OBJECT_NOT_FOUND') return res.status(404).json({ error: e.message });
+    if (e.code === 'ANALYSIS_OBJECT_NOT_FOUND' || e.code === 'DATASET_NOT_FOUND') return res.status(404).json({ error: e.message });
+    if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message });
     if (['INVALID_JOB_TYPE', 'INVALID_PARAMETERS', 'INVALID_OWNER'].includes(e.code)) {
       return res.status(400).json({ error: e.message });
     }
@@ -917,6 +978,192 @@ app.post('/api/upload-directory', requireAuth, (req, res) => {
       res.status(400).json({ error: e.message });
     }
   });
+});
+
+// ── Datasets API (project-scoped) ───────────────────────────────────────
+// Durable, project-scoped dataset records. Access is governed by the caller's
+// project role: owner/admin/analyst may create/register/update; any member
+// (incl. viewer) may list/read metadata. Identity and storage location are
+// server-controlled — clients may never supply an id, owner/creator/project
+// field, storage key/uri, sha256/size, or a raw filesystem path. A dataset in a
+// project the caller cannot access returns 404 (no existence leak); a known
+// member lacking the role returns 403. (`/api/projects` already has express.json
+// + requireAuth mounted above.) NOTE: there are intentionally no dataset
+// download routes in this branch (see docs/architecture.md).
+
+// Separate multer instance for dataset uploads so the dataset extension policy is
+// independent of the R-vault upload filter. The declared file_type (validated
+// against the DB allow-list) is the source of truth; the extension is a coarse
+// guard. tenx_zip arrives as .zip, hence its inclusion here.
+const datasetUpload = multer({
+  dest: UPLOAD_DIR,
+  limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 512 * 1024 * 1024) },
+  fileFilter: (req, file, cb) => {
+    const allowed = new Set(['.csv', '.tsv', '.txt', '.mtx', '.gz', '.h5', '.h5ad', '.h5seurat', '.rds', '.zip']);
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (!allowed.has(ext)) return cb(new Error('Unsupported dataset file type'));
+    cb(null, true);
+  }
+});
+
+// Run multer only for multipart requests; JSON registration falls through to the
+// express.json-parsed body. Surfaces multer errors (e.g. size/type) as 400.
+function maybeDatasetMultipart(req, res, next) {
+  if (String(req.headers['content-type'] || '').includes('multipart/form-data')) {
+    return datasetUpload.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  }
+  next();
+}
+
+function cleanupDatasetReqFile(req) {
+  if (req.file) cleanupUploadedFiles([req.file]);
+}
+
+// Server-controlled fields a client may never set on dataset create/update,
+// including any field that would let the client choose the storage location.
+const REJECTED_DATASET_FIELDS = [
+  'id', 'projectId', 'project_id', 'ownerUserId', 'owner_user_id',
+  'createdByUserId', 'created_by_user_id', 'userId', 'user_id',
+  'internalStorageKey', 'internal_storage_key', 'storageUri', 'storage_uri',
+  'sha256', 'fileSizeBytes', 'file_size_bytes',
+  'path', 'filePath', 'file_path', 'storagePath', 'storage_path'
+];
+
+function rejectDatasetServerFields(req, res) {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  for (const field of REJECTED_DATASET_FIELDS) {
+    if (body[field] !== undefined) {
+      cleanupDatasetReqFile(req);
+      res.status(400).json({ error: `Field '${field}' is not allowed; it is server-controlled.` });
+      return true;
+    }
+  }
+  return false;
+}
+
+// Coerce a metadata/validation_errors field that may arrive as a JSON string
+// (multipart form field) or a native object (JSON body). Returns { ok:false }
+// when a non-empty string is not valid JSON.
+function coerceDatasetJsonField(value) {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (typeof value === 'string') {
+    if (value.trim() === '') return { ok: true, value: undefined };
+    try { return { ok: true, value: JSON.parse(value) }; } catch { return { ok: false }; }
+  }
+  return { ok: true, value };
+}
+
+function sendDatasetError(res, e, context = 'Datasets') {
+  switch (e.code) {
+    case 'NOT_FOUND':
+    case 'DATASET_NOT_FOUND':
+      return res.status(404).json({ error: e.message });
+    case 'FORBIDDEN':
+      return res.status(403).json({ error: e.message });
+    case 'INVALID_FILE_TYPE':
+    case 'INVALID_UPLOAD_STATUS':
+    case 'INVALID_VALIDATION_STATUS':
+    case 'INVALID_VALIDATION_ERRORS':
+    case 'INVALID_STATUS_COMBO':
+    case 'INVALID_METADATA':
+    case 'NO_FIELDS':
+      return res.status(400).json({ error: e.message });
+    default:
+      console.error(`[${context}]`, e);
+      return res.status(500).json({ error: 'Internal error.' });
+  }
+}
+
+app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (rejectDatasetServerFields(req, res)) return;
+
+  const fileType = body.fileType !== undefined ? body.fileType : body.file_type;
+  const meta = coerceDatasetJsonField(body.metadata);
+  if (!meta.ok) { cleanupDatasetReqFile(req); return res.status(400).json({ error: 'metadata must be valid JSON.' }); }
+  const verrs = coerceDatasetJsonField(body.validationErrors);
+  if (!verrs.ok) { cleanupDatasetReqFile(req); return res.status(400).json({ error: 'validation_errors must be valid JSON.' }); }
+
+  try {
+    let dataset = db.createDatasetForProject(req.user.id, req.params.projectId, {
+      fileType,
+      originalFilename: body.originalFilename !== undefined
+        ? body.originalFilename
+        : (req.file ? req.file.originalname : undefined),
+      uploadStatus: body.uploadStatus,
+      validationStatus: body.validationStatus,
+      metadata: meta.value,
+      validationErrors: verrs.value
+    });
+
+    // If a file rode along, the server stores it under a server-chosen key and
+    // records sha256 + size. A storage failure leaves the record `failed`, never
+    // a misleading `uploaded`/`valid`.
+    if (req.file) {
+      try {
+        const stored = storeDatasetFile(req.file, req.user, req.params.projectId, dataset.id);
+        dataset = db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
+      } catch (storageErr) {
+        console.error('[Datasets] Storage failed:', storageErr);
+        db.markDatasetUploadFailed(req.params.projectId, dataset.id);
+        cleanupDatasetReqFile(req);
+        return res.status(500).json({ error: 'Dataset file storage failed.' });
+      }
+    }
+    res.status(201).json(db.toPublicDataset(dataset));
+  } catch (e) {
+    cleanupDatasetReqFile(req);
+    sendDatasetError(res, e);
+  }
+});
+
+app.get('/api/projects/:projectId/datasets', (req, res) => {
+  const filters = {};
+  if (typeof req.query.fileType === 'string') filters.fileType = req.query.fileType;
+  if (typeof req.query.uploadStatus === 'string') filters.uploadStatus = req.query.uploadStatus;
+  if (typeof req.query.validationStatus === 'string') filters.validationStatus = req.query.validationStatus;
+  try {
+    const rows = db.listDatasetsForProject(req.user.id, req.params.projectId, filters);
+    res.json(rows.map(db.toPublicDataset));
+  } catch (e) {
+    sendDatasetError(res, e);
+  }
+});
+
+app.get('/api/projects/:projectId/datasets/:datasetId', (req, res) => {
+  if (!isValidDatasetIdFormat(req.params.datasetId)) {
+    return res.status(400).json({ error: 'Malformed dataset ID.' });
+  }
+  try {
+    const dataset = db.getDatasetForProject(req.user.id, req.params.projectId, req.params.datasetId);
+    if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+    res.json(db.toPublicDataset(dataset));
+  } catch (e) {
+    sendDatasetError(res, e);
+  }
+});
+
+app.patch('/api/projects/:projectId/datasets/:datasetId', (req, res) => {
+  if (!isValidDatasetIdFormat(req.params.datasetId)) {
+    return res.status(400).json({ error: 'Malformed dataset ID.' });
+  }
+  if (rejectDatasetServerFields(req, res)) return;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  try {
+    const updated = db.updateDatasetForProject(req.user.id, req.params.projectId, req.params.datasetId, {
+      uploadStatus: body.uploadStatus,
+      validationStatus: body.validationStatus,
+      validationErrors: body.validationErrors,
+      metadata: body.metadata,
+      originalFilename: body.originalFilename
+    });
+    res.json(db.toPublicDataset(updated));
+  } catch (e) {
+    sendDatasetError(res, e);
+  }
 });
 
 // ── R Plumber Proxy ─────────────────────────────────────────────────────

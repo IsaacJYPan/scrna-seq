@@ -120,6 +120,7 @@ function initDatabase(dbPath) {
       owner_user_id INTEGER NOT NULL,
       analysis_object_id TEXT,
       result_analysis_object_id TEXT,
+      dataset_id TEXT,
       job_type TEXT NOT NULL,
       status TEXT NOT NULL,
       parameters_json TEXT NOT NULL DEFAULT '{}',
@@ -203,6 +204,47 @@ function initDatabase(dbPath) {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
     CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id);
+
+    -- ── Datasets (project-scoped durable dataset records) ──────────────
+    -- The first durable, project-scoped resource. Each row is an uploaded or
+    -- registered dataset belonging to exactly one project; access is governed by
+    -- the caller's project_members role (see verifyDatasetProjectAccess). Identity
+    -- is server-owned: ids are server-generated (ds_...), and the internal storage
+    -- key / storage uri / sha256 / size are chosen/computed by the server, never
+    -- supplied by the client. file_type / upload_status / validation_status are
+    -- constrained to explicit allow-lists in the DB helpers. NOTE: this branch adds
+    -- the durable dataset model + project-scoped API + datasetId verification only;
+    -- analysis objects, jobs, and R state remain user-scoped (see
+    -- docs/architecture.md).
+    CREATE TABLE IF NOT EXISTS datasets (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      owner_user_id INTEGER NOT NULL,
+      created_by_user_id INTEGER NOT NULL,
+      original_filename TEXT,
+      internal_storage_key TEXT,
+      storage_uri TEXT,
+      file_type TEXT NOT NULL,
+      file_size_bytes INTEGER,
+      sha256 TEXT,
+      upload_status TEXT NOT NULL,
+      validation_status TEXT NOT NULL,
+      validation_errors TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id),
+      FOREIGN KEY (owner_user_id) REFERENCES users(id),
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_datasets_project ON datasets(project_id);
+    CREATE INDEX IF NOT EXISTS idx_datasets_owner ON datasets(owner_user_id);
+    CREATE INDEX IF NOT EXISTS idx_datasets_creator ON datasets(created_by_user_id);
+    CREATE INDEX IF NOT EXISTS idx_datasets_file_type ON datasets(file_type);
+    CREATE INDEX IF NOT EXISTS idx_datasets_upload_status ON datasets(upload_status);
+    CREATE INDEX IF NOT EXISTS idx_datasets_validation_status ON datasets(validation_status);
+    CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
+    CREATE INDEX IF NOT EXISTS idx_datasets_sha256 ON datasets(sha256);
   `);
 
   // ── Schema migration: add 'operation' column if missing (for pre-existing DBs) ──
@@ -221,6 +263,17 @@ function initDatabase(dbPath) {
     db.exec("ALTER TABLE results_cache ADD COLUMN user_email TEXT NOT NULL DEFAULT ''");
     console.log('[DB] Migrated: added user_email column to results_cache table');
   }
+
+  // Add jobs.dataset_id for pre-existing DBs (the column is part of the CREATE
+  // above for fresh DBs; this branch lets a job reference a verified dataset).
+  const jobCols = db.prepare("PRAGMA table_info(jobs)").all().map(c => c.name);
+  if (!jobCols.includes('dataset_id')) {
+    db.exec('ALTER TABLE jobs ADD COLUMN dataset_id TEXT');
+    console.log('[DB] Migrated: added dataset_id column to jobs table');
+  }
+  // Created here (not in the CREATE block above) so it runs only after the column
+  // is guaranteed to exist on a pre-existing jobs table.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_dataset ON jobs(dataset_id)');
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_prov_user ON provenance(user_email);
@@ -677,6 +730,14 @@ function createAnalysisObjectForUser(ownerUserId, input = {}) {
     throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
   }
 
+  // A supplied datasetId must reference a real dataset whose project the caller
+  // can write to (owner/admin/analyst). Defense-in-depth: the route also checks
+  // id format (400) before calling this. Unknown/inaccessible → DATASET_NOT_FOUND
+  // (404, no cross-project/cross-user existence leak); viewer → FORBIDDEN (403).
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    verifyDatasetProjectAccess(owner, String(input.datasetId), DATASET_WRITE_ROLES);
+  }
+
   const parentObjectId = input.parentObjectId ? String(input.parentObjectId) : null;
   let lineageRootId = null;
   if (parentObjectId) {
@@ -805,6 +866,7 @@ function rowToJob(row) {
     ownerUserId: row.owner_user_id,
     analysisObjectId: row.analysis_object_id,
     resultAnalysisObjectId: row.result_analysis_object_id,
+    datasetId: row.dataset_id,
     jobType: row.job_type,
     status: row.status,
     parameters: JSON.parse(row.parameters_json || '{}'),
@@ -846,6 +908,7 @@ function listJobsForUser(ownerUserId, filters = {}) {
   if (filters.jobType) { clauses.push('job_type = ?'); params.push(String(filters.jobType)); }
   if (filters.analysisObjectId) { clauses.push('analysis_object_id = ?'); params.push(String(filters.analysisObjectId)); }
   if (filters.resultAnalysisObjectId) { clauses.push('result_analysis_object_id = ?'); params.push(String(filters.resultAnalysisObjectId)); }
+  if (filters.datasetId) { clauses.push('dataset_id = ?'); params.push(String(filters.datasetId)); }
 
   const rows = db.prepare(
     `SELECT * FROM jobs WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
@@ -889,16 +952,26 @@ function createJobForUser(ownerUserId, input = {}) {
     analysisObjectId = input.analysisObjectId;
   }
 
+  // A supplied datasetId must reference a real dataset whose project the caller
+  // can write to (owner/admin/analyst). The route validates id format (400)
+  // first. Unknown/inaccessible → DATASET_NOT_FOUND (404); viewer → FORBIDDEN.
+  let datasetId = null;
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    verifyDatasetProjectAccess(owner, String(input.datasetId), DATASET_WRITE_ROLES);
+    datasetId = String(input.datasetId);
+  }
+
   const id = generateJobId();
   db.prepare(`
     INSERT INTO jobs
-      (id, owner_user_id, analysis_object_id, job_type, status, parameters_json)
+      (id, owner_user_id, analysis_object_id, dataset_id, job_type, status, parameters_json)
     VALUES
-      (@id, @owner, @analysisObjectId, @jobType, @status, @parametersJson)
+      (@id, @owner, @analysisObjectId, @datasetId, @jobType, @status, @parametersJson)
   `).run({
     id,
     owner,
     analysisObjectId,
+    datasetId,
     jobType,
     status: INITIAL_JOB_STATUS,
     parametersJson: JSON.stringify(parameters)
@@ -1416,6 +1489,324 @@ function removeProjectMember(projectId, targetUserId, actorRole) {
   return true;
 }
 
+// ── Datasets (project-scoped) ────────────────────────────────────
+//
+// The first durable, project-scoped resource. A dataset belongs to exactly one
+// project; every read/write helper authorizes through the project_members role
+// (requireProjectRole / verifyProjectMember), so a dataset in a project the
+// caller cannot access is indistinguishable from one that does not exist (the
+// route returns 404; 403 is reserved for a known member lacking the role).
+// Identity is server-owned: ids are server-generated and the internal storage
+// key / storage uri / sha256 / size are set by the server (via the upload flow),
+// never accepted from the client. file_type / upload_status / validation_status
+// are constrained to the allow-lists below.
+
+const ALLOWED_DATASET_FILE_TYPES = new Set([
+  'tenx_zip', 'tenx_h5', 'seurat_rds', 'h5seurat', 'h5ad',
+  'count_matrix_csv', 'count_matrix_tsv', 'metadata_csv', 'metadata_tsv'
+]);
+
+const DATASET_UPLOAD_STATUSES = new Set(['pending', 'uploaded', 'failed']);
+const DATASET_VALIDATION_STATUSES = new Set(['pending', 'valid', 'invalid', 'skipped']);
+
+// Roles permitted to create/register/update a dataset. viewer is read-only.
+const DATASET_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const DATASET_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+
+function isValidDatasetFileType(fileType) {
+  return typeof fileType === 'string' && ALLOWED_DATASET_FILE_TYPES.has(fileType);
+}
+function isValidDatasetUploadStatus(status) {
+  return typeof status === 'string' && DATASET_UPLOAD_STATUSES.has(status);
+}
+function isValidDatasetValidationStatus(status) {
+  return typeof status === 'string' && DATASET_VALIDATION_STATUSES.has(status);
+}
+
+function generateDatasetId() {
+  // Server-generated, header/path-safe by construction: `ds_` + lowercase hex.
+  return `ds_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+// Strip any path components and keep a conservative, display-only filename. The
+// result is metadata ONLY — it is never used to derive a storage path (the
+// server chooses the storage key independently). Returns null for unusable input.
+function sanitizeDatasetFilename(name) {
+  if (typeof name !== 'string') return null;
+  const base = name.split(/[\\/]+/).pop().trim();
+  if (!base || base === '.' || base === '..') return null;
+  return base.slice(0, 255);
+}
+
+// A dataset must never look "valid" unless its bytes actually landed. This
+// guards the requirement that a pending/failed upload cannot be represented as
+// a valid dataset.
+function assertDatasetStatusCombo(uploadStatus, validationStatus) {
+  if (validationStatus === 'valid' && uploadStatus !== 'uploaded') {
+    throw codedError('INVALID_STATUS_COMBO',
+      'A dataset cannot have validation_status "valid" unless upload_status is "uploaded".');
+  }
+}
+
+function normalizeValidationErrors(value) {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value) || (typeof value === 'object')) return JSON.stringify(value);
+  throw codedError('INVALID_VALIDATION_ERRORS', 'validation_errors must be a JSON array or object.');
+}
+
+// Full internal row mapping (includes the server-only internal_storage_key).
+function rowToDataset(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    ownerUserId: row.owner_user_id,
+    createdByUserId: row.created_by_user_id,
+    originalFilename: row.original_filename,
+    internalStorageKey: row.internal_storage_key,
+    storageUri: row.storage_uri,
+    fileType: row.file_type,
+    fileSizeBytes: row.file_size_bytes,
+    sha256: row.sha256,
+    uploadStatus: row.upload_status,
+    validationStatus: row.validation_status,
+    validationErrors: row.validation_errors ? JSON.parse(row.validation_errors) : null,
+    metadata: JSON.parse(row.metadata || '{}'),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+// Client-facing projection. Deliberately omits internal_storage_key so the
+// server's filesystem/storage layout is never leaked to API consumers (there are
+// no dataset download routes in this branch).
+function toPublicDataset(dataset) {
+  if (!dataset) return null;
+  const { internalStorageKey, ...rest } = dataset; // eslint-disable-line no-unused-vars
+  return rest;
+}
+
+/**
+ * Create (register) a dataset in `projectId`. Requires the caller to be an
+ * owner/admin/analyst project member (enforced here as defense-in-depth — the
+ * route checks too). The id is server-generated; the storage key / sha256 / size
+ * are NOT accepted here (they are filled by the upload flow). Throws coded errors
+ * the route maps to HTTP statuses: `NOT_FOUND` (404), `FORBIDDEN` (403),
+ * `INVALID_FILE_TYPE` / `INVALID_UPLOAD_STATUS` / `INVALID_VALIDATION_STATUS` /
+ * `INVALID_STATUS_COMBO` / `INVALID_METADATA` / `INVALID_VALIDATION_ERRORS` (400).
+ */
+function createDatasetForProject(userId, projectId, input = {}) {
+  const membership = requireProjectRole(userId, projectId, DATASET_WRITE_ROLES);
+  const owner = membership.userId;
+
+  if (!isValidDatasetFileType(input.fileType)) {
+    throw codedError('INVALID_FILE_TYPE',
+      `Invalid file_type. Allowed: ${[...ALLOWED_DATASET_FILE_TYPES].join(', ')}.`);
+  }
+
+  const uploadStatus = input.uploadStatus === undefined ? 'pending' : input.uploadStatus;
+  if (!isValidDatasetUploadStatus(uploadStatus)) {
+    throw codedError('INVALID_UPLOAD_STATUS',
+      `Invalid upload_status. Allowed: ${[...DATASET_UPLOAD_STATUSES].join(', ')}.`);
+  }
+  const validationStatus = input.validationStatus === undefined ? 'pending' : input.validationStatus;
+  if (!isValidDatasetValidationStatus(validationStatus)) {
+    throw codedError('INVALID_VALIDATION_STATUS',
+      `Invalid validation_status. Allowed: ${[...DATASET_VALIDATION_STATUSES].join(', ')}.`);
+  }
+  assertDatasetStatusCombo(uploadStatus, validationStatus);
+
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+  const validationErrors = normalizeValidationErrors(input.validationErrors);
+
+  const id = generateDatasetId();
+  db.prepare(`
+    INSERT INTO datasets
+      (id, project_id, owner_user_id, created_by_user_id, original_filename,
+       file_type, upload_status, validation_status, validation_errors, metadata)
+    VALUES
+      (@id, @projectId, @owner, @owner, @originalFilename,
+       @fileType, @uploadStatus, @validationStatus, @validationErrors, @metadata)
+  `).run({
+    id,
+    projectId: String(projectId),
+    owner,
+    originalFilename: sanitizeDatasetFilename(input.originalFilename),
+    fileType: input.fileType,
+    uploadStatus,
+    validationStatus,
+    validationErrors,
+    metadata: JSON.stringify(metadata)
+  });
+
+  return getDatasetRow(id, projectId);
+}
+
+// Low-level project-scoped row fetch (no auth — callers above have already
+// authorized via requireProjectRole / verifyProjectMember).
+function getDatasetRow(datasetId, projectId) {
+  const row = db.prepare('SELECT * FROM datasets WHERE id = ? AND project_id = ?')
+    .get(String(datasetId), String(projectId));
+  return rowToDataset(row);
+}
+
+/** List a project's datasets (membership-scoped to any role). Filters are all
+ * project-scoped, so a filter can never widen the query beyond the project. */
+function listDatasetsForProject(userId, projectId, filters = {}) {
+  requireProjectRole(userId, projectId, DATASET_READ_ROLES);
+
+  const clauses = ['project_id = ?'];
+  const params = [String(projectId)];
+  if (filters.fileType !== undefined) {
+    if (!isValidDatasetFileType(filters.fileType)) throw codedError('INVALID_FILE_TYPE', 'Invalid file_type filter.');
+    clauses.push('file_type = ?'); params.push(filters.fileType);
+  }
+  if (filters.uploadStatus !== undefined) {
+    if (!isValidDatasetUploadStatus(filters.uploadStatus)) throw codedError('INVALID_UPLOAD_STATUS', 'Invalid upload_status filter.');
+    clauses.push('upload_status = ?'); params.push(filters.uploadStatus);
+  }
+  if (filters.validationStatus !== undefined) {
+    if (!isValidDatasetValidationStatus(filters.validationStatus)) throw codedError('INVALID_VALIDATION_STATUS', 'Invalid validation_status filter.');
+    clauses.push('validation_status = ?'); params.push(filters.validationStatus);
+  }
+
+  const rows = db.prepare(
+    `SELECT * FROM datasets WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(...params);
+  return rows.map(rowToDataset);
+}
+
+/** Return a dataset only if the caller is a project member and the dataset
+ * belongs to that project; otherwise null (route → 404). Any role may read. */
+function getDatasetForProject(userId, projectId, datasetId) {
+  requireProjectRole(userId, projectId, DATASET_READ_ROLES);
+  return getDatasetRow(datasetId, projectId);
+}
+
+/**
+ * Resolve a dataset by id (no project id in the path) and authorize the caller
+ * against the dataset's OWN project. This is the gate analysis-object / job
+ * creation calls when a `datasetId` is supplied. Throws `DATASET_NOT_FOUND`
+ * (404 — also for a non-member, so cross-project/cross-user references never
+ * reveal existence) or `FORBIDDEN` (403 — a member lacking the role). Returns the
+ * dataset on success.
+ */
+function verifyDatasetProjectAccess(userId, datasetId, allowedRoles = DATASET_READ_ROLES) {
+  if (typeof datasetId !== 'string' || datasetId === '') {
+    throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+  }
+  const row = db.prepare('SELECT * FROM datasets WHERE id = ?').get(datasetId);
+  if (!row) throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+
+  const membership = verifyProjectMember(userId, row.project_id);
+  // Non-member of the dataset's project → 404 (no existence leak), never 403.
+  if (!membership) throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+
+  const allowed = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+  if (!allowed.includes(membership.role)) {
+    throw codedError('FORBIDDEN', 'You do not have permission to use this dataset.');
+  }
+  return rowToDataset(row);
+}
+
+/**
+ * Update a dataset's mutable, client-safe fields (validation_status,
+ * validation_errors, upload_status, metadata, original_filename). Requires an
+ * owner/admin/analyst project member. Server-only columns (storage key, sha256,
+ * size, ids, owner) are never touched here. Throws `NOT_FOUND` (404, also when
+ * the dataset is not in the project), `FORBIDDEN` (403), the same INVALID_*
+ * codes as create, or `NO_FIELDS`.
+ */
+function updateDatasetForProject(userId, projectId, datasetId, input = {}) {
+  requireProjectRole(userId, projectId, DATASET_WRITE_ROLES);
+  const existing = getDatasetRow(datasetId, projectId);
+  if (!existing) throw codedError('NOT_FOUND', 'Dataset not found.');
+
+  const sets = [];
+  const params = { id: String(datasetId), projectId: String(projectId) };
+
+  let nextUpload = existing.uploadStatus;
+  let nextValidation = existing.validationStatus;
+
+  if (input.uploadStatus !== undefined) {
+    if (!isValidDatasetUploadStatus(input.uploadStatus)) {
+      throw codedError('INVALID_UPLOAD_STATUS', 'Invalid upload_status.');
+    }
+    nextUpload = input.uploadStatus;
+    sets.push('upload_status = @uploadStatus'); params.uploadStatus = input.uploadStatus;
+  }
+  if (input.validationStatus !== undefined) {
+    if (!isValidDatasetValidationStatus(input.validationStatus)) {
+      throw codedError('INVALID_VALIDATION_STATUS', 'Invalid validation_status.');
+    }
+    nextValidation = input.validationStatus;
+    sets.push('validation_status = @validationStatus'); params.validationStatus = input.validationStatus;
+  }
+  // Re-check the combo against the resulting (possibly mixed old/new) state.
+  assertDatasetStatusCombo(nextUpload, nextValidation);
+
+  if (input.validationErrors !== undefined) {
+    sets.push('validation_errors = @validationErrors');
+    params.validationErrors = normalizeValidationErrors(input.validationErrors);
+  }
+  if (input.metadata !== undefined) {
+    if (input.metadata === null || typeof input.metadata !== 'object' || Array.isArray(input.metadata)) {
+      throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+    }
+    sets.push('metadata = @metadata'); params.metadata = JSON.stringify(input.metadata);
+  }
+  if (input.originalFilename !== undefined) {
+    sets.push('original_filename = @originalFilename');
+    params.originalFilename = sanitizeDatasetFilename(input.originalFilename);
+  }
+
+  if (sets.length === 0) throw codedError('NO_FIELDS', 'No updatable fields provided.');
+  sets.push("updated_at = datetime('now')");
+  db.prepare(`UPDATE datasets SET ${sets.join(', ')} WHERE id = @id AND project_id = @projectId`).run(params);
+  return getDatasetRow(datasetId, projectId);
+}
+
+/**
+ * Record the result of a successful server-side file store: marks the dataset
+ * `uploaded` and fills the server-chosen storage key + computed sha256/size.
+ * Server-internal (the route has already authorized the create); not reachable
+ * from client input. validation_status is left untouched (stays `pending` —
+ * deep format validation is not performed in this branch).
+ */
+function markDatasetUploaded(projectId, datasetId, { internalStorageKey, storageUri = null, sha256, fileSizeBytes }) {
+  db.prepare(`
+    UPDATE datasets
+       SET upload_status = 'uploaded', internal_storage_key = @internalStorageKey,
+           storage_uri = @storageUri, sha256 = @sha256, file_size_bytes = @fileSizeBytes,
+           updated_at = datetime('now')
+     WHERE id = @id AND project_id = @projectId
+  `).run({
+    id: String(datasetId), projectId: String(projectId),
+    internalStorageKey: internalStorageKey != null ? String(internalStorageKey) : null,
+    storageUri: storageUri != null ? String(storageUri) : null,
+    sha256: sha256 != null ? String(sha256) : null,
+    fileSizeBytes: Number.isFinite(fileSizeBytes) ? fileSizeBytes : null
+  });
+  return getDatasetRow(datasetId, projectId);
+}
+
+/** Mark a dataset's upload as failed (storage did not complete). Server-internal.
+ * A failed upload must never look valid, so validation_status is forced back to
+ * a non-valid state. */
+function markDatasetUploadFailed(projectId, datasetId) {
+  db.prepare(`
+    UPDATE datasets
+       SET upload_status = 'failed',
+           validation_status = CASE WHEN validation_status = 'valid' THEN 'invalid' ELSE validation_status END,
+           updated_at = datetime('now')
+     WHERE id = @id AND project_id = @projectId
+  `).run({ id: String(datasetId), projectId: String(projectId) });
+  return getDatasetRow(datasetId, projectId);
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────
 
 function closeDatabase() {
@@ -1484,6 +1875,20 @@ module.exports = {
   countProjectOwners,
   addProjectMemberByEmail,
   updateProjectMemberRole,
-  removeProjectMember
+  removeProjectMember,
+  // Datasets (project-scoped)
+  isValidDatasetFileType,
+  isValidDatasetUploadStatus,
+  isValidDatasetValidationStatus,
+  generateDatasetId,
+  sanitizeDatasetFilename,
+  toPublicDataset,
+  createDatasetForProject,
+  listDatasetsForProject,
+  getDatasetForProject,
+  updateDatasetForProject,
+  verifyDatasetProjectAccess,
+  markDatasetUploaded,
+  markDatasetUploadFailed
 };
 
