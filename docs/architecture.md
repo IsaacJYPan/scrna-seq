@@ -374,6 +374,23 @@ on analysis objects/jobs becomes a reference to a real, access-checked dataset.
   comments, no public links. Covered by `backend/datasets.test.js` (HTTP routes +
   DB-helper layer) with `backend/analysis-objects.test.js` / `backend/jobs.test.js`
   covering the reference checks.
+- **Known limitations (storage / hashing).** These are acceptable under the
+  current upload size limit (`MAX_UPLOAD_BYTES`, default 512 MB) but should be
+  revisited before very large uploads or production-scale object storage:
+  - *In-memory hashing.* multer streams the upload to a temp file on disk, but
+    the sha256 is then computed by reading the whole file back into memory in one
+    buffer. This should become streaming hashing (hash a read stream) before the
+    upload limit is raised significantly.
+  - *Storage layout.* Dataset *metadata* is project-scoped, but the uploaded
+    *bytes* are currently stored under the existing per-user local vault layout
+    (keyed by the uploader). This is invisible today because there are no download
+    routes and `internal_storage_key` is never returned, but the project-scoped /
+    object-storage layout should be revisited **before** any dataset download or
+    artifact-serving route is added — not retrofitted afterward.
+  - *Cross-filesystem moves.* The temp-file → vault move uses `rename`, which
+    fails (`EXDEV`) if the temp dir and vault are on different filesystems; the
+    failure is handled honestly (the dataset is marked `failed`), but a
+    copy-then-unlink fallback is a future follow-up for such deployments.
 
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
