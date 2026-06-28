@@ -277,6 +277,30 @@ export const electronAPI = {
   cancelProjectJob: async (projectId, jobId) =>
     req(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: 'POST' }),
 
+  // Project-scoped provenance & figure metadata (project metadata/history; ids/
+  // owner/project/actor are server-controlled). Append-only; figures never carry
+  // a client-supplied or returned file path. R execution/state is unchanged.
+  createProjectProvenance: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/provenance`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listProjectProvenance: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/provenance${qs ? `?${qs}` : ''}`);
+  },
+  getProjectProvenance: async (projectId, provenanceId) =>
+    req(`/api/projects/${projectId}/provenance/${provenanceId}`),
+  createProjectFigure: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/figures`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listProjectFigures: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/figures${qs ? `?${qs}` : ''}`);
+  },
+  getProjectFigure: async (projectId, figureId) =>
+    req(`/api/projects/${projectId}/figures/${figureId}`),
+
   listProjectMembers: async (id) => req(`/api/projects/${id}/members`),
   addProjectMember: async (id, email, role) => req(`/api/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
   updateProjectMemberRole: async (id, userId, role) => req(`/api/projects/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
