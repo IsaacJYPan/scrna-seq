@@ -106,15 +106,19 @@ graph TD
   (`owner`, `admin`, `analyst`, `viewer`) and the `/api/organizations` +
   `/api/projects` route family. See *Organization & Project Authorization*
   below. Building on this foundation, **datasets** are project-scoped (see
-  *Datasets*) and **analysis objects and jobs now carry a project association for
-  project metadata/history** (see *Project-scoped analysis objects & jobs*).
-  **Important:** `provenance`, `cache`, and `figures` remain strictly
-  **user-scoped**, and — most importantly — **R execution/state keying is
-  unchanged and stays user/object-keyed**. Project membership grants visibility of
+  *Datasets*); **analysis objects and jobs** carry a project association for
+  project metadata/history (see *Project-scoped analysis objects & jobs*); and
+  **provenance and figure metadata** now also carry an optional project
+  association for project-member-readable metadata/history (see *Project-scoped
+  provenance & figure metadata*). **Important:** `cache` remains strictly
+  **user-scoped**; the owner-scoped `provenance`/`figures` routes are unchanged
+  and stay user-scoped; and — most importantly — **R execution/state keying is
+  unchanged and stays user/object-keyed**, and **no raw figure file access /
+  download surface is added**. Project membership grants visibility of
   metadata/history by role; it does **not** grant access to another user's live R
-  session, and there is no shared mutable project R state. The collaboration UI
-  remains a mockup until execution is migrated onto these primitives in a later
-  branch.
+  session or to raw figure files, and there is no shared mutable project R state.
+  The collaboration UI remains a mockup until execution is migrated onto these
+  primitives in a later branch.
 
 ## Reproducibility / Provenance Model
 - **Provenance.** Each R endpoint wraps its result in a provenance envelope
@@ -122,14 +126,23 @@ graph TD
   packages, script text, parameters, operation, and `parentIds`. The frontend
   saves the envelope via `POST /api/db/provenance`; the server stamps it with the
   owning `userEmail`. Records form a DAG walked by `getProvenanceChain`.
+  Provenance can **additionally** be created through a project workflow (see
+  *Project-scoped provenance & figure metadata*), which records a `project_id` +
+  the responsible actor and is readable by project members by role; that path is
+  append-only and disjoint from the owner-scoped `user_email` routes.
 - **Cache keys.** `makeCacheKey(operation, params, dataVersion, parentIds, userEmail)`
   hashes those inputs (incl. the normalized user email) with SHA-256 and truncates
   to 16 hex chars — so cache keys are intrinsically per-user. Cached results are
   also row-scoped by `user_email`, and a result can only be cached against
-  provenance the same user owns.
+  provenance the same user owns. **Cache remains user-scoped only** (not project
+  associated in this branch).
 - **Figures.** Figure metadata is stored in `figure_collection`, scoped by
   `user_email`. A figure id owned by one user cannot be overwritten or deleted by
-  another.
+  another. Figures can **additionally** be created through a project workflow (see
+  *Project-scoped provenance & figure metadata*) with a `project_id` + actor and
+  project-member-readable metadata; that path **never accepts or returns a file
+  path** — there is no figure file access/download surface. The owner-scoped
+  `file_path` hygiene guard (`assertSafeFigureFilePath`) is unchanged.
 - **Known gaps.** Cache invalidation is currently key-based only; there is no
   user-scoped cascade invalidation helper (the previous unscoped
   `deleteProvenanceAfter` / `deleteDownstreamProvenance` helpers were removed
@@ -461,6 +474,66 @@ does **not** make R execution or live R state project-shared.
   collaboration. Covered by `backend/project-analysis-resources.test.js` (HTTP
   routes + the R-ownership-unchanged assertions).
 
+### Project-scoped provenance & figure metadata (`provenance.project_id`, `figure_collection.project_id`)
+Provenance and figure metadata now carry an **optional** project association so
+records created through a project workflow can be read by project members
+according to role. Like the analysis-object/job layer above, this is a
+*metadata/authorization* layer only — it does **not** make R execution/state
+project-shared, and (for figures) it adds **no file access/download surface**.
+
+- **Schema.** `provenance` and `figure_collection` each gained a nullable
+  `project_id`, a `created_by_user_id` (the responsible actor), and same-project
+  reference columns: provenance →
+  `dataset_id`/`analysis_object_id`/`job_id`/`result_analysis_object_id` (+ the
+  existing `parent_ids` DAG); figures →
+  `analysis_object_id`/`job_id`/`provenance_id`/`dataset_id`. Migrations are
+  idempotent; legacy/owner-scoped rows keep `NULL project_id` and stay reachable
+  only through the owner-scoped `/api/db/provenance` and `/api/db/figures` routes.
+  Composite project indexes were added for the list/filter paths.
+- **Decoupled from the owner-scoped surface.** Project-scoped rows are written
+  with `user_email = ''`, so they never intersect the owner-scoped `user_email`
+  CRUD (list/get/delete all require a real, non-empty email). That keeps project
+  provenance/figures **append-only** — there is no project provenance/figure
+  update or delete route — and means an owner-scoped delete can never touch them.
+- **Project-scoped, role-checked access** (helpers in `backend/database.js`):
+  `createProjectProvenance` / `createProjectFigure` require **owner/admin/
+  analyst**; `listProject*` / `getProject*` allow **any member (incl. viewer)** to
+  read. All authorize through `requireProjectRole`, so an inaccessible
+  project/record returns **404** (no existence leak), a known member lacking the
+  role returns **403**, and a malformed `prov_`/`fig_` id returns **400**.
+- **Identity & scope are server-owned.** `project_id` comes from the route, never
+  the body; the actor is `created_by_user_id` from the session. The `POST` routes
+  reject any client-supplied `id`, owner/creator field, `project_id`, or actor
+  email (`userEmail`/`user_email`). Provenance/figure ids are server-generated
+  (`prov_<random>` / `fig_<random>`).
+- **Figures never expose a file path.** The figure `POST` route rejects any
+  client-supplied `filePath`/`file_path`/`storageKey`/`storage_key`/`storageUri`/
+  `internalStorageKey`/`path` (400); the stored `file_path` is always `''`; and
+  the project figure serializer **omits `file_path` entirely**. Raw figure file
+  serving remains out of scope and is not introduced here.
+- **References cannot cross the project.** A supplied `datasetId`,
+  `analysisObjectId`, `jobId`, `resultAnalysisObjectId`, `provenanceId`, or
+  provenance `parentIds[]` must resolve **within the same project** as the route
+  (else 404) — so a member of two projects cannot link project A metadata to a
+  project B resource.
+- **Routes** (authenticated, under `/api/projects/:projectId`):
+  `POST/GET /provenance`, `GET /provenance/:provenanceId`, `POST/GET /figures`,
+  `GET /figures/:figureId`. The owner-scoped `/api/db/provenance` and
+  `/api/db/figures` routes are unchanged and still pass their suites.
+- **R execution/state is explicitly NOT affected.** Associating an analysis
+  object with a project provenance/figure record is metadata only;
+  `verifyRObjectOwnership` / `deriveRStateKey` are unchanged, so a project
+  co-member who can read a record referencing another member's object still cannot
+  use that object id through `/api/r/*` (404 before reaching R). Asserted in
+  `backend/project-provenance-figures.test.js` and the live
+  `scripts/verify_r_state_proxy.js`.
+- **Scope of this branch.** Project association of provenance/figure *metadata*
+  only. **No reproducibility-artifact bundle, no dataset/figure downloads, no
+  object storage, no public links, no comments/invitations/audit logs, no shared
+  or mutable project R state, and no arbitrary R code execution.** This is **not**
+  a claim that reproducibility artifacts, downloads, or shared R execution are
+  complete. Covered by `backend/project-provenance-figures.test.js`.
+
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
 now confirms any client object id is a real `analysis_objects` row owned by the
@@ -514,15 +587,18 @@ id* gap, but the R execution model is still **not** production-grade:
   `organization_members`, `projects`, `project_members` + the
   `/api/organizations` and `/api/projects` route family with `owner`/`admin`/
   `analyst`/`viewer` roles; see *Organization & Project Authorization*). What
-  remains: migrating the remaining resources (provenance, cache, figures) onto
-  project scope, **project-scoped R execution/state**, and
-  invitations/comments/audit logs. Landed so far: the durable `datasets` model
-  (see *Datasets (project-scoped)*) with access-verified `datasetId` references,
-  and a **project association on analysis objects and jobs** for project-member
-  metadata/history (see *Project-scoped analysis objects & jobs*). What is
-  explicitly **not** done: analysis-object/job *R execution* is still
-  user/object-keyed — project metadata visibility does not imply shared or
-  continuable R sessions, and no worker drains the jobs queue.
+  remains: project-associating the last user-scoped resource (`cache`),
+  **project-scoped R execution/state**, a reproducibility-artifact/download model,
+  and invitations/comments/audit logs. Landed so far: the durable `datasets` model
+  (see *Datasets (project-scoped)*) with access-verified `datasetId` references, a
+  **project association on analysis objects and jobs** for project-member
+  metadata/history (see *Project-scoped analysis objects & jobs*), and a **project
+  association on provenance and figure metadata** (see *Project-scoped provenance &
+  figure metadata*; append-only, role-checked, no figure file access). What is
+  explicitly **not** done: *R execution* is still user/object-keyed — project
+  metadata visibility does not imply shared or continuable R sessions; no worker
+  drains the jobs queue; and there is **no dataset/figure download or
+  reproducibility-artifact surface**.
 - **Deployment target** — not defined (no container/orchestration manifest for
   the full stack beyond the R `Dockerfile`).
 - **Object storage** — uploads/artifacts are on local disk (`vault/`).
@@ -540,10 +616,13 @@ id* gap, but the R execution model is still **not** production-grade:
 - **No queue/worker draining the `jobs` model** (the durable job record exists,
   but execution is still synchronous and not job-backed), **no full
   object-storage or durable R-worker execution model**, and **no complete
-  reproducibility artifact model**. The org/project authorization layer
-  (membership + roles + routes) now backs project-scoped **datasets** and a
-  project association on **analysis-object/job metadata/history**, but **R
-  execution/state is still user/object-keyed and there is no shared mutable
-  project R state** — project members can see metadata/history by role, not use
-  another user's live R session. These remain security/foundation work, **not** a
-  claim of production-grade collaboration or R execution.
+  reproducibility artifact model** (provenance/figure metadata is now
+  project-associated, but there is no artifact bundle, no dataset/figure
+  download, and no raw figure file access surface). The org/project authorization
+  layer (membership + roles + routes) now backs project-scoped **datasets** and a
+  project association on **analysis-object/job and provenance/figure
+  metadata/history**, but **R execution/state is still user/object-keyed and there
+  is no shared mutable project R state** — project members can see metadata/history
+  by role, not use another user's live R session. These remain security/foundation
+  work, **not** a claim of production-grade collaboration, reproducibility
+  artifacts, downloads, or R execution.

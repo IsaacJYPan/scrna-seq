@@ -26,9 +26,25 @@ function initDatabase(dbPath) {
   db.pragma('journal_mode = WAL');
 
   db.exec(`
+    -- Provenance records. Historically user-scoped (keyed by user_email). This
+    -- branch adds an OPTIONAL project association so provenance created through a
+    -- project workflow can be read by project members by role. project_id +
+    -- created_by_user_id and the same-project reference columns
+    -- (dataset_id / analysis_object_id / job_id / result_analysis_object_id) are
+    -- NULL on legacy/owner-scoped rows. Project-scoped provenance is written with
+    -- user_email = '' so it is fully decoupled from the owner-scoped user_email
+    -- CRUD surface (list/get/delete all scope by a real, non-empty user_email),
+    -- which also keeps it append-only — there is no project provenance
+    -- delete/update route. R execution/state is untouched. See docs/architecture.md.
     CREATE TABLE IF NOT EXISTS provenance (
       id TEXT PRIMARY KEY,
       user_email TEXT NOT NULL DEFAULT '',
+      project_id TEXT,
+      created_by_user_id INTEGER,
+      dataset_id TEXT,
+      analysis_object_id TEXT,
+      job_id TEXT,
+      result_analysis_object_id TEXT,
       timestamp TEXT NOT NULL,
       language TEXT NOT NULL,
       language_version TEXT,
@@ -62,9 +78,23 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_cache_prov ON results_cache(provenance_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
+    -- Figure metadata. Historically user-scoped (keyed by user_email). This branch
+    -- adds an OPTIONAL project association (project_id + created_by_user_id and the
+    -- same-project reference columns analysis_object_id / job_id / provenance_id /
+    -- dataset_id), NULL on legacy/owner-scoped rows. Project-scoped figures are
+    -- written with user_email = '' (decoupled from the owner-scoped CRUD surface)
+    -- and ALWAYS file_path = '' — a client never supplies a file path on the
+    -- project route, and the project serializer never returns file_path. There is
+    -- intentionally no figure file access/download surface in this branch.
     CREATE TABLE IF NOT EXISTS figure_collection (
       id TEXT PRIMARY KEY,
       user_email TEXT NOT NULL,
+      project_id TEXT,
+      created_by_user_id INTEGER,
+      analysis_object_id TEXT,
+      job_id TEXT,
+      provenance_id TEXT,
+      dataset_id TEXT,
       object_id TEXT,
       plot_type TEXT NOT NULL,
       title TEXT DEFAULT '',
@@ -318,6 +348,55 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
   `);
 
+  // Add the optional project-association columns to provenance / figure_collection
+  // for pre-existing DBs (part of the CREATE blocks above for fresh DBs). Project
+  // scope is additive metadata: legacy rows keep NULL project_id and stay reachable
+  // only through the owner-scoped routes; the project-scoped creation paths set it.
+  // Idempotent — only ALTER when a column is absent. Does NOT touch R state keying,
+  // creator ownership, or the figure file-path validation.
+  const provCols2 = db.prepare("PRAGMA table_info(provenance)").all().map(c => c.name);
+  for (const [col, ddl] of [
+    ['project_id', 'ALTER TABLE provenance ADD COLUMN project_id TEXT'],
+    ['created_by_user_id', 'ALTER TABLE provenance ADD COLUMN created_by_user_id INTEGER'],
+    ['dataset_id', 'ALTER TABLE provenance ADD COLUMN dataset_id TEXT'],
+    ['analysis_object_id', 'ALTER TABLE provenance ADD COLUMN analysis_object_id TEXT'],
+    ['job_id', 'ALTER TABLE provenance ADD COLUMN job_id TEXT'],
+    ['result_analysis_object_id', 'ALTER TABLE provenance ADD COLUMN result_analysis_object_id TEXT']
+  ]) {
+    if (!provCols2.includes(col)) {
+      db.exec(ddl);
+      console.log(`[DB] Migrated: added ${col} column to provenance table`);
+    }
+  }
+  const figCols = db.prepare("PRAGMA table_info(figure_collection)").all().map(c => c.name);
+  for (const [col, ddl] of [
+    ['project_id', 'ALTER TABLE figure_collection ADD COLUMN project_id TEXT'],
+    ['created_by_user_id', 'ALTER TABLE figure_collection ADD COLUMN created_by_user_id INTEGER'],
+    ['analysis_object_id', 'ALTER TABLE figure_collection ADD COLUMN analysis_object_id TEXT'],
+    ['job_id', 'ALTER TABLE figure_collection ADD COLUMN job_id TEXT'],
+    ['provenance_id', 'ALTER TABLE figure_collection ADD COLUMN provenance_id TEXT'],
+    ['dataset_id', 'ALTER TABLE figure_collection ADD COLUMN dataset_id TEXT']
+  ]) {
+    if (!figCols.includes(col)) {
+      db.exec(ddl);
+      console.log(`[DB] Migrated: added ${col} column to figure_collection table`);
+    }
+  }
+  // Created here (not in the CREATE blocks above) so the project_id composite
+  // indexes run only after the columns are guaranteed to exist on pre-existing
+  // provenance / figure_collection tables.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_prov_project ON provenance(project_id);
+    CREATE INDEX IF NOT EXISTS idx_prov_project_dataset ON provenance(project_id, dataset_id);
+    CREATE INDEX IF NOT EXISTS idx_prov_project_analysis_object ON provenance(project_id, analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_prov_project_job ON provenance(project_id, job_id);
+    CREATE INDEX IF NOT EXISTS idx_figures_project ON figure_collection(project_id);
+    CREATE INDEX IF NOT EXISTS idx_figures_project_analysis_object ON figure_collection(project_id, analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_figures_project_job ON figure_collection(project_id, job_id);
+    CREATE INDEX IF NOT EXISTS idx_figures_project_provenance ON figure_collection(project_id, provenance_id);
+    CREATE INDEX IF NOT EXISTS idx_figures_project_dataset ON figure_collection(project_id, dataset_id);
+  `);
+
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_prov_user ON provenance(user_email);
     CREATE INDEX IF NOT EXISTS idx_cache_user ON results_cache(user_email);
@@ -361,8 +440,19 @@ function saveProvenance(envelope) {
   // helper (see requireOwnerEmail). A missing owner would persist a provenance
   // row no user can ever read (reads are owner-scoped), an orphaning footgun.
   const owner = requireOwnerEmail(envelope.userEmail || prov.userEmail);
+  const id = String(prov.id || '');
+  // `_insertProv` is INSERT OR REPLACE, which keys on the primary key (id) alone.
+  // Without this guard the owner-scoped route could overwrite a row owned by a
+  // different user — or a project-scoped row (user_email = '') — and re-home it
+  // onto the caller's owner-scoped surface (mirror of saveFigure's ownership
+  // guard). Reject any pre-existing row that is not the caller's own, surfaced as
+  // a generic not-found so a cross-user/project row's existence is not revealed.
+  const existing = db.prepare('SELECT user_email FROM provenance WHERE id = ?').get(id);
+  if (existing && normalizeEmail(existing.user_email) !== owner) {
+    throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
+  }
   _insertProv().run({
-    id: String(prov.id || ''),
+    id,
     userEmail: owner,
     timestamp: String(prov.timestamp || ''),
     language: String(prov.language || ''),
@@ -2134,6 +2224,316 @@ function cancelProjectJob(userId, projectId, jobId) {
   return getProjectJobRow(jobId, pid);
 }
 
+// ── Project-scoped provenance & figure metadata ──────────────────
+//
+// These helpers add a project_id association + project-member metadata
+// visibility on top of provenance / figure_collection, exactly like the
+// project-scoped analysis-objects/jobs layer above. They authorize through the
+// caller's project_members role (requireProjectRole):
+//   - unknown / inaccessible project → NOT_FOUND (404; no existence leak),
+//   - known member lacking the role  → FORBIDDEN (403).
+// Create requires owner/admin/analyst; list/read metadata is allowed for any
+// member (incl. viewer). project_id is taken from the authorized route project,
+// never from client input; the responsible actor is created_by_user_id (from the
+// session), and every cross-resource reference (dataset, analysis object, job,
+// result object, parent/linked provenance) is confined to the SAME project so an
+// association can never cross a project boundary.
+//
+// Project-scoped rows are written with user_email = '' so they never intersect
+// the owner-scoped user_email CRUD surface (list/get/delete all scope by a real,
+// non-empty user_email). That also keeps them append-only — there is no project
+// provenance/figure delete or update route in this branch. This is project
+// metadata/history ONLY: it does NOT touch R execution/state (still user/object-
+// keyed) and, for figures, NEVER stores or returns a file path — there is no
+// figure file access/download surface here.
+
+const PROVENANCE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const PROVENANCE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const FIGURE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const FIGURE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+
+function generateProvenanceId() {
+  // Server-generated, header-safe by construction: `prov_` + lowercase hex.
+  return `prov_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function generateFigureId() {
+  // Server-generated, header/path-safe by construction: `fig_` + lowercase hex.
+  return `fig_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+// Low-level project-scoped row fetches (no auth — callers above have already
+// authorized via requireProjectRole). A row in another project — or a legacy row
+// with NULL project_id — is invisible (project_id here is always a real id).
+function getProjectProvenanceRow(provenanceId, projectId) {
+  if (typeof provenanceId !== 'string' || provenanceId === '') return null;
+  const row = db.prepare('SELECT * FROM provenance WHERE id = ? AND project_id = ?')
+    .get(provenanceId, String(projectId));
+  return rowToProjectProvenance(row);
+}
+
+function getProjectFigureRow(figureId, projectId) {
+  if (typeof figureId !== 'string' || figureId === '') return null;
+  const row = db.prepare('SELECT * FROM figure_collection WHERE id = ? AND project_id = ?')
+    .get(figureId, String(projectId));
+  return rowToProjectFigure(row);
+}
+
+function rowToProjectProvenance(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    createdByUserId: row.created_by_user_id,
+    datasetId: row.dataset_id,
+    analysisObjectId: row.analysis_object_id,
+    jobId: row.job_id,
+    resultAnalysisObjectId: row.result_analysis_object_id,
+    timestamp: row.timestamp,
+    language: row.language,
+    languageVersion: row.language_version,
+    packages: JSON.parse(row.packages || '[]'),
+    script: row.script,
+    parameters: JSON.parse(row.parameters || '{}'),
+    parentIds: JSON.parse(row.parent_ids || '[]'),
+    operation: row.operation || 'unknown',
+    createdAt: row.created_at
+  };
+}
+
+// The project figure serializer NEVER exposes file_path (or any raw storage
+// path): project figures are metadata only and there is no file-serving route.
+function rowToProjectFigure(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    createdByUserId: row.created_by_user_id,
+    analysisObjectId: row.analysis_object_id,
+    jobId: row.job_id,
+    provenanceId: row.provenance_id,
+    datasetId: row.dataset_id,
+    plotType: row.plot_type,
+    title: row.title,
+    params: JSON.parse(row.params_json || '{}'),
+    fileFormat: row.file_format,
+    thumbnailB64: row.thumbnail_b64,
+    createdAt: row.created_at
+  };
+}
+
+// Validate that every optional reference on a project provenance/figure resolves
+// WITHIN the route's project. A reference to another project (or unknown) throws
+// the resource's NOT_FOUND code → 404, so an association can never cross a project
+// boundary (and a two-project member cannot link project A metadata to a project B
+// resource). Returns the normalized subset of references that were supplied.
+function resolveSameProjectRefs(pid, input, { allowResult = false, allowProvenanceRef = false, allowParents = false } = {}) {
+  const out = {};
+
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (typeof input.datasetId !== 'string' || !getDatasetRow(input.datasetId, pid)) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    out.datasetId = input.datasetId;
+  }
+  if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
+    if (typeof input.analysisObjectId !== 'string' || !getProjectAnalysisObjectRow(input.analysisObjectId, pid)) {
+      throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+    }
+    out.analysisObjectId = input.analysisObjectId;
+  }
+  if (input.jobId !== undefined && input.jobId !== null) {
+    if (typeof input.jobId !== 'string' || !getProjectJobRow(input.jobId, pid)) {
+      throw codedError('JOB_NOT_FOUND', 'Job not found.');
+    }
+    out.jobId = input.jobId;
+  }
+  if (allowResult && input.resultAnalysisObjectId !== undefined && input.resultAnalysisObjectId !== null) {
+    if (typeof input.resultAnalysisObjectId !== 'string' || !getProjectAnalysisObjectRow(input.resultAnalysisObjectId, pid)) {
+      throw codedError('RESULT_OBJECT_NOT_FOUND', 'Result analysis object not found.');
+    }
+    out.resultAnalysisObjectId = input.resultAnalysisObjectId;
+  }
+  if (allowProvenanceRef && input.provenanceId !== undefined && input.provenanceId !== null) {
+    if (typeof input.provenanceId !== 'string' || !getProjectProvenanceRow(input.provenanceId, pid)) {
+      throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
+    }
+    out.provenanceId = input.provenanceId;
+  }
+  if (allowParents && input.parentIds !== undefined && input.parentIds !== null) {
+    if (!Array.isArray(input.parentIds)) {
+      throw codedError('INVALID_PARENT_IDS', 'parentIds must be an array.');
+    }
+    for (const parentId of input.parentIds) {
+      if (typeof parentId !== 'string' || !getProjectProvenanceRow(parentId, pid)) {
+        throw codedError('PARENT_NOT_FOUND', 'Parent provenance record not found.');
+      }
+    }
+    out.parentIds = input.parentIds.map(String);
+  }
+  return out;
+}
+
+/**
+ * Create a project-scoped provenance record. Requires owner/admin/analyst of
+ * `projectId`. project_id is set from the route, the actor from the session.
+ * Optional dataset/analysisObject/job/result/parent references must all resolve
+ * within the SAME project (else 404). Append-only — there is no project provenance
+ * update/delete route. Throws coded errors (`NOT_FOUND`, `FORBIDDEN`,
+ * `INVALID_PARAMETERS`, `INVALID_PACKAGES`, `INVALID_PARENT_IDS`,
+ * `DATASET_NOT_FOUND`, `ANALYSIS_OBJECT_NOT_FOUND`, `JOB_NOT_FOUND`,
+ * `RESULT_OBJECT_NOT_FOUND`, `PARENT_NOT_FOUND`).
+ */
+function createProjectProvenance(userId, projectId, input = {}) {
+  const membership = requireProjectRole(userId, projectId, PROVENANCE_WRITE_ROLES);
+  const actor = membership.userId;
+  const pid = String(projectId);
+
+  const parameters = input.parameters === undefined ? {} : input.parameters;
+  if (parameters === null || typeof parameters !== 'object' || Array.isArray(parameters)) {
+    throw codedError('INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
+  }
+  const packages = input.packages === undefined ? [] : input.packages;
+  if (!Array.isArray(packages)) {
+    throw codedError('INVALID_PACKAGES', 'packages must be an array.');
+  }
+
+  const refs = resolveSameProjectRefs(pid, input, { allowResult: true, allowParents: true });
+
+  const id = generateProvenanceId();
+  db.prepare(`
+    INSERT INTO provenance
+      (id, user_email, project_id, created_by_user_id, dataset_id, analysis_object_id, job_id,
+       result_analysis_object_id, timestamp, language, language_version, packages, script,
+       parameters, parent_ids, operation)
+    VALUES
+      (@id, '', @projectId, @actor, @datasetId, @analysisObjectId, @jobId,
+       @resultAnalysisObjectId, @timestamp, @language, @languageVersion, @packages, @script,
+       @parameters, @parentIds, @operation)
+  `).run({
+    id,
+    projectId: pid,
+    actor,
+    datasetId: refs.datasetId || null,
+    analysisObjectId: refs.analysisObjectId || null,
+    jobId: refs.jobId || null,
+    resultAnalysisObjectId: refs.resultAnalysisObjectId || null,
+    timestamp: input.timestamp != null ? String(input.timestamp) : new Date().toISOString(),
+    language: input.language != null ? String(input.language) : '',
+    languageVersion: input.languageVersion != null ? String(input.languageVersion) : '',
+    packages: JSON.stringify(packages),
+    script: input.script != null ? String(input.script) : '',
+    parameters: JSON.stringify(parameters),
+    parentIds: JSON.stringify(refs.parentIds || []),
+    operation: input.operation != null ? String(input.operation) : 'unknown'
+  });
+
+  return getProjectProvenanceRow(id, pid);
+}
+
+/** List a project's provenance (any member may read). Filters are project-scoped,
+ * so a filter can never widen the query beyond the project. Legacy NULL-project_id
+ * rows never appear (the WHERE always pins a real project_id). */
+function listProjectProvenance(userId, projectId, filters = {}) {
+  requireProjectRole(userId, projectId, PROVENANCE_READ_ROLES);
+  const clauses = ['project_id = ?'];
+  const params = [String(projectId)];
+  if (filters.datasetId) { clauses.push('dataset_id = ?'); params.push(String(filters.datasetId)); }
+  if (filters.analysisObjectId) { clauses.push('analysis_object_id = ?'); params.push(String(filters.analysisObjectId)); }
+  if (filters.jobId) { clauses.push('job_id = ?'); params.push(String(filters.jobId)); }
+  if (filters.operation) { clauses.push('operation = ?'); params.push(String(filters.operation)); }
+  const rows = db.prepare(
+    `SELECT * FROM provenance WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(...params);
+  return rows.map(rowToProjectProvenance);
+}
+
+/** Return a project provenance record only if the caller is a member and the row
+ * belongs to that project; otherwise null (route → 404). Any role reads. */
+function getProjectProvenance(userId, projectId, provenanceId) {
+  requireProjectRole(userId, projectId, PROVENANCE_READ_ROLES);
+  return getProjectProvenanceRow(provenanceId, projectId);
+}
+
+/**
+ * Create a project-scoped figure metadata record. Requires owner/admin/analyst of
+ * `projectId`. project_id is set from the route, the actor from the session.
+ * Optional analysisObject/job/provenance/dataset references must resolve within
+ * the SAME project (else 404). file_path is ALWAYS '' here — a client never
+ * supplies one (the route rejects filePath/storage* fields) and none is returned.
+ * Throws coded errors (`NOT_FOUND`, `FORBIDDEN`, `INVALID_PARAMETERS`,
+ * `INVALID_PLOT_TYPE`, `ANALYSIS_OBJECT_NOT_FOUND`, `JOB_NOT_FOUND`,
+ * `PROVENANCE_NOT_FOUND`, `DATASET_NOT_FOUND`).
+ */
+function createProjectFigure(userId, projectId, input = {}) {
+  const membership = requireProjectRole(userId, projectId, FIGURE_WRITE_ROLES);
+  const actor = membership.userId;
+  const pid = String(projectId);
+
+  const params = input.params === undefined ? {} : input.params;
+  if (params === null || typeof params !== 'object' || Array.isArray(params)) {
+    throw codedError('INVALID_PARAMETERS', 'params must be a plain JSON object.');
+  }
+  const plotType = input.plotType === undefined || input.plotType === null ? 'Unknown' : input.plotType;
+  if (typeof plotType !== 'string' || plotType === '') {
+    throw codedError('INVALID_PLOT_TYPE', 'plotType must be a non-empty string.');
+  }
+
+  const refs = resolveSameProjectRefs(pid, input, { allowProvenanceRef: true });
+
+  const id = generateFigureId();
+  // file_path is ALWAYS '' on the project route: a client never supplies a path
+  // (the route rejects filePath/file_path/storage* fields) and the server stores
+  // none — there is intentionally no figure file access/download surface.
+  db.prepare(`
+    INSERT INTO figure_collection
+      (id, user_email, project_id, created_by_user_id, analysis_object_id, job_id, provenance_id,
+       dataset_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64)
+    VALUES
+      (@id, '', @projectId, @actor, @analysisObjectId, @jobId, @provenanceId,
+       @datasetId, @plotType, @title, @paramsJson, '', @fileFormat, @thumbnailB64)
+  `).run({
+    id,
+    projectId: pid,
+    actor,
+    analysisObjectId: refs.analysisObjectId || null,
+    jobId: refs.jobId || null,
+    provenanceId: refs.provenanceId || null,
+    datasetId: refs.datasetId || null,
+    plotType,
+    title: input.title != null ? String(input.title) : '',
+    paramsJson: JSON.stringify(params),
+    fileFormat: input.fileFormat != null ? String(input.fileFormat) : 'png',
+    thumbnailB64: input.thumbnailB64 != null ? String(input.thumbnailB64) : ''
+  });
+
+  return getProjectFigureRow(id, pid);
+}
+
+/** List a project's figure metadata (any member may read). Filters are
+ * project-scoped; legacy NULL-project_id rows never appear. */
+function listProjectFigures(userId, projectId, filters = {}) {
+  requireProjectRole(userId, projectId, FIGURE_READ_ROLES);
+  const clauses = ['project_id = ?'];
+  const params = [String(projectId)];
+  if (filters.analysisObjectId) { clauses.push('analysis_object_id = ?'); params.push(String(filters.analysisObjectId)); }
+  if (filters.jobId) { clauses.push('job_id = ?'); params.push(String(filters.jobId)); }
+  if (filters.provenanceId) { clauses.push('provenance_id = ?'); params.push(String(filters.provenanceId)); }
+  if (filters.datasetId) { clauses.push('dataset_id = ?'); params.push(String(filters.datasetId)); }
+  if (filters.plotType) { clauses.push('plot_type = ?'); params.push(String(filters.plotType)); }
+  const rows = db.prepare(
+    `SELECT * FROM figure_collection WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(...params);
+  return rows.map(rowToProjectFigure);
+}
+
+/** Return a project figure record only if the caller is a member and the row
+ * belongs to that project; otherwise null (route → 404). Any role reads. */
+function getProjectFigure(userId, projectId, figureId) {
+  requireProjectRole(userId, projectId, FIGURE_READ_ROLES);
+  return getProjectFigureRow(figureId, projectId);
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────
 
 function closeDatabase() {
@@ -2225,6 +2625,16 @@ module.exports = {
   createProjectJob,
   listProjectJobs,
   getProjectJob,
-  cancelProjectJob
+  cancelProjectJob,
+  // Project-scoped provenance & figure metadata (project metadata/history + roles;
+  // append-only, no file access; R execution/state remains user/object-keyed)
+  generateProvenanceId,
+  createProjectProvenance,
+  listProjectProvenance,
+  getProjectProvenance,
+  generateFigureId,
+  createProjectFigure,
+  listProjectFigures,
+  getProjectFigure
 };
 
