@@ -119,11 +119,57 @@ async function genericNoopHandler(ctx) {
   return { result: { ok: true, handled: 'generic', noop: true } };
 }
 
-// Default registry: ONLY `generic` is supported. (Job types are a fixed server-side
-// allow-list in database.js — normalize/qc_filter/pca/cluster/umap/find_markers/
-// integrate/generic — and the real analytical types are deliberately left
-// unregistered here so the worker fails them instead of pretending to run them.)
-const DEFAULT_HANDLERS = Object.freeze({ generic: genericNoopHandler });
+/**
+ * Test-safe placeholder handler that exercises the durable artifact/checkpoint
+ * wiring WITHOUT any R/Seurat work. It:
+ *   - heartbeats (proving the cooperative seam),
+ *   - creates a NEW immutable result analysis object (a checkpoint), atomically
+ *     linked back to the job — the parent object is never mutated,
+ *   - records a metadata-only `checkpoint` artifact referencing that result object,
+ *   - writes durable progress logs.
+ * Everything it writes is clearly labelled placeholder / metadata-only / test-safe:
+ * it runs NO R, fabricates NO scientific metrics, creates NO downloadable file, and
+ * exposes NO path. The result object's id is returned so the contract's
+ * completeJobByWorker keeps the link the checkpoint helper already made.
+ */
+async function checkpointNoopHandler(ctx) {
+  ctx.heartbeat();
+  ctx.log({ level: 'info', message: 'checkpoint.noop handler: creating placeholder, metadata-only checkpoint (no R/Seurat execution).' });
+
+  const checkpoint = ctx.createCheckpoint({
+    objectType: 'generic',
+    displayName: 'Placeholder checkpoint (no pipeline execution)',
+    metadata: { placeholder: true, checkpoint: true, source: 'checkpoint.noop', scientific_output: false }
+  });
+
+  const artifact = ctx.createArtifact({
+    artifactType: 'checkpoint',
+    resultAnalysisObjectId: checkpoint.id,
+    name: 'Placeholder checkpoint metadata',
+    description: 'Metadata-only checkpoint record. No raw artifact, no download, no real scientific output in this branch.',
+    storageKind: 'metadata_only',
+    metadata: { placeholder: true, scientific_output: false }
+  });
+
+  ctx.log({ level: 'info', message: `checkpoint.noop handler: recorded checkpoint ${checkpoint.id} and artifact ${artifact.id} (metadata-only).` });
+
+  // The checkpoint helper already linked result_analysis_object_id on the job; return
+  // it so completion is explicit (completeJobByWorker re-validates the same id).
+  return {
+    resultAnalysisObjectId: checkpoint.id,
+    result: { ok: true, handled: 'checkpoint.noop', placeholder: true, checkpointId: checkpoint.id, artifactId: artifact.id }
+  };
+}
+
+// Default registry: `generic` (a pure noop) plus the test-safe `checkpoint.noop`
+// placeholder that exercises the artifact/checkpoint metadata wiring. The real
+// analytical job types (normalize/qc_filter/pca/cluster/umap/find_markers/integrate)
+// remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
+// instead of pretending to run them.
+const DEFAULT_HANDLERS = Object.freeze({
+  generic: genericNoopHandler,
+  'checkpoint.noop': checkpointNoopHandler,
+});
 
 /**
  * Create a job worker. Returns a runner with `runOnce()`, `start()`, `stop()`,
@@ -253,6 +299,12 @@ function createJobWorker(options = {}) {
       workerId,
       heartbeat: () => db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())),
       log: (entry) => safeWorkerLog(jobId, claimToken, entry, resolveNowTs()),
+      // Durable, claim-guarded metadata writers for handlers that record output.
+      // Both are authorized by the live claim (worker_id + claim_token), so a handler
+      // can only write to the job it currently holds. They create NO files and expose
+      // NO paths — metadata only in this branch.
+      createArtifact: (input) => db.createJobArtifactByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      createCheckpoint: (input) => db.createCheckpointForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       logger: log,
     };
 
@@ -353,6 +405,7 @@ module.exports = {
   createJobWorker,
   generateWorkerId,
   genericNoopHandler,
+  checkpointNoopHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,

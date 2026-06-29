@@ -617,6 +617,77 @@ project-shared, and (for figures) it adds **no file access/download surface**.
   a claim that reproducibility artifacts, downloads, or shared R execution are
   complete. Covered by `backend/project-provenance-figures.test.js`.
 
+### Job artifacts & checkpoints (`job_artifacts`, `jobs.result_analysis_object_id`)
+The durable, **metadata-first** model that future real R/Seurat worker handlers will
+write their outputs through. A completed job records *what it produced* — a
+checkpoint, metrics, a log, a figure reference, a script fragment, or other
+metadata — and a successful **mutating** job links a new, immutable **result
+analysis object** (a checkpoint). This is the answer to "where does a completed job
+record its durable output, and how does a successful job create a result
+checkpoint" — it is **not** the artifact-download, object-storage, or
+reproducibility-bundle branch, and it does **not** add any real R/Seurat execution.
+
+- **Schema (`job_artifacts`).** Server-generated id (`art_<random>`), a required
+  `job_id`, an optional `project_id` (a real project id for an artifact from a
+  project job, `NULL` for one from a legacy owner-scoped job), `created_by_user_id`
+  (derived from the source job's owner), allow-listed `artifact_type`
+  (`checkpoint`/`metrics`/`log`/`figure`/`script_fragment`/`other_metadata`),
+  `storage_kind` (`metadata_only` — the only kind written this branch — or
+  `local_internal`; `object_storage` is **not** accepted yet), `status`
+  (`available`/`pending`/`error`), and same-scope reference columns
+  (`dataset_id`/`analysis_object_id`/`result_analysis_object_id`/`provenance_id`/
+  `figure_id`). `storage_uri`/`checksum_sha256`/`size_bytes` exist for a future
+  store but are **server/worker-set only** and never returned by the API. Migration
+  is idempotent (`CREATE TABLE IF NOT EXISTS`) on fresh and pre-existing DBs;
+  indexes cover project/job/dataset/object/result/provenance/figure/type/status.
+- **Identity & scope are server-owned.** Artifacts are **worker/helper-driven** —
+  there is **no public create/mutate route**. The create helpers ignore any
+  client-supplied `id`/`projectId`/`createdByUserId`/`storageUri`/path/storage-key/
+  `checksum`/`size`; `project_id` and the actor come from the **source job**. Every
+  optional reference is confined to the job's own scope (same project for a project
+  job; same owner for a legacy job), so an artifact can never cross a project (or
+  user) boundary — a member of two projects cannot reference project B's
+  job/object/dataset/provenance/figure from a project A artifact (404).
+- **Checkpoint / result object.** `createCheckpointForJobByWorker` creates a **new
+  immutable** analysis object (server id `ao_…`) in the **job's** project/owner —
+  it never mutates the parent — defaulting its parent/dataset to the job's own input
+  object/dataset so lineage stays in-project, and atomically links it back as the
+  job's `result_analysis_object_id`. It is **claim-guarded** (only the worker
+  holding the live claim can create it) and refuses a second checkpoint for the same
+  job (`CHECKPOINT_EXISTS`), so **two workers can never create duplicate result
+  objects**. A failed/canceled job loses its claim and therefore creates **no**
+  successful result object. The pre-existing `resultAnalysisObjectId` pre-link on
+  `createProjectJob` is preserved as optional metadata; the worker post-completion
+  link is the primary model.
+- **Worker integration (placeholder only).** A new test-safe `checkpoint.noop` job
+  type + handler exercises the wiring: it heartbeats, creates a **metadata-only**
+  checkpoint object and a `checkpoint` artifact (both clearly labelled
+  `placeholder` / `scientific_output: false`), writes durable logs, and completes
+  through the existing worker contract. `generic` remains a pure noop (no
+  artifacts); unsupported analytical types (normalize/pca/…) are still claimed then
+  **failed** (`UNSUPPORTED_JOB_TYPE`). The handler runs **no R**, fabricates **no**
+  metrics, creates **no** file, and exposes **no** path.
+- **Read routes (metadata only, no download).** Authenticated, under
+  `/api/projects/:projectId`: `GET /artifacts`, `GET /artifacts/:artifactId`,
+  `GET /jobs/:jobId/artifacts`. Any project member (incl. **viewer**) may read; an
+  inaccessible project/artifact is **404** (no existence leak), a known member
+  lacking the role is **403**, a malformed `art_`/`job_` id is **400**. The
+  serializer **omits `storage_uri`**, so no internal/local path or storage key is
+  ever exposed; claim tokens / worker internals are not in the artifact model at
+  all. The routes always pin a real `project_id`, so **legacy NULL-project artifacts
+  never leak** into them, and there are no owner-scoped artifact routes to leak them
+  through either. There is intentionally **no artifact download route**.
+- **Collaboration is through completed checkpoints/artifact metadata, not shared
+  live R sessions.** `verifyRObjectOwnership` / `deriveRStateKey` are unchanged: a
+  project co-member who can read a checkpoint's metadata is still **not** its R
+  owner and cannot use its object id through `/api/r/*` (404 before reaching R).
+  Asserted in `backend/job-artifacts-checkpoints.test.js`.
+- **Scope of this branch.** Durable artifact/checkpoint **metadata** + a placeholder
+  handler only. **No raw artifact download, no dataset/figure download, no object
+  storage, no full reproducibility bundle, no generated-R-script export, and no real
+  R/Seurat pipeline handler.** Future real R handlers must write their outputs
+  through this model. Covered by `backend/job-artifacts-checkpoints.test.js`.
+
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
 now confirms any client object id is a real `analysis_objects` row owned by the

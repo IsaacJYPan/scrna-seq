@@ -313,6 +313,64 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_datasets_validation_status ON datasets(validation_status);
     CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
     CREATE INDEX IF NOT EXISTS idx_datasets_sha256 ON datasets(sha256);
+
+    -- ── Job Artifacts & Checkpoints (durable output metadata) ──────────
+    -- The durable, metadata-FIRST record of what a (future real) job handler
+    -- produced: a checkpoint, a metrics blob, a log, a figure reference, a script
+    -- fragment, or other metadata. This branch wires the model + a placeholder
+    -- (checkpoint.noop) worker handler ONLY; there is NO raw artifact download,
+    -- NO object storage, NO reproducibility bundle, NO generated-R-script export,
+    -- and NO real R/Seurat pipeline writing here. R state remains user/object-keyed.
+    --
+    -- Identity & scope are server-owned: ids are server-generated (art_...),
+    -- project_id + created_by_user_id are derived from the SOURCE JOB (never the
+    -- client), and storage_uri / checksum / size / status are set by the trusted
+    -- server/worker tier, never accepted from a request body. There is no public
+    -- create route in this branch — artifact creation is worker/helper-driven.
+    --
+    -- project_id is NULL for an artifact produced by a legacy owner-scoped job, and
+    -- a real project id for an artifact produced by a project-scoped job; the
+    -- project read routes always pin a real project_id, so legacy NULL-project rows
+    -- never leak into them. storage_uri is NEVER returned by the read APIs (the
+    -- public projection omits it) so an internal/local path can never escape.
+    CREATE TABLE IF NOT EXISTS job_artifacts (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      job_id TEXT NOT NULL,
+      dataset_id TEXT,
+      analysis_object_id TEXT,
+      result_analysis_object_id TEXT,
+      provenance_id TEXT,
+      figure_id TEXT,
+      created_by_user_id INTEGER NOT NULL,
+      artifact_type TEXT NOT NULL,
+      name TEXT,
+      description TEXT,
+      mime_type TEXT,
+      storage_kind TEXT NOT NULL DEFAULT 'metadata_only',
+      storage_uri TEXT,
+      checksum_sha256 TEXT,
+      size_bytes INTEGER,
+      status TEXT NOT NULL DEFAULT 'available',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (job_id) REFERENCES jobs(id),
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id),
+      FOREIGN KEY (analysis_object_id) REFERENCES analysis_objects(id),
+      FOREIGN KEY (result_analysis_object_id) REFERENCES analysis_objects(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_project ON job_artifacts(project_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_job ON job_artifacts(job_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_dataset ON job_artifacts(dataset_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_analysis_object ON job_artifacts(analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_result_object ON job_artifacts(result_analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_provenance ON job_artifacts(provenance_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_figure ON job_artifacts(figure_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_type ON job_artifacts(artifact_type);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_status ON job_artifacts(status);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_project_job ON job_artifacts(project_id, job_id);
+    CREATE INDEX IF NOT EXISTS idx_job_artifacts_created ON job_artifacts(created_at);
   `);
 
   // ── Schema migration: add 'operation' column if missing (for pre-existing DBs) ──
@@ -989,7 +1047,12 @@ function createAnalysisObjectForUser(ownerUserId, input = {}) {
 // `validateJobTransition`; clients cannot set an arbitrary status.
 
 const ALLOWED_JOB_TYPES = new Set([
-  'normalize', 'qc_filter', 'pca', 'cluster', 'umap', 'find_markers', 'integrate', 'generic'
+  'normalize', 'qc_filter', 'pca', 'cluster', 'umap', 'find_markers', 'integrate', 'generic',
+  // Test-safe placeholder type that exercises the artifact/checkpoint wiring WITHOUT
+  // running any R/Seurat pipeline. Handled by the worker's `checkpoint.noop` handler
+  // (jobWorker.js); produces metadata-only artifacts + an immutable checkpoint object
+  // clearly labeled placeholder. NOT a real scientific output. See docs/architecture.md.
+  'checkpoint.noop'
 ]);
 
 const JOB_STATUSES = new Set([
@@ -3096,6 +3159,391 @@ function getProjectFigure(userId, projectId, figureId) {
   return getProjectFigureRow(figureId, projectId);
 }
 
+// ── Job artifacts & checkpoints (durable output metadata) ────────
+//
+// The durable, metadata-FIRST record of a job's output. This branch wires the
+// model + a placeholder (`checkpoint.noop`) worker handler ONLY: there is NO raw
+// artifact download, NO object storage, NO reproducibility bundle, NO generated-R-
+// script export, and NO real R/Seurat pipeline writing here. Artifact creation is
+// worker/helper-driven (there is no public create route); identity and scope are
+// server-owned and derived from the SOURCE JOB:
+//   - id is server-generated (`art_...`),
+//   - project_id + created_by_user_id come from the job (project_id/owner_user_id),
+//     never from client input,
+//   - storage_uri / checksum / size / status are server/worker-set, never accepted
+//     from a request body, and storage_uri is NEVER returned by the read APIs.
+// Every optional reference (dataset / analysis object / result object / provenance
+// / figure) is confined to the job's OWN scope: same project for a project job,
+// same owner for a legacy owner-scoped job. A reference that does not resolve in
+// that scope is a 404, so an artifact can never cross a project (or user) boundary.
+
+const ALLOWED_ARTIFACT_TYPES = new Set([
+  'checkpoint', 'metrics', 'log', 'figure', 'script_fragment', 'other_metadata'
+]);
+
+// metadata_only is the only kind the placeholder handler writes in this branch.
+// local_internal is reserved for a future local-store branch; object_storage is
+// intentionally NOT accepted yet (there is no object storage). Either way the
+// public projection omits storage_uri, so an internal/local path never escapes.
+const ALLOWED_ARTIFACT_STORAGE_KINDS = new Set(['metadata_only', 'local_internal']);
+
+const ALLOWED_ARTIFACT_STATUSES = new Set(['available', 'pending', 'error']);
+
+function isValidArtifactType(t) { return ALLOWED_ARTIFACT_TYPES.has(t); }
+function isValidArtifactStorageKind(k) { return ALLOWED_ARTIFACT_STORAGE_KINDS.has(k); }
+function isValidArtifactStatus(s) { return ALLOWED_ARTIFACT_STATUSES.has(s); }
+
+function generateJobArtifactId() {
+  // Server-generated, header/path-safe by construction: `art_` + lowercase hex.
+  return `art_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+const ARTIFACT_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+
+// Full internal row mapping (includes storage_uri / internal fields). Server-tier
+// only — never returned directly to a client (routes use toPublicJobArtifact).
+function rowToJobArtifact(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    jobId: row.job_id,
+    datasetId: row.dataset_id,
+    analysisObjectId: row.analysis_object_id,
+    resultAnalysisObjectId: row.result_analysis_object_id,
+    provenanceId: row.provenance_id,
+    figureId: row.figure_id,
+    createdByUserId: row.created_by_user_id,
+    artifactType: row.artifact_type,
+    name: row.name,
+    description: row.description,
+    mimeType: row.mime_type,
+    storageKind: row.storage_kind,
+    storageUri: row.storage_uri,
+    checksumSha256: row.checksum_sha256,
+    sizeBytes: row.size_bytes,
+    status: row.status,
+    metadata: JSON.parse(row.metadata_json || '{}'),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+// Client-facing projection. Deliberately OMITS storage_uri so an internal/local
+// storage path or key can never leak to an API consumer (there is no artifact
+// download route in this branch). Checksum/size/storageKind are safe descriptive
+// metadata and are kept; storage_uri is the only field stripped.
+function toPublicJobArtifact(artifact) {
+  if (!artifact) return null;
+  const { storageUri, ...rest } = artifact; // eslint-disable-line no-unused-vars
+  return rest;
+}
+
+function getJobArtifactRowById(id) {
+  if (typeof id !== 'string' || id === '') return null;
+  const row = db.prepare('SELECT * FROM job_artifacts WHERE id = ?').get(id);
+  return rowToJobArtifact(row);
+}
+
+// Resolve a job artifact's optional references against the job's OWN scope. For a
+// project job every reference must resolve within the job's project (else 404 via
+// the resource's NOT_FOUND code); for a legacy owner-scoped job, object references
+// must be owned by the same user and project-only resources (dataset/provenance/
+// figure) are rejected (there is no owner-scoped same-scope check for them). Each
+// reference defaults to the job's corresponding column when not supplied, so an
+// artifact is auto-associated with the job's own (already same-scope) references.
+function resolveArtifactRefs(job, input) {
+  const pid = job.project_id || null;
+  const owner = job.owner_user_id;
+  const out = {
+    datasetId: job.dataset_id || null,
+    analysisObjectId: job.analysis_object_id || null,
+    resultAnalysisObjectId: job.result_analysis_object_id || null,
+    provenanceId: null,
+    figureId: null
+  };
+
+  const resolveAo = (id, code, label) => {
+    if (typeof id !== 'string') throw codedError(code, `${label} not found.`);
+    const ok = pid ? !!getProjectAnalysisObjectRow(id, pid) : !!getAnalysisObjectForUser(id, owner);
+    if (!ok) throw codedError(code, `${label} not found.`);
+    return id;
+  };
+
+  if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
+    out.analysisObjectId = resolveAo(input.analysisObjectId, 'ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object');
+  }
+  if (input.resultAnalysisObjectId !== undefined && input.resultAnalysisObjectId !== null) {
+    out.resultAnalysisObjectId = resolveAo(input.resultAnalysisObjectId, 'RESULT_OBJECT_NOT_FOUND', 'Result analysis object');
+  }
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (!pid || typeof input.datasetId !== 'string' || !getDatasetRow(input.datasetId, pid)) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    out.datasetId = input.datasetId;
+  }
+  if (input.provenanceId !== undefined && input.provenanceId !== null) {
+    if (!pid || typeof input.provenanceId !== 'string' || !getProjectProvenanceRow(input.provenanceId, pid)) {
+      throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
+    }
+    out.provenanceId = input.provenanceId;
+  }
+  if (input.figureId !== undefined && input.figureId !== null) {
+    if (!pid || typeof input.figureId !== 'string' || !getProjectFigureRow(input.figureId, pid)) {
+      throw codedError('FIGURE_NOT_FOUND', 'Figure not found.');
+    }
+    out.figureId = input.figureId;
+  }
+  return out;
+}
+
+// Shared validation + insert for a job artifact. The actor and project scope are
+// taken from `job`, never from `input`; client-supplied id/projectId/createdByUserId/
+// storageUri/checksum/size are intentionally ignored (the signature never reads
+// them). storageKind defaults to 'metadata_only' and status to 'available'.
+function insertJobArtifact(job, input = {}) {
+  const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : '';
+  if (!isValidArtifactType(artifactType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE',
+      `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const storageKind = input.storageKind === undefined || input.storageKind === null
+    ? 'metadata_only' : String(input.storageKind);
+  if (!isValidArtifactStorageKind(storageKind)) {
+    throw codedError('INVALID_STORAGE_KIND',
+      `Invalid storageKind. Allowed: ${[...ALLOWED_ARTIFACT_STORAGE_KINDS].join(', ')}.`);
+  }
+  const status = input.status === undefined || input.status === null
+    ? 'available' : String(input.status);
+  if (!isValidArtifactStatus(status)) {
+    throw codedError('INVALID_ARTIFACT_STATUS',
+      `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  const refs = resolveArtifactRefs(job, input);
+
+  const id = generateJobArtifactId();
+  db.prepare(`
+    INSERT INTO job_artifacts
+      (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+       provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+       mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+    VALUES
+      (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+       @provenanceId, @figureId, @createdBy, @artifactType, @name, @description,
+       @mimeType, @storageKind, NULL, NULL, NULL, @status, @metadataJson)
+  `).run({
+    id,
+    projectId: job.project_id || null,
+    jobId: job.id,
+    datasetId: refs.datasetId,
+    analysisObjectId: refs.analysisObjectId,
+    resultAnalysisObjectId: refs.resultAnalysisObjectId,
+    provenanceId: refs.provenanceId,
+    figureId: refs.figureId,
+    createdBy: job.owner_user_id,
+    artifactType,
+    name: input.name != null ? String(input.name) : null,
+    description: input.description != null ? String(input.description) : null,
+    mimeType: input.mimeType != null ? String(input.mimeType) : null,
+    storageKind,
+    status,
+    metadataJson: JSON.stringify(metadata)
+  });
+  return getJobArtifactRowById(id);
+}
+
+/**
+ * Worker-facing: create a metadata-only artifact for a job the worker currently
+ * holds. Guarded exactly like heartbeat/complete (succeeds only while
+ * (worker_id, claim_token) match, status is 'running', and the lease is live), so
+ * a stale/reaped worker can never write artifacts to a job it has lost. project_id
+ * and created_by_user_id are derived from the job; storage_uri/checksum/size are
+ * never set here (metadata-only). Returns the full internal artifact. Throws
+ * `JOB_NOT_FOUND` / `CLAIM_LOST` / the artifact `INVALID_*` / reference `*_NOT_FOUND`.
+ */
+function createJobArtifactByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return insertJobArtifact(row, input);
+}
+
+/**
+ * Worker-facing: create a NEW immutable result analysis object (a checkpoint) for a
+ * successful mutating job, and atomically link it back as the job's
+ * result_analysis_object_id — WITHOUT mutating the parent object. Guarded by the
+ * live claim; refuses if the job already has a result object (so two workers can
+ * never create duplicate result objects for the same job). The result object is
+ * server-generated (`ao_...`), inherits the job's project/owner, and its parent /
+ * dataset / lineage root stay within the job's scope (default to the job's own
+ * analysis object / dataset). Clients cannot choose its id/owner/project/lineage —
+ * none of those are read from `input`. Throws `JOB_NOT_FOUND` / `CLAIM_LOST` /
+ * `CHECKPOINT_EXISTS` / `INVALID_OBJECT_TYPE` / `INVALID_METADATA` / `PARENT_NOT_FOUND`
+ * / `DATASET_NOT_FOUND`.
+ */
+function createCheckpointForJobByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.result_analysis_object_id) {
+    throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
+  }
+
+  const owner = row.owner_user_id;
+  const pid = row.project_id || null;
+
+  const objectType = input.objectType === undefined || input.objectType === null
+    ? 'generic' : String(input.objectType).trim();
+  if (!isValidObjectType(objectType)) {
+    throw codedError('INVALID_OBJECT_TYPE',
+      `Invalid objectType. Allowed: ${[...ALLOWED_OBJECT_TYPES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  // Parent defaults to the job's own input object (a checkpoint is a CHILD of it,
+  // never a mutation of it). A client-supplied parent must resolve in the job's
+  // scope. Lineage root is inherited within that scope.
+  const parentObjectId = input.parentObjectId !== undefined && input.parentObjectId !== null
+    ? String(input.parentObjectId)
+    : (row.analysis_object_id || null);
+  let lineageRootId = null;
+  if (parentObjectId) {
+    const parent = pid ? getProjectAnalysisObjectRow(parentObjectId, pid)
+                       : getAnalysisObjectForUser(parentObjectId, owner);
+    if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    lineageRootId = parent.lineageRootId || parent.id;
+  }
+
+  // Dataset defaults to the job's dataset; a client-supplied one must resolve in the
+  // job's project (datasets are project-scoped, so legacy jobs cannot set one).
+  let datasetId = row.dataset_id || null;
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (!pid || typeof input.datasetId !== 'string' || !getDatasetRow(input.datasetId, pid)) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    datasetId = input.datasetId;
+  }
+
+  const id = generateAnalysisObjectId();
+  const linked = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO analysis_objects
+        (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+         display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+      VALUES
+        (@id, @owner, @projectId, @datasetId, @parentObjectId, @lineageRootId, @objectType,
+         @displayName, NULL, NULL, @metadataJson, NULL)
+    `).run({
+      id,
+      owner,
+      projectId: pid,
+      datasetId,
+      parentObjectId,
+      lineageRootId,
+      objectType,
+      displayName: input.displayName != null ? String(input.displayName) : null,
+      metadataJson: JSON.stringify(metadata)
+    });
+    if (!parentObjectId) {
+      db.prepare('UPDATE analysis_objects SET lineage_root_id = id WHERE id = ?').run(id);
+    }
+    // Link the new checkpoint back to the job, re-checking the claim AND that no
+    // result object was set in the meantime — so a racing worker/claim cannot
+    // double-link. If the guard fails, the whole transaction (incl. the AO insert)
+    // rolls back and the caller sees CLAIM_LOST.
+    const info = db.prepare(`
+      UPDATE jobs SET result_analysis_object_id = @aoId, updated_at = @now
+      WHERE id = @jobId AND worker_id = @wid AND claim_token = @token
+        AND status = 'running' AND lease_expires_at > @now
+        AND result_analysis_object_id IS NULL
+    `).run({ aoId: id, jobId: String(jobId), wid, token, now });
+    return info.changes === 1;
+  }).immediate();
+
+  if (!linked) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return pid ? getProjectAnalysisObjectRow(id, pid) : getAnalysisObjectForUser(id, owner);
+}
+
+// ── Project-scoped artifact reads (metadata only; no download) ────
+//
+// Read-only, role-checked artifact metadata for project members. Like the other
+// project-scoped read helpers these authorize through requireProjectRole (any
+// member, incl. viewer, may read), so an inaccessible project/artifact is 404 and
+// a known member lacking the role is 403. They always pin a real project_id, so a
+// legacy NULL-project artifact never appears, and they return the PUBLIC projection
+// (storage_uri stripped). There is intentionally no project artifact CREATE/mutate
+// route — artifact creation is worker/helper-driven.
+
+function getProjectJobArtifactRow(artifactId, projectId) {
+  if (typeof artifactId !== 'string' || artifactId === '') return null;
+  const row = db.prepare('SELECT * FROM job_artifacts WHERE id = ? AND project_id = ?')
+    .get(artifactId, String(projectId));
+  return rowToJobArtifact(row);
+}
+
+function artifactFilterClauses(filters = {}) {
+  const clauses = [];
+  const params = [];
+  if (filters.jobId) { clauses.push('job_id = ?'); params.push(String(filters.jobId)); }
+  if (filters.artifactType) { clauses.push('artifact_type = ?'); params.push(String(filters.artifactType)); }
+  if (filters.status) { clauses.push('status = ?'); params.push(String(filters.status)); }
+  if (filters.analysisObjectId) { clauses.push('analysis_object_id = ?'); params.push(String(filters.analysisObjectId)); }
+  if (filters.resultAnalysisObjectId) { clauses.push('result_analysis_object_id = ?'); params.push(String(filters.resultAnalysisObjectId)); }
+  if (filters.datasetId) { clauses.push('dataset_id = ?'); params.push(String(filters.datasetId)); }
+  if (filters.provenanceId) { clauses.push('provenance_id = ?'); params.push(String(filters.provenanceId)); }
+  if (filters.figureId) { clauses.push('figure_id = ?'); params.push(String(filters.figureId)); }
+  return { clauses, params };
+}
+
+/** List a project's artifact metadata (any member may read). Filters are
+ * project-scoped; legacy NULL-project rows never appear. Public projection. */
+function listProjectArtifacts(userId, projectId, filters = {}) {
+  requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
+  const { clauses, params } = artifactFilterClauses(filters);
+  const where = ['project_id = ?', ...clauses];
+  const rows = db.prepare(
+    `SELECT * FROM job_artifacts WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC`
+  ).all(String(projectId), ...params);
+  return rows.map(r => toPublicJobArtifact(rowToJobArtifact(r)));
+}
+
+/** List a single project job's artifact metadata (any member may read). The job
+ * must belong to the project (else 404), so a cross-project job id cannot be used
+ * to read artifacts. Public projection. */
+function listProjectJobArtifacts(userId, projectId, jobId, filters = {}) {
+  requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
+  if (!getProjectJobRow(jobId, projectId)) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  return listProjectArtifacts(userId, projectId, { ...filters, jobId });
+}
+
+/** Return a single project artifact's metadata only if the caller is a member and
+ * the artifact belongs to that project; otherwise null (route → 404). Any role
+ * reads. Public projection (storage_uri stripped). */
+function getProjectArtifact(userId, projectId, artifactId) {
+  requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
+  return toPublicJobArtifact(getProjectJobArtifactRow(artifactId, projectId));
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────
 
 function closeDatabase() {
@@ -3112,10 +3560,26 @@ function getPragma(name) {
   return db.pragma(name, { simple: true });
 }
 
+/** Reflect a table's column names (read-only; for schema/migration tests). Returns
+ *  [] when no DB is open or the table does not exist. */
+function getTableColumns(table) {
+  if (!db) return [];
+  return db.prepare(`PRAGMA table_info(${JSON.stringify(String(table))})`).all().map(c => c.name);
+}
+
+/** Reflect a table's index names (read-only; for schema/migration tests). Returns
+ *  [] when no DB is open or the table does not exist. */
+function getTableIndexes(table) {
+  if (!db) return [];
+  return db.prepare(`PRAGMA index_list(${JSON.stringify(String(table))})`).all().map(i => i.name);
+}
+
 module.exports = {
   initDatabase,
   closeDatabase,
   getPragma,
+  getTableColumns,
+  getTableIndexes,
   saveProvenance,
   getProvenance,
   getAllProvenance,
@@ -3217,6 +3681,18 @@ module.exports = {
   generateFigureId,
   createProjectFigure,
   listProjectFigures,
-  getProjectFigure
+  getProjectFigure,
+  // Job artifacts & checkpoints (durable output metadata; metadata-only in this
+  // branch — no download, no object storage, no real R/Seurat outputs)
+  isValidArtifactType,
+  isValidArtifactStorageKind,
+  isValidArtifactStatus,
+  generateJobArtifactId,
+  toPublicJobArtifact,
+  createJobArtifactByWorker,
+  createCheckpointForJobByWorker,
+  listProjectArtifacts,
+  listProjectJobArtifacts,
+  getProjectArtifact
 };
 
