@@ -1052,7 +1052,14 @@ const ALLOWED_JOB_TYPES = new Set([
   // running any R/Seurat pipeline. Handled by the worker's `checkpoint.noop` handler
   // (jobWorker.js); produces metadata-only artifacts + an immutable checkpoint object
   // clearly labeled placeholder. NOT a real scientific output. See docs/architecture.md.
-  'checkpoint.noop'
+  'checkpoint.noop',
+  // Minimal worker-to-R bridge type: the ONLY job type that invokes the R backend.
+  // It runs exactly one allowlisted, read-only, metadata-only operation (an R runtime
+  // health/version check via the existing /health endpoint) through server-controlled
+  // code — NO arbitrary R, NO analysis-object access, NO mutation, NO checkpoint. The
+  // worker's `r.runtime.check` handler (jobWorker.js) drives backend/rWorkerBridge.js
+  // and records a metadata-only `r_runtime_check` artifact. NOT a scientific output.
+  'r.runtime.check'
 ]);
 
 const JOB_STATUSES = new Set([
@@ -3178,7 +3185,11 @@ function getProjectFigure(userId, projectId, figureId) {
 // that scope is a 404, so an artifact can never cross a project (or user) boundary.
 
 const ALLOWED_ARTIFACT_TYPES = new Set([
-  'checkpoint', 'metrics', 'log', 'figure', 'script_fragment', 'other_metadata'
+  'checkpoint', 'metrics', 'log', 'figure', 'script_fragment', 'other_metadata',
+  // Operational/inspection metadata recorded by the minimal worker-to-R bridge
+  // (backend/rWorkerBridge.js + the `r.runtime.check` worker handler). Metadata-only,
+  // not a scientific result: it captures sanitized R runtime status, never object data.
+  'r_runtime_check'
 ]);
 
 // metadata_only is the only kind the placeholder handler writes in this branch.
@@ -3243,6 +3254,17 @@ function getJobArtifactRowById(id) {
   if (typeof id !== 'string' || id === '') return null;
   const row = db.prepare('SELECT * FROM job_artifacts WHERE id = ?').get(id);
   return rowToJobArtifact(row);
+}
+
+/** Server-tier-internal: all artifacts for a job id, regardless of project scope
+ * (incl. legacy NULL-project / owner-scoped jobs). Like getWorkerJob this is NOT
+ * wired to any client route — the public surface is the role-checked project
+ * artifact routes. Used by the worker/tests to verify exactly-once artifact writes. */
+function getJobArtifactsByJobId(jobId) {
+  if (typeof jobId !== 'string' || jobId === '') return [];
+  return db.prepare('SELECT * FROM job_artifacts WHERE job_id = ? ORDER BY created_at ASC, id ASC')
+    .all(String(jobId))
+    .map(rowToJobArtifact);
 }
 
 // Resolve a job artifact's optional references against the job's OWN scope. For a
@@ -3691,6 +3713,7 @@ module.exports = {
   toPublicJobArtifact,
   createJobArtifactByWorker,
   createCheckpointForJobByWorker,
+  getJobArtifactsByJobId,
   listProjectArtifacts,
   listProjectJobArtifacts,
   getProjectArtifact

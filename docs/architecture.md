@@ -688,6 +688,57 @@ reproducibility-bundle branch, and it does **not** add any real R/Seurat executi
   R/Seurat pipeline handler.** Future real R handlers must write their outputs
   through this model. Covered by `backend/job-artifacts-checkpoints.test.js`.
 
+### Minimal worker-to-R bridge (`backend/rWorkerBridge.js`, `r.runtime.check`)
+The smallest safe seam that lets a job worker invoke the R backend through
+**server-controlled** code for exactly **one** explicitly allowlisted, read-only,
+**metadata-only** operation. It proves worker→R connectivity, explicit timeouts,
+sanitized errors, and the metadata-only artifact write path — **without** opening any
+door to arbitrary R. It is **not** the scRNA-seq pipeline, and it produces **no**
+scientific output.
+
+- **One allowlisted operation: `r.runtime.check`.** The only operation the bridge
+  will run. It issues a read-only `GET` to the existing R `/health` endpoint and
+  records sanitized runtime status (`status`/`mode`) as a **metadata-only**
+  `r_runtime_check` artifact. It touches **no** analysis object, mutates **nothing**,
+  creates **no** checkpoint/result object, and produces **no** download. The allowlist
+  (`R_BRIDGE_OPERATIONS`) is the only way to add an operation — there is no dynamic /
+  pass-through path, and an arbitrary operation name is rejected
+  (`UNSUPPORTED_R_OPERATION`) before any R contact.
+- **Server-derived context; no client control.** The bridge is an internal module —
+  **not** an HTTP route; there is **no public "run R bridge" endpoint**. The HTTP
+  method + path come from the server-defined spec, **never** from caller input. The
+  per-job `input` is **ignored** for `r.runtime.check`, so a smuggled
+  `code`/`rCode`/`path`/`endpoint`/`url`/`method`/`stateKey`/`objectId` field does
+  nothing: there is **no arbitrary R code**, **no** client-controlled R
+  path/endpoint, and **no** client-controlled R state key. Job/project/owner identity
+  is read from the trusted `job` row.
+- **Explicit timeout + sanitized errors.** Every call runs on a bounded, explicit
+  timeout. All failures (transport/timeout/non-200) are mapped to **coded, generic**
+  messages: raw R error text, stacks, internal URLs/hosts, ports, and the API token
+  **never** escape into job logs or artifact metadata. The default caller sends only
+  the API token (never an `X-Object-ID`/R state key), so it cannot reach per-object
+  live R state.
+- **Worker integration (`r.runtime.check` handler).** A single new handler in
+  `backend/jobWorker.js`, registered alongside `generic` and `checkpoint.noop`. On
+  success it records **exactly one** metadata-only `r_runtime_check` artifact (clearly
+  labelled `kind: operational`, `scientific_output: false`) and writes durable logs.
+  It creates **no** checkpoint/result object. A **failed**, **canceled**, or
+  **claim-lost** job finalizes **no** successful artifact (artifact writes are
+  claim-guarded), and **two workers cannot duplicate** an artifact for one job. The
+  real analytical job types (normalize/pca/…) remain **unregistered** and still fail
+  terminally (`UNSUPPORTED_JOB_TYPE`).
+- **R state boundary unchanged.** No R backend/proxy code changed:
+  `deriveRStateKey` / `verifyRObjectOwnership` / `/api/r/*` ownership are untouched.
+  Running an `r.runtime.check` job does **not** widen live-R object access — a project
+  co-member who can read project metadata is still **not** the R owner and cannot use
+  an object id through `/api/r/*` (404 before reaching R). Collaboration remains
+  through durable artifacts/checkpoints, **not** shared live R sessions.
+- **Scope of this branch.** A minimal worker-to-R bridge for **one** allowlisted,
+  metadata-only operation only. **No** real R/Seurat pipeline execution, **no**
+  generated R scripts, **no** downloads, **no** object storage, **no** full
+  reproducibility bundles, and **no** shared project R state. Covered by
+  `backend/r-worker-bridge.test.js`.
+
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
 now confirms any client object id is a real `analysis_objects` row owned by the

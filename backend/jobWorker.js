@@ -29,6 +29,7 @@
 
 const crypto = require('crypto');
 const database = require('./database');
+const rWorkerBridge = require('./rWorkerBridge');
 
 /** Stable, header-safe worker id (`worker_` + hex). One per worker instance. */
 function generateWorkerId() {
@@ -161,14 +162,63 @@ async function checkpointNoopHandler(ctx) {
   };
 }
 
-// Default registry: `generic` (a pure noop) plus the test-safe `checkpoint.noop`
-// placeholder that exercises the artifact/checkpoint metadata wiring. The real
-// analytical job types (normalize/qc_filter/pca/cluster/umap/find_markers/integrate)
-// remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
-// instead of pretending to run them.
+/**
+ * Minimal worker-to-R bridge handler: the ONLY handler that touches the R backend.
+ * It runs exactly one allowlisted, read-only, metadata-only operation
+ * (`r.runtime.check`) through the server-controlled bridge (backend/rWorkerBridge.js)
+ * and records a metadata-only `r_runtime_check` artifact describing the sanitized R
+ * runtime status. It:
+ *   - heartbeats (proving the cooperative seam),
+ *   - invokes the bridge with a SERVER-DERIVED operation + job context — the job's
+ *     own parameters are NOT used to choose the operation/path/code (the bridge
+ *     ignores per-job input for this op),
+ *   - records ONE metadata-only artifact on success,
+ *   - creates NO checkpoint / result analysis object, touches NO analysis-object or
+ *     live-R state, fabricates NO scientific metric, exposes NO path/download.
+ * Bridge errors arrive pre-sanitized (safe message + code), so failing the job never
+ * leaks raw R errors/stacks/internal URLs.
+ */
+async function rRuntimeCheckHandler(ctx) {
+  ctx.heartbeat();
+  ctx.log({ level: 'info', message: 'r.runtime.check handler: invoking allowlisted, metadata-only R runtime check (no pipeline execution).' });
+
+  const descriptor = await ctx.runRBridgeOperation({
+    job: ctx.job,
+    operation: 'r.runtime.check',
+    // Actor/context derived from the trusted job row, never from client input.
+    actor: { userId: ctx.job.ownerUserId, projectId: ctx.job.projectId || null },
+    input: ctx.job.parameters, // passed for completeness; the bridge IGNORES it (server-derived).
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+
+  const artifact = ctx.createArtifact({
+    artifactType: descriptor.artifactType, // 'r_runtime_check'
+    name: descriptor.name,
+    description: descriptor.description,
+    storageKind: descriptor.storageKind, // 'metadata_only'
+    metadata: descriptor.metadata,
+  });
+
+  ctx.log({ level: 'info', message: `r.runtime.check handler: recorded metadata-only artifact ${artifact.id} (operational inspection, not a scientific output).` });
+
+  // No result analysis object / checkpoint: this is a non-mutating inspection.
+  return {
+    result: { ok: true, handled: 'r.runtime.check', operation: 'r.runtime.check', artifactId: artifact.id }
+  };
+}
+
+// Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
+// placeholder that exercises the artifact/checkpoint metadata wiring, and the
+// minimal `r.runtime.check` worker-to-R bridge (one allowlisted, metadata-only
+// R-backed operation). The real analytical job types (normalize/qc_filter/pca/
+// cluster/umap/find_markers/integrate) remain deliberately UNREGISTERED so the
+// worker fails them (UNSUPPORTED_JOB_TYPE) instead of pretending to run them.
 const DEFAULT_HANDLERS = Object.freeze({
   generic: genericNoopHandler,
   'checkpoint.noop': checkpointNoopHandler,
+  'r.runtime.check': rRuntimeCheckHandler,
 });
 
 /**
@@ -183,6 +233,12 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - leaseSeconds       claim lease length passed to claim/heartbeat (default 30)
  *   - heartbeatIntervalMs advisory; handlers heartbeat cooperatively via ctx.heartbeat()
  *   - handlers           job_type → async handler registry (default DEFAULT_HANDLERS)
+ *   - rBridge            R-bridge module seam (default ./rWorkerBridge); injectable for tests
+ *   - callR              R caller used by the bridge; injectable for tests. Defaults to a
+ *                        real local-HTTP caller built from rBridgeConfig (used only by the
+ *                        r.runtime.check handler — generic/checkpoint.noop never call R)
+ *   - rBridgeConfig      { port, token } for the default R caller (server wires PLUMBER_PORT
+ *                        + API_TOKEN here so the in-process worker can reach the local R backend)
  *   - logger             { info, warn, error } (default console)
  *   - now                optional clock: a function (or string) returning a SQLite
  *                        'YYYY-MM-DD HH:MM:SS' timestamp, so tests drive lease timing
@@ -196,9 +252,20 @@ function createJobWorker(options = {}) {
     leaseSeconds = 30,
     heartbeatIntervalMs = Math.max(1000, Math.floor((30 * 1000) / 3)),
     handlers = DEFAULT_HANDLERS,
+    rBridge = rWorkerBridge,
+    callR,
+    rBridgeConfig = {},
     logger = console,
     now,
   } = options;
+
+  // Resolve the R caller once. Tests inject `callR` directly (a fake) so no real
+  // HTTP happens; in production the server passes rBridgeConfig (PLUMBER_PORT +
+  // API_TOKEN) and we build the narrow local-HTTP caller. Building it eagerly is
+  // harmless — it is only ever invoked by the r.runtime.check handler.
+  const resolvedCallR = typeof callR === 'function'
+    ? callR
+    : rBridge.createDefaultRCaller(rBridgeConfig);
 
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 0) {
     throw new Error('pollIntervalMs must be a non-negative integer.');
@@ -305,6 +372,11 @@ function createJobWorker(options = {}) {
       // NO paths — metadata only in this branch.
       createArtifact: (input) => db.createJobArtifactByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       createCheckpoint: (input) => db.createCheckpointForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      // R-bridge seam (used only by the r.runtime.check handler). The bridge is a
+      // pure function; the resolved R caller is injected so it cannot reach R by any
+      // path other than this server-controlled one.
+      runRBridgeOperation: (bridgeArgs) => rBridge.runRBridgeOperation(bridgeArgs),
+      callR: resolvedCallR,
       logger: log,
     };
 
@@ -406,6 +478,7 @@ module.exports = {
   generateWorkerId,
   genericNoopHandler,
   checkpointNoopHandler,
+  rRuntimeCheckHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,

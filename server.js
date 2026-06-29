@@ -1784,10 +1784,17 @@ function startJobWorkerIfEnabled(env = process.env, deps = {}) {
   const config = parseJobWorkerConfig(env, { logger });
   if (!config.enabled) return null;
   const create = deps.createJobWorker || require('./backend/jobWorker').createJobWorker;
+  // Wire the in-process worker to the local R backend so the r.runtime.check bridge
+  // handler can reach it. We build the narrow R caller HERE and pass it as a function
+  // (a closure over the secret), so the API token is NEVER placed as a plain field on
+  // the worker options object — a function value carries no serializable secret. The
+  // worker still runs ONLY the allowlisted, metadata-only R operation through it.
+  const callR = require('./backend/rWorkerBridge').createDefaultRCaller({ port: PLUMBER_PORT, token: API_TOKEN });
   const worker = create({
     db: deps.db || db,
     pollIntervalMs: config.pollIntervalMs,
     leaseSeconds: config.leaseSeconds,
+    callR,
     logger,
   });
   worker.start();

@@ -147,10 +147,24 @@ jobs:
         #                        responses, legacy NULL-project artifacts not leaked, and proof a
         #                        co-member reading a checkpoint cannot access it via /api/r/*;
         #                        NO download, NO object storage, NO real R/Seurat outputs)
+        #   r-worker-bridge     (minimal worker-to-R bridge: ONE allowlisted, read-only,
+        #                        metadata-only R operation (r.runtime.check → R /health) invoked
+        #                        through server-controlled code — arbitrary operation names,
+        #                        client-supplied R code/path/endpoint/method/state-key all
+        #                        ignored/rejected (input is server-derived); explicit timeout +
+        #                        sanitized errors (no raw R error/stack/internal URL leaks); one
+        #                        metadata-only r_runtime_check artifact on success with NO
+        #                        checkpoint/result object, NO analysis-object access, NO mutation;
+        #                        failed/canceled/claim-lost jobs finalize no artifact and two
+        #                        workers cannot duplicate one; role-checked project artifact reads
+        #                        omit storage-uri/path/state-key/claim-token/worker/R-URL; and
+        #                        proof the bridge does NOT widen live-R object access for a project
+        #                        co-member (membership ≠ live-R ownership); NO public bridge/worker
+        #                        route, NO download, NO arbitrary R, NO real R/Seurat pipeline)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
