@@ -1356,6 +1356,49 @@ app.get('/api/projects/:projectId/analysis-objects/:objectId', (req, res) => {
   }
 });
 
+// ── Read-only analysis-object lineage (DAG) routes ───────────────────────────
+// Role-checked, metadata-only lineage reads for project members (any role, incl.
+// viewer, may read). The edge table is the graph source; single-parent
+// parent_object_id / lineage_root_id remain compatibility/fast-path fields. There
+// is intentionally NO public edge-create route in this branch (edges are created by
+// the checkpoint helper / future server-side multi-parent operations). Responses
+// are public-safe (edge/graph metadata only): no storage uri/path, R state key,
+// claim token, or worker internal is ever in the edge or node projections. A
+// malformed object id is 400; an object in another project (or legacy NULL-project)
+// is 404; a non-member is 404; a member lacking the read role is 403.
+app.get('/api/projects/:projectId/analysis-objects/:objectId/parents', (req, res) => {
+  if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  try {
+    res.json(db.listProjectAnalysisObjectParents(req.user.id, req.params.projectId, req.params.objectId));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectLineage');
+  }
+});
+
+app.get('/api/projects/:projectId/analysis-objects/:objectId/children', (req, res) => {
+  if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  try {
+    res.json(db.listProjectAnalysisObjectChildren(req.user.id, req.params.projectId, req.params.objectId));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectLineage');
+  }
+});
+
+app.get('/api/projects/:projectId/analysis-objects/:objectId/lineage', (req, res) => {
+  if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  try {
+    res.json(db.getProjectAnalysisObjectLineage(req.user.id, req.params.projectId, req.params.objectId));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectLineage');
+  }
+});
+
 app.post('/api/projects/:projectId/jobs', (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // Status is server-managed; a client cannot pick the initial status.

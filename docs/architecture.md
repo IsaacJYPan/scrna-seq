@@ -794,6 +794,91 @@ never creates a checkpoint/result object.
   R script export, downloads, object storage, full reproducibility bundles, or shared
   project live R state. Covered by `backend/r-object-inspect.test.js`.
 
+### Analysis object lineage as a DAG (`analysis_object_edges`)
+The durable, **DAG-ready** edge model for analysis-object lineage. It formalizes
+lineage as an explicit parent→child **graph** *before* mutating R/Seurat jobs start
+producing real derived objects, so that future branching, integration, and
+comparison operations can be represented as first-class edges instead of being
+encoded in metadata. It is a **schema/contract/read-model** addition — it adds **no**
+mutating R/Seurat execution, generated scripts, downloads, object storage, full
+reproducibility bundles, or shared project R state.
+
+- **The edge table is the forward-looking graph source; the single-parent fields stay
+  compatibility/fast-path.** `analysis_objects.parent_object_id` and `lineage_root_id`
+  are **retained unchanged** as the denormalized fast-path for the common
+  single-parent case. The new `analysis_object_edges` table is what **graph traversal**
+  (parents/children/lineage reads) uses, and is what lets a **future** multi-parent
+  operation record several parents as multiple edge rows. Simple **branching** (two
+  children of one parent) is supported today; **multi-parent** children are
+  representable through the internal helper.
+- **Schema (`analysis_object_edges`).** Server-generated id (`aoe_<random>`), an
+  optional `project_id` (a real project id for an edge between project objects, `NULL`
+  for one between legacy owner-scoped objects), `parent_analysis_object_id`,
+  `child_analysis_object_id`, an optional `job_id` (the completing job for a checkpoint
+  edge), an allow-listed `edge_type`
+  (`derived_from`/`checkpoint`/`branch`/`integration_input`/`comparison_input`/
+  `manual_link`), an allow-listed `parent_role`
+  (`primary`/`secondary`/`reference`/`query`/`control`/`case`/`input`),
+  `metadata_json`, and the server-set `created_by_user_id`. A `CHECK` forbids a
+  self-edge, and a **unique index** over
+  `(parent, child, COALESCE(job_id,''), parent_role, edge_type)` makes the table
+  duplicate-safe even for the job-less backfill rows. Indexes cover
+  project/parent/child/job/type and the project-pinned parent/child/job composites.
+  Migration is idempotent (`CREATE TABLE IF NOT EXISTS`) on fresh and pre-existing
+  DBs.
+- **Idempotent backfill of existing parent links.** On init, every analysis object
+  that already has a `parent_object_id` **and no edge yet** gets a `derived_from`
+  edge (parent role `primary`, `job_id` NULL), so the edge table is the complete graph
+  source even for pre-existing data. The backfill is pure SQL `INSERT OR IGNORE`
+  guarded by `NOT EXISTS`, so re-running init **never duplicates** an edge; a child
+  whose parent link is missing/bad is skipped (no crash); and a **cross-project**
+  parent link (`parent.project_id IS child.project_id` fails) is **not** backfilled, so
+  a bad legacy cross-project link never leaks into a project's graph.
+- **Identity & scope are server-owned.** Edges are **helper/worker-driven** — there is
+  **no public edge create/mutate route**. `createLineageEdge` ignores any
+  client-supplied id/project/creator: the id is `aoe_…`, `created_by_user_id` is the
+  server-set actor, and `project_id` is **derived from the parent/child objects**. An
+  edge always stays **within one scope** — the parent and child must share the same
+  project (NULL↔NULL for legacy objects), else the cross-scope reference is a 404. A
+  job, if provided, must be in the same scope. The helper validates malformed ids
+  (400), unknown/cross-scope refs (404), self-parent (400), duplicates (409), and
+  rejects **cycles** (409) via a bounded ancestor/descendant traversal that covers both
+  direct and indirect cycles. `createLineageEdgesForChild` records a multi-parent child
+  atomically (all edges in one transaction).
+- **Checkpoint creation records the edge atomically.** A successful
+  checkpoint-producing job still creates exactly **one** immutable result object with
+  its compatibility `parent_object_id`/`lineage_root_id` set, and **the same
+  transaction** now also creates exactly **one** lineage edge: parent = the job's input
+  object, child = the result object, `job_id` = the completing job, `edge_type` =
+  `checkpoint`, `parent_role` = `primary`. The edge is created **only** when the
+  claim-guarded result link succeeds, so a **failed / canceled / claim-lost / duplicate**
+  completion creates **no** successful edge. (A checkpoint job with no input object
+  produces a lineage **root** with no edge.) `createProjectAnalysisObject` likewise
+  records a `derived_from` edge atomically when a parent is supplied, so live reads see
+  a complete graph without waiting for an init-time backfill.
+- **Read routes (metadata only, role-checked).** Authenticated, under
+  `/api/projects/:projectId/analysis-objects/:objectId`: `GET /parents`,
+  `GET /children`, `GET /lineage`. Any project member (incl. **viewer**) may read; an
+  inaccessible project/object is **404** (no existence leak), a known member lacking
+  the role is **403**, a malformed `ao_` id is **400**, and a cross-project or legacy
+  NULL-project object is **404** (the routes always pin a real `project_id`). The
+  `lineage` route returns a **bounded, deterministic** `{ rootObjectId, objectId,
+  nodes, edges, truncated }` graph (capped by node/depth limits; `truncated: true`
+  rather than walking forever). Responses carry only public-safe edge/graph metadata —
+  **no** storage uri/path, object hash, R state key, claim token, or worker internal;
+  graph nodes carry only `id`/`label`/`objectType`/`lineageRootId`.
+- **Collaboration is through durable lineage metadata, not shared live R sessions.**
+  `verifyRObjectOwnership` / `deriveRStateKey` are unchanged: a project co-member who
+  can read an object's lineage is still **not** its R owner and cannot use its object
+  id through `/api/r/*` (404 before reaching R). Asserted in
+  `backend/analysis-object-lineage-dag.test.js`.
+- **Scope of this branch.** A DAG-ready lineage **edge model** + project-scoped
+  read-only lineage graph reads + checkpoint edge creation. It does **not** implement
+  the full version-control system, **named branches**, **merge/integration** operation
+  semantics, mutating R/Seurat pipeline execution, generated R scripts, downloads,
+  object storage, full reproducibility bundles, or shared project live R state. Covered
+  by `backend/analysis-object-lineage-dag.test.js`.
+
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
 now confirms any client object id is a real `analysis_objects` row owned by the
