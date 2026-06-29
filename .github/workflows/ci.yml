@@ -122,10 +122,26 @@ jobs:
         #                        timeout so it never hangs, exits non-zero on stop failure with
         #                        a sanitized log, leaks no timers), and DB busy_timeout init;
         #                        NO R execution, NO artifacts, NO shared R state)
+        #   job-artifacts-checkpoints (durable artifact/checkpoint METADATA model: idempotent
+        #                        additive job_artifacts migration + indexes, artifact-type/
+        #                        storage-kind/status allow-lists, server-generated art_ ids with
+        #                        client id/project/creator/storage-uri/checksum/size ignored,
+        #                        same-scope-only references (no cross-project/owner leak),
+        #                        claim-guarded worker-only create (no public create route),
+        #                        single immutable result checkpoint object per successful job
+        #                        (CHECKPOINT_EXISTS / no duplicate by two workers; failed/
+        #                        canceled jobs create none), checkpoint.noop placeholder handler
+        #                        end-to-end with metadata-only artifact + durable logs while
+        #                        generic stays a noop and unsupported types still fail terminally,
+        #                        role-checked project read routes (404-vs-403, 400 malformed ids),
+        #                        no storage_uri/path/storage-key/claim-token/worker-internal in
+        #                        responses, legacy NULL-project artifacts not leaked, and proof a
+        #                        co-member reading a checkpoint cannot access it via /api/r/*;
+        #                        NO download, NO object storage, NO real R/Seurat outputs)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
