@@ -264,6 +264,15 @@ export const electronAPI = {
   },
   getProjectAnalysisObject: async (projectId, objectId) =>
     req(`/api/projects/${projectId}/analysis-objects/${objectId}`),
+  // Read-only analysis-object lineage (DAG). The edge table is the graph source;
+  // these return public-safe edge/graph metadata only (no create/mutate wrapper —
+  // edges are created server-side by the checkpoint helper / future multi-parent ops).
+  getProjectAnalysisObjectParents: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/analysis-objects/${objectId}/parents`),
+  getProjectAnalysisObjectChildren: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/analysis-objects/${objectId}/children`),
+  getProjectAnalysisObjectLineage: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/analysis-objects/${objectId}/lineage`),
   createProjectJob: async (projectId, payload) =>
     req(`/api/projects/${projectId}/jobs`, { method: 'POST', body: JSON.stringify(payload || {}) }),
   listProjectJobs: async (projectId, filters = {}) => {
