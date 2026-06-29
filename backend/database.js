@@ -1167,7 +1167,19 @@ const ALLOWED_JOB_TYPES = new Set([
   // object summary). The worker handler verifies the job creator OWNS the live object
   // before any R contact (project membership alone does NOT grant access). It mutates
   // NOTHING, creates NO checkpoint/result object, and is NOT a scientific output.
-  'r.object.inspect'
+  'r.object.inspect',
+  // First production-integrated scientific pipeline: the existing PBMC/Seurat
+  // preprocessing path (normalize → variable features → scale → PCA → neighbors →
+  // clusters → UMAP) wrapped as ONE allowlisted worker job. It runs on a COPY of the
+  // job's input analysis object (the parent is never mutated), persists a durable
+  // checkpoint RDS to a server-allocated internal vault key on the R backend, and
+  // records a result analysis object + lineage edge + summary/checkpoint artifacts +
+  // logs. Parameters are validated against a fixed server-side allowlist BEFORE any R
+  // contact (backend/pbmcPipeline.js); there is NO arbitrary R code/path/operation.
+  // DEG / pathway enrichment / CellChat are intentionally NOT part of this type (see
+  // docs/analysis-pipeline-integration.md). Driven by the `pbmc.pipeline.v1` worker
+  // handler (jobWorker.js) + the allowlisted `r.pbmc.pipeline.v1` bridge operation.
+  'pbmc.pipeline.v1'
 ]);
 
 const JOB_STATUSES = new Set([
@@ -3323,7 +3335,15 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   // sanitized object summary (class/dimensions/assay+reduction+metadata-field names,
   // runtime versions) — never expression/cell/gene data, embeddings, paths, or the
   // R state key. read_only: true, scientific_output: false.
-  'r_object_inspection'
+  'r_object_inspection',
+  // Scientific result summary recorded by the `pbmc.pipeline.v1` worker handler: a
+  // sanitized, bounded summary of a PBMC/Seurat preprocessing run (cell/feature/
+  // variable-feature/PC/cluster counts, reduction NAMES, resolved parameters, R/
+  // package versions). Metadata-only (storage_kind metadata_only); the durable
+  // object/file itself is recorded separately as a `checkpoint` artifact. Never
+  // contains expression matrices, per-cell/gene tables, embeddings, paths, or the R
+  // state key. scientific_output: true.
+  'pipeline_summary'
 ]);
 
 // metadata_only is the only kind the placeholder handler writes in this branch.
@@ -3532,6 +3552,126 @@ function createJobArtifactByWorker(jobId, workerId, claimToken, input = {}, opts
     throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
   }
   return insertJobArtifact(row, input);
+}
+
+// ── Durable internal checkpoint-artifact storage (worker/server-tier only) ────
+//
+// A SEPARATE, explicit helper from createJobArtifactByWorker: the generic helper
+// deliberately IGNORES any client-supplied storage_uri/checksum/size (a regression
+// guard), so the only way to record a real internal checkpoint file's coordinates is
+// through this narrow, server-tier path. It is reachable ONLY from the trusted worker
+// handler (there is no public artifact-create route), and the storage fields it
+// accepts are computed by the SERVER from R's response + a SERVER-allocated key —
+// never from job parameters or any client input.
+//
+// Invariants preserved:
+//   - storage_uri holds the SERVER-allocated INTERNAL vault key (a relative,
+//     traversal-free path the R backend confines to its vault). It is NEVER returned
+//     by the public projection (toPublicJobArtifact strips it) — there is still no
+//     download route. checksum/size/storageKind are safe public descriptors.
+//   - identity/scope (id/project/owner/refs) are derived from the job, exactly like
+//     insertJobArtifact, so a checkpoint artifact can never cross a project/owner.
+//   - storageKind is fixed to 'local_internal' here (the whole point of this helper);
+//     metadata-only artifacts must use createJobArtifactByWorker.
+
+// A safe, relative, traversal-free internal storage key. Defense-in-depth: even
+// though Node generates it from server-controlled ids, re-validate here so a bug can
+// never persist an absolute path, a parent-dir escape, or an unbounded blob.
+const _CHECKPOINT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
+function isSafeInternalStorageKey(key) {
+  if (typeof key !== 'string' || key === '') return false;
+  if (/^([/\\]|[A-Za-z]:[/\\]|\\\\)/.test(key)) return false;       // no absolute paths
+  if (/(^|[/\\])\.\.([/\\]|$)/.test(key)) return false;             // no `..` traversal
+  if (key.includes('\\') || key.includes('\0')) return false;       // no backslashes / NUL
+  return _CHECKPOINT_KEY_RE.test(key);
+}
+
+function normalizeChecksumSha256(value) {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(s) ? s : undefined; // undefined → caller rejects
+}
+
+function normalizeArtifactSizeBytes(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const n = Math.floor(value);
+  if (n < 0 || n > 1e15) return undefined;
+  return n;
+}
+
+function createCheckpointArtifactForJobByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+
+  const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : 'checkpoint';
+  if (!isValidArtifactType(artifactType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE',
+      `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  // This helper exists specifically to persist durable internal storage coordinates.
+  const storageKind = input.storageKind === undefined || input.storageKind === null
+    ? 'local_internal' : String(input.storageKind);
+  if (storageKind !== 'local_internal') {
+    throw codedError('INVALID_STORAGE_KIND',
+      'createCheckpointArtifactForJobByWorker only records local_internal storage; use createJobArtifactByWorker for metadata-only artifacts.');
+  }
+  if (!isSafeInternalStorageKey(input.internalStorageKey)) {
+    throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
+  }
+  const checksum = normalizeChecksumSha256(input.checksumSha256);
+  if (checksum === undefined) throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
+  const sizeBytes = normalizeArtifactSizeBytes(input.sizeBytes);
+  if (sizeBytes === undefined) throw codedError('INVALID_SIZE', 'sizeBytes must be a non-negative integer.');
+
+  const status = input.status === undefined || input.status === null ? 'available' : String(input.status);
+  if (!isValidArtifactStatus(status)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  const refs = resolveArtifactRefs(row, input);
+  const id = generateJobArtifactId();
+  db.prepare(`
+    INSERT INTO job_artifacts
+      (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+       provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+       mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+    VALUES
+      (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+       @provenanceId, @figureId, @createdBy, @artifactType, @name, @description,
+       @mimeType, @storageKind, @storageUri, @checksum, @sizeBytes, @status, @metadataJson)
+  `).run({
+    id,
+    projectId: row.project_id || null,
+    jobId: row.id,
+    datasetId: refs.datasetId,
+    analysisObjectId: refs.analysisObjectId,
+    resultAnalysisObjectId: refs.resultAnalysisObjectId,
+    provenanceId: refs.provenanceId,
+    figureId: refs.figureId,
+    createdBy: row.owner_user_id,
+    artifactType,
+    name: input.name != null ? String(input.name) : null,
+    description: input.description != null ? String(input.description) : null,
+    mimeType: input.mimeType != null ? String(input.mimeType) : null,
+    storageKind,
+    storageUri: input.internalStorageKey, // INTERNAL key — stripped by toPublicJobArtifact
+    checksum,
+    sizeBytes,
+    status,
+    metadataJson: JSON.stringify(metadata)
+  });
+  return getJobArtifactRowById(id);
 }
 
 // ── Analysis object lineage edges (DAG-ready graph model) ─────────────────────
@@ -4230,6 +4370,8 @@ module.exports = {
   generateJobArtifactId,
   toPublicJobArtifact,
   createJobArtifactByWorker,
+  createCheckpointArtifactForJobByWorker,
+  isSafeInternalStorageKey,
   createCheckpointForJobByWorker,
   getJobArtifactsByJobId,
   listProjectArtifacts,
