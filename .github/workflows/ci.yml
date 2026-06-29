@@ -161,10 +161,31 @@ jobs:
         #                        proof the bridge does NOT widen live-R object access for a project
         #                        co-member (membership ≠ live-R ownership); NO public bridge/worker
         #                        route, NO download, NO arbitrary R, NO real R/Seurat pipeline)
+        #   r-object-inspect    (read-only worker-to-R object inspection: ONE allowlisted,
+        #                        read-only, metadata-only operation (r.object.inspect → R
+        #                        GET /object/inspect) over server-derived object context — the
+        #                        object id comes from the TRUSTED job row, the X-Object-ID /
+        #                        R state key is SERVER-derived (never client-provided), and
+        #                        arbitrary operation/code/path/endpoint/method/state-key are
+        #                        impossible (default caller also defense-in-depth target-allowlists);
+        #                        the live-R object OWNER gate (verifyAnalysisObjectOwner) runs
+        #                        BEFORE any R contact so a project co-member/admin cannot inspect
+        #                        another user's live object (membership ≠ live-R access), with
+        #                        cross-project 404, legacy-object 404, malformed 400, unknown 404,
+        #                        viewer 403, and missing-object fail-before-R; inspection mutates
+        #                        NOTHING and creates NO checkpoint/result object (object byte-stable
+        #                        across repeats); ONE metadata-only r_object_inspection artifact on
+        #                        success with sanitized bounded summary (no expression/cell/gene/
+        #                        embedding/path/state-key/serialized data); failed/canceled/claim-
+        #                        lost jobs finalize no artifact and two workers cannot duplicate one;
+        #                        role-checked project artifact reads omit storage-uri/path/state-key/
+        #                        claim-token/worker/R-URL; deriveRStateKey stays server-derived and
+        #                        /api/r/* still rejects a co-member's cross-user object id; NO
+        #                        download, NO object storage, NO arbitrary R, NO real R/Seurat pipeline)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state

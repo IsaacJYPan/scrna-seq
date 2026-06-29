@@ -540,6 +540,47 @@ function(res) {
   }, error = function(e) { res$status <- 500; list(error = paste("object-info failed:", e$message)) })
 }
 
+#* Read-only inspection summary of the current live object (metadata only)
+#*
+#* Narrow, read-only companion to the worker-to-R object inspection bridge
+#* (backend/rWorkerBridge.js, operation r.object.inspect). It returns ONLY a small,
+#* sanitized structural summary of the object currently loaded for the caller's
+#* server-derived X-Object-ID session: existence, class, dimensions, assay/reduction/
+#* metadata-field NAMES (no values), field count, and runtime versions. It deliberately
+#* returns NO expression matrices, cell-level rows, gene lists, embeddings, raw sample
+#* values, or file paths. It mutates NOTHING: it never assigns to global_obj/raw_obj,
+#* never writes/saves, takes no path/code input, and evaluates no client expression.
+#* A missing/unloaded object is reported safely as { exists = FALSE } (not an error).
+#* @get /object/inspect
+function(req, res) {
+  if (is.null(global_obj)) {
+    return(list(exists = FALSE))
+  }
+  tryCatch({
+    meta_names <- tryCatch(colnames(global_obj@meta.data), error = function(e) character(0))
+    if (is.null(meta_names)) meta_names <- character(0)
+    seurat_ver <- tryCatch(as.character(utils::packageVersion("Seurat")), error = function(e) NULL)
+    list(
+      exists = TRUE,
+      class = class(global_obj)[1],
+      n_cells = ncol(global_obj),
+      n_features = nrow(global_obj),
+      assays = tryCatch(Assays(global_obj), error = function(e) list()),
+      reductions = tryCatch(names(global_obj@reductions), error = function(e) list()),
+      n_meta_fields = length(meta_names),
+      # NAMES only — never the per-cell values behind these columns.
+      meta_fields = as.list(meta_names),
+      seurat_version = seurat_ver,
+      r_version = as.character(getRversion())
+    )
+  }, error = function(e) {
+    # Never leak the raw R error/stack; the Node bridge also re-maps non-200s to a
+    # generic, sanitized message.
+    res$status <- 500
+    list(error = "object inspection failed")
+  })
+}
+
 #* Get all unique values (with counts) for a metadata column
 #* @get /meta-values
 function(res, column) {
