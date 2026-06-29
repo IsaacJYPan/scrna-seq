@@ -157,11 +157,11 @@ describe('job worker — unsupported job types', () => {
     expect(after.logs.some((l) => /unsupported job type/i.test(l.message))).toBe(true);
   });
 
-  it('default registry supports `generic` and the test-safe `checkpoint.noop`', () => {
+  it('default registry supports `generic`, `checkpoint.noop`, and `r.runtime.check`', () => {
     // The real analytical job types remain deliberately unregistered (failed as
-    // UNSUPPORTED_JOB_TYPE); only the noop + the metadata-only checkpoint placeholder
-    // are runnable in this branch.
-    expect(Object.keys(DEFAULT_HANDLERS).sort()).toEqual(['checkpoint.noop', 'generic']);
+    // UNSUPPORTED_JOB_TYPE); only the noop, the metadata-only checkpoint placeholder,
+    // and the minimal metadata-only R bridge are runnable in this branch.
+    expect(Object.keys(DEFAULT_HANDLERS).sort()).toEqual(['checkpoint.noop', 'generic', 'r.runtime.check']);
   });
 });
 
