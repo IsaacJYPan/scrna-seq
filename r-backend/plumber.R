@@ -581,6 +581,142 @@ function(req, res) {
   })
 }
 
+# ── Production worker-bridge pipeline: PBMC/Seurat preprocessing on a COPY ──────
+# Driven ONLY by the Node worker via the allowlisted `r.pbmc.pipeline.v1` bridge op.
+# The input object is loaded by session_loader from the request's X-Object-ID (the
+# parent's server-derived state key). We run the existing preprocessing path on a
+# LOCAL COPY (`obj`) and NEVER reassign global_obj, so the postroute hook re-saves the
+# PARENT unchanged — the parent stays a stable checkpoint. A durable checkpoint RDS is
+# written ONLY to the SERVER-provided internal key, confined to the vault by
+# validate_path(). No arbitrary code/path/function: params are typed Seurat arguments
+# and the storage key is server-allocated. The response is a sanitized, bounded summary
+# (no matrices/cells/genes/embeddings); the Node bridge sanitizes it again.
+#* @post /object/pbmc-pipeline
+#* @parser json
+function(req, res) {
+  if (is.null(global_obj)) {
+    res$status <- 400
+    return(list(error = "No input object loaded."))
+  }
+  body <- req$body
+  if (is.null(body) || is.null(body$params)) {
+    res$status <- 400
+    return(list(error = "Missing pipeline parameters."))
+  }
+  p <- body$params
+
+  # Defensive coercion/clamps (Node already validated against its allowlist; R never
+  # trusts blindly). A bad/missing value falls back to the documented default.
+  as_int <- function(v, d, lo, hi) {
+    x <- suppressWarnings(as.integer(v))
+    if (length(x) != 1 || is.na(x)) return(d)
+    max(lo, min(hi, x))
+  }
+  as_num <- function(v, d, lo, hi) {
+    x <- suppressWarnings(as.numeric(v))
+    if (length(x) != 1 || is.na(x)) return(d)
+    max(lo, min(hi, x))
+  }
+
+  norm_method <- if (!is.null(p$normalizationMethod)) as.character(p$normalizationMethod)[1] else "LogNormalize"
+  if (!norm_method %in% c("LogNormalize", "SCTransform")) norm_method <- "LogNormalize"
+  scale_factor    <- as_num(p$scaleFactor,       10000, 1, 1e7)
+  nfeatures       <- as_int(p$variableFeatures,  2000, 50, 10000)
+  pca_dims        <- as_int(p$pcaDims,           50, 2, 100)
+  cluster_dims    <- as_int(p$clusterDims,       15, 2, 100)
+  cluster_res     <- as_num(p$clusterResolution, 0.8, 0.01, 10)
+  umap_dims       <- as_int(p$umapDims,          15, 2, 100)
+  umap_components <- as_int(p$umapComponents,    2, 2, 3)
+  umap_neighbors  <- as_int(p$umapNeighbors,     30, 2, 200)
+  umap_min_dist   <- as_num(p$umapMinDist,       0.3, 0, 1)
+  used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+
+  storage_key <- body$storage_key
+  if (is.null(storage_key) || !is.character(storage_key) || nchar(storage_key) == 0) {
+    res$status <- 400
+    return(list(error = "Missing checkpoint storage key."))
+  }
+
+  tryCatch({
+    # COPY-on-modify: mutating `obj` never touches global_obj (the parent).
+    obj <- global_obj
+    set.seed(used_seed)
+
+    if (norm_method == "SCTransform") {
+      obj <- SCTransform(obj, verbose = FALSE)
+    } else {
+      obj <- NormalizeData(obj, normalization.method = norm_method, scale.factor = scale_factor, verbose = FALSE)
+      obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = nfeatures, verbose = FALSE)
+      obj <- ScaleData(obj, features = rownames(obj), verbose = FALSE)
+    }
+
+    npcs <- min(pca_dims, ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
+    if (is.na(npcs) || npcs < 2) stop("Insufficient cells/features for PCA.")
+    obj <- RunPCA(obj, features = VariableFeatures(object = obj), npcs = npcs, seed.use = used_seed, verbose = FALSE)
+
+    avail_dims <- ncol(Embeddings(obj, "pca"))
+    cdims <- min(cluster_dims, avail_dims)
+    obj <- FindNeighbors(obj, reduction = "pca", dims = 1:cdims, verbose = FALSE)
+    obj <- FindClusters(obj, resolution = cluster_res, random.seed = used_seed, verbose = FALSE)
+
+    udims <- min(umap_dims, avail_dims)
+    un <- min(umap_neighbors, ncol(obj) - 1, na.rm = TRUE)
+    if (is.na(un) || un < 2) stop("Insufficient cells for UMAP.")
+    obj <- RunUMAP(obj, reduction = "pca", dims = 1:udims, n.components = umap_components,
+                   n.neighbors = un, min.dist = umap_min_dist, seed.use = used_seed, verbose = FALSE)
+
+    # Durable checkpoint → SERVER-provided internal key, confined to the vault.
+    safe_path <- validate_path(storage_key, "vault")
+    dir.create(dirname(safe_path), recursive = TRUE, showWarnings = FALSE)
+    raw_for_bundle <- if (exists("raw_obj") && !is.null(raw_obj)) raw_obj else obj
+    saveRDS(list(global = obj, raw = raw_for_bundle), file = safe_path)
+    size_bytes <- as.numeric(file.info(safe_path)$size)
+    checksum <- tryCatch({
+      if (requireNamespace("digest", quietly = TRUE)) {
+        digest::digest(file = safe_path, algo = "sha256")
+      } else if (requireNamespace("openssl", quietly = TRUE)) {
+        as.character(openssl::sha256(file(safe_path)))
+      } else {
+        NA_character_
+      }
+    }, error = function(e) NA_character_)
+    saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
+
+    cluster_counts <- table(obj$seurat_clusters)
+
+    # No mutation of global_obj. Return a sanitized, bounded summary only.
+    list(
+      ok = TRUE,
+      summary = list(
+        n_cells = ncol(obj),
+        n_features = nrow(obj),
+        n_variable_features = length(VariableFeatures(obj)),
+        n_pcs = npcs,
+        n_clusters = length(cluster_counts),
+        cluster_sizes = as.integer(cluster_counts),
+        reductions = names(obj@reductions),
+        normalization_method = norm_method,
+        resolution = cluster_res,
+        used_seed = used_seed
+      ),
+      checkpoint = list(
+        saved = saved,
+        checksum_sha256 = if (is.na(checksum)) NULL else checksum,
+        size_bytes = size_bytes
+      ),
+      versions = list(
+        seurat_version = as.character(utils::packageVersion("Seurat")),
+        r_version = as.character(getRversion())
+      )
+    )
+  }, error = function(e) {
+    res$status <- 500
+    # Never leak the raw R error/stack; the Node bridge re-maps non-200s to a generic
+    # sanitized message anyway.
+    list(error = "pbmc pipeline failed")
+  })
+}
+
 #* Get all unique values (with counts) for a metadata column
 #* @get /meta-values
 function(res, column) {

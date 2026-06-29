@@ -510,7 +510,13 @@ const signupRateLimiter = createRateLimiter();
 // vault paths before proxying to R. backend/r-path-drift.test.js asserts that
 // every field feeding R's validate_path() in r-backend/plumber.R is covered
 // here, so a new R path-like field can't silently bypass Node-side validation.
-const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths'];
+// 'storage_key' is the PBMC pipeline checkpoint key (r-backend/plumber.R
+// POST /object/pbmc-pipeline → validate_path(storage_key, "vault")). In normal
+// operation it is server-allocated by the worker bridge (never client-supplied), but
+// because /api/r/* is a catch-all proxy we ALSO validate it here as defense-in-depth:
+// if a client ever sends a top-level `storage_key` through the proxy it is confined to
+// the vault before reaching R (and the r-path-drift guard stays satisfied).
+const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths', 'storage_key'];
 
 // Middleware
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));

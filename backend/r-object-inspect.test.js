@@ -95,7 +95,7 @@ describe('r.object.inspect — scope & registration', () => {
 
   it('registers r.object.inspect; generic / checkpoint.noop / r.runtime.check unchanged', () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.noop', 'generic', 'r.object.inspect', 'r.runtime.check']);
+      .toEqual(['checkpoint.noop', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(rObjectInspectHandler);
     // Pre-existing handlers are the exact same functions (not swapped out).
     expect(DEFAULT_HANDLERS.generic).toBe(worker.genericNoopHandler);
@@ -226,8 +226,9 @@ describe('r.object.inspect — bridge allowlist & input control', () => {
 
   it('createDefaultRCaller (defense-in-depth) refuses any non-allowlisted target BEFORE HTTP', async () => {
     const callR = createDefaultRCaller({ port: 8000, token: 't' });
-    // Only the two known bridge targets exist.
-    expect([...R_BRIDGE_ALLOWED_TARGETS].sort()).toEqual(['GET /health', 'GET /object/inspect']);
+    // Only the known bridge targets exist (the pipeline POST target was added by the
+    // pbmc.pipeline.v1 branch; this set is still exact/closed).
+    expect([...R_BRIDGE_ALLOWED_TARGETS].sort()).toEqual(['GET /health', 'GET /object/inspect', 'POST /object/pbmc-pipeline']);
     expect(isAllowedRBridgeTarget('GET', '/object/inspect')).toBe(true);
     expect(isAllowedRBridgeTarget('GET', '/health')).toBe(true);
     expect(isAllowedRBridgeTarget('POST', '/object/inspect')).toBe(false);

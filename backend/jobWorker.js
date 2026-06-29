@@ -30,6 +30,7 @@
 const crypto = require('crypto');
 const database = require('./database');
 const rWorkerBridge = require('./rWorkerBridge');
+const { validatePbmcPipelineParams, allocateCheckpointStorageKey } = require('./pbmcPipeline');
 
 /** Stable, header-safe worker id (`worker_` + hex). One per worker instance. */
 function generateWorkerId() {
@@ -308,18 +309,165 @@ async function rObjectInspectHandler(ctx) {
   };
 }
 
+/**
+ * PBMC/Seurat pipeline handler: the FIRST handler that runs a real scientific pipeline
+ * and produces a durable result. It wraps the existing plumber.R preprocessing path
+ * (normalize → variable features → scale → PCA → neighbors → clusters → UMAP) as ONE
+ * allowlisted, mutating bridge operation that runs on a COPY of the input object — the
+ * parent is NEVER mutated and remains a stable checkpoint.
+ *
+ * SAME OWNERSHIP BOUNDARY as r.object.inspect (project membership ≠ live R access):
+ *   the input object id comes from the TRUSTED job row; the job creator must OWN that
+ *   live object (verifyAnalysisObjectOwner) BEFORE any R contact, and the R state key
+ *   (X-Object-ID) is SERVER-DERIVED (deriveRObjectStateKey). A co-member/admin who
+ *   created a job against another user's object FAILS here.
+ *
+ * Order (all DB result/edge/artifact records are created only AFTER R success):
+ *   1. heartbeat; require + own the input object; derive its state key (all before R)
+ *   2. validate parameters against the fixed allowlist (backend/pbmcPipeline.js) —
+ *      invalid params fail the job here, BEFORE any R mutation
+ *   3. allocate a SERVER-controlled internal checkpoint key (no client input)
+ *   4. invoke the allowlisted `r.pbmc.pipeline.v1` bridge op (server-built body)
+ *   5. require a durable checkpoint save (saved + checksum) — else fail (no result)
+ *   6. create the result analysis object + checkpoint lineage edge (parent→result)
+ *   7. record a local_internal `checkpoint` artifact (key/checksum/size internal) and
+ *      a metadata-only `pipeline_summary` artifact (resolved params + summary)
+ * On failure/cancel/claim-loss no successful result object/edge/artifact is created;
+ * the claim guard makes two workers unable to duplicate any of them. Bridge errors
+ * arrive pre-sanitized (no raw R error/stack/internal URL/state key).
+ */
+async function pbmcPipelineHandler(ctx) {
+  ctx.heartbeat();
+  ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: validating ownership + parameters before any R contact.' });
+
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+
+  // 1. The job MUST reference an input analysis object. Fail safely BEFORE any R.
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Pipeline job is missing its input analysis object.');
+  }
+
+  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may run the
+  //    pipeline. Same owner-verified check the /api/r/* proxy uses; 404-style message
+  //    so another user's object existence is never revealed.
+  if (typeof ctx.verifyAnalysisObjectOwner !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+
+  // 3. Derive the input object's R state key (X-Object-ID) SERVER-SIDE. Never client-
+  //    provided; identical to what /api/r/* would send for this owner+object.
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+
+  // 4. Validate + resolve parameters against the fixed allowlist BEFORE any R mutation.
+  //    Throws a coded, SAFE-message error (INVALID_PARAMETER / UNKNOWN_PARAMETER / …)
+  //    that fails the job terminally without contacting R.
+  const { params, defaultsApplied } = validatePbmcPipelineParams(job.parameters);
+
+  // 5. Server-allocate the internal checkpoint storage key (no client input; relative,
+  //    traversal-free; the R backend confines it to its vault). Never logged/exposed.
+  const checkpointStorageKey = allocateCheckpointStorageKey(job.id);
+
+  ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: parameters valid; invoking allowlisted PBMC pipeline on a copy of the input object (parent unchanged).' });
+
+  // 6. Run the allowlisted, mutating bridge op. Object context + params body are all
+  //    server-derived; the bridge ignores raw job input for routing.
+  const descriptor = await ctx.runRBridgeOperation({
+    job,
+    operation: 'r.pbmc.pipeline.v1',
+    actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+    objectContext: { objectId, stateKey },
+    pipeline: { params, checkpointStorageKey },
+    input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+
+  // 7. A durable checkpoint MUST have been saved (with integrity) for success. If not,
+  //    fail BEFORE creating any DB result — so a missing/failed save leaves no result
+  //    object, edge, or artifact behind (nothing to roll back).
+  const checkpoint = descriptor.checkpoint || {};
+  if (checkpoint.saved !== true || typeof checkpoint.checksumSha256 !== 'string' || checkpoint.checksumSha256 === '') {
+    throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Pipeline did not produce a durable checkpoint.');
+  }
+
+  // 8. Create the result analysis object (a CHILD checkpoint of the input object) +
+  //    the parent→result lineage edge, atomically and claim-guarded. The parent is
+  //    never mutated. Result metadata records provenance WITHOUT implying a download.
+  const resultObject = ctx.createCheckpoint({
+    objectType: descriptor.resultObjectType || 'seurat',
+    displayName: 'PBMC pipeline result',
+    metadata: {
+      source: 'pbmc.pipeline.v1',
+      operation: 'r.pbmc.pipeline.v1',
+      scientific_output: true,
+      checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+      resolvedParams: params,
+      defaultsApplied,
+      summary: descriptor.summary,
+    },
+  });
+
+  // 9. Record the durable checkpoint artifact (local_internal): server-allocated key
+  //    (stored internally, stripped from public responses) + integrity checksum/size.
+  const checkpointArtifact = ctx.createCheckpointArtifact({
+    artifactType: 'checkpoint',
+    resultAnalysisObjectId: resultObject.id,
+    name: 'PBMC pipeline checkpoint',
+    description: 'Durable internal checkpoint of the PBMC pipeline result object (RDS on the R backend vault). No public download in this branch.',
+    storageKind: 'local_internal',
+    internalStorageKey: checkpointStorageKey,
+    checksumSha256: checkpoint.checksumSha256,
+    sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
+    metadata: { operation: 'r.pbmc.pipeline.v1', scientific_output: true, downloadable: false },
+  });
+
+  // 10. Record the metadata-only pipeline summary artifact (resolved params + summary).
+  const summaryArtifact = ctx.createArtifact({
+    artifactType: descriptor.artifactType, // 'pipeline_summary'
+    resultAnalysisObjectId: resultObject.id,
+    name: descriptor.name,
+    description: descriptor.description,
+    storageKind: 'metadata_only',
+    metadata: { ...descriptor.metadata, resolvedParams: params, defaultsApplied },
+  });
+
+  ctx.log({ level: 'info', message: `pbmc.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id} (parent ${objectId} unchanged).` });
+
+  return {
+    resultAnalysisObjectId: resultObject.id,
+    result: {
+      ok: true,
+      handled: 'pbmc.pipeline.v1',
+      operation: 'r.pbmc.pipeline.v1',
+      resultAnalysisObjectId: resultObject.id,
+      checkpointArtifactId: checkpointArtifact.id,
+      summaryArtifactId: summaryArtifact.id,
+    },
+  };
+}
+
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
-// `r.runtime.check` worker-to-R bridge, and the read-only `r.object.inspect` object
-// inspection bridge (both allowlisted, metadata-only R-backed operations). The real
-// analytical job types (normalize/qc_filter/pca/cluster/umap/find_markers/integrate)
-// remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
-// instead of pretending to run them.
+// `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
+// inspection bridge, and the first real scientific pipeline `pbmc.pipeline.v1`. The
+// other analytical job types (normalize/qc_filter/pca/cluster/umap/find_markers/
+// integrate) remain deliberately UNREGISTERED so the worker fails them
+// (UNSUPPORTED_JOB_TYPE) instead of pretending to run them. DEG / pathway enrichment /
+// CellChat are NOT registered here (see docs/analysis-pipeline-integration.md).
 const DEFAULT_HANDLERS = Object.freeze({
   generic: genericNoopHandler,
   'checkpoint.noop': checkpointNoopHandler,
   'r.runtime.check': rRuntimeCheckHandler,
   'r.object.inspect': rObjectInspectHandler,
+  'pbmc.pipeline.v1': pbmcPipelineHandler,
 });
 
 /**
@@ -477,6 +625,10 @@ function createJobWorker(options = {}) {
       // can only write to the job it currently holds. They create NO files and expose
       // NO paths — metadata only in this branch.
       createArtifact: (input) => db.createJobArtifactByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      // Durable internal checkpoint artifact (server-set storageKind/key/checksum/size).
+      // Distinct from createArtifact, whose generic input deliberately ignores storage
+      // fields; used only by the pbmc.pipeline.v1 handler for local_internal storage.
+      createCheckpointArtifact: (input) => db.createCheckpointArtifactForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       createCheckpoint: (input) => db.createCheckpointForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // R-bridge seam (used only by the r.runtime.check / r.object.inspect handlers).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
@@ -593,6 +745,7 @@ module.exports = {
   checkpointNoopHandler,
   rRuntimeCheckHandler,
   rObjectInspectHandler,
+  pbmcPipelineHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,
