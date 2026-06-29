@@ -17,8 +17,36 @@
 > running server claims, drains, or executes jobs; R execution is unchanged and
 > still synchronous; cancellation still records intent only and does not kill R
 > work; R active state is still user/object-keyed; and there is no shared/mutable
-> project R state. The first actual worker remains the future
-> `worker-queue-drain-minimal` branch.
+> project R state. The first actual worker is the `worker-queue-drain-minimal`
+> branch below.
+>
+> **Update — branch `worker-queue-drain-minimal` (this branch).** A **minimal
+> worker drain** now consumes the contract (`backend/jobWorker.js`,
+> `createJobWorker(...)` with `runOnce`/`start`/`stop`/`isRunning`). It reaps
+> expired leases, claims one eligible queued job, heartbeats, runs the matching
+> **registered** handler, and completes/fails it through the contract, writing
+> durable logs. Scope is deliberately narrow:
+>
+> - **Only registered handlers run.** The default registry has exactly one
+>   handler — a safe `generic` **noop** that appends a log and returns a tiny JSON
+>   result. It runs **no R/Seurat work**.
+> - **Unsupported job types are claimed then failed** with `UNSUPPORTED_JOB_TYPE`
+>   (the preferred policy: a job with no handler ends `failed`, never loops).
+> - **No scientific pipeline execution, no artifacts/checkpoints, no downloads, no
+>   object storage** — none of that exists yet.
+> - **Cancellation is cooperative / status-level only.** Canceling clears the
+>   claim/lease and moves the job to a terminal status; the worker then loses its
+>   claim (`CLAIM_LOST`) and never resurrects the job. It does **not** kill R work
+>   (there is no R handler to kill).
+> - **R state remains user/object-keyed and owner-verified**; the worker holds no
+>   R access and processing a job does not widen `verifyRObjectOwnership`. There is
+>   still **no shared project R state**.
+> - The worker is **disabled by default** and only starts when
+>   `ENABLE_JOB_WORKER=true`; it stops cleanly on shutdown.
+>
+> Tested in `backend/job-worker.test.js`. The next branch is either
+> `job-artifacts-and-checkpoints` (now that a minimal handler can run safely) or a
+> narrow R-handler bridge branch if real R pipeline execution is needed.
 >
 > The current runtime behavior is described in [`architecture.md`](architecture.md),
 > [`R_BACKEND.md`](R_BACKEND.md), and [`STATE_MANAGEMENT.md`](STATE_MANAGEMENT.md);

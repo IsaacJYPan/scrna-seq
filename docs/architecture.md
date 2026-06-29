@@ -283,15 +283,43 @@ ownership-scoped record:
   Canceling a claimed job (owner or project route) clears the `claim_token`/lease
   so the worker's next heartbeat/complete/fail fails deterministically
   (`CLAIM_LOST`). Covered by `backend/jobs-worker-contract.test.js`.
-- **Scope of this branch.** This adds the *durable worker-coordination schema +
+- **Minimal worker drain (`backend/jobWorker.js`).** A small, opt-in worker now
+  *consumes* the contract above. `createJobWorker({ db, workerId, pollIntervalMs,
+  leaseSeconds, handlers, logger, now })` returns a runner with
+  `runOnce()`/`start()`/`stop()`/`isRunning()`. One tick: `reapExpiredJobs` (recover
+  crashed leases), `claimNextJob` (single-winner; idle no-op if nothing is
+  claimable), heartbeat, run the **registered** handler, then complete/fail through
+  the contract — writing durable logs at claim / handler-start / completion /
+  failure via a new claim-guarded `appendJobLogByWorker` helper.
+  - **Handler registry (preferred policy).** Only job types present in the registry
+    run. The default registry has exactly one handler: a safe `generic` **noop**
+    that appends a log and returns a tiny JSON result — it runs **no R/Seurat work**.
+    An unregistered job type is claimed and then **failed** with `UNSUPPORTED_JOB_TYPE`
+    (terminal — it never loops).
+  - **Cancellation / claim-loss.** If a job is canceled or its lease reaped while a
+    handler runs, the worker's complete/fail surfaces `CLAIM_LOST` and the worker
+    **does not resurrect** the job (it stays canceled/failed). Cancellation remains
+    cooperative/status-level and does **not** kill R work.
+  - **Startup.** Disabled by default; `server.js` starts it only when
+    `ENABLE_JOB_WORKER=true` and stops it cleanly on `SIGINT`/`SIGTERM`. Logs never
+    include claim tokens, bearer tokens, or filesystem paths. Covered by
+    `backend/job-worker.test.js`.
+- **Scope of branch `worker-queue-drain-minimal`.** This wires a *minimal drain
+  loop* onto the contract. Still **NOT** implemented: full scRNA-seq pipeline
+  execution, artifact/checkpoint creation, downloads/object storage, public links,
+  and production runtime isolation. The worker is **not** wired into the R proxy
+  (no `X-Job-ID` execution path); R active state remains user/object-keyed and
+  owner-verified; there is no shared/mutable project R state, and worker activity
+  does not widen R object ownership. A small `busy_timeout = 5000` pragma softens
+  brief single-process write contention; true multi-process contention hardening
+  remains a follow-up.
+- **Earlier (contract-only) scope, retained for history.** The prior
+  `job-worker-contract-and-schema` branch added the *durable worker-coordination schema +
   contract + helpers* on top of the existing record/API/ownership boundary. There
-  is still **no worker or queue draining jobs**: nothing calls these helpers in the
-  running server, nothing advances a job past `queued` on its own, cancellation
-  records intent only and does **not** kill any R work, and existing R proxy
-  execution is unchanged and still synchronous. Jobs are not yet wired into the R
-  proxy (no `X-Job-ID`). R active state remains user/object-keyed and owner-verified;
-  there is no shared/mutable project R state. The first actual worker is the future
-  `worker-queue-drain-minimal` branch; result artifacts/checkpoints are the future
+  was **no worker** at that point: nothing called these helpers, nothing advanced a
+  job past `queued` on its own, and existing R proxy execution was unchanged and
+  synchronous. The `worker-queue-drain-minimal` branch above is the first actual
+  worker; result artifacts/checkpoints remain the future
   `job-artifacts-and-checkpoints` branch.
 
 ### Organization & Project Authorization (`organizations`, `projects`)
