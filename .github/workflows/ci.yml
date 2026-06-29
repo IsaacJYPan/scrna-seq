@@ -182,10 +182,29 @@ jobs:
         #                        claim-token/worker/R-URL; deriveRStateKey stays server-derived and
         #                        /api/r/* still rejects a co-member's cross-user object id; NO
         #                        download, NO object storage, NO arbitrary R, NO real R/Seurat pipeline)
+        #   analysis-object-lineage-dag (DAG-ready analysis-object lineage edge model:
+        #                        idempotent additive analysis_object_edges migration + indexes
+        #                        (incl. the COALESCE(job_id,'') unique index), one-time idempotent
+        #                        backfill of existing single-parent links as derived_from edges with
+        #                        cross-project links NOT backfilled, server-generated aoe_ ids with
+        #                        client project/creator/internal fields ignored, malformed ids 400 /
+        #                        unknown-or-cross-scope refs 404 / self-parent 400 / duplicate 409 /
+        #                        direct+indirect cycle 409, branching (two children of one parent)
+        #                        and multi-parent children representable + traversable, checkpoint
+        #                        completion creating exactly one job-linked checkpoint edge while
+        #                        failed/canceled/claim-lost/duplicate completions create none,
+        #                        role-checked read-only parents/children/lineage routes (404-vs-403,
+        #                        400 malformed, cross-project/legacy-NULL-project objects not leaked),
+        #                        responses omitting storage-uri/path/state-key/claim-token/worker
+        #                        internals, deterministic bounded graph, and proof a co-member who can
+        #                        read lineage still cannot use a checkpoint object via /api/r/*; the
+        #                        single-parent parent_object_id/lineage_root_id stay compatibility/
+        #                        fast-path fields; NO named branches, NO merge/integration semantics,
+        #                        NO mutating R/Seurat pipeline, NO download/object storage)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state

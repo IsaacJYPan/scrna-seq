@@ -371,6 +371,62 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_job_artifacts_status ON job_artifacts(status);
     CREATE INDEX IF NOT EXISTS idx_job_artifacts_project_job ON job_artifacts(project_id, job_id);
     CREATE INDEX IF NOT EXISTS idx_job_artifacts_created ON job_artifacts(created_at);
+
+    -- ── Analysis object lineage edges (DAG-ready parent→child model) ───────
+    -- The forward-looking, durable source of truth for analysis-object lineage as
+    -- a DAG. analysis_objects.parent_object_id / lineage_root_id remain as
+    -- COMPATIBILITY / fast-path fields for the common single-parent case; this
+    -- edge table is what graph traversal (parents/children/lineage reads) uses and
+    -- is what lets a FUTURE multi-parent operation (integration / comparison /
+    -- merge) record several parents WITHOUT encoding them in metadata. This branch
+    -- only writes single-parent 'checkpoint' edges (from the checkpoint helper) and
+    -- backfills existing parent links as 'derived_from'; it does NOT add named
+    -- branches, merge/integration semantics, or any mutating R/Seurat pipeline.
+    --
+    -- Identity & scope are server-owned: ids are server-generated (aoe_...),
+    -- project_id is DERIVED from the parent/child objects (never client input), and
+    -- created_by_user_id is the server-set actor. project_id is NULL for an edge
+    -- between legacy owner-scoped (NULL-project) objects and a real project id for a
+    -- project-scoped edge; the project lineage read routes always pin a real
+    -- project_id, so legacy NULL-project edges never leak into them (same pattern as
+    -- job_artifacts). An edge always stays WITHIN one scope: the helper refuses to
+    -- link a parent and child whose project scopes differ. There is intentionally
+    -- NO public edge-create route in this branch (edge creation is helper/worker-
+    -- driven); the read routes are metadata-only.
+    --
+    -- The expression unique index treats a NULL job_id as '' so a (parent, child,
+    -- job, parent_role, edge_type) tuple is unique even for the job-less backfill
+    -- rows; that makes both the backfill (INSERT OR IGNORE) and re-running init
+    -- idempotent — no duplicate edge on repeated startup/migration.
+    CREATE TABLE IF NOT EXISTS analysis_object_edges (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      parent_analysis_object_id TEXT NOT NULL,
+      child_analysis_object_id TEXT NOT NULL,
+      job_id TEXT,
+      edge_type TEXT NOT NULL,
+      parent_role TEXT NOT NULL DEFAULT 'primary',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_by_user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK (parent_analysis_object_id <> child_analysis_object_id),
+      FOREIGN KEY (project_id) REFERENCES projects(id),
+      FOREIGN KEY (parent_analysis_object_id) REFERENCES analysis_objects(id),
+      FOREIGN KEY (child_analysis_object_id) REFERENCES analysis_objects(id),
+      FOREIGN KEY (job_id) REFERENCES jobs(id),
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_aoe_project ON analysis_object_edges(project_id);
+    CREATE INDEX IF NOT EXISTS idx_aoe_parent ON analysis_object_edges(parent_analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_aoe_child ON analysis_object_edges(child_analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_aoe_job ON analysis_object_edges(job_id);
+    CREATE INDEX IF NOT EXISTS idx_aoe_type ON analysis_object_edges(edge_type);
+    CREATE INDEX IF NOT EXISTS idx_aoe_project_parent ON analysis_object_edges(project_id, parent_analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_aoe_project_child ON analysis_object_edges(project_id, child_analysis_object_id);
+    CREATE INDEX IF NOT EXISTS idx_aoe_project_job ON analysis_object_edges(project_id, job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_aoe_unique ON analysis_object_edges(
+      parent_analysis_object_id, child_analysis_object_id, COALESCE(job_id, ''), parent_role, edge_type
+    );
   `);
 
   // ── Schema migration: add 'operation' column if missing (for pre-existing DBs) ──
@@ -522,6 +578,50 @@ function initDatabase(dbPath) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_prov_user ON provenance(user_email);
     CREATE INDEX IF NOT EXISTS idx_cache_user ON results_cache(user_email);
+  `);
+
+  // ── Backfill lineage edges from existing single-parent links ────────────────
+  // Every analysis object that already has a parent_object_id gets a durable
+  // `derived_from` edge so the edge table is the complete graph source even for
+  // pre-existing data. This is pure SQL and idempotent:
+  //   - INSERT OR IGNORE + the expression unique index (parent, child,
+  //     COALESCE(job_id,''), parent_role, edge_type) means a second run inserts
+  //     nothing, so repeated startup/migration never duplicates a backfilled edge.
+  //   - The JOIN to the parent row means a child whose parent_object_id points at a
+  //     missing/bad historical row is simply skipped (no crash, no orphan edge).
+  //   - `parent.project_id IS child.project_id` confines the edge to ONE scope:
+  //     legacy NULL↔NULL pairs match (legacy edges stay NULL-project) and a real
+  //     project pair matches, but a cross-project parent link (different/NULL vs
+  //     real project) is intentionally NOT backfilled, so a bad legacy cross-project
+  //     link never leaks into a project's lineage graph.
+  // created_by_user_id / created_at are taken from the CHILD row (the object whose
+  // lineage this records); job_id is NULL because legacy links predate the job that
+  // produced them. This does NOT touch parent_object_id / lineage_root_id, which
+  // remain the compatibility/fast-path fields.
+  db.exec(`
+    INSERT OR IGNORE INTO analysis_object_edges
+      (id, project_id, parent_analysis_object_id, child_analysis_object_id, job_id,
+       edge_type, parent_role, metadata_json, created_by_user_id, created_at)
+    SELECT
+      'aoe_' || lower(hex(randomblob(12))),
+      child.project_id,
+      child.parent_object_id,
+      child.id,
+      NULL,
+      'derived_from',
+      'primary',
+      '{}',
+      child.owner_user_id,
+      child.created_at
+    FROM analysis_objects child
+    JOIN analysis_objects parent ON parent.id = child.parent_object_id
+    WHERE child.parent_object_id IS NOT NULL
+      AND parent.project_id IS child.project_id
+      AND NOT EXISTS (
+        SELECT 1 FROM analysis_object_edges e
+        WHERE e.parent_analysis_object_id = child.parent_object_id
+          AND e.child_analysis_object_id = child.id
+      );
   `);
 
   console.log('[DB] Database initialized at', dbPath);
@@ -2667,31 +2767,51 @@ function createProjectAnalysisObject(userId, projectId, input = {}) {
   }
 
   const id = generateAnalysisObjectId();
-  db.prepare(`
-    INSERT INTO analysis_objects
-      (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
-       display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
-    VALUES
-      (@id, @owner, @projectId, @datasetId, @parentObjectId, @lineageRootId, @objectType,
-       @displayName, @storageUri, @objectHash, @metadataJson, @createdByProvenanceId)
-  `).run({
-    id,
-    owner,
-    projectId: pid,
-    datasetId,
-    parentObjectId,
-    lineageRootId,
-    objectType,
-    displayName: input.displayName != null ? String(input.displayName) : null,
-    storageUri: input.storageUri != null ? String(input.storageUri) : null,
-    objectHash: input.objectHash != null ? String(input.objectHash) : null,
-    metadataJson: JSON.stringify(metadata),
-    createdByProvenanceId: input.createdByProvenanceId ? String(input.createdByProvenanceId) : null
-  });
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO analysis_objects
+        (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+         display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+      VALUES
+        (@id, @owner, @projectId, @datasetId, @parentObjectId, @lineageRootId, @objectType,
+         @displayName, @storageUri, @objectHash, @metadataJson, @createdByProvenanceId)
+    `).run({
+      id,
+      owner,
+      projectId: pid,
+      datasetId,
+      parentObjectId,
+      lineageRootId,
+      objectType,
+      displayName: input.displayName != null ? String(input.displayName) : null,
+      storageUri: input.storageUri != null ? String(input.storageUri) : null,
+      objectHash: input.objectHash != null ? String(input.objectHash) : null,
+      metadataJson: JSON.stringify(metadata),
+      createdByProvenanceId: input.createdByProvenanceId ? String(input.createdByProvenanceId) : null
+    });
 
-  if (!parentObjectId) {
-    db.prepare('UPDATE analysis_objects SET lineage_root_id = id WHERE id = ?').run(id);
-  }
+    if (!parentObjectId) {
+      db.prepare('UPDATE analysis_objects SET lineage_root_id = id WHERE id = ?').run(id);
+    } else {
+      // Atomically record the DAG edge so the edge table is the complete graph
+      // source for live reads (not only after an init-time backfill). Single-parent
+      // `derived_from`, primary role, no job; project_id is the (already same-project)
+      // parent's project. The child is brand-new, so no cycle is possible. The
+      // parent_object_id / lineage_root_id columns above remain the compatibility/
+      // fast-path fields.
+      _insertLineageEdgeRow({
+        projectId: pid,
+        parentObjectId,
+        childObjectId: id,
+        jobId: null,
+        edgeType: 'derived_from',
+        parentRole: 'primary',
+        metadata: {},
+        createdByUserId: owner,
+        now: dbNow()
+      });
+    }
+  }).immediate();
 
   return getProjectAnalysisObjectRow(id, pid);
 }
@@ -3414,6 +3534,368 @@ function createJobArtifactByWorker(jobId, workerId, claimToken, input = {}, opts
   return insertJobArtifact(row, input);
 }
 
+// ── Analysis object lineage edges (DAG-ready graph model) ─────────────────────
+//
+// The durable, forward-looking source of truth for analysis-object lineage as a
+// DAG. analysis_objects.parent_object_id / lineage_root_id stay as compatibility/
+// fast-path fields for single-parent lineage; these edge helpers are what graph
+// traversal uses and what lets a FUTURE multi-parent operation record several
+// parents as multiple edge rows instead of encoding them in metadata.
+//
+// Server-owned identity & scope: edge ids are server-generated (aoe_...),
+// project_id is DERIVED from the parent/child objects (never client input), and
+// created_by_user_id is the server-set actor. An edge always stays within ONE
+// scope (the parent and child must share the same project, NULL↔NULL for legacy
+// owner-scoped objects). There is NO public edge-create route in this branch.
+
+const ALLOWED_EDGE_TYPES = new Set([
+  'derived_from',     // generic "child is derived from parent" (used by the backfill)
+  'checkpoint',       // child is a checkpoint produced by a job from the parent input object
+  'branch',           // child is an explicit branch point off the parent
+  'integration_input',// parent is one input to a future integration/merge child
+  'comparison_input', // parent is one input to a future comparison child
+  'manual_link'       // explicit manual link (no public create route exposes this yet)
+]);
+const ALLOWED_PARENT_ROLES = new Set([
+  'primary', 'secondary', 'reference', 'query', 'control', 'case', 'input'
+]);
+function isValidEdgeType(t) { return ALLOWED_EDGE_TYPES.has(t); }
+function isValidParentRole(r) { return ALLOWED_PARENT_ROLES.has(r); }
+
+// Server-generated, R-header-irrelevant edge id (aoe_ + lowercase hex).
+function generateAnalysisObjectEdgeId() {
+  return `aoe_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+// Local id-shape guards (mirror server.js ANALYSIS_OBJECT_ID_PATTERN / JOB_ID_PATTERN)
+// so the DB-tier helpers can reject a MALFORMED id with a 400-mapped code before any
+// lookup, distinct from a well-formed-but-unknown id (404).
+const _AO_ID_RE = /^ao_[0-9a-f]+$/;
+const _JOB_ID_RE = /^job_[0-9a-f]+$/;
+
+// Traversal bounds: keep lineage reads/cycle checks cheap and DoS-safe even if a DAG
+// grows large or historical data is malformed. A traversal that hits these limits is
+// reported as truncated rather than walked unbounded.
+const LINEAGE_MAX_NODES = 500;
+const LINEAGE_MAX_DEPTH = 64;
+
+// Public-safe edge projection. Exposes only graph/metadata fields — never a storage
+// path, R state key, claim token, or other internal. (The edge row has none of those
+// columns, but the projection makes the safe contract explicit.)
+function rowToAnalysisObjectEdge(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    parentAnalysisObjectId: row.parent_analysis_object_id,
+    childAnalysisObjectId: row.child_analysis_object_id,
+    jobId: row.job_id,
+    edgeType: row.edge_type,
+    parentRole: row.parent_role,
+    metadata: JSON.parse(row.metadata_json || '{}'),
+    createdByUserId: row.created_by_user_id,
+    createdAt: row.created_at
+  };
+}
+
+// Low-level INSERT of a single edge row. No validation / cycle check — callers that
+// use this (e.g. the checkpoint transaction) have already validated scope and the
+// child is brand-new (cannot form a cycle). Server-generated id; created_by/project
+// are passed by the trusted caller, never the client. Returns the row id.
+function _insertLineageEdgeRow({ projectId, parentObjectId, childObjectId, jobId,
+  edgeType, parentRole, metadata, createdByUserId, now }) {
+  const id = generateAnalysisObjectEdgeId();
+  db.prepare(`
+    INSERT INTO analysis_object_edges
+      (id, project_id, parent_analysis_object_id, child_analysis_object_id, job_id,
+       edge_type, parent_role, metadata_json, created_by_user_id, created_at)
+    VALUES
+      (@id, @projectId, @parentObjectId, @childObjectId, @jobId,
+       @edgeType, @parentRole, @metadataJson, @createdByUserId, @createdAt)
+  `).run({
+    id,
+    projectId: projectId || null,
+    parentObjectId,
+    childObjectId,
+    jobId: jobId || null,
+    edgeType,
+    parentRole,
+    metadataJson: JSON.stringify(metadata || {}),
+    createdByUserId,
+    createdAt: isSqliteTimestamp(now) ? now : dbNow()
+  });
+  return id;
+}
+
+// Raw edge-row fetches (no auth; project-scoped read wrappers authorize above).
+function getLineageEdgesByParent(parentObjectId, projectScope) {
+  // projectScope: { projectId } pins a project (legacy NULL-project edges excluded);
+  // omitted → owner/global scope (used by internal helpers & legacy reads).
+  if (projectScope && projectScope.projectId !== undefined) {
+    return db.prepare(
+      'SELECT * FROM analysis_object_edges WHERE parent_analysis_object_id = ? AND project_id = ? ORDER BY created_at ASC, id ASC'
+    ).all(String(parentObjectId), String(projectScope.projectId));
+  }
+  return db.prepare(
+    'SELECT * FROM analysis_object_edges WHERE parent_analysis_object_id = ? ORDER BY created_at ASC, id ASC'
+  ).all(String(parentObjectId));
+}
+function getLineageEdgesByChild(childObjectId, projectScope) {
+  if (projectScope && projectScope.projectId !== undefined) {
+    return db.prepare(
+      'SELECT * FROM analysis_object_edges WHERE child_analysis_object_id = ? AND project_id = ? ORDER BY created_at ASC, id ASC'
+    ).all(String(childObjectId), String(projectScope.projectId));
+  }
+  return db.prepare(
+    'SELECT * FROM analysis_object_edges WHERE child_analysis_object_id = ? ORDER BY created_at ASC, id ASC'
+  ).all(String(childObjectId));
+}
+
+/**
+ * Bounded cycle check for a PROPOSED parent→child edge. Adding parent→child closes a
+ * cycle iff `parentObjectId` is already reachable from `childObjectId` by walking
+ * existing parent→child edges downward (i.e. child is already an ancestor of parent).
+ * We walk the descendants of `childObjectId`; if we ever reach `parentObjectId` it is
+ * a cycle. Bounded by LINEAGE_MAX_NODES so malformed/huge data fails safely. Scope is
+ * the proposed edge's derived project scope so the walk cannot cross projects.
+ */
+function lineageEdgeWouldCreateCycle(parentObjectId, childObjectId, projectScope) {
+  if (parentObjectId === childObjectId) return true;
+  const seen = new Set([String(childObjectId)]);
+  let frontier = [String(childObjectId)];
+  let visited = 0;
+  while (frontier.length > 0) {
+    const next = [];
+    for (const node of frontier) {
+      if (++visited > LINEAGE_MAX_NODES) return true; // fail safe: treat as cycle
+      const children = getLineageEdgesByParent(node, projectScope);
+      for (const e of children) {
+        const c = e.child_analysis_object_id;
+        if (c === String(parentObjectId)) return true; // reaches the proposed parent
+        if (!seen.has(c)) { seen.add(c); next.push(c); }
+      }
+    }
+    frontier = next;
+  }
+  return false;
+}
+
+/**
+ * Internal: create ONE validated lineage edge. Used by future multi-parent
+ * operations and the test suite; there is NO public create route. All identity/scope
+ * fields are server-owned — `actorUserId` becomes created_by_user_id and project_id
+ * is DERIVED from the objects, so neither can be set from client input.
+ *
+ * Validates: malformed parent/child/job ids → INVALID_* (400); self-parent →
+ * SELF_PARENT (400); bad edgeType/parentRole/metadata → INVALID_* (400); unknown or
+ * cross-scope parent/child → PARENT_NOT_FOUND / CHILD_NOT_FOUND (404); job that does
+ * not exist or is in another scope → JOB_NOT_FOUND (404); a proposed edge that would
+ * create a cycle → CYCLE (409); an exact duplicate edge → DUPLICATE_EDGE (409).
+ * Returns the public edge projection.
+ */
+function createLineageEdge(actorUserId, input = {}) {
+  const parentObjectId = typeof input.parentObjectId === 'string' ? input.parentObjectId : '';
+  const childObjectId = typeof input.childObjectId === 'string' ? input.childObjectId : '';
+  if (!_AO_ID_RE.test(parentObjectId)) throw codedError('INVALID_PARENT_ID', 'Malformed parent analysis object ID.');
+  if (!_AO_ID_RE.test(childObjectId)) throw codedError('INVALID_CHILD_ID', 'Malformed child analysis object ID.');
+  if (parentObjectId === childObjectId) throw codedError('SELF_PARENT', 'An analysis object cannot be its own parent.');
+
+  const edgeType = input.edgeType === undefined || input.edgeType === null ? 'derived_from' : String(input.edgeType);
+  if (!isValidEdgeType(edgeType)) {
+    throw codedError('INVALID_EDGE_TYPE', `Invalid edgeType. Allowed: ${[...ALLOWED_EDGE_TYPES].join(', ')}.`);
+  }
+  const parentRole = input.parentRole === undefined || input.parentRole === null ? 'primary' : String(input.parentRole);
+  if (!isValidParentRole(parentRole)) {
+    throw codedError('INVALID_PARENT_ROLE', `Invalid parentRole. Allowed: ${[...ALLOWED_PARENT_ROLES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+  let jobId = null;
+  if (input.jobId !== undefined && input.jobId !== null) {
+    if (!_JOB_ID_RE.test(String(input.jobId))) throw codedError('INVALID_JOB_ID', 'Malformed job ID.');
+    jobId = String(input.jobId);
+  }
+
+  // Parent/child must both exist and share ONE scope. project_id is derived from the
+  // objects: a parent and child in different projects (or one legacy NULL-project and
+  // one real project) are treated as cross-scope → 404, so an edge can never straddle
+  // a project boundary.
+  const parent = db.prepare('SELECT id, project_id FROM analysis_objects WHERE id = ?').get(parentObjectId);
+  if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+  const child = db.prepare('SELECT id, project_id FROM analysis_objects WHERE id = ?').get(childObjectId);
+  if (!child) throw codedError('CHILD_NOT_FOUND', 'Child analysis object not found.');
+  const sameScope = parent.project_id === child.project_id
+    || (parent.project_id == null && child.project_id == null);
+  if (!sameScope) throw codedError('CHILD_NOT_FOUND', 'Child analysis object not found.');
+  const projectId = parent.project_id || null;
+
+  if (jobId) {
+    const job = db.prepare('SELECT id, project_id FROM jobs WHERE id = ?').get(jobId);
+    const jobSameScope = job && (job.project_id === projectId || (job.project_id == null && projectId == null));
+    if (!job || !jobSameScope) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  }
+
+  const scope = { projectId };
+  if (lineageEdgeWouldCreateCycle(parentObjectId, childObjectId, scope)) {
+    throw codedError('CYCLE', 'This edge would create a cycle in the lineage graph.');
+  }
+
+  let id;
+  try {
+    id = _insertLineageEdgeRow({
+      projectId, parentObjectId, childObjectId, jobId,
+      edgeType, parentRole, metadata, createdByUserId: actorUserId, now: dbNow()
+    });
+  } catch (e) {
+    if (e && /UNIQUE constraint failed/i.test(String(e.message))) {
+      throw codedError('DUPLICATE_EDGE', 'An identical lineage edge already exists.');
+    }
+    throw e;
+  }
+  return rowToAnalysisObjectEdge(
+    db.prepare('SELECT * FROM analysis_object_edges WHERE id = ?').get(id)
+  );
+}
+
+/**
+ * Internal: create MANY edges for a single child with several parents (the shape a
+ * FUTURE integration/comparison/merge child will use). Each parent is its own edge
+ * row, validated and cycle-checked individually by createLineageEdge, all inside one
+ * transaction so a multi-parent child is recorded atomically (any failure rolls back
+ * every edge). `parents` is an array of { parentObjectId, edgeType?, parentRole?,
+ * jobId?, metadata? }. Returns the created edge projections.
+ */
+function createLineageEdgesForChild(actorUserId, childObjectId, parents = []) {
+  if (!Array.isArray(parents) || parents.length === 0) {
+    throw codedError('INVALID_PARENTS', 'parents must be a non-empty array.');
+  }
+  return db.transaction(() =>
+    parents.map(p => createLineageEdge(actorUserId, { ...p, childObjectId }))
+  ).immediate();
+}
+
+/** Internal: parent edges of an object (edges where the object is the CHILD). */
+function listLineageParents(objectId, projectScope) {
+  return getLineageEdgesByChild(objectId, projectScope).map(rowToAnalysisObjectEdge);
+}
+/** Internal: child edges of an object (edges where the object is the PARENT). */
+function listLineageChildren(objectId, projectScope) {
+  return getLineageEdgesByParent(objectId, projectScope).map(rowToAnalysisObjectEdge);
+}
+
+/**
+ * Bounded lineage graph around an object: walks both ancestors (up) and descendants
+ * (down) via edges, returning deterministic, de-duplicated { nodes, edges }. Walk is
+ * capped by LINEAGE_MAX_NODES / LINEAGE_MAX_DEPTH; if a cap is hit (or historical data
+ * somehow contains a cycle) the result is marked `truncated: true` rather than walked
+ * forever. Nodes carry only public-safe object fields (id, label, status-ish object
+ * type, lineageRootId) — never a storage path, R state key, or claim token. Scope is
+ * the given projectScope so the graph cannot cross a project boundary.
+ */
+function buildLineageGraph(objectId, projectScope, nodeFetcher) {
+  const start = String(objectId);
+  const edgeById = new Map();
+  const nodeIds = new Set([start]);
+  let truncated = false;
+
+  // Walk in one direction collecting edges + neighbor ids.
+  function walk(direction) {
+    const seen = new Set([start]);
+    let frontier = [start];
+    let depth = 0;
+    while (frontier.length > 0) {
+      if (++depth > LINEAGE_MAX_DEPTH) { truncated = true; break; }
+      const next = [];
+      for (const node of frontier) {
+        const edges = direction === 'down'
+          ? getLineageEdgesByParent(node, projectScope)
+          : getLineageEdgesByChild(node, projectScope);
+        for (const e of edges) {
+          if (!edgeById.has(e.id)) edgeById.set(e.id, e);
+          const neighbor = direction === 'down'
+            ? e.child_analysis_object_id : e.parent_analysis_object_id;
+          if (nodeIds.size < LINEAGE_MAX_NODES) nodeIds.add(neighbor);
+          else { truncated = true; }
+          if (!seen.has(neighbor) && nodeIds.has(neighbor)) { seen.add(neighbor); next.push(neighbor); }
+        }
+      }
+      frontier = next;
+    }
+  }
+  walk('down');
+  walk('up');
+
+  const nodes = [...nodeIds].sort().map(id => nodeFetcher(id)).filter(Boolean);
+  const edges = [...edgeById.values()]
+    .map(rowToAnalysisObjectEdge)
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1
+      : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
+  return { objectId: start, nodes, edges, truncated };
+}
+
+// ── Project-scoped lineage reads (role-checked; metadata only) ────────────────
+//
+// Read-only, role-checked lineage metadata for project members. Like the other
+// project-scoped read helpers these authorize through requireProjectRole (any
+// member, incl. viewer, may read), so an inaccessible project/object is 404 and a
+// known member lacking the read role is 403. They always pin a real project_id, so a
+// legacy NULL-project object/edge never appears, and they return public projections.
+// There is intentionally NO project edge CREATE/mutate route.
+
+const LINEAGE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+
+// Minimal public-safe node label for a lineage graph: only fields the existing
+// object read policy already exposes to members (id, displayName, objectType,
+// lineageRootId). NO storage uri / hash / owner-private fields.
+function lineageNodeForObject(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    label: row.display_name || null,
+    objectType: row.object_type,
+    lineageRootId: row.lineage_root_id
+  };
+}
+
+/** Parents of an object within a project (any member may read). The object must
+ * belong to the project (else 404); edges are pinned to the project so legacy
+ * NULL-project edges never appear. Returns public edge projections. */
+function listProjectAnalysisObjectParents(userId, projectId, objectId) {
+  requireProjectRole(userId, projectId, LINEAGE_READ_ROLES);
+  const pid = String(projectId);
+  if (!getProjectAnalysisObjectRow(objectId, pid)) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  return listLineageParents(objectId, { projectId: pid });
+}
+
+/** Children of an object within a project (any member may read). */
+function listProjectAnalysisObjectChildren(userId, projectId, objectId) {
+  requireProjectRole(userId, projectId, LINEAGE_READ_ROLES);
+  const pid = String(projectId);
+  if (!getProjectAnalysisObjectRow(objectId, pid)) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  return listLineageChildren(objectId, { projectId: pid });
+}
+
+/** Bounded lineage graph around a project object (any member may read). The object
+ * must belong to the project (else 404). Nodes/edges are project-pinned and public-
+ * safe; the graph is deterministic and bounded (LINEAGE_MAX_NODES / _DEPTH). */
+function getProjectAnalysisObjectLineage(userId, projectId, objectId) {
+  requireProjectRole(userId, projectId, LINEAGE_READ_ROLES);
+  const pid = String(projectId);
+  const root = getProjectAnalysisObjectRow(objectId, pid);
+  if (!root) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  const graph = buildLineageGraph(objectId, { projectId: pid },
+    (id) => lineageNodeForObject(
+      db.prepare('SELECT id, display_name, object_type, lineage_root_id FROM analysis_objects WHERE id = ? AND project_id = ?').get(id, pid)
+    ));
+  return { ...graph, projectId: pid, rootObjectId: root.lineageRootId || root.id };
+}
+
 /**
  * Worker-facing: create a NEW immutable result analysis object (a checkpoint) for a
  * successful mutating job, and atomically link it back as the job's
@@ -3511,7 +3993,29 @@ function createCheckpointForJobByWorker(jobId, workerId, claimToken, input = {},
         AND status = 'running' AND lease_expires_at > @now
         AND result_analysis_object_id IS NULL
     `).run({ aoId: id, jobId: String(jobId), wid, token, now });
-    return info.changes === 1;
+    const ok = info.changes === 1;
+    // Atomically record the DAG edge for this checkpoint in the SAME transaction:
+    // parent = the job's input object, child = the new checkpoint, edge_type =
+    // 'checkpoint', parent_role = 'primary'. Only when the link succeeded (so a
+    // claim-lost completion leaves no successful edge) AND there is an input object
+    // (a checkpoint with no input object is a lineage root → no edge). The new child
+    // has no other edges yet, so this can never form a cycle; project_id is derived
+    // from the job's scope (pid, possibly NULL for a legacy owner-scoped job — that
+    // edge simply never appears in the project lineage routes).
+    if (ok && parentObjectId) {
+      _insertLineageEdgeRow({
+        projectId: pid,
+        parentObjectId,
+        childObjectId: id,
+        jobId: String(jobId),
+        edgeType: 'checkpoint',
+        parentRole: 'primary',
+        metadata: {},
+        createdByUserId: owner,
+        now
+      });
+    }
+    return ok;
   }).immediate();
 
   if (!linked) {
@@ -3730,6 +4234,22 @@ module.exports = {
   getJobArtifactsByJobId,
   listProjectArtifacts,
   listProjectJobArtifacts,
-  getProjectArtifact
+  getProjectArtifact,
+  // Analysis object lineage edges (DAG-ready graph model; edge table is the
+  // forward-looking lineage source, single-parent fields remain compatibility/
+  // fast-path. No public edge-create route; reads are role-checked + metadata-only)
+  isValidEdgeType,
+  isValidParentRole,
+  generateAnalysisObjectEdgeId,
+  rowToAnalysisObjectEdge,
+  createLineageEdge,
+  createLineageEdgesForChild,
+  listLineageParents,
+  listLineageChildren,
+  lineageEdgeWouldCreateCycle,
+  buildLineageGraph,
+  listProjectAnalysisObjectParents,
+  listProjectAnalysisObjectChildren,
+  getProjectAnalysisObjectLineage
 };
 
