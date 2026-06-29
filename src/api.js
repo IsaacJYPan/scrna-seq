@@ -301,6 +301,24 @@ export const electronAPI = {
   getProjectFigure: async (projectId, figureId) =>
     req(`/api/projects/${projectId}/figures/${figureId}`),
 
+  // Project-scoped job artifact & checkpoint metadata (READ-ONLY). Metadata only —
+  // there is no create/mutate wrapper (artifacts are worker/helper-driven) and no
+  // download: responses never include a storage path/uri. R execution is unchanged.
+  listProjectArtifacts: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/artifacts${qs ? `?${qs}` : ''}`);
+  },
+  getProjectArtifact: async (projectId, artifactId) =>
+    req(`/api/projects/${projectId}/artifacts/${artifactId}`),
+  listProjectJobArtifacts: async (projectId, jobId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/jobs/${jobId}/artifacts${qs ? `?${qs}` : ''}`);
+  },
+
   listProjectMembers: async (id) => req(`/api/projects/${id}/members`),
   addProjectMember: async (id, email, role) => req(`/api/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
   updateProjectMemberRole: async (id, userId, role) => req(`/api/projects/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
