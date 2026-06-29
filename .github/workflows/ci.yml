@@ -1,10 +1,19 @@
 name: CI Pipeline
 
+# Private-repo GitHub Actions minutes are limited, so the full CI suite runs
+# on pull requests (which already test the merge result) plus manual dispatch.
+# The post-merge push-to-main run is intentionally omitted to avoid a duplicate
+# full run of the same code; trigger it by hand via workflow_dispatch if needed.
 on:
-  push:
-    branches: [ main ]
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
