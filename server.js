@@ -8,6 +8,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 const db = require('./backend/database');
+const { parseJobWorkerConfig } = require('./backend/jobWorker');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1691,24 +1692,53 @@ function startPlumber() {
 
 // ── Job worker (conservative, opt-in) ────────────────────────────────────────
 // Disabled by default. The minimal drain loop only runs when ENABLE_JOB_WORKER is
-// explicitly set, so local/dev and tests stay worker-free unless they ask for it.
-// It processes only registered handlers (currently the safe `generic` noop) — NO
-// scientific pipeline execution. See backend/jobWorker.js and docs/architecture.md.
+// explicitly the string "true", so local/dev and tests stay worker-free unless they
+// ask for it. It processes only registered handlers (currently the safe `generic`
+// noop) — NO scientific pipeline execution. See backend/jobWorker.js and
+// docs/architecture.md.
+//
+// Config parsing (parseJobWorkerConfig) is deterministic: invalid poll/lease values
+// fall back to documented defaults with a sanitized warning, and any ENABLE_JOB_WORKER
+// value other than exact "true" means disabled.
+
+// How long shutdown waits for an in-flight worker tick to settle before giving up.
+// Small + bounded so process shutdown never hangs forever on a stuck worker.
+const WORKER_SHUTDOWN_TIMEOUT_MS = 10000;
+
 let jobWorker = null;
-function startJobWorkerIfEnabled() {
-  if (process.env.ENABLE_JOB_WORKER !== 'true') return null;
-  const { createJobWorker } = require('./backend/jobWorker');
-  const worker = createJobWorker({
-    db,
-    pollIntervalMs: Number(process.env.JOB_WORKER_POLL_MS || 1000),
-    leaseSeconds: Number(process.env.JOB_WORKER_LEASE_SECONDS || 30),
-    logger: console,
+
+/**
+ * Start the opt-in worker if (and only if) the environment enables it. Idempotent:
+ * at most one worker loop exists at a time — a second call while a worker is live
+ * returns the existing worker instead of spawning a duplicate loop. Returns the
+ * worker, or null when disabled.
+ *
+ * @param {object} env   environment-like object (defaults to process.env)
+ * @param {object} deps  test seams: { createJobWorker, db, logger }
+ */
+function startJobWorkerIfEnabled(env = process.env, deps = {}) {
+  if (jobWorker) return jobWorker; // never create a duplicate loop
+  const logger = deps.logger || console;
+  const config = parseJobWorkerConfig(env, { logger });
+  if (!config.enabled) return null;
+  const create = deps.createJobWorker || require('./backend/jobWorker').createJobWorker;
+  const worker = create({
+    db: deps.db || db,
+    pollIntervalMs: config.pollIntervalMs,
+    leaseSeconds: config.leaseSeconds,
+    logger,
   });
   worker.start();
-  console.log(`[worker] Job worker started (id=${worker.workerId}).`);
+  jobWorker = worker;
+  if (typeof logger.info === 'function') {
+    logger.info(`[worker] Job worker started (id=${worker.workerId}).`);
+  }
   return worker;
 }
 
+/** Stop the active worker (if any) and clear the singleton. Safe to call with no
+ *  worker present and safe to call twice. Returns the worker's stop() promise, or
+ *  undefined when there was nothing to stop. */
 function stopJobWorker() {
   if (jobWorker) {
     const stopping = jobWorker.stop();
@@ -1718,18 +1748,90 @@ function stopJobWorker() {
   return undefined;
 }
 
+/**
+ * Graceful shutdown: await the worker's stop()/cleanup (bounded by a timeout so we
+ * never hang forever), then stop accepting new connections, then exit. Used by the
+ * SIGINT/SIGTERM handlers. Extracted + dependency-injected so the shutdown ordering
+ * is directly testable without real signals.
+ *
+ * @param {object}   args
+ * @param {object}   [args.server]    http.Server to close (best-effort; preserves the
+ *                                    prior exit-driven teardown — exit still tears it
+ *                                    down even if close() is slow).
+ * @param {object}   [args.worker]    worker with an async stop(); if omitted, no wait.
+ * @param {object}   [args.logger]    { warn, error, … } (default console).
+ * @param {number}   [args.timeoutMs] max ms to wait for worker stop (default above).
+ * @param {function} [args.exit]      process.exit seam (default process.exit).
+ * @returns {Promise<number>} the exit code used (0 ok, 1 if worker stop failed/timed out).
+ */
+async function shutdownJobWorkerAndServer(args = {}) {
+  const { server, worker } = args;
+  const logger = args.logger || console;
+  const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : WORKER_SHUTDOWN_TIMEOUT_MS;
+  const exit = typeof args.exit === 'function' ? args.exit : (code) => process.exit(code);
+  let exitCode = 0;
+
+  // 1. Wait for the worker to stop, bounded by a timeout so a stuck tick cannot wedge
+  //    shutdown. The timer is always cleared (finally) so no timer is leaked.
+  if (worker && typeof worker.stop === 'function') {
+    let timer = null;
+    try {
+      const stopped = Promise.resolve().then(() => worker.stop());
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(Object.assign(new Error('Worker stop timed out.'), { code: 'WORKER_STOP_TIMEOUT' })),
+          timeoutMs
+        );
+      });
+      await Promise.race([stopped, timeout]);
+    } catch (err) {
+      // Sanitized: code only, never a stack/message that could carry internals.
+      const code = err && err.code ? err.code : 'error';
+      if (typeof logger.error === 'function') {
+        logger.error(`[worker] shutdown: worker stop failed (${code}); exiting non-zero.`);
+      }
+      exitCode = 1;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  // 2. Stop accepting new connections (best-effort; exit finishes teardown).
+  if (server && typeof server.close === 'function') {
+    try { server.close(); } catch { /* best-effort; exit tears it down */ }
+  }
+
+  exit(exitCode);
+  return exitCode;
+}
+
 // Start Server
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
     console.log(`Node.js Web Server running on http://localhost:${PORT}`);
     console.log(`Starting local R Plumber backend...`);
     startPlumber();
-    jobWorker = startJobWorkerIfEnabled();
+    startJobWorkerIfEnabled();
   });
 
-  // Stop the worker cleanly on shutdown so no tick is left mid-claim.
+  // Stop the worker cleanly on shutdown so no tick is left mid-claim. A single
+  // `shuttingDown` latch makes this safe when SIGINT and SIGTERM arrive close
+  // together (no double-shutdown race / double exit).
+  let shuttingDown = false;
+  const onShutdownSignal = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const worker = jobWorker;
+    jobWorker = null;
+    shutdownJobWorkerAndServer({
+      server: httpServer,
+      worker,
+      logger: console,
+      timeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
+    });
+  };
   for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => { stopJobWorker(); process.exit(0); });
+    process.on(sig, onShutdownSignal);
   }
 }
 
@@ -1754,7 +1856,8 @@ module.exports = {
   authRateLimitWindowMs,
   rateLimitDisabled,
   R_PROXY_VALIDATED_PATH_FIELDS,
-  // Exposed for tests: opt-in job worker startup wiring
+  // Exposed for tests: opt-in job worker startup/shutdown wiring
   startJobWorkerIfEnabled,
-  stopJobWorker
+  stopJobWorker,
+  shutdownJobWorkerAndServer
 };

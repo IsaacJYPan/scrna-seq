@@ -331,6 +331,43 @@ describe('jobs worker contract — claim / lease / heartbeat', () => {
     expect(c2.attempts).toBe(2); // second claim
   });
 
+  it('requeue clears worker/claim/lease AND locked_at/heartbeat_at consistently (like releaseJob)', () => {
+    const job = newJob();
+    setJobScheduling(job.id, { maxAttempts: 3 });
+    const c1 = claimNextJob('w1', { now: T0, leaseSeconds: 30 });
+    // After claim, the lease fields are populated.
+    expect(c1.lockedAt).toBe(T0);
+    expect(c1.heartbeatAt).toBe(T0);
+
+    expect(reapExpiredJobs({ now: LATER }).requeued).toContain(job.id);
+
+    const requeued = getWorkerJob(job.id);
+    expect(requeued.status).toBe('queued');
+    expect(requeued.workerId).toBeNull();
+    expect(requeued.claimToken).toBeNull();
+    expect(requeued.leaseExpiresAt).toBeNull();
+    // The fix: locked_at is cleared and heartbeat_at is stamped to the reap instant —
+    // no stale claim metadata is left on the requeued row.
+    expect(requeued.lockedAt).toBeNull();
+    expect(requeued.heartbeatAt).toBe(LATER);
+  });
+
+  it('expired→failed clears claim/lease/token and stamps heartbeat (terminal-row convention)', () => {
+    const job = newJob(); // default max_attempts = 1
+    claimNextJob('w1', { now: T0, leaseSeconds: 30 });
+    expect(reapExpiredJobs({ now: LATER }).failed).toContain(job.id);
+
+    const failed = getWorkerJob(job.id);
+    expect(failed.status).toBe('failed');
+    expect(failed.claimToken).toBeNull();
+    expect(failed.leaseExpiresAt).toBeNull();
+    expect(failed.heartbeatAt).toBe(LATER);
+    // worker_id and locked_at are retained as diagnostics on the terminal row, exactly
+    // like failJobByWorker/completeJobByWorker.
+    expect(failed.workerId).toBe('w1');
+    expect(failed.lockedAt).toBe(T0);
+  });
+
   it('honors max_attempts across the full requeue→claim→reap cycle', () => {
     const job = newJob();
     setJobScheduling(job.id, { maxAttempts: 2 });

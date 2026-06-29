@@ -38,6 +38,68 @@ function generateWorkerId() {
 // Error code recorded on a job whose type has no registered handler.
 const UNSUPPORTED_JOB_TYPE = 'UNSUPPORTED_JOB_TYPE';
 
+// Documented safe defaults for worker runtime config. These MUST match the values
+// documented in .env.example (JOB_WORKER_POLL_MS / JOB_WORKER_LEASE_SECONDS) and the
+// createJobWorker() option defaults above.
+const JOB_WORKER_DEFAULTS = Object.freeze({ pollIntervalMs: 1000, leaseSeconds: 30 });
+
+/**
+ * Parse a value that must be a positive integer (poll ms / lease seconds). Returns
+ * the integer, or null for anything invalid: undefined/null, blank, non-numeric,
+ * NaN, Infinity, non-integer, zero, or negative. Callers decide the fallback/fail
+ * policy. (Zero is rejected: a zero poll interval would busy-loop and a zero lease
+ * would expire instantly, so neither is a meaningful runtime value here.)
+ */
+function parsePositiveIntOrNull(raw) {
+  if (raw === undefined || raw === null) return null;
+  const trimmed = String(raw).trim();
+  if (trimmed === '') return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
+/**
+ * Parse worker runtime config from an environment-like object, deterministically and
+ * safely. Policy (documented in docs/architecture.md + .env.example):
+ *   - `enabled` is true ONLY for the exact string "true" on ENABLE_JOB_WORKER. Any
+ *     other value ("TRUE", "1", "yes", blank, unset, …) means disabled.
+ *   - JOB_WORKER_POLL_MS must be a positive integer; otherwise fall back to the
+ *     documented default and warn (only if the var was present but invalid).
+ *   - JOB_WORKER_LEASE_SECONDS must be a positive integer; otherwise fall back to the
+ *     documented default and warn (only if present but invalid).
+ * Warnings name the variable and the default used — never the raw value — so no
+ * secret or operator-supplied content is echoed. Returns
+ * { enabled, pollIntervalMs, leaseSeconds }.
+ */
+function parseJobWorkerConfig(env = {}, opts = {}) {
+  const defaults = opts.defaults || JOB_WORKER_DEFAULTS;
+  const logger = opts.logger || console;
+  const warn = (m) => { if (logger && typeof logger.warn === 'function') logger.warn(m); };
+
+  const enabled = env.ENABLE_JOB_WORKER === 'true';
+
+  const pollRaw = env.JOB_WORKER_POLL_MS;
+  let pollIntervalMs = parsePositiveIntOrNull(pollRaw);
+  if (pollIntervalMs === null) {
+    if (pollRaw !== undefined) {
+      warn(`[worker] JOB_WORKER_POLL_MS is not a positive integer; using default ${defaults.pollIntervalMs}ms.`);
+    }
+    pollIntervalMs = defaults.pollIntervalMs;
+  }
+
+  const leaseRaw = env.JOB_WORKER_LEASE_SECONDS;
+  let leaseSeconds = parsePositiveIntOrNull(leaseRaw);
+  if (leaseSeconds === null) {
+    if (leaseRaw !== undefined) {
+      warn(`[worker] JOB_WORKER_LEASE_SECONDS is not a positive integer; using default ${defaults.leaseSeconds}s.`);
+    }
+    leaseSeconds = defaults.leaseSeconds;
+  }
+
+  return { enabled, pollIntervalMs, leaseSeconds };
+}
+
 /**
  * The only supported handler in this branch. A safe, deterministic noop: it
  * heartbeats once (proving the cooperative heartbeat seam works), writes a durable
@@ -293,4 +355,7 @@ module.exports = {
   genericNoopHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
+  JOB_WORKER_DEFAULTS,
+  parseJobWorkerConfig,
+  parsePositiveIntOrNull,
 };

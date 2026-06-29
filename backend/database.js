@@ -1684,12 +1684,18 @@ function reapExpiredJobs(opts = {}) {
         code: 'LEASE_EXPIRED',
         message: 'Worker lease expired; job re-queued for another claim.'
       }));
+      // Clear the claim fields consistently with releaseJob's running→queued path:
+      // a requeued job holds no claim, so worker_id/claim_token/locked_at/lease are
+      // all cleared and heartbeat_at is stamped as the "last touched" marker. (Prior
+      // versions left locked_at/heartbeat_at stale on the requeued row.)
       const info = db.prepare(`
         UPDATE jobs SET
           status = 'queued',
           worker_id = NULL,
           claim_token = NULL,
+          locked_at = NULL,
           lease_expires_at = NULL,
+          heartbeat_at = @now,
           last_worker_error = @lastErr,
           updated_at = @now
         WHERE id = @id AND status = 'running'
@@ -1701,12 +1707,17 @@ function reapExpiredJobs(opts = {}) {
         code: 'LEASE_EXPIRED',
         message: 'Worker lease expired and the claim budget (max_attempts) is exhausted; job failed.'
       }));
+      // Clear the live claim consistently with the worker terminal paths
+      // (completeJobByWorker/failJobByWorker): claim_token + lease cleared, heartbeat_at
+      // stamped, completed_at stamped. worker_id and locked_at are retained as
+      // diagnostics on the terminal row (same convention as failJobByWorker).
       const info = db.prepare(`
         UPDATE jobs SET
           status = 'failed',
           error_json = @errJson,
           last_worker_error = @errJson,
           completed_at = @now,
+          heartbeat_at = @now,
           claim_token = NULL,
           lease_expires_at = NULL,
           updated_at = @now
@@ -3094,9 +3105,17 @@ function closeDatabase() {
   }
 }
 
+/** Read a SQLite PRAGMA value (simple form). Read-only; exposed so tests can assert
+ *  init-time hardening such as busy_timeout. Returns undefined when no DB is open. */
+function getPragma(name) {
+  if (!db) return undefined;
+  return db.pragma(name, { simple: true });
+}
+
 module.exports = {
   initDatabase,
   closeDatabase,
+  getPragma,
   saveProvenance,
   getProvenance,
   getAllProvenance,

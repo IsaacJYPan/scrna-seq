@@ -111,10 +111,21 @@ jobs:
         #                        clean start/stop with no leaked timers, worker disabled by
         #                        default, and proof processing a job does NOT widen R object
         #                        ownership)
+        #   job-worker-runtime  (worker RUNTIME hardening: deterministic + safe env config
+        #                        parsing (ENABLE_JOB_WORKER exact "true" only; invalid
+        #                        poll/lease fall back to documented defaults with a sanitized
+        #                        warning that never echoes the raw value), opt-in startup
+        #                        wiring (no worker unless enabled, importing the server does
+        #                        not start one, single-loop idempotency, config passthrough,
+        #                        no claim-token/secret exposure), safe stop (no-worker / double
+        #                        stop), graceful shutdown (awaits worker stop, bounded by a
+        #                        timeout so it never hangs, exits non-zero on stop failure with
+        #                        a sanitized log, leaks no timers), and DB busy_timeout init;
+        #                        NO R execution, NO artifacts, NO shared R state)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
