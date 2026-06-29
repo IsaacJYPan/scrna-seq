@@ -22,10 +22,22 @@
 //     text, stacks, and internal URLs/hosts never escape (see sanitizeRBridgeError
 //     and the default caller's catch). Thrown errors always carry a SAFE message.
 //
-// SCOPE (this branch): the only operation is `r.runtime.check` — a read-only call
-// to the existing R `/health` endpoint that records sanitized runtime metadata. It
-// touches NO analysis object, mutates NOTHING, creates NO checkpoint/result object,
-// and produces NO download. This is NOT real scientific pipeline execution.
+// SCOPE: two read-only, metadata-only operations.
+//   - `r.runtime.check` — a read-only call to the R `/health` endpoint recording
+//     sanitized runtime metadata. Touches NO analysis object.
+//   - `r.object.inspect` — a read-only inspection of ONE existing live analysis
+//     object via the R `/object/inspect` endpoint. The object is identified by a
+//     SERVER-DERIVED state key (X-Object-ID); the caller cannot choose it. It reads
+//     a sanitized object summary (class/dimensions/assay+reduction+metadata-field
+//     NAMES, runtime versions) and records it as metadata. It returns NO cell/gene/
+//     expression/embedding data, mutates NOTHING in R, creates NO checkpoint/result
+//     object, and produces NO download.
+// Neither operation is real scientific pipeline execution. Object access is gated by
+// the worker handler BEFORE the bridge is reached: only the live-R object owner may
+// trigger an inspection (see jobWorker.js — verifyAnalysisObjectOwner). The bridge
+// receives object context only as SERVER-DERIVED `objectContext` ({ objectId,
+// stateKey }); `input` / job parameters can never choose the object, state key,
+// method, or path.
 
 const http = require('http');
 
@@ -55,12 +67,44 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     artifactDescription:
       'Operational R runtime connectivity/health check. Metadata only — not a scientific result, no analysis-object data.',
     touchesAnalysisObject: false,
+    requiresObjectContext: false,
+    readOnly: true,
+  }),
+  // Read-only inspection of ONE existing live analysis object. The object is
+  // addressed by a SERVER-DERIVED state key (X-Object-ID) supplied via
+  // `objectContext`; it reads a sanitized summary only and mutates nothing. The
+  // worker handler verifies live-R object ownership BEFORE this runs, so project
+  // membership alone never reaches another user's live object.
+  'r.object.inspect': Object.freeze({
+    method: 'GET',
+    path: '/object/inspect',
+    artifactType: 'r_object_inspection',
+    artifactName: 'R object inspection',
+    artifactDescription:
+      'Read-only inspection of a live analysis object. Metadata only — a sanitized object summary '
+      + '(class, dimensions, assay/reduction/metadata-field names, runtime versions). Not a scientific '
+      + 'result: no expression matrices, cell/gene data, embeddings, or serialized object contents.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    readOnly: true,
   }),
 });
+
+// Defense-in-depth target allowlist for the default R caller: the EXACT
+// "METHOD PATH" pairs the bridge is ever allowed to issue, derived from the
+// operation specs above. The caller refuses anything else before any HTTP, so even
+// a buggy/abused caller invocation cannot reach an arbitrary R endpoint/method.
+const R_BRIDGE_ALLOWED_TARGETS = Object.freeze(
+  new Set(Object.values(R_BRIDGE_OPERATIONS).map((s) => `${s.method} ${s.path}`))
+);
 
 function isAllowedRBridgeOperation(operation) {
   return typeof operation === 'string'
     && Object.prototype.hasOwnProperty.call(R_BRIDGE_OPERATIONS, operation);
+}
+
+function isAllowedRBridgeTarget(method, path) {
+  return R_BRIDGE_ALLOWED_TARGETS.has(`${method} ${path}`);
 }
 
 // ── Sanitization ─────────────────────────────────────────────────────────────
@@ -76,6 +120,70 @@ function sanitizeRuntimeField(value, maxLen = 64) {
   return cleaned === '' ? null : cleaned;
 }
 
+// Reduce a non-negative count to a bounded integer, or null. Guards against
+// non-numbers, negatives, NaN/Infinity, and absurd values so a hostile/garbage R
+// response can never inject a huge or non-numeric "dimension" into metadata.
+function sanitizeCount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const n = Math.floor(value);
+  if (n < 0 || n > 1e12) return null;
+  return n;
+}
+
+// Reduce an array of names (assays/reductions/metadata fields) to a bounded list of
+// short, safe strings. Caps BOTH the number of items and each item's length, and
+// drops anything non-scalar/unsafe — so a name list can never carry oversized,
+// path-like, or hostile content (or a huge gene list) into artifact metadata.
+function sanitizeNameList(value, maxItems = 64, maxLen = 64) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const v of value) {
+    const s = sanitizeRuntimeField(v, maxLen);
+    if (s) out.push(s);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+/**
+ * Build a SAFE, bounded, metadata-only summary of an inspected analysis object from
+ * the raw R `/object/inspect` body. Only a small allowlist of known structural fields
+ * is kept; every value is sanitized and capped. Deliberately NEVER includes
+ * expression matrices, cell-level rows, gene lists, embeddings, raw sample values,
+ * file paths, the R state key, or serialized object contents — even if the R response
+ * tried to include them, they are dropped because they are not on this allowlist.
+ */
+function sanitizeInspectionSummary(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const summary = { exists: b.exists === true };
+  if (!summary.exists) return summary;
+
+  const cls = sanitizeRuntimeField(b.class);
+  if (cls) summary.class = cls;
+
+  const nCells = sanitizeCount(b.n_cells);
+  if (nCells !== null) summary.nCells = nCells;
+  const nFeatures = sanitizeCount(b.n_features);
+  if (nFeatures !== null) summary.nFeatures = nFeatures;
+
+  const assays = sanitizeNameList(b.assays);
+  if (assays.length) summary.assays = assays;
+  const reductions = sanitizeNameList(b.reductions);
+  if (reductions.length) summary.reductions = reductions;
+
+  const nMeta = sanitizeCount(b.n_meta_fields);
+  if (nMeta !== null) summary.nMetaFields = nMeta;
+  const metaFields = sanitizeNameList(b.meta_fields);
+  if (metaFields.length) summary.metaFields = metaFields;
+
+  const sv = sanitizeRuntimeField(b.seurat_version);
+  if (sv) summary.seuratVersion = sv;
+  const rv = sanitizeRuntimeField(b.r_version);
+  if (rv) summary.rVersion = rv;
+
+  return summary;
+}
+
 /**
  * Map any thrown bridge/caller error to a SAFE { code, message } pair. Known coded
  * errors get a stable, generic message; anything else collapses to a single generic
@@ -86,10 +194,13 @@ function sanitizeRBridgeError(err) {
   const code = err && typeof err.code === 'string' ? err.code : 'R_BRIDGE_ERROR';
   const SAFE_MESSAGES = {
     UNSUPPORTED_R_OPERATION: 'Requested R bridge operation is not allowlisted.',
+    R_BRIDGE_TARGET_REJECTED: 'Requested R bridge target is not allowlisted.',
     R_BRIDGE_MISCONFIGURED: 'R bridge is not configured.',
+    R_OBJECT_CONTEXT_REQUIRED: 'Server-derived object context is required for object inspection.',
     R_TIMEOUT: 'R runtime did not respond before the timeout.',
     R_UNREACHABLE: 'R runtime is unreachable.',
     R_RUNTIME_CHECK_FAILED: 'R runtime check failed.',
+    R_OBJECT_INSPECT_FAILED: 'R object inspection failed.',
     R_BRIDGE_ERROR: 'R bridge operation failed.',
   };
   return { code, message: SAFE_MESSAGES[code] || SAFE_MESSAGES.R_BRIDGE_ERROR };
@@ -98,30 +209,46 @@ function sanitizeRBridgeError(err) {
 // ── Default R caller (real HTTP) ─────────────────────────────────────────────
 //
 // Builds the function the bridge uses to actually reach R. It is intentionally
-// narrow: it can only issue the server-defined { method, path } against the local
-// Plumber backend with the API token, on a bounded timeout. It NEVER sends an
-// X-Object-ID / R state key (so it cannot touch per-object live R state), and it
-// sanitizes every low-level failure (ECONNREFUSED, socket/host details, timeouts)
-// into a coded error with NO host/URL/stack, so nothing internal can leak upward.
+// narrow: it can only issue one of the server-defined { method, path } TARGETS
+// (R_BRIDGE_ALLOWED_TARGETS) against the local Plumber backend with the API token,
+// on a bounded timeout. Defense-in-depth: any non-allowlisted method/path is refused
+// BEFORE any HTTP, so even a buggy/abused invocation can never reach an arbitrary R
+// endpoint. The X-Object-ID header is sent ONLY when a server-derived `objectStateKey`
+// is supplied (for r.object.inspect); the caller never accepts a client/raw state key,
+// and r.runtime.check is always sent without one (it cannot touch per-object live R
+// state). Every low-level failure (ECONNREFUSED, socket/host details, timeouts) is
+// sanitized into a coded error with NO host/URL/stack, so nothing internal leaks.
 function createDefaultRCaller(config = {}) {
   const host = '127.0.0.1';
   const port = Number(config.port) || Number(process.env.PLUMBER_PORT) || 8000;
   const token = config.token || process.env.API_TOKEN || '';
 
-  return function callR({ method, path, timeoutMs }) {
+  return function callR({ method, path, timeoutMs, objectStateKey }) {
     return new Promise((resolve, reject) => {
       if (!token) {
         reject(codedError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.'));
+        return;
+      }
+      // Defense-in-depth: only the known bridge targets may ever be issued.
+      if (!isAllowedRBridgeTarget(method, path)) {
+        reject(codedError('R_BRIDGE_TARGET_REJECTED', 'Requested R bridge target is not allowlisted.'));
         return;
       }
       let settled = false;
       const finishOk = (v) => { if (!settled) { settled = true; resolve(v); } };
       const finishErr = (e) => { if (!settled) { settled = true; reject(e); } };
 
+      const headers = { 'X-API-Token': token, Accept: 'application/json' };
+      // Server-derived object state key only (never client-controlled). Absent for
+      // r.runtime.check, so that operation cannot reach per-object live R state.
+      if (typeof objectStateKey === 'string' && objectStateKey !== '') {
+        headers['X-Object-ID'] = objectStateKey;
+      }
+
       let req;
       try {
         req = http.request(
-          { host, port, method, path, headers: { 'X-API-Token': token, Accept: 'application/json' } },
+          { host, port, method, path, headers },
           (res) => {
             const chunks = [];
             res.on('data', (c) => chunks.push(c));
@@ -162,7 +289,12 @@ function createDefaultRCaller(config = {}) {
  * @param {object}   args.job           trusted job row (source of jobId/projectId/owner)
  * @param {string}   args.operation     MUST be an allowlisted operation name
  * @param {object}   [args.actor]       server-derived actor info (informational)
- * @param {object}   [args.input]       IGNORED for the current op (server-derived)
+ * @param {object}   [args.input]       IGNORED for choosing op/path/method/key (server-derived)
+ * @param {object}   [args.objectContext] SERVER-DERIVED { objectId, stateKey } for object
+ *                                       operations. Required when spec.requiresObjectContext.
+ *                                       Never sourced from input/job parameters — the worker
+ *                                       handler builds it from the trusted job + owner-verified
+ *                                       state-key derivation.
  * @param {object}   [args.claimContext] e.g. { workerId } (informational; never recorded)
  * @param {object}   [args.logger]      { info, warn, error }
  * @param {function} args.callR         injected R caller (default built per worker)
@@ -188,13 +320,29 @@ async function runRBridgeOperation(args = {}) {
     throw codedError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
 
-  // 2. The request is built ENTIRELY from the server-defined spec. `args.input` is
-  //    deliberately never read: the caller cannot choose method/path/code/endpoint/
-  //    state key. (For r.runtime.check there is no per-job input at all.)
+  // 2. The request method/path are built ENTIRELY from the server-defined spec.
+  //    `args.input` is deliberately never read: the caller cannot choose method/path/
+  //    code/endpoint/state key.
   const spec = R_BRIDGE_OPERATIONS[operation];
   const request = { method: spec.method, path: spec.path, timeoutMs };
 
+  // 2a. Object operations need SERVER-DERIVED object context (never from input). The
+  //     state key is the X-Object-ID the bridge sends; it is derived by the worker
+  //     handler from the trusted job + owner-verified deriver, never client-provided.
+  let objectContext = null;
+  if (spec.requiresObjectContext) {
+    objectContext = args.objectContext;
+    if (!objectContext || typeof objectContext !== 'object'
+      || typeof objectContext.stateKey !== 'string' || objectContext.stateKey === ''
+      || typeof objectContext.objectId !== 'string' || objectContext.objectId === '') {
+      throw codedError('R_OBJECT_CONTEXT_REQUIRED',
+        'Server-derived object context is required for object inspection.');
+    }
+    request.objectStateKey = objectContext.stateKey;
+  }
+
   if (logger && typeof logger.info === 'function') {
+    // NB: never log the state key (an R state key); only the safe method/path.
     logger.info(`[r-bridge] running allowlisted operation '${operation}' (${spec.method} ${spec.path}).`);
   }
 
@@ -209,12 +357,37 @@ async function runRBridgeOperation(args = {}) {
 
   if (!response || response.status !== 200) {
     // Never include the raw body/status text — only a generic, stable message.
-    throw codedError('R_RUNTIME_CHECK_FAILED', 'R runtime check failed.');
+    const failCode = spec.requiresObjectContext ? 'R_OBJECT_INSPECT_FAILED' : 'R_RUNTIME_CHECK_FAILED';
+    throw codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
   }
 
-  // 4. Build SAFE, metadata-only artifact metadata. Only a small, sanitized set of
-  //    known runtime fields is kept; everything else from the R response is dropped.
+  // 4. Build SAFE, metadata-only artifact metadata. Only a small, sanitized allowlist
+  //    of fields is kept; everything else from the R response is dropped.
   const body = response.body && typeof response.body === 'object' ? response.body : {};
+
+  if (operation === 'r.object.inspect') {
+    const metadata = {
+      operation,
+      kind: 'inspection',
+      scientific_output: false,
+      read_only: true,
+      inspectedAt: new Date().toISOString(),
+      // The analysis object id is a normal (already member-visible) resource id, NOT
+      // the R state key — the state key is never placed in metadata.
+      objectId: objectContext.objectId,
+      object: sanitizeInspectionSummary(body),
+    };
+    return {
+      operation,
+      artifactType: spec.artifactType,
+      storageKind: 'metadata_only',
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      metadata,
+    };
+  }
+
+  // r.runtime.check
   const runtime = {};
   const status = sanitizeRuntimeField(body.status);
   const mode = sanitizeRuntimeField(body.mode);
@@ -242,8 +415,13 @@ async function runRBridgeOperation(args = {}) {
 module.exports = {
   DEFAULT_R_BRIDGE_TIMEOUT_MS,
   R_BRIDGE_OPERATIONS,
+  R_BRIDGE_ALLOWED_TARGETS,
   isAllowedRBridgeOperation,
+  isAllowedRBridgeTarget,
   sanitizeRuntimeField,
+  sanitizeCount,
+  sanitizeNameList,
+  sanitizeInspectionSummary,
   sanitizeRBridgeError,
   createDefaultRCaller,
   runRBridgeOperation,

@@ -39,6 +39,15 @@ function generateWorkerId() {
 // Error code recorded on a job whose type has no registered handler.
 const UNSUPPORTED_JOB_TYPE = 'UNSUPPORTED_JOB_TYPE';
 
+/** Coded handler error carrying a stable, SAFE message. Handlers throw these for
+ *  pre-R validation failures; the message is durable (failHandlerError records it),
+ *  so it must never contain secrets, paths, or another user's existence details. */
+function codedHandlerError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
 // Documented safe defaults for worker runtime config. These MUST match the values
 // documented in .env.example (JOB_WORKER_POLL_MS / JOB_WORKER_LEASE_SECONDS) and the
 // createJobWorker() option defaults above.
@@ -209,16 +218,108 @@ async function rRuntimeCheckHandler(ctx) {
   };
 }
 
+/**
+ * Read-only worker-to-R object inspection handler: the ONLY handler that reads a live
+ * analysis object. It inspects ONE existing object via the allowlisted, read-only
+ * `r.object.inspect` bridge operation and records a metadata-only `r_object_inspection`
+ * artifact (sanitized object summary).
+ *
+ * CENTRAL OWNERSHIP BOUNDARY (project membership ≠ live R access):
+ *   The object id comes from the TRUSTED job row (job.analysisObjectId), never from
+ *   client passthrough. Before ANY R contact, the handler verifies the JOB CREATOR
+ *   (job.ownerUserId) OWNS that analysis object via the same owner-verified check the
+ *   /api/r/* proxy uses (verifyAnalysisObjectOwner). A project co-member (even an
+ *   admin) who created a job against another member's object therefore FAILS here —
+ *   owning the project metadata never grants live R object access. The R state key
+ *   (X-Object-ID) is SERVER-DERIVED from the owner + object id (deriveRObjectStateKey,
+ *   injected by the server) and never client-provided.
+ *
+ * It:
+ *   - heartbeats (proving the cooperative seam),
+ *   - validates object presence + owner BEFORE contacting R (fails safely otherwise),
+ *   - invokes the bridge with a SERVER-DERIVED operation + object context,
+ *   - records ONE metadata-only artifact on success,
+ *   - mutates NOTHING in R, creates NO checkpoint / result analysis object, exposes
+ *     NO path/download/state key, fabricates NO scientific metric.
+ * Bridge errors arrive pre-sanitized (safe message + code).
+ */
+async function rObjectInspectHandler(ctx) {
+  ctx.heartbeat();
+  ctx.log({ level: 'info', message: 'r.object.inspect handler: validating object ownership before any R contact (read-only inspection, no pipeline execution).' });
+
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+
+  // 1. The job MUST reference an analysis object. Fail safely BEFORE any R contact.
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Inspection job is missing its analysis object.');
+  }
+
+  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may inspect. This
+  //    is the same owner-verified check the /api/r/* proxy uses, so project membership
+  //    alone can never reach another user's live object. Uses a 404-style message so
+  //    we never reveal another user's object exists.
+  if (typeof ctx.verifyAnalysisObjectOwner !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+
+  // 3. Derive the R state key (X-Object-ID) SERVER-SIDE from the verified owner +
+  //    object id. Never client-provided. Injected by the server so deriveRStateKey
+  //    stays the single source of truth (no client controls the user-prefix).
+  if (typeof ctx.deriveRObjectStateKey !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+
+  const descriptor = await ctx.runRBridgeOperation({
+    job,
+    operation: 'r.object.inspect',
+    actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+    // SERVER-DERIVED object context: the bridge reads object id/state key only from
+    // here, never from job parameters / client input.
+    objectContext: { objectId, stateKey },
+    input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+
+  const artifact = ctx.createArtifact({
+    artifactType: descriptor.artifactType, // 'r_object_inspection'
+    // Associate the artifact with the inspected object (defaults to the job's own
+    // analysis object, which is already same-scope) — metadata link only, not access.
+    name: descriptor.name,
+    description: descriptor.description,
+    storageKind: descriptor.storageKind, // 'metadata_only'
+    metadata: descriptor.metadata,
+  });
+
+  ctx.log({ level: 'info', message: `r.object.inspect handler: recorded metadata-only artifact ${artifact.id} (read-only inspection, not a scientific output).` });
+
+  // No result analysis object / checkpoint: this is a non-mutating inspection.
+  return {
+    result: { ok: true, handled: 'r.object.inspect', operation: 'r.object.inspect', artifactId: artifact.id }
+  };
+}
+
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
-// placeholder that exercises the artifact/checkpoint metadata wiring, and the
-// minimal `r.runtime.check` worker-to-R bridge (one allowlisted, metadata-only
-// R-backed operation). The real analytical job types (normalize/qc_filter/pca/
-// cluster/umap/find_markers/integrate) remain deliberately UNREGISTERED so the
-// worker fails them (UNSUPPORTED_JOB_TYPE) instead of pretending to run them.
+// placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
+// `r.runtime.check` worker-to-R bridge, and the read-only `r.object.inspect` object
+// inspection bridge (both allowlisted, metadata-only R-backed operations). The real
+// analytical job types (normalize/qc_filter/pca/cluster/umap/find_markers/integrate)
+// remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
+// instead of pretending to run them.
 const DEFAULT_HANDLERS = Object.freeze({
   generic: genericNoopHandler,
   'checkpoint.noop': checkpointNoopHandler,
   'r.runtime.check': rRuntimeCheckHandler,
+  'r.object.inspect': rObjectInspectHandler,
 });
 
 /**
@@ -255,6 +356,11 @@ function createJobWorker(options = {}) {
     rBridge = rWorkerBridge,
     callR,
     rBridgeConfig = {},
+    // Server-derived R state-key deriver (ownerUserId, objectId) → X-Object-ID. Used
+    // ONLY by the r.object.inspect handler. Injected by the server from its canonical
+    // deriveRStateKey so the client never controls the key. Tests inject a deriver
+    // (the real server one or a deterministic fake); other handlers never use it.
+    deriveRObjectStateKey,
     logger = console,
     now,
   } = options;
@@ -372,11 +478,18 @@ function createJobWorker(options = {}) {
       // NO paths — metadata only in this branch.
       createArtifact: (input) => db.createJobArtifactByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       createCheckpoint: (input) => db.createCheckpointForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
-      // R-bridge seam (used only by the r.runtime.check handler). The bridge is a
-      // pure function; the resolved R caller is injected so it cannot reach R by any
-      // path other than this server-controlled one.
+      // R-bridge seam (used only by the r.runtime.check / r.object.inspect handlers).
+      // The bridge is a pure function; the resolved R caller is injected so it cannot
+      // reach R by any path other than this server-controlled one.
       runRBridgeOperation: (bridgeArgs) => rBridge.runRBridgeOperation(bridgeArgs),
       callR: resolvedCallR,
+      // Owner-verified gate + server-derived state-key deriver for r.object.inspect.
+      // verifyAnalysisObjectOwner is the SAME owner check the /api/r/* proxy uses, so
+      // project membership alone never reaches another user's live R object. The
+      // deriver is injected (server's canonical deriveRStateKey); the client never
+      // controls the X-Object-ID.
+      verifyAnalysisObjectOwner: (ownerUserId, objectId) => db.verifyAnalysisObjectOwner(ownerUserId, objectId),
+      deriveRObjectStateKey: typeof deriveRObjectStateKey === 'function' ? deriveRObjectStateKey : undefined,
       logger: log,
     };
 
@@ -479,6 +592,7 @@ module.exports = {
   genericNoopHandler,
   checkpointNoopHandler,
   rRuntimeCheckHandler,
+  rObjectInspectHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,
