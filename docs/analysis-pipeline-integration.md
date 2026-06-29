@@ -88,6 +88,16 @@ One job type, `pbmc.pipeline.v1`, created through the **existing** typed-job API
 `{ jobType, analysisObjectId, parameters }`). No new public route, no public worker
 route, no public R-bridge route, and no download route are added.
 
+**Internal-only R endpoint (enforced).** `POST /object/pbmc-pipeline` is reached **only**
+through the in-process worker bridge, which calls the R backend directly and does **not**
+traverse the public `/api/r/*` Express proxy. Because that proxy is a catch-all, the
+server explicitly **blocks** this path before any R contact
+(`isInternalOnlyRProxyPath` in [`server.js`](../server.js) → `404`), so a direct
+authenticated `POST /api/r/object/pbmc-pipeline` call cannot run the pipeline, write a
+checkpoint, or create any durable record. The block covers every spelling of the path
+(any method, trailing slash, doubled/`%2F`-encoded/backslash separators); the worker
+bridge is unaffected. Enforcement lives in Node, not in a comment.
+
 Parameters are validated server-side against a fixed allowlist
 ([`backend/pbmcPipeline.js`](../backend/pbmcPipeline.js)):
 
@@ -139,14 +149,24 @@ download route** in this branch.
 ### Worker success / failure behavior
 
 On success the handler creates **exactly one** result analysis object (a child
-checkpoint of the input object), **one** parent→result lineage edge (created atomically
-by `createCheckpointForJobByWorker`), **one** `checkpoint` artifact (`local_internal`),
-and **one** `pipeline_summary` artifact (metadata-only); it links
-`job.result_analysis_object_id` and writes durable logs. All DB result/edge/artifact
-records are created **only after** R confirms a durable checkpoint save (saved +
-checksum). On R failure, invalid params, cancellation, or claim loss, **no** successful
-result object/edge/artifact is created, and the claim guard prevents two workers from
-duplicating any of them.
+checkpoint of the input object), **one** parent→result lineage edge, **one** `checkpoint`
+artifact (`local_internal`), and **one** `pipeline_summary` artifact (metadata-only); it
+links `job.result_analysis_object_id` and writes durable logs. All five durable records
+are created in **one atomic, claim/lease-guarded transaction**
+(`completePbmcPipelineResultByWorker`): the result object, job link, lineage edge,
+checkpoint artifact, and summary artifact commit **together or not at all**, so a failure
+(including a claim loss or a bad artifact insert) can never leave a failed job linked to a
+result object/edge with missing artifacts. All DB records are created **only after** R
+confirms a durable checkpoint save (saved + checksum). On R failure, invalid params,
+cancellation, or claim loss, **no** successful result object/edge/artifact is created, and
+the claim guard (plus the `result_analysis_object_id IS NULL` re-check) prevents two
+workers from duplicating any of them.
+
+> **Orphan-file note.** The R checkpoint RDS is written by the R backend *before* the DB
+> transaction runs, so a DB rollback can leave an orphaned internal file on the R vault.
+> That is acceptable here — there is no public download route and Node may not share the
+> R vault filesystem — and is recorded as a storage-lifecycle follow-up. The invariant
+> that holds is that DB state never partially commits a successful-looking result.
 
 ### What is exposed (and what is not)
 

@@ -4164,6 +4164,238 @@ function createCheckpointForJobByWorker(jobId, workerId, claimToken, input = {},
   return pid ? getProjectAnalysisObjectRow(id, pid) : getAnalysisObjectForUser(id, owner);
 }
 
+// ── Atomic PBMC pipeline completion (result + edge + both artifacts) ──────────
+//
+// SINGLE-transaction completion for the `pbmc.pipeline.v1` worker handler. The earlier
+// design created the result object + job link + lineage edge in one transaction, then
+// inserted the checkpoint and summary artifacts in two separate statements afterward —
+// so a failure (claim-loss window / DB error) AFTER the first transaction could leave a
+// FAILED job still linked to a result object + edge with the required artifacts missing.
+//
+// This helper folds ALL FIVE durable records into ONE `db.transaction(...).immediate()`
+// so they are created together or not at all:
+//   1. result analysis object (a CHILD checkpoint of the job's input object)
+//   2. job.result_analysis_object_id link (claim/lease/result-IS-NULL guarded)
+//   3. parent→result lineage edge ('checkpoint'/'primary')
+//   4. local_internal checkpoint artifact (server key + checksum/size; key stripped publicly)
+//   5. metadata_only pipeline_summary artifact
+// If ANY step throws, the whole transaction rolls back: no result object remains linked,
+// no edge, no partial artifact. The claim guard prevents two workers from racing this in,
+// and the result-IS-NULL guard prevents a duplicate result/edge/artifacts.
+//
+// NOTE (orphan file lifecycle, documented follow-up): the R checkpoint RDS is written by
+// the R backend BEFORE this DB transaction runs. A DB rollback therefore can leave an
+// orphaned internal file on the R vault. That is acceptable for this branch — there is no
+// public download route and Node may not share the R vault filesystem — and is recorded
+// as a storage-lifecycle follow-up. The invariant that MUST hold (and does) is that DB
+// state never partially commits a successful-looking result without its required artifacts.
+function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.result_analysis_object_id) {
+    throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
+  }
+
+  const owner = row.owner_user_id;
+  const pid = row.project_id || null;
+
+  // ── Validate the result object spec (fail-fast, BEFORE any insert) ──
+  const result = input.result && typeof input.result === 'object' ? input.result : {};
+  const objectType = result.objectType === undefined || result.objectType === null
+    ? 'generic' : String(result.objectType).trim();
+  if (!isValidObjectType(objectType)) {
+    throw codedError('INVALID_OBJECT_TYPE', `Invalid objectType. Allowed: ${[...ALLOWED_OBJECT_TYPES].join(', ')}.`);
+  }
+  const resultMetadata = result.metadata === undefined ? {} : result.metadata;
+  if (resultMetadata === null || typeof resultMetadata !== 'object' || Array.isArray(resultMetadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  // ── Validate the checkpoint artifact spec (local_internal; integrity required) ──
+  const cp = input.checkpointArtifact && typeof input.checkpointArtifact === 'object' ? input.checkpointArtifact : {};
+  const cpType = typeof cp.artifactType === 'string' ? cp.artifactType.trim() : 'checkpoint';
+  if (!isValidArtifactType(cpType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE', `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const cpStorageKind = cp.storageKind === undefined || cp.storageKind === null ? 'local_internal' : String(cp.storageKind);
+  if (cpStorageKind !== 'local_internal') {
+    throw codedError('INVALID_STORAGE_KIND',
+      'completePbmcPipelineResultByWorker records a local_internal checkpoint artifact.');
+  }
+  if (!isSafeInternalStorageKey(cp.internalStorageKey)) {
+    throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
+  }
+  const cpChecksum = normalizeChecksumSha256(cp.checksumSha256);
+  if (cpChecksum === undefined || cpChecksum === null) {
+    throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
+  }
+  const cpSize = normalizeArtifactSizeBytes(cp.sizeBytes);
+  if (cpSize === undefined || cpSize === null) throw codedError('INVALID_SIZE', 'sizeBytes must be a non-negative integer.');
+  const cpStatus = cp.status === undefined || cp.status === null ? 'available' : String(cp.status);
+  if (!isValidArtifactStatus(cpStatus)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const cpMetadata = cp.metadata === undefined ? {} : cp.metadata;
+  if (cpMetadata === null || typeof cpMetadata !== 'object' || Array.isArray(cpMetadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  // ── Validate the summary artifact spec (metadata-only) ──
+  const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  const smType = typeof sm.artifactType === 'string' ? sm.artifactType.trim() : '';
+  if (!isValidArtifactType(smType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE', `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const smStorageKind = sm.storageKind === undefined || sm.storageKind === null ? 'metadata_only' : String(sm.storageKind);
+  if (!isValidArtifactStorageKind(smStorageKind)) {
+    throw codedError('INVALID_STORAGE_KIND', `Invalid storageKind. Allowed: ${[...ALLOWED_ARTIFACT_STORAGE_KINDS].join(', ')}.`);
+  }
+  const smStatus = sm.status === undefined || sm.status === null ? 'available' : String(sm.status);
+  if (!isValidArtifactStatus(smStatus)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const smMetadata = sm.metadata === undefined ? {} : sm.metadata;
+  if (smMetadata === null || typeof smMetadata !== 'object' || Array.isArray(smMetadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  // Parent defaults to the job's input object; lineage root inherited within scope.
+  const parentObjectId = result.parentObjectId !== undefined && result.parentObjectId !== null
+    ? String(result.parentObjectId)
+    : (row.analysis_object_id || null);
+  let lineageRootId = null;
+  if (parentObjectId) {
+    const parent = pid ? getProjectAnalysisObjectRow(parentObjectId, pid) : getAnalysisObjectForUser(parentObjectId, owner);
+    if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    lineageRootId = parent.lineageRootId || parent.id;
+  }
+  const datasetId = row.dataset_id || null;
+
+  const resultId = generateAnalysisObjectId();
+  const checkpointArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+
+  // Everything below is ONE atomic unit. Any throw (incl. JSON.stringify of a bad
+  // metadata object) rolls the whole thing back — no orphaned DB result/edge/artifact.
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO analysis_objects
+        (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+         display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+      VALUES
+        (@id, @owner, @projectId, @datasetId, @parentObjectId, @lineageRootId, @objectType,
+         @displayName, NULL, NULL, @metadataJson, NULL)
+    `).run({
+      id: resultId,
+      owner,
+      projectId: pid,
+      datasetId,
+      parentObjectId,
+      lineageRootId,
+      objectType,
+      displayName: result.displayName != null ? String(result.displayName) : null,
+      metadataJson: JSON.stringify(resultMetadata)
+    });
+    if (!parentObjectId) {
+      db.prepare('UPDATE analysis_objects SET lineage_root_id = id WHERE id = ?').run(resultId);
+    }
+
+    // Link back to the job, re-checking the claim AND result-IS-NULL so a racing
+    // worker/claim cannot double-link. A guard miss throws → the whole txn rolls back.
+    const linkInfo = db.prepare(`
+      UPDATE jobs SET result_analysis_object_id = @aoId, updated_at = @now
+      WHERE id = @jobId AND worker_id = @wid AND claim_token = @token
+        AND status = 'running' AND lease_expires_at > @now
+        AND result_analysis_object_id IS NULL
+    `).run({ aoId: resultId, jobId: String(jobId), wid, token, now });
+    if (linkInfo.changes !== 1) {
+      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    }
+
+    if (parentObjectId) {
+      _insertLineageEdgeRow({
+        projectId: pid,
+        parentObjectId,
+        childObjectId: resultId,
+        jobId: String(jobId),
+        edgeType: 'checkpoint',
+        parentRole: 'primary',
+        metadata: {},
+        createdByUserId: owner,
+        now
+      });
+    }
+
+    // Checkpoint artifact (local_internal): storage_uri holds the SERVER key (stripped
+    // by toPublicJobArtifact); checksum/size are safe public descriptors.
+    db.prepare(`
+      INSERT INTO job_artifacts
+        (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+         provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+         mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+      VALUES
+        (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+         NULL, NULL, @createdBy, @artifactType, @name, @description,
+         NULL, @storageKind, @storageUri, @checksum, @sizeBytes, @status, @metadataJson)
+    `).run({
+      id: checkpointArtifactId,
+      projectId: pid,
+      jobId: row.id,
+      datasetId,
+      analysisObjectId: parentObjectId,
+      resultAnalysisObjectId: resultId,
+      createdBy: owner,
+      artifactType: cpType,
+      name: cp.name != null ? String(cp.name) : null,
+      description: cp.description != null ? String(cp.description) : null,
+      storageKind: cpStorageKind,
+      storageUri: cp.internalStorageKey,
+      checksum: cpChecksum,
+      sizeBytes: cpSize,
+      status: cpStatus,
+      metadataJson: JSON.stringify(cpMetadata)
+    });
+
+    // Pipeline summary artifact (metadata-only): no storage_uri/checksum/size.
+    db.prepare(`
+      INSERT INTO job_artifacts
+        (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+         provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+         mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+      VALUES
+        (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+         NULL, NULL, @createdBy, @artifactType, @name, @description,
+         NULL, @storageKind, NULL, NULL, NULL, @status, @metadataJson)
+    `).run({
+      id: summaryArtifactId,
+      projectId: pid,
+      jobId: row.id,
+      datasetId,
+      analysisObjectId: parentObjectId,
+      resultAnalysisObjectId: resultId,
+      createdBy: owner,
+      artifactType: smType,
+      name: sm.name != null ? String(sm.name) : null,
+      description: sm.description != null ? String(sm.description) : null,
+      storageKind: smStorageKind,
+      status: smStatus,
+      metadataJson: JSON.stringify(smMetadata)
+    });
+  }).immediate();
+
+  return {
+    resultObject: pid ? getProjectAnalysisObjectRow(resultId, pid) : getAnalysisObjectForUser(resultId, owner),
+    checkpointArtifact: getJobArtifactRowById(checkpointArtifactId),
+    summaryArtifact: getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
 // ── Project-scoped artifact reads (metadata only; no download) ────
 //
 // Read-only, role-checked artifact metadata for project members. Like the other
@@ -4373,6 +4605,7 @@ module.exports = {
   createCheckpointArtifactForJobByWorker,
   isSafeInternalStorageKey,
   createCheckpointForJobByWorker,
+  completePbmcPipelineResultByWorker,
   getJobArtifactsByJobId,
   listProjectArtifacts,
   listProjectJobArtifacts,

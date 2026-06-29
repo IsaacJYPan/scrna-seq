@@ -239,6 +239,13 @@ jobs:
         # reaching R). Requires the R backend set up above.
         run: npm run test:r-state-proxy
 
+      - name: Run PBMC Pipeline Parent-Immutability Smoke Test
+        # Live Rscript + Seurat check that the pbmc.pipeline.v1 copy-on-modify path
+        # leaves the parent object UNCHANGED at the object level while the derived copy
+        # gains the new state (the Node tests only assert this at the DB-row level).
+        # Reuses the R env set up above; SKIPs cleanly if Seurat is unavailable.
+        run: npm run test:pbmc-parent
+
       - name: Run Visual/UX Tests
         run: npm run test:visual
 

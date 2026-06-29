@@ -12,6 +12,7 @@
     "test:integration": "node scripts/run_integration_tests.js",
     "test:tutorial": "node scripts/test_pbmc3k_tutorial.js",
     "test:r-state-proxy": "node scripts/verify_r_state_proxy.js",
+    "test:pbmc-parent": "Rscript scripts/verify_pbmc_parent_unmutated.R",
     "test:frontend": "vitest run src/",
     "test:backend": "vitest run backend/ --environment node",
     "test:visual": "node scripts/test_visual_ux.js",

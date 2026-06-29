@@ -398,46 +398,52 @@ async function pbmcPipelineHandler(ctx) {
     throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Pipeline did not produce a durable checkpoint.');
   }
 
-  // 8. Create the result analysis object (a CHILD checkpoint of the input object) +
-  //    the parent→result lineage edge, atomically and claim-guarded. The parent is
-  //    never mutated. Result metadata records provenance WITHOUT implying a download.
-  const resultObject = ctx.createCheckpoint({
-    objectType: descriptor.resultObjectType || 'seurat',
-    displayName: 'PBMC pipeline result',
-    metadata: {
-      source: 'pbmc.pipeline.v1',
-      operation: 'r.pbmc.pipeline.v1',
-      scientific_output: true,
-      checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
-      resolvedParams: params,
-      defaultsApplied,
-      summary: descriptor.summary,
+  // 8. Create the result analysis object (a CHILD checkpoint of the input object), the
+  //    job result link, the parent→result lineage edge, AND both required artifacts
+  //    (local_internal checkpoint + metadata_only pipeline_summary) in ONE atomic,
+  //    claim/lease-guarded DB transaction. Either all five durable records commit
+  //    together or none do — a failure can never leave a failed job linked to a result
+  //    object/edge with missing artifacts. The parent is never mutated; result metadata
+  //    records provenance WITHOUT implying a download.
+  const completion = ctx.completePbmcPipelineResult({
+    result: {
+      objectType: descriptor.resultObjectType || 'seurat',
+      displayName: 'PBMC pipeline result',
+      metadata: {
+        source: 'pbmc.pipeline.v1',
+        operation: 'r.pbmc.pipeline.v1',
+        scientific_output: true,
+        checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+        resolvedParams: params,
+        defaultsApplied,
+        summary: descriptor.summary,
+      },
+    },
+    // Durable checkpoint artifact (local_internal): server-allocated key (stored
+    // internally, stripped from public responses) + integrity checksum/size.
+    checkpointArtifact: {
+      artifactType: 'checkpoint',
+      name: 'PBMC pipeline checkpoint',
+      description: 'Durable internal checkpoint of the PBMC pipeline result object (RDS on the R backend vault). No public download in this branch.',
+      storageKind: 'local_internal',
+      internalStorageKey: checkpointStorageKey,
+      checksumSha256: checkpoint.checksumSha256,
+      sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
+      metadata: { operation: 'r.pbmc.pipeline.v1', scientific_output: true, downloadable: false },
+    },
+    // Metadata-only pipeline summary artifact (resolved params + sanitized summary).
+    summaryArtifact: {
+      artifactType: descriptor.artifactType, // 'pipeline_summary'
+      name: descriptor.name,
+      description: descriptor.description,
+      storageKind: 'metadata_only',
+      metadata: { ...descriptor.metadata, resolvedParams: params, defaultsApplied },
     },
   });
 
-  // 9. Record the durable checkpoint artifact (local_internal): server-allocated key
-  //    (stored internally, stripped from public responses) + integrity checksum/size.
-  const checkpointArtifact = ctx.createCheckpointArtifact({
-    artifactType: 'checkpoint',
-    resultAnalysisObjectId: resultObject.id,
-    name: 'PBMC pipeline checkpoint',
-    description: 'Durable internal checkpoint of the PBMC pipeline result object (RDS on the R backend vault). No public download in this branch.',
-    storageKind: 'local_internal',
-    internalStorageKey: checkpointStorageKey,
-    checksumSha256: checkpoint.checksumSha256,
-    sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
-    metadata: { operation: 'r.pbmc.pipeline.v1', scientific_output: true, downloadable: false },
-  });
-
-  // 10. Record the metadata-only pipeline summary artifact (resolved params + summary).
-  const summaryArtifact = ctx.createArtifact({
-    artifactType: descriptor.artifactType, // 'pipeline_summary'
-    resultAnalysisObjectId: resultObject.id,
-    name: descriptor.name,
-    description: descriptor.description,
-    storageKind: 'metadata_only',
-    metadata: { ...descriptor.metadata, resolvedParams: params, defaultsApplied },
-  });
+  const resultObject = completion.resultObject;
+  const checkpointArtifact = completion.checkpointArtifact;
+  const summaryArtifact = completion.summaryArtifact;
 
   ctx.log({ level: 'info', message: `pbmc.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id} (parent ${objectId} unchanged).` });
 
@@ -630,6 +636,10 @@ function createJobWorker(options = {}) {
       // fields; used only by the pbmc.pipeline.v1 handler for local_internal storage.
       createCheckpointArtifact: (input) => db.createCheckpointArtifactForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       createCheckpoint: (input) => db.createCheckpointForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      // Atomic PBMC completion: result object + job link + lineage edge + checkpoint
+      // artifact + summary artifact in ONE claim-guarded transaction (used only by the
+      // pbmc.pipeline.v1 handler) so an artifact failure can't leave a partial result.
+      completePbmcPipelineResult: (input) => db.completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // R-bridge seam (used only by the r.runtime.check / r.object.inspect handlers).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
       // reach R by any path other than this server-controlled one.
