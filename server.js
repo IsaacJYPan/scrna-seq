@@ -380,6 +380,13 @@ const FIGURE_ID_PATTERN = /^fig_[0-9a-f]+$/;
 function isValidFigureIdFormat(value) {
   return typeof value === 'string' && FIGURE_ID_PATTERN.test(value);
 }
+// Job-artifact ids are server-generated as `art_` + lowercase hex. A client
+// supplying one in a project route path must match the shape, else 400 — distinct
+// from a well-formed id that simply does not resolve (404).
+const ARTIFACT_ID_PATTERN = /^art_[0-9a-f]+$/;
+function isValidArtifactIdFormat(value) {
+  return typeof value === 'string' && ARTIFACT_ID_PATTERN.test(value);
+}
 
 // Middleware: verify any client-supplied X-Object-ID against the DB before it
 // reaches R. Sanitizing the string (deriveRStateKey) is not enough on its own:
@@ -1582,6 +1589,61 @@ app.get('/api/projects/:projectId/figures/:figureId', (req, res) => {
     res.json(fig);
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectFigures');
+  }
+});
+
+// ── Project-scoped job artifacts & checkpoints (read-only metadata) ──────
+// Durable artifact/checkpoint METADATA produced by jobs, readable by project
+// members by role. There is intentionally NO create/mutate route (artifact
+// creation is worker/helper-driven) and NO download route — these endpoints
+// return metadata only. The serializer omits storage_uri, so no internal/local
+// path or storage key is ever exposed; claim tokens / worker internals are not in
+// the artifact model at all. Legacy NULL-project artifacts never appear (the
+// helpers always pin a real project_id). See docs/architecture.md.
+app.get('/api/projects/:projectId/artifacts', (req, res) => {
+  const filters = {
+    jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
+    artifactType: typeof req.query.artifactType === 'string' ? req.query.artifactType : undefined,
+    status: typeof req.query.status === 'string' ? req.query.status : undefined,
+    analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
+    resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined,
+    datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
+    provenanceId: typeof req.query.provenanceId === 'string' ? req.query.provenanceId : undefined,
+    figureId: typeof req.query.figureId === 'string' ? req.query.figureId : undefined
+  };
+  try {
+    res.json(db.listProjectArtifacts(req.user.id, req.params.projectId, filters));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectArtifacts');
+  }
+});
+
+app.get('/api/projects/:projectId/artifacts/:artifactId', (req, res) => {
+  if (!isValidArtifactIdFormat(req.params.artifactId)) {
+    return res.status(400).json({ error: 'Malformed artifact ID.' });
+  }
+  try {
+    const artifact = db.getProjectArtifact(req.user.id, req.params.projectId, req.params.artifactId);
+    if (!artifact) return res.status(404).json({ error: 'Artifact not found.' });
+    res.json(artifact);
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectArtifacts');
+  }
+});
+
+app.get('/api/projects/:projectId/jobs/:jobId/artifacts', (req, res) => {
+  if (!isValidJobIdFormat(req.params.jobId)) {
+    return res.status(400).json({ error: 'Malformed job ID.' });
+  }
+  const filters = {
+    artifactType: typeof req.query.artifactType === 'string' ? req.query.artifactType : undefined,
+    status: typeof req.query.status === 'string' ? req.query.status : undefined,
+    resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined
+  };
+  try {
+    res.json(db.listProjectJobArtifacts(req.user.id, req.params.projectId, req.params.jobId, filters));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectArtifacts');
   }
 });
 
