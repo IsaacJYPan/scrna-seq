@@ -36,6 +36,7 @@ const {
   listProjectAnalysisObjectChildren, listProjectAnalysisObjectParents, getProjectAnalysisObjectLineage,
   isValidJobType, isValidArtifactType, isValidArtifactStorageKind,
   createCheckpointArtifactForJobByWorker, createJobArtifactByWorker, isSafeInternalStorageKey,
+  completePbmcPipelineResultByWorker, listAnalysisObjectsForUser,
   toPublicJobArtifact, listJobsForUser,
 } = dbmod;
 
@@ -57,7 +58,7 @@ const { createJobWorker, DEFAULT_HANDLERS, pbmcPipelineHandler } = worker;
 
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const serverModule = require('../server.js');
-const { deriveRObjectStateKey } = serverModule;
+const { deriveRObjectStateKey, isInternalOnlyRProxyPath, R_PROXY_INTERNAL_ONLY_PATHS } = serverModule;
 
 // Deterministic UTC instants in SQLite's 'YYYY-MM-DD HH:MM:SS' format.
 const T0 = '2030-01-01 00:00:00';
@@ -831,5 +832,215 @@ describe('pbmc.pipeline.v1 — R-side request contract', () => {
     await drainPipeline(recordingPipelineCaller(calls));
     expect(calls[0].timeoutMs).toBeGreaterThan(bridge.DEFAULT_R_BRIDGE_TIMEOUT_MS);
     expect(calls[0].timeoutMs).toBeLessThanOrEqual(bridge.MAX_R_BRIDGE_TIMEOUT_MS);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 9. B1 — the internal-only R endpoint is BLOCKED on the public /api/r/* proxy
+//    (it runs ONLY via the in-process worker bridge, which never traverses the proxy)
+// ════════════════════════════════════════════════════════════════════════════
+describe('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)', () => {
+  let server;
+  beforeAll(async () => { server = await startServer(); });
+  afterAll(() => { if (server) server.close(); });
+  beforeEach(() => { initDatabase(':memory:'); });
+  afterEach(() => { closeDatabase(); });
+
+  it('isInternalOnlyRProxyPath blocks every spelling of /object/pbmc-pipeline; allows other R paths', () => {
+    expect(R_PROXY_INTERNAL_ONLY_PATHS.has('/object/pbmc-pipeline')).toBe(true);
+    // doubled slashes, trailing slash, %2F-encoded and backslash separators all normalize
+    // to the blocked path.
+    for (const p of [
+      '/object/pbmc-pipeline', '/object/pbmc-pipeline/', '//object/pbmc-pipeline',
+      '/object//pbmc-pipeline', '/object/pbmc-pipeline%2F', '\\object\\pbmc-pipeline',
+      '/object/%70bmc-pipeline',
+    ]) {
+      expect(isInternalOnlyRProxyPath(p), p).toBe(true);
+    }
+    for (const ok of ['/object/inspect', '/health', '/normalize', '/object/pbmc-pipeline-extra', '/pbmc-pipeline', '']) {
+      expect(isInternalOnlyRProxyPath(ok), ok).toBe(false);
+    }
+  });
+
+  it('authenticated direct POST /api/r/object/pbmc-pipeline is 404 BEFORE R, with NO durable side effects', async () => {
+    const { user, token } = createUserWithToken({ email: 'owner@example.com' });
+    // The caller even owns a real live object (X-Object-ID) — the path is still blocked
+    // before the proxy ever reaches R / validates storage_key.
+    const owned = createAnalysisObjectForUser(user.id, { objectType: 'seurat', displayName: 'mine' });
+    const r = await api(server, '/api/r/object/pbmc-pipeline', {
+      method: 'POST', token,
+      headers: { 'X-Object-ID': owned.id },
+      body: { params: { pcaDims: 30 }, storage_key: 'vault/owner_example_com/evil.rds' },
+    });
+    expect(r.status).toBe(404);
+    // No checkpoint write is possible (R is never contacted) and the worker contract is
+    // bypassed → no job / result object / artifact / lineage edge exists.
+    expect(listJobsForUser(user.id, {})).toHaveLength(0);
+    expect(listAnalysisObjectsForUser(user.id, {})).toHaveLength(1); // only the object we pre-created
+  });
+
+  it('blocks the pbmc path for any method / odd spelling (still 404, no existence leak)', async () => {
+    const { token } = createUserWithToken({ email: 'owner2@example.com' });
+    for (const { method, path } of [
+      { method: 'GET', path: '/api/r/object/pbmc-pipeline' },
+      { method: 'POST', path: '/api/r/object/pbmc-pipeline/' },
+      { method: 'PUT', path: '/api/r/object/pbmc-pipeline' },
+      { method: 'POST', path: '/api/r/object//pbmc-pipeline' },
+    ]) {
+      const r = await api(server, path, { method, token });
+      expect(r.status, `${method} ${path}`).toBe(404);
+    }
+  });
+
+  it('unauthenticated direct call is rejected (401) and never reaches the pipeline', async () => {
+    const r = await api(server, '/api/r/object/pbmc-pipeline', { method: 'POST', body: { params: {} } });
+    expect(r.status).toBe(401);
+  });
+
+  it('does NOT over-block: a non-internal /api/r path still enforces X-Object-ID ownership before R', async () => {
+    const { token } = createUserWithToken({ email: 'owner3@example.com' });
+    // Malformed object id → 400 (verifyRObjectOwnership), still before any R contact.
+    const bad = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
+    expect(bad.status).toBe(400);
+    // Well-formed but not-owned/unknown → 404 (no existence leak), before R.
+    const unknown = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
+    expect(unknown.status).toBe(404);
+  });
+
+  it('the worker bridge to r.pbmc.pipeline.v1 STILL runs (the block is proxy-only)', async () => {
+    const { job, alice, proj } = seedPipelineJob({});
+    const res = await drainPipeline(recordingPipelineCaller([]));
+    expect(res.status).toBe('completed');
+    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBeTruthy();
+  });
+
+  it('a project co-member cannot reach the pipeline via the proxy on another user\'s object (blocked 404)', async () => {
+    const alice = createUserWithToken({ email: 'alice@example.com' });
+    const carol = createUserWithToken({ email: 'carol@example.com' });
+    const proj = seedProject(alice.user.id);
+    addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
+    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'a' });
+    const r = await api(server, '/api/r/object/pbmc-pipeline', {
+      method: 'POST', token: carol.token, headers: { 'X-Object-ID': aliceObj.id }, body: { params: {} },
+    });
+    expect(r.status).toBe(404); // blocked before R AND before ownership — no run, no leak
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 10. B2 — result object + job link + edge + BOTH artifacts are ONE atomic unit
+// ════════════════════════════════════════════════════════════════════════════
+describe('pbmc.pipeline.v1 — atomic result/artifact completion', () => {
+  beforeEach(() => { initDatabase(':memory:'); });
+  afterEach(() => { closeDatabase(); });
+
+  // Seed alice + project + parent object + a CLAIMED pbmc job; return the claim handle.
+  function seedClaimedPipelineJob() {
+    const alice = createUser('alice@example.com', 'password123', 'Alice');
+    const proj = seedProject(alice.id);
+    const parent = createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc' });
+    const job = createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: parent.id });
+    const claimed = claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
+    return { alice, proj, parent, job, claimed };
+  }
+
+  function completionInput(overrides = {}) {
+    return {
+      result: {
+        objectType: 'seurat', displayName: 'PBMC pipeline result',
+        metadata: { source: 'pbmc.pipeline.v1', scientific_output: true },
+        ...(overrides.result || {}),
+      },
+      checkpointArtifact: {
+        artifactType: 'checkpoint', name: 'cp', storageKind: 'local_internal',
+        internalStorageKey: 'checkpoints/job_x/abcabcabcabc.rds',
+        checksumSha256: 'a'.repeat(64), sizeBytes: 123, metadata: { k: 1 },
+        ...(overrides.checkpointArtifact || {}),
+      },
+      summaryArtifact: {
+        artifactType: 'pipeline_summary', name: 'sum', storageKind: 'metadata_only',
+        metadata: { k: 2 },
+        ...(overrides.summaryArtifact || {}),
+      },
+    };
+  }
+
+  // A self-referential object: passes the plain-object check but throws at JSON.stringify
+  // INSIDE the transaction — a real, deterministic way to fail one artifact insert AFTER
+  // the result object has been inserted, proving the whole unit rolls back.
+  function circular() { const o = {}; o.self = o; return o; }
+
+  function expectNothingPersisted(alice, proj, parent, job) {
+    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBeFalsy();
+    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(0);
+    expect(listAnalysisObjectsForUser(alice.id, {})).toHaveLength(1); // only the parent
+  }
+
+  it('success: result object + job link + lineage edge + checkpoint + summary artifact, all atomic', () => {
+    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
+    const out = completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
+    expect(out.resultObject.id).toMatch(/^ao_[0-9a-f]+$/);
+    expect(out.checkpointArtifact.artifactType).toBe('checkpoint');
+    expect(out.checkpointArtifact.storageUri).toBe('checkpoints/job_x/abcabcabcabc.rds');
+    expect(out.summaryArtifact.artifactType).toBe('pipeline_summary');
+    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBe(out.resultObject.id);
+    const children = listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id);
+    expect(children).toHaveLength(1);
+    expect(children[0].childAnalysisObjectId).toBe(out.resultObject.id);
+    expect(children[0].edgeType).toBe('checkpoint');
+    expect(getJobArtifactsByJobId(job.id)).toHaveLength(2);
+    expect(listAnalysisObjectsForUser(alice.id, {})).toHaveLength(2); // parent + result
+  });
+
+  it('checkpoint-artifact insert failure rolls back EVERYTHING (no result/link/edge/artifact)', () => {
+    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
+    expect(() => completePbmcPipelineResultByWorker(
+      claimed.id, 'worker_t', claimed.claimToken,
+      completionInput({ checkpointArtifact: { metadata: circular() } }), { now: T0 }
+    )).toThrow();
+    expectNothingPersisted(alice, proj, parent, job);
+  });
+
+  it('summary-artifact insert failure ALSO rolls back the checkpoint artifact + result + edge', () => {
+    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
+    expect(() => completePbmcPipelineResultByWorker(
+      claimed.id, 'worker_t', claimed.claimToken,
+      completionInput({ summaryArtifact: { metadata: circular() } }), { now: T0 }
+    )).toThrow();
+    // Crucially, NOT even the checkpoint artifact (inserted before the summary) survives.
+    expectNothingPersisted(alice, proj, parent, job);
+  });
+
+  it('claim-loss (wrong token) creates no result/edge/artifacts', () => {
+    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
+    expect(() => completePbmcPipelineResultByWorker(claimed.id, 'worker_t', 'wrong-token', completionInput(), { now: T0 }))
+      .toThrowError(/CLAIM_LOST|claim/i);
+    expectNothingPersisted(alice, proj, parent, job);
+  });
+
+  it('an invalid checkpoint key / checksum is rejected and persists nothing', () => {
+    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
+    expect(() => completePbmcPipelineResultByWorker(
+      claimed.id, 'worker_t', claimed.claimToken,
+      completionInput({ checkpointArtifact: { internalStorageKey: '../escape.rds' } }), { now: T0 }
+    )).toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
+    expectNothingPersisted(alice, proj, parent, job);
+    // Re-seed-free: a bad checksum is likewise refused with nothing persisted.
+    expect(() => completePbmcPipelineResultByWorker(
+      claimed.id, 'worker_t', claimed.claimToken,
+      completionInput({ checkpointArtifact: { checksumSha256: 'nothex' } }), { now: T0 }
+    )).toThrowError(/checksum/i);
+    expectNothingPersisted(alice, proj, parent, job);
+  });
+
+  it('duplicate completion is rejected (CHECKPOINT_EXISTS); no duplicate result/edge/artifacts', () => {
+    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
+    const out = completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
+    expect(() => completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 }))
+      .toThrowError(/CHECKPOINT_EXISTS|already has a result/i);
+    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBe(out.resultObject.id);
+    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(1);
+    expect(getJobArtifactsByJobId(job.id)).toHaveLength(2);
   });
 });

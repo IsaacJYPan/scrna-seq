@@ -194,6 +194,31 @@ function isProductionDiagnosticRProxyPath(reqPath) {
   return process.env.NODE_ENV === 'production' && isDiagnosticRProxyPath(reqPath);
 }
 
+// ── Internal-only R endpoints (never reachable through the public proxy) ──────
+// Some R endpoints are driven EXCLUSIVELY by the in-process worker bridge, which calls
+// the R backend directly (it does NOT traverse this Express proxy). They must therefore
+// be UNREACHABLE through the public /api/r/* catch-all. POST /object/pbmc-pipeline runs
+// the PBMC/Seurat pipeline on a copy of a live object and writes a checkpoint RDS; a
+// direct proxy call would let a client run it WITHOUT a durable job, worker claim,
+// result object, artifact, lineage edge, or provenance/log record — bypassing the whole
+// worker contract. We block every spelling (any method, trailing slash, doubled slashes,
+// %2F-encoded or backslash separators) using the same normalization as the diagnostic
+// gate, BEFORE any R contact, and return a no-leak 404 (never confirming the path).
+const R_PROXY_INTERNAL_ONLY_PATHS = new Set(['/object/pbmc-pipeline']);
+
+function isInternalOnlyRProxyPath(rawPath) {
+  let p = String(rawPath || '');
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    // Malformed percent-encoding: fall back to the raw value rather than throw.
+  }
+  p = p.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  if (!p.startsWith('/')) p = `/${p}`;
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1); // ignore a single trailing slash
+  return R_PROXY_INTERNAL_ONLY_PATHS.has(p);
+}
+
 function getUserVaultDir(user) {
   const segment = sanitizeVaultSegment(user?.email);
   if (!segment) throw new Error('Authenticated user email is required.');
@@ -1726,6 +1751,19 @@ app.use('/api/r', (req, res, next) => {
   next();
 });
 
+// Block internal-worker-only R endpoints (e.g. POST /object/pbmc-pipeline) from the
+// public catch-all BEFORE any R contact. These run ONLY through the in-process worker
+// bridge (a direct R call that does not traverse this proxy), so a direct user call
+// would bypass the durable job/result/artifact/lineage/provenance contract. 404 (not
+// 403), consistent with the no-leak policy — the proxy never confirms the endpoint
+// exists. The worker bridge is unaffected (it never reaches this middleware).
+app.use('/api/r', (req, res, next) => {
+  if (isInternalOnlyRProxyPath(req.path)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+
 app.use('/api/r', validateRProxyPaths);
 // Verify any client-supplied X-Object-ID against the DB BEFORE proxying to R,
 // so unknown/not-owned/malformed object ids never reach the R backend.
@@ -1980,6 +2018,8 @@ module.exports = {
   sanitizeObjectIdSegment,
   isProductionDiagnosticRProxyPath,
   isDiagnosticRProxyPath,
+  isInternalOnlyRProxyPath,
+  R_PROXY_INTERNAL_ONLY_PATHS,
   // Exposed for tests + R proxy ownership verification
   issueSession,
   isValidObjectIdFormat,

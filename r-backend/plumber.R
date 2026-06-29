@@ -581,8 +581,13 @@ function(req, res) {
   })
 }
 
-# ── Production worker-bridge pipeline: PBMC/Seurat preprocessing on a COPY ──────
-# Driven ONLY by the Node worker via the allowlisted `r.pbmc.pipeline.v1` bridge op.
+# ── Internal worker-bridge pipeline: PBMC/Seurat preprocessing on a COPY ──────
+# Internal-only: reached ONLY via the in-process Node worker bridge (the allowlisted
+# `r.pbmc.pipeline.v1` operation calls this R backend directly). The public Express
+# proxy BLOCKS this path (server.js isInternalOnlyRProxyPath → 404 before any R
+# contact), so a direct `/api/r/object/pbmc-pipeline` user call can never run it — that
+# enforcement lives in Node, not in this comment. The auth filter still requires the
+# server API token, so nothing outside the server can call R at all.
 # The input object is loaded by session_loader from the request's X-Object-ID (the
 # parent's server-derived state key). We run the existing preprocessing path on a
 # LOCAL COPY (`obj`) and NEVER reassign global_obj, so the postroute hook re-saves the
