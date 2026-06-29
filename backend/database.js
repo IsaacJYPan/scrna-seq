@@ -1059,7 +1059,15 @@ const ALLOWED_JOB_TYPES = new Set([
   // code — NO arbitrary R, NO analysis-object access, NO mutation, NO checkpoint. The
   // worker's `r.runtime.check` handler (jobWorker.js) drives backend/rWorkerBridge.js
   // and records a metadata-only `r_runtime_check` artifact. NOT a scientific output.
-  'r.runtime.check'
+  'r.runtime.check',
+  // Read-only worker-to-R object inspection: the ONLY job type that reads a live
+  // analysis object. It inspects ONE existing object (addressed by a server-derived
+  // R state key) in a read-only way via the allowlisted `r.object.inspect` bridge
+  // operation and records a metadata-only `r_object_inspection` artifact (sanitized
+  // object summary). The worker handler verifies the job creator OWNS the live object
+  // before any R contact (project membership alone does NOT grant access). It mutates
+  // NOTHING, creates NO checkpoint/result object, and is NOT a scientific output.
+  'r.object.inspect'
 ]);
 
 const JOB_STATUSES = new Set([
@@ -3189,7 +3197,13 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   // Operational/inspection metadata recorded by the minimal worker-to-R bridge
   // (backend/rWorkerBridge.js + the `r.runtime.check` worker handler). Metadata-only,
   // not a scientific result: it captures sanitized R runtime status, never object data.
-  'r_runtime_check'
+  'r_runtime_check',
+  // Read-only object-inspection metadata recorded by the `r.object.inspect` worker
+  // handler. Metadata-only (storage_kind metadata_only), not a scientific result: a
+  // sanitized object summary (class/dimensions/assay+reduction+metadata-field names,
+  // runtime versions) — never expression/cell/gene data, embeddings, paths, or the
+  // R state key. read_only: true, scientific_output: false.
+  'r_object_inspection'
 ]);
 
 // metadata_only is the only kind the placeholder handler writes in this branch.

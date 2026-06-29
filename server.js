@@ -150,13 +150,25 @@ function sanitizeObjectIdSegment(value) {
   return cleaned.replace(/^[._-]+/, '');
 }
 
+// Canonical, server-only derivation from a numeric owner user id + optional object
+// id. This is the single source of truth for the R state key format; deriveRStateKey
+// (the session-facing wrapper) delegates here, and the worker's read-only object
+// inspection bridge is injected with this exact function so it derives the SAME key
+// the /api/r/* proxy would — the client never controls the `user-${id}` prefix.
+function deriveRObjectStateKey(ownerUserId, clientObjectId) {
+  if (ownerUserId === undefined || ownerUserId === null || ownerUserId === '') {
+    throw new Error('An owner user id is required to derive an R state key.');
+  }
+  const base = `user-${ownerUserId}`;
+  const objectSegment = sanitizeObjectIdSegment(clientObjectId);
+  return objectSegment ? `${base}:obj-${objectSegment}` : base;
+}
+
 function deriveRStateKey(user, clientObjectId) {
   if (!user || (user.id === undefined || user.id === null)) {
     throw new Error('Authenticated user is required to derive an R state key.');
   }
-  const base = `user-${user.id}`;
-  const objectSegment = sanitizeObjectIdSegment(clientObjectId);
-  return objectSegment ? `${base}:obj-${objectSegment}` : base;
+  return deriveRObjectStateKey(user.id, clientObjectId);
 }
 
 // Normalize a proxy sub-path (the part after the /api/r mount) before deciding
@@ -1795,6 +1807,10 @@ function startJobWorkerIfEnabled(env = process.env, deps = {}) {
     pollIntervalMs: config.pollIntervalMs,
     leaseSeconds: config.leaseSeconds,
     callR,
+    // Inject the canonical, server-only R state-key deriver so the read-only
+    // r.object.inspect handler derives the SAME X-Object-ID the /api/r/* proxy would.
+    // The client never controls this key (the user-prefix is server-derived).
+    deriveRObjectStateKey,
     logger,
   });
   worker.start();
@@ -1911,6 +1927,7 @@ module.exports = {
   getUserVaultDir,
   isInsidePath,
   deriveRStateKey,
+  deriveRObjectStateKey,
   sanitizeObjectIdSegment,
   isProductionDiagnosticRProxyPath,
   isDiagnosticRProxyPath,
