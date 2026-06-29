@@ -53,13 +53,16 @@ async function drainR(callR, now = T0, opts = {}) {
 // 1. Bridge unit behavior (pure function; injected caller — no real R, no DB)
 // ════════════════════════════════════════════════════════════════════════════
 describe('rWorkerBridge — operation allowlist & request derivation', () => {
-  it('exposes exactly one allowlisted operation: r.runtime.check (read-only, no object access)', () => {
-    expect(Object.keys(R_BRIDGE_OPERATIONS)).toEqual(['r.runtime.check']);
+  it('exposes the r.runtime.check operation (read-only, no object access)', () => {
+    // The allowlist now also contains r.object.inspect (covered in r-object-inspect.test.js);
+    // r.runtime.check remains exactly as before — read-only /health, no object context.
+    expect(Object.keys(R_BRIDGE_OPERATIONS)).toContain('r.runtime.check');
     const spec = R_BRIDGE_OPERATIONS['r.runtime.check'];
     expect(spec.method).toBe('GET');
     expect(spec.path).toBe('/health');
     expect(spec.artifactType).toBe('r_runtime_check');
     expect(spec.touchesAnalysisObject).toBe(false);
+    expect(spec.requiresObjectContext).toBe(false);
     expect(isAllowedRBridgeOperation('r.runtime.check')).toBe(true);
   });
 
@@ -220,8 +223,10 @@ describe('r-bridge — scope & registration', () => {
   beforeEach(() => { initDatabase(':memory:'); });
   afterEach(() => { closeDatabase(); });
 
-  it('registers exactly one new R bridge handler; generic & checkpoint.noop unchanged', () => {
-    expect(Object.keys(DEFAULT_HANDLERS).sort()).toEqual(['checkpoint.noop', 'generic', 'r.runtime.check']);
+  it('registers the r.runtime.check bridge handler; generic & checkpoint.noop unchanged', () => {
+    // The registry also contains r.object.inspect (covered in r-object-inspect.test.js);
+    // here we assert r.runtime.check and the pre-existing handlers are intact.
+    expect(Object.keys(DEFAULT_HANDLERS)).toContain('r.runtime.check');
     expect(typeof DEFAULT_HANDLERS['r.runtime.check']).toBe('function');
     expect(DEFAULT_HANDLERS['r.runtime.check']).toBe(rRuntimeCheckHandler);
     // The pure noop / placeholder handlers were not swapped out.

@@ -739,6 +739,61 @@ scientific output.
   reproducibility bundles, and **no** shared project R state. Covered by
   `backend/r-worker-bridge.test.js`.
 
+### Read-only worker-to-R object inspection (`r.object.inspect`)
+A second allowlisted bridge operation that proves a worker can read **one existing
+live analysis object** through the R backend in a **read-only** way and record a
+**sanitized, metadata-only** inspection artifact — while the live-R ownership
+boundary stays intact. Like `r.runtime.check` it is **not** the scRNA-seq pipeline
+and produces **no** scientific output; it additionally never mutates R state and
+never creates a checkpoint/result object.
+
+- **One allowlisted, read-only operation: `r.object.inspect`.** Added to
+  `R_BRIDGE_OPERATIONS`, it issues a read-only `GET` to a tiny new R endpoint
+  `GET /object/inspect` (`r-backend/plumber.R`) and records a **metadata-only**
+  `r_object_inspection` artifact. The R endpoint returns **only** a bounded, sanitized
+  structural summary — existence, class, dimensions, assay/reduction/metadata-field
+  **names** (never values), field count, and runtime versions. It returns **no**
+  expression matrices, cell-level rows, gene lists, embeddings, raw sample values,
+  file paths, R state keys, or serialized object contents, and it **never** assigns to
+  R globals / writes / saves / evaluates client input — a missing object is reported
+  safely as `exists: false`.
+- **Server-derived object context; no client control.** The object id comes from the
+  **trusted job row** (`job.analysisObjectId`) after DB validation, never from
+  arbitrary client passthrough. The `X-Object-ID` / R **state key is derived
+  server-side** (`deriveRObjectStateKey`, the same single-source-of-truth derivation
+  `deriveRStateKey` uses) and is **never** client-provided. Job parameters / bridge
+  `input` cannot choose the object, state key, operation, method, or path. As
+  defense-in-depth, the default R caller now **target-allowlists** the exact
+  `GET /health` and `GET /object/inspect` pairs and refuses anything else before any
+  HTTP, so an arbitrary R endpoint/method can never be issued.
+- **Membership ≠ live-R access.** Before **any** R contact, the worker handler gates
+  the inspection on the **live-R object owner** using the same owner-verified check the
+  `/api/r/*` proxy uses (`verifyAnalysisObjectOwner`): only the job creator who **owns**
+  the analysis object may inspect it. A project co-member — **even an admin** — who
+  references another user's object fails with a 404-style error and **no** R contact.
+  Cross-project references (404), legacy owner-scoped objects referenced by a project
+  job (404), malformed object ids (400), unknown ids (404), viewers (403, by job
+  policy), and jobs with no object all fail safely **before** R.
+- **Read-only; no mutation.** The handler creates **no** checkpoint/result analysis
+  object and never mutates the inspected object (it is byte-stable across repeated
+  inspections). On success it records **exactly one** metadata-only
+  `r_object_inspection` artifact (`kind: inspection`, `read_only: true`,
+  `scientific_output: false`) plus durable, sanitized logs. A **failed**, **canceled**,
+  or **claim-lost** job finalizes **no** successful artifact (writes are claim-guarded),
+  and **two workers cannot duplicate** an artifact.
+- **R boundary unchanged.** `deriveRStateKey` / `verifyRObjectOwnership` / `/api/r/*`
+  ownership are **not** weakened: `deriveRStateKey` now delegates to the shared
+  `deriveRObjectStateKey` with identical behavior, and a project co-member supplying
+  another user's object id to `/api/r/*` is still rejected (404 before reaching R).
+  Project membership still does **not** grant live R object access. Collaboration
+  remains through durable metadata/checkpoints, **not** shared live R sessions.
+- **Scope of this branch.** A read-only worker-to-R object inspection bridge for **one**
+  allowlisted operation that records sanitized **metadata-only** artifacts. It does
+  **not** implement mutating R/Seurat pipeline execution (NormalizeData/
+  FindVariableFeatures/ScaleData/PCA/UMAP/clustering), arbitrary R execution, generated
+  R script export, downloads, object storage, full reproducibility bundles, or shared
+  project live R state. Covered by `backend/r-object-inspect.test.js`.
+
 ### R state — remaining design note (production blocker)
 `deriveRStateKey` keeps cross-user isolation intact, and `verifyRObjectOwnership`
 now confirms any client object id is a real `analysis_objects` row owned by the
