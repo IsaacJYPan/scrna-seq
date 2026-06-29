@@ -300,10 +300,23 @@ ownership-scoped record:
     handler runs, the worker's complete/fail surfaces `CLAIM_LOST` and the worker
     **does not resurrect** the job (it stays canceled/failed). Cancellation remains
     cooperative/status-level and does **not** kill R work.
-  - **Startup.** Disabled by default; `server.js` starts it only when
-    `ENABLE_JOB_WORKER=true` and stops it cleanly on `SIGINT`/`SIGTERM`. Logs never
-    include claim tokens, bearer tokens, or filesystem paths. Covered by
-    `backend/job-worker.test.js`.
+  - **Startup (opt-in, hardened).** Disabled by default; `server.js` starts it only
+    when `ENABLE_JOB_WORKER` is **exactly** the string `"true"`. Config is parsed by a
+    small testable helper (`parseJobWorkerConfig`): any other `ENABLE_JOB_WORKER` value
+    (`"TRUE"`, `"1"`, `"yes"`, blank, unset, …) means **disabled**, and invalid
+    `JOB_WORKER_POLL_MS` / `JOB_WORKER_LEASE_SECONDS` values (blank, non-integer,
+    `NaN`, infinite, zero, negative) **fall back to the documented defaults**
+    (`1000`ms / `30`s, matching `.env.example`) with a sanitized warning that never
+    echoes the raw value. `startJobWorkerIfEnabled` is **idempotent** — at most one
+    worker loop exists, repeated starts return the existing worker. Logs never include
+    claim tokens, bearer tokens, or filesystem paths.
+  - **Shutdown (defined, awaited).** On `SIGINT`/`SIGTERM` the server runs
+    `shutdownJobWorkerAndServer`, which **awaits** the worker's `stop()`/cleanup so an
+    in-flight tick settles before exit, bounded by a small timeout (default `10s`) so
+    shutdown never hangs forever; on a worker-stop failure/timeout it logs a sanitized
+    error and exits non-zero. A single latch makes concurrent `SIGINT`+`SIGTERM` safe
+    (no double-shutdown). `stop()` with no worker and a double `stop()` are both safe.
+    Covered by `backend/job-worker.test.js` and `backend/job-worker-runtime.test.js`.
 - **Scope of branch `worker-queue-drain-minimal`.** This wires a *minimal drain
   loop* onto the contract. Still **NOT** implemented: full scRNA-seq pipeline
   execution, artifact/checkpoint creation, downloads/object storage, public links,
@@ -313,6 +326,20 @@ ownership-scoped record:
   does not widen R object ownership. A small `busy_timeout = 5000` pragma softens
   brief single-process write contention; true multi-process contention hardening
   remains a follow-up.
+- **Scope of branch `worker-runtime-hardening`.** Hardens the *runtime* of the minimal
+  drain — **no new features**. It (1) makes worker env parsing safe and deterministic
+  (`parseJobWorkerConfig`: exact-`"true"` enable; invalid poll/lease fall back to
+  documented defaults with a sanitized warning), (2) makes shutdown **await** worker
+  stop/cleanup (bounded by a timeout, non-zero exit on failure, race-safe across
+  `SIGINT`/`SIGTERM`), (3) adds direct startup/shutdown wiring tests
+  (`backend/job-worker-runtime.test.js`), and (4) clears `locked_at`/`heartbeat_at`
+  consistently when `reapExpiredJobs` requeues/fails an expired job (matching
+  `releaseJob` / the worker terminal paths). It does **not** add R/Seurat pipeline
+  execution, an R handler, artifacts/checkpoints, downloads, object storage, shared
+  R state, new public worker routes, or production-grade multi-process worker
+  isolation. Cancellation remains cooperative/status-level only. R active state
+  remains user/object-keyed and owner-verified (`deriveRStateKey`,
+  `verifyRObjectOwnership`, and `/api/r/*` ownership semantics are unchanged).
 - **Earlier (contract-only) scope, retained for history.** The prior
   `job-worker-contract-and-schema` branch added the *durable worker-coordination schema +
   contract + helpers* on top of the existing record/API/ownership boundary. There

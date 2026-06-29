@@ -44,9 +44,24 @@
 > - The worker is **disabled by default** and only starts when
 >   `ENABLE_JOB_WORKER=true`; it stops cleanly on shutdown.
 >
-> Tested in `backend/job-worker.test.js`. The next branch is either
-> `job-artifacts-and-checkpoints` (now that a minimal handler can run safely) or a
-> narrow R-handler bridge branch if real R pipeline execution is needed.
+> **Update — branch `worker-runtime-hardening`.** Hardens the worker *runtime* only
+> (no new features). Worker env parsing is now safe and deterministic
+> (`parseJobWorkerConfig`): `ENABLE_JOB_WORKER` enables the worker **only** for the
+> exact string `"true"`, and invalid `JOB_WORKER_POLL_MS`/`JOB_WORKER_LEASE_SECONDS`
+> values fall back to the documented defaults (`1000`ms / `30`s) with a sanitized
+> warning. Shutdown is now **defined and awaited**: `SIGINT`/`SIGTERM` run
+> `shutdownJobWorkerAndServer`, which awaits the worker's `stop()`/cleanup (bounded by
+> a small timeout so it never hangs, non-zero exit on failure) and is race-safe across
+> both signals. `startJobWorkerIfEnabled` is idempotent (at most one loop), and
+> `reapExpiredJobs` now clears `locked_at`/`heartbeat_at` consistently on requeue/fail.
+> Still **no** R/Seurat execution, no R handler, no artifacts/checkpoints, no
+> downloads, no object storage, no shared R state, and no production-grade
+> multi-process worker isolation; cancellation remains cooperative/status-level only.
+>
+> Tested in `backend/job-worker.test.js` and `backend/job-worker-runtime.test.js`. The
+> next branch is either `job-artifacts-and-checkpoints` (now that a minimal handler can
+> run safely) or a narrow R-handler bridge branch if real R pipeline execution is
+> needed.
 >
 > The current runtime behavior is described in [`architecture.md`](architecture.md),
 > [`R_BACKEND.md`](R_BACKEND.md), and [`STATE_MANAGEMENT.md`](STATE_MANAGEMENT.md);
