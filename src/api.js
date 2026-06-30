@@ -14,8 +14,10 @@ export function apiUrl(path) {
 
 const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).substr(2, 9);
 localStorage.setItem('client_id', CLIENT_ID);
-const AUTH_TOKEN_KEY = 'benchone_auth_token';
-const AUTH_USER_KEY = 'benchone_auth_user';
+export const AUTH_TOKEN_KEY = 'benchone_auth_token';
+export const AUTH_USER_KEY = 'benchone_auth_user';
+const AUTH_SESSION_KEY_PREFIXES = ['benchone_auth_', 'benchone_session'];
+const SESSION_STORAGE_KEYS = ['client_id'];
 
 function getAuthToken() {
   return localStorage.getItem(AUTH_TOKEN_KEY);
@@ -34,6 +36,17 @@ function persistAuthResponse(data) {
   localStorage.setItem(AUTH_TOKEN_KEY, data.token);
   localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
   return { ...data.user, token: data.token };
+}
+
+export function clearAuthSessionStorage() {
+  const keysToRemove = new Set([AUTH_TOKEN_KEY, AUTH_USER_KEY, ...SESSION_STORAGE_KEYS]);
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && AUTH_SESSION_KEY_PREFIXES.some(prefix => key.startsWith(prefix))) {
+      keysToRemove.add(key);
+    }
+  }
+  keysToRemove.forEach(key => localStorage.removeItem(key));
 }
 
 function attachAuthHeader(headers) {
@@ -128,6 +141,26 @@ async function req(endpoint, options = {}) {
   return res.json();
 }
 
+function formatRVersion(version) {
+  if (!version) return 'Unknown';
+  const text = String(version).trim();
+  if (!text) return 'Unknown';
+  return /^R\b/i.test(text) ? text : `R ${text}`;
+}
+
+async function checkRuntimeDiagnostics() {
+  const data = await req('/api/runtime/diagnostics');
+  const packages = data.packages || data.runtime?.packages || {};
+  return {
+    version: formatRVersion(data.runtime?.rVersion || data.runtime?.version || data.rVersion),
+    supportedTarget: data.supportedTarget || 'R 4.5.x',
+    rscriptPath: data.rscript?.path || data.rscriptPath || 'Unknown',
+    rscriptSource: data.rscript?.source || 'unknown',
+    runtimeStatus: data.runtime?.status || 'unknown',
+    packages
+  };
+}
+
 export const electronAPI = {
   // R Plumber Proxy
   apiRequest: async (endpoint, options = {}) => {
@@ -175,8 +208,7 @@ export const electronAPI = {
   },
   getCurrentUser,
   logout: async () => {
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    localStorage.removeItem(AUTH_USER_KEY);
+    clearAuthSessionStorage();
   },
   
   // Figures
@@ -352,10 +384,23 @@ export const electronAPI = {
   // Theme
   setTheme: (theme) => { /* No-op in browser, handled by CSS */ },
 
-  // Diagnostics (Dummy for web)
-  getRScriptPath: async () => '/usr/bin/Rscript',
-  setRScriptPath: async () => true,
-  checkREnv: async () => ({ version: 'R 4.5.1', packages: { Seurat: true } }),
+  // Diagnostics
+  getRScriptPath: async () => {
+    try {
+      const result = await checkRuntimeDiagnostics();
+      return result.rscriptPath;
+    } catch {
+      return 'Unknown';
+    }
+  },
+  setRScriptPath: async () => ({ error: 'Rscript is configured on the server; browser clients cannot change it.' }),
+  checkREnv: async () => {
+    try {
+      return await checkRuntimeDiagnostics();
+    } catch (error) {
+      return { error: formatRequestError(error) };
+    }
+  },
   restartPlumber: () => {},
   runRInstaller: () => {},
   onRInstallerOutput: () => () => {},

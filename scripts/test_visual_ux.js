@@ -277,6 +277,12 @@ async function main() {
   
   // Mock Electron API
   await context.addInitScript(() => {
+    localStorage.setItem('benchone_auth_token', 'visual-test-token');
+    localStorage.setItem('benchone_auth_user', JSON.stringify({
+      id: 'visual-user',
+      email: 'researcher@lab.edu',
+      displayName: 'Visual Tester'
+    }));
     window.mockFigures = [];
     window.electronAPI = {
       getFigures: async () => window.mockFigures,
@@ -321,6 +327,29 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({ status: 'ok' })
+    });
+  });
+
+  await page.route('**/api/runtime/diagnostics*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        supportedTarget: 'R 4.5.x',
+        rscript: { path: 'Rscript', source: 'PATH' },
+        runtime: { status: 'ok', mode: 'R/Seurat runtime connected', rVersion: '4.6.0' },
+        packages: { Seurat: true, dplyr: true, harmony: false, CellChat: false, plumber: true, jsonlite: true, ggplot2: true }
+      })
+    });
+  });
+
+  await page.route('**/api/db/**', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify([])
     });
   });
 
@@ -618,9 +647,10 @@ async function main() {
     { id: 'dotplot',      label: 'Dot Plot',                  requiresData: true  },
     { id: 'geneviewer',   label: 'Gene Expression',           requiresData: true  },
     { id: 'deg',          label: 'Differential Expression',   requiresData: true  },
-    { id: 'annotate',     label: 'Cell Annotation',           requiresData: true  },
-    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true  },
-    { id: 'cellchat',     label: 'CellChat',                  requiresData: true  },
+    { id: 'annotate',     label: 'Cell Annotation',           requiresData: true, expectedDisabled: true  },
+    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true, expectedDisabled: true  },
+    { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: true  },
+    { id: 'customscript', label: 'Custom Script',             requiresData: true, expectedDisabled: true  },
     { id: 'publication',  label: 'Figures',                   requiresData: true  },
     { id: 'validation',   label: 'Validation',                requiresData: true  },
     { id: 'lineage',      label: 'Lineage',                   requiresData: false },
@@ -638,7 +668,7 @@ async function main() {
     try {
       if (tab.clickVia === 'engine-status') {
         // Diagnostics is opened via Engine Status block
-        const engineBlock = page.locator('aside div:has-text("Engine Ready"), aside div:has-text("Engine Offline"), aside div:has-text("Connected")').first();
+        const engineBlock = page.locator('aside div:has-text("Backend connected"), aside div:has-text("Backend offline"), aside div:has-text("R/Seurat runtime connected")').first();
         if (await engineBlock.count() > 0) {
           await engineBlock.click();
         } else {
@@ -649,6 +679,10 @@ async function main() {
         const btn = page.locator(`aside button:has-text("${tab.label}")`).first();
         if (await btn.count() === 0) {
           warn(`${tab.label}: sidebar button not found`);
+          continue;
+        }
+        if (tab.expectedDisabled) {
+          assert(`${tab.label}: marked disabled / not integrated`, await btn.isDisabled());
           continue;
         }
         await btn.click();

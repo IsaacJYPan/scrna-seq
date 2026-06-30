@@ -80,7 +80,7 @@ export default function Login({ onLogin }) {
             <Microscope size={40} className="text-primary" />
           </div>
           <h1 className="text-3xl font-black text-white tracking-tighter mb-1">BenchOne</h1>
-          <p className="text-slate-400 text-sm">Secure Research Analytics Platform</p>
+          <p className="text-slate-400 text-sm">Local Development Research Workbench</p>
         </div>
 
         <div className="bg-slate-800/40 backdrop-blur-xl border border-slate-700/50 rounded-2xl p-6 shadow-2xl">
@@ -189,7 +189,7 @@ export default function Login({ onLogin }) {
             >
               {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : (
                 <>
-                  {mode === 'login' ? 'Access Analytics' : 'Create Account'} <Shield size={18} />
+                  {mode === 'login' ? 'Open Workbench' : 'Create Account'} <Shield size={18} />
                 </>
               )}
             </button>
@@ -205,7 +205,7 @@ export default function Login({ onLogin }) {
         </div>
         
         <p className="text-center mt-6 text-slate-400 text-[10px] uppercase tracking-widest font-bold">
-          BenchOne v2.4 &mdash; Local Research Workbench
+          BenchOne experimental workflow
         </p>
       </div>
     </div>

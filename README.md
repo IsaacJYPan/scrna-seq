@@ -46,6 +46,21 @@ npm run dev      # Vite dev server + Express (which spawns local R Plumber)
 Requires a local R installation with Seurat (and the packages listed in
 `r-backend/`). See `docs/architecture.md` and `docs/R_BACKEND.md` for details.
 
+### Current local/dev limitations
+
+- R 4.5.x is the intended local development target for now. Diagnostics report
+  the detected R runtime and warn when it is outside the R 4.5.x target; startup
+  is not blocked solely because a different R version is detected.
+- Browser sessions still use localStorage bearer tokens. Logout clears the
+  current local auth/session keys, but this is not a production-grade session
+  model with secure cookies or server-side token revocation.
+- The React workspace still contains legacy/ephemeral local UI state while the
+  backend project, dataset, analysis-object, job, artifact, and lineage model is
+  DB-backed. That workflow mismatch is a known follow-up and is not solved here.
+- Pathway Enrichment, CellChat, Custom Script, and Cell Annotation are not
+  production-integrated workflow actions. They are hidden or disabled as future
+  work; arbitrary R script execution remains out of scope.
+
 ### Auth rate limiting & reverse proxies
 
 The auth endpoints (`/api/auth/login`, `/api/auth/signup`) have a simple,

@@ -14,6 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const PLUMBER_PORT = process.env.PLUMBER_PORT || 8000;
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS || 12 * 60 * 60);
+const SUPPORTED_R_TARGET = 'R 4.5.x';
 
 // Plumber auth token
 const API_TOKEN = crypto.randomBytes(32).toString('hex');
@@ -595,6 +596,21 @@ app.post('/api/auth/login', loginRateLimiter, (req, res) => {
 });
 
 // ── Database API Endpoints ──────────────────────────────────────────────
+// Runtime diagnostics (authenticated metadata only). This reports what the
+// backend detects; it does not let browser clients choose an executable path.
+app.use('/api/runtime', express.json());
+app.use('/api/runtime', requireAuth);
+app.get('/api/runtime/diagnostics', async (req, res) => {
+  try {
+    const diagnostics = await buildRuntimeDiagnostics();
+    res.json(diagnostics);
+  } catch (err) {
+    console.error('[Diagnostics] Runtime diagnostics failed:', err);
+    res.status(500).json({ error: 'Runtime diagnostics failed' });
+  }
+});
+
+// Database API endpoints.
 app.use('/api/db', express.json());
 app.use('/api/db', requireAuth);
 
@@ -1824,6 +1840,10 @@ app.use('/api/r', createProxyMiddleware({
 }));
 
 // ── Static Frontend ─────────────────────────────────────────────────────
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 const distPath = path.join(__dirname, 'dist');
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
@@ -1838,21 +1858,79 @@ if (fs.existsSync(distPath)) {
 }
 
 // ── Launch R Plumber ────────────────────────────────────────────────────
-function findRscript() {
-  const candidates = [
-    'C:\\Program Files\\R\\R-4.5.1\\bin\\Rscript.exe',
-    'Rscript'
-  ];
-  for (const c of candidates) {
-    // If it's absolute, check exists. If 'Rscript', just assume it works.
-    if (path.isAbsolute(c) && fs.existsSync(c)) return c;
-    if (c === 'Rscript') return c;
+let activeRscriptDiagnostic = null;
+
+function findRscript(env = process.env) {
+  const configured = (env.RSCRIPT_PATH || env.RSCRIPT || '').trim();
+  if (configured) {
+    return {
+      path: configured,
+      source: env.RSCRIPT_PATH ? 'RSCRIPT_PATH' : 'RSCRIPT',
+      exists: path.isAbsolute(configured) ? fs.existsSync(configured) : null
+    };
   }
-  return 'Rscript';
+  return { path: 'Rscript', source: 'PATH', exists: null };
+}
+
+function normalizeRVersion(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  const versionMatch = text.match(/(\d+\.\d+(?:\.\d+)?)/);
+  return versionMatch ? versionMatch[1] : text;
+}
+
+async function probeRHealth(timeoutMs = 750) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://127.0.0.1:${PLUMBER_PORT}/health`, {
+      headers: { 'X-API-Token': API_TOKEN, Accept: 'application/json' },
+      signal: controller.signal
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || `R health returned ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function buildRuntimeDiagnostics() {
+  const detectedRscript = activeRscriptDiagnostic || findRscript();
+  const diagnostics = {
+    supportedTarget: SUPPORTED_R_TARGET,
+    rscript: detectedRscript,
+    runtime: {
+      status: 'unavailable',
+      mode: null,
+      rVersion: null
+    },
+    packages: {}
+  };
+
+  try {
+    const health = await probeRHealth();
+    diagnostics.runtime = {
+      status: health.status || 'ok',
+      mode: health.mode || null,
+      rVersion: normalizeRVersion(health.r_version || health.rVersion || health.version)
+    };
+    diagnostics.packages = health.packages || {};
+  } catch (err) {
+    diagnostics.runtime.error = err.name === 'AbortError' ? 'R runtime health probe timed out.' : 'R runtime health probe unavailable.';
+  }
+
+  return diagnostics;
 }
 
 function startPlumber() {
-  const rscript = findRscript();
+  activeRscriptDiagnostic = findRscript();
+  const rscript = activeRscriptDiagnostic.path;
   const plumberScript = path.join(__dirname, 'r-backend', 'run.R');
   
   const rProcess = spawn(rscript, [plumberScript], {
@@ -2047,6 +2125,8 @@ module.exports = {
   authRateLimitWindowMs,
   rateLimitDisabled,
   R_PROXY_VALIDATED_PATH_FIELDS,
+  findRscript,
+  buildRuntimeDiagnostics,
   // Exposed for tests: opt-in job worker startup/shutdown wiring
   startJobWorkerIfEnabled,
   stopJobWorker,

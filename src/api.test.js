@@ -121,4 +121,52 @@ describe('API Client (electronAPI)', () => {
     await electronAPI.getFigures();
     expect(global.fetch).toHaveBeenCalledWith('/api/db/figures', expect.any(Object));
   });
+
+  it('clears auth and session localStorage so a reload remains logged out', async () => {
+    localStorage.setItem('benchone_auth_token', 'token-123');
+    localStorage.setItem('benchone_auth_user', JSON.stringify({ email: 'user@example.com' }));
+    localStorage.setItem('benchone_auth_extra', 'stale');
+    localStorage.setItem('benchone_session_id', 'session-123');
+    localStorage.setItem('client_id', 'client-123');
+    localStorage.setItem('benchone_ws_user@example.com', 'workspace-state');
+
+    expect(electronAPI.getCurrentUser()).toEqual({ email: 'user@example.com' });
+
+    await electronAPI.logout();
+
+    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
+    expect(localStorage.getItem('benchone_auth_user')).toBeNull();
+    expect(localStorage.getItem('benchone_auth_extra')).toBeNull();
+    expect(localStorage.getItem('benchone_session_id')).toBeNull();
+    expect(localStorage.getItem('client_id')).toBeNull();
+    expect(localStorage.getItem('benchone_ws_user@example.com')).toBe('workspace-state');
+
+    vi.resetModules();
+    const reloaded = await import('./api');
+    expect(reloaded.electronAPI.getCurrentUser()).toBeNull();
+  });
+
+  it('reads runtime diagnostics from the backend instead of hardcoded R strings', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({
+        supportedTarget: 'R 4.5.x',
+        rscript: { path: 'Rscript', source: 'PATH' },
+        runtime: { status: 'ok', rVersion: '4.6.0' },
+        packages: { Seurat: true, CellChat: false }
+      }),
+    });
+
+    const result = await electronAPI.checkREnv();
+
+    expect(global.fetch).toHaveBeenCalledWith('/api/runtime/diagnostics', expect.any(Object));
+    expect(result.version).toBe('R 4.6.0');
+    expect(result.version).not.toBe('R 4.5.1');
+    expect(result.supportedTarget).toBe('R 4.5.x');
+    expect(result.rscriptPath).toBe('Rscript');
+    expect(result.rscriptSource).toBe('PATH');
+    expect(result.packages).toMatchObject({ Seurat: true, CellChat: false });
+  });
 });

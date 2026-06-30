@@ -159,7 +159,25 @@ function(req, res) {
 #* Health check
 #* @get /health
 function(res) {
-  list(status = "ok", timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"), mode = "scRNA-seq Seurat Real")
+  package_available <- function(pkg) {
+    requireNamespace(pkg, quietly = TRUE)
+  }
+  list(
+    status = "ok",
+    timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+    mode = "R/Seurat runtime connected",
+    r_version = as.character(getRversion()),
+    r_home = R.home(),
+    packages = list(
+      Seurat = package_available("Seurat"),
+      dplyr = package_available("dplyr"),
+      harmony = package_available("harmony"),
+      CellChat = package_available("CellChat"),
+      plumber = package_available("plumber"),
+      jsonlite = package_available("jsonlite"),
+      ggplot2 = package_available("ggplot2")
+    )
+  )
 }
 
 #* Return the R process session ID (changes on every restart)
