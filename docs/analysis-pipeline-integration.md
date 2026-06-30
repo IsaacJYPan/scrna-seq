@@ -18,6 +18,11 @@ Integrated as a real vertical slice:
 > → durable checkpoint/result analysis object → artifact metadata → lineage edge →
 > provenance/job logs → safe project-readable metadata.
 
+A completed checkpoint can then be **reattached** into the owner's private live R session
+through the owner-only `checkpoint.load.v1` worker job, so downstream jobs can use it as
+live input — see [Checkpoint load / reattach](#checkpoint-load--reattach-checkpointloadv1).
+This stays **owner-only**; it does **not** add shared project live-R state.
+
 **Out of scope** (unchanged, deliberately not implemented here): DEG, pathway
 enrichment, CellChat, generated R script export, public downloads, object storage,
 full reproducibility bundles, shared project live-R state, and production-grade runtime
@@ -143,8 +148,9 @@ download route** in this branch.
 > **Filesystem note.** The checkpoint bytes live on the R backend's own `vault/`
 > volume. Node does not read them back (no download), so the integration does not
 > depend on Node and R sharing a filesystem view — R owns path resolution. Re-attaching
-> a saved checkpoint as live R state under the result object's canonical key is a
-> documented follow-up (see below).
+> a saved checkpoint as live R state under the result object's canonical key is now
+> available as the owner-only `checkpoint.load.v1` worker job (see the *Checkpoint load /
+> reattach* section below).
 
 ### Worker success / failure behavior
 
@@ -176,6 +182,76 @@ token, the internal R URL, R stack traces, expression matrices, per-cell/gene ta
 embeddings, or large gene lists. Bridge errors are pre-sanitized to stable coded
 messages.
 
+## Checkpoint load / reattach (`checkpoint.load.v1`)
+
+A completed internal checkpoint produced by `pbmc.pipeline.v1` is a durable RDS on the R
+vault, but it is **not automatically usable as live R state** for downstream jobs. The
+`checkpoint.load.v1` worker job closes that gap: it loads a completed checkpoint **back
+into the object owner's private live R session** under the canonical object key, so a
+later job (e.g. a future DEG/pathway/CellChat job) can use it as live input.
+
+This is a **worker-only** operation. Direct public R-proxy execution of the load endpoint
+is **blocked** — an authenticated `POST /api/r/object/checkpoint-load` returns `404`
+**before any R contact** (`server.js` `isInternalOnlyRProxyPath`, alongside the existing
+`/object/pbmc-pipeline` block), every spelling of the path and every method, with no
+durable side effect. Only the in-process worker bridge reaches the R endpoint.
+
+| Layer | File | Added |
+| --- | --- | --- |
+| Job type | [`backend/database.js`](../backend/database.js) | `checkpoint.load.v1` in `ALLOWED_JOB_TYPES`; `checkpoint_load` artifact type; `getLoadableCheckpointForAnalysisObject` selector. |
+| Bridge op | [`backend/rWorkerBridge.js`](../backend/rWorkerBridge.js) | Allowlisted `r.checkpoint.load.v1` operation (`POST /object/checkpoint-load`), server-built body (internal key + expected checksum/size only), sanitized load summary. |
+| Worker handler | [`backend/jobWorker.js`](../backend/jobWorker.js) | `checkpoint.load.v1` handler: ownership gate → server-selected checkpoint → bridge call → one metadata-only summary artifact. |
+| R endpoint | [`r-backend/plumber.R`](../r-backend/plumber.R) | `POST /object/checkpoint-load`: validates the server key via `validate_path`, verifies the checksum **before** `readRDS`, validates the bundle shape, reattaches into the request's `X-Object-ID` session only. |
+
+### Owner-only (v1)
+
+v1 is **owner-only**. The analysis object being loaded must be **owned by the job
+creator**: the worker verifies ownership with the same `verifyAnalysisObjectOwner` gate
+the `/api/r/*` proxy uses, and `getLoadableCheckpointForAnalysisObject` re-checks
+ownership + project scope, **before any R contact**. A project co-member or admin who does
+**not** own the object is rejected (404-style) — project membership grants durable
+metadata reads, **not** live R load. Viewers cannot create the job; non-members get 404;
+cross-project / malformed objects are rejected.
+
+This bound is deliberate: the live-R boundary is owner-verified and keyed on
+`ownerUserId + analysisObjectId`. Collaboration today happens through durable
+objects/artifacts/lineage, not shared live R state. A **collaborative checkpoint
+clone/fork/load** (letting a co-member load another user's checkpoint into *their own*
+session) would require a larger user-workspace/session-ownership design and is a future
+follow-up — it is **not** implemented here.
+
+### Checkpoint selection (server-controlled)
+
+The worker never accepts a client storage key/path. `getLoadableCheckpointForAnalysisObject`
+finds the **single** durable checkpoint for the object — `artifact_type` `checkpoint`,
+`storage_kind` `local_internal`, same project scope, linked via `result_analysis_object_id`,
+with a safe internal key + checksum + size. **Zero** candidates → `NO_CHECKPOINT_ARTIFACT`;
+**more than one** → `AMBIGUOUS_CHECKPOINT` (a **deterministic-reject** policy — the normal
+flow produces exactly one checkpoint per result object, so more than one is anomalous and
+refused rather than guessed). The bridge body is rebuilt from the **server-selected**
+internal key + expected checksum/size only; the R endpoint confines the key with
+`validate_path` and re-verifies the checksum before deserializing the RDS.
+
+### Live R state behavior
+
+The load **mutates** live R state — that is its purpose — but only the **owner's canonical
+object key**. The R endpoint reassigns `global_obj`/`raw_obj` for the request's
+`X-Object-ID` session, and the postroute hook persists **exactly that key**, so no other
+user's or object's live state is touched. Live R state remains private and user/object-keyed.
+
+### What it creates (and does not)
+
+On success the handler records **one** metadata-only `checkpoint_load` summary artifact
+(`scientific_output: false`, `live_state_mutation: true`; source object id, source
+checkpoint artifact id, the already-public checksum/size, a sanitized loaded-object
+summary, runtime versions). It creates **no** new analysis object, **no** lineage edge,
+and **no** checkpoint artifact — it reattaches an existing one. The internal storage key,
+R state key, raw path, matrices, cell/gene tables, and embeddings are never logged or
+placed in metadata. On R failure / `loaded:false` / missing/ambiguous checkpoint /
+cancellation / claim loss, **no** successful load artifact is created, and the claim guard
+prevents two workers from duplicating one. There is **no download, no object storage, no
+generated script, and no reproducibility bundle** here.
+
 ## DEG / pathway enrichment / CellChat audit
 
 These exist in `r-backend/plumber.R` but are **deliberately not integrated** in this
@@ -196,10 +272,11 @@ can be made fully safe and tested.
 
 ## Known limitations / follow-ups
 
-- The result object's scientific content is captured as a checkpoint RDS + sanitized
-  summary. **Re-attaching** a checkpoint as live, inspectable R state under the result
-  object's canonical state key is a follow-up (this branch does not load result state
-  into a live R session).
+- **Re-attaching** a completed checkpoint as live, inspectable R state under the object's
+  canonical state key is implemented as the owner-only `checkpoint.load.v1` worker job
+  (see *Checkpoint load / reattach* above). Still **owner-only** in v1 — a collaborative
+  checkpoint clone/fork/load (a co-member loading another user's checkpoint into their own
+  live session) is a future user-workspace/session-ownership design, not implemented here.
 - No public **download** of the checkpoint file (by design).
 - **Provenance** is recorded via artifact/result metadata + durable job logs (resolved
   params, summary, versions). A dedicated claim-guarded provenance helper for worker

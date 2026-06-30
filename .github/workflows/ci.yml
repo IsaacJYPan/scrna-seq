@@ -228,10 +228,40 @@ jobs:
         #                        absent-checkpoint create NO successful result/edge/artifact and two
         #                        workers cannot duplicate one; checkpoint key is server-controlled +
         #                        traversal-proof; NO download route; NO arbitrary R)
+        #   checkpoint-load-live-r-state (allowlisted checkpoint load / reattach into the
+        #                        OWNER's private live R session: ONE `checkpoint.load.v1`
+        #                        worker job + `r.checkpoint.load.v1` bridge op + internal
+        #                        POST /object/checkpoint-load. Scope: only this type/op added;
+        #                        existing handlers unchanged; NO DEG/pathway/CellChat/download
+        #                        type/op; NO public worker/R-bridge/download route. Selection:
+        #                        a SERVER-selected loadable checkpoint (artifact_type checkpoint
+        #                        + storage_kind local_internal + safe internal key + checksum/
+        #                        size, linked via result_analysis_object_id) — zero →
+        #                        NO_CHECKPOINT_ARTIFACT, >1 → AMBIGUOUS_CHECKPOINT (deterministic
+        #                        reject), wrong type/kind filtered out; the public projection
+        #                        still strips storage_uri. Ownership: OWNER-ONLY v1 — the job
+        #                        creator must OWN the object (verifyAnalysisObjectOwner) BEFORE any
+        #                        R contact and the X-Object-ID is SERVER-derived; a co-member/admin
+        #                        (membership ≠ live R)/viewer/non-member/cross-project/malformed
+        #                        object cannot load it. Block: direct authenticated
+        #                        /api/r/object/checkpoint-load is 404 BEFORE R for every method/odd
+        #                        spelling with no job/artifact/side effect; unauthenticated stays
+        #                        401; the pbmc block + ownership behavior still hold. Bridge: only
+        #                        the allowlisted op runs; the body is server-rebuilt from the
+        #                        SERVER-selected internal key + expected checksum/size — NO client
+        #                        storage key/path/endpoint/method/state-key; sanitized errors (no R
+        #                        URL/token/state-key/stack/path leak). Success: completes via the
+        #                        worker contract recording ONE metadata-only checkpoint_load summary
+        #                        artifact (live_state_mutation true, scientific_output false) and
+        #                        NO new result object / lineage edge / checkpoint artifact; a
+        #                        follow-up r.object.inspect addresses the SAME canonical key.
+        #                        Failure/cancel/claim-loss/missing-checkpoint create NO successful
+        #                        load artifact and two workers cannot duplicate one; storage key
+        #                        stays internal/private)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/checkpoint-load-live-r-state.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
@@ -245,6 +275,16 @@ jobs:
         # gains the new state (the Node tests only assert this at the DB-row level).
         # Reuses the R env set up above; SKIPs cleanly if Seurat is unavailable.
         run: npm run test:pbmc-parent
+
+      - name: Run Checkpoint-Load Reattach Smoke Test
+        # Live Rscript + Seurat check of the checkpoint.load.v1 R-side reattach path: a
+        # checksum-verified RDS bundle (list(global=<Seurat>, raw=...)) is verified BEFORE
+        # readRDS, validated for shape/class, and restored into the TARGET session only
+        # (a different object key is left untouched); mismatched checksum / unrecognized
+        # bundle / non-Seurat global are rejected. Mirrors r-backend/plumber.R
+        # POST /object/checkpoint-load. Reuses the R env above; SKIPs cleanly if Seurat is
+        # unavailable.
+        run: npm run test:checkpoint-load
 
       - name: Run Visual/UX Tests
         run: npm run test:visual

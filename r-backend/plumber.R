@@ -722,6 +722,122 @@ function(req, res) {
   })
 }
 
+# ── Internal worker-bridge: load a durable checkpoint back into the live session ──────
+# Internal-only: reached ONLY via the in-process Node worker bridge (the allowlisted
+# `r.checkpoint.load.v1` operation calls this R backend directly). The public Express
+# proxy BLOCKS this path (server.js isInternalOnlyRProxyPath → 404 before any R contact),
+# so a direct `/api/r/object/checkpoint-load` user call can never run it. The auth filter
+# still requires the server API token, so nothing outside the server can reach R at all.
+# The SERVER selects the checkpoint storage_key (never the client); it is confined to the
+# vault by validate_path() (no absolute paths / `..` / backslashes / vault escape). RDS
+# deserialization can run arbitrary code, so we verify the file checksum (when supplied)
+# BEFORE readRDS, then validate the bundle shape + Seurat class. We reattach the loaded
+# object into global_obj/raw_obj for THIS request's X-Object-ID session ONLY — the
+# postroute hook persists exactly that key, so no other user's/object's live state is
+# touched. The response is a sanitized, bounded summary (no matrices/cells/genes/
+# embeddings/paths/state-key); the Node bridge sanitizes it again.
+#* @post /object/checkpoint-load
+#* @parser json
+function(req, res) {
+  body <- req$body
+  storage_key <- if (!is.null(body)) body$storage_key else NULL
+  if (is.null(storage_key) || !is.character(storage_key) || length(storage_key) != 1 || nchar(storage_key) == 0) {
+    res$status <- 400
+    return(list(error = "Missing checkpoint storage key."))
+  }
+  expected_checksum <- if (!is.null(body$expected_checksum_sha256)) as.character(body$expected_checksum_sha256)[1] else NULL
+  expected_size <- if (!is.null(body$expected_size_bytes)) suppressWarnings(as.numeric(body$expected_size_bytes)[1]) else NULL
+
+  tryCatch({
+    # SERVER-provided internal key, confined to the vault.
+    safe_path <- validate_path(storage_key, "vault")
+    if (!grepl("\\.rds$", safe_path, ignore.case = TRUE)) {
+      stop("Only RDS checkpoints in the vault can be loaded.")
+    }
+    if (!file.exists(safe_path)) stop("Checkpoint file not found.")
+
+    # Optional size check (defense-in-depth; the server passes the recorded size).
+    if (!is.null(expected_size) && !is.na(expected_size)) {
+      actual_size <- as.numeric(file.info(safe_path)$size)
+      if (!is.na(actual_size) && actual_size != expected_size) {
+        stop("Checkpoint size mismatch.")
+      }
+    }
+
+    # Verify the checksum BEFORE deserializing when the server supplied one. RDS load can
+    # execute arbitrary R, so integrity-check the bytes first.
+    checksum_verified <- FALSE
+    if (!is.null(expected_checksum) && nchar(expected_checksum) > 0) {
+      actual_checksum <- tryCatch({
+        if (requireNamespace("digest", quietly = TRUE)) {
+          digest::digest(file = safe_path, algo = "sha256")
+        } else if (requireNamespace("openssl", quietly = TRUE)) {
+          as.character(openssl::sha256(file(safe_path)))
+        } else {
+          NA_character_
+        }
+      }, error = function(e) NA_character_)
+      if (is.na(actual_checksum)) stop("Unable to verify checkpoint checksum.")
+      if (!identical(tolower(actual_checksum), tolower(expected_checksum))) {
+        stop("Checkpoint checksum mismatch.")
+      }
+      checksum_verified <- TRUE
+    }
+
+    bundle <- readRDS(safe_path)
+
+    # Validate bundle shape: the pbmc checkpoint saves list(global=<Seurat>, raw=...).
+    # Accept that shape or a bare Seurat object (defensive); reject anything else.
+    loaded_obj <- NULL
+    raw_loaded <- NULL
+    if (inherits(bundle, "Seurat")) {
+      loaded_obj <- bundle
+      raw_loaded <- bundle
+    } else if (is.list(bundle) && "global" %in% names(bundle)) {
+      loaded_obj <- bundle$global
+      raw_loaded <- if ("raw" %in% names(bundle)) bundle$raw else bundle$global
+    } else {
+      stop("Checkpoint bundle format not recognized.")
+    }
+    if (!inherits(loaded_obj, "Seurat")) {
+      stop("Checkpoint does not contain a Seurat object.")
+    }
+
+    # Build the sanitized summary from the LOCAL object first, so a summary error can never
+    # leave live state mutated ahead of a reported failure.
+    meta_names <- tryCatch(colnames(loaded_obj@meta.data), error = function(e) character(0))
+    if (is.null(meta_names)) meta_names <- character(0)
+    seurat_ver <- tryCatch(as.character(utils::packageVersion("Seurat")), error = function(e) NULL)
+    summary_out <- list(
+      loaded = TRUE,
+      checksum_verified = checksum_verified,
+      class = class(loaded_obj)[1],
+      n_cells = ncol(loaded_obj),
+      n_features = nrow(loaded_obj),
+      assays = tryCatch(Assays(loaded_obj), error = function(e) list()),
+      reductions = tryCatch(names(loaded_obj@reductions), error = function(e) list()),
+      n_meta_fields = length(meta_names),
+      # NAMES only — never the per-cell values behind these columns.
+      meta_fields = as.list(meta_names),
+      seurat_version = seurat_ver,
+      r_version = as.character(getRversion())
+    )
+
+    # Reattach into the live session for THIS request's X-Object-ID (the LAST step). The
+    # postroute hook persists global_obj/raw_obj for that key only — no other object key
+    # is mutated.
+    global_obj <<- loaded_obj
+    raw_obj <<- raw_loaded
+
+    summary_out
+  }, error = function(e) {
+    res$status <- 500
+    # Never leak the raw R error/stack; the Node bridge re-maps non-200s to a generic
+    # sanitized message anyway.
+    list(error = "checkpoint load failed")
+  })
+}
+
 #* Get all unique values (with counts) for a metadata column
 #* @get /meta-values
 function(res, column) {
