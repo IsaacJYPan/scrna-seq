@@ -41,6 +41,7 @@
 
 const http = require('http');
 const { PBMC_PIPELINE_PARAM_NAMES } = require('./pbmcPipeline');
+const { DEG_FIND_MARKERS_PARAM_NAMES } = require('./degFindMarkers');
 
 /** Coded error helper (mirrors database.js so callers can branch on err.code). */
 function codedError(code, message) {
@@ -145,6 +146,40 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     readOnly: false,
     // A checkpoint load reads + deserializes an RDS bundle and rebuilds the live object;
     // explicit but bounded so a hung load can never wedge a worker indefinitely.
+    defaultTimeoutMs: 120000,
+  }),
+  // DEG / marker finding: run the existing FindAllMarkers path over ONE existing live
+  // analysis object (the OWNER's, addressed by a SERVER-DERIVED X-Object-ID) and write the
+  // full marker table to a SERVER-allocated internal vault key. DEG is an OUTPUT-producing
+  // analysis, NOT a mutating transformation: it does NOT mutate the live object (any
+  // temporary identity change is restored R-side) and creates NO new object. The request
+  // method/path are fixed; the body is reconstructed by the bridge from ONLY the allowlisted,
+  // server-validated params + the server-allocated result key (`carriesDegParams`). It returns
+  // a sanitized, bounded marker SUMMARY (group counts, per-group counts, top-N preview with
+  // safe columns) + the result-file integrity (saved/checksum/size) — never raw expression
+  // matrices, cell metadata, embeddings, the storage path/key, or the R state key. The worker
+  // handler verifies OWNERSHIP + validates params BEFORE this runs; there is NO arbitrary R.
+  'r.deg.find_markers.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/deg-find-markers',
+    artifactType: 'deg_summary',
+    artifactName: 'DEG marker summary',
+    artifactDescription:
+      'Sanitized, bounded summary of a DEG / FindAllMarkers run over an existing analysis object: '
+      + 'resolved parameters, groups/clusters detected, total marker count + per-group counts, and a '
+      + 'bounded top-N-per-group preview with safe columns only (group, gene, avg_log2FC, pct.1, pct.2, '
+      + 'adjusted p-value, rank) plus runtime versions. No expression matrices, cell/gene tables, '
+      + 'embeddings, storage path/key, or R state key.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesDegParams: true,
+    // DEG does NOT mutate the live object (idents restored R-side); it only reads the object
+    // and writes a separate output file. Marked non-mutating so the live-state invariant is
+    // explicit and asserted in tests.
+    mutating: false,
+    readOnly: false,
+    // FindAllMarkers over many clusters can run long; explicit but bounded so a hung run can
+    // never wedge a worker indefinitely.
     defaultTimeoutMs: 120000,
   }),
 });
@@ -362,6 +397,113 @@ function sanitizeLoadSummary(body) {
   return out;
 }
 
+// A finite number kept to ~6 significant figures, or null. Guards numeric marker stats
+// (avg_log2FC / pct / p-value) so a garbage R response can never inject NaN/Infinity or
+// an oversized value into public summary metadata. We use significant figures (not fixed
+// decimals) so very small adjusted p-values (e.g. 1e-12) are preserved rather than rounded
+// to zero, while float noise is still trimmed.
+function sanitizeStatNumber(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  if (Math.abs(value) > 1e12) return null;
+  if (value === 0) return 0;
+  return Number(value.toPrecision(6));
+}
+
+/**
+ * Build a SAFE, bounded, metadata-only DEG marker SUMMARY from the raw R body. Only a
+ * small allowlist of structural counts / safe stat columns survives; every value is
+ * sanitized and capped. Deliberately NEVER includes raw expression matrices, full cell
+ * metadata, embeddings, the storage path/key, or the R state key — even if the R response
+ * tried to include them, they are dropped (not on this allowlist). The top-N preview is
+ * doubly bounded: per-group by the validated topMarkersPerCluster and overall by a hard
+ * row cap, so an unbounded marker table can never reach public metadata.
+ */
+function sanitizeDegSummary(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
+  const out = {};
+
+  const groupBy = sanitizeRuntimeField(s.group_by);
+  if (groupBy) out.groupBy = groupBy;
+  const testUse = sanitizeRuntimeField(s.test_use);
+  if (testUse) out.testUse = testUse;
+  const assay = sanitizeRuntimeField(s.assay);
+  if (assay) out.assay = assay;
+
+  const nGroups = sanitizeCount(s.n_groups);
+  if (nGroups !== null) out.nGroups = nGroups;
+  // Group LABELS only (e.g. cluster ids) — bounded list of short safe strings.
+  const groups = sanitizeNameList(s.groups, 256);
+  if (groups.length) out.groups = groups;
+
+  const nMarkersTotal = sanitizeCount(s.n_markers_total);
+  if (nMarkersTotal !== null) out.nMarkersTotal = nMarkersTotal;
+
+  // Per-group marker counts: a bounded list of { group, n } (never per-cell data).
+  if (Array.isArray(s.markers_per_group)) {
+    const perGroup = [];
+    for (const row of s.markers_per_group) {
+      if (!row || typeof row !== 'object') continue;
+      const g = sanitizeRuntimeField(row.group);
+      const n = sanitizeCount(row.n);
+      if (g !== null && n !== null) perGroup.push({ group: g, n });
+      if (perGroup.length >= 256) break;
+    }
+    if (perGroup.length) out.markersPerGroup = perGroup;
+  }
+
+  // Top-N markers per group: SAFE columns only, doubly bounded (per-row sanitize + a hard
+  // overall row cap). group/gene are name-safe strings; the rest are bounded numbers.
+  if (Array.isArray(s.top_markers)) {
+    const rows = [];
+    const MAX_TOP_ROWS = 2000;
+    for (const r of s.top_markers) {
+      if (!r || typeof r !== 'object') continue;
+      const group = sanitizeRuntimeField(r.group);
+      const gene = sanitizeRuntimeField(r.gene);
+      if (group === null || gene === null) continue;
+      const safeRow = { group, gene };
+      const avg = sanitizeStatNumber(r.avg_log2FC);
+      if (avg !== null) safeRow.avgLog2FC = avg;
+      const p1 = sanitizeStatNumber(r.pct_1);
+      if (p1 !== null) safeRow.pct1 = p1;
+      const p2 = sanitizeStatNumber(r.pct_2);
+      if (p2 !== null) safeRow.pct2 = p2;
+      const padj = sanitizeStatNumber(r.p_val_adj);
+      if (padj !== null) safeRow.pValAdj = padj;
+      const rank = sanitizeCount(r.rank);
+      if (rank !== null) safeRow.rank = rank;
+      rows.push(safeRow);
+      if (rows.length >= MAX_TOP_ROWS) break;
+    }
+    if (rows.length) out.topMarkers = rows;
+  }
+
+  const sv = sanitizeRuntimeField(b.seurat_version || (b.versions && b.versions.seurat_version));
+  if (sv) out.seuratVersion = sv;
+  const rv = sanitizeRuntimeField(b.r_version || (b.versions && b.versions.r_version));
+  if (rv) out.rVersion = rv;
+
+  return out;
+}
+
+/**
+ * Build a SAFE descriptor of the DEG full-table result FILE from the raw R body: did R
+ * write the marker table, and (if so) its sanitized checksum + size + row count. Like
+ * sanitizeCheckpointInfo it NEVER includes the storage path/key — the worker already holds
+ * the SERVER-allocated key and records it internally (stripped from public responses).
+ */
+function sanitizeDegResultInfo(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const r = b.result && typeof b.result === 'object' ? b.result : {};
+  return {
+    saved: r.saved === true,
+    checksumSha256: sanitizeChecksum(r.checksum_sha256),
+    sizeBytes: sanitizeCount(r.size_bytes),
+    nRows: sanitizeCount(r.n_rows),
+  };
+}
+
 /**
  * Map any thrown bridge/caller error to a SAFE { code, message } pair. Known coded
  * errors get a stable, generic message; anything else collapses to a single generic
@@ -376,6 +518,7 @@ function sanitizeRBridgeError(err) {
     R_BRIDGE_MISCONFIGURED: 'R bridge is not configured.',
     R_OBJECT_CONTEXT_REQUIRED: 'Server-derived object context is required for object inspection.',
     R_PIPELINE_PARAMS_REQUIRED: 'Server-validated pipeline parameters are required.',
+    R_DEG_PARAMS_REQUIRED: 'Server-validated DEG parameters and result key are required.',
     R_CHECKPOINT_REQUIRED: 'A server-selected checkpoint is required for a checkpoint load.',
     R_TIMEOUT: 'R runtime did not respond before the timeout.',
     R_UNREACHABLE: 'R runtime is unreachable.',
@@ -383,6 +526,7 @@ function sanitizeRBridgeError(err) {
     R_OBJECT_INSPECT_FAILED: 'R object inspection failed.',
     R_PBMC_PIPELINE_FAILED: 'R PBMC pipeline run failed.',
     R_CHECKPOINT_LOAD_FAILED: 'R checkpoint load failed.',
+    R_DEG_FIND_MARKERS_FAILED: 'R DEG / marker finding run failed.',
     R_BRIDGE_ERROR: 'R bridge operation failed.',
   };
   return { code, message: SAFE_MESSAGES[code] || SAFE_MESSAGES.R_BRIDGE_ERROR };
@@ -589,6 +733,29 @@ async function runRBridgeOperation(args = {}) {
     request.body = loadBody;
   }
 
+  // 2d. DEG op: a SERVER-BUILT body reconstructed from ONLY the allowlisted, server-
+  //     validated DEG params + the SERVER-allocated result storage key. `args.deg` is
+  //     supplied by the worker handler AFTER it has validated the params
+  //     (backend/degFindMarkers.js) and allocated the key; raw client input is never
+  //     forwarded and there is NO client-controlled storage key/path. Re-whitelisting the
+  //     param names here is defense-in-depth: a stray/hostile field can never reach R.
+  if (spec.carriesDegParams) {
+    const deg = args.deg;
+    const params = deg && typeof deg === 'object' ? deg.params : null;
+    const resultStorageKey = deg && typeof deg === 'object' ? deg.resultStorageKey : null;
+    if (!params || typeof params !== 'object'
+      || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
+      throw codedError('R_DEG_PARAMS_REQUIRED', 'Server-validated DEG parameters and result key are required.');
+    }
+    const safeParams = {};
+    for (const name of DEG_FIND_MARKERS_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    // `storage_key` is a TOP-LEVEL body field (matches R's validate_path arg + the Node
+    // proxy's R_PROXY_VALIDATED_PATH_FIELDS allowlist).
+    request.body = { operation, params: safeParams, storage_key: resultStorageKey };
+  }
+
   if (logger && typeof logger.info === 'function') {
     // NB: never log the state key (an R state key); only the safe method/path.
     logger.info(`[r-bridge] running allowlisted operation '${operation}' (${spec.method} ${spec.path}).`);
@@ -608,6 +775,7 @@ async function runRBridgeOperation(args = {}) {
     let failCode = 'R_RUNTIME_CHECK_FAILED';
     if (spec.carriesParams) failCode = 'R_PBMC_PIPELINE_FAILED';
     else if (spec.carriesCheckpoint) failCode = 'R_CHECKPOINT_LOAD_FAILED';
+    else if (spec.carriesDegParams) failCode = 'R_DEG_FIND_MARKERS_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     throw codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
   }
@@ -668,6 +836,34 @@ async function runRBridgeOperation(args = {}) {
         // state key (the state key is never placed in metadata).
         objectId: objectContext.objectId,
         loaded,
+      },
+    };
+  }
+
+  if (operation === 'r.deg.find_markers.v1') {
+    // The bridge returns the SANITIZED pieces the worker needs; the worker (not the bridge)
+    // writes the DB artifacts. `result` carries only file save success + integrity
+    // (checksum/size/rows) — never the storage path/key. `summary` is a bounded, safe-column
+    // marker summary. Resolved params are added by the worker (which holds the validated set).
+    const summary = sanitizeDegSummary(body);
+    const result = sanitizeDegResultInfo(body);
+    return {
+      operation,
+      artifactType: spec.artifactType, // 'deg_summary'
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: objectContext.objectId,
+      summary,
+      result,
+      metadata: {
+        operation,
+        kind: 'deg_summary',
+        scientific_output: true,
+        downloadable: false,
+        ranAt: new Date().toISOString(),
+        // The analysis object id is a normal member-visible resource id — NOT the R state key.
+        objectId: objectContext.objectId,
+        summary,
       },
     };
   }
@@ -734,6 +930,9 @@ module.exports = {
   sanitizePipelineSummary,
   sanitizeCheckpointInfo,
   sanitizeLoadSummary,
+  sanitizeStatNumber,
+  sanitizeDegSummary,
+  sanitizeDegResultInfo,
   sanitizeRBridgeError,
   createDefaultRCaller,
   runRBridgeOperation,

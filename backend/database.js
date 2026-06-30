@@ -1191,7 +1191,21 @@ const ALLOWED_JOB_TYPES = new Set([
   // records one metadata-only `checkpoint_load` summary artifact. There is NO download,
   // NO object storage, NO arbitrary R/path. Driven by the `checkpoint.load.v1` worker
   // handler (jobWorker.js) + the allowlisted `r.checkpoint.load.v1` bridge operation.
-  'checkpoint.load.v1'
+  'checkpoint.load.v1',
+  // Allowlisted DEG / marker finding over the OWNER's private live R object (usually one
+  // produced by pbmc.pipeline.v1 → checkpoint.load.v1). It runs the existing FindAllMarkers
+  // path through ONE allowlisted, fixed R bridge operation against a SERVER-derived object
+  // state key, with parameters validated against a fixed allowlist BEFORE any R contact
+  // (backend/degFindMarkers.js). DEG is an OUTPUT-producing analysis, NOT a mutating
+  // checkpoint: it creates NO new analysis object and NO lineage edge, does not mutate the
+  // live object (any temporary identity change is restored R-side), and writes (1) an
+  // internal `deg_markers` full-table artifact (local_internal; no public download) and
+  // (2) a metadata-only `deg_summary` artifact. v1 is OWNER-ONLY: the job creator must OWN
+  // the analysis object (verifyAnalysisObjectOwner) — project membership alone never runs
+  // DEG against another user's live object. Pathway enrichment / CellChat remain
+  // unintegrated. Driven by the `deg.find_markers.v1` worker handler (jobWorker.js) + the
+  // allowlisted `r.deg.find_markers.v1` bridge operation.
+  'deg.find_markers.v1'
 ]);
 
 const JOB_STATUSES = new Set([
@@ -3364,7 +3378,21 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   // storage_kind metadata_only, scientific_output: false, live_state_mutation: true. It
   // NEVER contains the internal storage key/path, the R state key, expression/cell/gene
   // data, embeddings, or serialized object contents.
-  'checkpoint_load'
+  'checkpoint_load',
+  // Full DEG marker TABLE recorded by the `deg.find_markers.v1` worker handler. storage_kind
+  // local_internal: storage_uri holds the SERVER-allocated internal vault key for the marker
+  // table file (CSV) the R backend wrote — checksum/size are safe public descriptors, but the
+  // key/path is NEVER exposed (toPublicJobArtifact strips storage_uri) and there is NO download
+  // route. scientific_output: true. It is associated with the INPUT analysis object, NOT a new
+  // result object (DEG produces no new object/edge).
+  'deg_markers',
+  // Metadata-only DEG SUMMARY recorded by the `deg.find_markers.v1` worker handler: operation,
+  // resolved params, groups/clusters detected, total marker count + per-group counts, and a
+  // BOUNDED top-N-per-group preview with SAFE columns only (group, gene, avg_log2FC, pct.1,
+  // pct.2, adjusted p-value, rank) + runtime versions. storage_kind metadata_only,
+  // scientific_output: true, downloadable: false. It NEVER contains raw expression matrices,
+  // full cell metadata, embeddings, the internal storage key/path, or the R state key.
+  'deg_summary'
 ]);
 
 // metadata_only is the only kind the placeholder handler writes in this branch.
@@ -4417,6 +4445,189 @@ function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input =
   };
 }
 
+// ── Atomic DEG completion (full-table artifact + summary artifact) ────────────
+//
+// SINGLE-transaction completion for the `deg.find_markers.v1` worker handler. Unlike
+// completePbmcPipelineResultByWorker this creates NO new analysis object and NO lineage
+// edge — DEG is an OUTPUT-producing analysis over an EXISTING object, not a mutating
+// checkpoint-producing transformation. It folds BOTH durable artifacts into ONE
+// `db.transaction(...).immediate()` so they are created together or not at all:
+//   1. local_internal `deg_markers` artifact (the full marker table file): storage_uri
+//      holds the SERVER-allocated internal vault key + integrity checksum/size. The key
+//      is stripped by toPublicJobArtifact — there is NO download route.
+//   2. metadata_only `deg_summary` artifact (sanitized, bounded marker summary).
+// Both are associated with the job's INPUT analysis object (DEG creates no result object,
+// so result_analysis_object_id stays whatever the job already had — normally NULL). If ANY
+// step throws, the whole transaction rolls back: no partial DEG artifact remains.
+//
+// IDEMPOTENCY / single-winner: the worker holds the claim (worker_id + claim_token +
+// running + live lease), re-checked here; a stale/duplicate worker fails workerHoldsClaim.
+// To make a duplicate completion (same worker, same job, after the first commit) a no-op
+// rather than a second pair of artifacts, we refuse if a `deg_markers` artifact already
+// exists for this job (DEG_RESULT_EXISTS) — analogous to the pbmc result-IS-NULL guard.
+//
+// NOTE (orphan file lifecycle, documented follow-up): identical to the pbmc checkpoint —
+// the R backend writes the marker-table file BEFORE this DB transaction, so a DB rollback
+// can leave an orphaned internal file on the R vault. Acceptable for this branch (no
+// download route; Node may not share the R vault filesystem); recorded as a storage-
+// lifecycle follow-up. The invariant that MUST hold is that DB state never commits one DEG
+// artifact without the other.
+function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  // Duplicate-completion guard: a DEG result already recorded for this job is refused, so
+  // two workers (or a retried completion) can never duplicate the success artifacts.
+  const existing = db.prepare(
+    "SELECT 1 FROM job_artifacts WHERE job_id = ? AND artifact_type = 'deg_markers' LIMIT 1"
+  ).get(String(row.id));
+  if (existing) {
+    throw codedError('DEG_RESULT_EXISTS', 'Job already has a DEG marker result artifact.');
+  }
+
+  const owner = row.owner_user_id;
+  const pid = row.project_id || null;
+
+  // ── Validate the full-table artifact spec (local_internal; integrity required) ──
+  const tbl = input.markersArtifact && typeof input.markersArtifact === 'object' ? input.markersArtifact : {};
+  const tblType = typeof tbl.artifactType === 'string' ? tbl.artifactType.trim() : 'deg_markers';
+  if (!isValidArtifactType(tblType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE', `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const tblStorageKind = tbl.storageKind === undefined || tbl.storageKind === null ? 'local_internal' : String(tbl.storageKind);
+  if (tblStorageKind !== 'local_internal') {
+    throw codedError('INVALID_STORAGE_KIND',
+      'completeDegFindMarkersResultByWorker records a local_internal marker-table artifact.');
+  }
+  if (!isSafeInternalStorageKey(tbl.internalStorageKey)) {
+    throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
+  }
+  const tblChecksum = normalizeChecksumSha256(tbl.checksumSha256);
+  if (tblChecksum === undefined || tblChecksum === null) {
+    throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
+  }
+  const tblSize = normalizeArtifactSizeBytes(tbl.sizeBytes);
+  if (tblSize === undefined || tblSize === null) throw codedError('INVALID_SIZE', 'sizeBytes must be a non-negative integer.');
+  const tblStatus = tbl.status === undefined || tbl.status === null ? 'available' : String(tbl.status);
+  if (!isValidArtifactStatus(tblStatus)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const tblMetadata = tbl.metadata === undefined ? {} : tbl.metadata;
+  if (tblMetadata === null || typeof tblMetadata !== 'object' || Array.isArray(tblMetadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  // ── Validate the summary artifact spec (metadata-only) ──
+  const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  const smType = typeof sm.artifactType === 'string' ? sm.artifactType.trim() : 'deg_summary';
+  if (!isValidArtifactType(smType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE', `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const smStorageKind = sm.storageKind === undefined || sm.storageKind === null ? 'metadata_only' : String(sm.storageKind);
+  if (!isValidArtifactStorageKind(smStorageKind)) {
+    throw codedError('INVALID_STORAGE_KIND', `Invalid storageKind. Allowed: ${[...ALLOWED_ARTIFACT_STORAGE_KINDS].join(', ')}.`);
+  }
+  const smStatus = sm.status === undefined || sm.status === null ? 'available' : String(sm.status);
+  if (!isValidArtifactStatus(smStatus)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const smMetadata = sm.metadata === undefined ? {} : sm.metadata;
+  if (smMetadata === null || typeof smMetadata !== 'object' || Array.isArray(smMetadata)) {
+    throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+  }
+
+  // Both artifacts associate with the job's INPUT object (already same-scope). DEG creates
+  // no result object, so result_analysis_object_id stays the job's existing value.
+  const analysisObjectId = row.analysis_object_id || null;
+  const resultAnalysisObjectId = row.result_analysis_object_id || null;
+  const datasetId = row.dataset_id || null;
+
+  const markersArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+
+  // Everything below is ONE atomic unit. Any throw rolls the whole thing back so a DEG
+  // result file artifact can never commit without its summary (or vice versa).
+  db.transaction(() => {
+    // Re-assert the live claim INSIDE the transaction so a claim lost between the guard
+    // above and here cannot still write artifacts (mirrors the pbmc link guard intent).
+    const claimRow = db.prepare(`
+      SELECT 1 FROM jobs
+      WHERE id = @jobId AND worker_id = @wid AND claim_token = @token
+        AND status = 'running' AND lease_expires_at > @now
+    `).get({ jobId: String(row.id), wid, token, now });
+    if (!claimRow) {
+      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    }
+
+    // (1) Full marker-table artifact (local_internal): storage_uri holds the SERVER key
+    //     (stripped by toPublicJobArtifact); checksum/size are safe public descriptors.
+    db.prepare(`
+      INSERT INTO job_artifacts
+        (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+         provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+         mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+      VALUES
+        (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+         NULL, NULL, @createdBy, @artifactType, @name, @description,
+         @mimeType, @storageKind, @storageUri, @checksum, @sizeBytes, @status, @metadataJson)
+    `).run({
+      id: markersArtifactId,
+      projectId: pid,
+      jobId: row.id,
+      datasetId,
+      analysisObjectId,
+      resultAnalysisObjectId,
+      createdBy: owner,
+      artifactType: tblType,
+      name: tbl.name != null ? String(tbl.name) : null,
+      description: tbl.description != null ? String(tbl.description) : null,
+      mimeType: tbl.mimeType != null ? String(tbl.mimeType) : null,
+      storageKind: tblStorageKind,
+      storageUri: tbl.internalStorageKey,
+      checksum: tblChecksum,
+      sizeBytes: tblSize,
+      status: tblStatus,
+      metadataJson: JSON.stringify(tblMetadata)
+    });
+
+    // (2) DEG summary artifact (metadata-only): no storage_uri/checksum/size.
+    db.prepare(`
+      INSERT INTO job_artifacts
+        (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+         provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+         mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+      VALUES
+        (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+         NULL, NULL, @createdBy, @artifactType, @name, @description,
+         NULL, @storageKind, NULL, NULL, NULL, @status, @metadataJson)
+    `).run({
+      id: summaryArtifactId,
+      projectId: pid,
+      jobId: row.id,
+      datasetId,
+      analysisObjectId,
+      resultAnalysisObjectId,
+      createdBy: owner,
+      artifactType: smType,
+      name: sm.name != null ? String(sm.name) : null,
+      description: sm.description != null ? String(sm.description) : null,
+      storageKind: smStorageKind,
+      status: smStatus,
+      metadataJson: JSON.stringify(smMetadata)
+    });
+  }).immediate();
+
+  return {
+    markersArtifact: getJobArtifactRowById(markersArtifactId),
+    summaryArtifact: getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
 // ── Loadable-checkpoint discovery for checkpoint.load.v1 (server-tier only) ────
 //
 // Narrow, server-tier resolver: given an analysis object the worker wants to load back
@@ -4727,6 +4938,7 @@ module.exports = {
   isSafeInternalStorageKey,
   createCheckpointForJobByWorker,
   completePbmcPipelineResultByWorker,
+  completeDegFindMarkersResultByWorker,
   getLoadableCheckpointForAnalysisObject,
   getJobArtifactsByJobId,
   listProjectArtifacts,
