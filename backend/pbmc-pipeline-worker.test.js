@@ -121,7 +121,7 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
 
   it('registers pbmc.pipeline.v1; generic / checkpoint.noop / r.runtime.check / r.object.inspect unchanged', () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.noop', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
+      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS.generic).toBe(worker.genericNoopHandler);
     expect(DEFAULT_HANDLERS['checkpoint.noop']).toBe(worker.checkpointNoopHandler);
@@ -147,9 +147,10 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
     expect(spec.readOnly).toBe(false);
   });
 
-  it('the bridge target set stays exact/closed (adds only POST /object/pbmc-pipeline)', () => {
+  it('the bridge target set stays exact/closed (includes POST /object/pbmc-pipeline)', () => {
+    // Includes POST /object/checkpoint-load, added by the checkpoint.load.v1 branch.
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/pbmc-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/pbmc-pipeline']);
   });
 
   it('DEG / pathway enrichment / CellChat are NOT newly registered job types or handlers', () => {
@@ -157,9 +158,10 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
       'deg.find_markers.v1', 'enrichment.ora.v1', 'cellchat.infer.v1']) {
       expect(DEFAULT_HANDLERS[t]).toBeUndefined();
     }
-    // No new R-bridge op for them either.
+    // No new R-bridge op for them either (r.checkpoint.load.v1 is the only op added
+    // beyond the inspect/pipeline/runtime set, and it is NOT a DEG/pathway/CellChat op).
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
+      .toEqual(['r.checkpoint.load.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
   });
 
   it('an unsupported analytical job type still fails terminally (UNSUPPORTED_JOB_TYPE), no R contact', async () => {

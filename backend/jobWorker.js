@@ -460,6 +460,127 @@ async function pbmcPipelineHandler(ctx) {
   };
 }
 
+/**
+ * Checkpoint load / reattach handler (`checkpoint.load.v1`): loads a COMPLETED durable
+ * internal checkpoint (produced by pbmc.pipeline.v1) back into the job OWNER's PRIVATE
+ * live R session under the canonical object key, so downstream jobs can use it as live
+ * input. It is a live-state MUTATION of exactly one owner/object-keyed session — that is
+ * the purpose of this branch — but it creates NO new analysis object, NO lineage edge,
+ * and NO checkpoint artifact (it only reattaches an existing one).
+ *
+ * SAME OWNERSHIP BOUNDARY as r.object.inspect / pbmc.pipeline.v1 (project membership ≠
+ * live R access), enforced TWICE before any R contact:
+ *   - the object id comes from the TRUSTED job row; the job creator must OWN the live
+ *     object (verifyAnalysisObjectOwner), and the X-Object-ID is SERVER-derived
+ *     (deriveRObjectStateKey); a co-member/admin/viewer who created a job against another
+ *     user's object FAILS here.
+ *   - getLoadableCheckpoint re-verifies ownership + project scope + checkpoint storage
+ *     metadata and returns the SERVER-selected internal storage key (never client input).
+ *
+ * Order (the metadata artifact is recorded only AFTER R reports a successful load):
+ *   1. heartbeat; require + own the object; derive its canonical state key (all before R)
+ *   2. resolve the SERVER-selected loadable checkpoint (owner/scope/metadata verified) —
+ *      a missing/ambiguous/unsafe checkpoint fails the job here, BEFORE any R contact
+ *   3. invoke the allowlisted `r.checkpoint.load.v1` bridge op (server-built body: the
+ *      internal storage key + expected checksum/size only — no client storage key/path)
+ *   4. require R to report loaded === true — else fail (no success artifact)
+ *   5. record ONE metadata-only `checkpoint_load` summary artifact (no storage key/path/
+ *      state key; checksum/size are the already-public integrity descriptors)
+ * On failure/cancel/claim-loss no successful load artifact is created; the claim guard
+ * makes two workers unable to duplicate it. Bridge errors arrive pre-sanitized.
+ */
+async function checkpointLoadHandler(ctx) {
+  ctx.heartbeat();
+  ctx.log({ level: 'info', message: 'checkpoint.load.v1 handler: validating ownership + resolving checkpoint before any R contact.' });
+
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+
+  // 1. The job MUST reference the analysis object to load. Fail safely BEFORE any R.
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Checkpoint load job is missing its analysis object.');
+  }
+
+  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may load. Same
+  //    owner-verified check the /api/r/* proxy uses; 404-style message so another
+  //    user's object existence is never revealed. Also require the server-injected
+  //    deriver + loadable-checkpoint resolver.
+  if (typeof ctx.verifyAnalysisObjectOwner !== 'function'
+    || typeof ctx.deriveRObjectStateKey !== 'function'
+    || typeof ctx.getLoadableCheckpoint !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+
+  // 3. Derive the canonical object state key (X-Object-ID) SERVER-SIDE from the verified
+  //    owner + object id. Never client-provided; identical to what /api/r/* would send.
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+
+  // 4. Resolve the SERVER-selected loadable checkpoint (re-verifies owner + project scope
+  //    + checkpoint storage metadata). Throws coded SAFE-message errors
+  //    (ANALYSIS_OBJECT_NOT_FOUND / NO_CHECKPOINT_ARTIFACT / AMBIGUOUS_CHECKPOINT /
+  //    INVALID_*) that fail the job terminally WITHOUT contacting R. The internal storage
+  //    key it returns is SECRET — it is passed only to the server-controlled bridge and
+  //    is never logged or placed in artifact metadata.
+  const checkpoint = ctx.getLoadableCheckpoint(job.projectId || null, objectId, job.ownerUserId);
+
+  ctx.log({ level: 'info', message: 'checkpoint.load.v1 handler: checkpoint resolved; loading into the owner\'s private live R session (no new object/edge).' });
+
+  // 5. Run the allowlisted, mutating bridge op. Object context + checkpoint coordinates
+  //    are all server-derived; the bridge ignores raw job input for routing/storage key.
+  const descriptor = await ctx.runRBridgeOperation({
+    job,
+    operation: 'r.checkpoint.load.v1',
+    actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+    objectContext: { objectId, stateKey },
+    checkpoint: {
+      internalStorageKey: checkpoint.internalStorageKey,
+      checksumSha256: checkpoint.checksumSha256,
+      sizeBytes: checkpoint.sizeBytes,
+    },
+    input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+
+  // 6. R MUST report a successful load for success. If not, fail BEFORE recording any
+  //    success artifact (so a failed load leaves no checkpoint_load artifact behind).
+  const loaded = descriptor.loaded || {};
+  if (loaded.loaded !== true) {
+    throw codedHandlerError('CHECKPOINT_LOAD_FAILED', 'Checkpoint did not load into the live R session.');
+  }
+
+  // 7. Record ONE metadata-only checkpoint_load summary artifact. The internal storage
+  //    key/path and the R state key are NEVER placed in metadata; checksum/size are the
+  //    already-public integrity descriptors of the source checkpoint artifact.
+  const artifact = ctx.createArtifact({
+    artifactType: descriptor.artifactType, // 'checkpoint_load'
+    name: descriptor.name,
+    description: descriptor.description,
+    storageKind: descriptor.storageKind, // 'metadata_only'
+    metadata: {
+      ...descriptor.metadata,
+      sourceAnalysisObjectId: objectId,
+      checkpointArtifactId: checkpoint.checkpointArtifactId,
+      checksumSha256: checkpoint.checksumSha256,
+      sizeBytes: checkpoint.sizeBytes,
+    },
+  });
+
+  ctx.log({ level: 'info', message: `checkpoint.load.v1 handler: recorded metadata-only artifact ${artifact.id} (live-state reattach; no new analysis object or lineage edge).` });
+
+  // No result analysis object / checkpoint / lineage edge: this is a live-state reattach.
+  return {
+    result: { ok: true, handled: 'checkpoint.load.v1', operation: 'r.checkpoint.load.v1', artifactId: artifact.id },
+  };
+}
+
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
@@ -474,6 +595,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'r.runtime.check': rRuntimeCheckHandler,
   'r.object.inspect': rObjectInspectHandler,
   'pbmc.pipeline.v1': pbmcPipelineHandler,
+  'checkpoint.load.v1': checkpointLoadHandler,
 });
 
 /**
@@ -652,6 +774,12 @@ function createJobWorker(options = {}) {
       // controls the X-Object-ID.
       verifyAnalysisObjectOwner: (ownerUserId, objectId) => db.verifyAnalysisObjectOwner(ownerUserId, objectId),
       deriveRObjectStateKey: typeof deriveRObjectStateKey === 'function' ? deriveRObjectStateKey : undefined,
+      // Server-selected loadable-checkpoint resolver for checkpoint.load.v1 ONLY. It
+      // re-verifies object ownership + project scope + checkpoint storage metadata and
+      // returns the SERVER-controlled internal storage key (never client input). The
+      // worker keeps that key private (it is not logged or placed in artifact metadata).
+      getLoadableCheckpoint: (projectId, objectId, ownerUserId) =>
+        db.getLoadableCheckpointForAnalysisObject(projectId, objectId, ownerUserId),
       logger: log,
     };
 
@@ -756,6 +884,7 @@ module.exports = {
   rRuntimeCheckHandler,
   rObjectInspectHandler,
   pbmcPipelineHandler,
+  checkpointLoadHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,

@@ -204,7 +204,14 @@ function isProductionDiagnosticRProxyPath(reqPath) {
 // worker contract. We block every spelling (any method, trailing slash, doubled slashes,
 // %2F-encoded or backslash separators) using the same normalization as the diagnostic
 // gate, BEFORE any R contact, and return a no-leak 404 (never confirming the path).
-const R_PROXY_INTERNAL_ONLY_PATHS = new Set(['/object/pbmc-pipeline']);
+//
+// POST /object/checkpoint-load is the second such endpoint: it loads a durable internal
+// checkpoint RDS back into a live R session and MUTATES that live object key. A direct
+// proxy call would let a client trigger a live-state mutation WITHOUT a durable job,
+// worker claim, ownership re-verification, server-selected checkpoint, or sanitized load
+// record — and would accept a client-controlled storage key/path. It is driven ONLY by
+// the in-process worker bridge, so it must be UNREACHABLE through the public proxy.
+const R_PROXY_INTERNAL_ONLY_PATHS = new Set(['/object/pbmc-pipeline', '/object/checkpoint-load']);
 
 function isInternalOnlyRProxyPath(rawPath) {
   let p = String(rawPath || '');
