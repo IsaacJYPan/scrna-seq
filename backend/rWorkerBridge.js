@@ -119,6 +119,34 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     // so a hung R run can never wedge a worker indefinitely.
     defaultTimeoutMs: 120000,
   }),
+  // Checkpoint load / reattach: load a COMPLETED durable internal checkpoint RDS back
+  // into the OWNER's private live R session under the canonical object key, so later
+  // jobs can use it as live input. The request method/path are fixed; the X-Object-ID
+  // (the owner's canonical object key) is server-derived; the body is reconstructed by
+  // the bridge from ONLY the SERVER-selected checkpoint coordinates (`carriesCheckpoint`)
+  // — the internal storage key + expected checksum/size, never any client input. It
+  // mutates ONLY the target live object key and returns a sanitized, bounded summary
+  // (never matrices/cells/genes/embeddings/path/state-key). The worker handler verifies
+  // OWNERSHIP + selects the checkpoint BEFORE this runs; there is NO arbitrary R/path.
+  'r.checkpoint.load.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/checkpoint-load',
+    artifactType: 'checkpoint_load',
+    artifactName: 'Checkpoint load summary',
+    artifactDescription:
+      'Sanitized summary of loading a durable internal checkpoint back into the owner\'s private live R '
+      + 'session (reattach). Bounded object summary (class, dimensions, assay/reduction/metadata-field '
+      + 'names), checksum-verification flag, and runtime versions only — no expression matrices, '
+      + 'cell/gene tables, embeddings, storage path/key, or R state key.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesCheckpoint: true,
+    mutating: true,
+    readOnly: false,
+    // A checkpoint load reads + deserializes an RDS bundle and rebuilds the live object;
+    // explicit but bounded so a hung load can never wedge a worker indefinitely.
+    defaultTimeoutMs: 120000,
+  }),
 });
 
 // Defense-in-depth target allowlist for the default R caller: the EXACT
@@ -293,6 +321,48 @@ function sanitizeCheckpointInfo(body) {
 }
 
 /**
+ * Build a SAFE, bounded, metadata-only summary of a checkpoint LOAD/reattach from the
+ * raw R body. Like sanitizeInspectionSummary, only a small allowlist of structural
+ * fields survives; every value is sanitized and capped. It records WHETHER the load
+ * succeeded, whether the checksum was verified, and a bounded object summary — NEVER
+ * expression matrices, per-cell/gene tables, embeddings, raw sample values, the storage
+ * path/key, or the R state key (none of those are on the allowlist, so even a hostile R
+ * response cannot smuggle them through).
+ */
+function sanitizeLoadSummary(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const out = { loaded: b.loaded === true };
+  // Whether R re-verified the checkpoint file checksum before deserializing.
+  out.checksumVerified = b.checksum_verified === true;
+  if (!out.loaded) return out;
+
+  const cls = sanitizeRuntimeField(b.class);
+  if (cls) out.class = cls;
+
+  const nCells = sanitizeCount(b.n_cells);
+  if (nCells !== null) out.nCells = nCells;
+  const nFeatures = sanitizeCount(b.n_features);
+  if (nFeatures !== null) out.nFeatures = nFeatures;
+
+  const assays = sanitizeNameList(b.assays);
+  if (assays.length) out.assays = assays;
+  const reductions = sanitizeNameList(b.reductions);
+  if (reductions.length) out.reductions = reductions;
+
+  const nMeta = sanitizeCount(b.n_meta_fields);
+  if (nMeta !== null) out.nMetaFields = nMeta;
+  const metaFields = sanitizeNameList(b.meta_fields);
+  if (metaFields.length) out.metaFields = metaFields;
+
+  const sv = sanitizeRuntimeField(b.seurat_version);
+  if (sv) out.seuratVersion = sv;
+  const rv = sanitizeRuntimeField(b.r_version);
+  if (rv) out.rVersion = rv;
+
+  return out;
+}
+
+/**
  * Map any thrown bridge/caller error to a SAFE { code, message } pair. Known coded
  * errors get a stable, generic message; anything else collapses to a single generic
  * message. We never echo err.message verbatim from lower layers, so a raw R error
@@ -306,11 +376,13 @@ function sanitizeRBridgeError(err) {
     R_BRIDGE_MISCONFIGURED: 'R bridge is not configured.',
     R_OBJECT_CONTEXT_REQUIRED: 'Server-derived object context is required for object inspection.',
     R_PIPELINE_PARAMS_REQUIRED: 'Server-validated pipeline parameters are required.',
+    R_CHECKPOINT_REQUIRED: 'A server-selected checkpoint is required for a checkpoint load.',
     R_TIMEOUT: 'R runtime did not respond before the timeout.',
     R_UNREACHABLE: 'R runtime is unreachable.',
     R_RUNTIME_CHECK_FAILED: 'R runtime check failed.',
     R_OBJECT_INSPECT_FAILED: 'R object inspection failed.',
     R_PBMC_PIPELINE_FAILED: 'R PBMC pipeline run failed.',
+    R_CHECKPOINT_LOAD_FAILED: 'R checkpoint load failed.',
     R_BRIDGE_ERROR: 'R bridge operation failed.',
   };
   return { code, message: SAFE_MESSAGES[code] || SAFE_MESSAGES.R_BRIDGE_ERROR };
@@ -491,6 +563,32 @@ async function runRBridgeOperation(args = {}) {
     request.body = { operation, params: safeParams, storage_key: checkpointStorageKey };
   }
 
+  // 2c. Checkpoint-load op: a SERVER-BUILT body reconstructed from ONLY the server-
+  //     SELECTED checkpoint coordinates (the internal storage key + expected integrity).
+  //     `args.checkpoint` is supplied by the worker handler AFTER it has verified
+  //     ownership and resolved the loadable checkpoint (database.js
+  //     getLoadableCheckpointForAnalysisObject); raw client input is never forwarded and
+  //     there is NO client-controlled storage key/path. The expected checksum/size let R
+  //     re-verify file integrity before deserializing.
+  if (spec.carriesCheckpoint) {
+    const cp = args.checkpoint;
+    const storageKey = cp && typeof cp === 'object' ? cp.internalStorageKey : null;
+    if (!cp || typeof cp !== 'object'
+      || typeof storageKey !== 'string' || storageKey === '') {
+      throw codedError('R_CHECKPOINT_REQUIRED', 'A server-selected checkpoint is required for a checkpoint load.');
+    }
+    // `storage_key` is the TOP-LEVEL body field R confines via validate_path() and the
+    // Node proxy's R_PROXY_VALIDATED_PATH_FIELDS allowlist already covers.
+    const loadBody = { operation, storage_key: storageKey };
+    if (typeof cp.checksumSha256 === 'string' && cp.checksumSha256 !== '') {
+      loadBody.expected_checksum_sha256 = cp.checksumSha256;
+    }
+    if (Number.isFinite(cp.sizeBytes) && cp.sizeBytes >= 0) {
+      loadBody.expected_size_bytes = cp.sizeBytes;
+    }
+    request.body = loadBody;
+  }
+
   if (logger && typeof logger.info === 'function') {
     // NB: never log the state key (an R state key); only the safe method/path.
     logger.info(`[r-bridge] running allowlisted operation '${operation}' (${spec.method} ${spec.path}).`);
@@ -509,6 +607,7 @@ async function runRBridgeOperation(args = {}) {
     // Never include the raw body/status text — only a generic, stable message.
     let failCode = 'R_RUNTIME_CHECK_FAILED';
     if (spec.carriesParams) failCode = 'R_PBMC_PIPELINE_FAILED';
+    else if (spec.carriesCheckpoint) failCode = 'R_CHECKPOINT_LOAD_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     throw codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
   }
@@ -541,6 +640,34 @@ async function runRBridgeOperation(args = {}) {
         ranAt: new Date().toISOString(),
         objectId: objectContext.objectId,
         summary,
+      },
+    };
+  }
+
+  if (operation === 'r.checkpoint.load.v1') {
+    // The bridge returns the SANITIZED load summary the worker needs; the worker (not
+    // the bridge) writes the metadata-only checkpoint_load artifact. The summary carries
+    // only load success + verification + a bounded object summary — never the storage
+    // path/key (the worker already holds it internally and keeps it private).
+    const loaded = sanitizeLoadSummary(body);
+    return {
+      operation,
+      artifactType: spec.artifactType, // 'checkpoint_load'
+      storageKind: 'metadata_only',
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: objectContext.objectId,
+      loaded,
+      metadata: {
+        operation,
+        kind: 'checkpoint_load',
+        scientific_output: false,
+        live_state_mutation: true,
+        loadedAt: new Date().toISOString(),
+        // The analysis object id is a normal member-visible resource id — NOT the R
+        // state key (the state key is never placed in metadata).
+        objectId: objectContext.objectId,
+        loaded,
       },
     };
   }
@@ -606,6 +733,7 @@ module.exports = {
   sanitizeChecksum,
   sanitizePipelineSummary,
   sanitizeCheckpointInfo,
+  sanitizeLoadSummary,
   sanitizeRBridgeError,
   createDefaultRCaller,
   runRBridgeOperation,

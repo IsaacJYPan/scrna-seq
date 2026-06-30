@@ -1179,7 +1179,19 @@ const ALLOWED_JOB_TYPES = new Set([
   // DEG / pathway enrichment / CellChat are intentionally NOT part of this type (see
   // docs/analysis-pipeline-integration.md). Driven by the `pbmc.pipeline.v1` worker
   // handler (jobWorker.js) + the allowlisted `r.pbmc.pipeline.v1` bridge operation.
-  'pbmc.pipeline.v1'
+  'pbmc.pipeline.v1',
+  // Allowlisted checkpoint load / reattach: loads a COMPLETED internal checkpoint RDS
+  // (produced by `pbmc.pipeline.v1`) back into the job owner's PRIVATE live R session,
+  // under the canonical object key, so downstream jobs can use it as live input. v1 is
+  // OWNER-ONLY: the job creator must OWN the analysis object being loaded
+  // (verifyAnalysisObjectOwner) — project membership alone never loads another user's
+  // checkpoint into live R. It reads a SERVER-selected checkpoint artifact (storage
+  // kind / type / safe internal key verified), mutates ONLY the owner's live object
+  // key, creates NO new analysis object / lineage edge / checkpoint artifact, and
+  // records one metadata-only `checkpoint_load` summary artifact. There is NO download,
+  // NO object storage, NO arbitrary R/path. Driven by the `checkpoint.load.v1` worker
+  // handler (jobWorker.js) + the allowlisted `r.checkpoint.load.v1` bridge operation.
+  'checkpoint.load.v1'
 ]);
 
 const JOB_STATUSES = new Set([
@@ -3343,7 +3355,16 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   // object/file itself is recorded separately as a `checkpoint` artifact. Never
   // contains expression matrices, per-cell/gene tables, embeddings, paths, or the R
   // state key. scientific_output: true.
-  'pipeline_summary'
+  'pipeline_summary',
+  // Metadata-only summary recorded by the `checkpoint.load.v1` worker handler after a
+  // completed internal checkpoint is loaded back into the owner's PRIVATE live R session.
+  // It records WHAT was reattached: the source analysis object id, the source checkpoint
+  // artifact id, the (already-public) checksum/size descriptors, a sanitized loaded-object
+  // summary, and runtime versions. It is NOT a scientific result and NOT a new checkpoint:
+  // storage_kind metadata_only, scientific_output: false, live_state_mutation: true. It
+  // NEVER contains the internal storage key/path, the R state key, expression/cell/gene
+  // data, embeddings, or serialized object contents.
+  'checkpoint_load'
 ]);
 
 // metadata_only is the only kind the placeholder handler writes in this branch.
@@ -4396,6 +4417,106 @@ function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input =
   };
 }
 
+// ── Loadable-checkpoint discovery for checkpoint.load.v1 (server-tier only) ────
+//
+// Narrow, server-tier resolver: given an analysis object the worker wants to load back
+// into the OWNER's live R session, find the SINGLE durable internal checkpoint RDS for
+// it and return its SERVER-controlled storage coordinates (internal key + integrity).
+// It is reachable ONLY from the trusted `checkpoint.load.v1` worker handler — there is
+// NO public route — and the internal key it returns is NEVER exposed to a client (the
+// public artifact projection strips storage_uri; the worker keeps the key internal and
+// passes it only to the server-controlled R bridge).
+//
+// HARD VALIDATION (every failure throws a coded, SAFE-message error so the handler can
+// fail the job BEFORE any R contact, with a 404-style message that never reveals another
+// user's object exists):
+//   1. the analysis object exists and is OWNED by `ownerUserId` (v1 is owner-only — a
+//      project co-member/admin who does not own it is rejected here, exactly like the
+//      live-R object owner gate; project membership never loads another user's checkpoint)
+//   2. the object is in the job's scope: a project job (`projectId` set) may only load an
+//      object in THAT project; a legacy owner-scoped job (null project) may only load an
+//      owner-scoped object — blocking any legacy↔project cross-scope leak
+//   3. exactly ONE associated checkpoint artifact exists for the object (artifact_type
+//      'checkpoint', storage_kind 'local_internal', status 'available', same project
+//      scope, linked via result_analysis_object_id). Zero → NO_CHECKPOINT_ARTIFACT;
+//      MORE THAN ONE → AMBIGUOUS_CHECKPOINT (DETERMINISTIC-REJECT policy: we never guess
+//      which RDS to load — the normal pbmc.pipeline.v1 flow produces exactly one per
+//      result object, so >1 is anomalous and refused rather than silently picked)
+//   4. that artifact carries a SAFE internal storage key + a valid checksum + size (all
+//      of which pbmc.pipeline.v1 checkpoint creation guarantees) — else INVALID_STORAGE_KEY
+//      / INVALID_CHECKSUM / INVALID_SIZE
+// Returns server-tier coordinates ONLY: { analysisObjectId, projectId, checkpointArtifactId,
+// internalStorageKey, checksumSha256, sizeBytes }. The caller must treat internalStorageKey
+// as secret.
+function getLoadableCheckpointForAnalysisObject(projectId, analysisObjectId, ownerUserId) {
+  if (typeof analysisObjectId !== 'string' || analysisObjectId === '') {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const owner = Number(ownerUserId);
+  if (!Number.isInteger(owner) || owner <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid owner user id is required.');
+  }
+  const pid = projectId === undefined || projectId === null || projectId === '' ? null : String(projectId);
+
+  // 1. Ownership (v1 owner-only): getAnalysisObjectForUser pins owner_user_id = owner, so
+  //    a non-owner (incl. a project co-member/admin) resolves to null → 404-style error.
+  const obj = getAnalysisObjectForUser(analysisObjectId, owner);
+  if (!obj) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+
+  // 2. Scope: project job ⇒ object must be in that project; legacy owner-scoped job ⇒
+  //    object must be owner-scoped (project_id NULL). No legacy↔project crossing.
+  const objProjectId = obj.projectId || null;
+  if (pid) {
+    if (objProjectId !== pid) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  } else if (objProjectId) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+
+  // 3. The durable internal checkpoint(s) for this result object. Linked via
+  //    result_analysis_object_id (how completePbmcPipelineResultByWorker records it).
+  const candidates = db.prepare(`
+    SELECT * FROM job_artifacts
+    WHERE result_analysis_object_id = ?
+      AND artifact_type = 'checkpoint'
+      AND storage_kind = 'local_internal'
+      AND status = 'available'
+    ORDER BY created_at ASC, id ASC
+  `).all(analysisObjectId)
+    .map(rowToJobArtifact)
+    .filter((a) => (a.projectId || null) === objProjectId);
+
+  if (candidates.length === 0) {
+    throw codedError('NO_CHECKPOINT_ARTIFACT', 'No loadable checkpoint for this analysis object.');
+  }
+  if (candidates.length > 1) {
+    // Deterministic-reject: never silently choose among multiple checkpoints.
+    throw codedError('AMBIGUOUS_CHECKPOINT', 'Multiple loadable checkpoints; refusing to choose.');
+  }
+  const artifact = candidates[0];
+
+  // 4. The chosen checkpoint must carry a SAFE internal key + integrity descriptors.
+  if (!isSafeInternalStorageKey(artifact.storageUri)) {
+    throw codedError('INVALID_STORAGE_KEY', 'Checkpoint storage key is missing or unsafe.');
+  }
+  const checksum = normalizeChecksumSha256(artifact.checksumSha256);
+  if (checksum === undefined || checksum === null) {
+    throw codedError('INVALID_CHECKSUM', 'Checkpoint checksum is missing or invalid.');
+  }
+  const sizeBytes = normalizeArtifactSizeBytes(artifact.sizeBytes);
+  if (sizeBytes === undefined || sizeBytes === null) {
+    throw codedError('INVALID_SIZE', 'Checkpoint size is missing or invalid.');
+  }
+
+  return {
+    analysisObjectId,
+    projectId: objProjectId,
+    checkpointArtifactId: artifact.id,
+    internalStorageKey: artifact.storageUri, // SECRET — caller must not expose
+    checksumSha256: checksum,
+    sizeBytes,
+  };
+}
+
 // ── Project-scoped artifact reads (metadata only; no download) ────
 //
 // Read-only, role-checked artifact metadata for project members. Like the other
@@ -4606,6 +4727,7 @@ module.exports = {
   isSafeInternalStorageKey,
   createCheckpointForJobByWorker,
   completePbmcPipelineResultByWorker,
+  getLoadableCheckpointForAnalysisObject,
   getJobArtifactsByJobId,
   listProjectArtifacts,
   listProjectJobArtifacts,
