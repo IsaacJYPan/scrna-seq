@@ -43,7 +43,7 @@ describe('Sidebar component', () => {
       <Sidebar 
         activeTab="home"
         {...baseProps}
-        selectedObjects={['obj-1']} // Data loaded
+        selectedObjects={[{ id: 'ao_abc123' }]} // DB-backed object selected
         pipelineState={{ qc: true, normalize: true, integrate: false, pca: false, cluster: false }}
       />
     );
@@ -59,7 +59,7 @@ describe('Sidebar component', () => {
       <Sidebar
         activeTab="workspace"
         {...baseProps}
-        selectedObjects={['obj-1']}
+        selectedObjects={[{ id: 'ao_abc123' }]}
       />
     );
 

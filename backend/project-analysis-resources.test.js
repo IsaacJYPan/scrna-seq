@@ -209,6 +209,37 @@ describe('project analysis resources — server-controlled identity', () => {
     }
   });
 
+  it('rejects client-provided analysis object storage/state fields and omits storage metadata from responses', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+
+    for (const field of ['storageUri', 'storage_uri', 'storageKey', 'storage_key', 'internalStorageKey', 'objectHash', 'path', 'stateKey']) {
+      const res = await createAO(proj.id, alice.token, { objectType: 'seurat', [field]: 'vault/secret.rds' });
+      expect(res.status, field).toBe(400);
+    }
+    const nested = await createAO(proj.id, alice.token, {
+      objectType: 'seurat',
+      metadata: { sourceType: 'pbmc3k_demo', nested: { storageKey: 'vault/secret.rds' } }
+    });
+    expect(nested.status).toBe(400);
+
+    const created = await createAO(proj.id, alice.token, { objectType: 'seurat', metadata: { sourceType: 'pbmc3k_demo' } });
+    expect(created.status).toBe(201);
+    expect(created.data.id).toMatch(/^ao_[0-9a-f]+$/);
+    expect(created.data.storageUri).toBeUndefined();
+    expect(created.data.objectHash).toBeUndefined();
+
+    const list = await api(server, `/api/projects/${proj.id}/analysis-objects`, { token: alice.token });
+    expect(list.status).toBe(200);
+    expect(JSON.stringify(list.data)).not.toContain('vault/');
+    expect(list.data[0].storageUri).toBeUndefined();
+
+    const read = await api(server, `/api/projects/${proj.id}/analysis-objects/${created.data.id}`, { token: alice.token });
+    expect(read.status).toBe(200);
+    expect(read.data.storageUri).toBeUndefined();
+    expect(read.data.objectHash).toBeUndefined();
+  });
+
   it('rejects a client-provided job status (400)', async () => {
     const { alice } = users();
     const proj = seedProject(alice.user.id);

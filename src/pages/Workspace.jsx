@@ -9,7 +9,7 @@ import {
 // Removed API constant
 // ── Load Dataset Modal ─────────────────────────────────────────────
 
-function LoadModal({ onClose, onLoaded, loadingId, setLoadingId }) {
+function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId, onCreateAnalysisObjectForLoad }) {
   const [showFilters, setShowFilters] = useState(false);
   const [minCells, setMinCells] = useState(3);
   const [minFeatures, setMinFeatures] = useState(200);
@@ -39,13 +39,36 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId }) {
   const updateExtraMetaColName = (idx, name) => setExtraMetaCols(prev => prev.map((c, i) => i === idx ? { ...c, name } : c));
   const updateExtraMetaColValue = (colIdx, rowIdx, val) => setExtraMetaCols(prev => prev.map((c, i) => i === colIdx ? { ...c, values: c.values.map((v, j) => j === rowIdx ? val : v) } : c));
 
+  const runWithAnalysisObject = async ({
+    endpoint,
+    options = {},
+    displayName,
+    sourceType,
+    metadata = {},
+  }) => {
+    if (!activeProjectId) throw new Error('Select or create a backend project before loading data.');
+    const analysisObject = await onCreateAnalysisObjectForLoad({
+      projectId: activeProjectId,
+      displayName,
+      sourceType,
+      metadata,
+    });
+    const headers = { ...(options.headers || {}), 'X-Object-ID': analysisObject.id };
+    const data = await window.electronAPI.apiRequest(endpoint, { ...options, headers });
+    if (data.error) throw new Error(data.error);
+    if (data.result) onLoaded(data, displayName, analysisObject);
+  };
+
   const loadDemo = async () => {
     setError(null);
     setLoadingId('demo');
     try {
-      const data = await window.electronAPI.apiRequest(`/load-data?min_cells=${minCells}&min_features=${minFeatures}`);
-      if (data.error) throw new Error(data.error);
-      if (data.result) onLoaded(data, 'PBMC_3k_Tutorial');
+      await runWithAnalysisObject({
+        endpoint: `/load-data?min_cells=${minCells}&min_features=${minFeatures}`,
+        displayName: 'PBMC_3k_Tutorial',
+        sourceType: 'pbmc3k_demo',
+        metadata: { minCells, minFeatures },
+      });
     } catch (err) {
       setError(`Request failed: ${err.message}`);
     }
@@ -59,9 +82,12 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId }) {
     setLoadingId('10x');
     try {
       const params = new URLSearchParams({ path, min_cells: minCells, min_features: minFeatures });
-      const data = await window.electronAPI.apiRequest(`/load-local-10x?${params}`);
-      if (data.error) throw new Error(data.error);
-      if (data.result) onLoaded(data, path.split(/[/\\]/).pop());
+      await runWithAnalysisObject({
+        endpoint: `/load-local-10x?${params}`,
+        displayName: path.split(/[/\\]/).pop(),
+        sourceType: 'local_10x',
+        metadata: { minCells, minFeatures },
+      });
     } catch (err) {
       setError(`Request failed: ${err.message}`);
     }
@@ -139,7 +165,12 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId }) {
     setError(null);
     setLoadingId('multi10x');
     try {
-      const data = await window.electronAPI.apiRequest('/load-multi-10x', {
+      await runWithAnalysisObject({
+        endpoint: '/load-multi-10x',
+        displayName: trimmed.join('+').length > 40 ? `${trimmed.length}_samples_merged` : trimmed.join('+'),
+        sourceType: 'multi_10x',
+        metadata: { sampleCount: trimmed.length, minCells, minFeatures },
+        options: {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -150,12 +181,8 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId }) {
           min_cells: minCells,
           min_features: minFeatures,
         }),
+        },
       });
-      if (data.error) throw new Error(data.error);
-      if (data.result) {
-        const combinedName = trimmed.join('+');
-        onLoaded(data, combinedName.length > 40 ? `${trimmed.length}_samples_merged` : combinedName);
-      }
     } catch (err) {
       setError(`Request failed: ${err.message}`);
     }
@@ -168,9 +195,13 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId }) {
     setError(null);
     setLoadingId('rds');
     try {
-      const data = await window.electronAPI.apiRequest('/load-rds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-      if (data.error) throw new Error(data.error);
-      if (data.result) onLoaded(data, path.split(/[/\\]/).pop().replace(/\.rds$/i, ''));
+      await runWithAnalysisObject({
+        endpoint: '/load-rds',
+        displayName: path.split(/[/\\]/).pop().replace(/\.rds$/i, ''),
+        sourceType: 'rds_import',
+        metadata: {},
+        options: { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) },
+      });
     } catch (err) {
       setError(`Request failed: ${err.message}`);
     }
@@ -183,9 +214,12 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId }) {
     setError(null);
     setLoadingId('h5');
     try {
-      const data = await window.electronAPI.apiRequest(`/load-h5ad?path=${encodeURIComponent(path)}`);
-      if (data.error) throw new Error(data.error);
-      if (data.result) onLoaded(data, path.split(/[/\\]/).pop().replace(/\.(h5ad?|h5seurat)$/i, ''));
+      await runWithAnalysisObject({
+        endpoint: `/load-h5ad?path=${encodeURIComponent(path)}`,
+        displayName: path.split(/[/\\]/).pop().replace(/\.(h5ad?|h5seurat)$/i, ''),
+        sourceType: 'h5_import',
+        metadata: {},
+      });
     } catch (err) {
       setError(`Request failed: ${err.message}`);
     }
@@ -536,63 +570,48 @@ export default function Workspace({
   resetPipelineAfterSubset,
   setActiveTab,
   userEmail,
+  backendModelStatus,
+  onSelectProject,
+  onCreateProject,
+  onCreateAnalysisObjectForLoad,
+  onAnalysisObjectLoaded,
+  onSelectAnalysisObject,
 }) {
-  // Derive the RDS save path for the currently active object.
-  // Mirrors the getSessionPath logic in App.jsx so they stay in sync.
-  const sanitizeEmail = (email) => email?.replace(/[^a-zA-Z0-9]/g, '_') ?? '';
   const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
-  const activeObj = selectedObjects[0] || currentWs.objects[0] || null;
-  const parentSessionPath = userEmail && activeObj?.id
-    ? `vault/${sanitizeEmail(userEmail)}/${activeObj.id}.rds`
-    : null;
   const [showLoadModal, setShowLoadModal] = useState(false);
   const [loadingId, setLoadingId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
-  // Projects State
-  const defaultProjectId = currentWs.projects?.[0]?.id || 'proj-default';
+  // Projects come from the backend. The selected project ID may be cached as a
+  // UI preference, but the project list itself is not localStorage truth.
+  const defaultProjectId = currentWs.selectedProjectId || currentWs.projects?.[0]?.id || null;
   const [activeProjectId, setActiveProjectId] = useState(defaultProjectId);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
-  const [newProjectSeed, setNewProjectSeed] = useState('');
-  const [editingProjectId, setEditingProjectId] = useState(null);
-  const [editProjectName, setEditProjectName] = useState('');
-  const [editProjectSeed, setEditProjectSeed] = useState('');
   const [openMenuId, setOpenMenuId] = useState(null);
 
   // Sync active project if workspace changes
   React.useEffect(() => {
-    if (currentWs.projects && !currentWs.projects.find(p => p.id === activeProjectId)) {
-      setActiveProjectId(currentWs.projects[0]?.id || 'proj-default');
-    }
-  }, [currentWs.projects, activeProjectId]);
+    setActiveProjectId(defaultProjectId);
+  }, [defaultProjectId]);
 
-  const handleProjectSelect = (projId) => {
+  const handleProjectSelect = async (projId) => {
     setActiveProjectId(projId);
-    const currentActiveObj = currentWs.objects.find(o => o.id === currentWs.selectedObjectIds?.[0]);
-    if (!currentActiveObj || currentActiveObj.projectId !== projId) {
-      const lastSelectedId = currentWs.lastSelectedByProject?.[projId];
-      const targetObj = currentWs.objects.find(o => o.id === lastSelectedId && o.projectId === projId);
-      
-      if (targetObj) {
-        updateActiveWorkspace({ selectedObjectIds: [targetObj.id] });
-      } else {
-        const newProjectObjs = currentWs.objects.filter(o => o.projectId === projId);
-        if (newProjectObjs.length > 0) {
-          updateActiveWorkspace({ selectedObjectIds: [newProjectObjs[newProjectObjs.length - 1].id] });
-        } else {
-          updateActiveWorkspace({ selectedObjectIds: [] });
-        }
-      }
-    }
+    await onSelectProject?.(projId);
   };
 
-  const activeProjectObjects = currentWs.objects.filter(o => o.projectId === activeProjectId);
+  const activeProjectObjects = activeProjectId
+    ? currentWs.objects.filter(o => o.projectId === activeProjectId)
+    : [];
 
   // Called when any load option completes successfully
-  const handleLoaded = (data, suggestedName) => {
+  const handleLoaded = (data, suggestedName, analysisObject) => {
+    if (!analysisObject?.id) {
+      setLoadingId(null);
+      return;
+    }
     let baseName = suggestedName || 'Dataset';
     let finalName = baseName;
     let counter = 1;
@@ -602,27 +621,9 @@ export default function Workspace({
       counter++;
     }
 
-    const newObj = {
-      id: `obj-${crypto.randomUUID()}`,
-      projectId: activeProjectId,
-      name: finalName,
-      ...data.result,
-      timestamp: new Date().toISOString(),
-    };
-    updateActiveWorkspace({
-      objects: [...currentWs.objects, newObj],
-      selectedObjectIds: [newObj.id],
-      lastSelectedByProject: {
-        ...(currentWs.lastSelectedByProject || {}),
-        [activeProjectId]: newObj.id
-      }
-    });
-    const sanitizedEmail = (userEmail || '').replace(/[^a-zA-Z0-9]/g, '_');
-    if (sanitizedEmail) {
-      const path = `vault/${sanitizedEmail}/${newObj.id}.rds`;
-      window.electronAPI.apiRequest(`/save-session?path=${encodeURIComponent(path)}`).catch(e => console.warn('Auto-save failed:', e));
-    }
-    
+    const namedAnalysisObject = { ...analysisObject, displayName: analysisObject.displayName || finalName };
+    onAnalysisObjectLoaded?.(activeProjectId, namedAnalysisObject, data.result);
+
     setDataVersion(v => v + 1);
     setShowLoadModal(false);
   };
@@ -630,13 +631,7 @@ export default function Workspace({
   const selectObject = (id) => {
     const obj = currentWs.objects.find(o => o.id === id);
     if (!obj) return;
-    updateActiveWorkspace({ 
-      selectedObjectIds: [id],
-      lastSelectedByProject: {
-        ...(currentWs.lastSelectedByProject || {}),
-        [obj.projectId]: id
-      }
-    });
+    onSelectAnalysisObject?.(obj.projectId, id);
   };
 
   const handleRenameObject = (e, objId, currentName) => {
@@ -675,10 +670,6 @@ export default function Workspace({
       // It's a subset: don't delete from disk, just remove from workspace UI
       // If we *really* wanted to delete subset files we could do that here,
       // but right now subsets exist inside the parent's vault file.
-    } else {
-      // Base object: delete its session file from disk
-      const path = `vault/${userEmail.replace(/[^a-zA-Z0-9]/g, '_')}/${objId}.rds`;
-      window.electronAPI.apiRequest('/delete-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) }).catch(() => {});
     }
     setConfirmDeleteId(null);
     setOpenMenuId(null);
@@ -708,71 +699,15 @@ export default function Workspace({
 
   // ── Project Management ──────────────────────────────────────────
 
-  const handleCreateProject = () => {
+  const handleCreateProject = async () => {
     if (!newProjectName.trim()) return;
-    const newProj = { id: `proj-${crypto.randomUUID()}`, name: newProjectName.trim(), seed: newProjectSeed.trim() };
-    updateActiveWorkspace({
-      projects: [...(currentWs.projects || []), newProj],
-      selectedObjectIds: []
-    });
-    setNewProjectName('');
-    setNewProjectSeed('');
-    setIsCreatingProject(false);
-    setActiveProjectId(newProj.id);
-  };
-
-  const handleRenameProject = (projectId) => {
-    if (!editProjectName.trim()) {
-      setEditingProjectId(null);
-      return;
-    }
-    updateActiveWorkspace({
-      projects: currentWs.projects.map(p => p.id === projectId ? { ...p, name: editProjectName.trim(), seed: editProjectSeed.trim() } : p)
-    });
-    setEditingProjectId(null);
-  };
-
-  const handleDeleteProject = (projectId) => {
-    const proj = currentWs.projects.find(p => p.id === projectId);
-    const confirm = window.confirm(`Are you sure you want to delete the project "${proj?.name}"? All objects inside it will be permanently removed from disk.`);
-    if (!confirm) return;
-    
-    const projectObjects = currentWs.objects.filter(o => o.projectId === projectId);
-    const remainingProjects = currentWs.projects.filter(p => p.id !== projectId);
-    const remainingObjects = currentWs.objects.filter(o => o.projectId !== projectId);
-    
-    // 1. Batch cleanup for disk and localStorage
-      const objIdsToDelete = currentWs.objects.filter(o => !o.parentObjId && o.projectId === projectId).map(o => o.id);
-      objIdsToDelete.forEach(objId => {
-        const path = `vault/${userEmail.replace(/[^a-zA-Z0-9]/g, '_')}/${objId}.rds`;
-        window.electronAPI.apiRequest('/delete-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) }).catch(() => {});
-      });
-      // LocalStorage
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && (k.includes(`_${projectId}`) || k.endsWith(`_${projectId}`))) {
-          localStorage.removeItem(k);
-        }
-      }
-
-    const nextActiveProjId = activeProjectId === projectId 
-        ? (remainingProjects[0]?.id || 'proj-default') 
-        : activeProjectId;
-        
-    let newSelected = currentWs.selectedObjectIds || [];
-    if (newSelected.length > 0 && !remainingObjects.find(o => o.id === newSelected[0])) {
-      const fallbackObjs = remainingObjects.filter(o => o.projectId === nextActiveProjId);
-      newSelected = fallbackObjs.length > 0 ? [fallbackObjs[fallbackObjs.length - 1].id] : [];
-    }
-
-    updateActiveWorkspace({
-      projects: remainingProjects,
-      objects: remainingObjects,
-      selectedObjectIds: newSelected,
-    });
-    
-    if (activeProjectId === projectId) {
-      setActiveProjectId(nextActiveProjId);
+    try {
+      const project = await onCreateProject?.({ name: newProjectName.trim(), description: '' });
+      if (project?.id) setActiveProjectId(project.id);
+      setNewProjectName('');
+      setIsCreatingProject(false);
+    } catch (err) {
+      alert(err.message || 'Failed to create project.');
     }
   };
 
@@ -871,14 +806,6 @@ export default function Workspace({
                     className="bg-slate-800 border border-slate-700 text-sm text-white px-3 py-1.5 rounded focus:outline-none focus:border-primary w-40"
                     autoFocus
                   />
-                  <input
-                    type="number"
-                    value={newProjectSeed}
-                    onChange={e => setNewProjectSeed(e.target.value)}
-                    placeholder="Seed (Optional)"
-                    className="bg-slate-800 border border-slate-700 text-sm text-white px-3 py-1.5 rounded focus:outline-none focus:border-primary w-32"
-                    onKeyDown={e => e.key === 'Enter' && handleCreateProject()}
-                  />
                   <button onClick={handleCreateProject} className="btn btn-primary text-xs px-3 py-1.5">Save</button>
                   <button onClick={() => setIsCreatingProject(false)} className="text-slate-400 hover:text-white px-2"><X size={14} /></button>
                 </div>
@@ -892,74 +819,48 @@ export default function Workspace({
               )}
             </div>
 
+            {backendModelStatus?.error && (
+              <div className="mb-4 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                {backendModelStatus.error}
+              </div>
+            )}
+
             <div className="flex gap-2 overflow-x-auto pb-4 border-b border-border/50 custom-scrollbar">
-              {currentWs.projects?.map(proj => {
+              {backendModelStatus?.projectsLoading ? (
+                <div className="text-sm text-textMuted px-1 py-3">Loading backend projects...</div>
+              ) : currentWs.projects?.length === 0 ? (
+                <div className="w-full rounded border border-dashed border-border p-6 text-center">
+                  <h4 className="text-text font-bold mb-2">No backend projects</h4>
+                  <p className="text-sm text-textMuted mb-4">Create a real backend project before loading analysis objects.</p>
+                  <button
+                    onClick={() => setIsCreatingProject(true)}
+                    className="btn btn-primary text-xs px-4 py-2 inline-flex items-center gap-2"
+                  >
+                    <Plus size={14} /> Create Project
+                  </button>
+                </div>
+              ) : currentWs.projects?.map(proj => {
                 const isActive = activeProjectId === proj.id;
-                const isEditing = editingProjectId === proj.id;
                 const projObjects = currentWs.objects.filter(o => o.projectId === proj.id);
-                
+
                 return (
                   <div
                     key={proj.id}
-                    onClick={() => !isEditing && handleProjectSelect(proj.id)}
+                    onClick={() => handleProjectSelect(proj.id)}
                     className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border transition-all cursor-pointer min-w-max group ${
                       isActive ? 'bg-primary/10 border-primary text-white shadow-sm' : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
                     }`}
                   >
-                    {isEditing ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={editProjectName}
-                          onChange={e => setEditProjectName(e.target.value)}
-                          className="bg-slate-900 border border-primary text-sm px-2 py-0.5 rounded focus:outline-none w-32"
-                          autoFocus
-                        />
-                        <input
-                          type="number"
-                          value={editProjectSeed}
-                          onChange={e => setEditProjectSeed(e.target.value)}
-                          placeholder="Seed (opt)"
-                          className="bg-slate-900 border border-primary text-sm px-2 py-0.5 rounded focus:outline-none w-24"
-                          onKeyDown={e => e.key === 'Enter' && handleRenameProject(proj.id)}
-                        />
-                        <button onClick={(e) => { e.stopPropagation(); handleRenameProject(proj.id); }} className="text-primary hover:text-white px-1">
-                          Save
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col">
-                        <span className="font-bold text-sm">{proj.name}</span>
-                        {proj.seed && <span className="text-[9px] text-primary">Seed: {proj.seed}</span>}
-                      </div>
-                    )}
-                    
-                    {!isEditing && (
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-primary/20 text-primary' : 'bg-slate-900 text-slate-400'}`}>
-                          {projObjects.length}
-                        </span>
-                        
-                        {isActive && (
-                          <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity ml-1">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setEditProjectName(proj.name); setEditProjectSeed(proj.seed || ''); setEditingProjectId(proj.id); }}
-                              aria-label="Edit project" className="p-1 hover:bg-black/20 rounded text-slate-400 hover:text-white"
-                            >
-                              <Edit2 size={12} />
-                            </button>
-                            {currentWs.projects.length > 1 && (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleDeleteProject(proj.id); }}
-                                aria-label="Delete project" className="p-1 hover:bg-rose-500/20 rounded text-slate-400 hover:text-rose-400 ml-0.5"
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    <div className="flex flex-col">
+                      <span className="font-bold text-sm">{proj.name}</span>
+                      {proj.role && <span className="text-[9px] text-primary uppercase">{proj.role}</span>}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-primary/20 text-primary' : 'bg-slate-900 text-slate-400'}`}>
+                        {projObjects.length}
+                      </span>
+                    </div>
                   </div>
                 );
               })}
@@ -977,7 +878,7 @@ export default function Workspace({
               </h3>
               <button
                 onClick={() => setShowLoadModal(true)}
-                disabled={!!loadingId}
+                disabled={!!loadingId || !activeProjectId}
                 className="btn btn-primary flex items-center gap-2 px-5 text-sm shadow-lg shadow-primary/20"
               >
                 <FileUp size={16} /> Import Object
@@ -985,12 +886,26 @@ export default function Workspace({
             </div>
 
             <div className="grid grid-cols-1 gap-3">
-              {activeProjectObjects.length === 0 ? (
+              {!activeProjectId ? (
+                <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
+                  <FolderTree size={40} className="text-slate-400 mb-4 opacity-50" />
+                  <h4 className="text-text font-bold mb-2">Select a backend project</h4>
+                  <p className="text-sm text-textMuted mb-6">
+                    Projects are loaded from the backend. Select or create one to list analysis objects.
+                  </p>
+                </div>
+              ) : backendModelStatus?.objectsLoading ? (
                 <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
                   <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">No Objects in Project</h4>
+                  <h4 className="text-text font-bold mb-2">Loading analysis objects</h4>
+                  <p className="text-sm text-textMuted">Reading DB-backed project object metadata.</p>
+                </div>
+              ) : activeProjectObjects.length === 0 ? (
+                <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
+                  <Database size={40} className="text-slate-400 mb-4 opacity-50" />
+                  <h4 className="text-text font-bold mb-2">No analysis objects in this project</h4>
                   <p className="text-sm text-textMuted mb-6">
-                    Import your own data, load a demo, or move objects here from another project.
+                    Load the PBMC demo or import data to create a DB-backed analysis object.
                   </p>
                   <button
                     onClick={() => setShowLoadModal(true)}
@@ -1040,13 +955,15 @@ export default function Workspace({
                                 subset
                               </span>
                             )}
-                            <button
-                              onClick={e => handleRenameObject(e, obj.id, obj.name)}
-                              className="text-textMuted hover:text-text opacity-0 group-hover/edit:opacity-100 transition-opacity"
-                              title="Rename"
-                            >
-                              <Edit2 size={12} />
-                            </button>
+                            {!obj.isBackendAnalysisObject && (
+                              <button
+                                onClick={e => handleRenameObject(e, obj.id, obj.name)}
+                                className="text-textMuted hover:text-text opacity-0 group-hover/edit:opacity-100 transition-opacity"
+                                title="Rename"
+                              >
+                                <Edit2 size={12} />
+                              </button>
+                            )}
                           </>
                         )}
                       </div>
@@ -1106,7 +1023,7 @@ export default function Workspace({
                               <Search size={14} /> Inspect Data
                             </button>
                             
-                            {currentWs.projects?.length > 1 && (
+                            {!obj.isBackendAnalysisObject && currentWs.projects?.length > 1 && (
                               <>
                                 <div className="h-px bg-slate-700/50 my-1" />
                                 <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
@@ -1125,30 +1042,34 @@ export default function Workspace({
                               </>
                             )}
 
-                            <div className="h-px bg-slate-700/50 my-1" />
-                            
-                            {confirmDeleteId === obj.id ? (
-                              <div className="flex gap-1 px-2 py-1">
-                                <button
-                                  onClick={e => handleDeleteObject(e, obj.id)}
-                                  className="flex-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold py-1.5 rounded"
-                                >
-                                  Confirm
-                                </button>
-                                <button
-                                  onClick={e => { e.stopPropagation(); setConfirmDeleteId(null); }}
-                                  className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold py-1.5 rounded"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={e => handleDeleteObject(e, obj.id)}
-                                className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 flex items-center gap-2"
-                              >
-                                <Trash2 size={14} /> Delete Object
-                              </button>
+                            {!obj.isBackendAnalysisObject && (
+                              <>
+                                <div className="h-px bg-slate-700/50 my-1" />
+
+                                {confirmDeleteId === obj.id ? (
+                                  <div className="flex gap-1 px-2 py-1">
+                                    <button
+                                      onClick={e => handleDeleteObject(e, obj.id)}
+                                      className="flex-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold py-1.5 rounded"
+                                    >
+                                      Confirm
+                                    </button>
+                                    <button
+                                      onClick={e => { e.stopPropagation(); setConfirmDeleteId(null); }}
+                                      className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold py-1.5 rounded"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={e => handleDeleteObject(e, obj.id)}
+                                    className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 flex items-center gap-2"
+                                  >
+                                    <Trash2 size={14} /> Delete Object
+                                  </button>
+                                )}
+                              </>
                             )}
                           </div>
                         )}
@@ -1169,6 +1090,8 @@ export default function Workspace({
           onLoaded={handleLoaded}
           loadingId={loadingId}
           setLoadingId={setLoadingId}
+          activeProjectId={activeProjectId}
+          onCreateAnalysisObjectForLoad={onCreateAnalysisObjectForLoad}
         />
       )}
     </div>

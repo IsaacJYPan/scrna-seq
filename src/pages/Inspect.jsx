@@ -208,7 +208,6 @@ function AddMetadataTab({ onMetaAdded, info, callApi }) {
         key_column: keyColumn,
         value_columns: selectedCols.join(','),
       });
-      const checkData = await callApi(`/check-session`);
       const data = await callApi(`/add-metadata?${params}`);
       if (data.error) throw new Error(data.error);
       else { setResult(data); onMetaAdded?.(); }
@@ -436,7 +435,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi }) {
   );
 }
 
-function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObjects, userEmail, callApi }) {
+function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObjects, callApi }) {
   const [column, setColumn] = useState('');
   const [valuesData, setValuesData] = useState([]);
   const [selected, setSelected] = useState([]);
@@ -482,23 +481,20 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
     setError(null);
 
     // ── Non-destructive Subsetting ────────────────────────────────
-    // We pass the child's save path directly to R. R saves the subset
-    // to that path but LEAVES the parent in memory. This is fast and
-    // allows multiple subsets without repeated parent saves.
-    const newId = `obj-${Date.now()}`;
-    const sanitizedEmail = (userEmail || '').replace(/[^a-zA-Z0-9]/g, '_');
-    const childPath = `vault/${sanitizedEmail}/${newId}.rds`;
-
+    // Subsetting updates private live R state only. The parent App callback
+    // records the resulting child as DB-backed analysis-object metadata.
     try {
-      const params = new URLSearchParams({
-        column,
-        values: selected.join(','),
-        new_name: newName,
-        path: childPath
-      });
-      const data = await callApi(`/subset?${params}`, {}, { useCache: false });
+      const data = await callApi('/subset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          column,
+          values: selected.join(','),
+          new_name: newName,
+        }),
+      }, { useCache: false });
       if (data.error) throw new Error(data.error);
-      onSubsetCreated?.({ ...data, newId }, newName);
+      onSubsetCreated?.(data, newName);
     } catch (e) {
       setError(e.message);
       setSubsetting(false);
@@ -634,7 +630,7 @@ const TABS = [
   { id: 'subset',    label: 'Subset',       icon: <Scissors size={13} /> },
 ];
 
-export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, parentSessionPath, workspaceObjects = [], userEmail, callApi }) {
+export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, parentSessionPath, workspaceObjects = [], callApi }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -739,7 +735,7 @@ export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, 
                 {activeTab === 'overview'  && <OverviewTab info={info} />}
                 {activeTab === 'metadata'  && <MetadataTab info={info} />}
                 {activeTab === 'add-meta' && <AddMetadataTab info={info} onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} callApi={callApi} />}
-                {activeTab === 'subset' && <SubsetTab info={info} obj={obj} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} workspaceObjects={workspaceObjects} userEmail={userEmail} callApi={callApi} />}
+                {activeTab === 'subset' && <SubsetTab info={info} obj={obj} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} workspaceObjects={workspaceObjects} callApi={callApi} />}
               </>
             )}
           </div>

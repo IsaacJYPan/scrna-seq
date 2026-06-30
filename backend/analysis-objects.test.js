@@ -207,6 +207,40 @@ describe('analysis-objects API', () => {
     expect(stolen.status).toBe(404);
   });
 
+  it('rejects client-provided storage/state fields and omits storage metadata from public responses', async () => {
+    const { alice } = users();
+    for (const field of ['storageUri', 'storage_uri', 'storageKey', 'storage_key', 'internalStorageKey', 'objectHash', 'path', 'stateKey']) {
+      const res = await api(server, '/api/analysis-objects', {
+        method: 'POST', token: alice.token,
+        body: { objectType: 'seurat', [field]: 'vault/secret.rds' }
+      });
+      expect(res.status, field).toBe(400);
+    }
+    const nested = await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token,
+      body: { objectType: 'seurat', metadata: { sourceType: 'pbmc3k_demo', nested: { storageKey: 'vault/secret.rds' } } }
+    });
+    expect(nested.status).toBe(400);
+
+    const created = await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token,
+      body: { objectType: 'seurat', metadata: { sourceType: 'pbmc3k_demo' } }
+    });
+    expect(created.status).toBe(201);
+    expect(created.data.storageUri).toBeUndefined();
+    expect(created.data.objectHash).toBeUndefined();
+
+    const list = await api(server, '/api/analysis-objects', { token: alice.token });
+    expect(list.status).toBe(200);
+    expect(JSON.stringify(list.data)).not.toContain('vault/');
+    expect(list.data[0].storageUri).toBeUndefined();
+
+    const read = await api(server, `/api/analysis-objects/${created.data.id}`, { token: alice.token });
+    expect(read.status).toBe(200);
+    expect(read.data.storageUri).toBeUndefined();
+    expect(read.data.objectHash).toBeUndefined();
+  });
+
   // ── datasetId is now verified against the durable datasets model ───────────
   // datasetId remains optional/nullable, but if supplied it must reference a real
   // dataset whose project the caller can write to (owner/admin/analyst).

@@ -1027,6 +1027,12 @@ function rowToAnalysisObject(row) {
   };
 }
 
+function toPublicAnalysisObject(object) {
+  if (!object) return null;
+  const { storageUri, objectHash, ...rest } = object; // eslint-disable-line no-unused-vars
+  return rest;
+}
+
 function getAnalysisObjectForUser(id, ownerUserId) {
   const row = db.prepare(
     'SELECT * FROM analysis_objects WHERE id = ? AND owner_user_id = ?'
@@ -4847,6 +4853,7 @@ module.exports = {
   listAnalysisObjectsForUser,
   getAnalysisObjectForUser,
   verifyAnalysisObjectOwner,
+  toPublicAnalysisObject,
   // Jobs / task execution
   isValidJobType,
   isValidJobStatus,

@@ -694,6 +694,47 @@ app.use('/api/analysis-objects', express.json());
 app.use('/api/analysis-objects', requireAuth);
 
 const REJECTED_OWNER_FIELDS = ['userId', 'user_id', 'ownerUserId', 'owner_user_id'];
+const REJECTED_ANALYSIS_OBJECT_STORAGE_FIELDS = [
+  'storageUri', 'storage_uri',
+  'storageKey', 'storage_key',
+  'internalStorageKey', 'internal_storage_key',
+  'objectHash', 'object_hash',
+  'path', 'filePath', 'file_path',
+  'stateKey', 'state_key'
+];
+const REJECTED_ANALYSIS_OBJECT_STORAGE_FIELD_SET = new Set(REJECTED_ANALYSIS_OBJECT_STORAGE_FIELDS);
+
+function findRejectedAnalysisObjectStorageField(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findRejectedAnalysisObjectStorageField(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const [field, child] of Object.entries(value)) {
+    if (REJECTED_ANALYSIS_OBJECT_STORAGE_FIELD_SET.has(field)) return field;
+    const found = findRejectedAnalysisObjectStorageField(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+function rejectAnalysisObjectStorageFields(body, res) {
+  for (const field of REJECTED_ANALYSIS_OBJECT_STORAGE_FIELDS) {
+    if (body[field] !== undefined) {
+      res.status(400).json({ error: `Field '${field}' is not allowed; storage and state are server-controlled.` });
+      return true;
+    }
+  }
+  const metadataField = findRejectedAnalysisObjectStorageField(body.metadata);
+  if (metadataField) {
+    res.status(400).json({ error: `Metadata field '${metadataField}' is not allowed; storage and state are server-controlled.` });
+    return true;
+  }
+  return false;
+}
 
 app.post('/api/analysis-objects', (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -708,6 +749,7 @@ app.post('/api/analysis-objects', (req, res) => {
       return res.status(400).json({ error: `Field '${field}' is not allowed; ownership is derived from the session.` });
     }
   }
+  if (rejectAnalysisObjectStorageFields(body, res)) return;
 
   // Validate linked-resource ownership before creating anything. 404 (not 403)
   // so we never reveal that another user's resource exists.
@@ -737,12 +779,10 @@ app.post('/api/analysis-objects', (req, res) => {
       parentObjectId: body.parentObjectId,
       objectType: body.objectType,
       displayName: body.displayName,
-      storageUri: body.storageUri,
-      objectHash: body.objectHash,
       metadata: body.metadata,
       createdByProvenanceId: body.createdByProvenanceId
     });
-    res.status(201).json(created);
+    res.status(201).json(db.toPublicAnalysisObject(created));
   } catch (e) {
     if (e.code === 'PARENT_NOT_FOUND' || e.code === 'DATASET_NOT_FOUND') return res.status(404).json({ error: e.message });
     if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message });
@@ -761,13 +801,13 @@ app.get('/api/analysis-objects', (req, res) => {
     lineageRootId: typeof req.query.lineageRootId === 'string' ? req.query.lineageRootId : undefined,
     objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
   };
-  res.json(db.listAnalysisObjectsForUser(req.user.id, filters));
+  res.json(db.listAnalysisObjectsForUser(req.user.id, filters).map(db.toPublicAnalysisObject));
 });
 
 app.get('/api/analysis-objects/:id', (req, res) => {
   const obj = db.getAnalysisObjectForUser(req.params.id, req.user.id);
   if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
-  res.json(obj);
+  res.json(db.toPublicAnalysisObject(obj));
 });
 
 // ── Jobs API ────────────────────────────────────────────────────────────
@@ -1356,7 +1396,10 @@ app.post('/api/projects/:projectId/analysis-objects', (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // lineageRootId is server-derived; reject any client-supplied value alongside
   // the id/owner/creator/project fields.
-  if (rejectProjectResourceFields(req, res, { extra: ['lineageRootId', 'lineage_root_id'] })) return;
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['lineageRootId', 'lineage_root_id', ...REJECTED_ANALYSIS_OBJECT_STORAGE_FIELDS]
+  })) return;
+  if (rejectAnalysisObjectStorageFields(body, res)) return;
 
   // Validate reference id shapes → 400 before touching the DB.
   if (body.parentObjectId !== undefined && body.parentObjectId !== null &&
@@ -1381,12 +1424,10 @@ app.post('/api/projects/:projectId/analysis-objects', (req, res) => {
       parentObjectId: body.parentObjectId,
       objectType: body.objectType,
       displayName: body.displayName,
-      storageUri: body.storageUri,
-      objectHash: body.objectHash,
       metadata: body.metadata,
       createdByProvenanceId: body.createdByProvenanceId
     });
-    res.status(201).json(created);
+    res.status(201).json(db.toPublicAnalysisObject(created));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
   }
@@ -1400,7 +1441,7 @@ app.get('/api/projects/:projectId/analysis-objects', (req, res) => {
     objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
   };
   try {
-    res.json(db.listProjectAnalysisObjects(req.user.id, req.params.projectId, filters));
+    res.json(db.listProjectAnalysisObjects(req.user.id, req.params.projectId, filters).map(db.toPublicAnalysisObject));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
   }
@@ -1413,7 +1454,7 @@ app.get('/api/projects/:projectId/analysis-objects/:objectId', (req, res) => {
   try {
     const obj = db.getProjectAnalysisObject(req.user.id, req.params.projectId, req.params.objectId);
     if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
-    res.json(obj);
+    res.json(db.toPublicAnalysisObject(obj));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
   }
