@@ -27,10 +27,10 @@ function qcUnavailableMessage(rawError, { datasetInfo, sessionReady } = {}) {
 
   const message = String(rawError || '').trim();
   if (/analysis object not found/i.test(message)) {
-    return 'The dataset was loaded into the legacy live session, but this object is not available through the verified analysis-object backend path. This workflow needs the DB-backed object migration before QC can run reliably.';
+    return 'This analysis object exists in project history, but its live R session is not currently attached. Reload the demo object or load a checkpoint when checkpoint restore is wired for this workflow.';
   }
   if (/no object loaded|load data first/i.test(message)) {
-    return 'A dataset is selected, but the live R session no longer has the analysis object. Reload the dataset or wait for the DB-backed object workflow migration before relying on QC state.';
+    return 'This analysis object exists in project history, but its live R session is not currently attached. Reload the demo object to continue interactive analysis.';
   }
   return message || 'QC distribution data is unavailable for the selected object.';
 }
