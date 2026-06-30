@@ -31,6 +31,7 @@ const crypto = require('crypto');
 const database = require('./database');
 const rWorkerBridge = require('./rWorkerBridge');
 const { validatePbmcPipelineParams, allocateCheckpointStorageKey } = require('./pbmcPipeline');
+const { validateDegFindMarkersParams, allocateDegResultStorageKey } = require('./degFindMarkers');
 
 /** Stable, header-safe worker id (`worker_` + hex). One per worker instance. */
 function generateWorkerId() {
@@ -581,6 +582,152 @@ async function checkpointLoadHandler(ctx) {
   };
 }
 
+/**
+ * DEG / marker-finding handler (`deg.find_markers.v1`): runs the existing FindAllMarkers
+ * path over the OWNER's existing live analysis object (usually one produced by
+ * pbmc.pipeline.v1 → checkpoint.load.v1) as ONE allowlisted bridge operation. DEG is an
+ * OUTPUT-producing analysis, NOT a mutating checkpoint transformation: it creates NO new
+ * analysis object and NO lineage edge, and does not mutate the live object (any temporary
+ * identity change is restored R-side). It writes (1) an internal full marker-table artifact
+ * (local_internal; no public download) and (2) a metadata-only DEG summary artifact.
+ *
+ * SAME OWNERSHIP BOUNDARY as r.object.inspect / pbmc.pipeline.v1 / checkpoint.load.v1
+ * (project membership ≠ live R access): the input object id comes from the TRUSTED job row;
+ * the job creator must OWN that live object (verifyAnalysisObjectOwner) BEFORE any R contact,
+ * and the X-Object-ID is SERVER-derived (deriveRObjectStateKey). A co-member/admin/viewer who
+ * created a job against another user's object FAILS here.
+ *
+ * Order (both DB artifacts are created only AFTER R success):
+ *   1. heartbeat; require + own the input object; derive its state key (all before R)
+ *   2. validate parameters against the fixed allowlist (backend/degFindMarkers.js) —
+ *      invalid params fail the job here, BEFORE any R contact
+ *   3. allocate a SERVER-controlled internal result storage key (no client input)
+ *   4. invoke the allowlisted `r.deg.find_markers.v1` bridge op (server-built body)
+ *   5. require R to have written the full table (saved + checksum/size) — else fail
+ *      (no artifacts)
+ *   6. record a local_internal `deg_markers` artifact (key/checksum/size internal) and a
+ *      metadata-only `deg_summary` artifact in ONE atomic, claim-guarded transaction
+ * On failure/cancel/claim-loss no successful DEG artifact is created; the claim guard +
+ * DEG_RESULT_EXISTS guard make two workers unable to duplicate them. Bridge errors arrive
+ * pre-sanitized (no raw R error/stack/internal URL/state key).
+ */
+async function degFindMarkersHandler(ctx) {
+  ctx.heartbeat();
+  ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: validating ownership + parameters before any R contact.' });
+
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+
+  // 1. The job MUST reference an input analysis object. Fail safely BEFORE any R.
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'DEG job is missing its input analysis object.');
+  }
+
+  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may run DEG. Same
+  //    owner-verified check the /api/r/* proxy uses; 404-style message so another user's
+  //    object existence is never revealed. Also require the server-injected deriver.
+  if (typeof ctx.verifyAnalysisObjectOwner !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+
+  // 3. Derive the input object's R state key (X-Object-ID) SERVER-SIDE. Never client-
+  //    provided; identical to what /api/r/* would send for this owner+object.
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+
+  // 4. Validate + resolve parameters against the fixed allowlist BEFORE any R contact.
+  //    Throws a coded, SAFE-message error (INVALID_PARAMETER / UNKNOWN_PARAMETER / …)
+  //    that fails the job terminally without contacting R.
+  const { params, defaultsApplied } = validateDegFindMarkersParams(job.parameters);
+
+  // 5. Server-allocate the internal result storage key (no client input; relative,
+  //    traversal-free; the R backend confines it to its vault). Never logged/exposed.
+  const resultStorageKey = allocateDegResultStorageKey(job.id);
+
+  ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: parameters valid; running allowlisted DEG over the existing live object (no new object/edge, object not mutated).' });
+
+  // 6. Run the allowlisted DEG bridge op. Object context + params body are all server-
+  //    derived; the bridge ignores raw job input for routing/storage key.
+  const descriptor = await ctx.runRBridgeOperation({
+    job,
+    operation: 'r.deg.find_markers.v1',
+    actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+    objectContext: { objectId, stateKey },
+    deg: { params, resultStorageKey },
+    input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+
+  // 7. The full marker table MUST have been written (with integrity) for success. If not,
+  //    fail BEFORE creating any DB artifact — so a missing/failed write leaves nothing behind.
+  const result = descriptor.result || {};
+  if (result.saved !== true || typeof result.checksumSha256 !== 'string' || result.checksumSha256 === '') {
+    throw codedHandlerError('DEG_RESULT_WRITE_FAILED', 'DEG run did not produce a durable marker table.');
+  }
+
+  // 8. Record BOTH artifacts in ONE atomic, claim/lease-guarded transaction: the
+  //    local_internal full-table artifact (server-allocated key + checksum/size, key stripped
+  //    from public reads) and the metadata-only summary artifact (resolved params + bounded
+  //    summary). NO result analysis object and NO lineage edge are created.
+  const completion = ctx.completeDegFindMarkersResult({
+    markersArtifact: {
+      artifactType: 'deg_markers',
+      name: 'DEG marker table',
+      description: 'Durable internal full DEG marker table (CSV on the R backend vault). No public download in this branch.',
+      storageKind: 'local_internal',
+      mimeType: 'text/csv',
+      internalStorageKey: resultStorageKey,
+      checksumSha256: result.checksumSha256,
+      sizeBytes: result.sizeBytes != null ? result.sizeBytes : 0,
+      metadata: {
+        operation: 'r.deg.find_markers.v1',
+        scientific_output: true,
+        downloadable: false,
+        resolvedParams: params,
+        defaultsApplied,
+        nRows: result.nRows != null ? result.nRows : null,
+      },
+    },
+    summaryArtifact: {
+      artifactType: descriptor.artifactType, // 'deg_summary'
+      name: descriptor.name,
+      description: descriptor.description,
+      storageKind: 'metadata_only',
+      metadata: {
+        ...descriptor.metadata,
+        kind: 'deg_summary',
+        scientific_output: true,
+        downloadable: false,
+        resolvedParams: params,
+        defaultsApplied,
+      },
+    },
+  });
+
+  const markersArtifact = completion.markersArtifact;
+  const summaryArtifact = completion.summaryArtifact;
+
+  ctx.log({ level: 'info', message: `deg.find_markers.v1 handler: recorded marker table ${markersArtifact.id} + summary ${summaryArtifact.id} (object ${objectId} not mutated; no new object/edge).` });
+
+  // No result analysis object / checkpoint / lineage edge: DEG is an output-producing analysis.
+  return {
+    result: {
+      ok: true,
+      handled: 'deg.find_markers.v1',
+      operation: 'r.deg.find_markers.v1',
+      markersArtifactId: markersArtifact.id,
+      summaryArtifactId: summaryArtifact.id,
+    },
+  };
+}
+
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
@@ -596,6 +743,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'r.object.inspect': rObjectInspectHandler,
   'pbmc.pipeline.v1': pbmcPipelineHandler,
   'checkpoint.load.v1': checkpointLoadHandler,
+  'deg.find_markers.v1': degFindMarkersHandler,
 });
 
 /**
@@ -762,6 +910,10 @@ function createJobWorker(options = {}) {
       // artifact + summary artifact in ONE claim-guarded transaction (used only by the
       // pbmc.pipeline.v1 handler) so an artifact failure can't leave a partial result.
       completePbmcPipelineResult: (input) => db.completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      // Atomic DEG completion: the local_internal marker-table artifact + the metadata-only
+      // summary artifact in ONE claim-guarded transaction (used only by the deg.find_markers.v1
+      // handler) so one artifact can't commit without the other. Creates NO result object/edge.
+      completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // R-bridge seam (used only by the r.runtime.check / r.object.inspect handlers).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
       // reach R by any path other than this server-controlled one.
@@ -885,6 +1037,7 @@ module.exports = {
   rObjectInspectHandler,
   pbmcPipelineHandler,
   checkpointLoadHandler,
+  degFindMarkersHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,

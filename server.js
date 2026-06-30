@@ -211,7 +211,16 @@ function isProductionDiagnosticRProxyPath(reqPath) {
 // worker claim, ownership re-verification, server-selected checkpoint, or sanitized load
 // record — and would accept a client-controlled storage key/path. It is driven ONLY by
 // the in-process worker bridge, so it must be UNREACHABLE through the public proxy.
-const R_PROXY_INTERNAL_ONLY_PATHS = new Set(['/object/pbmc-pipeline', '/object/checkpoint-load']);
+//
+// POST /object/deg-find-markers is the third such endpoint: it runs DEG / FindAllMarkers
+// over a live object and writes the full marker table to a SERVER-allocated internal vault
+// key. A direct proxy call would let a client run DEG WITHOUT a durable job, worker claim,
+// ownership re-verification, server-selected output key, or sanitized summary — and would
+// accept a client-controlled storage key/path. It is driven ONLY by the in-process worker
+// bridge, so it must be UNREACHABLE through the public proxy.
+const R_PROXY_INTERNAL_ONLY_PATHS = new Set([
+  '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers'
+]);
 
 function isInternalOnlyRProxyPath(rawPath) {
   let p = String(rawPath || '');

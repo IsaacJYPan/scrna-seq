@@ -121,7 +121,7 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
 
   it('registers pbmc.pipeline.v1; generic / checkpoint.noop / r.runtime.check / r.object.inspect unchanged', () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
+      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS.generic).toBe(worker.genericNoopHandler);
     expect(DEFAULT_HANDLERS['checkpoint.noop']).toBe(worker.checkpointNoopHandler);
@@ -148,20 +148,27 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
   });
 
   it('the bridge target set stays exact/closed (includes POST /object/pbmc-pipeline)', () => {
-    // Includes POST /object/checkpoint-load, added by the checkpoint.load.v1 branch.
+    // Includes POST /object/checkpoint-load (checkpoint.load.v1 branch) and POST
+    // /object/deg-find-markers (deg.find_markers.v1 branch).
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/pbmc-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline']);
   });
 
-  it('DEG / pathway enrichment / CellChat are NOT newly registered job types or handlers', () => {
+  it('pathway enrichment / CellChat are NOT registered job types or handlers (DEG is, via its own branch)', () => {
+    // DEG (deg.find_markers.v1) is now registered by the deg.find_markers.v1 branch; the
+    // legacy plain analytical types stay UNREGISTERED handlers (still fail terminally), and
+    // pathway enrichment / CellChat remain entirely unintegrated.
     for (const t of ['deg', 'find_markers', 'enrichment', 'cellchat', 'cellchat.infer',
-      'deg.find_markers.v1', 'enrichment.ora.v1', 'cellchat.infer.v1']) {
+      'enrichment.ora.v1', 'cellchat.infer.v1']) {
       expect(DEFAULT_HANDLERS[t]).toBeUndefined();
     }
-    // No new R-bridge op for them either (r.checkpoint.load.v1 is the only op added
-    // beyond the inspect/pipeline/runtime set, and it is NOT a DEG/pathway/CellChat op).
+    // The bridge op set adds ONLY r.deg.find_markers.v1 beyond the inspect/pipeline/runtime/
+    // checkpoint-load set, and NO pathway/CellChat op.
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.checkpoint.load.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
+      .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
+    for (const op of ['r.enrichment.v1', 'r.cellchat.v1']) {
+      expect(isAllowedRBridgeOperation(op)).toBe(false);
+    }
   });
 
   it('an unsupported analytical job type still fails terminally (UNSUPPORTED_JOB_TYPE), no R contact', async () => {
