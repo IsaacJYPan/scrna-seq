@@ -838,6 +838,198 @@ function(req, res) {
   })
 }
 
+# ── Internal worker-bridge: DEG / marker finding over an existing live object ──────
+# Internal-only: reached ONLY via the in-process Node worker bridge (the allowlisted
+# `r.deg.find_markers.v1` operation calls this R backend directly). The public Express
+# proxy BLOCKS this path (server.js isInternalOnlyRProxyPath → 404 before any R contact),
+# so a direct `/api/r/object/deg-find-markers` user call can never run it. The auth filter
+# still requires the server API token, so nothing outside the server can reach R at all.
+# The input object is loaded by session_loader from the request's X-Object-ID (the owner's
+# server-derived canonical state key). DEG is an OUTPUT-producing analysis, NOT a mutation:
+# we run FindAllMarkers on a LOCAL COPY (`obj`) and NEVER reassign global_obj, so the
+# postroute hook re-saves the live object UNCHANGED (idents/metadata untouched at the
+# session level). The full marker table is written ONLY to the SERVER-provided internal key,
+# confined to the vault by validate_path(). No arbitrary code/path/function: params are
+# typed Seurat arguments validated against a fixed allowlist and the storage key is server-
+# allocated. The response is a sanitized, bounded summary (no matrices/cells/embeddings);
+# the Node bridge sanitizes it again.
+#* @post /object/deg-find-markers
+#* @parser json
+function(req, res) {
+  if (is.null(global_obj)) {
+    res$status <- 400
+    return(list(error = "No input object loaded."))
+  }
+  if (!inherits(global_obj, "Seurat")) {
+    res$status <- 400
+    return(list(error = "Loaded object is not a Seurat object."))
+  }
+  body <- req$body
+  if (is.null(body) || is.null(body$params)) {
+    res$status <- 400
+    return(list(error = "Missing DEG parameters."))
+  }
+  p <- body$params
+
+  storage_key <- body$storage_key
+  if (is.null(storage_key) || !is.character(storage_key) || length(storage_key) != 1 || nchar(storage_key) == 0) {
+    res$status <- 400
+    return(list(error = "Missing DEG result storage key."))
+  }
+
+  # Defensive coercion/clamps (Node already validated against its allowlist; R never trusts
+  # blindly). A bad/missing value falls back to the documented default. Strings are matched
+  # against fixed allowlists only — never used to choose an R function or column arbitrarily.
+  as_num <- function(v, d, lo, hi) {
+    x <- suppressWarnings(as.numeric(v))
+    if (length(x) != 1 || is.na(x)) return(d)
+    max(lo, min(hi, x))
+  }
+  as_int_or_null <- function(v, lo, hi) {
+    if (is.null(v)) return(NULL)
+    x <- suppressWarnings(as.integer(v))
+    if (length(x) != 1 || is.na(x)) return(NULL)
+    as.integer(max(lo, min(hi, x)))
+  }
+  as_bool <- function(v, d) {
+    if (is.logical(v) && length(v) == 1 && !is.na(v)) return(v)
+    d
+  }
+
+  group_by <- if (!is.null(p$groupBy)) as.character(p$groupBy)[1] else "seurat_clusters"
+  if (!group_by %in% c("seurat_clusters", "ident")) group_by <- "seurat_clusters"
+  assay_req <- if (!is.null(p$assay)) as.character(p$assay)[1] else "RNA"
+  if (!assay_req %in% c("RNA", "SCT")) assay_req <- "RNA"
+  test_use <- if (!is.null(p$testUse)) as.character(p$testUse)[1] else "wilcox"
+  if (!test_use %in% c("wilcox")) test_use <- "wilcox"
+  only_pos     <- as_bool(p$onlyPositive, TRUE)
+  min_pct      <- as_num(p$minPct, 0.1, 0, 1)
+  logfc_thresh <- as_num(p$logfcThreshold, 0.25, 0, 10)
+  max_cells    <- as_int_or_null(p$maxCellsPerIdent, 1, 100000)
+  rand_seed    <- as_int_or_null(p$randomSeed, 0, 2147483647)
+  top_n_val    <- as.integer(as_num(p$topMarkersPerCluster, 10, 5, 50))
+
+  tryCatch({
+    # COPY-on-read: any identity change happens on `obj`, never global_obj (the live object).
+    obj <- global_obj
+
+    # Pick a safe assay: the requested allowlisted assay if present, else the default.
+    assay_use <- if (assay_req %in% Assays(obj)) assay_req else DefaultAssay(obj)
+    DefaultAssay(obj) <- assay_use
+
+    # Resolve grouping. 'seurat_clusters' requires that metadata column to exist; 'ident'
+    # uses the object's CURRENT active identities as-is. Either way DEG needs >= 2 groups.
+    if (group_by == "seurat_clusters") {
+      if (!"seurat_clusters" %in% colnames(obj@meta.data)) {
+        res$status <- 400
+        return(list(error = "Group field 'seurat_clusters' not found. Run clustering first."))
+      }
+      Idents(obj) <- obj$seurat_clusters
+    }
+    if (length(levels(factor(Idents(obj)))) < 2) {
+      res$status <- 400
+      return(list(error = "DEG needs at least two identity groups."))
+    }
+
+    if (!is.null(rand_seed)) set.seed(rand_seed)
+
+    markers <- FindAllMarkers(
+      obj,
+      assay = assay_use,
+      only.pos = only_pos,
+      min.pct = min_pct,
+      logfc.threshold = logfc_thresh,
+      test.use = test_use,
+      max.cells.per.ident = if (is.null(max_cells)) Inf else max_cells,
+      random.seed = if (is.null(rand_seed)) 1 else rand_seed,
+      verbose = FALSE
+    )
+
+    if (is.null(markers) || nrow(markers) == 0) {
+      res$status <- 500
+      return(list(error = "No marker genes found."))
+    }
+    markers <- as.data.frame(markers)
+    # FindAllMarkers returns a `gene` column in modern Seurat; fall back to rownames.
+    if (!"gene" %in% colnames(markers)) markers$gene <- rownames(markers)
+
+    # Write the FULL marker table to the SERVER-provided internal key, confined to the vault.
+    safe_path <- validate_path(storage_key, "vault")
+    dir.create(dirname(safe_path), recursive = TRUE, showWarnings = FALSE)
+    write.csv(markers, file = safe_path, row.names = FALSE)
+    size_bytes <- as.numeric(file.info(safe_path)$size)
+    checksum <- tryCatch({
+      if (requireNamespace("digest", quietly = TRUE)) {
+        digest::digest(file = safe_path, algo = "sha256")
+      } else if (requireNamespace("openssl", quietly = TRUE)) {
+        as.character(openssl::sha256(file(safe_path)))
+      } else {
+        NA_character_
+      }
+    }, error = function(e) NA_character_)
+    saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
+
+    # Build a BOUNDED summary. group labels + per-group counts + a top-N-per-group preview
+    # with SAFE columns only. No raw matrices/cells/embeddings.
+    cluster_col <- markers$cluster
+    group_labels <- as.character(sort(unique(cluster_col)))
+    per_group <- lapply(group_labels, function(g) {
+      list(group = g, n = as.integer(sum(cluster_col == g)))
+    })
+
+    suppressMessages({ library(dplyr) })
+    top_tbl <- as.data.frame(markers) %>%
+      group_by(cluster) %>%
+      arrange(desc(avg_log2FC), .by_group = TRUE) %>%
+      slice_head(n = top_n_val) %>%
+      mutate(rank = row_number()) %>%
+      ungroup()
+
+    top_markers <- lapply(seq_len(nrow(top_tbl)), function(i) {
+      list(
+        group = as.character(top_tbl$cluster[i]),
+        gene = as.character(top_tbl$gene[i]),
+        avg_log2FC = round(as.numeric(top_tbl$avg_log2FC[i]), 4),
+        pct_1 = as.numeric(top_tbl$pct.1[i]),
+        pct_2 = as.numeric(top_tbl$pct.2[i]),
+        p_val_adj = as.numeric(top_tbl$p_val_adj[i]),
+        rank = as.integer(top_tbl$rank[i])
+      )
+    })
+
+    list(
+      ok = TRUE,
+      summary = list(
+        group_by = group_by,
+        test_use = test_use,
+        assay = assay_use,
+        n_groups = length(group_labels),
+        groups = as.list(group_labels),
+        n_markers_total = nrow(markers),
+        markers_per_group = per_group,
+        top_markers = top_markers
+      ),
+      result = list(
+        saved = saved,
+        checksum_sha256 = if (is.na(checksum)) NULL else checksum,
+        size_bytes = size_bytes,
+        n_rows = nrow(markers)
+      ),
+      versions = list(
+        seurat_version = as.character(utils::packageVersion("Seurat")),
+        r_version = as.character(getRversion())
+      )
+    )
+    # NB: global_obj is never reassigned here, so the postroute hook persists the live
+    # object UNCHANGED — DEG does not mutate live state.
+  }, error = function(e) {
+    res$status <- 500
+    # Never leak the raw R error/stack; the Node bridge re-maps non-200s to a generic
+    # sanitized message anyway.
+    list(error = "deg find markers failed")
+  })
+}
+
 #* Get all unique values (with counts) for a metadata column
 #* @get /meta-values
 function(res, column) {

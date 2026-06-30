@@ -258,10 +258,44 @@ jobs:
         #                        Failure/cancel/claim-loss/missing-checkpoint create NO successful
         #                        load artifact and two workers cannot duplicate one; storage key
         #                        stays internal/private)
+        #   deg-find-markers-worker (allowlisted DEG / marker finding over the OWNER's private
+        #                        live R object: ONE `deg.find_markers.v1` worker job +
+        #                        `r.deg.find_markers.v1` bridge op + internal POST
+        #                        /object/deg-find-markers. Scope: only this type/op added;
+        #                        existing handlers unchanged; NO pathway-enrichment/CellChat
+        #                        type/op; the legacy find_markers/deg analytical types stay
+        #                        UNREGISTERED handlers (still fail terminally); NO public worker/
+        #                        R-bridge/download route. Params: fixed server-side allowlist
+        #                        (backend/degFindMarkers.js) — defaults recorded; unknown rejected;
+        #                        strings restricted to fixed enums (groupBy/assay/testUse) so no
+        #                        param becomes R code/path/function; invalid → failed-before-R;
+        #                        resolved params in safe metadata; top-marker summary bounded
+        #                        [5,50]. Ownership: OWNER-ONLY v1 — the job creator must OWN the
+        #                        object (verifyAnalysisObjectOwner) BEFORE any R contact and the
+        #                        X-Object-ID is SERVER-derived; a co-member/admin (membership ≠
+        #                        live R)/viewer/non-member/cross-project/legacy/malformed object
+        #                        cannot run it. Block: direct authenticated
+        #                        /api/r/object/deg-find-markers is 404 BEFORE R for every method/
+        #                        odd spelling with no job/artifact/side effect; unauthenticated
+        #                        stays 401; the pbmc + checkpoint-load blocks still hold. Bridge:
+        #                        only the allowlisted op runs; the body is server-rebuilt from the
+        #                        allowlisted params + a SERVER-allocated result key — NO client
+        #                        storage key/path/endpoint/method/state-key; sanitized errors (no R
+        #                        URL/token/state-key/stack/path leak). Output/non-mutation: DEG is
+        #                        an OUTPUT analysis — it creates NO new analysis object and NO
+        #                        lineage edge and does not mutate the live object; on success it
+        #                        records EXACTLY one local_internal `deg_markers` full-table
+        #                        artifact (server key + checksum/size; storage_uri stripped from
+        #                        public reads; NO download) + one metadata-only `deg_summary`
+        #                        artifact (resolved params + bounded safe-column top-N preview) in
+        #                        ONE atomic transaction. Failure/cancel/claim-loss/missing-table/
+        #                        bad-checksum create NO successful DEG artifact and a duplicate
+        #                        completion is refused (DEG_RESULT_EXISTS); the summary sanitizer
+        #                        hard-caps rows and drops raw matrices/cell/embedding/path/state-key)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/checkpoint-load-live-r-state.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/checkpoint-load-live-r-state.test.js backend/deg-find-markers-worker.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
@@ -285,6 +319,16 @@ jobs:
         # POST /object/checkpoint-load. Reuses the R env above; SKIPs cleanly if Seurat is
         # unavailable.
         run: npm run test:checkpoint-load
+
+      - name: Run DEG Find-Markers Smoke Test
+        # Live Rscript + Seurat check of the deg.find_markers.v1 R-side path: FindAllMarkers
+        # over a small synthetic object with two clear groups produces markers, writes the full
+        # table to a file with a sha256 checksum, builds a BOUNDED top-N-per-group summary, and
+        # leaves the input object's identities/metadata UNCHANGED (DEG runs on a copy — no live
+        # mutation); a missing/single-identity group field fails safely. Mirrors r-backend/
+        # plumber.R POST /object/deg-find-markers. Reuses the R env above; SKIPs cleanly if
+        # Seurat is unavailable.
+        run: npm run test:deg-markers
 
       - name: Run Visual/UX Tests
         run: npm run test:visual

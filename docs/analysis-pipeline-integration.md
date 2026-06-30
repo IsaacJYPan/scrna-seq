@@ -8,7 +8,9 @@ provenance/log records, and a lineage edge.
 This document is implementation/architecture documentation only — it is **not** a
 roadmap or product spec. It records where the existing analysis code lives, what this
 branch reuses, the assumptions that code makes, how the branch wraps it safely, and an
-audit of the still-unwrapped workflows (DEG / pathway enrichment / CellChat).
+audit of the workflows wrapped since (DEG → `deg.find_markers.v1`, see
+[DEG / marker finding](#deg--marker-finding-degfind_markersv1)) vs. still unwrapped
+(pathway enrichment / CellChat).
 
 ## Scope of this branch
 
@@ -23,9 +25,10 @@ through the owner-only `checkpoint.load.v1` worker job, so downstream jobs can u
 live input — see [Checkpoint load / reattach](#checkpoint-load--reattach-checkpointloadv1).
 This stays **owner-only**; it does **not** add shared project live-R state.
 
-**Out of scope** (unchanged, deliberately not implemented here): DEG, pathway
-enrichment, CellChat, generated R script export, public downloads, object storage,
-full reproducibility bundles, shared project live-R state, and production-grade runtime
+**Out of scope of the original `pbmc.pipeline.v1` branch** (DEG was wrapped later — see
+[DEG / marker finding](#deg--marker-finding-degfind_markersv1)): pathway enrichment,
+CellChat, generated R script export, public downloads, object storage, full
+reproducibility bundles, shared project live-R state, and production-grade runtime
 isolation. Cancellation remains cooperative/status-level only (it does **not** kill
 in-flight R work).
 
@@ -252,17 +255,117 @@ cancellation / claim loss, **no** successful load artifact is created, and the c
 prevents two workers from duplicating one. There is **no download, no object storage, no
 generated script, and no reproducibility bundle** here.
 
+## DEG / marker finding (`deg.find_markers.v1`)
+
+DEG / marker finding is integrated as an allowlisted worker job over the object owner's
+**private live R state**. The intended flow is:
+
+```text
+pbmc.pipeline.v1  ->  checkpoint.load.v1  ->  deg.find_markers.v1
+```
+
+i.e. the user runs (or has) a completed PBMC pipeline result, loads that result checkpoint
+back into live R via `checkpoint.load.v1`, then runs `deg.find_markers.v1` over the loaded
+object. **DEG is an output-producing analysis, not a mutating checkpoint transformation:**
+it creates **no new analysis object and no lineage edge**, and it does **not** mutate the
+live object (the R endpoint runs `FindAllMarkers` on a copy and never reassigns `global_obj`,
+so the postroute hook re-saves the live object unchanged; identities/metadata are untouched).
+
+### Where it lives
+
+| Concern | File | What it adds |
+| --- | --- | --- |
+| Param allowlist | [`backend/degFindMarkers.js`](../backend/degFindMarkers.js) | `validateDegFindMarkersParams` (fixed allowlist; unknown rejected; strings restricted to enums) + `allocateDegResultStorageKey` (server-only internal key). |
+| Job type | [`backend/database.js`](../backend/database.js) | `deg.find_markers.v1` in `ALLOWED_JOB_TYPES`; `deg_markers` + `deg_summary` artifact types; `completeDegFindMarkersResultByWorker` (atomic two-artifact write, **no** result object/edge). |
+| Proxy block | [`server.js`](../server.js) | `/object/deg-find-markers` added to `R_PROXY_INTERNAL_ONLY_PATHS` (404 before R for every spelling/method). |
+| Bridge op | [`backend/rWorkerBridge.js`](../backend/rWorkerBridge.js) | Allowlisted `r.deg.find_markers.v1` operation (`POST /object/deg-find-markers`), server-built params body + server result key, sanitized bounded summary. |
+| Worker handler | [`backend/jobWorker.js`](../backend/jobWorker.js) | `deg.find_markers.v1` handler: ownership gate → param validation → result-key allocation → bridge call → two artifacts (atomic). |
+| R endpoint | [`r-backend/plumber.R`](../r-backend/plumber.R) | `POST /object/deg-find-markers` (internal-only): `FindAllMarkers` on a copy, writes the full table to the server key, returns a bounded sanitized summary. |
+
+### What it reuses vs. wraps
+
+It reuses the **existing real DEG logic** (`FindAllMarkers` over `seurat_clusters` /
+current idents, the same family of `only.pos` / `min.pct` / `logfc.threshold` / `wilcox`
+defaults the legacy `GET /deg` endpoint used). What the worker path **wraps/changes**: the
+legacy `GET /deg` returned large marker + heatmap tables directly to the interactive UI;
+the worker path instead writes the full table to an internal `local_internal` artifact and
+returns only a **bounded, sanitized** summary. The legacy `GET /deg` (and the plain
+`find_markers` analytical job type) remain as-is and **unwrapped** — `find_markers` is still
+an unregistered handler that fails terminally. Pathway enrichment and CellChat remain
+**unintegrated** (see audit below).
+
+### Owner-only (v1)
+
+Execution is **owner-only live R**, matching the current live-R boundary. The input object
+id comes from the trusted job row; the job creator must **own** that live object
+(`verifyAnalysisObjectOwner`) **before any R contact**, and the `X-Object-ID` is
+server-derived (`deriveRObjectStateKey`). A project co-member or admin who does not own the
+object is rejected before R; a viewer cannot create the job; a non-member gets a 404. Durable
+DEG artifacts may be readable by project members per existing artifact policy, but project
+membership never grants **execution** against another user's live object. Collaborative
+run-as / fork / session-ownership is future work.
+
+### Parameters
+
+Validated against a fixed server-side allowlist (`backend/degFindMarkers.js`) before any R
+contact; unknown names rejected, strings restricted to fixed enums (so no parameter becomes
+R code, a file path, or an R function name), defaults recorded, resolved params stored in
+artifact metadata:
+
+| Param | Type | Range / values | Default |
+| --- | --- | --- | --- |
+| `groupBy` | enum | `seurat_clusters`, `ident` | `seurat_clusters` |
+| `assay` | enum | `RNA`, `SCT` | `RNA` |
+| `onlyPositive` | bool | — | `true` |
+| `minPct` | number | 0–1 | `0.1` |
+| `logfcThreshold` | number | 0–10 | `0.25` |
+| `testUse` | enum | `wilcox` only (v1) | `wilcox` |
+| `maxCellsPerIdent` | int or null | 1–100000 | `null` |
+| `randomSeed` | int or null | 0–2147483647 | `null` |
+| `topMarkersPerCluster` | int | 5–50 | `10` |
+
+### Output artifacts (no downloads)
+
+On success the handler atomically records **two** artifacts (and **no** result object / edge):
+
+1. **`deg_markers`** — the full marker table. `storage_kind: local_internal`; the R backend
+   writes a CSV to the **server-selected** internal vault key (`deg/<jobId>/<token>.csv`), and
+   the checksum/size are recorded. The internal key is held in `storage_uri`, which the public
+   projection **strips** (`toPublicJobArtifact`). There is **no public download route**.
+2. **`deg_summary`** — `storage_kind: metadata_only`, `scientific_output: true`,
+   `downloadable: false`. A bounded safe summary: operation, resolved params, groups/clusters
+   detected, total marker count + per-group counts, and a **top-N-per-group** preview with safe
+   columns only (group, gene, `avg_log2FC`, `pct.1`, `pct.2`, adjusted p-value, rank) + runtime
+   versions. The top-marker preview is doubly bounded (per-group by `topMarkersPerCluster` and
+   overall by a hard row cap).
+
+Neither artifact ever exposes raw expression matrices, full cell metadata, embeddings, the
+internal storage key/path, or the R state key. On R failure / `saved:false` / missing
+checksum / cancellation / claim loss, **no** successful DEG artifact is created; the claim
+guard plus a `DEG_RESULT_EXISTS` guard prevent two workers (or a retried completion) from
+duplicating them.
+
+### Validation
+
+- Node: [`backend/deg-find-markers-worker.test.js`](../backend/deg-find-markers-worker.test.js)
+  (registration/scope, parameter validation, public-proxy block, bridge input control,
+  worker success/failure/cancel, authorization, sanitizers).
+- R smoke: [`scripts/verify_deg_find_markers.R`](../scripts/verify_deg_find_markers.R)
+  (`npm run test:deg-markers`) — produces markers, writes the table + checksum, bounds the
+  summary, proves the live object is unchanged, and fails safely on a missing/single group.
+
 ## DEG / pathway enrichment / CellChat audit
 
-These exist in `r-backend/plumber.R` but are **deliberately not integrated** in this
-branch (no new job type, no bridge op, no handler). They are documented here so the
-branch stays honest about what already exists.
+DEG is now integrated (see above). Pathway enrichment and CellChat still exist in
+`r-backend/plumber.R` but are **deliberately not integrated** in this branch (no new job
+type, no bridge op, no handler). They are documented here so the branch stays honest about
+what already exists.
 
-| Workflow | Endpoint | State | Reusability | Likely future job type |
+| Workflow | Endpoint | State | Reusability | Job type |
 | --- | --- | --- | --- | --- |
-| **DEG** | `GET /deg` | Real: `FindAllMarkers(only.pos, min.pct=0.25, logfc.threshold=0.25)` + top-5/cluster heatmap via `AverageExpression`. Returns large marker + heatmap tables. | Reusable logic; needs wrapping (bounded/sanitized summary + artifact instead of returning full tables) and a results artifact model. | `deg.find_markers.v1` |
-| **Pathway enrichment** | `GET /enrichment` | Real: clusterProfiler ORA (GO/KEGG), species auto-detection. Depends on optional Bioconductor packages (`clusterProfiler`, org dbs). | Reusable but **experimental**: optional heavy deps, must degrade safely when absent; needs the DEG step as input. | `enrichment.ora.v1` |
-| **CellChat** | `POST /cellchat-infer` (real); `GET /cellchat` (mock — returns `WNT` placeholder) | `/cellchat-infer` is real CellChat v2 inference (label remapping, `requireNamespace` guard). `/cellchat` is a stub. | `/cellchat-infer` reusable but **experimental** (optional `CellChat` GitHub dep, long-running, large output). The `/cellchat` stub should not be wrapped. | `cellchat.infer.v1` |
+| **DEG** | `GET /deg` (legacy UI) + internal `POST /object/deg-find-markers` (worker) | **Integrated** as `deg.find_markers.v1`: `FindAllMarkers` on a copy, full table to an internal `local_internal` artifact, bounded sanitized summary. Legacy `GET /deg` unchanged. | Wrapped (see *DEG / marker finding* above). | `deg.find_markers.v1` ✅ |
+| **Pathway enrichment** | `GET /enrichment` | Real: clusterProfiler ORA (GO/KEGG), species auto-detection. Depends on optional Bioconductor packages (`clusterProfiler`, org dbs). | Reusable but **experimental**: optional heavy deps, must degrade safely when absent; needs the DEG step as input. | `enrichment.ora.v1` (not built) |
+| **CellChat** | `POST /cellchat-infer` (real); `GET /cellchat` (mock — returns `WNT` placeholder) | `/cellchat-infer` is real CellChat v2 inference (label remapping, `requireNamespace` guard). `/cellchat` is a stub. | `/cellchat-infer` reusable but **experimental** (optional `CellChat` GitHub dep, long-running, large output). The `/cellchat` stub should not be wrapped. | `cellchat.infer.v1` (not built) |
 
 Wrapping any of these later should follow the same pattern as `pbmc.pipeline.v1`:
 server-side param allowlist, server-derived object context, ownership gate before R,
@@ -283,4 +386,12 @@ can be made fully safe and tested.
   writes is a follow-up; the role-checked `createProjectProvenance` path was not wired
   into the worker to keep the success path idempotent and claim-guarded.
 - Cancellation is cooperative/status-level only; it does not kill in-flight R work.
-- DEG / pathway enrichment / CellChat remain unintegrated (see audit above).
+- **DEG** is integrated as the owner-only `deg.find_markers.v1` worker job (see *DEG /
+  marker finding* above). It requires the input object to be **loaded in live R** for v1
+  (usually via `checkpoint.load.v1`); execution is owner-only; it creates no new analysis
+  object or lineage edge; the full marker table is `local_internal` with **no public
+  download**; and live R state remains private and user/object-keyed. **Pathway enrichment
+  and CellChat remain unintegrated** (see audit above).
+- DEG full-table **download / object storage / generated scripts / reproducibility bundles**
+  are not implemented. The internal `deg_markers` file follows the same orphan-on-rollback
+  lifecycle caveat as the pbmc checkpoint (documented storage-lifecycle follow-up).

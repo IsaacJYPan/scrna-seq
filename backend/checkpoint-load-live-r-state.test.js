@@ -151,7 +151,7 @@ describe('checkpoint.load.v1 — inventory & scope', () => {
 
   it('registers checkpoint.load.v1 alongside the existing handlers (existing handlers unchanged)', () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
+      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(checkpointLoadHandler);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(worker.pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(worker.rObjectInspectHandler);
@@ -176,23 +176,24 @@ describe('checkpoint.load.v1 — inventory & scope', () => {
 
   it('the bridge op/target sets stay exact/closed (adds only the checkpoint-load op/target)', () => {
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.checkpoint.load.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
+      .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/pbmc-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline']);
   });
 
-  it('NO DEG / pathway enrichment / CellChat job types or bridge ops are added', () => {
-    // None of these are runnable HANDLERS (the legacy analytical types like find_markers
-    // remain registered as job TYPES but deliberately have no worker handler).
+  it('NO pathway enrichment / CellChat job types or bridge ops are added by THIS branch', () => {
+    // The checkpoint.load.v1 branch adds only its own type/op. The legacy plain analytical
+    // types (deg/find_markers/enrichment/cellchat) remain UNREGISTERED handlers. (DEG is
+    // productionized as deg.find_markers.v1 by a SEPARATE branch — see that test file.)
     for (const t of ['deg', 'find_markers', 'enrichment', 'cellchat', 'cellchat.infer',
-      'deg.find_markers.v1', 'enrichment.ora.v1', 'cellchat.infer.v1']) {
+      'enrichment.ora.v1', 'cellchat.infer.v1']) {
       expect(DEFAULT_HANDLERS[t]).toBeUndefined();
     }
-    // No NEW production job type was added for them either.
-    for (const t of ['deg.find_markers.v1', 'enrichment.ora.v1', 'cellchat.infer.v1', 'checkpoint.download.v1']) {
+    // No pathway/CellChat production job type or bridge op exists.
+    for (const t of ['enrichment.ora.v1', 'cellchat.infer.v1', 'checkpoint.download.v1']) {
       expect(isValidJobType(t)).toBe(false);
     }
-    for (const op of ['r.deg.v1', 'r.enrichment.v1', 'r.cellchat.v1', 'r.checkpoint.download.v1']) {
+    for (const op of ['r.enrichment.v1', 'r.cellchat.v1', 'r.checkpoint.download.v1']) {
       expect(isAllowedRBridgeOperation(op)).toBe(false);
     }
   });
