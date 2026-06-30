@@ -8,15 +8,24 @@ describe('Sidebar component', () => {
     id: 'ws-1', name: 'Test WS', type: 'personal', objects: []
   }];
 
+  const baseProps = {
+    setActiveTab: () => {},
+    workspaces: mockWorkspaces,
+    activeWsIndex: 0,
+    pipelineState: { qc: false, normalize: false, integrate: false, pca: false, cluster: false },
+    setWorkspaces: () => {},
+    setActiveWsIndex: () => {},
+    onLogout: () => {},
+    theme: 'dark',
+    setTheme: () => {},
+  };
+
   it('renders disabled downstream options when data is not loaded', () => {
     render(
       <Sidebar 
         activeTab="home"
-        setActiveTab={() => {}}
-        workspaces={mockWorkspaces}
-        activeWsIndex={0}
+        {...baseProps}
         selectedObjects={[]} // No data loaded
-        pipelineState={{ qc: false, normalize: false, integrate: false, pca: false, cluster: false }}
       />
     );
 
@@ -33,9 +42,7 @@ describe('Sidebar component', () => {
     render(
       <Sidebar 
         activeTab="home"
-        setActiveTab={() => {}}
-        workspaces={mockWorkspaces}
-        activeWsIndex={0}
+        {...baseProps}
         selectedObjects={['obj-1']} // Data loaded
         pipelineState={{ qc: true, normalize: true, integrate: false, pca: false, cluster: false }}
       />
@@ -45,5 +52,23 @@ describe('Sidebar component', () => {
     // Wait, let's verify if QC is enabled. The Sidebar logic might disable it if there are NO objects, but enabled if there are.
     const qcButton = screen.getByRole('button', { name: /Quality Control/i });
     expect(qcButton).not.toBeDisabled();
+  });
+
+  it('marks non-integrated scientific features as disabled future actions', () => {
+    render(
+      <Sidebar
+        activeTab="workspace"
+        {...baseProps}
+        selectedObjects={['obj-1']}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: /Pathway Enrichment/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /CellChat/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Custom Script/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Cell Annotation/i })).toBeDisabled();
+    expect(screen.getByText(/Not implemented yet/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Coming later/i)).toHaveLength(2);
+    expect(screen.getByText(/Disabled/i)).toBeInTheDocument();
   });
 });

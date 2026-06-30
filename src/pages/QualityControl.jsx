@@ -19,6 +19,22 @@ const PLOT_TABS = [
   { id: 'stats', label: 'Distribution Summary' },
 ];
 
+function qcUnavailableMessage(rawError, { datasetInfo, sessionReady } = {}) {
+  if (!datasetInfo) return 'Load a dataset in the Workspace first.';
+  if (!sessionReady) {
+    return 'A dataset is selected, but the live R session is not ready. Reload or restore the session before running QC.';
+  }
+
+  const message = String(rawError || '').trim();
+  if (/analysis object not found/i.test(message)) {
+    return 'The dataset was loaded into the legacy live session, but this object is not available through the verified analysis-object backend path. This workflow needs the DB-backed object migration before QC can run reliably.';
+  }
+  if (/no object loaded|load data first/i.test(message)) {
+    return 'A dataset is selected, but the live R session no longer has the analysis object. Reload the dataset or wait for the DB-backed object workflow migration before relying on QC state.';
+  }
+  return message || 'QC distribution data is unavailable for the selected object.';
+}
+
 export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, objectId, sessionReady }) {
   const [activePlot, setActivePlot] = useState('mt');
 
@@ -46,6 +62,12 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
 
   useEffect(() => {
+    if (datasetInfo && !sessionReady) {
+      setDistributions(null);
+      setError(qcUnavailableMessage(null, { datasetInfo, sessionReady }));
+      return;
+    }
+
     if (datasetInfo && !loadingDist) {
       // Re-fetch distributions when the R session changes (e.g. after session restore)
       // so a failed early fetch (before session restore) doesn't persist.
@@ -54,7 +76,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       callApi('/qc-distributions', {}, { useCache: false })
         .then(data => {
           if (data.error) {
-            setError(data.error);
+            setError(qcUnavailableMessage(data.error, { datasetInfo, sessionReady }));
           } else {
             setDistributions(data);
             setError(null); // clear any previous 'no object' error
@@ -68,7 +90,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
     }
   // rSessionId triggers re-fetch when session is restored
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetInfo, rSessionId]);
+  }, [datasetInfo, rSessionId, sessionReady]);
 
   if (!datasetInfo) {
     return (
@@ -513,7 +535,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             </div>
           ) : !distributions ? (
             <div className="flex items-center justify-center h-[420px] text-slate-400 text-sm">
-              No distribution data available. Load a dataset first.
+              {qcUnavailableMessage(error, { datasetInfo, sessionReady })}
             </div>
           ) : activePlot === 'stats' ? (
             <div>
