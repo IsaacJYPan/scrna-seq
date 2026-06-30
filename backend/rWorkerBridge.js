@@ -40,6 +40,7 @@
 // method, or path.
 
 const http = require('http');
+const { PBMC_PIPELINE_PARAM_NAMES } = require('./pbmcPipeline');
 
 /** Coded error helper (mirrors database.js so callers can branch on err.code). */
 function codedError(code, message) {
@@ -51,6 +52,9 @@ function codedError(code, message) {
 // Default per-call timeout. Explicit and bounded so a hung/unreachable R backend
 // can never wedge a worker tick indefinitely.
 const DEFAULT_R_BRIDGE_TIMEOUT_MS = 10000;
+// Hard ceiling for any single bridge call (incl. the longer pipeline op), so even a
+// caller-supplied timeout can never make a worker tick unbounded.
+const MAX_R_BRIDGE_TIMEOUT_MS = 600000;
 
 // ── Operation allowlist ──────────────────────────────────────────────────────
 // The ONLY operations the bridge will run. Each entry fully describes the
@@ -87,6 +91,33 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     touchesAnalysisObject: true,
     requiresObjectContext: true,
     readOnly: true,
+  }),
+  // The first MUTATING bridge operation: run the existing PBMC/Seurat preprocessing
+  // pipeline on a COPY of one live analysis object (the parent is never mutated) and
+  // persist a durable checkpoint RDS to a SERVER-allocated internal vault key. The
+  // request method/path are fixed; the X-Object-ID (parent) is server-derived; the
+  // body is reconstructed by the bridge from ONLY the allowlisted, server-validated
+  // params + the server-allocated checkpoint key (`carriesParams`). It returns a
+  // sanitized, bounded summary — never matrices/cells/genes/embeddings. The worker
+  // handler validates params + ownership BEFORE this runs; there is NO arbitrary R.
+  'r.pbmc.pipeline.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/pbmc-pipeline',
+    artifactType: 'pipeline_summary',
+    artifactName: 'PBMC pipeline summary',
+    artifactDescription:
+      'Sanitized summary of a PBMC/Seurat preprocessing run (normalize → variable features → scale → '
+      + 'PCA → neighbors → clusters → UMAP) executed on a copy of the input object. Bounded counts, '
+      + 'reduction names, resolved parameters, and runtime versions only — no expression matrices, '
+      + 'cell/gene tables, embeddings, paths, or state keys.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesParams: true,
+    mutating: true,
+    readOnly: false,
+    // Pipeline runs are far longer than a health/inspect call — explicit but bounded
+    // so a hung R run can never wedge a worker indefinitely.
+    defaultTimeoutMs: 120000,
   }),
 });
 
@@ -184,6 +215,83 @@ function sanitizeInspectionSummary(body) {
   return summary;
 }
 
+// A 64-char lowercase hex sha256, or null. Guards the checkpoint checksum so a garbage
+// R response can never inject a non-hex / oversized value into artifact metadata.
+function sanitizeChecksum(value) {
+  if (typeof value !== 'string') return null;
+  const s = value.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(s) ? s : null;
+}
+
+/**
+ * Build a SAFE, bounded, metadata-only summary of a PBMC pipeline run from the raw R
+ * body. Only a small allowlist of structural counts / names survives; every value is
+ * sanitized and capped. Deliberately NEVER includes expression matrices, per-cell or
+ * per-gene tables, embeddings, raw sample values, file paths, or the R state key —
+ * even if the R response tried to include them, they are dropped (not on the allowlist).
+ */
+function sanitizePipelineSummary(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
+  const out = {};
+
+  const nCells = sanitizeCount(s.n_cells);
+  if (nCells !== null) out.nCells = nCells;
+  const nFeatures = sanitizeCount(s.n_features);
+  if (nFeatures !== null) out.nFeatures = nFeatures;
+  const nVar = sanitizeCount(s.n_variable_features);
+  if (nVar !== null) out.nVariableFeatures = nVar;
+  const nPcs = sanitizeCount(s.n_pcs);
+  if (nPcs !== null) out.nPcs = nPcs;
+  const nClusters = sanitizeCount(s.n_clusters);
+  if (nClusters !== null) out.nClusters = nClusters;
+
+  const reductions = sanitizeNameList(s.reductions);
+  if (reductions.length) out.reductions = reductions;
+
+  // Cluster sizes: a bounded list of non-negative counts (never per-cell data).
+  if (Array.isArray(s.cluster_sizes)) {
+    const sizes = [];
+    for (const v of s.cluster_sizes) {
+      const n = sanitizeCount(v);
+      if (n !== null) sizes.push(n);
+      if (sizes.length >= 256) break;
+    }
+    if (sizes.length) out.clusterSizes = sizes;
+  }
+
+  const method = sanitizeRuntimeField(s.normalization_method);
+  if (method) out.normalizationMethod = method;
+  const res = (typeof s.resolution === 'number' && Number.isFinite(s.resolution)) ? s.resolution : null;
+  if (res !== null) out.resolution = res;
+
+  const sv = sanitizeRuntimeField(b.seurat_version || (b.versions && b.versions.seurat_version));
+  if (sv) out.seuratVersion = sv;
+  const rv = sanitizeRuntimeField(b.r_version || (b.versions && b.versions.r_version));
+  if (rv) out.rVersion = rv;
+
+  const usedSeed = sanitizeCount(s.used_seed);
+  if (usedSeed !== null) out.usedSeed = usedSeed;
+
+  return out;
+}
+
+/**
+ * Build a SAFE checkpoint descriptor from the raw R body: did R save a durable
+ * checkpoint, and (if so) its sanitized checksum + size. NEVER includes the storage
+ * path/key — the worker already holds the SERVER-allocated key and records it
+ * internally (stripped from public responses); R only echoes save success + integrity.
+ */
+function sanitizeCheckpointInfo(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const c = b.checkpoint && typeof b.checkpoint === 'object' ? b.checkpoint : {};
+  return {
+    saved: c.saved === true,
+    checksumSha256: sanitizeChecksum(c.checksum_sha256),
+    sizeBytes: sanitizeCount(c.size_bytes),
+  };
+}
+
 /**
  * Map any thrown bridge/caller error to a SAFE { code, message } pair. Known coded
  * errors get a stable, generic message; anything else collapses to a single generic
@@ -197,10 +305,12 @@ function sanitizeRBridgeError(err) {
     R_BRIDGE_TARGET_REJECTED: 'Requested R bridge target is not allowlisted.',
     R_BRIDGE_MISCONFIGURED: 'R bridge is not configured.',
     R_OBJECT_CONTEXT_REQUIRED: 'Server-derived object context is required for object inspection.',
+    R_PIPELINE_PARAMS_REQUIRED: 'Server-validated pipeline parameters are required.',
     R_TIMEOUT: 'R runtime did not respond before the timeout.',
     R_UNREACHABLE: 'R runtime is unreachable.',
     R_RUNTIME_CHECK_FAILED: 'R runtime check failed.',
     R_OBJECT_INSPECT_FAILED: 'R object inspection failed.',
+    R_PBMC_PIPELINE_FAILED: 'R PBMC pipeline run failed.',
     R_BRIDGE_ERROR: 'R bridge operation failed.',
   };
   return { code, message: SAFE_MESSAGES[code] || SAFE_MESSAGES.R_BRIDGE_ERROR };
@@ -223,7 +333,7 @@ function createDefaultRCaller(config = {}) {
   const port = Number(config.port) || Number(process.env.PLUMBER_PORT) || 8000;
   const token = config.token || process.env.API_TOKEN || '';
 
-  return function callR({ method, path, timeoutMs, objectStateKey }) {
+  return function callR({ method, path, timeoutMs, objectStateKey, body }) {
     return new Promise((resolve, reject) => {
       if (!token) {
         reject(codedError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.'));
@@ -245,6 +355,16 @@ function createDefaultRCaller(config = {}) {
         headers['X-Object-ID'] = objectStateKey;
       }
 
+      // A request body is only ever sent for a POST target (the pipeline op). It is a
+      // SERVER-built, JSON-serializable object (the bridge reconstructs it from the
+      // allowlisted params + checkpoint key); raw client input never reaches here.
+      let payload = null;
+      if (method === 'POST' && body !== undefined && body !== null) {
+        payload = Buffer.from(JSON.stringify(body), 'utf8');
+        headers['Content-Type'] = 'application/json';
+        headers['Content-Length'] = payload.length;
+      }
+
       let req;
       try {
         req = http.request(
@@ -254,9 +374,9 @@ function createDefaultRCaller(config = {}) {
             res.on('data', (c) => chunks.push(c));
             res.on('end', () => {
               const raw = Buffer.concat(chunks).toString('utf8');
-              let body = null;
-              try { body = raw ? JSON.parse(raw) : null; } catch { body = null; }
-              finishOk({ status: res.statusCode, body });
+              let resBody = null;
+              try { resBody = raw ? JSON.parse(raw) : null; } catch { resBody = null; }
+              finishOk({ status: res.statusCode, body: resBody });
             });
           }
         );
@@ -272,6 +392,7 @@ function createDefaultRCaller(config = {}) {
       });
       // Collapse every transport-level error to a generic, host/URL-free code.
       req.on('error', () => finishErr(codedError('R_UNREACHABLE', 'R runtime is unreachable.')));
+      if (payload) req.write(payload);
       req.end();
     });
   };
@@ -305,8 +426,6 @@ function createDefaultRCaller(config = {}) {
 async function runRBridgeOperation(args = {}) {
   const { job, operation, callR } = args;
   const logger = args.logger || console;
-  const timeoutMs = Number.isInteger(args.timeoutMs) && args.timeoutMs > 0
-    ? args.timeoutMs : DEFAULT_R_BRIDGE_TIMEOUT_MS;
 
   // 1. Operation must be explicitly allowlisted. Arbitrary names are refused here,
   //    before any R contact.
@@ -324,6 +443,14 @@ async function runRBridgeOperation(args = {}) {
   //    `args.input` is deliberately never read: the caller cannot choose method/path/
   //    code/endpoint/state key.
   const spec = R_BRIDGE_OPERATIONS[operation];
+  // Timeout: an explicit caller value wins, else the op's own default (the pipeline op
+  // is longer), else the global default — always clamped to a hard ceiling so no call
+  // can run unbounded.
+  const requestedTimeout = Number.isInteger(args.timeoutMs) && args.timeoutMs > 0
+    ? args.timeoutMs
+    : (Number.isInteger(spec.defaultTimeoutMs) && spec.defaultTimeoutMs > 0
+      ? spec.defaultTimeoutMs : DEFAULT_R_BRIDGE_TIMEOUT_MS);
+  const timeoutMs = Math.min(requestedTimeout, MAX_R_BRIDGE_TIMEOUT_MS);
   const request = { method: spec.method, path: spec.path, timeoutMs };
 
   // 2a. Object operations need SERVER-DERIVED object context (never from input). The
@@ -339,6 +466,29 @@ async function runRBridgeOperation(args = {}) {
         'Server-derived object context is required for object inspection.');
     }
     request.objectStateKey = objectContext.stateKey;
+  }
+
+  // 2b. Operations that carry parameters (the pipeline op) get a SERVER-BUILT JSON body
+  //     reconstructed from ONLY the allowlisted param names + the server-allocated
+  //     checkpoint key. `args.pipeline` is supplied by the worker handler AFTER it has
+  //     validated the params (backend/pbmcPipeline.js) and allocated the key; raw
+  //     client input is never forwarded. Re-whitelisting here is defense-in-depth: a
+  //     stray/hostile field on the params object can never reach R.
+  if (spec.carriesParams) {
+    const pipeline = args.pipeline;
+    const params = pipeline && typeof pipeline === 'object' ? pipeline.params : null;
+    const checkpointStorageKey = pipeline && typeof pipeline === 'object' ? pipeline.checkpointStorageKey : null;
+    if (!params || typeof params !== 'object'
+      || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
+      throw codedError('R_PIPELINE_PARAMS_REQUIRED', 'Server-validated pipeline parameters are required.');
+    }
+    const safeParams = {};
+    for (const name of PBMC_PIPELINE_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    // `storage_key` is a TOP-LEVEL body field (matches R's validate_path arg + the
+    // Node proxy's R_PROXY_VALIDATED_PATH_FIELDS allowlist).
+    request.body = { operation, params: safeParams, storage_key: checkpointStorageKey };
   }
 
   if (logger && typeof logger.info === 'function') {
@@ -357,13 +507,43 @@ async function runRBridgeOperation(args = {}) {
 
   if (!response || response.status !== 200) {
     // Never include the raw body/status text — only a generic, stable message.
-    const failCode = spec.requiresObjectContext ? 'R_OBJECT_INSPECT_FAILED' : 'R_RUNTIME_CHECK_FAILED';
+    let failCode = 'R_RUNTIME_CHECK_FAILED';
+    if (spec.carriesParams) failCode = 'R_PBMC_PIPELINE_FAILED';
+    else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     throw codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
   }
 
   // 4. Build SAFE, metadata-only artifact metadata. Only a small, sanitized allowlist
   //    of fields is kept; everything else from the R response is dropped.
   const body = response.body && typeof response.body === 'object' ? response.body : {};
+
+  if (operation === 'r.pbmc.pipeline.v1') {
+    // The bridge returns the SANITIZED pieces the worker needs; the worker (not the
+    // bridge) writes the DB result object + artifacts. checkpoint carries only save
+    // success + integrity (checksum/size) — never the storage path/key.
+    const summary = sanitizePipelineSummary(body);
+    const checkpoint = sanitizeCheckpointInfo(body);
+    return {
+      operation,
+      artifactType: spec.artifactType, // 'pipeline_summary'
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      resultObjectType: 'seurat',
+      parentObjectId: objectContext.objectId,
+      summary,
+      checkpoint,
+      // Metadata for the metadata-only pipeline_summary artifact (resolved params are
+      // added by the worker, which holds the validated set).
+      metadata: {
+        operation,
+        kind: 'pipeline',
+        scientific_output: true,
+        ranAt: new Date().toISOString(),
+        objectId: objectContext.objectId,
+        summary,
+      },
+    };
+  }
 
   if (operation === 'r.object.inspect') {
     const metadata = {
@@ -414,6 +594,7 @@ async function runRBridgeOperation(args = {}) {
 
 module.exports = {
   DEFAULT_R_BRIDGE_TIMEOUT_MS,
+  MAX_R_BRIDGE_TIMEOUT_MS,
   R_BRIDGE_OPERATIONS,
   R_BRIDGE_ALLOWED_TARGETS,
   isAllowedRBridgeOperation,
@@ -422,6 +603,9 @@ module.exports = {
   sanitizeCount,
   sanitizeNameList,
   sanitizeInspectionSummary,
+  sanitizeChecksum,
+  sanitizePipelineSummary,
+  sanitizeCheckpointInfo,
   sanitizeRBridgeError,
   createDefaultRCaller,
   runRBridgeOperation,

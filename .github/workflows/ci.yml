@@ -54,6 +54,7 @@ jobs:
             any::RColorBrewer
             any::jsonlite
             any::base64enc
+            any::digest
 
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
@@ -201,16 +202,49 @@ jobs:
         #                        single-parent parent_object_id/lineage_root_id stay compatibility/
         #                        fast-path fields; NO named branches, NO merge/integration semantics,
         #                        NO mutating R/Seurat pipeline, NO download/object storage)
+        #   pbmc-pipeline-worker (first production-integrated scientific pipeline: the existing
+        #                        PBMC/Seurat preprocessing path wrapped as ONE allowlisted
+        #                        `pbmc.pipeline.v1` worker job + `r.pbmc.pipeline.v1` bridge op.
+        #                        Scope: only this type added; generic/checkpoint.noop/r.runtime.check/
+        #                        r.object.inspect unchanged; unsupported types still terminal; NO
+        #                        DEG/pathway/CellChat registered; NO public worker/R-bridge/download
+        #                        route. Params: fixed server-side allowlist (defaults recorded;
+        #                        unknown rejected; strings never coerced so no param becomes R code/
+        #                        path/function; invalid → failed-before-R; resolved params in safe
+        #                        metadata). Ownership: input object id from the TRUSTED job row; the
+        #                        job creator must OWN the live object (verifyAnalysisObjectOwner)
+        #                        BEFORE any R contact and the X-Object-ID is SERVER-derived
+        #                        (deriveRObjectStateKey) — a co-member/admin/viewer/non-member/cross-
+        #                        project/legacy/malformed object cannot run it. Bridge: only the
+        #                        allowlisted op runs; arbitrary op/code/path/endpoint/method/state-key
+        #                        rejected/impossible; the params body is server-rebuilt from the
+        #                        allowlist + a SERVER-allocated checkpoint key; sanitized errors (no
+        #                        R URL/token/state-key/stack leak). Success: completes via the worker
+        #                        contract creating EXACTLY one result object + one parent→result
+        #                        checkpoint edge + one local_internal checkpoint artifact (checksum/
+        #                        size; storage_uri stripped from public reads) + one metadata-only
+        #                        pipeline_summary artifact; links result_analysis_object_id; same
+        #                        project/lineage-root; parent unchanged. Failure/cancel/claim-loss/
+        #                        absent-checkpoint create NO successful result/edge/artifact and two
+        #                        workers cannot duplicate one; checkpoint key is server-controlled +
+        #                        traversal-proof; NO download route; NO arbitrary R)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
         # isolation (malformed/unknown/cross-user X-Object-ID rejected before
         # reaching R). Requires the R backend set up above.
         run: npm run test:r-state-proxy
+
+      - name: Run PBMC Pipeline Parent-Immutability Smoke Test
+        # Live Rscript + Seurat check that the pbmc.pipeline.v1 copy-on-modify path
+        # leaves the parent object UNCHANGED at the object level while the derived copy
+        # gains the new state (the Node tests only assert this at the DB-row level).
+        # Reuses the R env set up above; SKIPs cleanly if Seurat is unavailable.
+        run: npm run test:pbmc-parent
 
       - name: Run Visual/UX Tests
         run: npm run test:visual
