@@ -81,3 +81,5 @@ visual_test.js
 docs/guide/
 
 .project/
+
+.playwright-mcp*

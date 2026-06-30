@@ -12,9 +12,6 @@ import HeatmapPlot from './pages/HeatmapPlot';
 import DotPlot from './pages/DotPlot';
 import GeneViewer from './pages/GeneViewer';
 import DifferentialExpression from './pages/DifferentialExpression';
-import Annotation from './pages/Annotation';
-import Enrichment from './pages/Enrichment';
-import CellChat from './pages/CellChat';
 import Publication from './pages/Publication';
 import Validation from './pages/Validation';
 import LineageExplorer from './pages/LineageExplorer';
@@ -70,16 +67,41 @@ function PlaceholderPage({ title, subtitle, icon }) {
   return (
     <div className="h-full flex items-center justify-center p-8 bg-background">
       <div className="text-center max-w-md">
-        <div className="text-6xl mb-6">{icon}</div>
+        <div className="inline-flex items-center justify-center px-3 py-1.5 rounded border border-border bg-surface text-xs font-bold uppercase tracking-widest text-textMuted mb-6">
+          {icon}
+        </div>
         <h2 className="text-2xl font-black text-white mb-3 tracking-tight">{title}</h2>
         <p className="text-slate-400 text-sm leading-relaxed mb-6">{subtitle}</p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-primary/10 border border-primary/20 rounded-full text-[10px] font-black text-primary uppercase tracking-widest">
-          Coming Soon
+          Not production-integrated
         </div>
       </div>
     </div>
   );
 }
+
+const FUTURE_FEATURES = {
+  annotate: {
+    title: 'Cell Annotation Not Integrated',
+    subtitle: 'Cell annotation is intentionally disabled in this workflow. Any future support must keep biological interpretation reviewable by the researcher.',
+    icon: 'Not implemented'
+  },
+  enrichment: {
+    title: 'Pathway Enrichment Not Integrated',
+    subtitle: 'Pathway enrichment is planned for a later DB-backed job workflow. It is not available as a production-integrated analysis action here.',
+    icon: 'Coming later'
+  },
+  cellchat: {
+    title: 'CellChat Not Integrated',
+    subtitle: 'CellChat requires the pinned R 4.5 environment and a durable job/artifact workflow. This branch does not enable CellChat execution.',
+    icon: 'Coming later'
+  },
+  customscript: {
+    title: 'Custom Script Disabled',
+    subtitle: 'Arbitrary user-provided R execution is out of scope and is not exposed by this local development workbench.',
+    icon: 'Disabled'
+  }
+};
 
 const TabContent = ({ id, activeTab, children }) => (
   <div className={`absolute inset-0 ${activeTab === id ? 'block' : 'hidden'}`}>
@@ -203,7 +225,7 @@ export default function App() {
   const datasetInfo = selectedObjects.length > 0 ? selectedObjects[0] : (currentWs.objects[0] || null);
   const currentProvId = currentWs.branches[currentWs.activeBranch];
 
-  const [apiStatus, setApiStatus] = useState('checking');
+  const [apiStatus, setApiStatus] = useState('Checking backend');
   const [provenanceRecords, setProvenanceRecords] = useState([]);
   const [drawerProvId, setDrawerProvId] = useState(null);
   const [drawerChain, setDrawerChain] = useState(null);
@@ -228,8 +250,8 @@ export default function App() {
         console.warn('[App] Failed to load persisted provenance:', err);
       });
     window.electronAPI.apiRequest('/health')
-      .then(data => setApiStatus(`Connected (${data.mode})`))
-      .catch(() => setApiStatus('Disconnected'));
+      .then(data => setApiStatus(data?.error ? 'Backend disconnected' : (data?.mode || 'R/Seurat runtime connected')))
+      .catch(() => setApiStatus('Backend disconnected'));
   }, [user?.email]);
 
   const updateActiveWorkspace = useCallback((updates) => {
@@ -491,8 +513,19 @@ export default function App() {
     setDrawerProvId(provId);
   };
 
-  const handleLogout = () => {
-    setUser(null);
+  const handleLogout = async () => {
+    try {
+      await window.electronAPI?.logout?.();
+    } finally {
+      setUser(null);
+      setActiveTab('workspace');
+      setProvenanceRecords([]);
+      setDrawerProvId(null);
+      setDrawerChain(null);
+      setRSessionId(null);
+      setSessionCheckDone(false);
+      setApiStatus('Checking backend');
+    }
   };
 
   // ── Workspace Persistence ───────────────────────────────────────
@@ -742,9 +775,10 @@ export default function App() {
         <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><Annotation key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><Enrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><CellChat {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.annotate} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.enrichment} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.cellchat} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="customscript"><TabContent id="customscript" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.customscript} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
