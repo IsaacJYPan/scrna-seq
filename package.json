@@ -14,6 +14,7 @@
     "test:r-state-proxy": "node scripts/verify_r_state_proxy.js",
     "test:pbmc-parent": "Rscript scripts/verify_pbmc_parent_unmutated.R",
     "test:checkpoint-load": "Rscript scripts/verify_checkpoint_load.R",
+    "test:deg-markers": "Rscript scripts/verify_deg_find_markers.R",
     "test:frontend": "vitest run src/",
     "test:backend": "vitest run backend/ --environment node",
     "test:visual": "node scripts/test_visual_ux.js",
