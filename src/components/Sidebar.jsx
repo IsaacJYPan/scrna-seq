@@ -32,6 +32,7 @@ export default function Sidebar({
   const sharedWs = workspaces.filter(ws => ws.type === 'shared');
   const currentWorkspace = workspaces[activeWsIndex];
   const hasData = selectedObjects && selectedObjects.length > 0;
+  const backendConnected = typeof apiStatus === 'string' && /connected/i.test(apiStatus) && !/disconnected/i.test(apiStatus);
 
   // Pipeline steps — ordered, gated
   const pipelineItems = [
@@ -54,10 +55,10 @@ export default function Sidebar({
   const analysisItems = [
     { id: 'geneviewer', label: 'Gene Expression', icon: BarChart3 },
     { id: 'deg', label: 'Differential Expression', icon: FileText },
-    { id: 'annotate', label: 'Cell Annotation', icon: Sparkles },
-    { id: 'enrichment', label: 'Pathway Enrichment', icon: Microscope },
-    { id: 'cellchat', label: 'CellChat', icon: MessageSquare },
-    { id: 'customscript', label: 'Custom Script', icon: Terminal },
+    { id: 'annotate', label: 'Cell Annotation', icon: Sparkles, disabled: true, status: 'Not implemented yet' },
+    { id: 'enrichment', label: 'Pathway Enrichment', icon: Microscope, disabled: true, status: 'Coming later' },
+    { id: 'cellchat', label: 'CellChat', icon: MessageSquare, disabled: true, status: 'Coming later' },
+    { id: 'customscript', label: 'Custom Script', icon: Terminal, disabled: true, status: 'Disabled' },
   ];
 
   // Output modules
@@ -87,12 +88,14 @@ export default function Sidebar({
   const NavButton = ({ item, disabled = false }) => {
     const Icon = item.icon;
     const isActive = activeTab === item.id;
+    const isDisabled = disabled || item.disabled;
     return (
       <button
-        onClick={() => !disabled && setActiveTab(item.id)}
-        disabled={disabled}
+        onClick={() => !isDisabled && setActiveTab(item.id)}
+        disabled={isDisabled}
+        title={item.status || item.label}
         className={`w-full flex items-center gap-3 px-3 py-[7px] rounded text-[15px] font-medium transition-colors group
-          ${disabled ? 'opacity-30 cursor-not-allowed' : ''}
+          ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}
           ${isActive 
             ? 'bg-black/5 dark:bg-slate-700 text-text' 
             : 'text-textMuted hover:bg-black/5 dark:hover:bg-slate-700 hover:text-text'
@@ -100,7 +103,15 @@ export default function Sidebar({
         `}
       >
         <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-slate-200 flex-shrink-0`} />
-        <span className="truncate flex-1 text-left">{item.label}</span>
+        <span className="min-w-0 flex-1 text-left">
+          <span className="block truncate">{item.label}</span>
+          {item.status && (
+            <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">
+              <Lock size={10} />
+              {item.status}
+            </span>
+          )}
+        </span>
         {item.id === 'publication' && figuresCount > 0 && (
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-blue-700 dark:text-blue-300 bg-blue-500/10 border border-blue-500/20">
             {figuresCount}
@@ -283,8 +294,8 @@ export default function Sidebar({
         >
           <div className="flex flex-col justify-center min-w-0 pr-2 pb-0.5 flex-1">
              <div className="flex items-center gap-1.5 mb-[2px]">
-                <div className={`w-2.5 h-2.5 rounded-full border border-black dark:border-white shadow-sm ${apiStatus && apiStatus.includes('Connected') ? 'bg-success' : 'animate-pulse bg-danger'}`}></div>
-                <span className="text-[13px] font-bold text-text truncate leading-none mt-1">{apiStatus ? 'Engine Ready' : 'Engine Offline'}</span>
+                <div className={`w-2.5 h-2.5 rounded-full border border-black dark:border-white shadow-sm ${backendConnected ? 'bg-success' : 'animate-pulse bg-danger'}`}></div>
+                <span className="text-[13px] font-bold text-text truncate leading-none mt-1">{backendConnected ? 'Backend connected' : 'Backend offline'}</span>
              </div>
              <span className="text-[11px] text-slate-400 truncate leading-none">{apiStatus || "Connection lost"}</span>
           </div>
