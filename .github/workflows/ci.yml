@@ -66,6 +66,12 @@ jobs:
         run: npm run test:frontend
 
       - name: Run Backend Tests
+        # Backend CONTRACT tests: they exercise the real Express + SQLite stack,
+        # including subsystems that are backend-only and NOT surfaced in the React
+        # UI yet (durable jobs, worker coordination, artifacts/checkpoints, lineage
+        # DAG, datasets, RBAC management). A green run proves the API/DB contract
+        # holds — not that a feature is wired into the UI. See the "Implemented vs
+        # UI-wired" table in README.md.
         run: npm run test:backend
 
       - name: Run Security Tests
@@ -292,10 +298,18 @@ jobs:
         #                        bad-checksum create NO successful DEG artifact and a duplicate
         #                        completion is refused (DEG_RESULT_EXISTS); the summary sanitizer
         #                        hard-caps rows and drops raw matrices/cell/embedding/path/state-key)
+        #   r-proxy-policy      (pins the R-proxy path policy: the three internal
+        #                        worker-only endpoints (pbmc-pipeline/checkpoint-load/
+        #                        deg-find-markers) are blocked with a no-leak 404 BEFORE R
+        #                        for every method/odd spelling, auth precedes the block, and
+        #                        the legacy live-R analytical endpoints (deg/cellchat/
+        #                        cellchat-infer/enrichment/annotate-clusters) stay reachable
+        #                        behind auth — documenting current legacy reachability, NOT
+        #                        endorsing it as a product workflow)
         # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
         # step (npm run test:backend); this step names the security-critical
         # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/checkpoint-load-live-r-state.test.js backend/deg-find-markers-worker.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
+        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/r-proxy-policy.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/checkpoint-load-live-r-state.test.js backend/deg-find-markers-worker.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R Plumber check proving DB-backed per-object R state
@@ -331,6 +345,12 @@ jobs:
         run: npm run test:deg-markers
 
       - name: Run Visual/UX Tests
+        # MOCKED frontend visual smoke test: renders the built UI with backend + R
+        # responses mocked in the browser. Checks rendering/layout and obvious UI
+        # regressions only — it does NOT verify real backend, R, project/object,
+        # job, artifact, or tenant behavior, and is not integration/security
+        # evidence. The db-flow variant (test:visual:db-flow) is a fully-mocked,
+        # browser-dependent local pre-merge smoke and is intentionally NOT run here.
         run: npm run test:visual
 
       - name: Build Application

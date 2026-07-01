@@ -1,3 +1,9 @@
+// LEGACY / PROTOTYPE — NOT IMPORTED.
+// Cell annotation is not a production-integrated UI workflow; App.jsx renders a
+// PlaceholderPage for the "annotate" tab instead of this component. This file is
+// kept as a legacy live-R prototype (it calls the authenticated /api/r/* proxy).
+// Do not build on it without deciding the annotation product direction first.
+// See the "Implemented vs UI-wired" table in README.md.
 import React, { useState, useCallback, useEffect } from 'react';
 import { Tag, AlertTriangle, Save, Play } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
