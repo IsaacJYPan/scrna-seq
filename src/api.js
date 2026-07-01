@@ -296,6 +296,11 @@ export const electronAPI = {
   },
   getProjectAnalysisObject: async (projectId, objectId) =>
     req(`/api/projects/${projectId}/analysis-objects/${objectId}`),
+  // Persist a small, safe display summary (cells/features/density) so the Workspace
+  // card keeps accurate counts after a refresh. Metadata-only; server rejects any
+  // storage/state/owner/project field. R execution/state is unchanged.
+  updateProjectAnalysisObjectSummary: async (projectId, objectId, summary) =>
+    req(`/api/projects/${projectId}/analysis-objects/${objectId}/summary`, { method: 'PATCH', body: JSON.stringify(summary || {}) }),
   // Read-only analysis-object lineage (DAG). The edge table is the graph source;
   // these return public-safe edge/graph metadata only (no create/mutate wrapper —
   // edges are created server-side by the checkpoint helper / future multi-parent ops).
