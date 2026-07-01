@@ -1460,6 +1460,32 @@ app.get('/api/projects/:projectId/analysis-objects/:objectId', (req, res) => {
   }
 });
 
+// Persist a small, safe DISPLAY summary (cells / features / density) for a project
+// analysis object so the Workspace/Data Info card keeps accurate counts after a
+// browser refresh (live R counts are transient and never persisted elsewhere). This
+// is project METADATA only: it does NOT touch R state, does NOT make live R state
+// project-shared, and does NOT weaken verifyRObjectOwnership. Server-controlled
+// identity fields and any storage/state/path field are rejected; only finite numeric
+// cells/features/density are read. project_id/object_id come from the route, never
+// the body. Non-member → 404, member lacking a write role → 403.
+app.patch('/api/projects/:projectId/analysis-objects/:objectId/summary', (req, res) => {
+  if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (rejectProjectResourceFields(req, res)) return;
+  if (rejectAnalysisObjectStorageFields(body, res)) return;
+  try {
+    const updated = db.updateProjectAnalysisObjectSummary(
+      req.user.id, req.params.projectId, req.params.objectId,
+      { cells: body.cells, features: body.features, density: body.density }
+    );
+    res.json(db.toPublicAnalysisObject(updated));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
+  }
+});
+
 // ── Read-only analysis-object lineage (DAG) routes ───────────────────────────
 // Role-checked, metadata-only lineage reads for project members (any role, incl.
 // viewer, may read). The edge table is the graph source; single-parent
