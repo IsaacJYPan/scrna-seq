@@ -813,8 +813,8 @@ app.get('/api/analysis-objects/:id', (req, res) => {
 // ── Jobs API ────────────────────────────────────────────────────────────
 // Durable, ownership-scoped records for long-running analysis work. Job ids
 // and status are server-managed; clients may never choose an id, assert
-// ownership, or set a status. This is the foundation for backgrounding R work
-// — there is no worker draining jobs yet (see docs/architecture.md).
+// ownership, or set a status. This is the foundation for backgrounding R work;
+// the opt-in worker drains only registered, allowlisted handlers.
 app.use('/api/jobs', express.json());
 app.use('/api/jobs', requireAuth);
 
@@ -903,7 +903,7 @@ app.post('/api/jobs/:id/cancel', (req, res) => {
 // caller cannot access returns 404 (never revealing it exists); 403 is reserved
 // for a known member who lacks the required role. This branch models membership
 // + authorization ONLY; no existing user-scoped resource is migrated into
-// project ownership (see docs/architecture.md).
+// project ownership.
 app.use('/api/organizations', express.json());
 app.use('/api/organizations', requireAuth);
 app.use('/api/projects', express.json());
@@ -1143,7 +1143,7 @@ app.post('/api/upload-directory', requireAuth, (req, res) => {
 // project the caller cannot access returns 404 (no existence leak); a known
 // member lacking the role returns 403. (`/api/projects` already has express.json
 // + requireAuth mounted above.) NOTE: there are intentionally no dataset
-// download routes in this branch (see docs/architecture.md).
+// download routes in this branch.
 
 // Separate multer instance for dataset uploads so the dataset extension policy is
 // independent of the R-vault upload filter. The declared file_type (validated
@@ -1333,8 +1333,8 @@ app.patch('/api/projects/:projectId/datasets/:datasetId', (req, res) => {
 // IMPORTANT: this is project-scoped METADATA only. It does NOT make R execution/
 // state project-shared — R state stays user/object-keyed (verifyRObjectOwnership
 // is unchanged and still owner-verified). A project member seeing an object's
-// metadata does NOT gain access to another user's live R session. There is no
-// worker draining jobs in this branch. See docs/architecture.md.
+// metadata does NOT gain access to another user's live R session. The opt-in
+// worker remains allowlisted and does not change this boundary.
 
 // Map the coded errors thrown by the project-scoped analysis-object/job helpers
 // to HTTP statuses: 404 for unknown/not-accessible (no existence leak), 403 for a
@@ -1621,7 +1621,7 @@ app.post('/api/projects/:projectId/jobs/:jobId/cancel', (req, res) => {
 // Append-only provenance records associated with a project, readable by project
 // members by role. project_id comes from the route; the responsible actor from
 // the session. There is no update/delete route (provenance is append-only). R
-// execution/state is untouched — this is metadata only. See docs/architecture.md.
+// execution/state is untouched — this is metadata only.
 app.post('/api/projects/:projectId/provenance', (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // Reject server-controlled id/owner/creator/project fields, plus the actor email
@@ -1784,7 +1784,7 @@ app.get('/api/projects/:projectId/figures/:figureId', (req, res) => {
 // return metadata only. The serializer omits storage_uri, so no internal/local
 // path or storage key is ever exposed; claim tokens / worker internals are not in
 // the artifact model at all. Legacy NULL-project artifacts never appear (the
-// helpers always pin a real project_id). See docs/architecture.md.
+// helpers always pin a real project_id).
 app.get('/api/projects/:projectId/artifacts', (req, res) => {
   const filters = {
     jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
@@ -2015,9 +2015,8 @@ function startPlumber() {
 // ── Job worker (conservative, opt-in) ────────────────────────────────────────
 // Disabled by default. The minimal drain loop only runs when ENABLE_JOB_WORKER is
 // explicitly the string "true", so local/dev and tests stay worker-free unless they
-// ask for it. It processes only registered handlers (currently the safe `generic`
-// noop) — NO scientific pipeline execution. See backend/jobWorker.js and
-// docs/architecture.md.
+// ask for it. It processes only registered handlers; arbitrary job types fail
+// terminally instead of becoming dynamic R execution. See backend/jobWorker.js.
 //
 // Config parsing (parseJobWorkerConfig) is deterministic: invalid poll/lease values
 // fall back to documented defaults with a sanitized warning, and any ENABLE_JOB_WORKER

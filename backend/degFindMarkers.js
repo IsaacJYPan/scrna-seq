@@ -22,8 +22,7 @@
 //     relative, traversal-free path the R backend further confines to its vault.
 //
 // SCOPE: DEG is an OUTPUT-producing analysis over an EXISTING live object. It creates
-// NO new analysis object and NO lineage edge (see docs/analysis-pipeline-integration.md
-// and backend/jobWorker.js degFindMarkersHandler). Pathway enrichment and CellChat are
+// NO new analysis object and NO lineage edge. Pathway enrichment and CellChat are
 // intentionally NOT integrated here.
 
 const crypto = require('crypto');

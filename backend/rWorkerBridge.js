@@ -1,10 +1,10 @@
-// ── Minimal worker-to-R bridge ───────────────────────────────────────────────
+// ── Worker-to-R bridge ───────────────────────────────────────────────────────
 //
-// The smallest safe seam that lets a job worker invoke the R backend through
-// SERVER-CONTROLLED code for exactly ONE explicitly allowlisted, read-only,
-// metadata-only operation. It proves worker→R connectivity, explicit timeouts,
-// sanitized errors, and the metadata-only artifact write path — WITHOUT opening a
-// door to arbitrary R.
+// The safe seam that lets a job worker invoke the R backend through
+// SERVER-CONTROLLED, explicitly allowlisted operations. It started with
+// metadata-only runtime/inspection checks and now also carries selected
+// owner-verified scientific workflow handlers. It still opens no dynamic route
+// to arbitrary R.
 //
 // HARD BOUNDARIES (do not weaken):
 //   - This is NOT an HTTP route. It is an internal module called only by the
@@ -13,16 +13,16 @@
 //     only thing the caller chooses; the HTTP method + path are taken from the
 //     server-defined spec, NEVER from caller input.
 //   - No arbitrary R code, no client-controlled R path/endpoint/method/URL, no
-//     client-controlled R state key. The `input` argument is intentionally
-//     IGNORED for the one operation here (it is server-derived) — smuggling a
-//     `code` / `path` / `endpoint` / `method` / `stateKey` field does nothing.
+//     client-controlled R state key. Per-operation payloads are rebuilt by this
+//     module from validated, server-derived inputs; smuggling a `code` / `path` /
+//     `endpoint` / `method` / `stateKey` field does nothing.
 //   - Job/project/object identity is derived from the trusted `job` row, not from
 //     caller input.
 //   - Errors are sanitized before they can reach job logs / artifacts: raw R error
 //     text, stacks, and internal URLs/hosts never escape (see sanitizeRBridgeError
 //     and the default caller's catch). Thrown errors always carry a SAFE message.
 //
-// SCOPE: two read-only, metadata-only operations.
+// SCOPE: fixed allowlisted operations only.
 //   - `r.runtime.check` — a read-only call to the R `/health` endpoint recording
 //     sanitized runtime metadata. Touches NO analysis object.
 //   - `r.object.inspect` — a read-only inspection of ONE existing live analysis
@@ -32,7 +32,10 @@
 //     NAMES, runtime versions) and records it as metadata. It returns NO cell/gene/
 //     expression/embedding data, mutates NOTHING in R, creates NO checkpoint/result
 //     object, and produces NO download.
-// Neither operation is real scientific pipeline execution. Object access is gated by
+//   - `r.pbmc.pipeline.v1`, `r.checkpoint.load.v1`, and `r.deg.find_markers.v1`
+//     are selected owner-verified workflow handlers with server-built payloads and
+//     sanitized outputs. They are not a general execution/eval mechanism.
+// Object access is gated by
 // the worker handler BEFORE the bridge is reached: only the live-R object owner may
 // trigger an inspection (see jobWorker.js — verifyAnalysisObjectOwner). The bridge
 // receives object context only as SERVER-DERIVED `objectContext` ({ objectId,
@@ -617,10 +620,10 @@ function createDefaultRCaller(config = {}) {
 // ── The bridge ───────────────────────────────────────────────────────────────
 
 /**
- * Run one allowlisted, metadata-only R-backed operation and return a SAFE artifact
- * descriptor describing what to record. Does NOT write to the database itself — the
- * worker handler creates the artifact through the claim-guarded helper — so the
- * bridge stays a pure, testable seam.
+ * Run one allowlisted R-backed operation and return a SAFE descriptor describing
+ * what to record. Does NOT write to the database itself — the worker handler
+ * creates artifacts/results through claim-guarded helpers — so the bridge stays a
+ * pure, testable seam.
  *
  * @param {object}   args
  * @param {object}   args.job           trusted job row (source of jobId/projectId/owner)
