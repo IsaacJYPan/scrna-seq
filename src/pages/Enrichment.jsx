@@ -1,3 +1,9 @@
+// LEGACY / PROTOTYPE — NOT IMPORTED.
+// Pathway enrichment is not a production-integrated UI workflow; App.jsx renders a
+// PlaceholderPage for the "enrichment" tab instead of this component. This file is
+// kept as a legacy live-R prototype (it calls the authenticated /api/r/* proxy).
+// Do not build on it without deciding the enrichment product direction first.
+// See the "Implemented vs UI-wired" table in README.md.
 import React, { useState, useCallback, useEffect } from 'react';
 import { Microscope, Activity, ChevronRight, AlertTriangle, RefreshCw, BarChart2, Zap } from 'lucide-react';
 import Plot from 'react-plotly.js';
