@@ -209,12 +209,133 @@ describe('project analysis resources — server-controlled identity', () => {
     }
   });
 
+  it('rejects client-provided analysis object storage/state fields and omits storage metadata from responses', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+
+    for (const field of ['storageUri', 'storage_uri', 'storageKey', 'storage_key', 'internalStorageKey', 'objectHash', 'path', 'stateKey']) {
+      const res = await createAO(proj.id, alice.token, { objectType: 'seurat', [field]: 'vault/secret.rds' });
+      expect(res.status, field).toBe(400);
+    }
+    const nested = await createAO(proj.id, alice.token, {
+      objectType: 'seurat',
+      metadata: { sourceType: 'pbmc3k_demo', nested: { storageKey: 'vault/secret.rds' } }
+    });
+    expect(nested.status).toBe(400);
+
+    const created = await createAO(proj.id, alice.token, { objectType: 'seurat', metadata: { sourceType: 'pbmc3k_demo' } });
+    expect(created.status).toBe(201);
+    expect(created.data.id).toMatch(/^ao_[0-9a-f]+$/);
+    expect(created.data.storageUri).toBeUndefined();
+    expect(created.data.objectHash).toBeUndefined();
+
+    const list = await api(server, `/api/projects/${proj.id}/analysis-objects`, { token: alice.token });
+    expect(list.status).toBe(200);
+    expect(JSON.stringify(list.data)).not.toContain('vault/');
+    expect(list.data[0].storageUri).toBeUndefined();
+
+    const read = await api(server, `/api/projects/${proj.id}/analysis-objects/${created.data.id}`, { token: alice.token });
+    expect(read.status).toBe(200);
+    expect(read.data.storageUri).toBeUndefined();
+    expect(read.data.objectHash).toBeUndefined();
+  });
+
   it('rejects a client-provided job status (400)', async () => {
     const { alice } = users();
     const proj = seedProject(alice.user.id);
     const res = await createJob(proj.id, alice.token, { jobType: 'normalize', status: 'completed' });
     expect(res.status).toBe(400);
     expect(res.data.error).toMatch(/status is server-managed/i);
+  });
+});
+
+// ── Analysis-object display summary (cells/features/density) ─────────────────
+describe('project analysis resources — display summary metadata', () => {
+  function summaryPath(projectId, objectId) {
+    return `/api/projects/${projectId}/analysis-objects/${objectId}/summary`;
+  }
+  async function patchSummary(projectId, objectId, token, body) {
+    return api(server, summaryPath(projectId, objectId), { method: 'PATCH', token, body });
+  }
+
+  it('persists cells/features/density and exposes them via the public response (survives reload)', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    const created = await createAO(proj.id, alice.token, { objectType: 'seurat', metadata: { sourceType: 'pbmc3k_demo' } });
+    expect(created.status).toBe(201);
+    const aoId = created.data.id;
+
+    const patched = await patchSummary(proj.id, aoId, alice.token, { cells: 2700, features: 13714, density: 2.59 });
+    expect(patched.status).toBe(200);
+    expect(patched.data.metadata.summary).toEqual({ cells: 2700, features: 13714, density: 2.59 });
+    // Original metadata is preserved, not clobbered.
+    expect(patched.data.metadata.sourceType).toBe('pbmc3k_demo');
+
+    // A fresh GET (simulating a reload) still sees the persisted counts.
+    const reread = await api(server, `/api/projects/${proj.id}/analysis-objects/${aoId}`, { token: alice.token });
+    expect(reread.status).toBe(200);
+    expect(reread.data.metadata.summary).toEqual({ cells: 2700, features: 13714, density: 2.59 });
+
+    const list = await api(server, `/api/projects/${proj.id}/analysis-objects`, { token: alice.token });
+    expect(list.data[0].metadata.summary.cells).toBe(2700);
+  });
+
+  it('never exposes storage/hash/state/path fields and rejects attempts to set them', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    const created = await createAO(proj.id, alice.token, { objectType: 'seurat', metadata: { sourceType: 'pbmc3k_demo' } });
+    const aoId = created.data.id;
+
+    for (const field of ['storageUri', 'storage_uri', 'storageKey', 'storage_key', 'internalStorageKey', 'objectHash', 'path', 'stateKey', 'state_key']) {
+      const res = await patchSummary(proj.id, aoId, alice.token, { cells: 10, [field]: 'vault/secret.rds' });
+      expect(res.status, field).toBe(400);
+    }
+    // Server-controlled identity fields are also rejected.
+    for (const field of ['id', 'projectId', 'ownerUserId', 'owner_user_id']) {
+      const res = await patchSummary(proj.id, aoId, alice.token, { cells: 10, [field]: 'x' });
+      expect(res.status, field).toBe(400);
+    }
+
+    const ok = await patchSummary(proj.id, aoId, alice.token, { cells: 2700, features: 13714, density: 2.59 });
+    expect(ok.status).toBe(200);
+    const raw = JSON.stringify(ok.data);
+    expect(raw).not.toContain('vault/');
+    expect(ok.data.storageUri).toBeUndefined();
+    expect(ok.data.objectHash).toBeUndefined();
+    expect(ok.data.metadata.summary.storageKey).toBeUndefined();
+    expect(ok.data.metadata.summary.stateKey).toBeUndefined();
+  });
+
+  it('rejects non-numeric / negative summary values (400)', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    const aoId = (await createAO(proj.id, alice.token, { objectType: 'seurat' })).data.id;
+
+    expect((await patchSummary(proj.id, aoId, alice.token, { cells: 'lots' })).status).toBe(400);
+    expect((await patchSummary(proj.id, aoId, alice.token, { features: -5 })).status).toBe(400);
+    expect((await patchSummary(proj.id, aoId, alice.token, { density: 'high' })).status).toBe(400);
+  });
+
+  it('400 on malformed object id, 404 on unknown object in the project', async () => {
+    const { alice } = users();
+    const proj = seedProject(alice.user.id);
+    expect((await patchSummary(proj.id, 'not-an-ao-id', alice.token, { cells: 1 })).status).toBe(400);
+    expect((await patchSummary(proj.id, 'ao_deadbeefdeadbeefdeadbeef', alice.token, { cells: 1 })).status).toBe(404);
+  });
+
+  it('non-member gets 404 and a viewer gets 403 (no RBAC weakening)', async () => {
+    const { alice, bob, dave } = users();
+    const proj = seedProject(alice.user.id);
+    addMember(proj.id, bob.user.email, 'viewer');
+    const aoId = (await createAO(proj.id, alice.token, { objectType: 'seurat' })).data.id;
+
+    // Non-member: 404 (no existence leak).
+    expect((await patchSummary(proj.id, aoId, dave.token, { cells: 1 })).status).toBe(404);
+    // Viewer is a member but lacks a write role: 403.
+    expect((await patchSummary(proj.id, aoId, bob.token, { cells: 1 })).status).toBe(403);
+    // The object's summary was not mutated by the rejected calls.
+    const reread = await api(server, `/api/projects/${proj.id}/analysis-objects/${aoId}`, { token: alice.token });
+    expect(reread.data.metadata.summary).toBeUndefined();
   });
 });
 

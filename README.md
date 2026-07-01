@@ -54,12 +54,19 @@ Requires a local R installation with Seurat (and the packages listed in
 - Browser sessions still use localStorage bearer tokens. Logout clears the
   current local auth/session keys, but this is not a production-grade session
   model with secure cookies or server-side token revocation.
-- The React workspace still contains legacy/ephemeral local UI state while the
-  backend project, dataset, analysis-object, job, artifact, and lineage model is
-  DB-backed. That workflow mismatch is a known follow-up and is not solved here.
+- The React workspace now begins using backend projects and DB-backed analysis
+  objects for the PBMC demo/live-object path. localStorage project/object blobs
+  are no longer authoritative; it may cache selected project/object IDs as UI
+  preferences only.
+- Immediate PBMC demo -> Quality Control uses a verified DB analysis object ID.
+  The live R object remains transient/private: object metadata can persist after
+  refresh even when the live R session is no longer attached.
 - Pathway Enrichment, CellChat, Custom Script, and Cell Annotation are not
   production-integrated workflow actions. They are hidden or disabled as future
   work; arbitrary R script execution remains out of scope.
+- This branch does not add artifact downloads, object storage, generated
+  reproducibility scripts, report generation, shared project live R state,
+  production-grade runtime isolation, or a full dataset upload redesign.
 
 ### Auth rate limiting & reverse proxies
 

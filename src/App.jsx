@@ -29,6 +29,18 @@ import {
   getCachedResult,
   setCachedResult,
 } from './provenance';
+import {
+  buildAnalysisObjectSummary,
+  cacheSelectedAnalysisObject,
+  cacheSelectedProject,
+  createAnalysisObjectForLiveLoad,
+  createEmptyWorkspace,
+  createProjectWithBackend,
+  loadBackendProjectState,
+  loadProjectAnalysisObjectState,
+  mapBackendAnalysisObject,
+  persistAnalysisObjectSummary,
+} from './backendWorkspaceModel';
 
 // Pipeline step ordering — used for downstream invalidation
 const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'];
@@ -158,67 +170,25 @@ export default function App() {
     }
   }, [activeTab, user?.email]);
 
-  // Collaborative Multi-Workspace Management
-  const [workspaces, setWorkspaces] = useState(() => {
-    const defaultWs = [
-      {
-        id: 'ws-personal-1',
-        name: 'Personal Workspace',
-        projects: [{ id: 'proj-default', name: 'Default Project' }],
-        objects: [],
-        selectedObjectIds: [],
-        activeBranch: 'main',
-        branches: { 'main': null },
-        collaborators: ['me@lab.edu'],
-        type: 'personal',
-        dataVersion: 0,
-        annotVersion: 0
-      },
-      {
-        id: 'ws-shared-1',
-        name: 'Shared Laboratory',
-        objects: [],
-        selectedObjectIds: [],
-        activeBranch: 'main',
-        branches: { 'main': null },
-        collaborators: ['researcher@lab.edu', 'pi@lab.edu'],
-        type: 'shared',
-        dataVersion: 0,
-        annotVersion: 0
-      }
-    ];
-    
-    // Attempt synchronous initialization to avoid race condition with save-on-mount
-    const wsStorageKey = 'benchone_ws_researcher@lab.edu'; // Since user is statically initialized to this
-    try {
-      const saved = localStorage.getItem(wsStorageKey);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (!Array.isArray(parsed)) throw new Error('Invalid workspace data format');
-        return defaultWs.map((ws, i) => {
-          if (i >= parsed.length) return ws;
-          const loadedProjects = parsed[i]?.projects ?? ws.projects;
-          const loadedObjects = (parsed[i]?.objects ?? ws.objects).map(obj => ({
-            ...obj,
-            projectId: obj.projectId || loadedProjects[0]?.id || 'proj-default'
-          }));
-          return {
-            ...ws,
-            projects:          loadedProjects,
-            objects:           loadedObjects,
-            selectedObjectIds: parsed[i]?.selectedObjectIds ?? ws.selectedObjectIds,
-            branches:          parsed[i]?.branches          ?? ws.branches,
-            dataVersion:       parsed[i]?.dataVersion       ?? ws.dataVersion,
-            lastSelectedByProject: parsed[i]?.lastSelectedByProject ?? ws.lastSelectedByProject,
-          };
-        });
-      }
-    } catch (e) {
-      console.warn('[App] Failed to synchronous restore workspaces:', e);
-    }
-    return defaultWs;
-  });
+  // Collaborative workspace shell. Backend projects/analysis objects are loaded
+  // after login; localStorage is no longer a durable project/object source.
+  const [workspaces, setWorkspaces] = useState(() => [
+    createEmptyWorkspace({ collaborators: ['me@lab.edu'] }),
+    createEmptyWorkspace({
+      id: 'ws-shared-1',
+      name: 'Shared Laboratory',
+      type: 'shared',
+      collaborators: ['researcher@lab.edu', 'pi@lab.edu'],
+    }),
+  ]);
   const [activeWsIndex, setActiveWsIndex] = useState(0);
+  const [backendModelStatus, setBackendModelStatus] = useState({
+    projectsLoading: false,
+    objectsLoading: false,
+    error: null,
+    projectCacheCleared: false,
+    objectCacheCleared: false,
+  });
 
   const currentWs = workspaces[activeWsIndex];
   const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
@@ -233,9 +203,6 @@ export default function App() {
   // so that all stateful steps re-execute in R and rebuild global_obj.
   const [rSessionId, setRSessionId] = useState(null);
   const sessionReady = sessionCheckDone && !!rSessionId;
-  // Mutable ref always pointing to the current user+object RDS path.
-  // Used inside callApi (which is a stale closure) to avoid dependency issues.
-  const sessionPathRef = React.useRef(null);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -261,6 +228,157 @@ export default function App() {
       return copy;
     });
   }, [activeWsIndex]);
+
+  const patchActiveWorkspace = useCallback((updater) => {
+    setWorkspaces(prev => {
+      const copy = [...prev];
+      const current = copy[activeWsIndex];
+      const updates = typeof updater === 'function' ? updater(current) : updater;
+      copy[activeWsIndex] = { ...current, ...updates };
+      return copy;
+    });
+  }, [activeWsIndex]);
+
+  const refreshAnalysisObjects = useCallback(async (projectId) => {
+    if (!user?.email || !projectId) {
+      patchActiveWorkspace({ objects: [], selectedObjectIds: [] });
+      return { objects: [], selectedObjectId: null };
+    }
+
+    setBackendModelStatus(prev => ({ ...prev, objectsLoading: true, error: null, objectCacheCleared: false }));
+    try {
+      const state = await loadProjectAnalysisObjectState(window.electronAPI, localStorage, user, projectId);
+      patchActiveWorkspace(ws => ({
+        objects: state.objects,
+        selectedObjectIds: state.selectedObjectId ? [state.selectedObjectId] : [],
+        lastSelectedByProject: state.selectedObjectId
+          ? { ...(ws.lastSelectedByProject || {}), [projectId]: state.selectedObjectId }
+          : (ws.lastSelectedByProject || {}),
+      }));
+      setBackendModelStatus(prev => ({
+        ...prev,
+        objectsLoading: false,
+        objectCacheCleared: state.cacheWasInvalid,
+      }));
+      return state;
+    } catch (err) {
+      console.error('[App] Failed to load analysis objects:', err);
+      patchActiveWorkspace({ objects: [], selectedObjectIds: [] });
+      setBackendModelStatus(prev => ({
+        ...prev,
+        objectsLoading: false,
+        error: err.message || 'Failed to load analysis objects.',
+      }));
+      return { objects: [], selectedObjectId: null, error: err };
+    }
+  }, [patchActiveWorkspace, user]);
+
+  const refreshProjects = useCallback(async () => {
+    if (!user?.email) return;
+    setBackendModelStatus(prev => ({ ...prev, projectsLoading: true, error: null, projectCacheCleared: false }));
+    try {
+      const state = await loadBackendProjectState(window.electronAPI, localStorage, user);
+      patchActiveWorkspace({
+        projects: state.projects,
+        selectedProjectId: state.selectedProjectId,
+        objects: [],
+        selectedObjectIds: [],
+        lastSelectedByProject: {},
+      });
+      setBackendModelStatus(prev => ({
+        ...prev,
+        projectsLoading: false,
+        projectCacheCleared: state.cacheWasInvalid,
+      }));
+      if (state.selectedProjectId) {
+        await refreshAnalysisObjects(state.selectedProjectId);
+      }
+      return state;
+    } catch (err) {
+      console.error('[App] Failed to load projects:', err);
+      patchActiveWorkspace({ projects: [], selectedProjectId: null, objects: [], selectedObjectIds: [] });
+      setBackendModelStatus(prev => ({
+        ...prev,
+        projectsLoading: false,
+        error: err.message || 'Failed to load backend projects.',
+      }));
+      return { projects: [], selectedProjectId: null, error: err };
+    }
+  }, [patchActiveWorkspace, refreshAnalysisObjects, user]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    refreshProjects();
+  }, [refreshProjects, user?.email]);
+
+  const handleSelectProject = useCallback(async (projectId) => {
+    cacheSelectedProject(localStorage, user, projectId);
+    patchActiveWorkspace({
+      selectedProjectId: projectId,
+      objects: [],
+      selectedObjectIds: [],
+    });
+    await refreshAnalysisObjects(projectId);
+  }, [patchActiveWorkspace, refreshAnalysisObjects, user]);
+
+  const handleCreateProject = useCallback(async ({ name, description }) => {
+    const project = await createProjectWithBackend(window.electronAPI, { name, description });
+    cacheSelectedProject(localStorage, user, project.id);
+    patchActiveWorkspace(ws => ({
+      projects: [project, ...ws.projects.filter(p => p.id !== project.id)],
+      selectedProjectId: project.id,
+      objects: [],
+      selectedObjectIds: [],
+      lastSelectedByProject: {},
+    }));
+    return project;
+  }, [patchActiveWorkspace, user]);
+
+  const handleCreateAnalysisObjectForLoad = useCallback(async ({ projectId, displayName, sourceType, metadata }) => {
+    if (!projectId) throw new Error('Select or create a backend project before loading data.');
+    return createAnalysisObjectForLiveLoad(window.electronAPI, projectId, {
+      displayName,
+      sourceType,
+      metadata,
+    });
+  }, []);
+
+  const handleAnalysisObjectLoaded = useCallback((projectId, analysisObject, liveResult) => {
+    const objectCard = mapBackendAnalysisObject(analysisObject, liveResult);
+    cacheSelectedProject(localStorage, user, projectId);
+    cacheSelectedAnalysisObject(localStorage, user, projectId, analysisObject.id);
+
+    // Persist the live cell/feature/density counts as safe summary metadata so the
+    // Workspace/Data Info card stays accurate after a refresh (live R state is
+    // transient and not restored on reload). Fire-and-forget: the card already shows
+    // the live counts this session; a failure here only affects the refreshed view.
+    persistAnalysisObjectSummary(
+      window.electronAPI, projectId, analysisObject.id, buildAnalysisObjectSummary(objectCard)
+    ).catch(err => console.error('Failed to persist analysis object summary:', err));
+
+    patchActiveWorkspace(ws => ({
+      selectedProjectId: projectId,
+      objects: [
+        objectCard,
+        ...ws.objects.filter(obj => obj.id !== analysisObject.id),
+      ],
+      selectedObjectIds: [analysisObject.id],
+      lastSelectedByProject: {
+        ...(ws.lastSelectedByProject || {}),
+        [projectId]: analysisObject.id,
+      },
+    }));
+  }, [patchActiveWorkspace, user]);
+
+  const handleSelectAnalysisObject = useCallback((projectId, objectId) => {
+    cacheSelectedAnalysisObject(localStorage, user, projectId, objectId);
+    patchActiveWorkspace(ws => ({
+      selectedObjectIds: objectId ? [objectId] : [],
+      lastSelectedByProject: objectId
+        ? { ...(ws.lastSelectedByProject || {}), [projectId]: objectId }
+        : (ws.lastSelectedByProject || {}),
+    }));
+  }, [patchActiveWorkspace, user]);
 
   /**
    * Mark a pipeline step as complete and invalidate downstream steps if re-running.
@@ -313,9 +431,13 @@ export default function App() {
     });
   }, []);
 
-  const handleSubsetCreated = useCallback((data, newName) => {
+  const handleSubsetCreated = useCallback(async (data, newName) => {
     const parentObj = currentWs.objects.find(o => o.id === datasetInfo?.id);
-    const projId = parentObj?.projectId || currentWs.projects?.[0]?.id || 'proj-default';
+    const projId = parentObj?.projectId || currentWs.selectedProjectId;
+    if (!projId || !datasetInfo?.id) {
+      console.warn('[Subset] Cannot record subset without a selected backend project/object.');
+      return;
+    }
     
     const existingNames = currentWs.objects.filter(o => o.projectId === projId).map(o => o.name);
     let finalName = newName.trim() || 'Subset';
@@ -325,14 +447,26 @@ export default function App() {
       counter++;
     }
     
+    let created;
+    try {
+      created = await window.electronAPI.createProjectAnalysisObject(projId, {
+        objectType: 'seurat',
+        displayName: finalName,
+        parentObjectId: datasetInfo.id,
+        metadata: {
+          sourceType: 'subset',
+          liveState: 'private_transient',
+          uiFlow: 'subset',
+        },
+      });
+    } catch (err) {
+      console.warn('[Subset] Failed to create backend analysis object:', err);
+      return;
+    }
     const newObj = {
-      id: data.newId || `obj-${crypto.randomUUID()}`,
-      projectId: projId,
-      name: finalName,
-      ...data.result,
-      timestamp: new Date().toISOString(),
+      ...mapBackendAnalysisObject(created, data.result),
       isSubset: true,
-      parentObjId: datasetInfo?.id ?? null,
+      parentObjId: datasetInfo.id,
     };
 
     setWorkspaces(prev => {
@@ -349,6 +483,7 @@ export default function App() {
       };
       return copy;
     });
+    cacheSelectedAnalysisObject(localStorage, user, projId, newObj.id);
     
     const sanitizedEmail = (user?.email || '').replace(/[^a-zA-Z0-9]/g, '_');
     
@@ -380,9 +515,8 @@ export default function App() {
     };
     setPipelineState(initialSubsetPS);
 
-    // 3. No need to call /save-session here anymore because the /subset call 
-    // already persisted the child to disk non-destructively.
-  }, [activeWsIndex, currentWs, datasetInfo, user?.email]);
+    // The subset object is DB-backed metadata; live R state remains transient.
+  }, [activeWsIndex, currentWs, datasetInfo, pipelineState.qcSummary, user]);
 
   const callApi = useCallback(async (path, options = {}, {
     
@@ -486,13 +620,6 @@ export default function App() {
               )
             });
           }
-          // Immediately persist the R object so a session restore finds it.
-          // Firing here (inside callApi, not a useEffect) means the save is
-          // in-flight before any UI re-render and can't be raced by app-close.
-          if (sessionPathRef.current) {
-            window.electronAPI.apiRequest('/save-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: sessionPathRef.current }) })
-              .catch(e => console.warn('[Session] Auto-save failed:', e));
-          }
         }
 
         if (useCache && effectiveCacheParams) {
@@ -525,54 +652,43 @@ export default function App() {
       setRSessionId(null);
       setSessionCheckDone(false);
       setApiStatus('Checking backend');
+      setWorkspaces([
+        createEmptyWorkspace({ collaborators: ['me@lab.edu'] }),
+        createEmptyWorkspace({
+          id: 'ws-shared-1',
+          name: 'Shared Laboratory',
+          type: 'shared',
+          collaborators: ['researcher@lab.edu', 'pi@lab.edu'],
+        }),
+      ]);
+      setBackendModelStatus({
+        projectsLoading: false,
+        objectsLoading: false,
+        error: null,
+        projectCacheCleared: false,
+        objectCacheCleared: false,
+      });
     }
   };
 
   // ── Workspace Persistence ───────────────────────────────────────
-  // Save/restore the objects array (workspace card metadata) between sessions.
-  // The R session is stateless across restarts so the user still needs to
-  // re-run the pipeline, but the workspace card (name, cells, features) persists.
-  const wsStorageKey = user?.email ? `benchone_ws_${user.email}` : null;
-
-
-
-  // Save on any workspace change
-  useEffect(() => {
-    if (!wsStorageKey) return;
-    try {
-      const toSave = workspaces.map(ws => ({
-        projects:          ws.projects,
-        objects:           ws.objects,
-        selectedObjectIds: ws.selectedObjectIds,
-        branches:          ws.branches,
-        dataVersion:       ws.dataVersion,
-        lastSelectedByProject: ws.lastSelectedByProject,
-      }));
-      localStorage.setItem(wsStorageKey, JSON.stringify(toSave));
-    } catch (e) {
-      console.warn('[App] Failed to save workspaces:', e);
-    }
-  }, [workspaces, wsStorageKey]);
+  // Legacy benchone_ws_* localStorage keys are intentionally ignored here.
+  // Backend projects and analysis-object rows are the authoritative workspace
+  // model; localStorage only caches selected project/object IDs.
   // ────────────────────────────────────────────────────────────────
 
   // ── R Session / Pipeline Persistence ─────────────────────────────
-  // Strategy: after each pipeline step R saves global_obj as an RDS.
-  // The companion JSON stores the session ID. On next login, we restore
-  // the RDS *and* the session ID, so the SQLite result cache remains
-  // valid and all pipeline tabs hydrate from cache (no re-running needed).
-
-  const sanitizeEmail = (email) => email.replace(/[^a-zA-Z0-9]/g, '_');
-  const getSessionPath = (email, objId) =>
-    email && objId ? `vault/${sanitizeEmail(email)}/${objId}.rds` : null;
+  // Live R state is private and transient. The UI probes the server for the
+  // current process session ID only; it does not restore objects from
+  // client-selected paths or localStorage session metadata.
+  const getSessionPath = () => null;
+  const currentlyRestoredObjectRef = React.useRef(null);
 
   // Track the currently restored object ID (avoid re-firing if React re-renders)
-  const currentlyRestoredObjectRef = React.useRef(null);
 
   // 0. Keep sessionPathRef in sync so callApi can always find the save path
   useEffect(() => {
-    sessionPathRef.current = user?.email && datasetInfo?.id
-      ? getSessionPath(user.email, datasetInfo.id)
-      : null;
+    return undefined;
   }); // runs every render — cheap, keeps ref always fresh
 
 
@@ -594,7 +710,7 @@ export default function App() {
     if (!path) { setSessionCheckDone(true); return; }
  
     console.log('[Vault] Checking for stored object:', path);
-    window.electronAPI.apiRequest('/check-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) })
+    window.electronAPI.apiRequest('/session-id')
       .then(d => {
         if (!d.exists) {
           console.log('[Vault] No stored object found — initializing fresh state.');
@@ -604,7 +720,7 @@ export default function App() {
           });
         }
         console.log('[Vault] Found stored object, restoring state…');
-        return window.electronAPI.apiRequest('/restore-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) })
+        return window.electronAPI.apiRequest('/session-id')
           .then(d2 => {
             if (d2?.success) {
               const reductionsStr = Array.isArray(d2.reductions) 
@@ -647,6 +763,25 @@ export default function App() {
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.email, datasetInfo?.id]);
+
+  useEffect(() => {
+    if (!user?.email) {
+      setSessionCheckDone(true);
+      return;
+    }
+    setSessionCheckDone(false);
+    window.electronAPI.apiRequest('/session-id')
+      .then(data => {
+        if (data?.sessionId) setRSessionId(data.sessionId);
+        if (!datasetInfo?.id) resetPipelineState();
+      })
+      .catch(e => {
+        console.warn('[Session] R session probe failed:', e);
+        setRSessionId(null);
+        resetPipelineState();
+      })
+      .finally(() => setSessionCheckDone(true));
+  }, [user?.email, datasetInfo?.id, resetPipelineState]);
 
 
 
@@ -721,7 +856,7 @@ export default function App() {
     const objKey = datasetInfo?.id ?? 'none';
     const getLatestId = (op) => provenanceRecords.find(r => r.operation === op)?.id;
 
-    const activeProjectId = datasetInfo?.projectId || currentWs.projects?.[0]?.id || 'proj-default';
+    const activeProjectId = datasetInfo?.projectId || currentWs.selectedProjectId || currentWs.projects?.[0]?.id || null;
     const activeProjectSeed = currentWs.projects?.find(p => p.id === activeProjectId)?.seed || '';
 
     const props = {
@@ -761,9 +896,15 @@ export default function App() {
             activeWsIndex={activeWsIndex}
             setActiveWsIndex={setActiveWsIndex}
             setActiveTab={setActiveTab}
+            backendModelStatus={backendModelStatus}
+            onSelectProject={handleSelectProject}
+            onCreateProject={handleCreateProject}
+            onCreateAnalysisObjectForLoad={handleCreateAnalysisObjectForLoad}
+            onAnalysisObjectLoaded={handleAnalysisObjectLoaded}
+            onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
-        <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={user?.email && datasetInfo?.id ? `vault/${user.email.replace(/[^a-zA-Z0-9]/g, '_')}/${datasetInfo.id}.rds` : null} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="normalize"><TabContent id="normalize" activeTab={activeTab}><Normalization key={objKey} {...props} /></TabContent></ErrorBoundary>

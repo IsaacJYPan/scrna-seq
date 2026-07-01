@@ -119,6 +119,13 @@ graph TD
   session or to raw figure files, and there is no shared mutable project R state.
   The collaboration UI remains a mockup until execution is migrated onto these
   primitives in a later branch.
+- **Frontend project/object source of truth.** The React workspace now starts
+  from `GET /api/projects` after login and lists project analysis objects from
+  `GET /api/projects/:projectId/analysis-objects`. Creating/loading the PBMC demo
+  first creates a project-scoped DB analysis object, then uses that verified
+  `ao_*` id on live R calls. localStorage may cache selected project/object ids
+  only; legacy workspace blobs are not durable project/object truth. Object
+  metadata can survive refresh even when the private live R state is gone.
 
 ## Reproducibility / Provenance Model
 - **Provenance.** Each R endpoint wraps its result in a provenance envelope
@@ -224,6 +231,12 @@ longer be an arbitrary client string that selects R session state:
   authenticated and owner-scoped; not-owned/unknown ids return 404. A test-only
   `GET /api/r/__test/state-key` diagnostic exposes the derived key (gated by
   `ENABLE_R_TEST_DIAGNOSTICS`, 404 in production / when disabled).
+- The UI's PBMC demo/live-load path uses the project-scoped
+  `/api/projects/:projectId/analysis-objects` route. The browser supplies only
+  the selected `ao_*` id to R-proxied calls; Express verifies ownership with
+  `verifyRObjectOwnership` and derives the R state key server-side. It does not
+  allow the browser to choose owners, project ids outside the route, R state
+  keys, storage paths, storage keys, job status, or lineage roots.
 
 ### Jobs / Task Execution (`jobs`)
 Long-running analysis is no longer modeled as *only* a browser request/response.

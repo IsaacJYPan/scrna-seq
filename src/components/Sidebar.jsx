@@ -72,8 +72,9 @@ export default function Sidebar({
     const newWs = {
       id: `ws-${Date.now()}`,
       name: `New Workspace ${workspaces.length}`,
-      projects: [{ id: `proj-${Date.now()}`, name: 'Default Project' }],
+      projects: [],
       objects: [],
+      selectedProjectId: null,
       selectedObjectIds: [],
       activeBranch: 'main',
       branches: { 'main': null },
