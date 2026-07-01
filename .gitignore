@@ -35,6 +35,7 @@ Thumbs.db
 
 # Local assistant/tool settings
 .claude/
+/AGENTS.md
 
 # Vite
 .vite/
