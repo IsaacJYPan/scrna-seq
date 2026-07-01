@@ -191,3 +191,24 @@ export async function createAnalysisObjectForLiveLoad(api, projectId, input) {
   const payload = buildLiveLoadAnalysisObjectPayload(input);
   return api.createProjectAnalysisObject(projectId, payload);
 }
+
+// Build a small, safe display summary from a mapped analysis-object card. Only the
+// finite numeric counts the Workspace/Data Info card shows are included — no storage,
+// state, path, or identity fields. Returns {} when no usable numbers are present.
+export function buildAnalysisObjectSummary({ cells, features, density } = {}) {
+  const summary = {};
+  if (Number.isFinite(cells)) summary.cells = cells;
+  if (Number.isFinite(features)) summary.features = features;
+  if (Number.isFinite(density)) summary.density = density;
+  return summary;
+}
+
+// Persist the display summary onto the backend analysis object so the counts survive
+// a browser refresh (live R counts are transient). Metadata-only; the backend rejects
+// any storage/state/owner/project field and leaves R state untouched. No-ops when
+// there is nothing to persist or the API does not support the call.
+export async function persistAnalysisObjectSummary(api, projectId, objectId, summary) {
+  if (!projectId || !objectId || !summary || Object.keys(summary).length === 0) return null;
+  if (!api || typeof api.updateProjectAnalysisObjectSummary !== 'function') return null;
+  return api.updateProjectAnalysisObjectSummary(projectId, objectId, summary);
+}

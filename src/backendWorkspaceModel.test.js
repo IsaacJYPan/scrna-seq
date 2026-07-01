@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  buildAnalysisObjectSummary,
   buildLiveLoadAnalysisObjectPayload,
   cacheSelectedAnalysisObject,
   cacheSelectedProject,
@@ -8,6 +9,7 @@ import {
   createProjectWithBackend,
   loadBackendProjectState,
   loadProjectAnalysisObjectState,
+  persistAnalysisObjectSummary,
   selectedObjectStorageKey,
   selectedProjectStorageKey,
 } from './backendWorkspaceModel';
@@ -199,5 +201,54 @@ describe('backend workspace model', () => {
       displayName: 'PBMC_3k_Tutorial',
     }));
     expect(created.id).toBe('ao_created');
+  });
+
+  it('builds a display summary from only finite numeric counts', () => {
+    expect(buildAnalysisObjectSummary({ cells: 2700, features: 13714, density: 2.59 }))
+      .toEqual({ cells: 2700, features: 13714, density: 2.59 });
+    // Missing / non-finite values are dropped, never coerced to 0.
+    expect(buildAnalysisObjectSummary({ cells: 2700, features: undefined, density: NaN }))
+      .toEqual({ cells: 2700 });
+    expect(buildAnalysisObjectSummary({})).toEqual({});
+    expect(buildAnalysisObjectSummary()).toEqual({});
+  });
+
+  it('persists the summary through the backend only when there is something to send', async () => {
+    const api = { updateProjectAnalysisObjectSummary: vi.fn(async () => ({ id: 'ao_1' })) };
+
+    await persistAnalysisObjectSummary(api, 'proj_1', 'ao_1', { cells: 2700, features: 13714, density: 2.59 });
+    expect(api.updateProjectAnalysisObjectSummary).toHaveBeenCalledWith('proj_1', 'ao_1', { cells: 2700, features: 13714, density: 2.59 });
+
+    api.updateProjectAnalysisObjectSummary.mockClear();
+    await persistAnalysisObjectSummary(api, 'proj_1', 'ao_1', {});
+    await persistAnalysisObjectSummary(api, null, 'ao_1', { cells: 1 });
+    await persistAnalysisObjectSummary(api, 'proj_1', null, { cells: 1 });
+    expect(api.updateProjectAnalysisObjectSummary).not.toHaveBeenCalled();
+  });
+
+  it('reloads cells/features/density from persisted summary metadata after a refresh', async () => {
+    // Simulates a browser refresh: no live R result, counts come from the object's
+    // persisted metadata.summary instead of the transient live load.
+    const api = {
+      listProjectAnalysisObjects: vi.fn(async () => [
+        {
+          id: 'ao_abc123',
+          projectId: 'proj_1',
+          objectType: 'seurat',
+          displayName: 'PBMC_3k_Tutorial',
+          metadata: { sourceType: 'pbmc3k_demo', summary: { cells: 2700, features: 13714, density: 2.59 } },
+        },
+      ]),
+    };
+    const storage = makeStorage();
+
+    const state = await loadProjectAnalysisObjectState(api, storage, user, 'proj_1');
+
+    expect(state.objects[0]).toEqual(expect.objectContaining({
+      id: 'ao_abc123',
+      cells: 2700,
+      features: 13714,
+      density: 2.59,
+    }));
   });
 });

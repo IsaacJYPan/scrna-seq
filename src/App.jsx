@@ -30,6 +30,7 @@ import {
   setCachedResult,
 } from './provenance';
 import {
+  buildAnalysisObjectSummary,
   cacheSelectedAnalysisObject,
   cacheSelectedProject,
   createAnalysisObjectForLiveLoad,
@@ -38,6 +39,7 @@ import {
   loadBackendProjectState,
   loadProjectAnalysisObjectState,
   mapBackendAnalysisObject,
+  persistAnalysisObjectSummary,
 } from './backendWorkspaceModel';
 
 // Pipeline step ordering — used for downstream invalidation
@@ -345,6 +347,15 @@ export default function App() {
     const objectCard = mapBackendAnalysisObject(analysisObject, liveResult);
     cacheSelectedProject(localStorage, user, projectId);
     cacheSelectedAnalysisObject(localStorage, user, projectId, analysisObject.id);
+
+    // Persist the live cell/feature/density counts as safe summary metadata so the
+    // Workspace/Data Info card stays accurate after a refresh (live R state is
+    // transient and not restored on reload). Fire-and-forget: the card already shows
+    // the live counts this session; a failure here only affects the refreshed view.
+    persistAnalysisObjectSummary(
+      window.electronAPI, projectId, analysisObject.id, buildAnalysisObjectSummary(objectCard)
+    ).catch(err => console.error('Failed to persist analysis object summary:', err));
+
     patchActiveWorkspace(ws => ({
       selectedProjectId: projectId,
       objects: [

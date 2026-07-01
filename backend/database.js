@@ -2883,6 +2883,47 @@ function getProjectAnalysisObject(userId, projectId, objectId) {
   return getProjectAnalysisObjectRow(objectId, projectId);
 }
 
+// Display-summary fields that may be persisted on metadata.summary. These are the
+// small, non-sensitive counts the Workspace/Data Info card shows. Storage URIs,
+// hashes, paths, and R state keys are NEVER part of this set.
+const ALLOWED_ANALYSIS_SUMMARY_FIELDS = ['cells', 'features', 'density'];
+
+/**
+ * Persist a small, safe display summary (cells / features / density) onto a project
+ * analysis object's `metadata.summary`. Requires owner/admin/analyst of the project;
+ * the object must belong to the project (else ANALYSIS_OBJECT_NOT_FOUND → 404). Only
+ * finite, non-negative numeric fields are read — no storage/state/path/owner fields
+ * are ever read or written, and R state is untouched. Returns the updated row.
+ */
+function updateProjectAnalysisObjectSummary(userId, projectId, objectId, summary = {}) {
+  requireProjectRole(userId, projectId, ANALYSIS_WRITE_ROLES);
+  const pid = String(projectId);
+  const existing = getProjectAnalysisObjectRow(objectId, pid);
+  if (!existing) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+
+  const input = summary && typeof summary === 'object' && !Array.isArray(summary) ? summary : {};
+  const cleanSummary = {};
+  for (const field of ALLOWED_ANALYSIS_SUMMARY_FIELDS) {
+    const value = input[field];
+    if (value === undefined || value === null) continue;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) {
+      throw codedError('INVALID_METADATA', `Summary field '${field}' must be a non-negative number.`);
+    }
+    cleanSummary[field] = n;
+  }
+
+  const metadata = existing.metadata && typeof existing.metadata === 'object' ? existing.metadata : {};
+  const prevSummary = metadata.summary && typeof metadata.summary === 'object' && !Array.isArray(metadata.summary)
+    ? metadata.summary : {};
+  const nextMetadata = { ...metadata, summary: { ...prevSummary, ...cleanSummary } };
+
+  db.prepare('UPDATE analysis_objects SET metadata_json = ?, updated_at = ? WHERE id = ? AND project_id = ?')
+    .run(JSON.stringify(nextMetadata), dbNow(), String(objectId), pid);
+
+  return getProjectAnalysisObjectRow(objectId, pid);
+}
+
 /**
  * Create a project-scoped job. Requires owner/admin/analyst of `projectId`.
  * project_id and owner_user_id are server-set; status starts at INITIAL_JOB_STATUS
@@ -4919,6 +4960,7 @@ module.exports = {
   createProjectAnalysisObject,
   listProjectAnalysisObjects,
   getProjectAnalysisObject,
+  updateProjectAnalysisObjectSummary,
   createProjectJob,
   listProjectJobs,
   getProjectJob,
