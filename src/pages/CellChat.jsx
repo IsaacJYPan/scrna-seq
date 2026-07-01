@@ -1,3 +1,9 @@
+// LEGACY / PROTOTYPE — NOT IMPORTED.
+// CellChat is not a production-integrated UI workflow; App.jsx renders a
+// PlaceholderPage for the "cellchat" tab instead of this component. This file is
+// kept as a legacy live-R prototype (it calls the authenticated /api/r/* proxy).
+// Do not build on it without deciding the CellChat product direction first.
+// See the "Implemented vs UI-wired" table in README.md.
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { MessageSquare, Play, Loader2, AlertCircle, Download, Search } from 'lucide-react';
 import Plot from 'react-plotly.js';
