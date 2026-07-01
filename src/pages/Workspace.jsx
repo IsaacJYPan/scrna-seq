@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 
 // Removed API constant
-// ── Load Dataset Modal ─────────────────────────────────────────────
+// ── Load Object Modal ──────────────────────────────────────────────
 
 function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId, onCreateAnalysisObjectForLoad }) {
   const [showFilters, setShowFilters] = useState(false);
@@ -269,7 +269,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
       id: 'rds',
       icon: <HardDrive size={22} className="text-violet-400" />,
       title: 'Seurat RDS Object',
-      desc: 'Load a pre-existing Seurat object saved as .rds. Existing reductions and metadata will be detected.',
+      desc: 'Load a trusted local Seurat object saved as .rds. RDS imports are a trusted-input boundary in this local/dev app.',
       tag: '.rds',
       tagColor: 'text-violet-400 bg-violet-500/10 border-violet-500/20',
       action: loadRds,
@@ -466,8 +466,8 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
           {/* Header */}
           <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800">
             <div>
-              <h3 className="text-lg font-black text-white tracking-tight">Load Dataset</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Choose a source to import into your workspace.</p>
+              <h3 className="text-lg font-black text-white tracking-tight">Load / Attach Object</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a DB-backed object and attach private live R state.</p>
             </div>
             <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
               <X size={16} />
@@ -556,6 +556,166 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
 
 // ── Main Workspace ─────────────────────────────────────────────────
 
+function StatusPill({ label, tone = 'slate' }) {
+  const tones = {
+    green: 'bg-success/10 text-success border-success/30',
+    blue: 'bg-primary/10 text-blue-700 dark:text-blue-300 border-primary/20',
+    amber: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+    slate: 'bg-slate-800 text-slate-300 border-slate-700',
+  };
+  return (
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${tones[tone] || tones.slate}`}>
+      {label}
+    </span>
+  );
+}
+
+function pipelineStatus(done, hasObject, fallback = 'Requires loaded object') {
+  if (!hasObject) return { label: fallback, tone: 'slate' };
+  return done ? { label: 'Ready', tone: 'green' } : { label: 'Ready', tone: 'blue' };
+}
+
+function WorkbenchOverview({
+  activeProject,
+  selectedObject,
+  activeProjectObjects,
+  pipelineState,
+  sessionReady,
+  rSessionId,
+  setActiveTab,
+  setShowLoadModal,
+}) {
+  const hasProject = !!activeProject;
+  const hasObject = !!selectedObject;
+  const isDbBacked = !!selectedObject?.isBackendAnalysisObject || /^ao_/.test(selectedObject?.id || '');
+  const liveAttached = selectedObject?.liveState === 'attached';
+  const liveStatus = !hasObject
+    ? { label: 'Requires loaded object', tone: 'slate' }
+    : liveAttached
+      ? { label: 'Live R: attached', tone: 'green' }
+      : { label: 'Live R: not attached', tone: sessionReady && rSessionId ? 'amber' : 'slate' };
+
+  const sections = [
+    { label: 'Project context', status: hasProject ? { label: 'Ready', tone: 'green' } : { label: 'Select project', tone: 'slate' }, detail: 'Durable backend project metadata.' },
+    { label: 'Dataset / object', status: hasObject ? { label: 'Ready', tone: 'green' } : { label: 'Requires loaded object', tone: 'slate' }, detail: 'DB-backed analysis object identity.' },
+    { label: 'Inspect', status: pipelineStatus(false, hasObject), detail: 'Live object metadata and subsetting.' },
+    { label: 'Quality control', status: pipelineStatus(pipelineState?.qc, hasObject), detail: 'Transient live-R workflow.' },
+    { label: 'Normalize', status: pipelineStatus(pipelineState?.normalize, hasObject), detail: 'Transient live-R workflow.' },
+    { label: 'PCA', status: pipelineStatus(pipelineState?.pca, hasObject), detail: 'Transient live-R workflow.' },
+    { label: 'Cluster / UMAP', status: !hasObject ? { label: 'Requires loaded object', tone: 'slate' } : pipelineState?.pca ? { label: 'Ready', tone: 'blue' } : { label: 'Requires PCA', tone: 'amber' }, detail: 'Live-R analysis and visualization.' },
+    { label: 'Markers / DEG', status: hasObject ? { label: 'Transient live-R workflow', tone: 'amber' } : { label: 'Requires loaded object', tone: 'slate' }, detail: 'Current UI uses the legacy live-R DEG path.' },
+    { label: 'Jobs & artifacts', status: hasProject ? { label: 'Read-only metadata', tone: 'blue' } : { label: 'Select project', tone: 'slate' }, detail: 'Durable backend foundation; no launch/download UI.' },
+    { label: 'Reports / export', status: { label: 'Future workflow', tone: 'slate' }, detail: 'Figure gallery exists; full reports are not implemented.' },
+    { label: 'Diagnostics', status: { label: 'Ready', tone: 'green' }, detail: 'Backend and R runtime checks.' },
+  ];
+
+  let nextAction = 'Select or create a backend project.';
+  let actionLabel = 'Create Project';
+  let action = null;
+  if (hasProject && !hasObject) {
+    nextAction = 'Load a PBMC demo or trusted local object into this backend project.';
+    actionLabel = 'Load Object';
+    action = () => setShowLoadModal(true);
+  } else if (hasProject && hasObject && !liveAttached) {
+    nextAction = 'This DB-backed object is selected, but its private live R state is not attached in this browser session.';
+    actionLabel = 'Open Object List';
+  } else if (hasProject && hasObject && !pipelineState?.qc) {
+    nextAction = 'Run quality control against the attached private live R object.';
+    actionLabel = 'Open Quality Control';
+    action = () => setActiveTab('qc');
+  } else if (hasProject && hasObject && !pipelineState?.normalize) {
+    nextAction = 'Run normalization before PCA and clustering.';
+    actionLabel = 'Open Normalize';
+    action = () => setActiveTab('normalize');
+  } else if (hasProject && hasObject && !pipelineState?.pca) {
+    nextAction = 'Run PCA to unlock clustering and UMAP.';
+    actionLabel = 'Open PCA';
+    action = () => setActiveTab('pca');
+  } else if (hasProject && hasObject) {
+    nextAction = 'Continue through clustering, UMAP, markers, or read project history.';
+    actionLabel = 'Open Jobs & Artifacts';
+    action = () => setActiveTab('history');
+  }
+
+  return (
+    <section className="space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h3 className="text-2xl font-black tracking-tight text-text">Pipeline Workbench</h3>
+          <p className="mt-2 max-w-3xl text-sm text-textMuted">
+            Current project, object, live-R attachment, and durable history status. Backend metadata is durable; live R state is private and transient.
+          </p>
+        </div>
+        {action && (
+          <button onClick={action} className="btn btn-primary text-sm font-bold">
+            {actionLabel}
+          </button>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="card p-4 bg-surface/70">
+          <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
+            <FolderTree size={14} /> Project
+          </div>
+          <div className="truncate text-lg font-bold text-text">{activeProject?.name || 'No backend project selected'}</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {activeProject?.role && <StatusPill label={activeProject.role} tone="blue" />}
+            {hasProject && <StatusPill label="Backend project" tone="green" />}
+          </div>
+        </div>
+
+        <div className="card p-4 bg-surface/70">
+          <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
+            <Database size={14} /> Object
+          </div>
+          <div className="truncate text-lg font-bold text-text">{selectedObject?.name || 'No analysis object selected'}</div>
+          <div className="mt-1 font-mono text-xs text-textMuted">{selectedObject?.id || `${activeProjectObjects.length} object(s) in project`}</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {isDbBacked && <StatusPill label="DB-backed object" tone="green" />}
+            {hasObject && <StatusPill label="Durable metadata" tone="blue" />}
+          </div>
+        </div>
+
+        <div className="card p-4 bg-surface/70">
+          <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
+            <Lock size={14} /> Live R State
+          </div>
+          <div className="text-lg font-bold text-text">{liveAttached ? 'Attached this session' : 'Private transient state'}</div>
+          <p className="mt-1 text-xs text-textMuted">Project membership does not grant live R object access.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <StatusPill label={liveStatus.label} tone={liveStatus.tone} />
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-widest text-blue-700 dark:text-blue-300">Next action</div>
+            <p className="mt-1 text-sm text-text">{nextAction}</p>
+          </div>
+          {!action && actionLabel === 'Create Project' && (
+            <span className="text-xs text-textMuted">Use the Projects section below.</span>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {sections.map(section => (
+          <div key={section.label} className="rounded-lg border border-border bg-surface/70 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="font-bold text-text">{section.label}</div>
+              <StatusPill label={section.status.label} tone={section.status.tone} />
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-textMuted">{section.detail}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export default function Workspace({
   callApi,
   datasetInfo,
@@ -576,6 +736,9 @@ export default function Workspace({
   onCreateAnalysisObjectForLoad,
   onAnalysisObjectLoaded,
   onSelectAnalysisObject,
+  pipelineState,
+  sessionReady,
+  rSessionId,
 }) {
   const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
   const [showLoadModal, setShowLoadModal] = useState(false);
@@ -730,6 +893,8 @@ export default function Workspace({
 
   const activeCount = selectedObjects.length;
   const displayObject = selectedObjects[0] || currentWs.objects[0];
+  const selectedObject = selectedObjects[0] || activeProjectObjects[0] || null;
+  const activeProject = currentWs.projects?.find(project => project.id === activeProjectId) || null;
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">
@@ -747,23 +912,28 @@ export default function Workspace({
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
         <div className="max-w-5xl mx-auto space-y-12 animate-in fade-in slide-in-from-bottom-6">
+          <WorkbenchOverview
+            activeProject={activeProject}
+            selectedObject={selectedObject}
+            activeProjectObjects={activeProjectObjects}
+            pipelineState={pipelineState}
+            sessionReady={sessionReady}
+            rSessionId={rSessionId}
+            setActiveTab={setActiveTab}
+            setShowLoadModal={setShowLoadModal}
+          />
 
           {/* Stats Block */}
           {displayObject && (
             <div className="animate-in fade-in slide-in-from-bottom-8 duration-700">
-              <button 
-                className="flex items-center gap-2 mb-4 group/info cursor-pointer hover:bg-white/5 px-2 py-1 -ml-2 rounded-lg transition-colors"
-                onClick={() => alert("Detailed dataset metadata modal would open here.")}
-                title="View detailed metadata"
-              >
+              <div className="flex items-center gap-2 mb-4 px-2 py-1 -ml-2">
                 <Info size={16} className="text-primary group-hover/info:text-white transition-colors" />
                 <h3 className="text-[10px] font-black text-slate-400 group-hover/info:text-slate-300 uppercase tracking-widest transition-colors">
                   {activeCount > 1
-                    ? `Multi-Select Mode (${activeCount} Active)`
+                    ? `Multi-Select Mode (${activeCount} Selected)`
                     : `Data Info: ${displayObject.name}`}
                 </h3>
-                <ChevronDown size={14} className="text-slate-500 group-hover/info:text-slate-300 opacity-0 group-hover/info:opacity-100 transition-all -ml-1" />
-              </button>
+              </div>
               <div className="grid grid-cols-4 gap-4">
                 {[
                   { label: 'Cells (Primary)',    value: displayObject.cells?.toLocaleString() || '0',        info: 'Total unique barcodes after filtering.', icon: Database },
@@ -881,7 +1051,7 @@ export default function Workspace({
                 disabled={!!loadingId || !activeProjectId}
                 className="btn btn-primary flex items-center gap-2 px-5 text-sm shadow-lg shadow-primary/20"
               >
-                <FileUp size={16} /> Import Object
+                <FileUp size={16} /> Load Object
               </button>
             </div>
 
@@ -911,7 +1081,7 @@ export default function Workspace({
                     onClick={() => setShowLoadModal(true)}
                     className="btn btn-primary flex items-center gap-2"
                   >
-                    <FileUp size={15} /> Load Dataset
+                    <FileUp size={15} /> Load Object
                   </button>
                 </div>
               ) : activeProjectObjects.map(obj => {
@@ -981,6 +1151,21 @@ export default function Workspace({
                             <span className="text-[10px] text-slate-400">{obj.source}</span>
                           </>
                         )}
+                        {obj.isBackendAnalysisObject && (
+                          <>
+                            <div className="w-1 h-1 rounded-full bg-slate-700"></div>
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide text-blue-700 dark:text-blue-300 bg-primary/10 border-primary/20">
+                              DB-backed
+                            </span>
+                          </>
+                        )}
+                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide ${
+                          obj.liveState === 'attached'
+                            ? 'text-success bg-success/10 border-success/30'
+                            : 'text-amber-400 bg-amber-500/10 border-amber-500/30'
+                        }`}>
+                          {obj.liveState === 'attached' ? 'Live R attached' : 'Live R not attached'}
+                        </span>
                       </div>
                     </div>
 
@@ -989,7 +1174,7 @@ export default function Workspace({
 
                       {isSelected && (
                         <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-black text-blue-700 dark:text-blue-300 uppercase shadow-sm">
-                          <CheckCircle size={10} /> Active
+                          <CheckCircle size={10} /> Selected
                         </div>
                       )}
 

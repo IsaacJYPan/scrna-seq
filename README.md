@@ -34,10 +34,14 @@ At a glance:
 - **UI-wired:** auth, organizations/projects, DB-backed analysis objects
   (`ao_*`), live R object state, QC/Normalize/PCA/Cluster/UMAP/plots, DEG (via
   the **legacy** `/api/r/deg` path), provenance/figures/cache.
+- **Backend implemented with partial read-only UI visibility:** durable jobs,
+  artifacts/checkpoints, and lineage exist in the backend, and the React UI now
+  includes a read-only Jobs & Artifacts / durable history surface for safe
+  metadata visibility. Job launching, checkpoint loading, artifact downloads,
+  and lineage mutation are still not UI-wired.
 - **Backend-only (implemented + tested, no UI yet):** project members/RBAC
-  endpoints, datasets, durable jobs, the opt-in worker loop, the PBMC pipeline /
-  checkpoint-load / DEG-marker / runtime-check / object-inspect workers,
-  artifacts/checkpoints, and the analysis-object lineage DAG.
+  endpoints, datasets, the opt-in worker loop, and the PBMC pipeline /
+  checkpoint-load / DEG-marker / runtime-check / object-inspect workers.
 - **Not implemented (product):** pathway enrichment, CellChat, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
   object storage, secure cookie sessions, shared project live R state.
