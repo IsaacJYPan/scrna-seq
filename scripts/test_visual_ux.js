@@ -353,6 +353,67 @@ async function main() {
     });
   });
 
+  // ── DB-backed project / analysis-object model (mocked; no backend in CI) ─────
+  // The app loads the backend project model on startup and during the PBMC demo
+  // load. This suite runs frontend-only, so these are mocked exactly like the R and
+  // /api/db routes above. Without them the /api proxy is refused, the app renders an
+  // "Internal Server Error" banner, and the console + a11y audits fail on it.
+  const visualOrg = { id: 'org_visual_mock', name: 'Visual Test Org', role: 'owner' };
+  const visualProject = {
+    id: 'proj_visual_mock', organizationId: visualOrg.id, name: 'Visual Test Project',
+    description: '', role: 'owner', createdAt: '2026-01-01 00:00:00', updatedAt: '2026-01-01 00:00:00'
+  };
+  const visualAnalysisObject = (overrides = {}) => ({
+    id: 'ao_visualmock0001', ownerUserId: 1, projectId: visualProject.id,
+    datasetId: null, parentObjectId: null, lineageRootId: 'ao_visualmock0001',
+    objectType: 'seurat', displayName: 'PBMC_3k_Tutorial',
+    metadata: { sourceType: 'pbmc3k_demo', summary: { cells: 2700, features: 13714, density: 2.59 } },
+    createdByProvenanceId: null, createdAt: '2026-01-01 00:00:00', updatedAt: '2026-01-01 00:00:00',
+    ...overrides
+  });
+  const jsonBody = request => { try { return JSON.parse(request.postData() || '{}'); } catch { return {}; } };
+  // Stateful so the flow matches the real app: the project starts with no analysis
+  // objects (so the "QC disabled before data" gate holds), and the demo load creates
+  // one that then persists across the in-test page reload (so the pipeline tabs stay
+  // enabled instead of reverting to a disabled/empty state).
+  let demoObjectExists = false;
+
+  await page.route('**/api/organizations**', async route => {
+    const isPost = route.request().method() === 'POST';
+    await route.fulfill({
+      status: isPost ? 201 : 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify(isPost ? visualOrg : [visualOrg])
+    });
+  });
+
+  await page.route('**/api/projects**', async route => {
+    const request = route.request();
+    const method = request.method();
+    const path = new URL(request.url()).pathname;
+    let status = 200;
+    let body;
+    if (/\/analysis-objects\/[^/]+\/summary$/.test(path)) {
+      // PATCH summary — echo the persisted counts back on the object.
+      const patch = jsonBody(request);
+      body = visualAnalysisObject({
+        metadata: { sourceType: 'pbmc3k_demo', summary: {
+          cells: patch.cells ?? 2700, features: patch.features ?? 13714, density: patch.density ?? 2.59
+        } }
+      });
+    } else if (path.endsWith('/analysis-objects')) {
+      if (method === 'POST') { status = 201; demoObjectExists = true; body = visualAnalysisObject({ displayName: jsonBody(request).displayName || 'PBMC_3k_Tutorial' }); }
+      else { body = demoObjectExists ? [visualAnalysisObject()] : []; } // GET list
+    } else if (path.endsWith('/api/projects')) {
+      if (method === 'POST') { status = 201; body = { ...visualProject, name: jsonBody(request).name || visualProject.name }; }
+      else { body = [visualProject]; } // GET list — one project so the demo load has a target
+    } else {
+      body = visualProject; // GET one project
+    }
+    await route.fulfill({ status, contentType: 'application/json', headers: corsHeaders, body: JSON.stringify(body) });
+  });
+
   await page.route('**/check-session*', async route => {
     await route.fulfill({
       status: 200,

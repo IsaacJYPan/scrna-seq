@@ -853,7 +853,7 @@ export default function Workspace({
                   >
                     <div className="flex flex-col">
                       <span className="font-bold text-sm">{proj.name}</span>
-                      {proj.role && <span className="text-[9px] text-primary uppercase">{proj.role}</span>}
+                      {proj.role && <span className="text-[9px] font-semibold uppercase px-1.5 py-px rounded bg-blue-600 text-white">{proj.role}</span>}
                     </div>
 
                     <div className="flex items-center gap-2">
