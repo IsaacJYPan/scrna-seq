@@ -1,6 +1,12 @@
 # Dependencies
 node_modules/
 
+# Markdown documentation policy
+# Track only the public root README by default. Development/spec/agent markdown
+# belongs in ignored local context such as .project/codex/.
+*.md
+!/README.md
+
 # Build output
 dist/
 
@@ -36,6 +42,7 @@ Thumbs.db
 # Local assistant/tool settings
 .claude/
 /AGENTS.md
+/WORKFLOW.md
 
 # Vite
 .vite/

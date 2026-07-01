@@ -41,7 +41,7 @@ function initDatabase(dbPath) {
     -- user_email = '' so it is fully decoupled from the owner-scoped user_email
     -- CRUD surface (list/get/delete all scope by a real, non-empty user_email),
     -- which also keeps it append-only — there is no project provenance
-    -- delete/update route. R execution/state is untouched. See docs/architecture.md.
+    -- delete/update route. R execution/state is untouched.
     CREATE TABLE IF NOT EXISTS provenance (
       id TEXT PRIMARY KEY,
       user_email TEXT NOT NULL DEFAULT '',
@@ -123,7 +123,7 @@ function initDatabase(dbPath) {
     -- project so project members can list/read it by role; it does NOT change R
     -- state keying (still user/object-keyed) and does NOT remove creator
     -- ownership (owner_user_id). Legacy rows keep a NULL project_id; the new
-    -- project-scoped creation path always sets it. See docs/architecture.md.
+    -- project-scoped creation path always sets it.
     CREATE TABLE IF NOT EXISTS analysis_objects (
       id TEXT PRIMARY KEY,
       owner_user_id INTEGER NOT NULL,
@@ -159,17 +159,16 @@ function initDatabase(dbPath) {
     -- is server-generated. project_id (nullable) associates the job's metadata/
     -- history with a project for project-member visibility by role; it does NOT
     -- make R execution project-shared and does NOT remove creator ownership.
-    -- NOTE: this branch adds the durable record + project metadata/API only —
-    -- there is no worker/queue draining jobs yet (see docs/architecture.md).
+    -- NOTE: the durable record + project metadata/API were added before the worker.
+    -- The current worker is opt-in and drains only registered, allowlisted handlers.
     --
     -- The worker_id / claim_token / *_at lease columns + attempts / max_attempts /
     -- priority are the durable, versioned job-worker COORDINATION CONTRACT: they
-    -- let a FUTURE worker safely claim, lease, heartbeat, release, and fail a job
-    -- (see "Worker coordination" helpers below and
-    -- docs/project-r-execution-design.md §3/§7). They are coordination metadata
-    -- only — NO worker drains the queue in this branch, nothing sets status past
-    -- 'queued' on its own, R execution is unchanged and still synchronous, and
-    -- R active state remains user/object-keyed. claim_token is a bearer capability
+    -- let the opt-in worker safely claim, lease, heartbeat, release, and fail a job
+    -- (see "Worker coordination" helpers below). They are coordination metadata;
+    -- only the opt-in worker may advance registered jobs past 'queued'. Legacy
+    -- interactive R execution remains request-coupled, and R active state remains
+    -- user/object-keyed. claim_token is a bearer capability
     -- and is NEVER returned by the owner/project read APIs (rowToJob omits it).
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -215,7 +214,7 @@ function initDatabase(dbPath) {
     -- membership tables + authorization helpers only; it does NOT migrate any
     -- existing user-scoped resource (analysis objects, jobs, provenance, cache,
     -- figures) into project ownership, and it does NOT touch R state keying.
-    -- See docs/architecture.md. Org/project ids are server-generated
+    -- Org/project ids are server-generated
     -- (org_... / proj_...); clients never supply ids, owner, or role fields.
     CREATE TABLE IF NOT EXISTS organizations (
       id TEXT PRIMARY KEY,
@@ -259,8 +258,7 @@ function initDatabase(dbPath) {
     -- One row per (project, user) granting a role. The project creator gets an
     -- 'owner' row at creation time. Project membership is independent of org
     -- membership in this branch (a project member need not be an org member);
-    -- this is intentional for the narrow foundation and is documented in
-    -- docs/architecture.md.
+    -- this is intentional for the narrow foundation.
     CREATE TABLE IF NOT EXISTS project_members (
       project_id TEXT NOT NULL,
       user_id INTEGER NOT NULL,
@@ -282,8 +280,7 @@ function initDatabase(dbPath) {
     -- supplied by the client. file_type / upload_status / validation_status are
     -- constrained to explicit allow-lists in the DB helpers. NOTE: this branch adds
     -- the durable dataset model + project-scoped API + datasetId verification only;
-    -- analysis objects, jobs, and R state remain user-scoped (see
-    -- docs/architecture.md).
+    -- analysis objects, jobs, and R state remain user-scoped.
     CREATE TABLE IF NOT EXISTS datasets (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -497,7 +494,8 @@ function initDatabase(dbPath) {
   // no old job is backfilled into 'running' or otherwise re-statused, and existing
   // job IDs are unchanged. Idempotent: each column is only ALTERed when absent, so
   // re-running initDatabase (and a fresh DB, where the column already exists) is a
-  // no-op. This does NOT add a worker, drain the queue, or change R execution.
+  // no-op. This migration alone does not start the worker, drain the queue, or
+  // change R execution.
   const jobWorkerCols = db.prepare("PRAGMA table_info(jobs)").all().map(c => c.name);
   for (const [col, ddl] of [
     ['worker_id', 'ALTER TABLE jobs ADD COLUMN worker_id TEXT'],
@@ -1157,17 +1155,16 @@ const ALLOWED_JOB_TYPES = new Set([
   // Test-safe placeholder type that exercises the artifact/checkpoint wiring WITHOUT
   // running any R/Seurat pipeline. Handled by the worker's `checkpoint.noop` handler
   // (jobWorker.js); produces metadata-only artifacts + an immutable checkpoint object
-  // clearly labeled placeholder. NOT a real scientific output. See docs/architecture.md.
+  // clearly labeled placeholder. NOT a real scientific output.
   'checkpoint.noop',
-  // Minimal worker-to-R bridge type: the ONLY job type that invokes the R backend.
-  // It runs exactly one allowlisted, read-only, metadata-only operation (an R runtime
-  // health/version check via the existing /health endpoint) through server-controlled
-  // code — NO arbitrary R, NO analysis-object access, NO mutation, NO checkpoint. The
+  // Minimal worker-to-R bridge type: a read-only R runtime health/version check via
+  // the existing /health endpoint through server-controlled code. NO arbitrary R,
+  // NO analysis-object access, NO mutation, NO checkpoint. The
   // worker's `r.runtime.check` handler (jobWorker.js) drives backend/rWorkerBridge.js
   // and records a metadata-only `r_runtime_check` artifact. NOT a scientific output.
   'r.runtime.check',
-  // Read-only worker-to-R object inspection: the ONLY job type that reads a live
-  // analysis object. It inspects ONE existing object (addressed by a server-derived
+  // Read-only worker-to-R object inspection. It inspects ONE existing object
+  // (addressed by a server-derived
   // R state key) in a read-only way via the allowlisted `r.object.inspect` bridge
   // operation and records a metadata-only `r_object_inspection` artifact (sanitized
   // object summary). The worker handler verifies the job creator OWNS the live object
@@ -1182,8 +1179,8 @@ const ALLOWED_JOB_TYPES = new Set([
   // records a result analysis object + lineage edge + summary/checkpoint artifacts +
   // logs. Parameters are validated against a fixed server-side allowlist BEFORE any R
   // contact (backend/pbmcPipeline.js); there is NO arbitrary R code/path/operation.
-  // DEG / pathway enrichment / CellChat are intentionally NOT part of this type (see
-  // docs/analysis-pipeline-integration.md). Driven by the `pbmc.pipeline.v1` worker
+  // DEG / pathway enrichment / CellChat are intentionally NOT part of this type.
+  // Driven by the `pbmc.pipeline.v1` worker
   // handler (jobWorker.js) + the allowlisted `r.pbmc.pipeline.v1` bridge operation.
   'pbmc.pipeline.v1',
   // Allowlisted checkpoint load / reattach: loads a COMPLETED internal checkpoint RDS
@@ -1238,8 +1235,8 @@ const JOB_TRANSITIONS = {
   canceled: new Set()
 };
 
-// Jobs are created already queued: the record is durable and "ready to run",
-// even though no worker drains the queue yet (see docs/architecture.md).
+// Jobs are created already queued: the record is durable and "ready to run".
+// The opt-in worker drains only registered, allowlisted handlers.
 const INITIAL_JOB_STATUS = 'queued';
 
 function isValidJobType(jobType) {
@@ -1414,8 +1411,9 @@ function createJobForUser(ownerUserId, input = {}) {
  * entry — all in one atomic update. Throws coded errors (`JOB_NOT_FOUND`,
  * `INVALID_STATUS`, `INVALID_TRANSITION`, `RESULT_OBJECT_NOT_FOUND`).
  *
- * This is the only path that mutates job status, so the client can never set an
- * arbitrary status: routes call cancel (below); a future worker calls this.
+ * This is the owner-scoped path that mutates job status, so the client can never
+ * set an arbitrary status: routes call cancel (below); worker helpers enforce
+ * claim/lease ownership for worker-driven transitions.
  */
 function updateJobStatusForUser(ownerUserId, jobId, nextStatus, opts = {}) {
   const owner = Number(ownerUserId);
@@ -1452,7 +1450,7 @@ function updateJobStatusForUser(ownerUserId, jobId, nextStatus, opts = {}) {
   // mid-flight on this job fails its next heartbeat/complete/fail deterministically
   // (CLAIM_LOST) instead of acting on a now-terminal job. worker_id is retained as
   // an audit trail of which worker last held it. This is how a user/owner cancel
-  // makes future worker behavior safe — see the "Worker coordination" helpers.
+  // makes worker behavior safe — see the "Worker coordination" helpers.
   db.prepare(`
     UPDATE jobs SET
       status = @status,
@@ -1510,16 +1508,11 @@ function appendJobLogForUser(ownerUserId, jobId, entry) {
 
 // ── Worker coordination (claim / lease / heartbeat / release / fail) ─────────
 //
-// The durable, versioned contract a FUTURE worker will use to safely claim, lease,
-// heartbeat, release, complete, and fail jobs. This branch ships the contract +
-// schema + helpers ONLY: it does NOT add a worker loop, does NOT drain the queue,
-// does NOT call R, and does NOT make any execution asynchronous. Nothing in the
-// running server invokes these helpers yet — they exist for the worker branch that
-// comes next (`worker-queue-drain-minimal`), and for the tests that pin the
-// contract. R active state stays user/object-keyed and owner-verified; these
-// helpers never touch R, never read a client-supplied path, and never widen
-// ownership (claim is authorized by a server-issued worker id + claim token, which
-// is exactly how the trusted server tier already talks to R).
+// The durable, versioned contract the opt-in worker uses to safely claim, lease,
+// heartbeat, release, complete, and fail jobs. R active state stays
+// user/object-keyed and owner-verified; these helpers never read a client-supplied
+// path and never widen ownership. Claim is authorized by a server-issued worker id
+// plus claim token, matching the trusted-server pattern used for R access.
 //
 // Authorization model: worker operations are NOT user-scoped. A worker authorizes
 // by holding the job's current `claim_token` (a server-issued bearer capability)
@@ -1549,8 +1542,7 @@ function appendJobLogForUser(ownerUserId, jobId, entry) {
 //     deterministic in tests; production callers omit them and use the DB clock.
 
 const DEFAULT_LEASE_SECONDS = 30;
-// Worker ids are server-issued by the future worker process and must be header-safe
-// (a server-controlled X-Worker-ID is part of the documented future contract).
+// Worker ids are server-issued by the worker process and must be header-safe.
 const WORKER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SQLITE_TS_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -1996,7 +1988,7 @@ function setJobScheduling(jobId, opts = {}) {
 //
 // SCOPE: this layer ONLY models membership + authorization. It deliberately does
 // not touch analysis objects, jobs, provenance, cache, figures, or R state —
-// those remain user-scoped (see docs/architecture.md).
+// those remain user-scoped.
 
 // The four roles, in descending privilege. Stored verbatim in the *_members
 // `role` column; any value outside this set is rejected before it is persisted.
@@ -3442,8 +3434,8 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   'deg_summary'
 ]);
 
-// metadata_only is the only kind the placeholder handler writes in this branch.
-// local_internal is reserved for a future local-store branch; object_storage is
+// metadata_only is used for summaries/operational artifacts. local_internal is
+// used for server-allocated internal checkpoint/DEG outputs. object_storage is
 // intentionally NOT accepted yet (there is no object storage). Either way the
 // public projection omits storage_uri, so an internal/local path never escapes.
 const ALLOWED_ARTIFACT_STORAGE_KINDS = new Set(['metadata_only', 'local_internal']);
@@ -4907,8 +4899,8 @@ module.exports = {
   updateJobStatusForUser,
   cancelJobForUser,
   appendJobLogForUser,
-  // Worker coordination (durable claim/lease/heartbeat contract; no worker runs
-  // these yet — see "Worker coordination" above and docs/project-r-execution-design.md)
+  // Worker coordination (durable claim/lease/heartbeat contract consumed by the
+  // opt-in worker; see "Worker coordination" above).
   generateClaimToken,
   getWorkerJob,
   claimNextJob,

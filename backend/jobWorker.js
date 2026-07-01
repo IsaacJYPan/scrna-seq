@@ -73,7 +73,7 @@ function parsePositiveIntOrNull(raw) {
 
 /**
  * Parse worker runtime config from an environment-like object, deterministically and
- * safely. Policy (documented in docs/architecture.md + .env.example):
+ * safely. Policy (also reflected in .env.example):
  *   - `enabled` is true ONLY for the exact string "true" on ENABLE_JOB_WORKER. Any
  *     other value ("TRUE", "1", "yes", blank, unset, …) means disabled.
  *   - JOB_WORKER_POLL_MS must be a positive integer; otherwise fall back to the
@@ -174,9 +174,9 @@ async function checkpointNoopHandler(ctx) {
 }
 
 /**
- * Minimal worker-to-R bridge handler: the ONLY handler that touches the R backend.
- * It runs exactly one allowlisted, read-only, metadata-only operation
- * (`r.runtime.check`) through the server-controlled bridge (backend/rWorkerBridge.js)
+ * Minimal runtime-check bridge handler. It runs the allowlisted, read-only,
+ * metadata-only `r.runtime.check` operation through the server-controlled bridge
+ * (backend/rWorkerBridge.js)
  * and records a metadata-only `r_runtime_check` artifact describing the sanitized R
  * runtime status. It:
  *   - heartbeats (proving the cooperative seam),
@@ -735,7 +735,7 @@ async function degFindMarkersHandler(ctx) {
 // other analytical job types (normalize/qc_filter/pca/cluster/umap/find_markers/
 // integrate) remain deliberately UNREGISTERED so the worker fails them
 // (UNSUPPORTED_JOB_TYPE) instead of pretending to run them. DEG / pathway enrichment /
-// CellChat are NOT registered here (see docs/analysis-pipeline-integration.md).
+// CellChat are NOT registered here.
 const DEFAULT_HANDLERS = Object.freeze({
   generic: genericNoopHandler,
   'checkpoint.noop': checkpointNoopHandler,
