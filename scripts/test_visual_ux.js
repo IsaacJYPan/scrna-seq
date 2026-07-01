@@ -394,7 +394,45 @@ async function main() {
     const path = new URL(request.url()).pathname;
     let status = 200;
     let body;
-    if (/\/analysis-objects\/[^/]+\/summary$/.test(path)) {
+    if (/\/analysis-objects\/[^/]+\/lineage$/.test(path)) {
+      body = {
+        projectId: visualProject.id,
+        objectId: 'ao_visualmock0001',
+        rootObjectId: 'ao_visualmock0001',
+        nodes: demoObjectExists ? [visualAnalysisObject()] : [],
+        edges: [],
+        truncated: false
+      };
+    } else if (/\/artifacts$/.test(path)) {
+      body = demoObjectExists ? [{
+        id: 'artifact_visual_1',
+        name: 'Mock checkpoint',
+        artifactType: 'checkpoint',
+        status: 'available',
+        storageKind: 'metadata_only',
+        jobId: 'job_visual_1'
+      }] : [];
+    } else if (/\/jobs$/.test(path)) {
+      body = demoObjectExists ? [{
+        id: 'job_visual_1',
+        status: 'completed',
+        jobType: 'pbmc.pipeline.v1',
+        analysisObjectId: 'ao_visualmock0001',
+        resultAnalysisObjectId: 'ao_visualmock0001',
+        datasetId: null,
+        createdAt: '2026-01-01 00:00:00'
+      }] : [];
+    } else if (/\/provenance$/.test(path)) {
+      body = demoObjectExists ? [{
+        id: 'prov_visual_1',
+        operation: 'load_demo',
+        analysisObjectId: 'ao_visualmock0001',
+        jobId: 'job_visual_1',
+        createdAt: '2026-01-01 00:00:00'
+      }] : [];
+    } else if (/\/figures$/.test(path)) {
+      body = [];
+    } else if (/\/analysis-objects\/[^/]+\/summary$/.test(path)) {
       // PATCH summary — echo the persisted counts back on the object.
       const patch = jsonBody(request);
       body = visualAnalysisObject({
@@ -611,11 +649,11 @@ async function main() {
     warn('QC button not found — skipping gate check');
   }
 
-  // ── Test 4: Load Dataset Modal ─────────────────────────────────────────────
-  section('STEP 6: Load Dataset modal flow');
+  // ── Test 4: Load Object Modal ──────────────────────────────────────────────
+  section('STEP 6: Load Object modal flow');
   let dataLoaded = false;
   try {
-    const loadBtn = page.locator('button:has-text("Load Dataset"), button:has-text("Import Object"), button:has-text("Load")').first();
+    const loadBtn = page.locator('button:has-text("Load Object"), button:has-text("Load / Attach Object"), button:has-text("Load Dataset"), button:has-text("Import Object"), button:has-text("Load")').first();
     if (await loadBtn.count() > 0) {
       await loadBtn.click();
       await sleep(1000);
@@ -629,7 +667,7 @@ async function main() {
         try {
           await page.waitForSelector('text=PBMC_3k_Tutorial', { timeout: 90000 });
           dataLoaded = true;
-          pass('Load Dataset modal: PBMC3k demo dataset loaded successfully');
+          pass('Load Object modal: PBMC3k demo dataset loaded successfully');
 
           await sleep(1500);
 
@@ -685,10 +723,10 @@ async function main() {
         await sleep(500);
       }
     } else {
-      warn('Load Dataset button not found — skipping modal test');
+      warn('Load Object button not found — skipping modal test');
     }
   } catch (e) {
-    warn('Load Dataset flow error', e.message);
+    warn('Load Object flow error', e.message);
     // Safety dismiss
     await page.keyboard.press('Escape').catch(() => {});
     await sleep(300);
@@ -701,20 +739,21 @@ async function main() {
     { id: 'normalize',    label: 'Normalization',             requiresData: true  },
     { id: 'integrate',    label: 'Integration',               requiresData: true  },
     { id: 'pca',          label: 'PCA',                       requiresData: true  },
-    { id: 'cluster',      label: 'Clustering',                requiresData: true  },
+    { id: 'cluster',      label: 'Cluster',                   requiresData: true  },
     { id: 'umap',         label: 'UMAP',                      requiresData: true  },
     { id: 'featureplot',  label: 'Feature Plot',              requiresData: true  },
     { id: 'heatmap',      label: 'Heatmap',                   requiresData: true  },
     { id: 'dotplot',      label: 'Dot Plot',                  requiresData: true  },
     { id: 'geneviewer',   label: 'Gene Expression',           requiresData: true  },
-    { id: 'deg',          label: 'Differential Expression',   requiresData: true  },
+    { id: 'deg',          label: 'Markers / DEG',             requiresData: true  },
     { id: 'annotate',     label: 'Cell Annotation',           requiresData: true, expectedDisabled: true  },
     { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true, expectedDisabled: true  },
     { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: true  },
     { id: 'customscript', label: 'Custom Script',             requiresData: true, expectedDisabled: true  },
-    { id: 'publication',  label: 'Figures',                   requiresData: true  },
+    { id: 'history',      label: 'Jobs & Artifacts',          requiresData: false },
+    { id: 'publication',  label: 'Reports / Export',          requiresData: true  },
     { id: 'validation',   label: 'Validation',                requiresData: true  },
-    { id: 'lineage',      label: 'Lineage',                   requiresData: false },
+    { id: 'lineage',      label: 'Session DAG',               requiresData: false },
     { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, clickVia: 'engine-status' },
   ];
 
@@ -810,7 +849,7 @@ async function main() {
             await saveToGalleryBtn.click();
             await sleep(2000); // Wait for R backend generation and SQLite IPC
             
-            const galleryBtn = page.locator('aside button:has-text("Figures")').first();
+            const galleryBtn = page.locator('aside button:has-text("Reports / Export"), aside button:has-text("Figures")').first();
             await galleryBtn.click();
             await sleep(PAGE_SETTLE_MS);
             

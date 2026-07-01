@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ImageIcon, Trash2, FolderOpen, Download, Filter, SortDesc,
+  ImageIcon, Trash2, Filter,
   BookImage, Loader2, LayoutGrid, Rows3, RefreshCw
 } from 'lucide-react';
 
@@ -41,10 +41,6 @@ function FigureCard({ figure, onDelete, compact }) {
     }
   };
 
-  const handleOpenFolder = () => {
-    if (window.electronAPI?.openExportsFolder) window.electronAPI.openExportsFolder();
-  };
-
   if (compact) {
     return (
       <div className="flex items-center gap-3 p-3 bg-surface border border-border rounded-lg hover:border-primary/40 transition-all group">
@@ -67,9 +63,6 @@ function FigureCard({ figure, onDelete, compact }) {
           )}
         </div>
         <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button onClick={handleOpenFolder} title="Open folder" className="p-1.5 text-textMuted hover:text-primary transition-colors rounded hover:bg-primary/10">
-            <FolderOpen size={14} />
-          </button>
           <button onClick={handleDelete} disabled={deleting} title="Delete" className="p-1.5 text-textMuted hover:text-danger transition-colors rounded hover:bg-danger/10">
             {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
           </button>
@@ -97,9 +90,6 @@ function FigureCard({ figure, onDelete, compact }) {
         )}
         {/* Overlay actions */}
         <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
-          <button onClick={handleOpenFolder} title="Open exports folder" className="p-2.5 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors">
-            <FolderOpen size={18} />
-          </button>
           <button onClick={handleDelete} disabled={deleting} title="Delete from gallery" className="p-2.5 bg-white/10 hover:bg-danger/40 rounded-full text-white transition-colors">
             {deleting ? <Loader2 size={18} className="animate-spin" /> : <Trash2 size={18} />}
           </button>
@@ -175,7 +165,7 @@ export default function Publication({ userEmail }) {
           <div>
             <h2 className="text-2xl font-bold text-text tracking-tight">Figure Gallery</h2>
             <p className="text-textMuted text-sm">
-              {figures.length} figure{figures.length !== 1 ? 's' : ''} saved · Save figures from any analysis tab
+              {figures.length} figure{figures.length !== 1 ? 's' : ''} saved. Figure metadata/gallery only; no public download surface.
             </p>
           </div>
         </div>
@@ -188,13 +178,6 @@ export default function Publication({ userEmail }) {
             title="Refresh gallery"
           >
             <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-          </button>
-          {/* Open folder */}
-          <button
-            onClick={() => window.electronAPI?.openExportsFolder?.()}
-            className="flex items-center gap-2 px-3 py-2 text-sm text-textMuted hover:text-primary border border-border hover:border-primary/50 rounded-lg transition-colors"
-          >
-            <FolderOpen size={15} /> Open Exports Folder
           </button>
           {/* View toggle */}
           <div className="flex bg-surface border border-border rounded-lg p-0.5">

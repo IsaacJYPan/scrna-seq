@@ -299,7 +299,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
           <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">Clustering Required</h2>
+          <h2 className="text-xl font-bold text-white mb-2">PCA Required</h2>
           <p className="opacity-80">UMAP requires Principal Component Analysis (PCA) to be completed.</p>
         </div>
       </div>
