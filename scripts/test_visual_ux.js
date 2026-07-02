@@ -353,6 +353,31 @@ async function main() {
     });
   });
 
+  // ── Auth session restore (mocked; no backend in CI) ──────────────────────────
+  // On startup the app calls restoreSession() → GET /api/auth/session to adopt the
+  // HttpOnly-cookie session (source of auth truth). With no backend the Vite /api
+  // proxy returns a 500 (ECONNREFUSED) and the request aborts, which the console +
+  // network audits flag. Mock it to return the same user the init script seeds into
+  // localStorage so the app stays logged in. logout is a best-effort POST that is
+  // never triggered here, but is mocked too for completeness.
+  const visualAuthUser = { id: 'visual-user', email: 'researcher@lab.edu', displayName: 'Visual Tester' };
+  await page.route('**/api/auth/session*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ user: visualAuthUser, authVia: 'cookie' })
+    });
+  });
+  await page.route('**/api/auth/logout*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ success: true })
+    });
+  });
+
   // ── DB-backed project / analysis-object model (mocked; no backend in CI) ─────
   // The app loads the backend project model on startup and during the PBMC demo
   // load. This suite runs frontend-only, so these are mocked exactly like the R and
