@@ -8,7 +8,7 @@ window.electronAPI = electronAPI;
 
 class GlobalErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { hasError: false }; }
-  static getDerivedStateFromError(error) { return { hasError: true }; }
+  static getDerivedStateFromError(_error) { return { hasError: true }; }
   componentDidCatch(error, info) { console.error("Global Error:", error, info); }
   render() {
     if (this.state.hasError) return <div style={{padding: '2rem', color: 'white'}}><h1>Critical Application Error</h1><p>Please restart the application.</p></div>;

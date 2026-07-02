@@ -111,7 +111,6 @@ export default function FigureSavePanel({
   const [saveError, setSaveError] = useState(null);
 
   const debounceRef = useRef(null);
-  const abortRef = useRef(null);
 
   // Build params object for R
   const buildParams = useCallback(() => ({
@@ -166,7 +165,7 @@ export default function FigureSavePanel({
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [buildParams, isOpen]);
+  }, [buildParams, isOpen, refreshPreview]);
 
   // Reset on open
   useEffect(() => {
@@ -224,7 +223,6 @@ export default function FigureSavePanel({
   if (!isOpen) return null;
 
   const isUMAP       = plotType === 'UMAP';
-  const needsFeatures = ['FeaturePlot', 'DotPlot', 'Heatmap', 'Violin'].includes(plotType);
 
   return (
     <div className="fixed inset-0 z-50 flex">

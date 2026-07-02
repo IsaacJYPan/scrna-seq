@@ -83,7 +83,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           }
           setLoadingDist(false);
         })
-        .catch(err => {
+        .catch(() => {
           setError('Failed to fetch QC distributions.');
           setLoadingDist(false);
         });
@@ -128,9 +128,9 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   });
 
   // --- Compute stats from real distribution data ---
-  const mtValues = distributions?.percent_mt || [];
-  const featureValues = distributions?.nFeature_RNA || [];
-  const countValues = distributions?.nCount_RNA || [];
+  const mtValues = React.useMemo(() => distributions?.percent_mt || [], [distributions]);
+  const featureValues = React.useMemo(() => distributions?.nFeature_RNA || [], [distributions]);
+  const countValues = React.useMemo(() => distributions?.nCount_RNA || [], [distributions]);
 
   const mtJitter = React.useMemo(() => mtValues.map(() => (Math.random() - 0.5) * 0.4), [mtValues]);
   const featureJitter = React.useMemo(() => featureValues.map(() => (Math.random() - 0.5) * 0.4), [featureValues]);

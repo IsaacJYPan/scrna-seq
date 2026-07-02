@@ -4,7 +4,7 @@ import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function PCA({ callApi, datasetInfo, currentProvId, normProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed }) {
+export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvId, normProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed }) {
   const [params, setParam] = useTabParams('pca', userEmail, objectId, { npcs: 50 });
   const npcs = params.npcs;
   const setNpcs = (v) => setParam('npcs', v);

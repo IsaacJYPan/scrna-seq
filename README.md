@@ -61,7 +61,13 @@ npm run dev
 
 This starts Vite plus the Express server, which starts local R Plumber in the
 current development setup. A local R installation with the required Seurat
-packages is expected.
+packages is expected. The local/dev R target is the R 4.5.x family; the Docker
+image pins R 4.5.3 with Bioconductor 3.22.
+
+RDS imports are disabled by default because RDS deserialization can execute R
+code. Set `ALLOW_TRUSTED_RDS_LOAD=true` only for trusted local/dev `.rds` files.
+The Docker image skips optional legacy packages such as CellChat and SeuratDisk
+unless built with `--build-arg INSTALL_OPTIONAL_R_PACKAGES=true`.
 
 Fast checks (no R backend required):
 

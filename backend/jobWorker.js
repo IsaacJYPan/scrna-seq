@@ -760,7 +760,6 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - workerId           this worker's id (defaults to a fresh generated id)
  *   - pollIntervalMs     delay between idle ticks in start() (default 1000)
  *   - leaseSeconds       claim lease length passed to claim/heartbeat (default 30)
- *   - heartbeatIntervalMs advisory; handlers heartbeat cooperatively via ctx.heartbeat()
  *   - handlers           job_type → async handler registry (default DEFAULT_HANDLERS)
  *   - rBridge            R-bridge module seam (default ./rWorkerBridge); injectable for tests
  *   - callR              R caller used by the bridge; injectable for tests. Defaults to a
@@ -781,7 +780,6 @@ function createJobWorker(options = {}) {
     workerId = generateWorkerId(),
     pollIntervalMs = 1000,
     leaseSeconds = 30,
-    heartbeatIntervalMs = Math.max(1000, Math.floor((30 * 1000) / 3)),
     handlers = DEFAULT_HANDLERS,
     rBridge = rWorkerBridge,
     callR,

@@ -6,8 +6,8 @@ import FigureSavePanel from './FigureSavePanel';
 describe('FigureSavePanel component', () => {
   beforeEach(() => {
     global.window.electronAPI = {
-      saveFigure: vi.fn(async (record) => ({ success: true })),
-      apiRequest: vi.fn(async (endpoint, options) => ({
+      saveFigure: vi.fn(async (_record) => ({ success: true })),
+      apiRequest: vi.fn(async (_endpoint, _options) => ({
         result: { base64: 'mock_base64_string', file_path: 'test.png', file_name: 'test.png' }
       }))
     };

@@ -1,10 +1,10 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React from 'react';
 import { Network, AlertTriangle } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function Clustering({ callApi, datasetInfo, currentProvId, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed }) {
+export default function Clustering({ callApi, datasetInfo, currentProvId: _currentProvId, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed }) {
   // Persisted parameters
   const [params, setParam] = useTabParams('cluster', userEmail, objectId, {
     algorithm: 1,

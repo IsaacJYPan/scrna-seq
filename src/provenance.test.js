@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeCacheKey, buildPipelineScript } from './provenance';
 
 describe('provenance.js logic', () => {

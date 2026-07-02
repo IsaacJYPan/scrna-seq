@@ -11,10 +11,11 @@
  *                                  timers, sanitized failure handling (server.js)
  *   - DB busy_timeout init    — proof the single-process lock softening is applied
  *
- * SCOPE: this is hardening only. NO R/Seurat pipeline execution, NO artifacts, NO
- * shared R state, NO new public routes. The worker remains opt-in and minimal.
+ * SCOPE: this is runtime wiring hardening only. These tests do not execute the
+ * registered R/scientific handlers or create scientific artifacts; they verify the
+ * worker remains opt-in and starts only through the server-controlled runtime path.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 
 const dbmod = require('./database');
 const worker = require('./jobWorker');
