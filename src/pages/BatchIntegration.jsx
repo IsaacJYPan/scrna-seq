@@ -31,7 +31,7 @@ const METHOD_INFO = {
 };
 
 export default function BatchIntegration({
-  callApi, datasetInfo, pipelineState, normProvId, integrateProvId,
+  callApi, datasetInfo, pipelineState, normProvId, integrateProvId: _integrateProvId,
   openProvenance, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed
 }) {
   const [params, setParam] = useTabParams('integrate', userEmail, objectId, {
@@ -103,7 +103,7 @@ export default function BatchIntegration({
       const data = await callApi(`/meta-values?column=${encodeURIComponent(col)}`);
       if (data.error) throw new Error(data.error);
       setBatchPreview(data);
-    } catch (_) {}
+    } catch {}
   }, [sessionReady]);
 
   useEffect(() => {

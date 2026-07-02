@@ -4,7 +4,7 @@
 // kept as a legacy live-R prototype (it calls the authenticated /api/r/* proxy).
 // Do not build on it without deciding the CellChat product direction first.
 // See the "Implemented vs UI-wired" table in README.md.
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { MessageSquare, Play, Loader2, AlertCircle, Download, Search } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { usePipelineStep } from '../hooks/usePipelineStep';

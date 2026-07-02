@@ -453,6 +453,10 @@ function(res, req) {
 #* @parser json
 function(res, req) {
   tryCatch({
+    if (!identical(Sys.getenv("ALLOW_TRUSTED_RDS_LOAD"), "true")) {
+      res$status <- 403
+      return(list(error = "RDS loading is disabled. Set ALLOW_TRUSTED_RDS_LOAD=true only for trusted local/dev inputs."))
+    }
     path <- validate_path(req$body$path, "vault")
     if (!grepl("\\.rds$", path, ignore.case = TRUE)) {
       stop("Only RDS files in the vault can be loaded.")

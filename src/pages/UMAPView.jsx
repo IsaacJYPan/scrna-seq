@@ -7,45 +7,6 @@ import FigureSavePanel from '../components/FigureSavePanel';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
-function generate2DData(nClusters) {
-  const traces = [];
-  for (let i = 0; i < nClusters; i++) {
-    const n = Math.floor(Math.random() * 180) + 80;
-    const cx = (Math.random() - 0.5) * 16;
-    const cy = (Math.random() - 0.5) * 16;
-    traces.push({
-      x: Array.from({ length: n }, () => cx + (Math.random() - 0.5) * 4),
-      y: Array.from({ length: n }, () => cy + (Math.random() - 0.5) * 4),
-      mode: 'markers',
-      type: 'scattergl',
-      name: `Cluster ${i}`,
-      marker: { size: 4, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 0.7 },
-      hovertemplate: `<b>Cluster ${i}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`
-    });
-  }
-  return traces;
-}
-
-function generate3DData(nClusters) {
-  const traces = [];
-  for (let i = 0; i < nClusters; i++) {
-    const n = Math.floor(Math.random() * 180) + 80;
-    const cx = (Math.random() - 0.5) * 16;
-    const cy = (Math.random() - 0.5) * 16;
-    const cz = (Math.random() - 0.5) * 16;
-    traces.push({
-      x: Array.from({ length: n }, () => cx + (Math.random() - 0.5) * 4),
-      y: Array.from({ length: n }, () => cy + (Math.random() - 0.5) * 4),
-      z: Array.from({ length: n }, () => cz + (Math.random() - 0.5) * 4),
-      mode: 'markers',
-      type: 'scatter3d',
-      name: `Cluster ${i}`,
-      marker: { size: 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 0.7 },
-    });
-  }
-  return traces;
-}
-
 export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed }) {
 
   const [savePanelOpen, setSavePanelOpen] = useState(false);
@@ -99,7 +60,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
 
   // resultNComponents: in-session state that mirrors savedResultNComponents
   // We initialize from the persisted value so traces render correctly after hydration.
-  const [resultNComponents, setResultNComponents] = useState(() => savedResultNComponents);
+  const [resultNComponents] = useState(() => savedResultNComponents);
 
   // Keep dims in sync if the user re-clusters with different dims
   useEffect(() => {
