@@ -482,7 +482,7 @@ export default function FigureSavePanel({
                 }
               </button>
               <p className="text-[10px] text-slate-500 text-center">
-                Exports to <code className="font-mono">exports/</code> folder · Thumbnail saved to gallery
+                Saves figure metadata and preview to the gallery; no public download route is created
               </p>
             </div>
           </div>

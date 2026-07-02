@@ -15,6 +15,7 @@ import DifferentialExpression from './pages/DifferentialExpression';
 import Publication from './pages/Publication';
 import Validation from './pages/Validation';
 import LineageExplorer from './pages/LineageExplorer';
+import ProjectHistory from './pages/ProjectHistory';
 import BatchIntegration from './pages/BatchIntegration';
 import Collaborators from './pages/Collaborators';
 import Inspect from './pages/Inspect';
@@ -170,16 +171,10 @@ export default function App() {
     }
   }, [activeTab, user?.email]);
 
-  // Collaborative workspace shell. Backend projects/analysis objects are loaded
-  // after login; localStorage is no longer a durable project/object source.
+  // Local workspace shell. Backend projects/analysis objects are loaded after
+  // login; localStorage is no longer a durable project/object source.
   const [workspaces, setWorkspaces] = useState(() => [
     createEmptyWorkspace({ collaborators: ['me@lab.edu'] }),
-    createEmptyWorkspace({
-      id: 'ws-shared-1',
-      name: 'Shared Laboratory',
-      type: 'shared',
-      collaborators: ['researcher@lab.edu', 'pi@lab.edu'],
-    }),
   ]);
   const [activeWsIndex, setActiveWsIndex] = useState(0);
   const [backendModelStatus, setBackendModelStatus] = useState({
@@ -654,12 +649,6 @@ export default function App() {
       setApiStatus('Checking backend');
       setWorkspaces([
         createEmptyWorkspace({ collaborators: ['me@lab.edu'] }),
-        createEmptyWorkspace({
-          id: 'ws-shared-1',
-          name: 'Shared Laboratory',
-          type: 'shared',
-          collaborators: ['researcher@lab.edu', 'pi@lab.edu'],
-        }),
       ]);
       setBackendModelStatus({
         projectsLoading: false,
@@ -916,6 +905,7 @@ export default function App() {
         <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.annotate} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.enrichment} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.cellchat} /></TabContent></ErrorBoundary>
