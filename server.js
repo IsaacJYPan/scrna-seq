@@ -2019,6 +2019,24 @@ function startPlumber() {
   rProcess.stderr.on('data', d => console.log(`[R:err] ${d.toString().trim()}`));
   rProcess.on('close', code => console.log(`R process exited with code ${code}`));
 
+  // If Rscript cannot be spawned at all (e.g. not installed, or a bad
+  // RSCRIPT_PATH), the child emits an 'error' event. Without a listener that
+  // event is thrown as an uncaught exception and takes down the whole web
+  // server. The app is designed to run degraded when R is unavailable (runtime
+  // diagnostics report R as unavailable and R suites skip), so log a clear,
+  // actionable message and keep the Express server alive instead of crashing.
+  rProcess.on('error', (err) => {
+    console.error(
+      `[R] Failed to launch R Plumber backend via ${activeRscriptDiagnostic.source} ` +
+      `("${rscript}"): ${err.message}`
+    );
+    console.error(
+      '[R] The web server will keep running, but R-backed analysis and /api/r/* ' +
+      'will be unavailable until R is reachable. Install R 4.5.x + Seurat, or set ' +
+      'RSCRIPT_PATH to a valid Rscript. Runtime diagnostics will report R as unavailable.'
+    );
+  });
+
   process.on('exit', () => rProcess.kill());
 }
 
