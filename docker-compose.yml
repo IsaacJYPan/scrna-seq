@@ -22,3 +22,24 @@ services:
     environment:
       - PORT=8000
     restart: unless-stopped
+
+  # Local/dev + CI Postgres for the hosted-service database path. This is NOT a
+  # production/vendor deployment — it is a convenience database so you can develop
+  # and test against Postgres (backend/pgDatabase.js + backend/pg/schema.sql)
+  # without installing Postgres on the host. Initialize the schema with
+  # `DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna npm run init:postgres`.
+  # Bound to localhost only; do not expose this port publicly.
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      - POSTGRES_USER=scrna
+      - POSTGRES_PASSWORD=scrna
+      - POSTGRES_DB=scrna
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

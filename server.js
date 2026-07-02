@@ -8,6 +8,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 const db = require('./backend/database');
+const config = require('./backend/config');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 
 const app = express();
@@ -90,17 +91,113 @@ function getBearerToken(req) {
   return match ? match[1] : null;
 }
 
+// ── HttpOnly cookie session (hosted-service auth foundation) ─────────────────
+// Browser auth is migrating from localStorage bearer tokens toward an HttpOnly,
+// SameSite, Secure-in-production session cookie. The token payload is the SAME
+// stateless HMAC session used by the bearer path (issueSession/verifySession),
+// so this is a transport change, not a new trust model. During the transition
+// BOTH are accepted (cookie is preferred); the bearer path is legacy/dev
+// compatibility and is documented as deprecated (docs/architecture.md).
+
+// Minimal, dependency-free cookie reader. Express 5 does not parse cookies by
+// default and we deliberately avoid adding a parser dependency for one cookie.
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const out = {};
+  if (!header || typeof header !== 'string') return out;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const name = part.slice(0, eq).trim();
+    if (!name) continue;
+    out[name] = decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return out;
+}
+
+function getCookieToken(req) {
+  return parseCookies(req)[config.SESSION_COOKIE_NAME] || null;
+}
+
+// Serialize the session Set-Cookie. HttpOnly (never readable by JS, the whole
+// point of the migration), SameSite (CSRF first line of defense), Secure in
+// production, Path=/, and Max-Age tied to the session TTL.
+function buildSessionCookie(token, { clear = false } = {}) {
+  const parts = [`${config.SESSION_COOKIE_NAME}=${clear ? '' : encodeURIComponent(token)}`];
+  parts.push('Path=/');
+  parts.push('HttpOnly');
+  parts.push(`SameSite=${config.cookieSameSite()}`);
+  if (config.cookieSecure()) parts.push('Secure');
+  parts.push(`Max-Age=${clear ? 0 : config.sessionTtlSeconds()}`);
+  return parts.join('; ');
+}
+
+function setSessionCookie(res, token) {
+  res.append('Set-Cookie', buildSessionCookie(token));
+}
+
+function clearSessionCookie(res) {
+  res.append('Set-Cookie', buildSessionCookie('', { clear: true }));
+}
+
+// Resolve the authenticated user from the cookie first, then the legacy bearer
+// header. `req.authVia` records which transport won so the CSRF check can apply
+// only to cookie-authenticated (browser-auto-sent) mutations.
+function resolveSessionUser(req) {
+  const cookieToken = getCookieToken(req);
+  if (cookieToken) {
+    const user = verifySession(cookieToken);
+    if (user) return { user, via: 'cookie' };
+  }
+  const bearer = getBearerToken(req);
+  if (bearer) {
+    const user = verifySession(bearer);
+    if (user) return { user, via: 'bearer' };
+  }
+  return { user: null, via: null };
+}
+
+// CSRF defense for cookie-authenticated state-changing requests. A cookie is
+// sent automatically by the browser on cross-site requests, so a mutating
+// request authenticated via cookie must also carry an Origin/Referer that is in
+// the allowed-origins allowlist. SameSite=Lax already blocks most cross-site
+// cookie sends; this origin check is the explicit, testable second layer.
+// Bearer-authenticated requests are exempt: a bearer token is never auto-sent by
+// a browser, so it is not a CSRF vector.
+const CSRF_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+function enforceCsrfForCookieAuth(req, res) {
+  if (req.authVia !== 'cookie') return true;
+  if (CSRF_SAFE_METHODS.has(req.method)) return true;
+  const origin = req.headers.origin
+    || (req.headers.referer ? originOf(req.headers.referer) : '');
+  if (config.isAllowedOrigin(origin)) return true;
+  res.status(403).json({ error: 'CSRF origin check failed.' });
+  return false;
+}
+
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+}
+
 function requireAuth(req, res, next) {
   if (req.method === 'OPTIONS') return next();
 
-  const user = verifySession(getBearerToken(req));
+  const { user, via } = resolveSessionUser(req);
   if (!user) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
   req.user = user;
+  req.authVia = via;
   req.session = { id: `user-${user.id}`, user };
-  next();
+
+  if (!enforceCsrfForCookieAuth(req, res)) return undefined;
+  return next();
 }
 
 function validateSignupBody(body) {
@@ -571,7 +668,17 @@ const signupRateLimiter = createRateLimiter();
 const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths', 'storage_key'];
 
 // Middleware
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
+// CORS must allow credentials so the browser sends/stores the HttpOnly session
+// cookie cross-origin (when the API is on a different origin than the frontend).
+// Origin is reflected only from the configured allowlist; requests without an
+// Origin header (same-origin, server-to-server, tests) are allowed.
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
+    return cb(null, config.isAllowedOrigin(origin));
+  },
+  credentials: true
+}));
 // Do not use express.json() globally, as it consumes the body stream and breaks http-proxy-middleware for POST requests.
 // ── Auth Endpoints ────────────────────────────────────────────────────────
 app.use('/api/auth', express.json());
@@ -583,7 +690,11 @@ app.post('/api/auth/signup', signupRateLimiter, (req, res) => {
     const user = db.createUser(validated.email, validated.password, validated.displayName);
     if (user.error) return res.status(409).json({ error: user.error });
 
-    res.status(201).json({ success: true, token: issueSession(user), user });
+    // Set the HttpOnly session cookie (preferred, hosted-service auth) AND return
+    // the token in JSON for legacy/dev bearer compatibility during the transition.
+    const token = issueSession(user);
+    setSessionCookie(res, token);
+    res.status(201).json({ success: true, token, user });
   } catch (err) {
     console.error('[Auth] Signup failed:', err);
     res.status(500).json({ error: 'Signup failed' });
@@ -598,11 +709,42 @@ app.post('/api/auth/login', loginRateLimiter, (req, res) => {
     const user = db.verifyUser(validated.email, validated.password);
     if (user.error) return res.status(401).json({ error: 'Invalid email or password.' });
 
-    res.json({ success: true, token: issueSession(user), user });
+    // Set the HttpOnly session cookie (preferred) AND return the token in JSON
+    // for legacy/dev bearer compatibility during the transition.
+    const token = issueSession(user);
+    setSessionCookie(res, token);
+    res.json({ success: true, token, user });
   } catch (err) {
     console.error('[Auth] Login failed:', err);
     res.status(500).json({ error: 'Login failed' });
   }
+});
+
+// Current-session endpoint: lets the browser restore auth state from the
+// HttpOnly cookie (which JavaScript cannot read) instead of trusting a
+// localStorage bearer token. Returns the authenticated user or 401. Accepts
+// cookie (preferred) or legacy bearer via requireAuth.
+app.get('/api/auth/session', requireAuth, (req, res) => {
+  res.json({ user: req.user, authVia: req.authVia });
+});
+
+// Logout: clear the server session cookie. Best-effort — it always clears the
+// cookie even if no valid session is present, so a stale browser cookie is
+// removed. CSRF: only a cookie-authenticated logout is origin-checked (bearer
+// logout, used by legacy/dev, is not a CSRF vector); an unauthenticated call
+// simply clears any cookie and returns success.
+app.post('/api/auth/logout', (req, res) => {
+  const { user, via } = resolveSessionUser(req);
+  req.authVia = via;
+  if (user && via === 'cookie') {
+    const origin = req.headers.origin
+      || (req.headers.referer ? originOf(req.headers.referer) : '');
+    if (!config.isAllowedOrigin(origin)) {
+      return res.status(403).json({ error: 'CSRF origin check failed.' });
+    }
+  }
+  clearSessionCookie(res);
+  return res.json({ success: true });
 });
 
 // ── Database API Endpoints ──────────────────────────────────────────────
@@ -2167,6 +2309,17 @@ async function shutdownJobWorkerAndServer(args = {}) {
 
 // Start Server
 if (require.main === module) {
+  // Fail fast on an insecure/incomplete production configuration rather than
+  // booting a hosted service with a missing secret, DB, origin, or non-Secure
+  // cookies. Never prints secret values — only the offending variable names.
+  const configErrors = config.validateProductionConfig();
+  if (configErrors.length > 0) {
+    console.error('[Config] Refusing to start — invalid production configuration:');
+    for (const e of configErrors) console.error(`  - ${e}`);
+    process.exit(1);
+  }
+  console.log('[Config]', JSON.stringify(config.summary()));
+
   const httpServer = app.listen(PORT, () => {
     console.log(`Node.js Web Server running on http://localhost:${PORT}`);
     console.log(`Starting local R Plumber backend...`);
@@ -2211,8 +2364,14 @@ module.exports = {
   R_PROXY_INTERNAL_ONLY_PATHS,
   // Exposed for tests + R proxy ownership verification
   issueSession,
+  verifySession,
   isValidObjectIdFormat,
   verifyRObjectOwnership,
+  // Exposed for tests: HttpOnly cookie session foundation
+  parseCookies,
+  buildSessionCookie,
+  resolveSessionUser,
+  requireAuth,
   // Exposed for tests: auth rate limiting + R path-field drift guard
   loginRateLimiter,
   signupRateLimiter,
