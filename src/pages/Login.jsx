@@ -62,7 +62,7 @@ export default function Login({ onLogin }) {
         }
         onLogin(result);
       }
-    } catch (err) {
+    } catch {
       setError('An unexpected error occurred. Please try again.');
       setLoading(false);
     }

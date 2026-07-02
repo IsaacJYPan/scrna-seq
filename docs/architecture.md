@@ -97,11 +97,13 @@ worker bridge. The current policy is pinned by `backend/r-proxy-policy.test.js`.
 
 ## RDS loading is a trusted-input boundary
 
-The R backend can load `.rds` objects (e.g. via `/api/r/load-rds`). **RDS
-deserialization can execute arbitrary R code.** The route is owner-scoped and
-path-validated (confined to the per-user vault), but imported RDS files should
-be treated as **trusted/local-dev input** until stronger sandbox/container
-isolation exists. Do not load untrusted `.rds` files.
+The R backend has a legacy `.rds` object loader (`/api/r/load-rds`), but it is
+fail-closed by default at the Express boundary and again in R. **RDS
+deserialization can execute arbitrary R code.** Set `ALLOW_TRUSTED_RDS_LOAD=true`
+only for trusted local/dev inputs; the route remains owner-scoped and
+path-validated (confined to the per-user vault), but it is not safe for
+untrusted uploads until stronger sandbox/container isolation exists. Worker
+checkpoint loading is a separate internal path for server-created checkpoints.
 
 ## State & storage boundaries
 
@@ -123,8 +125,8 @@ isolation exists. Do not load untrusted `.rds` files.
   inspection — none of these worker workflows are wired into the UI yet.
 - There is no public artifact download surface, object storage, generated report
   export, arbitrary R execution, or shared project live R state.
-- R 4.5.x is the intended local development target; report if R 4.6.x is
-  detected.
+- R 4.5.x is the intended local development target; the Dockerfile pins R 4.5.3
+  with Bioconductor 3.22. Report if R 4.6.x is detected.
 
 ## Testing & CI notes
 

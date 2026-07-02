@@ -2,7 +2,7 @@ import { Sparkles, AlertTriangle } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function Normalization({ callApi, datasetInfo, currentProvId, qcProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
+export default function Normalization({ callApi, datasetInfo, currentProvId: _currentProvId, qcProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   // Persisted parameters
   const [params, setParam] = useTabParams('normalize', userEmail, objectId, {
     method: 'LogNormalize',

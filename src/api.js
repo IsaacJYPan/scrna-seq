@@ -387,7 +387,7 @@ export const electronAPI = {
   dbClearCache: async () => req('/api/db/cache', { method: 'DELETE' }),
 
   // Theme
-  setTheme: (theme) => { /* No-op in browser, handled by CSS */ },
+  setTheme: (_theme) => { /* No-op in browser, handled by CSS */ },
 
   // Diagnostics
   getRScriptPath: async () => {

@@ -441,7 +441,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
   const [selected, setSelected] = useState([]);
   const [newName, setNewName] = useState('Subset');
   const [subsetting, setSubsetting] = useState(false);
-  const [savingParent, setSavingParent] = useState(false);
+  const [savingParent] = useState(false);
   const [error, setError] = useState(null);
   const [loadingVals, setLoadingVals] = useState(false);
 

@@ -198,6 +198,7 @@ async function main() {
       PORT: String(PORT),
       PLUMBER_PORT: String(PLUMBER_PORT),
       ENABLE_R_TEST_DIAGNOSTICS: 'true',
+      ALLOW_TRUSTED_RDS_LOAD: 'true',
       NODE_ENV: 'test',
       SESSION_SECRET: 'r-state-proxy-test-secret',
     },

@@ -42,16 +42,23 @@ const LEGACY_REACHABLE = [
 ];
 
 let server;
+let prevTrustedRdsLoad;
 
 beforeAll(async () => {
+  prevTrustedRdsLoad = process.env.ALLOW_TRUSTED_RDS_LOAD;
   server = await startServer();
 });
 
 afterAll(() => {
   if (server) server.close();
+  if (prevTrustedRdsLoad === undefined) delete process.env.ALLOW_TRUSTED_RDS_LOAD;
+  else process.env.ALLOW_TRUSTED_RDS_LOAD = prevTrustedRdsLoad;
 });
 
-beforeEach(() => { initDatabase(':memory:'); });
+beforeEach(() => {
+  initDatabase(':memory:');
+  delete process.env.ALLOW_TRUSTED_RDS_LOAD;
+});
 afterEach(() => { closeDatabase(); });
 
 describe('isInternalOnlyRProxyPath classifier (source of truth for the block)', () => {
@@ -106,5 +113,35 @@ describe('R proxy HTTP policy', () => {
       const res = await api(server, `/api/r${p}`, { method: 'GET' });
       expect(res.status).toBe(401);
     }
+  });
+
+  it('blocks public RDS loading by default before any R contact', async () => {
+    const { user, token } = createUserWithToken({ email: 'owner@example.com' });
+    const res = await api(server, '/api/r/load-rds', {
+      method: 'POST',
+      token,
+      body: { path: `vault/${serverModule.sanitizeVaultSegment(user.email)}/trusted-local.rds` }
+    });
+    expect(res.status).toBe(403);
+    expect(res.data.error).toMatch(/RDS loading is disabled/i);
+  });
+
+  it('does not reveal path-validation details when RDS loading is disabled', async () => {
+    const { token } = createUserWithToken({ email: 'owner@example.com' });
+    const res = await api(server, '/api/r/load-rds', {
+      method: 'POST',
+      token,
+      body: { path: '../outside.rds' }
+    });
+    expect(res.status).toBe(403);
+    expect(res.data.error).toMatch(/RDS loading is disabled/i);
+  });
+
+  it('requires auth before the RDS trust gate', async () => {
+    const res = await api(server, '/api/r/load-rds', {
+      method: 'POST',
+      body: { path: 'vault/owner_example_com/trusted-local.rds' }
+    });
+    expect(res.status).toBe(401);
   });
 });

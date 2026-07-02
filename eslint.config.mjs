@@ -9,11 +9,8 @@ import reactHooks from 'eslint-plugin-react-hooks';
 // errors) on the current tree; tighten these as the codebase is cleaned up.
 //
 // Known lint debt (intentionally warnings, not errors):
-//   * react-hooks/rules-of-hooks in src/pages/QualityControl.jsx — hooks are
-//     called after an early `return` (line ~73). Fixing it means reordering the
-//     component's hooks, which is out of scope for this hardening pass and is
-//     tracked as a follow-up. Kept as a warning so it stays visible.
-//   * no-unused-vars across several pages — surfaced but non-blocking.
+//   * no-unused-vars and react-hooks/exhaustive-deps across several pages —
+//     surfaced but non-blocking while the mixed prototype/UI code is cleaned up.
 export default [
   {
     ignores: [
