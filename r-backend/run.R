@@ -1,6 +1,8 @@
 # ── Plumber Server Launcher ───────────────────────────────────────
 # This script sets up the environment and starts the Plumber API.
-# Called by: Electron main.js or manually via Rscript
+# Launched by: the Express server (server.js startPlumber) as an internal,
+# localhost-only compute backend, or manually via `Rscript run.R`. (The historical
+# Electron main.js launcher is no longer the active runtime.)
 
 library(plumber)
 library(jsonlite)
