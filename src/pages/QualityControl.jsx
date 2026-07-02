@@ -92,18 +92,6 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetInfo, rSessionId, sessionReady]);
 
-  if (!datasetInfo) {
-    return (
-      <div className="h-full flex items-center justify-center p-8 bg-background">
-        <div className="text-center max-w-sm">
-          <Activity size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
-          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
-          <p className="text-textMuted">Load a dataset in the Workspace first.</p>
-        </div>
-      </div>
-    );
-  }
-
   const mtCutoffNum = parseFloat(mtCutoff) || 0;
   const minFeatNum = parseInt(minFeatures) || 0;
   const maxFeatNum = parseInt(maxFeatures) || 0;
@@ -147,6 +135,22 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const mtJitter = React.useMemo(() => mtValues.map(() => (Math.random() - 0.5) * 0.4), [mtValues]);
   const featureJitter = React.useMemo(() => featureValues.map(() => (Math.random() - 0.5) * 0.4), [featureValues]);
   const countJitter = React.useMemo(() => countValues.map(() => (Math.random() - 0.5) * 0.4), [countValues]);
+
+  // Guard rendering AFTER all hooks so the hook call order stays stable across
+  // renders (React rules-of-hooks). Returning before usePipelineStep / the useMemo
+  // calls above would change the hook count when datasetInfo toggles (e.g. logout,
+  // project switch, or clearing the selected object) and crash the page.
+  if (!datasetInfo) {
+    return (
+      <div className="h-full flex items-center justify-center p-8 bg-background">
+        <div className="text-center max-w-sm">
+          <Activity size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
+          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
+          <p className="text-textMuted">Load a dataset in the Workspace first.</p>
+        </div>
+      </div>
+    );
+  }
 
   const median = arr => { if (!arr.length) return 0; const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
   const mean = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;

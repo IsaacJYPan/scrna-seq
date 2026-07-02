@@ -6,12 +6,16 @@
 // heartbeated, completed or failed, protected from duplicate workers, and handled
 // safely after cancellation or lease expiry — with durable status + logs.
 //
-// SCOPE (this branch): NO scientific pipeline execution. The only supported
-// handler is a safe, deterministic `generic` noop that appends a log and returns a
-// tiny JSON result; it runs NO R/Seurat work, creates NO artifacts/checkpoints,
-// and produces NO downloads. Every other (otherwise valid) job type is
-// intentionally UNREGISTERED and is failed with UNSUPPORTED_JOB_TYPE — see the
-// handler-registry policy below.
+// SCOPE: the registry has grown beyond a noop. Registered handlers now include a
+// safe `generic` noop, a metadata-only `checkpoint.noop`, read-only R inspection
+// (`r.runtime.check`, `r.object.inspect`), and REAL scientific/R work:
+// `pbmc.pipeline.v1` (Seurat preprocessing on a COPY of the input object, writes a
+// checkpoint RDS), `checkpoint.load.v1` (mutates the OWNER's live R session), and
+// `deg.find_markers.v1` (DEG/FindAllMarkers). See DEFAULT_HANDLERS below for the
+// authoritative list. Every other (otherwise valid) job type is intentionally
+// UNREGISTERED and is failed with UNSUPPORTED_JOB_TYPE — see the handler-registry
+// policy below. NO handler executes arbitrary/client-supplied R, and every R-facing
+// handler verifies live-object ownership BEFORE any R contact.
 //
 // HANDLER-REGISTRY POLICY (preferred policy from the contract):
 //   The worker only runs job types present in its handler registry. An unknown /
@@ -21,11 +25,12 @@
 //   not run. Because claim consumes an attempt and failJobByWorker is terminal, an
 //   unsupported job ends in `failed`, never re-queued.
 //
-// CANCELLATION (cooperative / status-level only, this branch): canceling a job
+// CANCELLATION (cooperative / status-level only): canceling a job
 //   clears its claim_token + lease and moves it to a terminal status. The worker
 //   therefore loses its claim; its next heartbeat/complete/fail throws CLAIM_LOST
 //   and the worker stops touching the job (it is NEVER resurrected to completed).
-//   This does NOT kill in-flight R work — there is no R handler here to kill.
+//   This does NOT kill in-flight R work that a registered R-facing handler has
+//   already started.
 
 const crypto = require('crypto');
 const database = require('./database');
@@ -113,7 +118,7 @@ function parseJobWorkerConfig(env = {}, opts = {}) {
 }
 
 /**
- * The only supported handler in this branch. A safe, deterministic noop: it
+ * Safe, deterministic noop handler: it
  * heartbeats once (proving the cooperative heartbeat seam works), writes a durable
  * log line, and returns a tiny JSON result. It runs NO R/Seurat work and touches
  * NO shared state. Handlers receive a `ctx` with:
@@ -221,10 +226,9 @@ async function rRuntimeCheckHandler(ctx) {
 }
 
 /**
- * Read-only worker-to-R object inspection handler: the ONLY handler that reads a live
- * analysis object. It inspects ONE existing object via the allowlisted, read-only
- * `r.object.inspect` bridge operation and records a metadata-only `r_object_inspection`
- * artifact (sanitized object summary).
+ * Read-only worker-to-R object inspection handler. It inspects ONE existing object
+ * via the allowlisted, read-only `r.object.inspect` bridge operation and records a
+ * metadata-only `r_object_inspection` artifact (sanitized object summary).
  *
  * CENTRAL OWNERSHIP BOUNDARY (project membership ≠ live R access):
  *   The object id comes from the TRUSTED job row (job.analysisObjectId), never from
@@ -731,11 +735,11 @@ async function degFindMarkersHandler(ctx) {
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
-// inspection bridge, and the first real scientific pipeline `pbmc.pipeline.v1`. The
-// other analytical job types (normalize/qc_filter/pca/cluster/umap/find_markers/
-// integrate) remain deliberately UNREGISTERED so the worker fails them
-// (UNSUPPORTED_JOB_TYPE) instead of pretending to run them. DEG / pathway enrichment /
-// CellChat are NOT registered here.
+// inspection bridge, and allowlisted R/scientific handlers: `pbmc.pipeline.v1`,
+// `checkpoint.load.v1`, and `deg.find_markers.v1`. Other analytical job types
+// (normalize/qc_filter/pca/cluster/umap/integrate, pathway enrichment, CellChat)
+// remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
+// instead of pretending to run them.
 const DEFAULT_HANDLERS = Object.freeze({
   generic: genericNoopHandler,
   'checkpoint.noop': checkpointNoopHandler,
@@ -760,8 +764,10 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - handlers           job_type → async handler registry (default DEFAULT_HANDLERS)
  *   - rBridge            R-bridge module seam (default ./rWorkerBridge); injectable for tests
  *   - callR              R caller used by the bridge; injectable for tests. Defaults to a
- *                        real local-HTTP caller built from rBridgeConfig (used only by the
- *                        r.runtime.check handler — generic/checkpoint.noop never call R)
+ *                        real local-HTTP caller built from rBridgeConfig (used by every
+ *                        R-facing handler — r.runtime.check, r.object.inspect,
+ *                        pbmc.pipeline.v1, checkpoint.load.v1, deg.find_markers.v1;
+ *                        generic/checkpoint.noop never call R)
  *   - rBridgeConfig      { port, token } for the default R caller (server wires PLUMBER_PORT
  *                        + API_TOKEN here so the in-process worker can reach the local R backend)
  *   - logger             { info, warn, error } (default console)
@@ -781,9 +787,9 @@ function createJobWorker(options = {}) {
     callR,
     rBridgeConfig = {},
     // Server-derived R state-key deriver (ownerUserId, objectId) → X-Object-ID. Used
-    // ONLY by the r.object.inspect handler. Injected by the server from its canonical
+    // by owner-verified live-object handlers. Injected by the server from its canonical
     // deriveRStateKey so the client never controls the key. Tests inject a deriver
-    // (the real server one or a deterministic fake); other handlers never use it.
+    // (the real server one or a deterministic fake).
     deriveRObjectStateKey,
     logger = console,
     now,
@@ -792,7 +798,7 @@ function createJobWorker(options = {}) {
   // Resolve the R caller once. Tests inject `callR` directly (a fake) so no real
   // HTTP happens; in production the server passes rBridgeConfig (PLUMBER_PORT +
   // API_TOKEN) and we build the narrow local-HTTP caller. Building it eagerly is
-  // harmless — it is only ever invoked by the r.runtime.check handler.
+  // harmless: it is only invoked when a registered R-facing handler runs.
   const resolvedCallR = typeof callR === 'function'
     ? callR
     : rBridge.createDefaultRCaller(rBridgeConfig);
@@ -914,7 +920,8 @@ function createJobWorker(options = {}) {
       // summary artifact in ONE claim-guarded transaction (used only by the deg.find_markers.v1
       // handler) so one artifact can't commit without the other. Creates NO result object/edge.
       completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
-      // R-bridge seam (used only by the r.runtime.check / r.object.inspect handlers).
+      // R-bridge seam (used by every R-facing handler: r.runtime.check,
+      // r.object.inspect, pbmc.pipeline.v1, checkpoint.load.v1, deg.find_markers.v1).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
       // reach R by any path other than this server-controlled one.
       runRBridgeOperation: (bridgeArgs) => rBridge.runRBridgeOperation(bridgeArgs),
