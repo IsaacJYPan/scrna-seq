@@ -159,6 +159,26 @@ export default function App() {
   const [user, setUser] = useState(() => window.electronAPI?.getCurrentUser?.() || null);
   const isLoggedIn = !!user;
 
+  // Restore auth state from the HttpOnly session cookie (source of truth) on
+  // mount, rather than trusting the localStorage bearer token. The cookie is not
+  // readable by JS, so we ask the backend who we are. This reconciles the fast
+  // synchronous bootstrap (cached user) with the real server session: if the
+  // cookie session is valid we adopt/refresh the user; if it is gone we clear a
+  // stale cached user so a reload does not appear logged in.
+  useEffect(() => {
+    let cancelled = false;
+    if (!window.electronAPI?.restoreSession) return undefined;
+    window.electronAPI.restoreSession().then((restored) => {
+      if (cancelled) return;
+      if (restored && restored.email) {
+        setUser((prev) => (prev && prev.email === restored.email ? prev : restored));
+      } else if (restored === null) {
+        setUser(null);
+      }
+    }).catch(() => { /* transient failure: keep current state */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const [figuresCount, setFiguresCount] = useState(0);
 
   useEffect(() => {

@@ -4,12 +4,17 @@ A local/development-oriented single-cell RNA-seq analysis workbench:
 
 - React/Vite browser app.
 - Express API server for auth, project/object/job metadata, uploads, and R proxying.
-- SQLite for local metadata/cache/provenance/job state.
+- SQLite for local metadata/cache/provenance/job state, with a **Postgres path**
+  in progress for the hosted service (`backend/pgDatabase.js` + `backend/pg/schema.sql`).
 - R Plumber/Seurat backend for computation.
 
 This repository is not a production-complete multi-tenant service. Treat it as a
 local or trusted-environment workbench while the production boundaries are still
-being hardened.
+being hardened. Infrastructure is moving toward a hosted-service-ready shape:
+Postgres over SQLite, HttpOnly cookie sessions over localStorage bearer tokens,
+and centralized environment/config validation (`backend/config.js`). Data is
+sensitive by default — no public downloads, no shared live R state, and no raw
+storage paths/keys in responses.
 
 ## Runtime Shape
 
@@ -42,9 +47,14 @@ At a glance:
 - **Backend-only (implemented + tested, no UI yet):** project members/RBAC
   endpoints, datasets, the opt-in worker loop, and the PBMC pipeline /
   checkpoint-load / DEG-marker / runtime-check / object-inspect workers.
+- **Infrastructure foundation (backend-wired, hosted-service direction):**
+  HttpOnly cookie sessions (login/signup set the cookie; `/api/auth/session`
+  restores; `/api/auth/logout` clears; localStorage bearer is deprecated
+  fallback), a Postgres data layer + schema proven by a real-Postgres contract
+  test (SQLite still the runtime), and centralized config validation.
 - **Not implemented (product):** pathway enrichment, CellChat, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
-  object storage, secure cookie sessions, shared project live R state.
+  object storage, server-side session revocation, shared project live R state.
 
 See **[docs/architecture.md](docs/architecture.md)** for the full
 implemented-vs-UI-wired table, the DEG dual-path detail, the
@@ -74,9 +84,27 @@ Fast checks (no R backend required):
 ```bash
 npm run lint
 npm run build
-npm run test:backend    # backend CONTRACT tests (incl. backend-only subsystems)
+npm run test:backend    # backend CONTRACT tests (incl. backend-only subsystems), SQLite
 npm run test:frontend
 ```
+
+### Postgres (hosted-service database path)
+
+SQLite is the current runtime; Postgres is the hosted-service target. To develop
+or test against Postgres locally:
+
+```bash
+docker compose up -d postgres      # localhost-only Postgres (or use any local PG)
+export DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna
+npm run init:postgres              # apply backend/pg/schema.sql (idempotent)
+npm run test:backend:postgres      # real-Postgres contract test
+```
+
+The Postgres contract test skips cleanly when `DATABASE_URL`/`PG*` is not set, so
+the default `npm run test:backend` (SQLite) is unaffected. Configuration is read
+and validated in `backend/config.js`; see `.env.example` for all variables.
+Existing local SQLite data is disposable dev/test data and is **not** migrated —
+a fresh Postgres database starts empty.
 
 R/workflow checks for the hardened, live paths (require a real R/Seurat backend;
 they skip cleanly when Seurat is unavailable):
