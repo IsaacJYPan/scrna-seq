@@ -1,5 +1,6 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { FileText, Download, Play, LayoutGrid, Table } from 'lucide-react';
+import React, { useState } from 'react';
+import { FileText, Play, LayoutGrid, Table } from 'lucide-react';
+import Plot from 'react-plotly.js';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import { useTabParams } from '../hooks/useTabParams';
 
@@ -83,8 +84,15 @@ export default function DifferentialExpression({ callApi, datasetInfo, clusterPr
     <div className="h-full w-full flex flex-col bg-background p-6 overflow-y-auto custom-scrollbar">
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Differential Expression (DEGs)</h2>
-          <p className="text-textMuted text-sm">Identify driving cluster marker genes using non-parametric Wilcoxon rank sum tests.</p>
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <h2 className="text-2xl font-bold text-white tracking-tight">Markers / Differential Expression</h2>
+            <span className="inline-flex rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-amber-400">
+              Legacy live-R
+            </span>
+          </div>
+          <p className="text-textMuted text-sm">
+            Identify cluster marker genes through the legacy synchronous live-R DEG path. Durable worker-backed DEG exists in the backend but is not UI-wired here.
+          </p>
         </div>
         <div className="flex gap-3">
           {degResult && (
@@ -173,7 +181,7 @@ export default function DifferentialExpression({ callApi, datasetInfo, clusterPr
             )}
             <FileText size={48} className="text-primary opacity-50 mb-4" />
             <p className="text-textMuted max-w-sm text-lg">
-              Requires a clustered Seurat Object. Computes <code className="text-blue-400 bg-blue-400/10 px-1 rounded">FindAllMarkers()</code> to rank genes structurally significant to each single-cell subcluster.
+              Requires a clustered Seurat object attached to this private live-R session. Computes <code className="text-blue-400 bg-blue-400/10 px-1 rounded">FindAllMarkers()</code> through the legacy live-R route.
             </p>
           </div>
         </div>

@@ -348,9 +348,9 @@ export default function LineageExplorer({ provenanceRecords, setProvenanceRecord
         <div className="flex justify-between items-center mb-6">
           <div>
             <h2 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
-              <History size={24} className="text-primary" /> Computational DAG
+              <History size={24} className="text-primary" /> Legacy Session DAG
             </h2>
-            <p className="text-textMuted text-sm">Traverse your computational DAG, branch experiments, and export specific pipeline fragments.</p>
+            <p className="text-textMuted text-sm">Inspect live-R session provenance. Durable project lineage is shown in Jobs & Artifacts.</p>
           </div>
 
           <div className="flex gap-4">
@@ -477,15 +477,15 @@ export default function LineageExplorer({ provenanceRecords, setProvenanceRecord
                     <Share2 size={20} />
                   </div>
                   <div>
-                    <div className="text-sm font-bold text-white">Partial Pipeline</div>
-                    <div className="text-[10px] text-textMuted">Export code for this branch.</div>
+                    <div className="text-sm font-bold text-white">Legacy Script Preview</div>
+                    <div className="text-[10px] text-textMuted">Preview this transient live-R step.</div>
                   </div>
                 </div>
                 <button
                   onClick={() => openProvenance(selectedNode.id)}
                   className="btn btn-primary text-xs px-4 py-2 shadow-lg shadow-primary/20"
                 >
-                  Export
+                  Preview
                 </button>
               </div>
             </div>

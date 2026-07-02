@@ -1,6 +1,5 @@
 import React from 'react';
-import { exportPipeline, downloadSingleScript, buildPipelineScript } from '../provenance';
-import { X, Download, FileCode2, Copy } from 'lucide-react';
+import { X, FileCode2, Copy } from 'lucide-react';
 
 export default function ProvenanceDrawer({ provId, chain, onClose }) {
   if (!provId || !chain) return null;
@@ -52,38 +51,33 @@ export default function ProvenanceDrawer({ provId, chain, onClose }) {
             </div>
           </div>
 
-          {/* R Script for this step */}
+          {/* Legacy live-R script preview for this step */}
           <div>
-            <span className="block text-[10px] text-textMuted mb-2 font-semibold tracking-wider uppercase">Step Script (R)</span>
+            <span className="block text-[10px] text-textMuted mb-2 font-semibold tracking-wider uppercase">Legacy step script preview (R)</span>
             <pre className="bg-slate-900 border border-slate-700/50 rounded-lg p-4 overflow-auto text-xs font-mono text-slate-300 shadow-inner leading-relaxed">
               <code>{target.script}</code>
             </pre>
+            <p className="mt-2 text-xs text-textMuted">
+              This preview is from the live-R provenance path. It is not a supported generated report or complete reproducibility export.
+            </p>
           </div>
 
-          {/* Hint to go to Lineage for full pipeline */}
           {hasAncestors && (
             <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl text-center">
               <p className="text-xs text-textMuted">
                 This step is part of a <span className="text-primary font-bold">{chain.length}-step</span> pipeline.
-                Visit <span className="text-white font-bold">Lineage</span> to view and export the full script.
+                Visit <span className="text-white font-bold">Session DAG</span> to inspect the transient live-R lineage.
               </p>
             </div>
           )}
         </div>
 
         <div className="p-4 bg-slate-800/80 border-t border-border flex justify-between items-center shadow-inner">
-           <button 
+           <button
              onClick={() => navigator.clipboard.writeText(target.script)}
              className="btn btn-secondary flex items-center gap-2 hover:bg-slate-700"
            >
-             <Copy size={16} /> Copy Script
-           </button>
-           
-           <button 
-             onClick={() => downloadSingleScript(target)}
-             className="btn btn-primary flex items-center gap-2 shadow-sm"
-           >
-             <Download size={16} /> Download .R File
+             <Copy size={16} /> Copy Preview
            </button>
         </div>
       </div>

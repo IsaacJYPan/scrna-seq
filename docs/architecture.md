@@ -39,27 +39,27 @@ Status legend:
 | --- | --- | --- |
 | Auth / logout | UI-wired | localStorage bearer token; no secure cookies / server-side revocation yet. |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
-| Project members / RBAC endpoints | backend-only | Role-checked member APIs exist and are tested. The in-app "Collaborators" panel is a local/in-memory shell and is **not** wired to these endpoints. |
+| Project members / RBAC endpoints | backend-only | Role-checked member APIs exist and are tested. The in-app "Collaborators" panel is a disabled status surface and is **not** wired to these endpoints. |
 | Project-scoped datasets | backend-only | Upload with server-chosen storage key + sha256; no UI dataset manager. |
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. |
 | QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the authenticated live-R proxy (`/api/r/*`). |
 | DEG (differential expression) | UI-wired (legacy path) | UI calls the legacy live-R endpoint `/api/r/deg`. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | backend-only | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. Not wired into the UI. |
-| Durable jobs | backend-only | Durable ownership-scoped job records + API; no UI job manager. |
+| Durable jobs | UI-wired (read-only metadata) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The UI does not create, cancel, or retry jobs. |
 | Job worker loop | backend-only (opt-in) | Off unless `ENABLE_JOB_WORKER="true"`; drains only registered, allowlisted handlers. |
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
-| Checkpoint artifacts | backend-only | Immutable result checkpoint metadata per successful job. |
+| Checkpoint artifacts | UI-wired (read-only metadata) | Immutable result checkpoint metadata per successful job can be listed. The UI does not load checkpoints. |
 | Checkpoint load worker (`checkpoint.load.v1`) | backend-only | Owner-only reattach of a server-selected checkpoint into live R; not wired into the UI. |
-| Job artifacts (metadata) | backend-only | Read-only, path/storage-key stripped from responses; no download route. |
-| Analysis-object lineage DAG | backend-only | Edge model + parents/children/lineage read routes; no lineage-DAG UI. |
-| Provenance / figures / cache | UI-wired | Through the older `/api/db/*` routes. |
+| Job artifacts (metadata) | UI-wired (read-only metadata) | Read-only, path/storage-key stripped from responses; no download route. Jobs & Artifacts renders sanitized metadata only. |
+| Analysis-object lineage DAG | UI-wired (read-only summary) | Edge model + parents/children/lineage read routes are surfaced as a bounded summary in Jobs & Artifacts. Mutations remain server/worker-driven. |
+| Provenance / figures / cache | UI-wired | Older `/api/db/*` routes still back the live gallery/cache path. Jobs & Artifacts also shows project-scoped provenance and figure metadata read-only. |
 | Runtime check / object inspect workers | backend-only | Read-only, metadata-only bridge operations. |
 | Pathway enrichment | not implemented (product) | No durable workflow. A legacy authenticated R endpoint may still exist (see below). |
 | CellChat / cell-cell communication | not implemented (product) | No durable workflow. Legacy authenticated R endpoints may still exist (see below). |
 | Cell annotation | not implemented (product) | UI placeholder only. A legacy authenticated R endpoint may still exist (see below). |
 | Custom Script / arbitrary R execution | not implemented | Out of scope; no arbitrary-R endpoint. |
-| Reports / generated R scripts | not implemented | No report or script-export surface. |
+| Reports / generated R scripts | not implemented | No supported report or script-export surface. Legacy live-R provenance script preview is copy-only and not a complete reproducibility export. |
 | Artifact downloads | not implemented | No public download route; responses never expose storage paths/keys. |
 | Object storage | not implemented | Local vault only; no external object storage. |
 | Secure cookie sessions | not implemented | Browser auth is still localStorage bearer tokens. |
@@ -108,9 +108,11 @@ isolation exists. Do not load untrusted `.rds` files.
 - Browser auth is still localStorage bearer-token based; secure cookie sessions
   and server-side token revocation are not implemented.
 - Backend projects, DB-backed analysis objects, jobs, artifacts, checkpoints,
-  and lineage are the durable source of truth **at the API/DB layer**. Of these,
-  projects and analysis objects are UI-wired; jobs, artifacts, checkpoints,
-  lineage, datasets, and RBAC management are backend-only (see the table above).
+  and lineage are the durable source of truth **at the API/DB layer**. Projects
+  and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
+  lineage are visible as read-only metadata in Jobs & Artifacts. Datasets, RBAC
+  management, checkpoint loading, and worker job launch/cancel flows remain
+  backend-only (see the table above).
 - localStorage may cache selected project/object IDs and UI preferences only; it
   is not authoritative for projects, analysis objects, lineage, jobs, roles, or
   checkpoints.
@@ -128,8 +130,12 @@ isolation exists. Do not load untrusted `.rds` files.
 
 - `npm run test:backend` runs the full `backend/*.test.js` suite. These are
   **backend contract tests**: they exercise the real Express + SQLite stack,
-  including subsystems that are **backend-only** (jobs, worker coordination,
-  artifacts/checkpoints, lineage DAG, datasets, RBAC). A passing backend suite
+  including backend contract coverage for worker coordination, datasets, RBAC,
+  and the durable jobs/artifacts/lineage APIs. Durable jobs, artifacts/checkpoints,
+  and lineage are implemented in the backend. The React UI now includes a
+  read-only Jobs & Artifacts / durable history surface for safe metadata
+  visibility, but job launching, checkpoint loading, artifact downloads, and
+  lineage mutation are still not UI-wired. A passing backend suite
   means the API/DB contract holds — **not** that a feature is surfaced in the UI.
 - `npm run test:visual` is a **mocked** frontend visual smoke test: it renders
   the built UI with backend and R responses mocked in the browser. It checks

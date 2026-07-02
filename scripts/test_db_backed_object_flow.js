@@ -137,6 +137,24 @@ async function installRoutes(page) {
       return fulfill(route, 201, project);
     }
 
+    const lineageMatch = pathname.match(/^\/api\/projects\/([^/]+)\/analysis-objects\/([^/]+)\/lineage$/);
+    if (lineageMatch && request.method() === 'GET') {
+      const [, projectId, objectId] = lineageMatch;
+      return fulfill(route, 200, {
+        projectId,
+        objectId,
+        rootObjectId: objectId,
+        nodes: [{ id: objectId, label: 'PBMC_3k_Tutorial', objectType: 'seurat', lineageRootId: objectId }],
+        edges: [],
+        truncated: false,
+      });
+    }
+
+    const historyListMatch = pathname.match(/^\/api\/projects\/([^/]+)\/(jobs|artifacts|provenance|figures)$/);
+    if (historyListMatch && request.method() === 'GET') {
+      return fulfill(route, 200, []);
+    }
+
     const objectListMatch = pathname.match(/^\/api\/projects\/([^/]+)\/analysis-objects$/);
     if (objectListMatch && request.method() === 'GET') {
       return fulfill(route, 200, state.objectsByProject.get(objectListMatch[1]) || []);
@@ -261,19 +279,19 @@ async function main() {
     await page.getByRole('button', { name: /Create Project/i }).click();
     await page.getByPlaceholder('Project Name').fill('DB Flow Project');
     await page.getByRole('button', { name: /^Save$/ }).click();
-    await page.getByText('DB Flow Project').waitFor({ timeout: 10_000 });
+    await page.getByText('DB Flow Project').first().waitFor({ timeout: 10_000 });
 
-    await page.getByRole('button', { name: /Load Dataset/i }).click();
+    await page.getByRole('button', { name: /Load Object/i }).first().click();
     await page.getByRole('button', { name: /PBMC 3k Demo Dataset/i }).click();
     await page.locator('text=PBMC_3k_Tutorial').first().waitFor({ timeout: 10_000 });
 
-    await page.getByRole('button', { name: /Quality Control/i }).click();
+    await page.getByRole('button', { name: /^Quality Control$/i }).click();
     await page.getByRole('heading', { name: /Quality Control/i }).waitFor({ timeout: 10_000 });
     const applyButton = page.getByRole('button', { name: /Apply QC Filters/i });
     await waitUntil('enabled QC button', async () => applyButton.isEnabled(), 10_000);
 
     await page.reload({ waitUntil: 'networkidle' });
-    await page.getByText('DB Flow Project').waitFor({ timeout: 10_000 });
+    await page.getByText('DB Flow Project').first().waitFor({ timeout: 10_000 });
     await page.locator('text=PBMC_3k_Tutorial').first().waitFor({ timeout: 10_000 });
     await page.screenshot({ path: SCREENSHOT, fullPage: false });
 
