@@ -128,6 +128,32 @@ describe('Workspace backend-backed project/object UI', () => {
     expect(screen.getByText(/Project membership does not grant live R object access/i)).toBeInTheDocument();
   });
 
+  it('does not treat an unselected project object as the active workflow object', () => {
+    renderWorkspace({
+      currentWs: {
+        ...baseWorkspace,
+        projects: [{ id: 'proj_1', name: 'PBMC Project', role: 'owner', isBackendProject: true }],
+        selectedProjectId: 'proj_1',
+        objects: [{
+          id: 'ao_unselected',
+          projectId: 'proj_1',
+          name: 'Unselected PBMC',
+          objectType: 'seurat',
+          cells: 2700,
+          features: 13714,
+          isBackendAnalysisObject: true,
+          liveState: 'unknown',
+        }],
+        selectedObjectIds: [],
+      },
+    });
+
+    expect(screen.getByText(/No analysis object selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/Select a DB-backed analysis object from the project list below/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Select object/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Data Info: Unselected PBMC/i)).not.toBeInTheDocument();
+  });
+
   it('creates a backend analysis object before PBMC demo load and calls R with that verified object ID', async () => {
     const onCreateAnalysisObjectForLoad = vi.fn(async () => ({
       id: 'ao_demo123',

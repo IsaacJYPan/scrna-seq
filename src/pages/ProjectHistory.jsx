@@ -17,7 +17,7 @@ function formatId(value) {
 
 function badgeClass(tone = 'slate') {
   const tones = {
-    blue: 'bg-primary/10 text-blue-700 dark:text-blue-300 border-primary/20',
+    blue: 'bg-primary/10 text-text border-primary/20',
     green: 'bg-success/10 text-success border-success/30',
     amber: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
     rose: 'bg-danger/10 text-danger border-danger/30',
@@ -64,7 +64,7 @@ function SummaryCard({ label, value, detail }) {
   return (
     <div className="card p-4 bg-surface/70">
       <div className="text-2xl font-black text-text">{value}</div>
-      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-blue-700 dark:text-blue-300">{label}</div>
+      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-text">{label}</div>
       {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
     </div>
   );
@@ -263,9 +263,17 @@ function FigureList({ figures }) {
 }
 
 export default function ProjectHistory({ currentWs, datasetInfo }) {
-  const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
-  const selectedObjectId = datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
+  const activeProjectId = currentWs?.selectedProjectId || datasetInfo?.projectId || currentWs?.projects?.[0]?.id || null;
   const activeProject = currentWs?.projects?.find(project => project.id === activeProjectId) || null;
+  const selectedIds = currentWs?.selectedObjectIds || [];
+  const selectedObject = (currentWs?.objects || []).find(object => (
+    object.projectId === activeProjectId && selectedIds.includes(object.id)
+  )) || (
+    datasetInfo?.projectId === activeProjectId && selectedIds.includes(datasetInfo.id)
+      ? datasetInfo
+      : null
+  );
+  const selectedObjectId = selectedObject?.id || null;
 
   const [state, setState] = useState({
     loading: false,

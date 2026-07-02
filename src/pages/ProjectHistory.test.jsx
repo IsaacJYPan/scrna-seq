@@ -161,4 +161,19 @@ describe('ProjectHistory', () => {
     expect(screen.getByText(/Select a backend project/i)).toBeInTheDocument();
     expect(screen.getByText(/scoped to a backend project/i)).toBeInTheDocument();
   });
+
+  it('does not load object lineage when no object is selected in the active project', async () => {
+    render(
+      <ProjectHistory
+        currentWs={{ ...currentWs, selectedObjectIds: [] }}
+        datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }}
+      />
+    );
+
+    await waitFor(() => {
+      expect(window.electronAPI.listProjectJobs).toHaveBeenCalledWith('proj_1');
+    });
+    expect(window.electronAPI.getProjectAnalysisObjectLineage).not.toHaveBeenCalled();
+    expect(screen.getByText(/No selected object/i)).toBeInTheDocument();
+  });
 });

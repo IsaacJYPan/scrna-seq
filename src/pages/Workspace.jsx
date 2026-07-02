@@ -559,7 +559,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
 function StatusPill({ label, tone = 'slate' }) {
   const tones = {
     green: 'bg-success/10 text-success border-success/30',
-    blue: 'bg-primary/10 text-blue-700 dark:text-blue-300 border-primary/20',
+    blue: 'bg-primary/10 text-text border-primary/20',
     amber: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
     slate: 'bg-slate-800 text-slate-300 border-slate-700',
   };
@@ -587,6 +587,7 @@ function WorkbenchOverview({
 }) {
   const hasProject = !!activeProject;
   const hasObject = !!selectedObject;
+  const hasObjectsInProject = activeProjectObjects.length > 0;
   const isDbBacked = !!selectedObject?.isBackendAnalysisObject || /^ao_/.test(selectedObject?.id || '');
   const liveAttached = selectedObject?.liveState === 'attached';
   const liveStatus = !hasObject
@@ -597,7 +598,15 @@ function WorkbenchOverview({
 
   const sections = [
     { label: 'Project context', status: hasProject ? { label: 'Ready', tone: 'green' } : { label: 'Select project', tone: 'slate' }, detail: 'Durable backend project metadata.' },
-    { label: 'Dataset / object', status: hasObject ? { label: 'Ready', tone: 'green' } : { label: 'Requires loaded object', tone: 'slate' }, detail: 'DB-backed analysis object identity.' },
+    {
+      label: 'Dataset / object',
+      status: hasObject
+        ? { label: 'Ready', tone: 'green' }
+        : hasObjectsInProject
+          ? { label: 'Select object', tone: 'amber' }
+          : { label: 'Requires loaded object', tone: 'slate' },
+      detail: 'DB-backed analysis object identity.',
+    },
     { label: 'Inspect', status: pipelineStatus(false, hasObject), detail: 'Live object metadata and subsetting.' },
     { label: 'Quality control', status: pipelineStatus(pipelineState?.qc, hasObject), detail: 'Transient live-R workflow.' },
     { label: 'Normalize', status: pipelineStatus(pipelineState?.normalize, hasObject), detail: 'Transient live-R workflow.' },
@@ -612,7 +621,10 @@ function WorkbenchOverview({
   let nextAction = 'Select or create a backend project.';
   let actionLabel = 'Create Project';
   let action = null;
-  if (hasProject && !hasObject) {
+  if (hasProject && !hasObject && hasObjectsInProject) {
+    nextAction = 'Select a DB-backed analysis object from the project list below before opening live-R workflow tabs.';
+    actionLabel = 'Select Object';
+  } else if (hasProject && !hasObject) {
     nextAction = 'Load a PBMC demo or trusted local object into this backend project.';
     actionLabel = 'Load Object';
     action = () => setShowLoadModal(true);
@@ -692,7 +704,7 @@ function WorkbenchOverview({
       <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-[10px] font-black uppercase tracking-widest text-blue-700 dark:text-blue-300">Next action</div>
+            <div className="text-[10px] font-black uppercase tracking-widest text-text">Next action</div>
             <p className="mt-1 text-sm text-text">{nextAction}</p>
           </div>
           {!action && actionLabel === 'Create Project' && (
@@ -891,9 +903,10 @@ export default function Workspace({
 
   // ────────────────────────────────────────────────────────────────
 
-  const activeCount = selectedObjects.length;
-  const displayObject = selectedObjects[0] || currentWs.objects[0];
-  const selectedObject = selectedObjects[0] || activeProjectObjects[0] || null;
+  const activeSelectedObjects = selectedObjects.filter(obj => !activeProjectId || obj.projectId === activeProjectId);
+  const activeCount = activeSelectedObjects.length;
+  const displayObject = activeSelectedObjects[0] || null;
+  const selectedObject = displayObject;
   const activeProject = currentWs.projects?.find(project => project.id === activeProjectId) || null;
 
   return (
@@ -952,7 +965,7 @@ export default function Workspace({
                     </div>
                     <stat.icon size={24} className="text-slate-500/50 mb-2 group-hover:text-primary/50 transition-colors" />
                     <div className="text-2xl font-black text-text mb-1 tracking-tighter text-center">{stat.value}</div>
-                    <div className="text-[10px] font-bold text-blue-700 dark:text-blue-300 uppercase tracking-widest text-center">{stat.label}</div>
+                    <div className="text-[10px] font-bold text-text uppercase tracking-widest text-center">{stat.label}</div>
                   </div>
                 ))}
               </div>
@@ -1154,7 +1167,7 @@ export default function Workspace({
                         {obj.isBackendAnalysisObject && (
                           <>
                             <div className="w-1 h-1 rounded-full bg-slate-700"></div>
-                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide text-blue-700 dark:text-blue-300 bg-primary/10 border-primary/20">
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide text-text bg-primary/10 border-primary/20">
                               DB-backed
                             </span>
                           </>
@@ -1173,7 +1186,7 @@ export default function Workspace({
                     <div className="flex items-center gap-3 flex-shrink-0 relative">
 
                       {isSelected && (
-                        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-black text-blue-700 dark:text-blue-300 uppercase shadow-sm">
+                        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-black text-text uppercase shadow-sm">
                           <CheckCircle size={10} /> Selected
                         </div>
                       )}

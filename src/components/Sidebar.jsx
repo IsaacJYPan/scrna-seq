@@ -115,7 +115,7 @@ export default function Sidebar({
           )}
         </span>
         {item.id === 'publication' && figuresCount > 0 && (
-          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-blue-700 dark:text-blue-300 bg-blue-500/10 border border-blue-500/20">
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">
             {figuresCount}
           </span>
         )}
