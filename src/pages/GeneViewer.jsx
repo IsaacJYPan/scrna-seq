@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Search, BarChart3, Play, Layers, ChevronDown, ChevronRight, ImageDown } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import FigureSavePanel from '../components/FigureSavePanel';
@@ -100,7 +100,7 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi }
         setGeneData(data);
         setActiveGene(gene);
       }
-    } catch (err) {
+    } catch {
       setError("Failed to fetch gene data.");
     }
     setLoading(false);

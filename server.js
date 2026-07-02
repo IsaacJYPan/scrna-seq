@@ -195,6 +195,10 @@ function isProductionDiagnosticRProxyPath(reqPath) {
   return process.env.NODE_ENV === 'production' && isDiagnosticRProxyPath(reqPath);
 }
 
+function trustedRdsLoadEnabled(env = process.env) {
+  return env.ALLOW_TRUSTED_RDS_LOAD === 'true';
+}
+
 // ── Internal-only R endpoints (never reachable through the public proxy) ──────
 // Some R endpoints are driven EXCLUSIVELY by the in-process worker bridge, which calls
 // the R backend directly (it does NOT traverse this Express proxy). They must therefore
@@ -359,6 +363,12 @@ function validateRProxyPaths(req, res, next) {
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : {};
+    if (req.path === '/load-rds' && !trustedRdsLoadEnabled()) {
+      return res.status(403).json({
+        error: 'RDS loading is disabled. Set ALLOW_TRUSTED_RDS_LOAD=true only for trusted local/dev inputs.'
+      });
+    }
+
     const values = [];
     // Scalar path fields from query string and JSON body (see allowlist above).
     for (const field of R_PROXY_VALIDATED_PATH_FIELDS) {
@@ -2178,6 +2188,7 @@ module.exports = {
   sanitizeObjectIdSegment,
   isProductionDiagnosticRProxyPath,
   isDiagnosticRProxyPath,
+  trustedRdsLoadEnabled,
   isInternalOnlyRProxyPath,
   R_PROXY_INTERNAL_ONLY_PATHS,
   // Exposed for tests + R proxy ownership verification

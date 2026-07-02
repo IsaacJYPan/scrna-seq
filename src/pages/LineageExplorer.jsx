@@ -115,7 +115,7 @@ export default function LineageExplorer({ provenanceRecords, setProvenanceRecord
       try {
         const d = new Date(node.timestamp);
         timeStr = !isNaN(d.getTime()) ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : node.timestamp || '';
-      } catch (e) { timeStr = ''; }
+      } catch { timeStr = ''; }
 
       const isHead = Object.values(branches).includes(node.id);
       

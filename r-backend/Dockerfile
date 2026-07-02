@@ -1,4 +1,4 @@
-FROM rocker/r-ver:4.3.1
+FROM rocker/r-ver:4.5.3
 
 # Install system dependencies required for Seurat, Plumber, and other R packages
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
@@ -20,15 +20,20 @@ RUN Rscript -e "install.packages('remotes', repos='https://cloud.r-project.org/'
 # Install CRAN dependencies
 RUN Rscript -e "install.packages(c('plumber', 'jsonlite', 'Seurat', 'ggplot2', 'base64enc'), repos='https://cloud.r-project.org/')"
 
-# Install Bioconductor dependencies
-RUN Rscript -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics'))"
+# Install Bioconductor dependencies pinned to the R 4.5-compatible release.
+RUN Rscript -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics'), ask=FALSE)"
 
-# Install CellChat (requires NMF, igraph, etc., often installed via remotes or CRAN)
-RUN Rscript -e "install.packages('NMF', repos='https://cloud.r-project.org/')"
-RUN Rscript -e "remotes::install_github('sqjin/CellChat')"
-
-# Install SeuratDisk for H5AD support
-RUN Rscript -e "remotes::install_github('mojaveazure/seurat-disk')"
+# Optional legacy/prototype dependencies. CellChat is not a production-integrated
+# workflow in the app, and SeuratDisk-backed H5AD/H5Seurat import remains optional;
+# keep them out of the default image unless a trusted local build explicitly asks.
+ARG INSTALL_OPTIONAL_R_PACKAGES=false
+RUN if [ "$INSTALL_OPTIONAL_R_PACKAGES" = "true" ]; then \
+      Rscript -e "install.packages('NMF', repos='https://cloud.r-project.org/')" && \
+      Rscript -e "remotes::install_github('sqjin/CellChat')" && \
+      Rscript -e "remotes::install_github('mojaveazure/seurat-disk')"; \
+    else \
+      echo "Skipping optional legacy R packages (CellChat, SeuratDisk). Set INSTALL_OPTIONAL_R_PACKAGES=true to include them."; \
+    fi
 
 # Copy the backend code into the container
 WORKDIR /app

@@ -7,7 +7,8 @@ const {
   resolveVaultPath,
   sanitizeVaultSegment,
   deriveRStateKey,
-  isProductionDiagnosticRProxyPath
+  isProductionDiagnosticRProxyPath,
+  trustedRdsLoadEnabled
 } = serverModule;
 
 describe('server vault path authorization', () => {
@@ -84,5 +85,15 @@ describe('R diagnostic proxy gating', () => {
     process.env.NODE_ENV = 'test';
 
     expect(isProductionDiagnosticRProxyPath('/__test/session-state')).toBe(false);
+  });
+});
+
+describe('trusted RDS load gate', () => {
+  it('is fail-closed and only accepts the exact string true', () => {
+    expect(trustedRdsLoadEnabled({})).toBe(false);
+    expect(trustedRdsLoadEnabled({ ALLOW_TRUSTED_RDS_LOAD: 'false' })).toBe(false);
+    expect(trustedRdsLoadEnabled({ ALLOW_TRUSTED_RDS_LOAD: 'TRUE' })).toBe(false);
+    expect(trustedRdsLoadEnabled({ ALLOW_TRUSTED_RDS_LOAD: '1' })).toBe(false);
+    expect(trustedRdsLoadEnabled({ ALLOW_TRUSTED_RDS_LOAD: 'true' })).toBe(true);
   });
 });
