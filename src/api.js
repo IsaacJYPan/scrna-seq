@@ -14,6 +14,12 @@ export function apiUrl(path) {
 
 const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).substr(2, 9);
 localStorage.setItem('client_id', CLIENT_ID);
+// DEPRECATED (transition): the HttpOnly session cookie set by the backend is now
+// the source of auth truth. The localStorage bearer token is legacy/dev
+// compatibility only — it is still sent as a fallback Authorization header and
+// still cached here, but the backend prefers the cookie and the app restores auth
+// state via restoreSession() (GET /api/auth/session), which reads the cookie the
+// browser cannot expose to JavaScript. See docs/architecture.md → auth.
 export const AUTH_TOKEN_KEY = 'benchone_auth_token';
 export const AUTH_USER_KEY = 'benchone_auth_user';
 const AUTH_SESSION_KEY_PREFIXES = ['benchone_auth_', 'benchone_session'];
@@ -80,7 +86,7 @@ async function uploadSingleFile(file) {
   const headers = {};
   attachAuthHeader(headers);
 
-  const res = await fetch(apiUrl('/api/upload'), { method: 'POST', headers, body: form });
+  const res = await fetch(apiUrl('/api/upload'), { method: 'POST', headers, body: form, credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data.path;
@@ -95,7 +101,7 @@ async function uploadDirectory(files) {
   const headers = {};
   attachAuthHeader(headers);
 
-  const res = await fetch(apiUrl('/api/upload-directory'), { method: 'POST', headers, body: form });
+  const res = await fetch(apiUrl('/api/upload-directory'), { method: 'POST', headers, body: form, credentials: 'include' });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data.path;
@@ -131,8 +137,11 @@ async function req(endpoint, options = {}) {
   options.headers = options.headers || {};
   options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
   options.headers['X-Client-ID'] = CLIENT_ID;
+  // Send the HttpOnly session cookie (source of auth truth) even cross-origin.
+  // The bearer header is still attached as legacy/dev fallback.
+  options.credentials = options.credentials || 'include';
   attachAuthHeader(options.headers);
-  
+
   const res = await fetch(apiUrl(endpoint), options);
   if (!res.ok) {
     const text = await res.text();
@@ -167,8 +176,9 @@ export const electronAPI = {
     try {
       options.headers = options.headers || {};
       options.headers['X-Client-ID'] = CLIENT_ID;
+      options.credentials = options.credentials || 'include';
       attachAuthHeader(options.headers);
-      
+
       const res = await fetch(apiUrl(`/api/r${endpoint}`), options);
       const contentType = res.headers.get('content-type');
       let data;
@@ -207,7 +217,51 @@ export const electronAPI = {
     }
   },
   getCurrentUser,
+  // Restore auth state from the HttpOnly session cookie (source of truth). The
+  // cookie is not readable by JS, so the app asks the backend who it is. On
+  // success the user is cached in localStorage for a fast synchronous bootstrap
+  // (getCurrentUser) on the next load; on 401 any stale cached user is cleared.
+  restoreSession: async () => {
+    try {
+      // Attach the legacy bearer header too, so an existing bearer-only session
+      // (from before the cookie migration) is still recognized and not forcibly
+      // logged out on first load after deploy.
+      const headers = { 'X-Client-ID': CLIENT_ID };
+      attachAuthHeader(headers);
+      const res = await fetch(apiUrl('/api/auth/session'), {
+        method: 'GET',
+        headers,
+        credentials: 'include'
+      });
+      if (!res.ok) {
+        if (res.status === 401) localStorage.removeItem(AUTH_USER_KEY);
+        return null;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (data?.user) {
+        localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
+        return data.user;
+      }
+      return null;
+    } catch {
+      // Network/backend unavailable: fall back to the cached user (offline-ish
+      // dev), rather than forcing a logout on a transient failure.
+      return getCurrentUser();
+    }
+  },
   logout: async () => {
+    // Best-effort server-side cookie clear. Swallow any error (and tolerate a
+    // fetch mock that returns undefined) so logout always proceeds to clear
+    // local state.
+    try {
+      await fetch(apiUrl('/api/auth/logout'), {
+        method: 'POST',
+        headers: { 'X-Client-ID': CLIENT_ID },
+        credentials: 'include'
+      });
+    } catch {
+      // ignore — local state is cleared regardless
+    }
     clearAuthSessionStorage();
   },
   
@@ -277,7 +331,7 @@ export const electronAPI = {
     if (metadata && Object.keys(metadata).length > 0) form.append('metadata', JSON.stringify(metadata));
     const headers = {};
     attachAuthHeader(headers);
-    const res = await fetch(apiUrl(`/api/projects/${projectId}/datasets`), { method: 'POST', headers, body: form });
+    const res = await fetch(apiUrl(`/api/projects/${projectId}/datasets`), { method: 'POST', headers, body: form, credentials: 'include' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || res.statusText);
     return data;
