@@ -146,6 +146,41 @@ describe('API Client (electronAPI)', () => {
     expect(reloaded.electronAPI.getCurrentUser()).toBeNull();
   });
 
+  it('restores auth state from the HttpOnly cookie session (not localStorage bearer)', async () => {
+    const sessionUser = { id: 7, email: 'restored@example.com', displayName: 'Restored' };
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ user: sessionUser, authVia: 'cookie' }),
+    });
+
+    const result = await electronAPI.restoreSession();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/auth/session',
+      expect.objectContaining({ credentials: 'include' })
+    );
+    expect(result).toEqual(sessionUser);
+    // Cached for the next synchronous bootstrap.
+    expect(electronAPI.getCurrentUser()).toEqual(sessionUser);
+  });
+
+  it('clears the cached user when the cookie session is invalid (401)', async () => {
+    localStorage.setItem('benchone_auth_user', JSON.stringify({ email: 'stale@example.com' }));
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 401,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ error: 'Authentication required' }),
+    });
+
+    const result = await electronAPI.restoreSession();
+
+    expect(result).toBeNull();
+    expect(localStorage.getItem('benchone_auth_user')).toBeNull();
+  });
+
   it('reads runtime diagnostics from the backend instead of hardcoded R strings', async () => {
     global.fetch.mockResolvedValue({
       ok: true,

@@ -21,7 +21,26 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
+    # Postgres service for the hosted-service database contract test. The rest of
+    # the backend suite still runs against SQLite (the current runtime); this
+    # provisions a real Postgres so backend/postgres-contract.test.js proves the
+    # schema + pgDatabase layer on Postgres instead of skipping.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scrna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -73,6 +92,20 @@ jobs:
         # holds — not that a feature is wired into the UI. See the "Implemented vs
         # UI-wired" table in README.md.
         run: npm run test:backend
+
+      - name: Run Postgres Contract Test
+        # Hosted-service database foundation (evidence label: Postgres contract).
+        # Applies backend/pg/schema.sql to the Postgres service and runs the
+        # contract test (auth, project RBAC, server-generated ids, analysis-object
+        # ownership, job state machine, artifact result-checkpoint immutability,
+        # public sanitization). SQLite remains the app runtime; this proves the
+        # Postgres path is real and green before it becomes the runtime.
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/scrna_test
+          NODE_ENV: test
+        run: |
+          npm run init:postgres
+          npm run test:backend:postgres
 
       - name: Run Security Tests
         # Per-user DB isolation + analysis-object identity/ownership, the

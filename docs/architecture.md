@@ -37,7 +37,7 @@ Status legend:
 
 | Subsystem | Status | Notes |
 | --- | --- | --- |
-| Auth / logout | UI-wired | localStorage bearer token; no secure cookies / server-side revocation yet. |
+| Auth / logout | UI-wired (cookie foundation) | HttpOnly session cookie is the source of auth truth (login/signup set it; `GET /api/auth/session` restores it; `POST /api/auth/logout` clears it). The localStorage bearer token is deprecated legacy/dev compatibility, still accepted in a transition mode. CSRF for cookie-auth mutations is a SameSite=Lax cookie + an allowed-origin check. Server-side session **revocation/versioning** is still future work (stateless HMAC token). |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
 | Project members / RBAC endpoints | backend-only | Role-checked member APIs exist and are tested. The in-app "Collaborators" panel is a disabled status surface and is **not** wired to these endpoints. |
 | Project-scoped datasets | backend-only | Upload with server-chosen storage key + sha256; no UI dataset manager. |
@@ -62,7 +62,8 @@ Status legend:
 | Reports / generated R scripts | not implemented | No supported report or script-export surface. Legacy live-R provenance script preview is copy-only and not a complete reproducibility export. |
 | Artifact downloads | not implemented | No public download route; responses never expose storage paths/keys. |
 | Object storage | not implemented | Local vault only; no external object storage. |
-| Secure cookie sessions | not implemented | Browser auth is still localStorage bearer tokens. |
+| Secure cookie sessions | backend-wired (transitional) | HttpOnly + SameSite + Secure-in-production session cookie is set on login/signup and accepted on every route; frontend restores via `/api/auth/session`. localStorage bearer is deprecated fallback. Session revocation/versioning not yet implemented. |
+| Postgres database path | backend-only (foundation) | `backend/pgDatabase.js` + `backend/pg/schema.sql` provide the Postgres data layer + schema, proven by a real-Postgres contract test. SQLite is still the app runtime; the full data-layer port is the next branch. See "Database backend" below. |
 | Shared project live R state | not implemented | Collaboration is via durable metadata, never a shared live R session. |
 
 ## DEG paths (two implementations)
@@ -105,10 +106,56 @@ path-validated (confined to the per-user vault), but it is not safe for
 untrusted uploads until stronger sandbox/container isolation exists. Worker
 checkpoint loading is a separate internal path for server-created checkpoints.
 
+## Database backend
+
+The app is mid-migration from SQLite to Postgres for the hosted service.
+
+- **Runtime today:** SQLite (`backend/database.js`), loaded by `server.js`. This
+  is the temporary local/test fallback, not the intended hosted-service database.
+- **Postgres foundation:** `backend/pg/schema.sql` is the Postgres translation of
+  the durable schema (same tables, server-owned identity, role/scope columns, job
+  state-machine + worker-coordination columns, artifact immutability, lineage DAG).
+  `backend/pgDatabase.js` is an async `pg` data layer implementing the core
+  durable entities (users, orgs/projects/members, analysis objects, jobs +
+  state machine, artifacts + result-checkpoint immutability) with the same
+  security invariants (server-generated ids, server-set ownership/role/status,
+  public projections that strip claim tokens / worker internals / `storage_uri`).
+- **Backend selection** is via `DATABASE_BACKEND` (`sqlite` | `postgres`) or
+  inferred from `DATABASE_URL` (see `backend/config.js`). Selecting `postgres`
+  does not yet switch the running server — porting the full route/DB call surface
+  off synchronous better-sqlite3 onto the async `pg` layer is the next branch.
+- **Schema init:** `npm run init:postgres` applies `schema.sql` idempotently
+  (`DATABASE_URL` or `PG*` env). It does **not** migrate existing SQLite dev data:
+  local SQLite state is disposable dev/test data (gitignored `*.db`), so a fresh
+  Postgres database starts empty and users/projects are re-created through the
+  normal signup/create flows.
+- **Local Postgres:** `docker compose up postgres` (localhost-only) or any local
+  Postgres; then `DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna npm run init:postgres`.
+- **Evidence:** `backend/postgres-contract.test.js` runs against a real Postgres
+  (CI service + `npm run test:backend:postgres`) and SKIPS cleanly when no
+  Postgres is configured, so the default SQLite `npm run test:backend` stays green.
+
 ## State & storage boundaries
 
-- Browser auth is still localStorage bearer-token based; secure cookie sessions
-  and server-side token revocation are not implemented.
+- Browser auth is now an **HttpOnly session cookie** (source of truth); the
+  localStorage bearer token is deprecated legacy/dev compatibility accepted in a
+  transition mode. CSRF for cookie-authenticated state-changing requests is
+  SameSite=Lax + an allowed-origin check (`FRONTEND_ORIGIN`). Server-side session
+  revocation/versioning is not yet implemented (the token is a stateless HMAC);
+  project role/membership is still re-checked on every project-scoped request.
+  SameSite=Lax is intended for same-site/local deployments (API and frontend on
+  the same origin). For cross-origin hosted deployments — API and frontend on
+  different origins — cookie auth requires an explicit `COOKIE_SAMESITE=None` +
+  `COOKIE_SECURE=true` configuration, a correct `FRONTEND_ORIGIN` allowlist, and
+  HTTPS; `validateProductionConfig()` refuses to boot with `SameSite=None` and a
+  non-Secure cookie.
+- Durable project resources use **server-owned, project-scoped storage keys**
+  (`backend/storage.js`, `projects/<projectId>/<kind>/<id>`): server-generated,
+  traversal-proof, never client-supplied, and never returned in a public response
+  (serializers already strip `storage_uri` / internal keys). This is a local
+  filesystem convention today; the key format is provider-agnostic so a future
+  object-storage backend can adopt it without changing callers. No object storage
+  and no public downloads are introduced.
 - Backend projects, DB-backed analysis objects, jobs, artifacts, checkpoints,
   and lineage are the durable source of truth **at the API/DB layer**. Projects
   and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
