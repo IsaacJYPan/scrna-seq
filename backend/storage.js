@@ -48,10 +48,31 @@ const PROJECT_STORAGE_KINDS = new Set([
 function isSafeKeySegment(value) {
   if (typeof value !== 'string' || value === '') return false;
   if (value.includes('\0')) return false;
+  if (value.includes('%')) return false;
   // Server-generated ids are lowercase-hex-prefixed tokens (ds_/art_/ao_/job_/
   // proj_...). Confine key segments to that safe alphabet so a key can never
   // carry a path-traversal segment or separator even if a caller passes junk.
   return /^[A-Za-z0-9._-]+$/.test(value) && value !== '.' && value !== '..';
+}
+
+function assertSafeStorageKey(key) {
+  if (typeof key !== 'string' || key === '' || key.includes('\0')) {
+    throw new Error('Invalid storage key.');
+  }
+  if (key.includes('%')) {
+    throw new Error('Invalid storage key.');
+  }
+  if (/^([/\\]|[A-Za-z]:|\\\\)/.test(key)) {
+    throw new Error('Storage key must be relative.');
+  }
+  if (key.includes('\\')) {
+    throw new Error('Storage key must use POSIX separators.');
+  }
+
+  const segments = key.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new Error('Storage key contains an unsafe path segment.');
+  }
 }
 
 /**
@@ -80,9 +101,7 @@ function projectStorageKey(projectId, kind, id) {
  * absolute path is server-internal and must not be exposed in a response.
  */
 function resolveStoragePath(key) {
-  if (typeof key !== 'string' || key === '' || key.includes('\0')) {
-    throw new Error('Invalid storage key.');
-  }
+  assertSafeStorageKey(key);
   const root = storageRoot();
   const abs = path.resolve(root, key);
   const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
@@ -98,5 +117,6 @@ module.exports = {
   storageRoot,
   isSafeKeySegment,
   projectStorageKey,
+  assertSafeStorageKey,
   resolveStoragePath
 };

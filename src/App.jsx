@@ -156,15 +156,15 @@ export default function App() {
   // and always miss the SQLite cache.
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
 
-  const [user, setUser] = useState(() => window.electronAPI?.getCurrentUser?.() || null);
+  const [user, setUser] = useState(null);
   const isLoggedIn = !!user;
 
   // Restore auth state from the HttpOnly session cookie (source of truth) on
   // mount, rather than trusting the localStorage bearer token. The cookie is not
   // readable by JS, so we ask the backend who we are. This reconciles the fast
   // synchronous bootstrap (cached user) with the real server session: if the
-  // cookie session is valid we adopt/refresh the user; if it is gone we clear a
-  // stale cached user so a reload does not appear logged in.
+  // cookie session is valid we adopt/refresh the user; if it is gone we stay
+  // logged out so a reload cannot trust a stale localStorage bearer/user cache.
   useEffect(() => {
     let cancelled = false;
     if (!window.electronAPI?.restoreSession) return undefined;

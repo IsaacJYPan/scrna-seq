@@ -23,6 +23,8 @@
 
 'use strict';
 
+const path = require('path');
+
 function trimmed(raw) {
   return raw === undefined || raw === null ? '' : String(raw).trim();
 }
@@ -38,6 +40,12 @@ function positiveIntFromEnv(rawValue, fallback) {
   const n = Number(rawValue);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return fallback;
   return n;
+}
+
+function isValidPositiveIntOverride(rawValue) {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return true;
+  const n = Number(rawValue);
+  return Number.isFinite(n) && Number.isInteger(n) && n > 0;
 }
 
 function nodeEnv() {
@@ -125,6 +133,14 @@ function cookieSameSite() {
   return 'Lax';
 }
 
+function validateCookieConfig() {
+  const errors = [];
+  if (cookieSameSite() === 'None' && !cookieSecure()) {
+    errors.push('COOKIE_SAMESITE=None requires Secure cookies (COOKIE_SECURE=true); browsers reject None cookies without Secure.');
+  }
+  return errors;
+}
+
 // ── Allowed browser origins (CORS + CSRF) ───────────────────────────────────
 // Comma-separated FRONTEND_ORIGIN (preferred) or legacy FRONTEND_URL. Trailing
 // slashes are stripped so an origin compares cleanly against a request Origin
@@ -154,6 +170,38 @@ function rBackendUrl() {
   return `http://127.0.0.1:${plumberPort()}`;
 }
 
+// ── Storage roots + upload limits (server-only; never exposed to clients) ────
+function resolveRoot(envValue, fallbackSegments) {
+  const raw = trimmed(envValue);
+  if (raw) return path.resolve(raw);
+  return path.join(process.cwd(), ...fallbackSegments);
+}
+
+function storageRoot() {
+  return resolveRoot(process.env.STORAGE_ROOT, ['data']);
+}
+
+function vaultRoot() {
+  return resolveRoot(process.env.VAULT_ROOT, ['vault']);
+}
+
+function maxUploadBytes() {
+  return positiveIntFromEnv(process.env.MAX_UPLOAD_BYTES, 512 * 1024 * 1024);
+}
+
+function maxUploadFiles() {
+  return positiveIntFromEnv(process.env.MAX_UPLOAD_FILES, 10000);
+}
+
+function pathContains(parent, child) {
+  const rel = path.relative(parent, child);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function isFilesystemRoot(absPath) {
+  return path.parse(absPath).root === absPath;
+}
+
 // ── Supported R target ──────────────────────────────────────────────────────
 function supportedRTarget() {
   return 'R 4.5.x';
@@ -176,13 +224,14 @@ function summary() {
 }
 
 /**
- * Validate required production-like configuration. Returns an array of
- * human-readable error strings (empty === OK). server.js calls this at startup
- * and refuses to boot in production if it is non-empty. Never echoes secret
- * values — only names the missing/invalid variable.
+ * Validate runtime configuration. Cookie invariants are enforced in every
+ * environment because browsers reject unsafe SameSite=None cookies regardless of
+ * NODE_ENV; the remaining hosted-service requirements are production-only.
+ * Returns an array of human-readable error strings (empty === OK). Never echoes
+ * secret values — only names the missing/invalid variable.
  */
 function validateProductionConfig() {
-  const errors = [];
+  const errors = validateCookieConfig();
   if (!isProduction()) return errors;
 
   if (!trimmed(process.env.SESSION_SECRET)) {
@@ -197,14 +246,41 @@ function validateProductionConfig() {
   if (!cookieSecure()) {
     errors.push('Session cookies must be Secure in production (do not set COOKIE_SECURE=false).');
   }
-  if (cookieSameSite() === 'None' && !cookieSecure()) {
-    errors.push('COOKIE_SAMESITE=None requires Secure cookies (COOKIE_SECURE must not be false) — browsers reject None cookies without Secure.');
+  if (cookieSameSite() === 'None') {
+    const insecureOrigins = allowedOrigins().filter((origin) => {
+      try {
+        return new URL(origin).protocol !== 'https:';
+      } catch {
+        return true;
+      }
+    });
+    if (insecureOrigins.length > 0) {
+      errors.push('COOKIE_SAMESITE=None is for cross-site cookie deployments and requires every FRONTEND_ORIGIN to use https:// in production.');
+    }
+  }
+  if (!isValidPositiveIntOverride(process.env.MAX_UPLOAD_BYTES)) {
+    errors.push('MAX_UPLOAD_BYTES must be a positive integer when set.');
+  }
+  if (!isValidPositiveIntOverride(process.env.MAX_UPLOAD_FILES)) {
+    errors.push('MAX_UPLOAD_FILES must be a positive integer when set.');
+  }
+  const durableRoot = storageRoot();
+  const privateRoot = vaultRoot();
+  if (isFilesystemRoot(durableRoot)) {
+    errors.push('STORAGE_ROOT must not resolve to the filesystem root.');
+  }
+  if (isFilesystemRoot(privateRoot)) {
+    errors.push('VAULT_ROOT must not resolve to the filesystem root.');
+  }
+  if (pathContains(durableRoot, privateRoot) || pathContains(privateRoot, durableRoot)) {
+    errors.push('STORAGE_ROOT and VAULT_ROOT must be separate non-overlapping directories.');
   }
   return errors;
 }
 
 module.exports = {
   positiveIntFromEnv,
+  isValidPositiveIntOverride,
   nodeEnv,
   isProduction,
   databaseBackend,
@@ -215,10 +291,15 @@ module.exports = {
   sessionTtlSeconds,
   cookieSecure,
   cookieSameSite,
+  validateCookieConfig,
   allowedOrigins,
   isAllowedOrigin,
   plumberPort,
   rBackendUrl,
+  storageRoot,
+  vaultRoot,
+  maxUploadBytes,
+  maxUploadFiles,
   supportedRTarget,
   summary,
   validateProductionConfig

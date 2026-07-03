@@ -173,6 +173,27 @@ describe('CSRF protection for cookie-authenticated mutations', () => {
 });
 
 describe('logout + legacy bearer compatibility', () => {
+  it('prefers a valid cookie over a different valid legacy bearer token', async () => {
+    const cookieEmail = uniqueEmail('cookie-wins');
+    await http('/api/auth/signup', { method: 'POST', body: { email: cookieEmail, password: 'password123', displayName: 'Cookie' } });
+    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email: cookieEmail, password: 'password123' } });
+    const cookie = getSessionCookie(loginRes);
+
+    const bearerUser = db.createUser(uniqueEmail('bearer-loses'), 'password123', 'Bearer');
+    const bearerToken = issueSession(bearerUser);
+
+    const { status, data } = await http('/api/auth/session', {
+      headers: {
+        Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}`,
+        Authorization: `Bearer ${bearerToken}`
+      }
+    });
+
+    expect(status).toBe(200);
+    expect(data.authVia).toBe('cookie');
+    expect(data.user.email).toBe(cookieEmail);
+  });
+
   it('clears the session cookie on logout', async () => {
     const email = uniqueEmail('logout');
     await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });

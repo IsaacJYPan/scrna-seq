@@ -2486,7 +2486,7 @@ function rowToDataset(row) {
 // no dataset download routes in this branch).
 function toPublicDataset(dataset) {
   if (!dataset) return null;
-  const { internalStorageKey, ...rest } = dataset; // eslint-disable-line no-unused-vars
+  const { internalStorageKey, storageUri, ...rest } = dataset; // eslint-disable-line no-unused-vars
   return rest;
 }
 
