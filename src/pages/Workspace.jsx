@@ -612,8 +612,16 @@ function WorkbenchOverview({
     { label: 'Normalize', status: pipelineStatus(pipelineState?.normalize, hasObject), detail: 'Transient live-R workflow.' },
     { label: 'PCA', status: pipelineStatus(pipelineState?.pca, hasObject), detail: 'Transient live-R workflow.' },
     { label: 'Cluster / UMAP', status: !hasObject ? { label: 'Requires loaded object', tone: 'slate' } : pipelineState?.pca ? { label: 'Ready', tone: 'blue' } : { label: 'Requires PCA', tone: 'amber' }, detail: 'Live-R analysis and visualization.' },
-    { label: 'Markers / DEG', status: hasObject ? { label: 'Transient live-R workflow', tone: 'amber' } : { label: 'Requires loaded object', tone: 'slate' }, detail: 'Current UI uses the legacy live-R DEG path.' },
-    { label: 'Jobs & artifacts', status: hasProject ? { label: 'Read-only metadata', tone: 'blue' } : { label: 'Select project', tone: 'slate' }, detail: 'Durable backend foundation; no launch/download UI.' },
+    {
+      label: 'Markers / DEG',
+      status: !hasObject
+        ? { label: 'Requires loaded object', tone: 'slate' }
+        : isDbBacked
+          ? { label: 'Durable worker job', tone: 'green' }
+          : { label: 'Requires DB-backed object', tone: 'amber' },
+      detail: 'Current UI launches deg.find_markers.v1 jobs for DB-backed objects and shows bounded summary metadata.',
+    },
+    { label: 'Jobs & artifacts', status: hasProject ? { label: 'Metadata plus DEG launch', tone: 'blue' } : { label: 'Select project', tone: 'slate' }, detail: 'Durable backend foundation; no download UI.' },
     { label: 'Reports / export', status: { label: 'Future workflow', tone: 'slate' }, detail: 'Figure gallery exists; full reports are not implemented.' },
     { label: 'Diagnostics', status: { label: 'Ready', tone: 'green' }, detail: 'Backend and R runtime checks.' },
   ];
