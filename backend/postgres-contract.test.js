@@ -142,4 +142,190 @@ describe.skipIf(!CONFIGURED)('Postgres contract (hosted-service database foundat
     expect(publicArtifact).not.toHaveProperty('storageUri');
     expect(publicArtifact.checksumSha256).toBe('abc123'); // safe descriptive metadata kept
   });
+
+  it('enforces project membership, dataset metadata safety, and public analysis-object projection', async () => {
+    const owner = await pg.createUser('parity-owner@example.com', 'password123', 'Parity Owner');
+    const viewer = await pg.createUser('parity-viewer@example.com', 'password123', 'Parity Viewer');
+    const stranger = await pg.createUser('parity-stranger@example.com', 'password123', 'Parity Stranger');
+    const org = await pg.createOrganization('Parity Lab', owner.id);
+    const project = await pg.createProject(org.id, 'Parity Project', owner.id);
+    await pg.addProjectMember(project.id, viewer.id, 'viewer');
+
+    const dataset = await pg.createDatasetForProject(owner.id, project.id, {
+      id: 'ds_client',
+      ownerUserId: stranger.id,
+      createdByUserId: stranger.id,
+      originalFilename: '../matrix.h5',
+      fileType: 'tenx_h5',
+      uploadStatus: 'pending',
+      validationStatus: 'pending',
+      internalStorageKey: 'client/key',
+      storageUri: '/client/path',
+      metadata: { organism: 'human' }
+    });
+    expect(dataset.id).toMatch(/^ds_[0-9a-f]+$/);
+    expect(dataset.ownerUserId).toBe(owner.id);
+    expect(dataset.createdByUserId).toBe(owner.id);
+    expect(dataset.originalFilename).toBe('matrix.h5');
+    expect(dataset.internalStorageKey).toBeNull();
+    expect(dataset.storageUri).toBeNull();
+
+    const publicDataset = pg.toPublicDataset(dataset);
+    expect(publicDataset).not.toHaveProperty('internalStorageKey');
+    expect(publicDataset).not.toHaveProperty('storageUri');
+
+    const readByViewer = await pg.getDatasetForProject(viewer.id, project.id, dataset.id);
+    expect(readByViewer.id).toBe(dataset.id);
+
+    await expect(pg.createDatasetForProject(viewer.id, project.id, {
+      fileType: 'tenx_h5'
+    })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(pg.listDatasetsForProject(stranger.id, project.id))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+    const obj = await pg.createProjectAnalysisObject(owner.id, project.id, {
+      objectType: 'seurat',
+      datasetId: dataset.id,
+      displayName: 'Project object',
+      storageUri: '/client/object.rds',
+      objectHash: 'client-hash',
+      metadata: { cells: 10 }
+    });
+    expect(obj.id).toMatch(/^ao_[0-9a-f]+$/);
+    expect(obj.projectId).toBe(project.id);
+    expect(obj.datasetId).toBe(dataset.id);
+    expect(obj.ownerUserId).toBe(owner.id);
+    expect(obj.storageUri).toBeNull();
+    expect(obj.objectHash).toBeNull();
+
+    const publicObj = pg.toPublicAnalysisObject(obj);
+    expect(publicObj).not.toHaveProperty('storageUri');
+    expect(publicObj).not.toHaveProperty('objectHash');
+
+    const viewerObjects = await pg.listProjectAnalysisObjects(viewer.id, project.id);
+    expect(viewerObjects.map(o => o.id)).toContain(obj.id);
+    await expect(pg.getProjectAnalysisObject(stranger.id, project.id, obj.id))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('records project jobs, log transitions, and artifact metadata without public storage leaks', async () => {
+    const owner = await pg.createUser('parity-jobs-owner@example.com', 'password123', 'Job Owner');
+    const viewer = await pg.createUser('parity-jobs-viewer@example.com', 'password123', 'Job Viewer');
+    const org = await pg.createOrganization('Job Lab', owner.id);
+    const project = await pg.createProject(org.id, 'Job Project', owner.id);
+    await pg.addProjectMember(project.id, viewer.id, 'viewer');
+    const dataset = await pg.createDatasetForProject(owner.id, project.id, {
+      fileType: 'tenx_h5',
+      uploadStatus: 'pending',
+      validationStatus: 'pending'
+    });
+    const obj = await pg.createProjectAnalysisObject(owner.id, project.id, {
+      objectType: 'seurat',
+      datasetId: dataset.id
+    });
+    const otherProject = await pg.createProject(org.id, 'Other Job Project', owner.id);
+    const otherObj = await pg.createProjectAnalysisObject(owner.id, otherProject.id, {
+      objectType: 'seurat'
+    });
+
+    const job = await pg.createProjectJob(owner.id, project.id, {
+      jobType: 'checkpoint.noop',
+      analysisObjectId: obj.id,
+      datasetId: dataset.id,
+      status: 'completed',
+      ownerUserId: viewer.id,
+      parameters: { alpha: 1 }
+    });
+    expect(job.id).toMatch(/^job_[0-9a-f]+$/);
+    expect(job.ownerUserId).toBe(owner.id);
+    expect(job.projectId).toBe(project.id);
+    expect(job.status).toBe('queued');
+
+    const logged = await pg.appendJobLogForUser(owner.id, job.id, { level: 'warn', message: 'queued for worker' });
+    expect(logged.logs).toHaveLength(1);
+    expect(logged.logs[0].message).toBe('queued for worker');
+
+    const running = await pg.updateJobStatusForUser(owner.id, job.id, 'running');
+    expect(running.startedAt).toBeTruthy();
+    await expect(pg.updateJobStatusForUser(owner.id, job.id, 'completed', {
+      resultAnalysisObjectId: otherObj.id
+    })).rejects.toMatchObject({ code: 'RESULT_OBJECT_NOT_FOUND' });
+    const done = await pg.updateJobStatusForUser(owner.id, job.id, 'completed', {
+      log: 'completed',
+      resultAnalysisObjectId: obj.id
+    });
+    expect(done.status).toBe('completed');
+    expect(done.logs.map(l => l.message)).toContain('completed');
+    await expect(pg.updateJobStatusForUser(owner.id, job.id, 'running'))
+      .rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+
+    const artifact = await pg.createArtifact(done, {
+      artifactType: 'metrics',
+      name: 'metrics',
+      storageKind: 'local_internal',
+      storageUri: 'projects/internal/metrics.json',
+      metadata: { rows: 3 }
+    });
+    const rawArtifacts = await pg.getJobArtifactsByJobId(job.id);
+    expect(rawArtifacts[0].storageUri).toBe('projects/internal/metrics.json');
+
+    const publicArtifacts = await pg.listProjectJobArtifacts(viewer.id, project.id, job.id);
+    expect(publicArtifacts).toHaveLength(1);
+    expect(publicArtifacts[0]).not.toHaveProperty('storageUri');
+    const publicArtifact = await pg.getProjectArtifact(viewer.id, project.id, artifact.id);
+    expect(publicArtifact).not.toHaveProperty('storageUri');
+  });
+
+  it('creates same-project lineage edges and rejects cycles and cross-project edges', async () => {
+    const owner = await pg.createUser('parity-lineage-owner@example.com', 'password123', 'Lineage Owner');
+    const viewer = await pg.createUser('parity-lineage-viewer@example.com', 'password123', 'Lineage Viewer');
+    const org = await pg.createOrganization('Lineage Lab', owner.id);
+    const project = await pg.createProject(org.id, 'Lineage Project', owner.id);
+    const otherProject = await pg.createProject(org.id, 'Other Lineage Project', owner.id);
+    await pg.addProjectMember(project.id, viewer.id, 'viewer');
+
+    const root = await pg.createProjectAnalysisObject(owner.id, project.id, {
+      objectType: 'seurat',
+      displayName: 'root'
+    });
+    const child = await pg.createProjectAnalysisObject(owner.id, project.id, {
+      objectType: 'seurat',
+      parentObjectId: root.id,
+      displayName: 'child'
+    });
+    const secondChild = await pg.createProjectAnalysisObject(owner.id, project.id, {
+      objectType: 'seurat',
+      displayName: 'second child'
+    });
+    const otherObj = await pg.createProjectAnalysisObject(owner.id, otherProject.id, {
+      objectType: 'seurat'
+    });
+
+    const parents = await pg.listProjectAnalysisObjectParents(viewer.id, project.id, child.id);
+    expect(parents).toHaveLength(1);
+    expect(parents[0].parentAnalysisObjectId).toBe(root.id);
+
+    const edge = await pg.createLineageEdge(owner.id, {
+      parentObjectId: root.id,
+      childObjectId: secondChild.id,
+      edgeType: 'branch',
+      parentRole: 'primary',
+      metadata: { reason: 'test' }
+    });
+    expect(edge.id).toMatch(/^aoe_[0-9a-f]+$/);
+    expect(edge.projectId).toBe(project.id);
+
+    await expect(pg.createLineageEdge(owner.id, {
+      parentObjectId: child.id,
+      childObjectId: root.id
+    })).rejects.toMatchObject({ code: 'CYCLE' });
+    await expect(pg.createLineageEdge(owner.id, {
+      parentObjectId: root.id,
+      childObjectId: otherObj.id
+    })).rejects.toMatchObject({ code: 'CHILD_NOT_FOUND' });
+
+    const graph = await pg.getProjectAnalysisObjectLineage(viewer.id, project.id, root.id);
+    expect(graph.nodes.map(n => n.id)).toEqual(expect.arrayContaining([root.id, child.id, secondChild.id]));
+    expect(graph.edges.map(e => e.childAnalysisObjectId)).toEqual(expect.arrayContaining([child.id, secondChild.id]));
+  });
 });

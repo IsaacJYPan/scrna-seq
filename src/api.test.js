@@ -166,8 +166,32 @@ describe('API Client (electronAPI)', () => {
     expect(electronAPI.getCurrentUser()).toEqual(sessionUser);
   });
 
-  it('clears the cached user when the cookie session is invalid (401)', async () => {
+  it('sends the legacy bearer during restore for compatibility while cookies remain preferred by the backend', async () => {
+    localStorage.setItem('benchone_auth_token', 'legacy-token');
+    const sessionUser = { id: 8, email: 'cookie@example.com', displayName: 'Cookie' };
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ user: sessionUser, authVia: 'cookie' }),
+    });
+
+    const result = await electronAPI.restoreSession();
+
+    expect(result).toEqual(sessionUser);
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/auth/session',
+      expect.objectContaining({
+        credentials: 'include',
+        headers: expect.objectContaining({ Authorization: 'Bearer legacy-token' })
+      })
+    );
+  });
+
+  it('clears stale auth keys when the server rejects restore (401)', async () => {
+    localStorage.setItem('benchone_auth_token', 'stale-token');
     localStorage.setItem('benchone_auth_user', JSON.stringify({ email: 'stale@example.com' }));
+    localStorage.setItem('benchone_auth_extra', 'stale-extra');
     global.fetch.mockResolvedValue({
       ok: false,
       status: 401,
@@ -178,7 +202,21 @@ describe('API Client (electronAPI)', () => {
     const result = await electronAPI.restoreSession();
 
     expect(result).toBeNull();
+    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
     expect(localStorage.getItem('benchone_auth_user')).toBeNull();
+    expect(localStorage.getItem('benchone_auth_extra')).toBeNull();
+  });
+
+  it('does not treat cached localStorage auth as truth when session restore cannot reach the backend', async () => {
+    localStorage.setItem('benchone_auth_token', 'stale-token');
+    localStorage.setItem('benchone_auth_user', JSON.stringify({ email: 'offline@example.com' }));
+    global.fetch.mockRejectedValue(new Error('network down'));
+
+    const result = await electronAPI.restoreSession();
+
+    expect(result).toBeNull();
+    expect(localStorage.getItem('benchone_auth_token')).toBe('stale-token');
+    expect(electronAPI.getCurrentUser()).toEqual({ email: 'offline@example.com' });
   });
 
   it('reads runtime diagnostics from the backend instead of hardcoded R strings', async () => {

@@ -218,9 +218,9 @@ export const electronAPI = {
   },
   getCurrentUser,
   // Restore auth state from the HttpOnly session cookie (source of truth). The
-  // cookie is not readable by JS, so the app asks the backend who it is. On
-  // success the user is cached in localStorage for a fast synchronous bootstrap
-  // (getCurrentUser) on the next load; on 401 any stale cached user is cleared.
+  // cookie is not readable by JS, so the app asks the backend who it is. The
+  // legacy bearer header is still attached for transitional compatibility, but
+  // localStorage is not treated as proof of an authenticated browser session.
   restoreSession: async () => {
     try {
       // Attach the legacy bearer header too, so an existing bearer-only session
@@ -234,7 +234,7 @@ export const electronAPI = {
         credentials: 'include'
       });
       if (!res.ok) {
-        if (res.status === 401) localStorage.removeItem(AUTH_USER_KEY);
+        if (res.status === 401) clearAuthSessionStorage();
         return null;
       }
       const data = await res.json().catch(() => ({}));
@@ -244,9 +244,9 @@ export const electronAPI = {
       }
       return null;
     } catch {
-      // Network/backend unavailable: fall back to the cached user (offline-ish
-      // dev), rather than forcing a logout on a transient failure.
-      return getCurrentUser();
+      // Network/backend unavailable: keep local cache untouched, but do not use
+      // it as auth truth. The app stays logged out until the backend confirms.
+      return null;
     }
   },
   logout: async () => {
