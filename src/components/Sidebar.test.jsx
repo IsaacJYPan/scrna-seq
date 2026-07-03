@@ -91,7 +91,7 @@ describe('Sidebar component', () => {
     );
 
     expect(screen.getByText(/Live R Pipeline/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Markers \/ DEG, Legacy live-R/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Markers \/ DEG, Durable worker/i })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: /Jobs & Artifacts, Read-only/i })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: /Session DAG, Transient live-R/i })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: /Full Reports, Future workflow/i })).toBeDisabled();

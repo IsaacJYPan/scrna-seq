@@ -6,10 +6,35 @@
 // which is the correct default for a single-origin deployment where the
 // Express server also serves the built frontend.
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+const DEG_FIND_MARKERS_JOB_TYPE = 'deg.find_markers.v1';
+const DEG_FIND_MARKERS_PARAM_KEYS = new Set([
+  'groupBy',
+  'assay',
+  'onlyPositive',
+  'minPct',
+  'logfcThreshold',
+  'testUse',
+  'maxCellsPerIdent',
+  'randomSeed',
+  'topMarkersPerCluster',
+]);
 
 export function apiUrl(path) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   return `${API_BASE_URL}${normalizedPath}`;
+}
+
+export function buildDegFindMarkersJobPayload(objectId, params = {}) {
+  const safeParams = {};
+  const rawParams = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+  for (const [key, value] of Object.entries(rawParams)) {
+    if (DEG_FIND_MARKERS_PARAM_KEYS.has(key)) safeParams[key] = value;
+  }
+  return {
+    jobType: DEG_FIND_MARKERS_JOB_TYPE,
+    analysisObjectId: objectId,
+    parameters: safeParams,
+  };
 }
 
 const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).substr(2, 9);
@@ -376,6 +401,11 @@ export const electronAPI = {
   getProjectJobLogs: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}/logs`),
   cancelProjectJob: async (projectId, jobId) =>
     req(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: 'POST' }),
+  createDegFindMarkersJob: async (projectId, objectId, params = {}) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildDegFindMarkersJobPayload(objectId, params)),
+    }),
 
   // Project-scoped provenance & figure metadata (project metadata/history; ids/
   // owner/project/actor are server-controlled). Append-only; figures never carry

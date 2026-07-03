@@ -44,9 +44,9 @@ Status legend:
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. |
 | QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the authenticated live-R proxy (`/api/r/*`). |
-| DEG (differential expression) | UI-wired (legacy path) | UI calls the legacy live-R endpoint `/api/r/deg`. See "DEG paths" below. |
-| Durable DEG worker (`deg.find_markers.v1`) | backend-only | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. Not wired into the UI. |
-| Durable jobs | UI-wired (read-only metadata) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The UI does not create, cancel, or retry jobs. |
+| DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
+| Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
+| Durable jobs | UI-wired (read-only metadata + DEG launch) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1` jobs. Other job launch, cancel, retry, and checkpoint-load flows are not generally UI-wired. |
 | Job worker loop | backend-only (opt-in) | Off unless `ENABLE_JOB_WORKER="true"`; drains only registered, allowlisted handlers. |
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
 | Checkpoint artifacts | UI-wired (read-only metadata) | Immutable result checkpoint metadata per successful job can be listed. The UI does not load checkpoints. |
@@ -68,16 +68,19 @@ Status legend:
 
 ## DEG paths (two implementations)
 
-There are currently two DEG implementations, and only one is wired into the app:
+There are currently two DEG implementations, but the React DEG page now uses the
+durable worker path as its primary workflow:
 
-- **UI today:** the React DEG page calls the **legacy live-R path** `/api/r/deg`
-  through the authenticated proxy. This runs synchronously against the caller's
-  private live object.
-- **Backend-only:** a **durable, worker-backed** DEG implementation
-  (`deg.find_markers.v1` job + `r.deg.find_markers.v1` bridge operation) exists
-  and is tested, but is **not** wired into the UI.
+- **UI today:** the React DEG page creates a project-scoped
+  `deg.find_markers.v1` job, polls project job status/logs, and renders only
+  sanitized `deg_summary` artifact metadata. Full raw marker tables are stored as
+  internal `deg_markers` artifacts and are not downloadable.
+- **Legacy/dev path:** `/api/r/deg` remains reachable behind the authenticated
+  live-R proxy for temporary legacy/development compatibility. It is not the main
+  DEG UI workflow and should not be treated as the durable product path.
 
-Neither path is removed, and the UI is not migrated to the worker.
+Neither path is removed. The UI migration does not add public downloads,
+generated reports/scripts, pathway enrichment, CellChat, or shared live R state.
 
 ## Hidden/disabled features vs reachable R endpoints
 
@@ -167,9 +170,11 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
 - Backend projects, DB-backed analysis objects, jobs, artifacts, checkpoints,
   and lineage are the durable source of truth **at the API/DB layer**. Projects
   and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
-  lineage are visible as read-only metadata in Jobs & Artifacts. Datasets, RBAC
-  management, checkpoint loading, and worker job launch/cancel flows remain
-  backend-only (see the table above).
+  lineage are visible as read-only metadata in Jobs & Artifacts. The DEG tab can
+  launch `deg.find_markers.v1` worker jobs and read sanitized DEG summary
+  artifacts. Datasets, RBAC management, checkpoint loading, non-DEG worker job
+  launch/cancel flows, and artifact downloads remain backend-only or absent (see
+  the table above).
 - localStorage may cache selected project/object IDs and UI preferences only; it
   is not authoritative for projects, analysis objects, lineage, jobs, roles, or
   checkpoints.
@@ -177,7 +182,8 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
   state. Project metadata visibility does not grant live R access.
 - The worker is opt-in and allowlisted. Registered handlers include PBMC
   pipeline, checkpoint load, DEG marker finding, runtime check, and object
-  inspection — none of these worker workflows are wired into the UI yet.
+  inspection. The DEG marker workflow is UI-wired for job launch/status/safe
+  summary metadata only; the other worker workflows remain backend-only.
 - There is no public artifact download surface, object storage, generated report
   export, arbitrary R execution, or shared project live R state.
 - R 4.5.x is the intended local development target; the Dockerfile pins R 4.5.3
@@ -191,8 +197,9 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
   and the durable jobs/artifacts/lineage APIs. Durable jobs, artifacts/checkpoints,
   and lineage are implemented in the backend. The React UI now includes a
   read-only Jobs & Artifacts / durable history surface for safe metadata
-  visibility, but job launching, checkpoint loading, artifact downloads, and
-  lineage mutation are still not UI-wired. A passing backend suite
+  visibility, and the DEG tab launches `deg.find_markers.v1` jobs and reads
+  bounded `deg_summary` metadata. General job launching, checkpoint loading,
+  artifact downloads, and lineage mutation are still not UI-wired. A passing backend suite
   means the API/DB contract holds — **not** that a feature is surfaced in the UI.
 - `npm run test:visual` is a **mocked** frontend visual smoke test: it renders
   the built UI with backend and R responses mocked in the browser. It checks
