@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { electronAPI, apiUrl } from './api';
+import { electronAPI, apiUrl, buildDegFindMarkersJobPayload } from './api';
 
 describe('apiUrl (VITE_API_BASE_URL resolution)', () => {
   afterEach(() => {
@@ -40,6 +40,40 @@ describe('apiUrl (VITE_API_BASE_URL resolution)', () => {
 
   it('is importable as a named export from the live module', () => {
     expect(typeof apiUrl).toBe('function');
+  });
+});
+
+describe('buildDegFindMarkersJobPayload', () => {
+  it('builds the durable DEG job payload without server-owned or non-allowlisted fields', () => {
+    const payload = buildDegFindMarkersJobPayload('ao_abc123', {
+      groupBy: 'seurat_clusters',
+      assay: 'RNA',
+      testUse: 'wilcox',
+      minPct: 0.1,
+      logfcThreshold: 0.25,
+      onlyPositive: true,
+      topMarkersPerCluster: 10,
+      ownerUserId: 99,
+      status: 'completed',
+      storageUri: 'vault/private/markers.csv',
+      stateKey: 'user-1:obj-ao_abc123',
+      path: 'C:/private/markers.csv',
+    });
+
+    expect(payload).toEqual({
+      jobType: 'deg.find_markers.v1',
+      analysisObjectId: 'ao_abc123',
+      parameters: {
+        groupBy: 'seurat_clusters',
+        assay: 'RNA',
+        testUse: 'wilcox',
+        minPct: 0.1,
+        logfcThreshold: 0.25,
+        onlyPositive: true,
+        topMarkersPerCluster: 10,
+      },
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|completed|vault|stateKey|C:\/private/i);
   });
 });
 
@@ -241,5 +275,36 @@ describe('API Client (electronAPI)', () => {
     expect(result.rscriptPath).toBe('Rscript');
     expect(result.rscriptSource).toBe('PATH');
     expect(result.packages).toMatchObject({ Seurat: true, CellChat: false });
+  });
+
+  it('creates durable DEG jobs through the project job API wrapper', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_abc123', jobType: 'deg.find_markers.v1', status: 'queued' }),
+    });
+
+    const result = await electronAPI.createDegFindMarkersJob('proj_1', 'ao_abc123', {
+      groupBy: 'seurat_clusters',
+      assay: 'RNA',
+      testUse: 'wilcox',
+      storageUri: 'vault/private/markers.csv',
+    });
+
+    expect(result.id).toBe('job_abc123');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'deg.find_markers.v1',
+      analysisObjectId: 'ao_abc123',
+      parameters: {
+        groupBy: 'seurat_clusters',
+        assay: 'RNA',
+        testUse: 'wilcox',
+      },
+    });
   });
 });

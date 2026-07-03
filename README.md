@@ -37,16 +37,19 @@ assume "implemented and tested" means "usable in the UI".
 At a glance:
 
 - **UI-wired:** auth, organizations/projects, DB-backed analysis objects
-  (`ao_*`), live R object state, QC/Normalize/PCA/Cluster/UMAP/plots, DEG (via
-  the **legacy** `/api/r/deg` path), provenance/figures/cache.
+  (`ao_*`), live R object state, QC/Normalize/PCA/Cluster/UMAP/plots, DEG through
+  durable `deg.find_markers.v1` jobs and bounded summary artifacts,
+  provenance/figures/cache.
 - **Backend implemented with partial read-only UI visibility:** durable jobs,
   artifacts/checkpoints, and lineage exist in the backend, and the React UI now
   includes a read-only Jobs & Artifacts / durable history surface for safe
-  metadata visibility. Job launching, checkpoint loading, artifact downloads,
-  and lineage mutation are still not UI-wired.
+  metadata visibility. DEG job launch is wired in the DEG tab; checkpoint loading,
+  artifact downloads, general job launch/cancel/retry, and lineage mutation are
+  still not UI-wired.
 - **Backend-only (implemented + tested, no UI yet):** project members/RBAC
-  endpoints, datasets, the opt-in worker loop, and the PBMC pipeline /
-  checkpoint-load / DEG-marker / runtime-check / object-inspect workers.
+  endpoints, datasets, the opt-in worker loop controls, and the PBMC pipeline /
+  checkpoint-load / runtime-check / object-inspect worker workflows. The DEG
+  marker worker is now UI-wired for launch/status/safe summary metadata only.
 - **Infrastructure foundation (backend-wired, hosted-service direction):**
   HttpOnly cookie sessions (login/signup set the cookie; `/api/auth/session`
   restores; `/api/auth/logout` clears; cookie auth is preferred while the

@@ -49,7 +49,7 @@ export default function Sidebar({
   ];
 
   const markerItems = [
-    { id: 'deg', label: 'Markers / DEG', icon: FileText, status: 'Legacy live-R' },
+    { id: 'deg', label: 'Markers / DEG', icon: FileText, status: 'Durable worker' },
     { id: 'annotate', label: 'Cell Annotation', icon: Sparkles, disabled: true, status: 'Not integrated' },
     { id: 'enrichment', label: 'Pathway Enrichment', icon: Microscope, disabled: true, status: 'Future workflow' },
     { id: 'cellchat', label: 'CellChat', icon: MessageSquare, disabled: true, status: 'Future workflow' },
