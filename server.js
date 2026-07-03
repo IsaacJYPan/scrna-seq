@@ -1234,7 +1234,7 @@ app.delete('/api/projects/:id/members/:userId', (req, res) => {
 const upload = multer({
   dest: UPLOAD_DIR,
   preservePath: true,
-  limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 512 * 1024 * 1024) },
+  limits: { fileSize: config.maxUploadBytes() },
   fileFilter: (req, file, cb) => {
     const allowed = new Set(['.csv', '.tsv', '.txt', '.mtx', '.gz', '.h5', '.h5ad', '.h5seurat', '.rds']);
     const ext = path.extname(file.originalname || '').toLowerCase();
@@ -1271,7 +1271,7 @@ app.post('/api/upload', requireAuth, (req, res) => {
 });
 
 app.post('/api/upload-directory', requireAuth, (req, res) => {
-  upload.array('files', Number(process.env.MAX_UPLOAD_FILES || 10000))(req, res, (err) => {
+  upload.array('files', config.maxUploadFiles())(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
 
@@ -1303,7 +1303,7 @@ app.post('/api/upload-directory', requireAuth, (req, res) => {
 // guard. tenx_zip arrives as .zip, hence its inclusion here.
 const datasetUpload = multer({
   dest: UPLOAD_DIR,
-  limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 512 * 1024 * 1024) },
+  limits: { fileSize: config.maxUploadBytes() },
   fileFilter: (req, file, cb) => {
     const allowed = new Set(['.csv', '.tsv', '.txt', '.mtx', '.gz', '.h5', '.h5ad', '.h5seurat', '.rds', '.zip']);
     const ext = path.extname(file.originalname || '').toLowerCase();
@@ -2309,12 +2309,12 @@ async function shutdownJobWorkerAndServer(args = {}) {
 
 // Start Server
 if (require.main === module) {
-  // Fail fast on an insecure/incomplete production configuration rather than
-  // booting a hosted service with a missing secret, DB, origin, or non-Secure
-  // cookies. Never prints secret values — only the offending variable names.
+  // Fail fast on insecure runtime configuration. Cookie invariants apply in all
+  // environments; the broader hosted-service requirements are production-only.
+  // Never prints secret values — only the offending variable names.
   const configErrors = config.validateProductionConfig();
   if (configErrors.length > 0) {
-    console.error('[Config] Refusing to start — invalid production configuration:');
+    console.error('[Config] Refusing to start — invalid runtime configuration:');
     for (const e of configErrors) console.error(`  - ${e}`);
     process.exit(1);
   }

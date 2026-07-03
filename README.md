@@ -49,9 +49,10 @@ At a glance:
   checkpoint-load / DEG-marker / runtime-check / object-inspect workers.
 - **Infrastructure foundation (backend-wired, hosted-service direction):**
   HttpOnly cookie sessions (login/signup set the cookie; `/api/auth/session`
-  restores; `/api/auth/logout` clears; localStorage bearer is deprecated
-  fallback), a Postgres data layer + schema proven by a real-Postgres contract
-  test (SQLite still the runtime), and centralized config validation.
+  restores; `/api/auth/logout` clears; cookie auth is preferred while the
+  localStorage bearer remains a deprecated fallback), an expanded Postgres data
+  layer + schema proven by a real-Postgres contract test (SQLite still the
+  runtime), server-owned storage-key hardening, and centralized config validation.
 - **Not implemented (product):** pathway enrichment, CellChat, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
   object storage, server-side session revocation, shared project live R state.
@@ -101,8 +102,11 @@ npm run test:backend:postgres      # real-Postgres contract test
 ```
 
 The Postgres contract test skips cleanly when `DATABASE_URL`/`PG*` is not set, so
-the default `npm run test:backend` (SQLite) is unaffected. Configuration is read
-and validated in `backend/config.js`; see `.env.example` for all variables.
+the default `npm run test:backend` (SQLite) is unaffected. The Postgres adapter
+now covers a broader parity slice for projects, datasets, analysis objects,
+jobs/artifacts, and lineage, but it is still not the Express runtime backend.
+Configuration is read and validated in `backend/config.js`; see `.env.example`
+for cookie, storage-root, and upload-limit requirements.
 Existing local SQLite data is disposable dev/test data and is **not** migrated —
 a fresh Postgres database starts empty.
 

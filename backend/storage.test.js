@@ -14,6 +14,7 @@ describe('projectStorageKey', () => {
     const key = storage.projectStorageKey('proj_abc123', 'artifacts', 'art_def456');
     expect(key).toBe('projects/proj_abc123/artifacts/art_def456');
     expect(key.startsWith('/')).toBe(false);
+    expect(key.includes('\\')).toBe(false);
   });
 
   it('rejects an unknown resource kind', () => {
@@ -24,7 +25,10 @@ describe('projectStorageKey', () => {
     expect(() => storage.projectStorageKey('../etc', 'artifacts', 'art_x')).toThrow();
     expect(() => storage.projectStorageKey('proj_abc', 'artifacts', '..')).toThrow();
     expect(() => storage.projectStorageKey('proj_abc', 'artifacts', 'a/b')).toThrow();
+    expect(() => storage.projectStorageKey('proj_abc', 'artifacts', 'a\\b')).toThrow();
     expect(() => storage.projectStorageKey('proj_abc', 'artifacts', 'a\0b')).toThrow();
+    expect(() => storage.projectStorageKey('proj_abc', 'artifacts', '%2e%2e')).toThrow();
+    expect(() => storage.projectStorageKey('proj_abc', 'artifacts', '%252e%252e')).toThrow();
   });
 });
 
@@ -34,9 +38,22 @@ describe('resolveStoragePath', () => {
     expect(abs.startsWith(storage.storageRoot())).toBe(true);
   });
 
-  it('refuses a key that escapes the storage root', () => {
-    expect(() => storage.resolveStoragePath('../../etc/passwd')).toThrow(/escapes the storage root/);
+  it('refuses traversal, encoded traversal, absolute, Windows-style, and NUL keys', () => {
+    expect(() => storage.resolveStoragePath('../../etc/passwd')).toThrow(/unsafe path segment/);
+    expect(() => storage.resolveStoragePath('projects/proj_abc/../artifacts/art_def')).toThrow(/unsafe path segment/);
+    expect(() => storage.resolveStoragePath('/etc/passwd')).toThrow(/relative/);
+    expect(() => storage.resolveStoragePath('C:\\Windows\\win.ini')).toThrow(/relative|POSIX/);
+    expect(() => storage.resolveStoragePath('projects\\proj_abc\\artifacts\\art_def')).toThrow(/POSIX/);
     expect(() => storage.resolveStoragePath('a\0b')).toThrow(/Invalid storage key/);
+    expect(() => storage.resolveStoragePath('projects/proj_abc/%2e%2e/secret')).toThrow(/Invalid storage key/);
+    expect(() => storage.resolveStoragePath('projects/proj_abc/%252e%252e/secret')).toThrow(/Invalid storage key/);
+  });
+
+  it('refuses empty or ambiguous path segments before resolution', () => {
+    expect(() => storage.resolveStoragePath('')).toThrow(/Invalid storage key/);
+    expect(() => storage.resolveStoragePath('projects//artifacts/art_def')).toThrow(/unsafe path segment/);
+    expect(() => storage.resolveStoragePath('./projects/proj_abc')).toThrow(/unsafe path segment/);
+    expect(() => storage.resolveStoragePath('projects/proj_abc/.')).toThrow(/unsafe path segment/);
   });
 
   it('honors STORAGE_ROOT override', () => {
