@@ -148,6 +148,11 @@ CREATE TABLE IF NOT EXISTS datasets (
 );
 CREATE INDEX IF NOT EXISTS idx_datasets_project ON datasets(project_id);
 CREATE INDEX IF NOT EXISTS idx_datasets_owner ON datasets(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_datasets_creator ON datasets(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_datasets_file_type ON datasets(file_type);
+CREATE INDEX IF NOT EXISTS idx_datasets_upload_status ON datasets(upload_status);
+CREATE INDEX IF NOT EXISTS idx_datasets_validation_status ON datasets(validation_status);
+CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
 CREATE INDEX IF NOT EXISTS idx_datasets_sha256 ON datasets(sha256);
 
 -- ── Analysis objects (server-owned identity; optional project association) ───
@@ -172,6 +177,10 @@ CREATE INDEX IF NOT EXISTS idx_ao_project ON analysis_objects(project_id);
 CREATE INDEX IF NOT EXISTS idx_ao_dataset ON analysis_objects(dataset_id);
 CREATE INDEX IF NOT EXISTS idx_ao_parent ON analysis_objects(parent_object_id);
 CREATE INDEX IF NOT EXISTS idx_ao_lineage_root ON analysis_objects(lineage_root_id);
+CREATE INDEX IF NOT EXISTS idx_ao_project_dataset ON analysis_objects(project_id, dataset_id);
+CREATE INDEX IF NOT EXISTS idx_ao_project_parent ON analysis_objects(project_id, parent_object_id);
+CREATE INDEX IF NOT EXISTS idx_ao_project_lineage_root ON analysis_objects(project_id, lineage_root_id);
+CREATE INDEX IF NOT EXISTS idx_ao_project_owner ON analysis_objects(project_id, owner_user_id);
 
 -- ── Jobs (durable, ownership-scoped; state machine + worker coordination) ────
 CREATE TABLE IF NOT EXISTS jobs (
@@ -203,10 +212,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_analysis_object ON jobs(analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_result_object ON jobs(result_analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(job_type);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_claimable ON jobs(status, priority DESC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_worker ON jobs(worker_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_project_status ON jobs(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_jobs_project_analysis_object ON jobs(project_id, analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_project_result_object ON jobs(project_id, result_analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
 
 -- ── Job artifacts / checkpoints (metadata-first; server-owned) ───────────────
 CREATE TABLE IF NOT EXISTS job_artifacts (
@@ -234,7 +251,15 @@ CREATE TABLE IF NOT EXISTS job_artifacts (
 );
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_project ON job_artifacts(project_id);
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_job ON job_artifacts(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_dataset ON job_artifacts(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_analysis_object ON job_artifacts(analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_result_object ON job_artifacts(result_analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_provenance ON job_artifacts(provenance_id);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_figure ON job_artifacts(figure_id);
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_type ON job_artifacts(artifact_type);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_status ON job_artifacts(status);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_project_job ON job_artifacts(project_id, job_id);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_created ON job_artifacts(created_at);
 -- Artifact immutability: at most ONE result checkpoint per job. In SQLite this
 -- invariant is enforced in the helper layer (CHECKPOINT_EXISTS); Postgres makes
 -- it a hard partial-unique constraint so two racing workers cannot both write a
@@ -260,6 +285,9 @@ CREATE TABLE IF NOT EXISTS analysis_object_edges (
 CREATE INDEX IF NOT EXISTS idx_aoe_project ON analysis_object_edges(project_id);
 CREATE INDEX IF NOT EXISTS idx_aoe_parent ON analysis_object_edges(parent_analysis_object_id);
 CREATE INDEX IF NOT EXISTS idx_aoe_child ON analysis_object_edges(child_analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_aoe_project_parent ON analysis_object_edges(project_id, parent_analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_aoe_project_child ON analysis_object_edges(project_id, child_analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_aoe_project_job ON analysis_object_edges(project_id, job_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_aoe_unique ON analysis_object_edges(
   parent_analysis_object_id, child_analysis_object_id, COALESCE(job_id, ''), parent_role, edge_type
 );
