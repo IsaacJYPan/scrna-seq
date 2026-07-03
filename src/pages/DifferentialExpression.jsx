@@ -1,300 +1,658 @@
-import React, { useState } from 'react';
-import { FileText, Play, LayoutGrid, Table } from 'lucide-react';
-import Plot from 'react-plotly.js';
-import { usePipelineStep } from '../hooks/usePipelineStep';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  Archive,
+  CheckCircle2,
+  Clock,
+  FileText,
+  Loader2,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 
-export default function DifferentialExpression({ callApi, datasetInfo, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, currentWs, userEmail, objectId }) {
-  const [viewMode, setViewMode] = useState('table');
-  const [selectedCluster, setSelectedCluster] = useState(null);
-  const [visibleCount, setVisibleCount] = useState(10);
+const DEG_JOB_TYPE = 'deg.find_markers.v1';
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
+const POLL_MS = 3000;
 
-  const [params, setParam] = useTabParams('deg', userEmail, objectId, {
+const DEFAULT_PARAMS = {
+  groupBy: 'seurat_clusters',
+  assay: 'RNA',
+  onlyPositive: true,
+  minPct: 0.1,
+  logfcThreshold: 0.25,
+  maxCellsPerIdent: '',
+  randomSeed: '',
+  topMarkersPerCluster: 10,
+};
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function optionalIntOrNull(value, min, max) {
+  if (value === '' || value === null || value === undefined) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+function asAllowed(value, allowed, fallback) {
+  return allowed.includes(value) ? value : fallback;
+}
+
+function buildDegParams(params) {
+  return {
+    groupBy: asAllowed(params.groupBy, ['seurat_clusters', 'ident'], 'seurat_clusters'),
+    assay: asAllowed(params.assay, ['RNA', 'SCT'], 'RNA'),
+    onlyPositive: params.onlyPositive !== false,
+    minPct: clampNumber(params.minPct, 0, 1, 0.1),
+    logfcThreshold: clampNumber(params.logfcThreshold, 0, 10, 0.25),
     testUse: 'wilcox',
-    latentVars: ''
-  });
-  const { testUse, latentVars } = params;
+    maxCellsPerIdent: optionalIntOrNull(params.maxCellsPerIdent, 1, 100000),
+    randomSeed: optionalIntOrNull(params.randomSeed, 0, 2147483647),
+    topMarkersPerCluster: Math.trunc(clampNumber(params.topMarkersPerCluster, 5, 50, 10)),
+  };
+}
 
-  const { running: computing, result: degResult, error, runStep: runDEGs } = usePipelineStep({
-    callApi,
-    endpoint: `/deg?test_use=${testUse}${latentVars ? `&latent_vars=${encodeURIComponent(latentVars)}` : ''}`,
-    ipcContext: {
-      operation: 'deg',
-      parentIds: clusterProvId ? [clusterProvId] : [],
-      useCache: true,
-      cacheParams: { type: 'deg', testUse, latentVars }
-    },
-    readyToHydrate: !!(datasetInfo && pipelineState?.cluster),
-    sessionReady,
-    rSessionId,
-    onSuccess: () => {
-      setSelectedCluster(null);
-      setVisibleCount(10);
+function formatDate(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function formatNumber(value) {
+  if (value === null || value === undefined || value === '') return 'NA';
+  if (typeof value === 'number') {
+    if (Math.abs(value) > 0 && Math.abs(value) < 0.001) return value.toExponential(2);
+    return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  }
+  return String(value);
+}
+
+function parseErrorMessage(error) {
+  const raw = error?.message || String(error || 'Request failed.');
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.error || raw;
+  } catch {
+    return raw;
+  }
+}
+
+function redactUnsafeText(value) {
+  const raw = String(value || '');
+  if (!raw) return '';
+  return raw
+    .replace(/[A-Za-z]:[\\/][^\s'")]+/g, '[redacted path]')
+    .replace(/\/__private_vault__\/[^\s'")]+/g, '[redacted path]')
+    .replace(/\bvault\/[^\s'")]+/gi, '[redacted storage]')
+    .replace(/\bstorage_(uri|key)\b/gi, '[redacted storage field]')
+    .replace(/\bstorage(Uri|Key)\b/g, '[redacted storage field]')
+    .replace(/\binternal_storage_key\b/gi, '[redacted storage field]')
+    .replace(/\binternalStorageKey\b/g, '[redacted storage field]')
+    .replace(/\bclaim_?token\b/gi, '[redacted worker field]')
+    .replace(/\bstate_?key\b/gi, '[redacted state field]')
+    .replace(/\buser-\d+:obj-[A-Za-z0-9_-]+/g, '[redacted state]');
+}
+
+function statusTone(status) {
+  if (status === 'completed') return 'green';
+  if (status === 'failed' || status === 'canceled') return 'rose';
+  if (status === 'running') return 'blue';
+  return 'amber';
+}
+
+function badgeClass(tone = 'slate') {
+  const tones = {
+    blue: 'bg-primary/10 text-text border-primary/20',
+    green: 'bg-success/10 text-success border-success/30',
+    amber: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+    rose: 'bg-danger/10 text-danger border-danger/30',
+    slate: 'bg-slate-800 text-slate-300 border-slate-700',
+  };
+  return tones[tone] || tones.slate;
+}
+
+function StatusBadge({ children, tone = 'slate' }) {
+  return (
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${badgeClass(tone)}`}>
+      {children}
+    </span>
+  );
+}
+
+function SummaryMetric({ label, value, detail }) {
+  return (
+    <div className="rounded border border-border bg-surface/70 p-4">
+      <div className="text-2xl font-black text-text">{value}</div>
+      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-textMuted">{label}</div>
+      {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
+    </div>
+  );
+}
+
+function EmptyNotice({ title, children }) {
+  return (
+    <div className="rounded-lg border border-dashed border-border p-6 text-center">
+      <p className="font-bold text-text">{title}</p>
+      <p className="mt-2 text-sm text-textMuted">{children}</p>
+    </div>
+  );
+}
+
+function JobLogs({ logs }) {
+  const rows = Array.isArray(logs) ? logs : [];
+  if (!rows.length) {
+    return (
+      <EmptyNotice title="No job logs yet">
+        Logs will appear after the worker claims the durable DEG job.
+      </EmptyNotice>
+    );
+  }
+
+  return (
+    <div className="max-h-64 overflow-y-auto rounded-lg border border-border bg-black/20 custom-scrollbar">
+      {rows.map((entry, index) => (
+        <div key={`${entry?.ts || index}-${index}`} className="border-b border-border/40 p-3 text-xs last:border-b-0">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <StatusBadge tone={entry?.level === 'error' ? 'rose' : entry?.level === 'warn' ? 'amber' : 'slate'}>
+              {entry?.level || 'info'}
+            </StatusBadge>
+            <span className="font-mono text-textMuted">{formatDate(entry?.ts)}</span>
+          </div>
+          <p className="text-textMuted">{redactUnsafeText(entry?.message)}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TopMarkersTable({ markers }) {
+  const rows = Array.isArray(markers) ? markers : [];
+  if (!rows.length) {
+    return (
+      <EmptyNotice title="No top-marker preview">
+        The summary artifact did not include a public top-marker preview.
+      </EmptyNotice>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full min-w-[680px] text-left text-xs">
+        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+          <tr>
+            <th className="p-3">Group</th>
+            <th className="p-3">Gene</th>
+            <th className="p-3">avg log2FC</th>
+            <th className="p-3">pct 1</th>
+            <th className="p-3">pct 2</th>
+            <th className="p-3">p adj</th>
+            <th className="p-3">Rank</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border/40 bg-surface/70">
+          {rows.map((marker, index) => (
+            <tr key={`${marker.group || 'group'}-${marker.gene || 'gene'}-${index}`}>
+              <td className="p-3 font-mono text-textMuted">{marker.group || 'NA'}</td>
+              <td className="p-3 font-bold text-text">{marker.gene || 'NA'}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(marker.avgLog2FC)}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(marker.pct1)}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(marker.pct2)}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(marker.pValAdj)}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(marker.rank)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export default function DifferentialExpression({
+  datasetInfo,
+  pipelineState,
+  currentWs,
+  userEmail,
+  objectId,
+}) {
+  const [params, setParam] = useTabParams('deg', userEmail, objectId, DEFAULT_PARAMS);
+  const [job, setJob] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [artifacts, setArtifacts] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
+
+  const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
+  const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
+  const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
+  const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
+  const canLaunch = !!userEmail && !!activeProjectId && !!selectedObjectId && isDbBackedObject && !loading;
+
+  const safeParams = useMemo(() => buildDegParams(params), [params]);
+  const terminal = job?.status ? TERMINAL_STATUSES.has(job.status) : false;
+  const summaryArtifact = artifacts.find(artifact => artifact.artifactType === 'deg_summary') || null;
+  const markersArtifact = artifacts.find(artifact => artifact.artifactType === 'deg_markers') || null;
+  const summary = summaryArtifact?.metadata?.summary || null;
+  const resolvedParams = summaryArtifact?.metadata?.resolvedParams || job?.parameters || safeParams;
+  const visibleLogs = logs.length ? logs : (Array.isArray(job?.logs) ? job.logs : []);
+
+  useEffect(() => {
+    setJob(null);
+    setLogs([]);
+    setArtifacts([]);
+    setError(null);
+    setLastRefreshedAt(null);
+  }, [activeProjectId, selectedObjectId]);
+
+  const refreshJobState = useCallback(async (jobId = job?.id, { silent = false } = {}) => {
+    if (!jobId || !activeProjectId) return null;
+    const api = window.electronAPI || {};
+    if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
+      setError('Project job APIs are unavailable in this frontend runtime.');
+      return null;
     }
-  });
+
+    if (!silent) setRefreshing(true);
+    try {
+      const [nextJob, logResponse, nextArtifacts] = await Promise.all([
+        api.getProjectJob(activeProjectId, jobId),
+        api.getProjectJobLogs(activeProjectId, jobId),
+        api.listProjectJobArtifacts(activeProjectId, jobId),
+      ]);
+      setJob(nextJob || null);
+      setLogs(Array.isArray(logResponse?.logs) ? logResponse.logs : []);
+      setArtifacts(Array.isArray(nextArtifacts) ? nextArtifacts : []);
+      setLastRefreshedAt(new Date().toISOString());
+      return nextJob || null;
+    } catch (err) {
+      setError(parseErrorMessage(err));
+      return null;
+    } finally {
+      if (!silent) setRefreshing(false);
+    }
+  }, [activeProjectId, job?.id]);
+
+  useEffect(() => {
+    if (!job?.id || terminal) return undefined;
+    let canceled = false;
+    const poll = async () => {
+      if (!canceled) await refreshJobState(job.id, { silent: true });
+    };
+    const id = window.setInterval(poll, POLL_MS);
+    return () => {
+      canceled = true;
+      window.clearInterval(id);
+    };
+  }, [job?.id, terminal, refreshJobState]);
+
+  const launchDegJob = useCallback(async () => {
+    setError(null);
+    if (!userEmail) {
+      setError('Sign in before launching a durable DEG job.');
+      return;
+    }
+    if (!activeProjectId) {
+      setError('Select a backend project before launching DEG.');
+      return;
+    }
+    if (!selectedObjectId || !isDbBackedObject) {
+      setError('Select a DB-backed analysis object before launching DEG.');
+      return;
+    }
+
+    const api = window.electronAPI || {};
+    if (!api.createDegFindMarkersJob && !api.createProjectJob) {
+      setError('Project job creation is unavailable in this frontend runtime.');
+      return;
+    }
+
+    setLoading(true);
+    setLogs([]);
+    setArtifacts([]);
+    try {
+      const created = api.createDegFindMarkersJob
+        ? await api.createDegFindMarkersJob(activeProjectId, selectedObjectId, safeParams)
+        : await api.createProjectJob(activeProjectId, {
+          jobType: DEG_JOB_TYPE,
+          analysisObjectId: selectedObjectId,
+          parameters: safeParams,
+        });
+      setJob(created);
+      setLastRefreshedAt(new Date().toISOString());
+      await refreshJobState(created.id, { silent: true });
+    } catch (err) {
+      setError(parseErrorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [activeProjectId, isDbBackedObject, refreshJobState, safeParams, selectedObjectId, userEmail]);
 
   if (!datasetInfo) {
     return (
-      <div className="h-full flex items-center justify-center p-8 bg-background text-center">
+      <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
-          <FileText size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
-          <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
+          <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
+          <h2 className="mb-2 text-xl font-bold text-white">No Dataset Loaded</h2>
+          <p className="text-sm text-textMuted">Load or select a DB-backed analysis object before launching durable DEG jobs.</p>
         </div>
       </div>
     );
   }
 
-  const markers = degResult?.result?.markers || degResult?.markers || [];
-  const heatmap = degResult?.result?.heatmap || null;
-
-  // Group markers by cluster, sorted numerically
-  const clusterMap = {};
-  markers.forEach(m => {
-    const key = String(m.cluster);
-    if (!clusterMap[key]) clusterMap[key] = [];
-    clusterMap[key].push(m);
-  });
-  const clusterKeys = Object.keys(clusterMap).sort((a, b) => Number(a) - Number(b));
-  const activeCluster = selectedCluster ?? clusterKeys[0] ?? null;
-  const activeMarkers = activeCluster ? (clusterMap[activeCluster] || []) : [];
-
-  const activeAnnotations = currentWs?.annotations || {};
-
-  const heatmapData = heatmap ? [{
-    z: heatmap.z,
-    x: heatmap.clusters.map(c => activeAnnotations[c] || `Cluster ${c}`),
-    y: heatmap.genes,
-    type: 'heatmap',
-    colorscale: 'YlGnBu',
-    showscale: true,
-    colorbar: { title: 'Avg Expr', thickness: 15 }
-  }] : [];
-
-  const heatmapLayout = {
-    autosize: true,
-    paper_bgcolor: 'transparent',
-    plot_bgcolor: 'transparent',
-    font: { color: '#94a3b8' },
-    xaxis: { title: 'Cell Clusters', gridcolor: '#334155', tickfont: { size: 10 } },
-    yaxis: { title: 'Top Marker Genes', gridcolor: '#334155', tickfont: { size: 9 } },
-    margin: { l: 80, r: 20, t: 30, b: 50 }
-  };
-
   return (
-    <div className="h-full w-full flex flex-col bg-background p-6 overflow-y-auto custom-scrollbar">
-      <div className="flex justify-between items-center mb-6">
-        <div>
-          <div className="flex flex-wrap items-center gap-2 mb-1">
-            <h2 className="text-2xl font-bold text-white tracking-tight">Markers / Differential Expression</h2>
-            <span className="inline-flex rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-amber-400">
-              Legacy live-R
-            </span>
-          </div>
-          <p className="text-textMuted text-sm">
-            Identify cluster marker genes through the legacy synchronous live-R DEG path. Durable worker-backed DEG exists in the backend but is not UI-wired here.
-          </p>
-        </div>
-        <div className="flex gap-3">
-          {degResult && (
-            <div className="flex bg-slate-800 rounded-lg p-1 mr-4">
-              <button
-                onClick={() => setViewMode('table')}
-                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'table' ? 'bg-primary text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
-              >
-                <Table size={14} /> Table
-              </button>
-              <button
-                onClick={() => setViewMode('heatmap')}
-                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'heatmap' ? 'bg-primary text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
-              >
-                <LayoutGrid size={14} /> Heatmap
-              </button>
+    <div className="h-full w-full overflow-y-auto bg-background p-6 custom-scrollbar">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6">
+        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
+          <div>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <h2 className="text-2xl font-bold tracking-tight text-white">Markers / Differential Expression</h2>
+              <StatusBadge tone="green">durable worker</StatusBadge>
+              <StatusBadge tone="amber">no public download</StatusBadge>
             </div>
-          )}
-          {degResult && (
-            <button
-              className="btn btn-ghost border border-primary/50 text-primary text-sm flex items-center gap-2"
-              onClick={() => openProvenance(degResult.provenance.id)}
-            >
-              🔗 View Script
-            </button>
-          )}
-          <button
-            onClick={() => runDEGs()}
-            disabled={computing || !!degResult}
-            className={`btn ${degResult ? 'btn-secondary text-success border-success/30' : 'btn-primary'} flex items-center gap-2 shadow-lg shadow-primary/20`}
-          >
-            {computing ? <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span> : <Play size={16} />}
-            {degResult ? 'Markers Computed' : 'Find All Markers'}
-          </button>
-        </div>
-      </div>
-
-      {!degResult && !computing && (
-        <div className="flex flex-col gap-6 flex-1">
-          <details className="card p-6 border-l-4 border-l-primary group">
-            <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
-              <span className="text-primary group-open:rotate-90 transition-transform">▶</span>
-              ⚙️ Advanced Options
-            </summary>
-            <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-2 gap-6">
-              <div>
-                <label htmlFor="deg-test" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Statistical Test</label>
-                <select
-                  id="deg-test"
-                  value={testUse}
-                  onChange={e => setParam('testUse', e.target.value)}
-                  className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
-                >
-                  <option value="wilcox">Wilcoxon Rank Sum (Default)</option>
-                  <option value="bimod">Likelihood-ratio test</option>
-                  <option value="roc">ROC Analysis</option>
-                  <option value="t">Student's t-test</option>
-                  <option value="poisson">Poisson GLM</option>
-                  <option value="negbinom">Negative Binomial GLM</option>
-                  <option value="MAST">MAST</option>
-                  <option value="DESeq2">DESeq2</option>
-                </select>
-                <p className="text-[10px] text-slate-400 mt-1">Backend for computing differential expression</p>
-              </div>
-              <div>
-                <label htmlFor="deg-latent" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Latent Vars (Covariates)</label>
-                <input
-                  id="deg-latent"
-                  type="text" 
-                  value={latentVars || ''}
-                  onChange={e => setParam('latentVars', e.target.value)}
-                  placeholder="e.g. batch, age, sex"
-                  className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
-                />
-                <p className="text-[10px] text-slate-400 mt-1">Comma-separated variables to test for regression</p>
-              </div>
-            </div>
-          </details>
-
-          <div className="card p-12 text-center flex flex-col items-center justify-center flex-1">
-            {error && (
-              <div className="bg-rose-500/10 text-rose-400 p-4 rounded-lg mb-6 max-w-lg border border-rose-500/20">
-                <p className="font-bold mb-1">Error</p>
-                <p className="text-sm">{error}</p>
-              </div>
-            )}
-            <FileText size={48} className="text-primary opacity-50 mb-4" />
-            <p className="text-textMuted max-w-sm text-lg">
-              Requires a clustered Seurat object attached to this private live-R session. Computes <code className="text-blue-400 bg-blue-400/10 px-1 rounded">FindAllMarkers()</code> through the legacy live-R route.
+            <p className="max-w-3xl text-sm text-textMuted">
+              Launches an allowlisted `deg.find_markers.v1` project job and reads sanitized artifact metadata. Full marker tables are stored internally and are not downloadable in this version.
             </p>
           </div>
-        </div>
-      )}
+          <div className="flex flex-wrap gap-3">
+            {job?.id && (
+              <button
+                onClick={() => refreshJobState(job.id)}
+                disabled={refreshing}
+                className="btn btn-secondary inline-flex items-center gap-2 text-sm"
+              >
+                {refreshing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                Refresh
+              </button>
+            )}
+            <button
+              onClick={launchDegJob}
+              disabled={!canLaunch}
+              className="btn btn-primary inline-flex items-center gap-2 text-sm shadow-lg shadow-primary/20 disabled:opacity-50"
+            >
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+              Launch Durable DEG Job
+            </button>
+          </div>
+        </header>
 
-      {computing && (
-        <div className="card flex items-center justify-center flex-1 flex-col">
-          <div className="text-primary tracking-widest uppercase font-bold text-sm mb-4 animate-pulse">COMPUTING NON-PARAMETRIC WILCOXON TESTS...</div>
-          <div className="w-64 h-2 bg-black/50 rounded-full overflow-hidden mx-auto">
-            <div className="h-full bg-primary animate-[translate_1s_infinite]"></div>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="rounded-lg border border-border bg-surface/60 p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
+            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || activeProjectId || 'None'}</div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface/60 p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Analysis object</div>
+            <div className="mt-1 truncate font-mono text-text">{selectedObjectId || 'None'}</div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface/60 p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Live-R ownership</div>
+            <div className="mt-1 text-sm text-text">Worker verifies owner before R contact</div>
           </div>
         </div>
-      )}
 
-      {degResult && (
-        <div className="card flex-1 flex flex-col overflow-hidden relative">
-          {degResult._fromCache && <div className="absolute top-4 right-4 text-[10px] bg-primary/20 text-primary px-2 py-0.5 rounded z-10 font-bold">CACHED</div>}
+        {error && (
+          <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">
+            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> DEG job unavailable</div>
+            <p className="mt-1 text-sm">{redactUnsafeText(error)}</p>
+          </div>
+        )}
 
-          <div className="p-4 border-b border-border bg-slate-800/50">
-            <h3 className="text-lg font-bold text-white flex items-center gap-2">
-              {viewMode === 'table' ? 'Top Conserved Cluster Markers' : 'Differential Expression Heatmap'}
-              <span className="text-xs bg-black/30 text-textMuted px-2 py-0.5 rounded font-mono font-normal">{degResult.result.total_markers} total identified</span>
-            </h3>
+        {!isDbBackedObject && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-300">
+            Select a DB-backed analysis object (`ao_*`) before launching the durable DEG worker.
+          </div>
+        )}
+
+        <section className="rounded-lg border border-border bg-surface/50 p-5">
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-bold text-text">Allowlisted Parameters</h3>
+              <p className="mt-1 text-sm text-textMuted">
+                The UI sends only the worker-supported DEG parameter set. The statistical test is fixed to Wilcoxon in v1.
+              </p>
+            </div>
+            {pipelineState?.cluster ? (
+              <StatusBadge tone="green">cluster state seen</StatusBadge>
+            ) : (
+              <StatusBadge tone="amber">cluster metadata required by R</StatusBadge>
+            )}
           </div>
 
-          {viewMode === 'table' ? (
-            <div className="flex-1 overflow-auto custom-scrollbar bg-surface/50 flex flex-col">
-              {/* Cluster navigator */}
-              <div className="flex items-center gap-3 px-4 py-3 border-b border-border bg-slate-800/60 sticky top-0 z-10">
-                <button
-                  onClick={() => {
-                    const idx = clusterKeys.indexOf(activeCluster);
-                    if (idx > 0) { setSelectedCluster(clusterKeys[idx - 1]); setVisibleCount(10); }
-                  }}
-                  disabled={clusterKeys.indexOf(activeCluster) === 0}
-                  className="w-7 h-7 flex items-center justify-center rounded border border-border text-slate-400 hover:text-white hover:border-primary disabled:opacity-30 transition"
-                >‹</button>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Group by</span>
+              <select
+                value={params.groupBy}
+                onChange={event => setParam('groupBy', event.target.value)}
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+              >
+                <option value="seurat_clusters">seurat_clusters</option>
+                <option value="ident">Current identities</option>
+              </select>
+            </label>
 
-                <select
-                  value={activeCluster ?? ''}
-                  onChange={e => { setSelectedCluster(e.target.value); setVisibleCount(10); }}
-                  className="bg-surface border border-border rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-primary"
-                >
-                  {clusterKeys.map(k => (
-                    <option key={k} value={k}>{activeAnnotations[k] || `Cluster ${k}`}</option>
-                  ))}
-                </select>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Assay</span>
+              <select
+                value={params.assay}
+                onChange={event => setParam('assay', event.target.value)}
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+              >
+                <option value="RNA">RNA</option>
+                <option value="SCT">SCT</option>
+              </select>
+            </label>
 
-                <button
-                  onClick={() => {
-                    const idx = clusterKeys.indexOf(activeCluster);
-                    if (idx < clusterKeys.length - 1) { setSelectedCluster(clusterKeys[idx + 1]); setVisibleCount(10); }
-                  }}
-                  disabled={clusterKeys.indexOf(activeCluster) === clusterKeys.length - 1}
-                  className="w-7 h-7 flex items-center justify-center rounded border border-border text-slate-400 hover:text-white hover:border-primary disabled:opacity-30 transition"
-                >›</button>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">min.pct</span>
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                value={params.minPct}
+                onChange={event => setParam('minPct', event.target.value)}
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+              />
+            </label>
 
-                <span className="text-xs text-slate-400 ml-2">
-                  Showing {Math.min(visibleCount, activeMarkers.length)} of {activeMarkers.length} markers
-                </span>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">logfc threshold</span>
+              <input
+                type="number"
+                min="0"
+                max="10"
+                step="0.05"
+                value={params.logfcThreshold}
+                onChange={event => setParam('logfcThreshold', event.target.value)}
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Top markers / group</span>
+              <input
+                type="number"
+                min="5"
+                max="50"
+                step="1"
+                value={params.topMarkersPerCluster}
+                onChange={event => setParam('topMarkersPerCluster', event.target.value)}
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Max cells / ident</span>
+              <input
+                type="number"
+                min="1"
+                max="100000"
+                step="1"
+                value={params.maxCellsPerIdent}
+                onChange={event => setParam('maxCellsPerIdent', event.target.value)}
+                placeholder="No cap"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white placeholder:text-slate-500 focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
+              <input
+                type="number"
+                min="0"
+                max="2147483647"
+                step="1"
+                value={params.randomSeed}
+                onChange={event => setParam('randomSeed', event.target.value)}
+                placeholder="None"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white placeholder:text-slate-500 focus:border-primary focus:outline-none"
+              />
+            </label>
+
+            <label className="flex items-center gap-3 rounded border border-border bg-black/10 p-3">
+              <input
+                type="checkbox"
+                checked={params.onlyPositive !== false}
+                onChange={event => setParam('onlyPositive', event.target.checked)}
+                className="h-4 w-4 rounded border-border bg-surface text-primary"
+              />
+              <span>
+                <span className="block text-sm font-bold text-text">Only positive markers</span>
+                <span className="block text-xs text-textMuted">Sent as a strict boolean.</span>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-border bg-surface/50 p-5">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">
+                <Clock size={18} className="text-primary" />
+                Job Status
+              </h3>
+              <p className="mt-1 text-sm text-textMuted">
+                The job will remain queued until the opt-in worker is running.
+              </p>
+            </div>
+            {job?.status && <StatusBadge tone={statusTone(job.status)}>{job.status}</StatusBadge>}
+          </div>
+
+          {!job ? (
+            <EmptyNotice title="No DEG job launched for this object">
+              Configure parameters and launch a durable worker-backed DEG job. This page does not call the legacy `/api/r/deg` endpoint.
+            </EmptyNotice>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job ID</div>
+                  <div className="mt-1 font-mono text-text">{job.id}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job type</div>
+                  <div className="mt-1 font-mono text-text">{job.jobType || DEG_JOB_TYPE}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Last refreshed</div>
+                  <div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div>
+                </div>
               </div>
 
-              {/* Table */}
-              <table className="w-full text-left border-collapse">
-                <thead className="sticky top-[49px] bg-slate-800 text-[10px] font-black text-textMuted uppercase tracking-wider shadow z-10 border-b border-border">
-                  <tr>
-                    <th className="p-4 w-1/5">Gene</th>
-                    <th className="p-4 w-1/5">p-Value (adj)</th>
-                    <th className="p-4 w-1/5">log2(FoldChange)</th>
-                    <th className="p-4 w-1/5">pct.1</th>
-                    <th className="p-4 w-1/5">pct.2</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/30 text-sm">
-                  {activeMarkers.slice(0, visibleCount).map((m, i) => (
-                    <tr key={i} className="hover:bg-slate-800/80 transition-colors">
-                      <td className="p-4 font-bold text-white tracking-widest">{m.gene}</td>
-                      <td className="p-4 font-mono text-slate-400 text-xs">
-                        {typeof m.p_val === 'number' ? m.p_val.toExponential(2) : (m.p_val || '0')}
-                      </td>
-                      <td className={`p-4 font-mono font-bold ${typeof m.log2FC === 'number' && m.log2FC < 0 ? 'text-rose-400' : 'text-success'}`}>
-                        {typeof m.log2FC === 'number' ? (m.log2FC > 0 ? `+${m.log2FC.toFixed(2)}` : m.log2FC.toFixed(2)) : (m.log2FC || '0')}
-                      </td>
-                      <td className="p-4 text-slate-400 font-mono text-[10px]">{m.pct1 || '0'}</td>
-                      <td className="p-4 text-slate-400 font-mono text-[10px]">{m.pct2 || '0'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-
-              {/* Show more */}
-              {visibleCount < activeMarkers.length && (
-                <button
-                  onClick={() => setVisibleCount(v => v + 10)}
-                  className="w-full py-3 text-xs text-primary hover:text-white hover:bg-primary/10 border-t border-border transition font-bold"
-                >
-                  Show 10 more ({activeMarkers.length - visibleCount} remaining)
-                </button>
+              {job.error?.message && (
+                <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                  {job.error.code ? `${redactUnsafeText(job.error.code)}: ` : ''}{redactUnsafeText(job.error.message)}
+                </div>
               )}
-            </div>
-          ) : (
-            <div className="flex-1 overflow-hidden p-6 bg-slate-900 shadow-inner">
-              <Plot
-                data={heatmapData}
-                layout={heatmapLayout}
-                config={{ responsive: true, displaylogo: false }}
-                className="w-full h-full"
-                useResizeHandler
-              />
+
+              <JobLogs logs={visibleLogs} />
             </div>
           )}
+        </section>
+
+        <section className="rounded-lg border border-border bg-surface/50 p-5">
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text">
+                <Archive size={18} className="text-primary" />
+                DEG Summary Artifact
+              </h3>
+              <p className="mt-1 text-sm text-textMuted">
+                Only bounded `deg_summary` metadata is rendered here. The full marker table artifact remains internal.
+              </p>
+            </div>
+            {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}
+          </div>
+
+          {summary ? (
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                <SummaryMetric label="Groups" value={summary.nGroups ?? summary.groups?.length ?? 'NA'} detail={(summary.groups || []).join(', ') || 'Not reported'} />
+                <SummaryMetric label="Markers" value={summary.nMarkersTotal ?? 'NA'} detail="Bounded public count" />
+                <SummaryMetric label="Assay" value={summary.assay || resolvedParams.assay || 'RNA'} detail={`Group by ${summary.groupBy || resolvedParams.groupBy || 'seurat_clusters'}`} />
+                <SummaryMetric label="Test" value={summary.testUse || resolvedParams.testUse || 'wilcox'} detail="Worker v1 allowlist" />
+              </div>
+
+              {Array.isArray(summary.markersPerGroup) && summary.markersPerGroup.length > 0 && (
+                <div className="rounded border border-border bg-black/10 p-4">
+                  <h4 className="mb-3 text-sm font-bold text-text">Marker Counts By Group</h4>
+                  <div className="flex flex-wrap gap-2">
+                    {summary.markersPerGroup.map(row => (
+                      <span key={row.group} className="rounded border border-border bg-surface px-3 py-1 text-xs text-textMuted">
+                        <span className="font-mono text-text">{row.group}</span>: {row.n}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <h4 className="mb-3 text-sm font-bold text-text">Top Marker Preview</h4>
+                <TopMarkersTable markers={summary.topMarkers} />
+              </div>
+
+              <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
+                <div className="mb-1 flex items-center gap-2 font-bold text-text">
+                  <CheckCircle2 size={16} className="text-primary" />
+                  Durable DEG completed
+                </div>
+                Summary artifact: <span className="font-mono text-text">{summaryArtifact.id}</span>. Full raw marker tables are internal-only and downloads are not implemented in this version.
+              </div>
+            </div>
+          ) : job?.status === 'completed' ? (
+            <EmptyNotice title="DEG job completed without public summary metadata">
+              Full marker tables are stored internally and downloads are not implemented in this version.
+            </EmptyNotice>
+          ) : (
+            <EmptyNotice title="No public DEG summary yet">
+              A `deg_summary` artifact will appear here after the worker completes successfully.
+            </EmptyNotice>
+          )}
+
+          {markersArtifact && (
+            <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-300">
+              Internal marker artifact <span className="font-mono">{markersArtifact.id}</span> exists for job bookkeeping. It is not downloadable, and no storage path or key is shown.
+            </div>
+          )}
+        </section>
+
+        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
+          <div className="mb-1 flex items-center gap-2 font-bold text-text">
+            <ShieldCheck size={16} className="text-primary" />
+            Boundary note
+          </div>
+          Project membership shows metadata only. The worker still verifies that the job creator owns the private live R object before contacting R, and this UI does not enable pathway enrichment, CellChat, reports, public downloads, or reproducibility bundles.
         </div>
-      )}
+      </div>
     </div>
   );
 }
