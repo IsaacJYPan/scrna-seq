@@ -56,6 +56,17 @@ unsupported_export_format_message <- function() {
          paste(ALLOWED_EXPORT_FORMATS, collapse = ", "), ".")
 }
 
+classify_seurat_pipeline_error <- function(e) {
+  msg <- conditionMessage(e)
+  if (grepl("hdf5r", msg, ignore.case = TRUE)) return("missing_hdf5r")
+  if (grepl("Dataset file not found", msg, fixed = TRUE)) return("dataset_not_found")
+  if (grepl("Access denied", msg, fixed = TRUE)) return("storage_access_denied")
+  if (grepl("QC filtering would leave fewer than 3 cells", msg, fixed = TRUE)) return("qc_filter_empty")
+  if (grepl("Insufficient cells/features for PCA", msg, fixed = TRUE)) return("insufficient_pca_input")
+  if (grepl("Insufficient cells for UMAP", msg, fixed = TRUE)) return("insufficient_umap_input")
+  "pipeline_failed"
+}
+
 resolve_analysis_path <- function(user_path) {
   if (grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)) {
     return(user_path)
@@ -621,6 +632,8 @@ function(req, res) {
 #* @post /object/pbmc-pipeline
 #* @parser json
 function(req, res) {
+  # Release the heavy working set back to the OS on exit (see /object/seurat-pipeline).
+  on.exit(try(gc(full = TRUE), silent = TRUE), add = TRUE)
   if (is.null(global_obj)) {
     res$status <- 400
     return(list(error = "No input object loaded."))
@@ -738,9 +751,190 @@ function(req, res) {
     )
   }, error = function(e) {
     res$status <- 500
-    # Never leak the raw R error/stack; the Node bridge re-maps non-200s to a generic
-    # sanitized message anyway.
+    # Log the real cause to stderr (captured by the Node parent as an [R:err] line) so
+    # operators can diagnose failures. The RESPONSE body stays generic: the Node bridge
+    # re-maps non-200s to a sanitized message and never forwards this text to clients.
+    message(sprintf("[object/pbmc-pipeline] pipeline error: %s", conditionMessage(e)))
     list(error = "pbmc pipeline failed")
+  })
+}
+
+# Internal worker-bridge pipeline: uploaded dataset -> Seurat checkpoint.
+# Reached only via the Node worker bridge (`r.seurat.pipeline.v1`). Express blocks
+# `/api/r/object/seurat-pipeline` from the public proxy before R contact.
+#* @post /object/seurat-pipeline
+#* @parser json
+function(req, res) {
+  # Force a GC on exit so the ~300MB working set (scaled matrix, saved bundle) is
+  # released back to the OS rather than accumulating in the long-running plumber
+  # process, which otherwise starves a subsequent heavy request (e.g. checkpoint load).
+  on.exit(try(gc(full = TRUE), silent = TRUE), add = TRUE)
+  body <- req$body
+  if (is.null(body) || is.null(body$params)) {
+    res$status <- 400
+    return(list(error = "Missing pipeline parameters."))
+  }
+  p <- body$params
+
+  as_int <- function(v, d, lo, hi) {
+    x <- suppressWarnings(as.integer(v))
+    if (length(x) != 1 || is.na(x)) return(d)
+    max(lo, min(hi, x))
+  }
+  as_num <- function(v, d, lo, hi) {
+    x <- suppressWarnings(as.numeric(v))
+    if (length(x) != 1 || is.na(x)) return(d)
+    max(lo, min(hi, x))
+  }
+
+  dataset_storage_key <- body$dataset_storage_key
+  dataset_type <- body$dataset_file_type
+  storage_key <- body$storage_key
+  if (is.null(dataset_storage_key) || !is.character(dataset_storage_key) || nchar(dataset_storage_key) == 0 ||
+      is.null(storage_key) || !is.character(storage_key) || nchar(storage_key) == 0) {
+    res$status <- 400
+    return(list(error = "Missing storage key."))
+  }
+  if (is.null(dataset_type) || !identical(as.character(dataset_type)[1], "tenx_h5")) {
+    res$status <- 400
+    return(list(error = "Unsupported dataset type."))
+  }
+
+  min_cells <- as_int(p$minCells, 3, 0, 10000)
+  min_features <- as_int(p$minFeatures, 200, 0, 100000)
+  apply_qc <- isTRUE(p$applyQcFilter)
+  min_features_filter <- as_int(p$minFeaturesFilter, 200, 0, 100000)
+  max_features_filter <- as_int(p$maxFeaturesFilter, 2500, 1, 1000000)
+  max_percent_mt <- as_num(p$maxPercentMt, 5, 0, 100)
+  norm_method <- if (!is.null(p$normalizationMethod)) as.character(p$normalizationMethod)[1] else "LogNormalize"
+  if (!norm_method %in% c("LogNormalize", "SCTransform")) norm_method <- "LogNormalize"
+  scale_factor <- as_num(p$scaleFactor, 10000, 1, 1e7)
+  nfeatures <- as_int(p$variableFeatures, 2000, 50, 10000)
+  pca_dims <- as_int(p$pcaDims, 50, 2, 100)
+  cluster_dims <- as_int(p$clusterDims, 15, 2, 100)
+  cluster_res <- as_num(p$clusterResolution, 0.8, 0.01, 10)
+  umap_dims <- as_int(p$umapDims, 15, 2, 100)
+  umap_components <- as_int(p$umapComponents, 2, 2, 3)
+  umap_neighbors <- as_int(p$umapNeighbors, 30, 2, 200)
+  umap_min_dist <- as_num(p$umapMinDist, 0.3, 0, 1)
+  used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+
+  tryCatch({
+    # Read10X_h5 needs hdf5r (a Seurat *Suggests*, not a hard dependency). Fail with a
+    # clear, actionable message if it is missing rather than a cryptic downstream error.
+    if (!requireNamespace("hdf5r", quietly = TRUE)) {
+      stop("R package 'hdf5r' is not installed; cannot read 10x HDF5 (tenx_h5). Install 'hdf5r' on the R backend.")
+    }
+    dataset_path <- validate_path(dataset_storage_key, "vault")
+    if (!file.exists(dataset_path)) stop("Dataset file not found.")
+    mat <- Read10X_h5(filename = dataset_path)
+    if (is.list(mat)) {
+      if ("Gene Expression" %in% names(mat)) {
+        mat <- mat[["Gene Expression"]]
+      } else {
+        mat <- mat[[1]]
+      }
+    }
+
+    obj <- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
+    raw_obj <- obj
+    warnings <- c()
+    pre_filter_cells <- ncol(obj)
+
+    mt_ok <- TRUE
+    tryCatch({
+      obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^[Mm][Tt]-")
+    }, error = function(e) {
+      mt_ok <<- FALSE
+      warnings <<- c(warnings, "percent.mt could not be computed")
+      obj[["percent.mt"]] <<- 0
+    })
+
+    if (apply_qc) {
+      keep <- obj$nFeature_RNA >= min_features_filter &
+        obj$nFeature_RNA <= max_features_filter &
+        obj$percent.mt <= max_percent_mt
+      if (sum(keep) < 3) stop("QC filtering would leave fewer than 3 cells.")
+      obj <- subset(obj, cells = colnames(obj)[keep])
+    }
+    post_filter_cells <- ncol(obj)
+
+    set.seed(used_seed)
+    if (norm_method == "SCTransform") {
+      obj <- SCTransform(obj, verbose = FALSE)
+    } else {
+      obj <- NormalizeData(obj, normalization.method = norm_method, scale.factor = scale_factor, verbose = FALSE)
+      obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = nfeatures, verbose = FALSE)
+      obj <- ScaleData(obj, features = rownames(obj), verbose = FALSE)
+    }
+
+    npcs <- min(pca_dims, ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
+    if (is.na(npcs) || npcs < 2) stop("Insufficient cells/features for PCA.")
+    obj <- RunPCA(obj, features = VariableFeatures(object = obj), npcs = npcs, seed.use = used_seed, verbose = FALSE)
+
+    avail_dims <- ncol(Embeddings(obj, "pca"))
+    cdims <- min(cluster_dims, avail_dims)
+    obj <- FindNeighbors(obj, reduction = "pca", dims = 1:cdims, verbose = FALSE)
+    obj <- FindClusters(obj, resolution = cluster_res, random.seed = used_seed, verbose = FALSE)
+
+    udims <- min(umap_dims, avail_dims)
+    un <- min(umap_neighbors, ncol(obj) - 1, na.rm = TRUE)
+    if (is.na(un) || un < 2) stop("Insufficient cells for UMAP.")
+    obj <- RunUMAP(obj, reduction = "pca", dims = 1:udims, n.components = umap_components,
+                   n.neighbors = un, min.dist = umap_min_dist, seed.use = used_seed, verbose = FALSE)
+
+    safe_path <- validate_path(storage_key, "vault")
+    dir.create(dirname(safe_path), recursive = TRUE, showWarnings = FALSE)
+    saveRDS(list(global = obj, raw = raw_obj), file = safe_path)
+    size_bytes <- as.numeric(file.info(safe_path)$size)
+    checksum <- tryCatch({
+      if (requireNamespace("digest", quietly = TRUE)) {
+        digest::digest(file = safe_path, algo = "sha256")
+      } else if (requireNamespace("openssl", quietly = TRUE)) {
+        as.character(openssl::sha256(file(safe_path)))
+      } else {
+        NA_character_
+      }
+    }, error = function(e) NA_character_)
+    saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
+    cluster_counts <- table(obj$seurat_clusters)
+
+    list(
+      ok = TRUE,
+      summary = list(
+        n_cells = ncol(obj),
+        n_features = nrow(obj),
+        pre_filter_cells = pre_filter_cells,
+        post_filter_cells = post_filter_cells,
+        percent_mt_available = mt_ok,
+        n_variable_features = length(VariableFeatures(obj)),
+        n_pcs = npcs,
+        n_clusters = length(cluster_counts),
+        cluster_sizes = as.integer(cluster_counts),
+        reductions = names(obj@reductions),
+        normalization_method = norm_method,
+        resolution = cluster_res,
+        used_seed = used_seed
+      ),
+      warnings = as.list(warnings),
+      checkpoint = list(
+        saved = saved,
+        checksum_sha256 = if (is.na(checksum)) NULL else checksum,
+        size_bytes = size_bytes
+      ),
+      versions = list(
+        seurat_version = as.character(utils::packageVersion("Seurat")),
+        r_version = as.character(getRversion())
+      )
+    )
+  }, error = function(e) {
+    res$status <- 500
+    code <- classify_seurat_pipeline_error(e)
+    # Log the real cause to stderr (captured by the Node parent as an [R:err] line) so
+    # operators can diagnose failures. The RESPONSE body stays generic: the Node bridge
+    # re-maps non-200s to a sanitized message and never forwards this text to clients.
+    message(sprintf("[object/seurat-pipeline] pipeline error: %s", conditionMessage(e)))
+    list(error = "seurat pipeline failed", code = code)
   })
 }
 
@@ -761,6 +955,9 @@ function(req, res) {
 #* @post /object/checkpoint-load
 #* @parser json
 function(req, res) {
+  # Release the readRDS/checksum working set back to the OS on exit (the reattached
+  # object stays in global_obj/raw_obj; only transient copies are collected).
+  on.exit(try(gc(full = TRUE), silent = TRUE), add = TRUE)
   body <- req$body
   storage_key <- if (!is.null(body)) body$storage_key else NULL
   if (is.null(storage_key) || !is.character(storage_key) || length(storage_key) != 1 || nchar(storage_key) == 0) {
@@ -854,8 +1051,10 @@ function(req, res) {
     summary_out
   }, error = function(e) {
     res$status <- 500
-    # Never leak the raw R error/stack; the Node bridge re-maps non-200s to a generic
-    # sanitized message anyway.
+    # Log the real cause to stderr (captured by the Node parent as an [R:err] line) so
+    # operators can diagnose failures. The RESPONSE body stays generic: the Node bridge
+    # re-maps non-200s to a sanitized message and never forwards this text to clients.
+    message(sprintf("[object/checkpoint-load] load error: %s", conditionMessage(e)))
     list(error = "checkpoint load failed")
   })
 }
@@ -1046,8 +1245,10 @@ function(req, res) {
     # object UNCHANGED — DEG does not mutate live state.
   }, error = function(e) {
     res$status <- 500
-    # Never leak the raw R error/stack; the Node bridge re-maps non-200s to a generic
-    # sanitized message anyway.
+    # Log the real cause to stderr (captured by the Node parent as an [R:err] line) so
+    # operators can diagnose failures. The RESPONSE body stays generic: the Node bridge
+    # re-maps non-200s to a sanitized message and never forwards this text to clients.
+    message(sprintf("[object/deg-find-markers] DEG error: %s", conditionMessage(e)))
     list(error = "deg find markers failed")
   })
 }

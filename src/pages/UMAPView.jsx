@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Layers, ListFilter, AlertTriangle, ImageDown } from 'lucide-react';
+import { Layers, ListFilter, AlertTriangle, ImageDown, FileText } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -7,7 +7,7 @@ import FigureSavePanel from '../components/FigureSavePanel';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
-export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed }) {
+export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme }) {
 
   const [savePanelOpen, setSavePanelOpen] = useState(false);
 
@@ -24,6 +24,10 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
   const [base64Image, setBase64Image] = useState(null);
   const [loadingBase64, setLoadingBase64] = useState(false);
   const isHighPerfMode = datasetInfo?.cells > 50000;
+  const umapParentIds = React.useMemo(
+    () => [pcaProvId, pipelineState?.cluster ? clusterProvId : null].filter(Boolean),
+    [pcaProvId, clusterProvId, pipelineState?.cluster]
+  );
 
   // Pipeline step hook for state and cache-checking
   const { running, result, error, setResult, hasHydrated, setHasHydrated, runStep } = usePipelineStep({
@@ -32,7 +36,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
     ipcContext: {
       operation: 'umap',
       step: 'umap',
-      parentIds: pcaProvId ? [pcaProvId] : [],
+      parentIds: umapParentIds,
       useCache: true,
       cacheParams: { type: 'umap', dims, n_components: nComponents, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
     },
@@ -82,7 +86,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
     const ipc = {
       operation: 'umap',
       step: 'umap',
-      parentIds: pcaProvId ? [pcaProvId] : [],
+      parentIds: umapParentIds,
       useCache: true,
       cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
     };
@@ -93,7 +97,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
       setCachedDims(prev => ({ ...prev, [nc]: data }));
       setParam2('resultNComponents', nc);  // persist for hydration on reload
     }
-  }, [runStep, dims, nComponents, nNeighbors, minDist, setParam2, pcaProvId]);
+  }, [runStep, dims, nComponents, nNeighbors, minDist, activeProjectSeed, setParam2, umapParentIds]);
 
   // Silent cache-only prefetch — populates cachedDims without touching running/error state.
   // Used to warm the other dimension during hydration so 2D↔3D toggle is instant.
@@ -101,7 +105,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
     const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`, {}, {
       operation: 'umap',
       step: 'umap',
-      parentIds: pcaProvId ? [pcaProvId] : [],
+      parentIds: umapParentIds,
       useCache: true,
       cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' },
       onlyIfCached: true  // never triggers a real R computation
@@ -109,7 +113,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
     if (data?.result) {
       setCachedDims(prev => ({ ...prev, [nc]: data }));
     }
-  }, [callApi, pcaProvId, dims, nNeighbors, minDist, activeProjectSeed]);
+  }, [callApi, umapParentIds, dims, nNeighbors, minDist, activeProjectSeed]);
 
   const is2D = nComponents === 2;
 
@@ -210,17 +214,19 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
     }
   }, [result, isHighPerfMode, nComponents]);
 
+  const isDark = theme === 'dark';
+  const plotText = isDark ? '#94a3b8' : '#475569';
   const layout2D = React.useMemo(() => ({
     autosize: true,
     uirevision: 'true',
     margin: { l: 50, r: 20, t: 10, b: 50 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    font: { color: '#94a3b8' },
+    font: { color: plotText },
     xaxis: { title: 'UMAP 1', showgrid: false, zeroline: false },
     yaxis: { title: 'UMAP 2', showgrid: false, zeroline: false },
     showlegend: false,
     hovermode: 'closest'
-  }), []);
+  }), [plotText]);
 
   // layout3D is memoized with NO dependencies to ensure perfect stability.
   // By keeping this object reference the same for the entire life of the mount,
@@ -249,7 +255,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
           <Layers size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
-          <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
+          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
         </div>
       </div>
     );
@@ -260,7 +266,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
           <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">PCA Required</h2>
+          <h2 className="text-xl font-bold text-text mb-2">PCA Required</h2>
           <p className="opacity-80">UMAP requires Principal Component Analysis (PCA) to be completed.</p>
         </div>
       </div>
@@ -271,7 +277,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
     <div className="h-full w-full flex flex-col bg-background p-6">
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">UMAP Embedding</h2>
+          <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">UMAP Embedding</h2>
           <p className="text-textMuted">Uniform Manifold Approximation and Projection for visualization.</p>
         </div>
         <div className="flex gap-3">
@@ -283,7 +289,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
             <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            >📝 View Step Script</button>
+            ><FileText size={15} /> View Step Script</button>
           )}
           <button
             onClick={() => runUMAP()}
@@ -313,17 +319,17 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
         <div className="grid grid-cols-4 gap-5">
           <div>
             <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Dimensions</label>
-            <div className="flex bg-slate-800 rounded-lg p-0.5 border border-border">
+            <div className="flex bg-black/5 dark:bg-slate-800 rounded-lg p-0.5 border border-border">
               <button
                 onClick={() => setParam('nComponents', 2)}
-                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 2 ? 'bg-primary text-white shadow' : 'text-slate-400'}`}
+                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 2 ? 'bg-primary text-white shadow' : 'text-textMuted'}`}
               >2D</button>
               <button
                 onClick={() => setParam('nComponents', 3)}
-                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-slate-300'}`}
+                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-textMuted'}`}
               >3D</button>
             </div>
-            <p className="text-[10px] text-slate-400 mt-1">2D for publications</p>
+            <p className="text-[10px] text-textMuted mt-1">2D for publications</p>
           </div>
           <div>
             <label htmlFor="umap-neighbors" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of Neighbors</label>
@@ -331,9 +337,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
               id="umap-neighbors"
               type="number" value={nNeighbors} min={5} max={100}
               onChange={e => setParam2('nNeighbors', parseInt(e.target.value))}
-              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
+              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-slate-400 mt-1">Local vs global structure</p>
+            <p className="text-[10px] text-textMuted mt-1">Local vs global structure</p>
           </div>
           <div>
             <label htmlFor="umap-dist" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Minimum Distance</label>
@@ -341,9 +347,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
               id="umap-dist"
               type="number" value={minDist} min={0.01} max={1.0} step={0.05}
               onChange={e => setParam2('minDist', parseFloat(e.target.value))}
-              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
+              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-slate-400 mt-1">Packing density</p>
+            <p className="text-[10px] text-textMuted mt-1">Packing density</p>
           </div>
           <div>
             <label htmlFor="umap-dims" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Input Dimensions (PCs)</label>
@@ -351,9 +357,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
               id="umap-dims"
               type="number" value={dims} min={5} max={100}
               onChange={e => setDims(parseInt(e.target.value))}
-              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
+              className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
-            <p className="text-[10px] text-slate-400 mt-1">From PCA</p>
+            <p className="text-[10px] text-textMuted mt-1">From PCA</p>
           </div>
         </div>
       </div>
@@ -364,7 +370,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
           {!result && !running && (
             <div className="text-center p-8">
               <Layers size={48} className="mx-auto mb-4 text-slate-600" />
-              <p className="text-slate-400">Configure parameters and click "Run UMAP".</p>
+              <p className="text-textMuted">Configure parameters and click "Run UMAP".</p>
             </div>
           )}
 
@@ -385,7 +391,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
               {loadingBase64 ? (
                 <div className="flex flex-col items-center">
                   <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
-                  <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">Rendering High-Res PNG...</p>
+                  <p className="text-textMuted font-bold uppercase tracking-widest text-xs">Rendering High-Res PNG...</p>
                 </div>
               ) : base64Image ? (
                 <>
@@ -447,15 +453,15 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, openProvenan
         {result && (
           <div className="w-64 flex flex-col gap-4 flex-shrink-0">
             <div className="card p-4 flex-1 flex flex-col">
-              <h4 className="font-semibold border-b border-border pb-2 mb-3 text-white text-sm">
+              <h4 className="font-semibold border-b border-border pb-2 mb-3 text-text text-sm">
                 <ListFilter size={14} className="inline text-primary mr-2" />Clusters
               </h4>
               <div className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar">
                 {activeTraces.map((trace, i) => (
                   <div key={i} className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-white/5">
                     <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: trace.marker?.color || CLUSTER_COLORS[i] }}></div>
-                    <span className="text-slate-300">{trace.name}</span>
-                    <span className="ml-auto text-slate-400 font-mono">{trace.x?.length}</span>
+                    <span className="text-text">{trace.name}</span>
+                    <span className="ml-auto text-textMuted font-mono">{trace.x?.length}</span>
                   </div>
                 ))}
               </div>

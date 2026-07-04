@@ -45,12 +45,19 @@
 const http = require('http');
 const { PBMC_PIPELINE_PARAM_NAMES } = require('./pbmcPipeline');
 const { DEG_FIND_MARKERS_PARAM_NAMES } = require('./degFindMarkers');
+const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
 
 /** Coded error helper (mirrors database.js so callers can branch on err.code). */
 function codedError(code, message) {
   const err = new Error(message);
   err.code = code;
   return err;
+}
+
+function sanitizeRDiagnosticCode(value) {
+  if (typeof value !== 'string') return null;
+  const cleaned = value.replace(/[^a-z0-9_.:-]/gi, '').slice(0, 80);
+  return cleaned || null;
 }
 
 // Default per-call timeout. Explicit and bounded so a hung/unreachable R backend
@@ -185,6 +192,26 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     // never wedge a worker indefinitely.
     defaultTimeoutMs: 120000,
   }),
+  // Dataset-backed Seurat pipeline: load one server-resolved 10x HDF5 dataset,
+  // create a Seurat object, run QC/preprocessing/clustering/UMAP, and save a
+  // server-allocated checkpoint. Dataset and checkpoint storage keys are rebuilt
+  // from trusted worker inputs only; clients cannot choose a path or R function.
+  'r.seurat.pipeline.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/seurat-pipeline',
+    artifactType: 'pipeline_summary',
+    artifactName: 'Seurat pipeline summary',
+    artifactDescription:
+      'Sanitized summary of a dataset-backed Seurat preprocessing run over one uploaded 10x HDF5 dataset. '
+      + 'Bounded counts, reduction names, resolved parameters, warnings, and runtime versions only - no '
+      + 'expression matrices, cell/gene tables, embeddings, paths, or state keys.',
+    touchesAnalysisObject: false,
+    requiresObjectContext: false,
+    carriesSeuratDatasetParams: true,
+    mutating: true,
+    readOnly: false,
+    defaultTimeoutMs: 120000,
+  }),
 });
 
 // Defense-in-depth target allowlist for the default R caller: the EXACT
@@ -305,6 +332,11 @@ function sanitizePipelineSummary(body) {
   if (nCells !== null) out.nCells = nCells;
   const nFeatures = sanitizeCount(s.n_features);
   if (nFeatures !== null) out.nFeatures = nFeatures;
+  const preFilterCells = sanitizeCount(s.pre_filter_cells);
+  if (preFilterCells !== null) out.preFilterCells = preFilterCells;
+  const postFilterCells = sanitizeCount(s.post_filter_cells);
+  if (postFilterCells !== null) out.postFilterCells = postFilterCells;
+  if (typeof s.percent_mt_available === 'boolean') out.percentMtAvailable = s.percent_mt_available;
   const nVar = sanitizeCount(s.n_variable_features);
   if (nVar !== null) out.nVariableFeatures = nVar;
   const nPcs = sanitizeCount(s.n_pcs);
@@ -530,6 +562,7 @@ function sanitizeRBridgeError(err) {
     R_PBMC_PIPELINE_FAILED: 'R PBMC pipeline run failed.',
     R_CHECKPOINT_LOAD_FAILED: 'R checkpoint load failed.',
     R_DEG_FIND_MARKERS_FAILED: 'R DEG / marker finding run failed.',
+    R_SEURAT_PIPELINE_FAILED: 'R Seurat pipeline run failed.',
     R_BRIDGE_ERROR: 'R bridge operation failed.',
   };
   return { code, message: SAFE_MESSAGES[code] || SAFE_MESSAGES.R_BRIDGE_ERROR };
@@ -759,6 +792,34 @@ async function runRBridgeOperation(args = {}) {
     request.body = { operation, params: safeParams, storage_key: resultStorageKey };
   }
 
+  // 2e. Dataset-backed Seurat pipeline op: body reconstructed from ONLY
+  // server-validated params and DB-resolved storage coordinates.
+  if (spec.carriesSeuratDatasetParams) {
+    const seurat = args.seuratPipeline;
+    const params = seurat && typeof seurat === 'object' ? seurat.params : null;
+    const datasetStorageKey = seurat && typeof seurat === 'object' ? seurat.datasetStorageKey : null;
+    const datasetFileType = seurat && typeof seurat === 'object' ? seurat.datasetFileType : null;
+    const checkpointStorageKey = seurat && typeof seurat === 'object' ? seurat.checkpointStorageKey : null;
+    if (!params || typeof params !== 'object'
+      || typeof datasetStorageKey !== 'string' || datasetStorageKey === ''
+      || typeof datasetFileType !== 'string' || datasetFileType === ''
+      || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
+      throw codedError('R_SEURAT_PIPELINE_PARAMS_REQUIRED',
+        'Server-validated Seurat pipeline parameters and storage keys are required.');
+    }
+    const safeParams = {};
+    for (const name of SEURAT_PIPELINE_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    request.body = {
+      operation,
+      params: safeParams,
+      dataset_storage_key: datasetStorageKey,
+      dataset_file_type: datasetFileType,
+      storage_key: checkpointStorageKey,
+    };
+  }
+
   if (logger && typeof logger.info === 'function') {
     // NB: never log the state key (an R state key); only the safe method/path.
     logger.info(`[r-bridge] running allowlisted operation '${operation}' (${spec.method} ${spec.path}).`);
@@ -770,6 +831,11 @@ async function runRBridgeOperation(args = {}) {
     response = await callR(request);
   } catch (err) {
     const safe = sanitizeRBridgeError(err);
+    // Server-side diagnostic: the low-level code (timeout/ECONNREFUSED/etc.) for the
+    // operation. Never the raw error text; the thrown/public message stays sanitized.
+    if (logger && typeof logger.warn === 'function') {
+      logger.warn(`[r-bridge] operation '${operation}' (${spec.method} ${spec.path}) call failed: ${safe.code}.`);
+    }
     throw codedError(safe.code, safe.message);
   }
 
@@ -779,8 +845,20 @@ async function runRBridgeOperation(args = {}) {
     if (spec.carriesParams) failCode = 'R_PBMC_PIPELINE_FAILED';
     else if (spec.carriesCheckpoint) failCode = 'R_CHECKPOINT_LOAD_FAILED';
     else if (spec.carriesDegParams) failCode = 'R_DEG_FIND_MARKERS_FAILED';
+    else if (spec.carriesSeuratDatasetParams) failCode = 'R_SEURAT_PIPELINE_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
-    throw codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
+    // Server-side diagnostic: the R HTTP status + our coded reason (never the R body,
+    // which the R endpoint already logs in full to its own stderr). Pairs with the
+    // plumber-side message() so a failure is traceable across both processes.
+    const rStatus = response ? response.status : null;
+    const rCode = sanitizeRDiagnosticCode(response && response.body && response.body.code);
+    if (logger && typeof logger.warn === 'function') {
+      logger.warn(`[r-bridge] operation '${operation}' (${spec.method} ${spec.path}) got R status ${rStatus || 'none'}${rCode ? ` (${rCode})` : ''} -> ${failCode}.`);
+    }
+    const err = codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
+    err.rStatus = rStatus;
+    err.rCode = rCode;
+    throw err;
   }
 
   // 4. Build SAFE, metadata-only artifact metadata. Only a small, sanitized allowlist
@@ -867,6 +945,28 @@ async function runRBridgeOperation(args = {}) {
         // The analysis object id is a normal member-visible resource id — NOT the R state key.
         objectId: objectContext.objectId,
         summary,
+      },
+    };
+  }
+
+  if (operation === 'r.seurat.pipeline.v1') {
+    const summary = sanitizePipelineSummary(body);
+    const checkpoint = sanitizeCheckpointInfo(body);
+    return {
+      operation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      resultObjectType: 'seurat',
+      summary,
+      checkpoint,
+      metadata: {
+        operation,
+        kind: 'pipeline',
+        scientific_output: true,
+        ranAt: new Date().toISOString(),
+        summary,
+        warnings: sanitizeNameList(body.warnings, 32, 160),
       },
     };
   }

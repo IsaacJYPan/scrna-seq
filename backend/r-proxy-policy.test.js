@@ -29,6 +29,7 @@ const INTERNAL_ONLY = [
   '/object/pbmc-pipeline',
   '/object/checkpoint-load',
   '/object/deg-find-markers',
+  '/object/seurat-pipeline',
 ];
 
 // Legacy live-R analytical endpoints that are currently reachable (owner-scoped)
@@ -62,7 +63,7 @@ beforeEach(() => {
 afterEach(() => { closeDatabase(); });
 
 describe('isInternalOnlyRProxyPath classifier (source of truth for the block)', () => {
-  it('exposes exactly the three worker-only paths', () => {
+  it('exposes exactly the worker-only paths', () => {
     expect([...R_PROXY_INTERNAL_ONLY_PATHS].sort()).toEqual([...INTERNAL_ONLY].sort());
   });
 

@@ -3,8 +3,9 @@ import {
   Database, FileUp, Zap, CheckCircle, Info, Globe, Lock,
   LayoutGrid, List, Edit2, FolderOpen, HardDrive, FlaskConical,
   X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2,
-  FolderTree, Plus, MoreVertical, ScatterChart
+  FolderTree, Plus, MoreVertical, ScatterChart, Loader2, RefreshCw, Archive
 } from 'lucide-react';
+import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 
 // Removed API constant
 // ── Load Object Modal ──────────────────────────────────────────────
@@ -560,7 +561,7 @@ function StatusPill({ label, tone = 'slate' }) {
   const tones = {
     green: 'bg-success/10 text-success border-success/30',
     blue: 'bg-primary/10 text-text border-primary/20',
-    amber: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+    amber: 'bg-amber-500/10 text-amber-600 border-amber-500/30',
     slate: 'bg-slate-800 text-slate-300 border-slate-700',
   };
   return (
@@ -568,6 +569,91 @@ function StatusPill({ label, tone = 'slate' }) {
       {label}
     </span>
   );
+}
+
+function formatDate(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function safeMessage(value) {
+  return String(value || '')
+    .replace(/[A-Za-z]:[\\/][^\s'")]+/g, '[redacted path]')
+    .replace(/\/__private_vault__\/[^\s'")]+/g, '[redacted path]')
+    .replace(/\bvault\/[^\s'")]+/gi, '[redacted storage]')
+    .replace(/\bstorage_?(uri|key)\b/gi, '[redacted storage field]')
+    .replace(/\bclaim_?token\b/gi, '[redacted worker field]')
+    .replace(/\bstate_?key\b/gi, '[redacted state field]')
+    .replace(/\buser-\d+:obj-[A-Za-z0-9_-]+/g, '[redacted state]');
+}
+
+function isSupportedTenxH5File(file) {
+  return !!file?.name && /\.h5$/i.test(file.name);
+}
+
+function parseApiError(error) {
+  const raw = error?.message || String(error || 'Request failed.');
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.error || raw;
+  } catch {
+    return raw;
+  }
+}
+
+const DEFAULT_SEURAT_PIPELINE_PARAMS = Object.freeze({
+  minCells: 3,
+  minFeatures: 200,
+  applyQcFilter: true,
+  minFeaturesFilter: 200,
+  maxFeaturesFilter: 2500,
+  maxPercentMt: 5,
+  normalizationMethod: 'LogNormalize',
+  scaleFactor: 10000,
+  variableFeatures: 2000,
+  pcaDims: 50,
+  clusterDims: 15,
+  clusterResolution: 0.8,
+  umapDims: 15,
+  umapComponents: 2,
+  umapNeighbors: 30,
+  umapMinDist: 0.3,
+  seed: null,
+});
+
+const SEURAT_NUMERIC_CONTROLS = Object.freeze([
+  { key: 'minCells', label: 'Min cells', min: 0, max: 10000, step: 1 },
+  { key: 'minFeatures', label: 'Min features', min: 0, max: 100000, step: 1 },
+  { key: 'minFeaturesFilter', label: 'QC min features', min: 0, max: 100000, step: 1 },
+  { key: 'maxFeaturesFilter', label: 'QC max features', min: 1, max: 1000000, step: 1 },
+  { key: 'maxPercentMt', label: 'Max percent MT', min: 0, max: 100, step: 0.1 },
+  { key: 'scaleFactor', label: 'Scale factor', min: 1, max: 10000000, step: 1 },
+  { key: 'variableFeatures', label: 'Variable features', min: 50, max: 10000, step: 1 },
+  { key: 'pcaDims', label: 'PCA dims', min: 2, max: 100, step: 1 },
+  { key: 'clusterDims', label: 'Cluster dims', min: 2, max: 100, step: 1 },
+  { key: 'clusterResolution', label: 'Cluster resolution', min: 0.01, max: 10, step: 0.01 },
+  { key: 'umapDims', label: 'UMAP dims', min: 2, max: 100, step: 1 },
+  { key: 'umapNeighbors', label: 'UMAP neighbors', min: 2, max: 200, step: 1 },
+  { key: 'umapMinDist', label: 'UMAP min dist', min: 0, max: 1, step: 0.01 },
+]);
+
+function datasetDisplayName(dataset) {
+  return dataset?.originalFilename || dataset?.name || dataset?.id || 'Dataset';
+}
+
+function rawDatasetObjectName(dataset) {
+  const base = datasetDisplayName(dataset).replace(/\.[^.]+$/, '');
+  return `${base} raw dataset`;
+}
+
+function scrubEmptyParams(params) {
+  const out = {};
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value !== '') out[key] = value;
+  }
+  return out;
 }
 
 function pipelineStatus(done, hasObject, fallback = 'Requires loaded object') {
@@ -732,6 +818,544 @@ function WorkbenchOverview({
           </div>
         ))}
       </div>
+    </section>
+  );
+}
+
+function SeuratPipelinePanel({
+  activeProjectId,
+  selectedObject,
+  currentWs,
+  updateActiveWorkspace,
+  onSelectAnalysisObject,
+  setActiveTab,
+}) {
+  const [datasets, setDatasets] = useState([]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState('');
+  const [datasetStatus, setDatasetStatus] = useState({ loading: false, uploading: false, error: null });
+  const [job, setJob] = useState(null);
+  const [loadJob, setLoadJob] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [artifacts, setArtifacts] = useState([]);
+  const [jobStatus, setJobStatus] = useState({ launching: false, refreshing: false, error: null });
+  const [loadStatus, setLoadStatus] = useState({ launching: false, refreshing: false, error: null });
+  const [params, setParams] = useState(() => ({ ...DEFAULT_SEURAT_PIPELINE_PARAMS }));
+
+  const activeDataset = datasets.find(dataset => dataset.id === selectedDatasetId) || null;
+  const inputObjects = (currentWs.objects || [])
+    .filter(object => object.projectId === activeProjectId && object.datasetId === selectedDatasetId);
+  const selectedInputObject = selectedObject?.projectId === activeProjectId && selectedObject?.datasetId === selectedDatasetId
+    ? selectedObject
+    : null;
+  const inputObject = selectedInputObject || inputObjects[0] || null;
+  const resultObjectId = job?.resultAnalysisObjectId || artifacts.find(a => a.resultAnalysisObjectId)?.resultAnalysisObjectId || null;
+  const resultObject = (currentWs.objects || []).find(object => object.id === resultObjectId) || null;
+  const checkpointArtifact = artifacts.find(artifact => /checkpoint/i.test(artifact.artifactType || artifact.type || '')) || null;
+  const summaryArtifact = artifacts.find(artifact => /summary|inspect/i.test(artifact.artifactType || artifact.type || '')) || null;
+  const safeSummary = summaryArtifact?.metadata?.summary || summaryArtifact?.metadata?.objectSummary || job?.summary || null;
+  const warnings = [
+    ...(Array.isArray(job?.warnings) ? job.warnings : []),
+    ...(Array.isArray(summaryArtifact?.metadata?.warnings) ? summaryArtifact.metadata.warnings : []),
+  ];
+  const checkpointAttached = loadJob?.status === 'completed' || resultObject?.liveState === 'attached';
+  const loadCompleted = checkpointAttached;
+  const loadJobErrorMessage = loadJob?.status === 'failed'
+    ? (typeof loadJob.error === 'string' ? loadJob.error : loadJob.error?.message || 'Checkpoint load failed.')
+    : null;
+  const canContinueToDeg = Boolean(resultObjectId && checkpointAttached);
+
+  const loadDatasets = React.useCallback(async () => {
+    if (!activeProjectId) {
+      setDatasets([]);
+      setSelectedDatasetId('');
+      return;
+    }
+    const api = window.electronAPI || {};
+    if (!api.listDatasets) return;
+    setDatasetStatus(prev => ({ ...prev, loading: true, error: null }));
+    try {
+      const rows = await api.listDatasets(activeProjectId, { fileType: 'tenx_h5' });
+      const next = Array.isArray(rows) ? rows : [];
+      setDatasets(next);
+      setSelectedDatasetId(prev => (next.some(dataset => dataset.id === prev) ? prev : (next[0]?.id || '')));
+    } catch (error) {
+      setDatasetStatus(prev => ({ ...prev, error: parseApiError(error) }));
+    } finally {
+      setDatasetStatus(prev => ({ ...prev, loading: false }));
+    }
+  }, [activeProjectId]);
+
+  React.useEffect(() => {
+    loadDatasets();
+  }, [loadDatasets]);
+
+  const upsertWorkspaceObject = React.useCallback((backendObject, { select = false, liveResult = {} } = {}) => {
+    if (!backendObject?.id || typeof updateActiveWorkspace !== 'function') return null;
+    const mapped = backendObject.isBackendAnalysisObject ? backendObject : mapBackendAnalysisObject(backendObject, liveResult);
+    const nextObjects = [mapped, ...(currentWs.objects || []).filter(object => object.id !== mapped.id)];
+    const updates = { objects: nextObjects };
+    if (select) {
+      updates.selectedObjectIds = [mapped.id];
+      updates.lastSelectedByProject = {
+        ...(currentWs.lastSelectedByProject || {}),
+        [activeProjectId]: mapped.id,
+      };
+    }
+    updateActiveWorkspace(updates);
+    return mapped;
+  }, [activeProjectId, currentWs.lastSelectedByProject, currentWs.objects, updateActiveWorkspace]);
+
+  const ensureDatasetInputObject = async () => {
+    if (inputObject?.id) return inputObject;
+    const api = window.electronAPI || {};
+    if (!api.createProjectAnalysisObject) {
+      throw new Error('Project analysis-object API is unavailable in this frontend runtime.');
+    }
+    const created = await api.createProjectAnalysisObject(activeProjectId, {
+      datasetId: selectedDatasetId,
+      objectType: 'matrix',
+      displayName: rawDatasetObjectName(activeDataset),
+      metadata: {
+        source: 'dataset',
+        sourceType: 'tenx_h5_dataset',
+        datasetId: selectedDatasetId,
+        fileType: activeDataset?.fileType || 'tenx_h5',
+        supportedWorkflow: 'seurat.pipeline.v1',
+        scientific_output: false,
+      },
+    });
+    return upsertWorkspaceObject(created) || mapBackendAnalysisObject(created);
+  };
+
+  const refreshJob = React.useCallback(async (jobId = job?.id) => {
+    if (!activeProjectId || !jobId) return;
+    const api = window.electronAPI || {};
+    if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) return;
+    setJobStatus(prev => ({ ...prev, refreshing: true, error: null }));
+    try {
+      const [nextJob, logResponse, nextArtifacts] = await Promise.all([
+        api.getProjectJob(activeProjectId, jobId),
+        api.getProjectJobLogs(activeProjectId, jobId),
+        api.listProjectJobArtifacts(activeProjectId, jobId),
+      ]);
+      setJob(nextJob || null);
+      setLogs(Array.isArray(logResponse?.logs) ? logResponse.logs : []);
+      setArtifacts(Array.isArray(nextArtifacts) ? nextArtifacts : []);
+      if (nextJob?.resultAnalysisObjectId && api.getProjectAnalysisObject) {
+        try {
+          const result = await api.getProjectAnalysisObject(activeProjectId, nextJob.resultAnalysisObjectId);
+          upsertWorkspaceObject(result);
+        } catch {
+          // The job/artifact metadata remains usable even if the optional UI cache refresh fails.
+        }
+      }
+    } catch (error) {
+      setJobStatus(prev => ({ ...prev, error: parseApiError(error) }));
+    } finally {
+      setJobStatus(prev => ({ ...prev, refreshing: false }));
+    }
+  }, [activeProjectId, job?.id, upsertWorkspaceObject]);
+
+  React.useEffect(() => {
+    if (!job?.id || !['queued', 'running'].includes(job.status) || jobStatus.refreshing) return undefined;
+    const timer = window.setTimeout(() => refreshJob(job.id), 2500);
+    return () => window.clearTimeout(timer);
+  }, [job?.id, job?.status, jobStatus.refreshing, refreshJob]);
+
+  const uploadDataset = async (event) => {
+    const file = event.target.files?.[0] || null;
+    event.target.value = '';
+    if (!file) return;
+    if (!isSupportedTenxH5File(file)) {
+      setDatasetStatus({
+        loading: false,
+        uploading: false,
+        error: 'Unsupported for this pipeline: upload a 10x Genomics filtered feature-barcode matrix HDF5 file with a .h5 extension.',
+      });
+      return;
+    }
+    const api = window.electronAPI || {};
+    if (!api.uploadDataset) {
+      setDatasetStatus(prev => ({ ...prev, error: 'Dataset upload API is unavailable in this frontend runtime.' }));
+      return;
+    }
+    setDatasetStatus({ loading: false, uploading: true, error: null });
+    try {
+      const created = await api.uploadDataset(activeProjectId, file, {
+        supportedWorkflow: 'seurat.pipeline.v1',
+        supportedFormat: '10x Genomics filtered feature-barcode matrix HDF5 (.h5)',
+      }, 'tenx_h5');
+      setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
+      setSelectedDatasetId(created.id);
+    } catch (error) {
+      setDatasetStatus(prev => ({ ...prev, error: parseApiError(error) }));
+    } finally {
+      setDatasetStatus(prev => ({ ...prev, uploading: false }));
+    }
+  };
+
+  const launchPipeline = async () => {
+    if (!activeProjectId || !selectedDatasetId) return;
+    const api = window.electronAPI || {};
+    if (!api.createSeuratPipelineJob) {
+      setJobStatus(prev => ({ ...prev, error: 'Seurat pipeline job wrapper is unavailable in this frontend runtime.' }));
+      return;
+    }
+    setJobStatus({ launching: true, refreshing: false, error: null });
+    setLogs([]);
+    setArtifacts([]);
+    try {
+      const input = await ensureDatasetInputObject();
+      const created = await api.createSeuratPipelineJob(activeProjectId, {
+        datasetId: selectedDatasetId,
+        analysisObjectId: input.id,
+        params: scrubEmptyParams(params),
+      });
+      setJob(created);
+      await refreshJob(created.id);
+    } catch (error) {
+      setJobStatus(prev => ({ ...prev, error: parseApiError(error) }));
+    } finally {
+      setJobStatus(prev => ({ ...prev, launching: false }));
+    }
+  };
+
+  const refreshLoadJob = React.useCallback(async (jobId = loadJob?.id) => {
+    if (!activeProjectId || !jobId) return;
+    const api = window.electronAPI || {};
+    if (!api.getProjectJob) return;
+    setLoadStatus(prev => ({ ...prev, refreshing: true, error: null }));
+    try {
+      const nextJob = await api.getProjectJob(activeProjectId, jobId);
+      setLoadJob(nextJob || null);
+      if (nextJob?.status === 'completed' && resultObjectId) {
+        const existing = (currentWs.objects || []).find(object => object.id === resultObjectId);
+        if (existing) upsertWorkspaceObject({ ...existing, liveState: 'attached' });
+      }
+    } catch (error) {
+      setLoadStatus(prev => ({ ...prev, error: parseApiError(error) }));
+    } finally {
+      setLoadStatus(prev => ({ ...prev, refreshing: false }));
+    }
+  }, [activeProjectId, currentWs.objects, loadJob?.id, resultObjectId, upsertWorkspaceObject]);
+
+  React.useEffect(() => {
+    if (!loadJob?.id || !['queued', 'running'].includes(loadJob.status) || loadStatus.refreshing) return undefined;
+    const timer = window.setTimeout(() => refreshLoadJob(loadJob.id), 2500);
+    return () => window.clearTimeout(timer);
+  }, [loadJob?.id, loadJob?.status, loadStatus.refreshing, refreshLoadJob]);
+
+  const loadCheckpoint = async () => {
+    if (!activeProjectId || !resultObjectId) return;
+    const api = window.electronAPI || {};
+    if (!api.createProjectJob) {
+      setLoadStatus(prev => ({ ...prev, error: 'Project job API is unavailable in this frontend runtime.' }));
+      return;
+    }
+    setLoadStatus({ launching: true, refreshing: false, error: null });
+    try {
+      const created = await api.createProjectJob(activeProjectId, {
+        jobType: 'checkpoint.load.v1',
+        analysisObjectId: resultObjectId,
+        parameters: {},
+      });
+      setLoadJob(created);
+      await refreshLoadJob(created.id);
+    } catch (error) {
+      setLoadStatus(prev => ({ ...prev, error: parseApiError(error) }));
+    } finally {
+      setLoadStatus(prev => ({ ...prev, launching: false }));
+    }
+  };
+
+  const continueToDeg = () => {
+    if (!canContinueToDeg) return;
+    onSelectAnalysisObject?.(activeProjectId, resultObjectId);
+    setActiveTab('deg');
+  };
+
+  const canLaunch = !!activeProjectId && !!selectedDatasetId && !jobStatus.launching;
+
+  return (
+    <section className="rounded-lg border border-border bg-surface/70 p-5" data-testid="seurat-pipeline-panel">
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <h3 className="text-xl font-black tracking-tight text-text">Supported Seurat Pipeline</h3>
+            <StatusPill label="seurat.pipeline.v1" tone="blue" />
+            <StatusPill label="10x .h5 only" tone="green" />
+          </div>
+          <p className="max-w-3xl text-sm text-textMuted">
+            This path supports 10x Genomics filtered feature-barcode matrix HDF5 files (`.h5`) uploaded as `tenx_h5`. Other formats are not labeled as supported here.
+          </p>
+        </div>
+        <button onClick={loadDatasets} disabled={!activeProjectId || datasetStatus.loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+          {datasetStatus.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+          Refresh datasets
+        </button>
+      </div>
+
+      {!activeProjectId ? (
+        <div className="rounded border border-dashed border-border p-5 text-sm text-textMuted">
+          Select or create a backend project before uploading datasets or launching the durable Seurat pipeline.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+          <div className="space-y-4">
+            <div className="rounded border border-border bg-background/40 p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-bold text-text">Dataset upload / selection</h4>
+                  <p className="mt-1 text-xs text-textMuted">Supported format: 10x Genomics filtered feature-barcode matrix HDF5 (`.h5`).</p>
+                </div>
+                <label className="btn btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
+                  <FileUp size={16} />
+                  {datasetStatus.uploading ? 'Uploading...' : 'Upload 10x .h5'}
+                  <input
+                    data-testid="seurat-pipeline-upload"
+                    type="file"
+                    accept=".h5"
+                    className="sr-only"
+                    disabled={datasetStatus.uploading}
+                    onChange={uploadDataset}
+                  />
+                </label>
+              </div>
+              {datasetStatus.error && (
+                <div className="mb-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                  {safeMessage(datasetStatus.error)}
+                </div>
+              )}
+              {datasets.length === 0 ? (
+                <div className="rounded border border-dashed border-border p-4 text-sm text-textMuted">
+                  No `tenx_h5` datasets are recorded for this project yet.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {datasets.map(dataset => (
+                    <label key={dataset.id} className="flex cursor-pointer items-start gap-3 rounded border border-border bg-surface p-3 hover:border-primary/40">
+                      <input
+                        type="radio"
+                        name="seurat-pipeline-dataset"
+                        checked={selectedDatasetId === dataset.id}
+                        onChange={() => setSelectedDatasetId(dataset.id)}
+                        className="mt-1"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-bold text-text">{dataset.originalFilename || dataset.name || dataset.id}</span>
+                        <span className="mt-1 block text-xs text-textMuted">
+                          {dataset.id} / {dataset.fileType || 'tenx_h5'} / {dataset.uploadStatus || 'registered'} / {dataset.validationStatus || 'pending validation'}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded border border-border bg-background/40 p-4">
+              <h4 className="mb-3 font-bold text-text">Launch parameters</h4>
+              <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 xl:grid-cols-3">
+                <label className="rounded border border-border bg-surface p-3">
+                  <span className="block font-bold text-textMuted">Normalization</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-text"
+                    value={params.normalizationMethod}
+                    onChange={event => setParams(prev => ({ ...prev, normalizationMethod: event.target.value }))}
+                  >
+                    <option value="LogNormalize">LogNormalize</option>
+                    <option value="SCTransform">SCTransform</option>
+                  </select>
+                </label>
+                <label className="rounded border border-border bg-surface p-3">
+                  <span className="block font-bold text-textMuted">UMAP components</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-text"
+                    value={params.umapComponents}
+                    onChange={event => setParams(prev => ({ ...prev, umapComponents: Number(event.target.value) }))}
+                  >
+                    <option value={2}>2</option>
+                    <option value={3}>3</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 rounded border border-border bg-surface p-3 font-bold text-textMuted">
+                  <input
+                    type="checkbox"
+                    checked={params.applyQcFilter}
+                    onChange={event => setParams(prev => ({ ...prev, applyQcFilter: event.target.checked }))}
+                  />
+                  Apply QC filter
+                </label>
+                {SEURAT_NUMERIC_CONTROLS.map(control => (
+                  <label key={control.key} className="rounded border border-border bg-surface p-3">
+                    <span className="block font-bold text-textMuted">{control.label}</span>
+                    <input
+                      type="number"
+                      min={control.min}
+                      max={control.max}
+                      step={control.step}
+                      className="mt-1 w-full rounded border border-border bg-background px-2 py-1 font-mono text-text"
+                      value={params[control.key]}
+                      onChange={event => setParams(prev => ({
+                        ...prev,
+                        [control.key]: event.target.value === '' ? '' : Number(event.target.value),
+                      }))}
+                    />
+                  </label>
+                ))}
+                <label className="rounded border border-border bg-surface p-3">
+                  <span className="block font-bold text-textMuted">Seed (optional)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={2147483647}
+                    step={1}
+                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1 font-mono text-text"
+                    value={params.seed ?? ''}
+                    onChange={event => setParams(prev => ({
+                      ...prev,
+                      seed: event.target.value === '' ? null : Number(event.target.value),
+                    }))}
+                  />
+                </label>
+              </div>
+              <div className="mt-3 rounded border border-border bg-surface px-3 py-2 text-xs text-textMuted">
+                Input object: <span className="font-mono text-text">{inputObject?.id || 'will be created from selected dataset'}</span>
+              </div>
+              <button
+                onClick={launchPipeline}
+                disabled={!canLaunch}
+                className="btn btn-primary mt-4 inline-flex items-center gap-2 text-sm disabled:opacity-50"
+              >
+                {jobStatus.launching ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
+                Launch durable Seurat pipeline
+              </button>
+              {jobStatus.error && (
+                <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                  {safeMessage(jobStatus.error)}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded border border-border bg-background/40 p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h4 className="font-bold text-text">Job status</h4>
+                {job?.id && (
+                  <button onClick={() => refreshJob(job.id)} disabled={jobStatus.refreshing} className="btn btn-secondary inline-flex items-center gap-2 px-3 py-1.5 text-xs">
+                    {jobStatus.refreshing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                    Refresh job
+                  </button>
+                )}
+              </div>
+              {!job ? (
+                <p className="text-sm text-textMuted">No `seurat.pipeline.v1` job has been launched from this panel yet.</p>
+              ) : (
+                <div className="space-y-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono font-bold text-text">{job.id}</span>
+                    <StatusPill label={job.status || 'unknown'} tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'amber' : 'blue'} />
+                  </div>
+                  <div className="text-xs text-textMuted">Created: {formatDate(job.createdAt)}</div>
+                  <div className="grid grid-cols-1 gap-2 text-xs">
+                    <div>Dataset: <span className="font-mono text-text">{job.datasetId || activeDataset?.id || 'None'}</span></div>
+                    <div>Input object: <span className="font-mono text-text">{job.analysisObjectId || selectedObject?.id || 'None'}</span></div>
+                    <div>Result object: <span className="font-mono text-text">{resultObjectId || 'Pending worker completion'}</span></div>
+                  </div>
+                  {job.error?.message && (
+                    <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-danger">
+                      {safeMessage(job.error.message)}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded border border-border bg-background/40 p-4">
+              <h4 className="mb-3 flex items-center gap-2 font-bold text-text"><Archive size={16} /> Result continuation</h4>
+              {safeSummary ? (
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {Object.entries(safeSummary).slice(0, 6).map(([key, value]) => (
+                    <div key={key} className="rounded border border-border bg-surface p-2">
+                      <div className="font-bold uppercase tracking-wide text-textMuted">{key}</div>
+                      <div className="mt-1 truncate text-text">{Array.isArray(value) ? value.join(', ') : String(value)}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-textMuted">Object inspection summary will appear here if the worker returns public summary metadata.</p>
+              )}
+              <div className="mt-3 space-y-2 text-xs text-textMuted">
+                <p>Result analysis object: <span className="font-mono text-text">{resultObjectId || 'not available yet'}</span></p>
+                <p>Checkpoint: <span className="font-mono text-text">{checkpointArtifact?.id || 'not available yet'}</span></p>
+                {resultObjectId && resultObject?.liveState !== 'attached' && (
+                  <p>Live R workflows require checkpoint reattach into your private R state before downstream jobs can use the result object.</p>
+                )}
+                {loadJob?.id && (
+                  <p>Checkpoint load job: <span className="font-mono text-text">{loadJob.id}</span> / {loadJob.status || 'queued'}</p>
+                )}
+              </div>
+              {(loadStatus.error || loadJobErrorMessage) && (
+                <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+                  {safeMessage(loadStatus.error || loadJobErrorMessage)}
+                </div>
+              )}
+              {warnings.length > 0 && (
+                <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
+                  {warnings.map((warning, index) => <div key={`${warning}-${index}`}>{safeMessage(warning)}</div>)}
+                </div>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={loadCheckpoint}
+                  disabled={!resultObjectId || loadStatus.launching || loadStatus.refreshing || loadCompleted}
+                  className="btn btn-secondary inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                >
+                  {loadStatus.launching || loadStatus.refreshing ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
+                  {loadCompleted ? 'Checkpoint attached' : 'Load checkpoint'}
+                </button>
+                {loadJob?.id && loadJob.status !== 'completed' && (
+                  <button
+                    onClick={() => refreshLoadJob(loadJob.id)}
+                    disabled={loadStatus.refreshing}
+                    className="btn btn-secondary inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                  >
+                    {loadStatus.refreshing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                    Refresh load
+                  </button>
+                )}
+                <button
+                  onClick={continueToDeg}
+                  disabled={!canContinueToDeg}
+                  className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                >
+                  Continue to durable DEG
+                </button>
+                <button onClick={() => setActiveTab('history')} className="btn btn-secondary text-sm">
+                  Open Jobs & Artifacts
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded border border-border bg-background/40 p-4">
+              <h4 className="mb-3 font-bold text-text">Logs</h4>
+              {logs.length === 0 ? (
+                <p className="text-sm text-textMuted">Worker logs will appear after the job is claimed.</p>
+              ) : (
+                <div className="max-h-44 space-y-2 overflow-y-auto custom-scrollbar">
+                  {logs.map((entry, index) => (
+                    <div key={`${entry?.ts || index}-${index}`} className="rounded border border-border bg-surface p-2 text-xs">
+                      <div className="font-mono text-textMuted">{formatDate(entry?.ts)} / {entry?.level || 'info'}</div>
+                      <div className="mt-1 text-textMuted">{safeMessage(entry?.message)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -944,6 +1568,15 @@ export default function Workspace({
             setShowLoadModal={setShowLoadModal}
           />
 
+          <SeuratPipelinePanel
+            activeProjectId={activeProjectId}
+            selectedObject={selectedObject}
+            currentWs={currentWs}
+            updateActiveWorkspace={updateActiveWorkspace}
+            onSelectAnalysisObject={onSelectAnalysisObject}
+            setActiveTab={setActiveTab}
+          />
+
           {/* Stats Block */}
           {displayObject && (
             <div className="animate-in fade-in slide-in-from-bottom-8 duration-700">
@@ -1044,7 +1677,7 @@ export default function Workspace({
                   >
                     <div className="flex flex-col">
                       <span className="font-bold text-sm">{proj.name}</span>
-                      {proj.role && <span className="text-[9px] font-semibold uppercase px-1.5 py-px rounded bg-blue-600 text-white">{proj.role}</span>}
+                      {proj.role && <span className="text-[9px] font-semibold uppercase px-1.5 py-px rounded bg-blue-600 text-on-accent">{proj.role}</span>}
                     </div>
 
                     <div className="flex items-center gap-2">

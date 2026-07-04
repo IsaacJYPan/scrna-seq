@@ -64,7 +64,7 @@ class ErrorBoundary extends React.Component {
         <div className="h-full flex items-center justify-center p-8 bg-background">
           <div className="text-center max-w-md">
             <div className="text-6xl mb-4">⚠️</div>
-            <h2 className="text-xl font-bold text-white mb-2">Component Error</h2>
+            <h2 className="text-xl font-bold text-text mb-2">Component Error</h2>
             <p className="text-slate-400 text-sm mb-4">{this.state.error?.message || 'An unexpected error occurred in this module.'}</p>
             <pre className="text-xs text-slate-400 bg-black/30 p-3 rounded-lg overflow-auto max-h-32 text-left mb-4">{this.state.error?.stack?.split('\n').slice(0, 5).join('\n')}</pre>
             <button onClick={() => this.setState({ hasError: false, error: null })} className="btn btn-primary text-sm">Retry</button>
@@ -83,7 +83,7 @@ function PlaceholderPage({ title, subtitle, icon }) {
         <div className="inline-flex items-center justify-center px-3 py-1.5 rounded border border-border bg-surface text-xs font-bold uppercase tracking-widest text-textMuted mb-6">
           {icon}
         </div>
-        <h2 className="text-2xl font-black text-white mb-3 tracking-tight">{title}</h2>
+        <h2 className="text-2xl font-black text-text mb-3 tracking-tight">{title}</h2>
         <p className="text-slate-400 text-sm leading-relaxed mb-6">{subtitle}</p>
         <div className="inline-flex items-center gap-2 px-4 py-2 bg-primary/10 border border-primary/20 rounded-full text-[10px] font-black text-primary uppercase tracking-widest">
           Not production-integrated
@@ -125,10 +125,10 @@ const TabContent = ({ id, activeTab, children }) => (
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
 
-  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
   useEffect(() => {
     localStorage.setItem('theme', theme);
-    if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    if (theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
     else document.documentElement.removeAttribute('data-theme');
 
     if (window.electronAPI && window.electronAPI.setTheme) {
@@ -855,7 +855,7 @@ export default function App() {
   }, [currentProvId, provenanceRecords]);
   // ────────────────────────────────────────────────────────────────
 
-  if (!isLoggedIn) return <Login onLogin={(u) => setUser(u || null)} />;
+  if (!isLoggedIn) return <Login onLogin={(u) => setUser(u || null)} theme={theme} setTheme={setTheme} />;
 
   const handleDataVersionChange = (fn) => {
     updateActiveWorkspace({ dataVersion: (typeof fn === 'function' ? fn(currentWs.dataVersion) : fn) });
@@ -960,7 +960,7 @@ export default function App() {
         setTheme={setTheme}
         figuresCount={figuresCount}
       />
-      <main className="flex-1 flex flex-col relative overflow-hidden h-full overflow-y-auto custom-scrollbar">
+      <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
         {renderContent()}
       </main>
 

@@ -37,6 +37,11 @@ const database = require('./database');
 const rWorkerBridge = require('./rWorkerBridge');
 const { validatePbmcPipelineParams, allocateCheckpointStorageKey } = require('./pbmcPipeline');
 const { validateDegFindMarkersParams, allocateDegResultStorageKey } = require('./degFindMarkers');
+const {
+  validateSeuratPipelineParams,
+  allocateSeuratCheckpointStorageKey,
+  assertSupportedSeuratPipelineDataset,
+} = require('./seuratPipeline');
 
 /** Stable, header-safe worker id (`worker_` + hex). One per worker instance. */
 function generateWorkerId() {
@@ -58,7 +63,11 @@ function codedHandlerError(code, message) {
 // Documented safe defaults for worker runtime config. These MUST match the values
 // documented in .env.example (JOB_WORKER_POLL_MS / JOB_WORKER_LEASE_SECONDS) and the
 // createJobWorker() option defaults above.
-const JOB_WORKER_DEFAULTS = Object.freeze({ pollIntervalMs: 1000, leaseSeconds: 30 });
+// leaseSeconds default is generous because real R compute jobs (Seurat pipeline,
+// DEG, checkpoint load) run tens of seconds to minutes; the in-flight lease renewal
+// in the runRBridgeOperation ctx seam keeps longer runs alive, and this default is the
+// safety floor for the pre-handler window. Override with JOB_WORKER_LEASE_SECONDS.
+const JOB_WORKER_DEFAULTS = Object.freeze({ pollIntervalMs: 1000, leaseSeconds: 120 });
 
 /**
  * Parse a value that must be a positive integer (poll ms / lease seconds). Returns
@@ -465,6 +474,147 @@ async function pbmcPipelineHandler(ctx) {
   };
 }
 
+async function seuratPipelineHandler(ctx) {
+  ctx.heartbeat();
+  ctx.log({ level: 'info', message: 'seurat.pipeline.v1 handler: resolving dataset + parameters before any R contact.' });
+
+  const job = ctx.job;
+  const datasetId = job.datasetId;
+  const objectId = job.analysisObjectId;
+  if (typeof job.projectId !== 'string' || job.projectId === '') {
+    throw codedHandlerError('PROJECT_CONTEXT_REQUIRED', 'Seurat pipeline job is missing its project context.');
+  }
+  if (typeof datasetId !== 'string' || datasetId === '') {
+    throw codedHandlerError('DATASET_CONTEXT_REQUIRED', 'Seurat pipeline job is missing its input dataset.');
+  }
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Seurat pipeline job is missing its raw dataset analysis object.');
+  }
+  if (typeof ctx.getDatasetForProject !== 'function' || typeof ctx.getProjectAnalysisObject !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+
+  const dataset = ctx.getDatasetForProject(job.ownerUserId, job.projectId, datasetId);
+  if (!dataset) throw codedHandlerError('DATASET_NOT_FOUND', 'Dataset not found.');
+  try {
+    assertSupportedSeuratPipelineDataset(dataset);
+  } catch (err) {
+    throw codedHandlerError(err.code || 'DATASET_NOT_READY', err.message || 'Dataset is not ready for analysis.');
+  }
+  const inputObject = ctx.getProjectAnalysisObject(job.ownerUserId, job.projectId, objectId);
+  if (!inputObject) throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  if (inputObject.datasetId !== datasetId) {
+    throw codedHandlerError('INVALID_PARAMETERS', 'Seurat pipeline input object must reference the same dataset as the job.');
+  }
+
+  const { params, defaultsApplied } = validateSeuratPipelineParams(job.parameters);
+  const checkpointStorageKey = allocateSeuratCheckpointStorageKey(job.id);
+
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.seurat.pipeline.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId },
+      seuratPipeline: {
+        params,
+        datasetStorageKey: dataset.internalStorageKey,
+        datasetFileType: dataset.fileType,
+        checkpointStorageKey,
+      },
+      input: job.parameters,
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (err) {
+    const status = Number.isInteger(err && err.rStatus) ? err.rStatus : null;
+    const rCode = typeof (err && err.rCode) === 'string' && err.rCode ? err.rCode : null;
+    ctx.log({
+      level: 'error',
+      message: `seurat.pipeline.v1 handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
+    });
+    throw err;
+  }
+
+  const checkpoint = descriptor.checkpoint || {};
+  if (checkpoint.saved !== true || typeof checkpoint.checksumSha256 !== 'string' || checkpoint.checksumSha256 === '') {
+    throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Pipeline did not produce a durable checkpoint.');
+  }
+
+  const completion = ctx.completeSeuratPipelineResult({
+    source: {
+      displayName: 'Dataset input',
+      metadata: {
+        source: 'dataset',
+        datasetId,
+        fileType: dataset.fileType,
+        scientific_output: false,
+      },
+    },
+    result: {
+      objectType: descriptor.resultObjectType || 'seurat',
+      displayName: 'Seurat pipeline result',
+      metadata: {
+        source: 'seurat.pipeline.v1',
+        operation: 'r.seurat.pipeline.v1',
+        scientific_output: true,
+        datasetId,
+        checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+        resolvedParams: params,
+        defaultsApplied,
+        summary: descriptor.summary,
+        warnings: descriptor.metadata && descriptor.metadata.warnings ? descriptor.metadata.warnings : [],
+      },
+    },
+    checkpointArtifact: {
+      artifactType: 'checkpoint',
+      name: 'Seurat pipeline checkpoint',
+      description: 'Durable internal checkpoint of the Seurat pipeline result object (RDS on the R backend vault). No public download in this branch.',
+      storageKind: 'local_internal',
+      internalStorageKey: checkpointStorageKey,
+      checksumSha256: checkpoint.checksumSha256,
+      sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
+      metadata: {
+        operation: 'r.seurat.pipeline.v1',
+        scientific_output: true,
+        downloadable: false,
+        datasetId,
+      },
+    },
+    summaryArtifact: {
+      artifactType: descriptor.artifactType,
+      name: descriptor.name,
+      description: descriptor.description,
+      storageKind: 'metadata_only',
+      metadata: {
+        ...descriptor.metadata,
+        datasetId,
+        resolvedParams: params,
+        defaultsApplied,
+      },
+    },
+  });
+
+  const resultObject = completion.resultObject;
+  const checkpointArtifact = completion.checkpointArtifact;
+  const summaryArtifact = completion.summaryArtifact;
+
+  ctx.log({ level: 'info', message: `seurat.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id}.` });
+
+  return {
+    resultAnalysisObjectId: resultObject.id,
+    result: {
+      ok: true,
+      handled: 'seurat.pipeline.v1',
+      operation: 'r.seurat.pipeline.v1',
+      resultAnalysisObjectId: resultObject.id,
+      checkpointArtifactId: checkpointArtifact.id,
+      summaryArtifactId: summaryArtifact.id,
+    },
+  };
+}
+
 /**
  * Checkpoint load / reattach handler (`checkpoint.load.v1`): loads a COMPLETED durable
  * internal checkpoint (produced by pbmc.pipeline.v1) back into the job OWNER's PRIVATE
@@ -746,6 +896,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'r.runtime.check': rRuntimeCheckHandler,
   'r.object.inspect': rObjectInspectHandler,
   'pbmc.pipeline.v1': pbmcPipelineHandler,
+  'seurat.pipeline.v1': seuratPipelineHandler,
   'checkpoint.load.v1': checkpointLoadHandler,
   'deg.find_markers.v1': degFindMarkersHandler,
 });
@@ -779,7 +930,7 @@ function createJobWorker(options = {}) {
     db = database,
     workerId = generateWorkerId(),
     pollIntervalMs = 1000,
-    leaseSeconds = 30,
+    leaseSeconds = JOB_WORKER_DEFAULTS.leaseSeconds,
     handlers = DEFAULT_HANDLERS,
     rBridge = rWorkerBridge,
     callR,
@@ -914,6 +1065,7 @@ function createJobWorker(options = {}) {
       // artifact + summary artifact in ONE claim-guarded transaction (used only by the
       // pbmc.pipeline.v1 handler) so an artifact failure can't leave a partial result.
       completePbmcPipelineResult: (input) => db.completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      completeSeuratPipelineResult: (input) => db.completeSeuratPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // Atomic DEG completion: the local_internal marker-table artifact + the metadata-only
       // summary artifact in ONE claim-guarded transaction (used only by the deg.find_markers.v1
       // handler) so one artifact can't commit without the other. Creates NO result object/edge.
@@ -922,7 +1074,33 @@ function createJobWorker(options = {}) {
       // r.object.inspect, pbmc.pipeline.v1, checkpoint.load.v1, deg.find_markers.v1).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
       // reach R by any path other than this server-controlled one.
-      runRBridgeOperation: (bridgeArgs) => rBridge.runRBridgeOperation(bridgeArgs),
+      //
+      // Real R compute (Seurat preprocessing, FindAllMarkers, checkpoint load) is a
+      // single blocking bridge call that can run tens of seconds to minutes — longer
+      // than the claim lease. The worker is single-threaded, but the R call is awaited
+      // (I/O-bound), so we renew the lease from a timer while it is in flight. Without
+      // this the lease expires mid-run, the job is reaped and retried, and overlapping
+      // retries run concurrent heavy R (memory-driven 500s) until max_attempts fails
+      // the job. Cancellation stays cooperative: a heartbeat that loses the claim is
+      // swallowed here and surfaces at the guarded completion after R returns.
+      runRBridgeOperation: async (bridgeArgs) => {
+        const renewEveryMs = Math.max(5000, Math.floor((leaseSeconds * 1000) / 2));
+        const renewTimer = setInterval(() => {
+          try {
+            db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs()));
+          } catch {
+            // Claim lost (canceled/reaped) — stop renewing; the guarded completion
+            // will refuse to resurrect the job. Do not throw from the timer.
+            clearInterval(renewTimer);
+          }
+        }, renewEveryMs);
+        if (typeof renewTimer.unref === 'function') renewTimer.unref();
+        try {
+          return await rBridge.runRBridgeOperation(bridgeArgs);
+        } finally {
+          clearInterval(renewTimer);
+        }
+      },
       callR: resolvedCallR,
       // Owner-verified gate + server-derived state-key deriver for r.object.inspect.
       // verifyAnalysisObjectOwner is the SAME owner check the /api/r/* proxy uses, so
@@ -937,6 +1115,10 @@ function createJobWorker(options = {}) {
       // worker keeps that key private (it is not logged or placed in artifact metadata).
       getLoadableCheckpoint: (projectId, objectId, ownerUserId) =>
         db.getLoadableCheckpointForAnalysisObject(projectId, objectId, ownerUserId),
+      getDatasetForProject: (ownerUserId, projectId, datasetId) =>
+        db.getDatasetForProject(ownerUserId, projectId, datasetId),
+      getProjectAnalysisObject: (ownerUserId, projectId, objectId) =>
+        db.getProjectAnalysisObject(ownerUserId, projectId, objectId),
       logger: log,
     };
 
@@ -1041,6 +1223,7 @@ module.exports = {
   rRuntimeCheckHandler,
   rObjectInspectHandler,
   pbmcPipelineHandler,
+  seuratPipelineHandler,
   checkpointLoadHandler,
   degFindMarkersHandler,
   DEFAULT_HANDLERS,

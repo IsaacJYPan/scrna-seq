@@ -64,7 +64,7 @@ function formatFeaturePlot(data) {
   }];
 }
 
-export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi }) {
+export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, theme }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeGene, setActiveGene] = useState(null);
@@ -133,6 +133,10 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi }
   const toggleCategory = (cat) => {
     setExpandedCats(prev => ({ ...prev, [cat]: !prev[cat] }));
   };
+
+  const isDark = theme === 'dark';
+  const plotText = isDark ? '#94a3b8' : '#475569';
+  const plotGrid = isDark ? '#334155' : '#d8e0ea';
 
   return (
     <div className="h-full w-full flex bg-background overflow-hidden">
@@ -272,12 +276,12 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi }
                     autosize: true,
                     paper_bgcolor: 'transparent',
                     plot_bgcolor: 'transparent',
-                    font: { color: '#94a3b8' },
+                    font: { color: plotText },
                     margin: { l: 60, r: 20, t: 20, b: 60 },
                     hoverlabel: hoverStyle,
                     ...(viewMode === 'violin' ? {
-                      xaxis: { gridcolor: '#334155', title: 'Clusters' },
-                      yaxis: { title: 'Expression Level', gridcolor: '#334155' },
+                      xaxis: { gridcolor: plotGrid, title: 'Clusters' },
+                      yaxis: { title: 'Expression Level', gridcolor: plotGrid },
                       showlegend: false
                     } : {
                       xaxis: { title: 'UMAP1', showgrid: false, zeroline: false },

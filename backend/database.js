@@ -11,6 +11,10 @@
 
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
+const {
+  validateSeuratPipelineParams,
+  assertSupportedSeuratPipelineDataset,
+} = require('./seuratPipeline');
 
 let db;
 
@@ -1207,7 +1211,13 @@ const ALLOWED_JOB_TYPES = new Set([
   // DEG against another user's live object. Pathway enrichment / CellChat remain
   // unintegrated. Driven by the `deg.find_markers.v1` worker handler (jobWorker.js) + the
   // allowlisted `r.deg.find_markers.v1` bridge operation.
-  'deg.find_markers.v1'
+  'deg.find_markers.v1',
+  // Dataset-backed Seurat preprocessing from one uploaded 10x Genomics HDF5 dataset.
+  // The job references a same-project dataset row; the worker resolves the server-owned
+  // internal storage key and validates file/status before R contact. Parameters are
+  // fixed-allowlist only. Produces the same durable result object + checkpoint +
+  // pipeline_summary artifact shape as pbmc.pipeline.v1, without trusting client paths.
+  'seurat.pipeline.v1'
 ]);
 
 const JOB_STATUSES = new Set([
@@ -1358,6 +1368,10 @@ function createJobForUser(ownerUserId, input = {}) {
   if (!isValidJobType(jobType)) {
     throw codedError('INVALID_JOB_TYPE',
       `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
+  }
+  if (jobType === 'seurat.pipeline.v1') {
+    throw codedError('INVALID_JOB_TYPE',
+      'seurat.pipeline.v1 jobs must be created through a project-scoped dataset.');
   }
 
   const parameters = input.parameters === undefined ? {} : input.parameters;
@@ -2941,8 +2955,12 @@ function createProjectJob(userId, projectId, input = {}) {
   }
 
   let analysisObjectId = null;
+  let analysisObject = null;
   if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
-    if (typeof input.analysisObjectId !== 'string' || !getProjectAnalysisObjectRow(input.analysisObjectId, pid)) {
+    analysisObject = typeof input.analysisObjectId === 'string'
+      ? getProjectAnalysisObjectRow(input.analysisObjectId, pid)
+      : null;
+    if (!analysisObject) {
       throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
     }
     analysisObjectId = input.analysisObjectId;
@@ -2960,11 +2978,27 @@ function createProjectJob(userId, projectId, input = {}) {
   }
 
   let datasetId = null;
+  let dataset = null;
   if (input.datasetId !== undefined && input.datasetId !== null) {
-    if (typeof input.datasetId !== 'string' || !getDatasetRow(input.datasetId, pid)) {
+    dataset = typeof input.datasetId === 'string' ? getDatasetRow(input.datasetId, pid) : null;
+    if (!dataset) {
       throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
     }
     datasetId = input.datasetId;
+  }
+
+  if (jobType === 'seurat.pipeline.v1') {
+    if (!datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.pipeline.v1 requires datasetId.');
+    }
+    if (!analysisObjectId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.pipeline.v1 requires an input analysisObjectId for lineage.');
+    }
+    if (analysisObject.datasetId !== datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.pipeline.v1 input analysisObjectId must reference the same datasetId.');
+    }
+    validateSeuratPipelineParams(parameters);
+    assertSupportedSeuratPipelineDataset(dataset);
   }
 
   const id = generateJobId();
@@ -4510,6 +4544,136 @@ function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input =
 // download route; Node may not share the R vault filesystem); recorded as a storage-
 // lifecycle follow-up. The invariant that MUST hold is that DB state never commits one DEG
 // artifact without the other.
+function completeSeuratPipelineResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.result_analysis_object_id) throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
+  if (!row.project_id || !row.dataset_id || !row.analysis_object_id || !getDatasetRow(row.dataset_id, row.project_id)) {
+    throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+  }
+
+  const owner = row.owner_user_id;
+  const pid = row.project_id;
+  const datasetId = row.dataset_id;
+  const result = input.result && typeof input.result === 'object' ? input.result : {};
+  const cp = input.checkpointArtifact && typeof input.checkpointArtifact === 'object' ? input.checkpointArtifact : {};
+  const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+
+  const resultMetadata = result.metadata === undefined ? {} : result.metadata;
+  const cpMetadata = cp.metadata === undefined ? {} : cp.metadata;
+  const smMetadata = sm.metadata === undefined ? {} : sm.metadata;
+  for (const metadata of [resultMetadata, cpMetadata, smMetadata]) {
+    if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      throw codedError('INVALID_METADATA', 'metadata must be a plain JSON object.');
+    }
+  }
+  if (!isSafeInternalStorageKey(cp.internalStorageKey)) {
+    throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
+  }
+  const cpChecksum = normalizeChecksumSha256(cp.checksumSha256);
+  if (cpChecksum === undefined || cpChecksum === null) throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
+  const cpSize = normalizeArtifactSizeBytes(cp.sizeBytes);
+  if (cpSize === undefined || cpSize === null) throw codedError('INVALID_SIZE', 'sizeBytes must be a non-negative integer.');
+  const smType = typeof sm.artifactType === 'string' ? sm.artifactType.trim() : '';
+  if (!isValidArtifactType(smType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE', `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+
+  const sourceId = row.analysis_object_id;
+  const sourceObject = getProjectAnalysisObjectRow(sourceId, pid);
+  if (!sourceObject || sourceObject.datasetId !== datasetId) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const resultId = generateAnalysisObjectId();
+  const checkpointArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO analysis_objects
+        (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+         display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+      VALUES
+        (@id, @owner, @projectId, @datasetId, @parentObjectId, @lineageRootId, 'seurat',
+         @displayName, NULL, NULL, @metadataJson, NULL)
+    `).run({
+      id: resultId, owner, projectId: pid, datasetId,
+      parentObjectId: sourceId, lineageRootId: sourceObject.lineageRootId || sourceId,
+      displayName: result.displayName != null ? String(result.displayName) : 'Seurat pipeline result',
+      metadataJson: JSON.stringify(resultMetadata)
+    });
+
+    const linkInfo = db.prepare(`
+      UPDATE jobs SET result_analysis_object_id = @aoId, updated_at = @now
+      WHERE id = @jobId AND worker_id = @wid AND claim_token = @token
+        AND status = 'running' AND lease_expires_at > @now
+        AND result_analysis_object_id IS NULL
+    `).run({ aoId: resultId, jobId: String(jobId), wid, token, now });
+    if (linkInfo.changes !== 1) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+
+    _insertLineageEdgeRow({
+      projectId: pid,
+      parentObjectId: sourceId,
+      childObjectId: resultId,
+      jobId: String(jobId),
+      edgeType: 'checkpoint',
+      parentRole: 'primary',
+      metadata: { source: 'dataset', datasetId },
+      createdByUserId: owner,
+      now
+    });
+
+    db.prepare(`
+      INSERT INTO job_artifacts
+        (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+         provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+         mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+      VALUES
+        (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+         NULL, NULL, @createdBy, 'checkpoint', @name, @description,
+         NULL, 'local_internal', @storageUri, @checksum, @sizeBytes, 'available', @metadataJson)
+    `).run({
+      id: checkpointArtifactId, projectId: pid, jobId: row.id, datasetId,
+      analysisObjectId: sourceId, resultAnalysisObjectId: resultId, createdBy: owner,
+      name: cp.name != null ? String(cp.name) : null,
+      description: cp.description != null ? String(cp.description) : null,
+      storageUri: cp.internalStorageKey, checksum: cpChecksum, sizeBytes: cpSize,
+      metadataJson: JSON.stringify(cpMetadata)
+    });
+
+    db.prepare(`
+      INSERT INTO job_artifacts
+        (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+         provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+         mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+      VALUES
+        (@id, @projectId, @jobId, @datasetId, @analysisObjectId, @resultAnalysisObjectId,
+         NULL, NULL, @createdBy, @artifactType, @name, @description,
+         NULL, 'metadata_only', NULL, NULL, NULL, 'available', @metadataJson)
+    `).run({
+      id: summaryArtifactId, projectId: pid, jobId: row.id, datasetId,
+      analysisObjectId: sourceId, resultAnalysisObjectId: resultId, createdBy: owner,
+      artifactType: smType,
+      name: sm.name != null ? String(sm.name) : null,
+      description: sm.description != null ? String(sm.description) : null,
+      metadataJson: JSON.stringify(smMetadata)
+    });
+  }).immediate();
+
+  return {
+    sourceObject: getProjectAnalysisObjectRow(sourceId, pid),
+    resultObject: getProjectAnalysisObjectRow(resultId, pid),
+    checkpointArtifact: getJobArtifactRowById(checkpointArtifactId),
+    summaryArtifact: getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
 function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
   const wid = requireWorkerId(workerId);
   const token = requireClaimToken(claimToken);
@@ -4978,6 +5142,7 @@ module.exports = {
   isSafeInternalStorageKey,
   createCheckpointForJobByWorker,
   completePbmcPipelineResultByWorker,
+  completeSeuratPipelineResultByWorker,
   completeDegFindMarkersResultByWorker,
   getLoadableCheckpointForAnalysisObject,
   getJobArtifactsByJobId,
