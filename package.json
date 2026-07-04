@@ -4,7 +4,8 @@
   "description": "Web-based scRNA-seq analysis platform: React/Vite frontend, Express API, SQLite, and an R Plumber/Seurat backend",
   "main": "server.js",
   "scripts": {
-    "dev": "concurrently \"npm run vite\" \"node server.js\"",
+    "dev": "concurrently \"npm run vite\" \"node --require ./scripts/enable-job-worker.cjs server.js\"",
+    "dev:no-worker": "concurrently \"npm run vite\" \"node server.js\"",
     "vite": "vite",
     "build": "vite build",
     "start": "node server.js",
@@ -12,6 +13,7 @@
     "test:integration": "node scripts/run_integration_tests.js",
     "test:tutorial": "node scripts/test_pbmc3k_tutorial.js",
     "test:r-state-proxy": "node scripts/verify_r_state_proxy.js",
+    "test:seurat-pipeline": "node scripts/verify_seurat_pipeline.js",
     "test:pbmc-parent": "Rscript scripts/verify_pbmc_parent_unmutated.R",
     "test:checkpoint-load": "Rscript scripts/verify_checkpoint_load.R",
     "test:deg-markers": "Rscript scripts/verify_deg_find_markers.R",

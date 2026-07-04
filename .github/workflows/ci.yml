@@ -74,6 +74,7 @@ jobs:
             any::jsonlite
             any::base64enc
             any::digest
+            any::hdf5r
 
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
@@ -356,6 +357,20 @@ jobs:
         # gains the new state (the Node tests only assert this at the DB-row level).
         # Reuses the R env set up above; SKIPs cleanly if Seurat is unavailable.
         run: npm run test:pbmc-parent
+
+      - name: Download PBMC3k Sample Data
+        # Provides the real 10x MTX tutorial input that verify_seurat_pipeline.js
+        # converts to HDF5. Without this, the Seurat pipeline smoke intentionally
+        # skips and CI would not exercise the live worker/R path.
+        run: node scripts/download_sample_data.js
+
+      - name: Run Seurat Pipeline End-to-End Smoke Test
+        # Live Node worker + R Plumber + Seurat check for the UI-wired
+        # seurat.pipeline.v1 path. Converts the bundled PBMC3k MTX data to a real
+        # 10x HDF5 file, runs the actual worker/bridge/R pipeline at the default
+        # worker lease, and verifies tutorial counts plus public no-path-leak
+        # projections. This is the regression gate mocked worker tests cannot provide.
+        run: npm run test:seurat-pipeline
 
       - name: Run Checkpoint-Load Reattach Smoke Test
         # Live Rscript + Seurat check of the checkpoint.load.v1 R-side reattach path: a

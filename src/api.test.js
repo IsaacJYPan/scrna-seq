@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { electronAPI, apiUrl, buildDegFindMarkersJobPayload } from './api';
+import { electronAPI, apiUrl, buildDegFindMarkersJobPayload, buildSeuratPipelineJobPayload } from './api';
 
 describe('apiUrl (VITE_API_BASE_URL resolution)', () => {
   afterEach(() => {
@@ -74,6 +74,64 @@ describe('buildDegFindMarkersJobPayload', () => {
       },
     });
     expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|completed|vault|stateKey|C:\/private/i);
+  });
+});
+
+describe('buildSeuratPipelineJobPayload', () => {
+  it('builds the durable Seurat pipeline payload without server-owned or unsupported fields', () => {
+    const payload = buildSeuratPipelineJobPayload({
+      datasetId: 'ds_abc123',
+      analysisObjectId: 'ao_input123',
+      params: {
+        minCells: 3,
+        minFeatures: 200,
+        applyQcFilter: true,
+        minFeaturesFilter: 250,
+        maxFeaturesFilter: 5000,
+        maxPercentMt: 20,
+        normalizationMethod: 'LogNormalize',
+        scaleFactor: 10000,
+        variableFeatures: 2000,
+        pcaDims: 30,
+        clusterDims: 20,
+        clusterResolution: 0.8,
+        umapDims: 20,
+        umapComponents: 2,
+        umapNeighbors: 30,
+        umapMinDist: 0.3,
+        seed: 7,
+        ownerUserId: 99,
+        status: 'completed',
+        storageUri: 'vault/private/pipeline.rds',
+        stateKey: 'user-1:obj-ao_input123',
+      },
+    });
+
+    expect(payload).toEqual({
+      jobType: 'seurat.pipeline.v1',
+      datasetId: 'ds_abc123',
+      analysisObjectId: 'ao_input123',
+      parameters: {
+        minCells: 3,
+        minFeatures: 200,
+        applyQcFilter: true,
+        minFeaturesFilter: 250,
+        maxFeaturesFilter: 5000,
+        maxPercentMt: 20,
+        normalizationMethod: 'LogNormalize',
+        scaleFactor: 10000,
+        variableFeatures: 2000,
+        pcaDims: 30,
+        clusterDims: 20,
+        clusterResolution: 0.8,
+        umapDims: 20,
+        umapComponents: 2,
+        umapNeighbors: 30,
+        umapMinDist: 0.3,
+        seed: 7,
+      },
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|completed|vault|stateKey/i);
   });
 });
 
@@ -304,6 +362,40 @@ describe('API Client (electronAPI)', () => {
         groupBy: 'seurat_clusters',
         assay: 'RNA',
         testUse: 'wilcox',
+      },
+    });
+  });
+
+  it('creates durable Seurat pipeline jobs through the project job API wrapper', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_pipeline123', jobType: 'seurat.pipeline.v1', status: 'queued' }),
+    });
+
+    const result = await electronAPI.createSeuratPipelineJob('proj_1', {
+      datasetId: 'ds_abc123',
+      analysisObjectId: 'ao_input123',
+      params: {
+        minCells: 3,
+        minFeatures: 200,
+        storageUri: 'vault/private/pipeline.rds',
+      },
+    });
+
+    expect(result.id).toBe('job_pipeline123');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'seurat.pipeline.v1',
+      datasetId: 'ds_abc123',
+      analysisObjectId: 'ao_input123',
+      parameters: {
+        minCells: 3,
+        minFeatures: 200,
       },
     });
   });

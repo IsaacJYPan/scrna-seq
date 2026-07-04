@@ -11,7 +11,7 @@ class GlobalErrorBoundary extends React.Component {
   static getDerivedStateFromError(_error) { return { hasError: true }; }
   componentDidCatch(error, info) { console.error("Global Error:", error, info); }
   render() {
-    if (this.state.hasError) return <div style={{padding: '2rem', color: 'white'}}><h1>Critical Application Error</h1><p>Please restart the application.</p></div>;
+    if (this.state.hasError) return <div className="bg-background text-text" style={{padding: '2rem', minHeight: '100vh'}}><h1>Critical Application Error</h1><p>Please restart the application.</p></div>;
     return this.props.children;
   }
 }

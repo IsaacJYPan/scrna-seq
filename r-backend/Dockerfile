@@ -17,8 +17,10 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 # Install remotes to install specific package versions if needed
 RUN Rscript -e "install.packages('remotes', repos='https://cloud.r-project.org/')"
 
-# Install CRAN dependencies
-RUN Rscript -e "install.packages(c('plumber', 'jsonlite', 'Seurat', 'ggplot2', 'base64enc'), repos='https://cloud.r-project.org/')"
+# Install CRAN dependencies. hdf5r is REQUIRED for Read10X_h5 (the tenx_h5 Seurat
+# pipeline input): it is only a Seurat *Suggests*, so it must be installed explicitly
+# or the seurat.pipeline.v1 endpoint fails. libhdf5-dev (above) provides its system lib.
+RUN Rscript -e "install.packages(c('plumber', 'jsonlite', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc'), repos='https://cloud.r-project.org/')"
 
 # Install Bioconductor dependencies pinned to the R 4.5-compatible release.
 RUN Rscript -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics'), ask=FALSE)"

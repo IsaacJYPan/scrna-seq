@@ -158,7 +158,10 @@ function allocateDegResultStorageKey(jobId) {
     throw codedError('INVALID_JOB_ID', 'A server-generated job id is required to allocate a DEG result key.');
   }
   const token = crypto.randomBytes(12).toString('hex');
-  return `deg/${jobId}/${token}.csv`;
+  // R's validate_path(key, "vault") requires the key to resolve UNDER ANALYSIS_ROOT/vault;
+  // a key without the `vault/` prefix is rejected as a path-traversal attempt, so the DEG
+  // R run fails before writing. Prefix it, matching allocateSeuratCheckpointStorageKey.
+  return `vault/deg/${jobId}/${token}.csv`;
 }
 
 module.exports = {

@@ -23,7 +23,13 @@ const { parseJobWorkerConfig, parsePositiveIntOrNull, JOB_WORKER_DEFAULTS } = wo
 
 import serverModule from '../server.js';
 const server = serverModule.default || serverModule;
-const { startJobWorkerIfEnabled, stopJobWorker, shutdownJobWorkerAndServer } = server;
+const {
+  startJobWorkerIfEnabled,
+  startRBackendAndJobWorkerIfEnabled,
+  waitForOwnedRHealth,
+  stopJobWorker,
+  shutdownJobWorkerAndServer,
+} = server;
 
 function silentLogger() {
   return { info: () => {}, warn: () => {}, error: () => {} };
@@ -78,9 +84,9 @@ describe('parseJobWorkerConfig — poll/lease parsing + fallback policy', () => 
   it('uses documented defaults when poll/lease are unset (and defaults match .env.example)', () => {
     const cfg = parseJobWorkerConfig({}, { logger: silentLogger() });
     expect(cfg.pollIntervalMs).toBe(1000);
-    expect(cfg.leaseSeconds).toBe(30);
+    expect(cfg.leaseSeconds).toBe(120);
     // Defaults constant must match what we assert above and what .env.example documents.
-    expect(JOB_WORKER_DEFAULTS).toEqual({ pollIntervalMs: 1000, leaseSeconds: 30 });
+    expect(JOB_WORKER_DEFAULTS).toEqual({ pollIntervalMs: 1000, leaseSeconds: 120 });
   });
 
   it('parses valid positive-integer poll/lease values', () => {
@@ -211,8 +217,105 @@ describe('startJobWorkerIfEnabled — opt-in startup wiring', () => {
     expect(JSON.stringify(seen || {})).not.toMatch(/claim|token|secret/i);
     // Public server exports are unchanged shape-wise (no new public API surface).
     expect(typeof server.startJobWorkerIfEnabled).toBe('function');
+    expect(typeof server.startRBackendAndJobWorkerIfEnabled).toBe('function');
+    expect(typeof server.waitForOwnedRHealth).toBe('function');
     expect(typeof server.stopJobWorker).toBe('function');
     expect(typeof server.shutdownJobWorkerAndServer).toBe('function');
+  });
+
+  it('logs clearly when the R backend starts but the worker is disabled', async () => {
+    const logger = recordingLogger();
+    const result = await startRBackendAndJobWorkerIfEnabled(
+      {},
+      {
+        startPlumber: () => ({ ready: Promise.resolve() }),
+        createJobWorker: () => {
+          throw new Error('worker should not be constructed');
+        },
+        logger,
+      }
+    );
+
+    expect(result.worker).toBeNull();
+    expect(logger.infos.join('\n')).toMatch(/Job worker disabled/);
+  });
+
+  it('does not start a worker when the owned R backend is not ready', async () => {
+    const created = [];
+    const logger = recordingLogger();
+    const result = await startRBackendAndJobWorkerIfEnabled(
+      { ENABLE_JOB_WORKER: 'true' },
+      {
+        startPlumber: () => ({ ready: Promise.reject(new Error('bind failed')) }),
+        createJobWorker: () => { const fw = fakeWorker(); created.push(fw); return fw; },
+        probeRHealth: vi.fn(async () => ({ status: 'ok' })),
+        logger,
+      }
+    );
+
+    expect(result.worker).toBeNull();
+    expect(created).toHaveLength(0);
+    expect(logger.errors.join('\n')).toMatch(/Job worker not started/);
+  });
+
+  it('starts the worker only after the owned R backend is ready and health-checked', async () => {
+    const created = [];
+    const probeRHealth = vi.fn(async () => ({ status: 'ok' }));
+    const result = await startRBackendAndJobWorkerIfEnabled(
+      { ENABLE_JOB_WORKER: 'true' },
+      {
+        startPlumber: () => ({ ready: Promise.resolve() }),
+        createJobWorker: () => { const fw = fakeWorker(); created.push(fw); return fw; },
+        probeRHealth,
+        logger: silentLogger(),
+      }
+    );
+
+    expect(probeRHealth).toHaveBeenCalledTimes(1);
+    expect(created).toHaveLength(1);
+    expect(result.worker).toBe(created[0]);
+    expect(result.worker.calls.start).toBe(1);
+  });
+
+  it('retries transient R health failures before starting the worker', async () => {
+    const created = [];
+    let probes = 0;
+    const result = await startRBackendAndJobWorkerIfEnabled(
+      { ENABLE_JOB_WORKER: 'true' },
+      {
+        startPlumber: () => ({ ready: Promise.resolve() }),
+        createJobWorker: () => { const fw = fakeWorker(); created.push(fw); return fw; },
+        probeRHealth: vi.fn(async () => {
+          probes += 1;
+          if (probes < 3) throw new Error('not listening yet');
+          return { status: 'ok' };
+        }),
+        rHealthTimeoutMs: 1000,
+        rHealthIntervalMs: 1,
+        logger: silentLogger(),
+      }
+    );
+
+    expect(probes).toBe(3);
+    expect(created).toHaveLength(1);
+    expect(result.worker).toBe(created[0]);
+  });
+});
+
+describe('waitForOwnedRHealth', () => {
+  it('returns once a later probe succeeds', async () => {
+    let probes = 0;
+    const health = await waitForOwnedRHealth(
+      async () => {
+        probes += 1;
+        if (probes === 1) return { status: 'starting' };
+        return { status: 'ok' };
+      },
+      { timeoutMs: 1000, intervalMs: 1 }
+    );
+
+    expect(health.status).toBe('ok');
+    expect(probes).toBe(2);
   });
 });
 
