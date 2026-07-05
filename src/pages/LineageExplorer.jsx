@@ -366,7 +366,7 @@ export default function LineageExplorer({ provenanceRecords, setProvenanceRecord
             <button
               key={b}
               onClick={() => updateActiveWorkspace({ activeBranch: b })}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${currentWs.activeBranch === b ? 'bg-blue-400/10 border-blue-400 text-blue-400' : 'bg-slate-800 border-border text-slate-400'}`}
+              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${currentWs.activeBranch === b ? 'bg-blue-500/10 border-blue-500/40 text-blue-900 dark:border-blue-300/60 dark:text-blue-200' : 'bg-slate-800 border-border text-slate-400'}`}
             >
               {b}
             </button>
@@ -380,7 +380,7 @@ export default function LineageExplorer({ provenanceRecords, setProvenanceRecord
           <div className="w-px bg-border mx-2"></div>
           <button
             onClick={() => setGroupSequential(prev => !prev)}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${groupSequential ? 'bg-primary/20 border-primary text-primary' : 'bg-slate-800 border-border text-slate-400'}`}
+            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${groupSequential ? 'bg-blue-500/10 border-blue-500/40 text-blue-900 dark:border-blue-300/60 dark:text-blue-200' : 'bg-slate-800 border-border text-slate-400'}`}
           >
             {groupSequential ? 'Expand DAG' : 'Collapse Sequential Steps'}
           </button>

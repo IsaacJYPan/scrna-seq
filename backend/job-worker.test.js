@@ -162,7 +162,7 @@ describe('job worker — unsupported job types', () => {
     // UNSUPPORTED_JOB_TYPE); only the noop, the metadata-only checkpoint placeholder,
     // the two metadata-only R bridge operations, and the first real pipeline
     // (pbmc.pipeline.v1) are runnable in this branch.
-    expect(Object.keys(DEFAULT_HANDLERS).sort()).toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
+    expect(Object.keys(DEFAULT_HANDLERS).sort()).toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
   });
 });
 
@@ -357,6 +357,66 @@ describe('job worker — startup config (disabled by default)', () => {
 
   it('createJobWorker rejects an invalid pollIntervalMs', () => {
     expect(() => createJobWorker({ db: dbmod, pollIntervalMs: -1 })).toThrow(/pollIntervalMs/);
+  });
+});
+
+// Lease renewal while a long R bridge call is in flight. Real Seurat/DEG/checkpoint
+// R calls run tens of seconds to minutes — longer than the lease — so the worker must
+// renew the claim from a timer while the awaited call is pending. Without this the
+// lease expires mid-run and the job is reaped/retried into failure. Mocked-callR unit
+// tests (which return instantly) can never exercise this, so it is asserted directly
+// here with fake timers and a controllable bridge call.
+describe('job worker — lease renewal during a long R bridge call', () => {
+  beforeEach(() => {
+    initDatabase(':memory:');
+    alice = createUser('alice@example.com', 'password123', 'Alice');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    closeDatabase();
+  });
+
+  it('heartbeats repeatedly (renewing the lease) while a slow R call is awaited', async () => {
+    vi.useFakeTimers();
+    const job = createJobForUser(alice.id, { jobType: 'generic' });
+    expect(job).toBeTruthy();
+
+    // A bridge whose runRBridgeOperation blocks until we release it, so we can advance
+    // fake time (firing the renewal interval) while the handler is inside the call.
+    let releaseBridge;
+    const bridgePending = new Promise((resolve) => { releaseBridge = () => resolve({ ok: true }); });
+    const fakeBridge = { runRBridgeOperation: () => bridgePending };
+
+    const handlers = {
+      generic: async (ctx) => {
+        await ctx.runRBridgeOperation({ operation: 'r.runtime.check' });
+        return { result: { ok: true } };
+      },
+    };
+
+    const spy = spyDb(dbmod);
+    const w = createJobWorker({
+      db: spy,
+      rBridge: fakeBridge,
+      callR: () => {},
+      handlers,
+      leaseSeconds: 30, // renewal interval = max(5000, leaseSeconds*1000/2) = 15000ms
+      now: () => T0,
+      logger: silentLogger(),
+    });
+
+    const runPromise = w.runOnce();
+    // Reach the awaited bridge call and register the interval.
+    await vi.advanceTimersByTimeAsync(0);
+    const beforeRenewals = spy._calls.heartbeat; // 1 pre-handler heartbeat
+    // Two renewal windows fire while the call is still pending.
+    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(spy._calls.heartbeat).toBeGreaterThanOrEqual(beforeRenewals + 2);
+
+    releaseBridge();
+    const res = await runPromise;
+    expect(res.status).toBe('completed');
   });
 });
 

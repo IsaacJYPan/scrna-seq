@@ -1,4 +1,4 @@
-import { Sparkles, AlertTriangle } from 'lucide-react';
+import { Sparkles, AlertTriangle, FileText } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
@@ -63,7 +63,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            >📝 View Step Script</button>
+            ><FileText size={15} /> View Step Script</button>
           )}
           <button
             onClick={() => runNormalization(false)}

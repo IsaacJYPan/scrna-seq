@@ -151,7 +151,7 @@ describe('checkpoint.load.v1 — inventory & scope', () => {
 
   it('registers checkpoint.load.v1 alongside the existing handlers (existing handlers unchanged)', () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
+      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(checkpointLoadHandler);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(worker.pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(worker.rObjectInspectHandler);
@@ -176,9 +176,9 @@ describe('checkpoint.load.v1 — inventory & scope', () => {
 
   it('the bridge op/target sets stay exact/closed (adds only the checkpoint-load op/target)', () => {
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
+      .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
   });
 
   it('NO pathway enrichment / CellChat job types or bridge ops are added by THIS branch', () => {

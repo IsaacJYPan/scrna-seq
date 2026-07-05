@@ -96,19 +96,19 @@ export default function Sidebar({
         disabled={isDisabled}
         title={item.status || item.label}
         aria-label={item.status ? `${item.label}, ${item.status}` : item.label}
-        className={`w-full flex items-center gap-3 px-3 py-[7px] rounded text-[15px] font-medium transition-colors group
+        className={`w-full flex items-center gap-3 px-3 py-[7px] rounded border text-[15px] font-medium transition-colors group
           ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}
           ${isActive
-            ? 'bg-black/5 dark:bg-slate-700 text-text'
-            : 'text-textMuted hover:bg-black/5 dark:hover:bg-slate-700 hover:text-text'
+            ? 'border-primary/30 bg-primary/10 text-text dark:border-slate-600 dark:bg-slate-700'
+            : 'border-transparent text-textMuted hover:bg-black/5 dark:hover:bg-slate-700 hover:text-text'
           }
         `}
       >
-        <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-slate-200 flex-shrink-0`} />
+        <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />
         <span className="min-w-0 flex-1 text-left">
           <span className="block truncate">{item.label}</span>
           {item.status && (
-            <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">
+            <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200">
               <Lock size={10} />
               {item.status}
             </span>
@@ -157,8 +157,8 @@ export default function Sidebar({
   return (
     <div className="flex h-full flex-shrink-0 z-20 shadow-2xl relative">
       <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0">
-        <div className="w-12 h-12 rounded-[24px] bg-primary flex items-center justify-center shadow-lg shadow-black/50 mb-1 hover:rounded-[16px] transition-all duration-200 cursor-pointer">
-          <span className="text-white text-xl font-black tracking-tighter">sc</span>
+        <div className="w-12 h-12 rounded-[24px] bg-primary flex items-center justify-center shadow-lg shadow-black/50 mb-1 hover:rounded-[16px] transition-all duration-200 cursor-pointer" title="BenchOne">
+          <Microscope size={22} className="text-on-accent" />
         </div>
 
         <div className="w-8 h-0.5 bg-black/10 dark:bg-slate-800 rounded-full my-1" />
@@ -206,7 +206,7 @@ export default function Sidebar({
       <aside className={`bg-surface flex flex-col h-full select-none transition-all duration-300 overflow-hidden ${isCollapsed ? 'w-0 opacity-0' : 'w-60 opacity-100'}`}>
         <div className="h-12 w-full flex items-center px-4 shadow-sm border-b border-border hover:bg-slate-700 transition-colors cursor-pointer group" onClick={() => setIsCollapsed(true)}>
           <h1 className="text-[15px] font-black text-slate-100 truncate flex-1 leading-none">{currentWorkspace?.name || 'BenchOne'}</h1>
-          <ChevronLeft size={18} className="text-slate-400 group-hover:text-slate-200" />
+          <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-4 space-y-5 custom-scrollbar">

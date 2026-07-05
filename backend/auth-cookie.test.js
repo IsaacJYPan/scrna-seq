@@ -159,6 +159,19 @@ describe('CSRF protection for cookie-authenticated mutations', () => {
     expect(status).toBe(201);
   });
 
+  it('allows a cookie-auth POST when the Origin matches the request Host (same-origin, e.g. npm start on :3000)', async () => {
+    // Origin equals baseUrl (the host the browser connected to) but is NOT the
+    // FRONTEND_ORIGIN allowlist entry (:5173). Same-origin is not a CSRF vector, so
+    // this must be accepted — otherwise the Express-served SPA can't mutate.
+    const cookie = await loginCookie('csrf-same-origin');
+    const { status } = await http('/api/organizations', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}`, Origin: baseUrl },
+      body: { name: 'My Org' }
+    });
+    expect(status).toBe(201);
+  });
+
   it('exempts bearer-auth mutations from the CSRF origin check', async () => {
     const email = uniqueEmail('bearer-csrf');
     const user = db.createUser(email, 'password123', 'B');
@@ -204,6 +217,22 @@ describe('logout + legacy bearer compatibility', () => {
       method: 'POST',
       headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}`, Origin: ALLOWED_ORIGIN }
     });
+    expect(status).toBe(200);
+    const cleared = getSessionCookie(res);
+    expect(cleared).toMatch(/Max-Age=0/i);
+  });
+
+  it('clears the session cookie on same-origin logout even when FRONTEND_ORIGIN points at the dev server', async () => {
+    const email = uniqueEmail('logout-same-origin');
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
+    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email, password: 'password123' } });
+    const cookie = getSessionCookie(loginRes);
+
+    const { status, res } = await http('/api/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}`, Origin: baseUrl }
+    });
+
     expect(status).toBe(200);
     const cleared = getSessionCookie(res);
     expect(cleared).toMatch(/Max-Age=0/i);

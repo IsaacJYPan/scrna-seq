@@ -7,6 +7,7 @@
 // Express server also serves the built frontend.
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const DEG_FIND_MARKERS_JOB_TYPE = 'deg.find_markers.v1';
+const SEURAT_PIPELINE_JOB_TYPE = 'seurat.pipeline.v1';
 const DEG_FIND_MARKERS_PARAM_KEYS = new Set([
   'groupBy',
   'assay',
@@ -17,6 +18,25 @@ const DEG_FIND_MARKERS_PARAM_KEYS = new Set([
   'maxCellsPerIdent',
   'randomSeed',
   'topMarkersPerCluster',
+]);
+const SEURAT_PIPELINE_PARAM_KEYS = new Set([
+  'minCells',
+  'minFeatures',
+  'applyQcFilter',
+  'minFeaturesFilter',
+  'maxFeaturesFilter',
+  'maxPercentMt',
+  'normalizationMethod',
+  'scaleFactor',
+  'variableFeatures',
+  'pcaDims',
+  'clusterDims',
+  'clusterResolution',
+  'umapDims',
+  'umapComponents',
+  'umapNeighbors',
+  'umapMinDist',
+  'seed',
 ]);
 
 export function apiUrl(path) {
@@ -33,6 +53,20 @@ export function buildDegFindMarkersJobPayload(objectId, params = {}) {
   return {
     jobType: DEG_FIND_MARKERS_JOB_TYPE,
     analysisObjectId: objectId,
+    parameters: safeParams,
+  };
+}
+
+export function buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params = {} } = {}) {
+  const safeParams = {};
+  const rawParams = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+  for (const [key, value] of Object.entries(rawParams)) {
+    if (SEURAT_PIPELINE_PARAM_KEYS.has(key)) safeParams[key] = value;
+  }
+  return {
+    jobType: SEURAT_PIPELINE_JOB_TYPE,
+    ...(datasetId ? { datasetId } : {}),
+    ...(analysisObjectId ? { analysisObjectId } : {}),
     parameters: safeParams,
   };
 }
@@ -405,6 +439,11 @@ export const electronAPI = {
     req(`/api/projects/${projectId}/jobs`, {
       method: 'POST',
       body: JSON.stringify(buildDegFindMarkersJobPayload(objectId, params)),
+    }),
+  createSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params })),
     }),
 
   // Project-scoped provenance & figure metadata (project metadata/history; ids/

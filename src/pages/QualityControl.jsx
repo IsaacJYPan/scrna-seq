@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check } from 'lucide-react';
+import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -318,7 +318,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            >📝 View Step Script</button>
+            ><FileText size={15} /> View Step Script</button>
           )}
           <button
             onClick={runFiltering}

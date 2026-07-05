@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { BarChart3, AlertTriangle } from 'lucide-react';
+import { BarChart3, AlertTriangle, FileText } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
-export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvId, normProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed }) {
+export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvId, normProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed, theme }) {
   const [params, setParam] = useTabParams('pca', userEmail, objectId, { npcs: 50 });
   const npcs = params.npcs;
   const setNpcs = (v) => setParam('npcs', v);
@@ -63,13 +63,16 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
     hovertemplate: '<b>PC%{x}</b><br>Stdev: %{y:.3f}<extra></extra>'
   }];
 
+  const isDark = theme === 'dark';
+  const plotText = isDark ? '#94a3b8' : '#475569';
+  const plotGrid = isDark ? '#334155' : '#d8e0ea';
   const elbowLayout = {
     autosize: true,
     margin: { l: 60, r: 20, t: 10, b: 50 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    font: { color: '#94a3b8', size: 11 },
-    xaxis: { title: 'Principal Component', gridcolor: '#334155', zeroline: false },
-    yaxis: { title: 'Standard Deviation', gridcolor: '#334155', zeroline: false },
+    font: { color: plotText, size: 11 },
+    xaxis: { title: 'Principal Component', gridcolor: plotGrid, zeroline: false },
+    yaxis: { title: 'Standard Deviation', gridcolor: plotGrid, zeroline: false },
     showlegend: false
   };
 
@@ -90,7 +93,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            >📝 View Step Script</button>
+            ><FileText size={15} /> View Step Script</button>
           )}
           <button
             onClick={() => runPCA()}
@@ -129,7 +132,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
               }}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
             />
-            <p className="text-[10px] text-slate-400 mt-1">Standard: 50. Use elbow plot to determine how many to keep downstream.</p>
+            <p className="text-[10px] text-textMuted mt-1">Standard: 50. Use elbow plot to determine how many to keep downstream.</p>
           </div>
         </div>
       )}
@@ -149,27 +152,27 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
         <div className="space-y-6">
           {/* Summary stats */}
           <div className="grid grid-cols-3 gap-4">
-            <div className="card p-4 bg-black/20 text-center">
+            <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
               <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Components</div>
               <div className="text-2xl font-black text-text">{stdevs.length}</div>
             </div>
-            <div className="card p-4 bg-black/20 text-center">
+            <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
               <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Top PC Stdev</div>
               <div className="text-2xl font-black text-primary">{stdevs[0]?.toFixed(2) || '—'}</div>
             </div>
-            <div className="card p-4 bg-black/20 text-center">
+            <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
               <div className="text-[10px] text-textMuted uppercase font-bold mb-1">PC10 Stdev</div>
               <div className="text-2xl font-black text-slate-400">{stdevs[9]?.toFixed(2) || '—'}</div>
             </div>
           </div>
 
           {/* View tabs */}
-          <div className="flex bg-slate-800 rounded-lg p-1 border border-border w-fit">
+          <div className="flex bg-black/5 dark:bg-slate-800 rounded-lg p-1 border border-border w-fit">
             {viewTabs.map(tab => (
               <button
                 key={tab.id}
                 onClick={() => setActiveView(tab.id)}
-                className={`px-5 py-2 rounded-md text-xs font-bold transition-all ${activeView === tab.id ? 'bg-primary text-text shadow' : 'text-slate-400 hover:text-text'}`}
+                className={`px-5 py-2 rounded-md text-xs font-bold transition-all ${activeView === tab.id ? 'bg-primary text-white shadow' : 'text-textMuted hover:text-text'}`}
               >
                 {tab.label}
               </button>
@@ -196,12 +199,12 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
 
           {activeView === 'loadings' && (
             <div className="card overflow-hidden">
-              <div className="p-4 border-b border-border bg-slate-800/40">
+              <div className="p-4 border-b border-border bg-black/5 dark:bg-slate-800/40">
                 <h4 className="font-bold text-text text-xs uppercase tracking-widest">Top Gene Loadings per PC</h4>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-black/20 text-textMuted font-bold uppercase border-b border-border">
+                  <thead className="bg-black/5 dark:bg-black/20 text-textMuted font-bold uppercase border-b border-border">
                     <tr>
                       <th className="p-3">Rank</th>
                       {Object.keys(loadings).map(pc => (
