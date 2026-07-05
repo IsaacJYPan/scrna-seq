@@ -108,7 +108,7 @@ export default function Sidebar({
         <span className="min-w-0 flex-1 text-left">
           <span className="block truncate">{item.label}</span>
           {item.status && (
-            <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">
+            <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200">
               <Lock size={10} />
               {item.status}
             </span>
