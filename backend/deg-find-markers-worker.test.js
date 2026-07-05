@@ -156,7 +156,7 @@ describe('deg.find_markers.v1 — inventory & scope', () => {
 
   it('registers deg.find_markers.v1 alongside the existing handlers (existing handlers unchanged)', () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check']);
+      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['deg.find_markers.v1']).toBe(degFindMarkersHandler);
     // Existing handlers still point at their existing functions.
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(worker.checkpointLoadHandler);
@@ -184,9 +184,9 @@ describe('deg.find_markers.v1 — inventory & scope', () => {
 
   it('the bridge op/target sets stay exact/closed (adds only the DEG op/target)', () => {
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check']);
+      .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
   });
 
   it('NO pathway enrichment / CellChat job types or bridge ops are added', () => {
@@ -300,7 +300,7 @@ describe('validateDegFindMarkersParams — fixed allowlist', () => {
 describe('allocateDegResultStorageKey — server-controlled internal key', () => {
   it('builds a safe relative key from a well-formed job id only', () => {
     const key = allocateDegResultStorageKey('job_abc123');
-    expect(key).toMatch(/^deg\/job_abc123\/[0-9a-f]{24}\.csv$/);
+    expect(key).toMatch(/^vault\/deg\/job_abc123\/[0-9a-f]{24}\.csv$/);
     expect(dbmod.isSafeInternalStorageKey(key)).toBe(true);
   });
   it('refuses anything but a server-generated job id (no client input contributes)', () => {
@@ -563,7 +563,7 @@ describe('deg.find_markers.v1 — worker success', () => {
     const degReqs = calls.filter((c) => c.path === '/object/deg-find-markers');
     expect(degReqs).toHaveLength(1);
     expect(degReqs[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, obj.id));
-    expect(degReqs[0].body.storage_key).toMatch(/^deg\/job_[0-9a-f]+\/[0-9a-f]{24}\.csv$/);
+    expect(degReqs[0].body.storage_key).toMatch(/^vault\/deg\/job_[0-9a-f]+\/[0-9a-f]{24}\.csv$/);
 
     const { markers, summary, all } = degArtifacts(job.id);
     expect(all).toHaveLength(2);
@@ -575,7 +575,7 @@ describe('deg.find_markers.v1 — worker success', () => {
     expect(markers[0].checksumSha256).toBe('a'.repeat(64));
     expect(markers[0].sizeBytes).toBe(4096);
     // The internal projection holds storage_uri; the PUBLIC projection strips it.
-    expect(markers[0].storageUri).toMatch(/^deg\//);
+    expect(markers[0].storageUri).toMatch(/^vault\/deg\//);
     expect(dbmod.toPublicJobArtifact(markers[0])).not.toHaveProperty('storageUri');
 
     // The summary artifact: metadata-only, bounded, scientific_output + not downloadable.

@@ -4,7 +4,7 @@ import { Grid3x3, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 
 // Removed API constant
-export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi }) {
+export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme }) {
   const [heatmapData, setHeatmapData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -64,14 +64,17 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
     colorbar: { thickness: 14, len: 0.8, title: { text: 'Avg Expr', side: 'right' } },
   }] : [];
 
+  const isDark = theme === 'dark';
+  const plotText = isDark ? '#94a3b8' : '#475569';
+  const plotGrid = isDark ? '#1e293b' : '#d8e0ea';
   const layout = {
     autosize: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-    font: { color: '#94a3b8', size: 10, family: 'Inter, system-ui' },
+    font: { color: plotText, size: 10, family: 'Inter, system-ui' },
     margin: { l: 100, r: 60, t: 30, b: 80 },
-    xaxis: { title: 'Cluster', tickangle: -45 },
-    yaxis: { title: 'Gene', automargin: true },
+    xaxis: { title: 'Cluster', type: 'category', tickangle: -45, gridcolor: plotGrid },
+    yaxis: { title: 'Gene', automargin: true, gridcolor: plotGrid },
   };
 
   return (

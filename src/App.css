@@ -1,23 +1,45 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 @theme {
   --color-primary: #3371e3;
-  --color-background: #0f172a;
-  --color-surface: #1e293b;
-  --color-border: #334155;
-  --color-text: #f8fafc;
-  --color-textMuted: #94a3b8;
-  --color-success: #4ade80;
-  --color-danger: #ef4444;
+  --color-background: #f6f8fb;
+  --color-surface: #ffffff;
+  --color-border: #c8d3e1;
+  --color-text: #111827;
+  --color-textMuted: #475569;
+  --color-success: #0b6e30;
+  --color-danger: #dc2626;
 }
 
 @layer base {
-  :root[data-theme="light"] {
-    --color-background: #f8fafc;
-    --color-surface: #ffffff;
-    --color-border: #e2e8f0;
-    --color-text: #0f172a;
-    --color-textMuted: #475569;
+  /* Elevation + nested-surface tokens. Kept as plain CSS vars (not @theme)
+     so both themes can override them without generating stray utilities.
+     --color-surfaceRaised is a slightly lifted panel for nested cards. */
+  :root {
+    --color-surfaceRaised: #f1f5f9;
+    --accent-soft: rgba(51, 113, 227, 0.10);
+    --elev-1: 0 1px 2px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
+    --elev-2: 0 8px 20px -8px rgba(15, 23, 42, 0.20), 0 3px 8px -3px rgba(15, 23, 42, 0.10);
+    --ring: 0 0 0 3px rgba(51, 113, 227, 0.22);
+  }
+
+  :root[data-theme="dark"] {
+    --color-background: #0e1626;
+    --color-surface: #182236;
+    --color-surfaceRaised: #1f2b43;
+    --color-border: #30405c;
+    --color-text: #f1f5f9;
+    --color-textMuted: #9fb0c9;
+    --color-success: #4ade80;
+    --color-danger: #f2565b;
+    /* Brand blue is legible as a large fill, but too dark for small accent
+       text/icons on the dark canvas. Accent text is lightened separately. */
+    --accent-soft: rgba(96, 160, 255, 0.14);
+    --elev-1: 0 1px 2px rgba(0, 0, 0, 0.40), 0 2px 6px rgba(0, 0, 0, 0.28);
+    --elev-2: 0 10px 28px -8px rgba(0, 0, 0, 0.55), 0 4px 10px -4px rgba(0, 0, 0, 0.4);
+    --ring: 0 0 0 3px rgba(96, 160, 255, 0.30);
   }
 
   body {
@@ -27,34 +49,233 @@
 
 @layer components {
   .btn {
-    @apply px-4 py-2 rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-background;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md font-semibold transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
   }
   .btn-primary {
-    @apply bg-primary hover:bg-blue-600 text-white focus:ring-primary;
+    @apply bg-primary text-white focus-visible:ring-primary;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18);
   }
+  .btn-primary:hover {
+    @apply bg-blue-600;
+    box-shadow: var(--elev-2);
+  }
+  .btn-primary:active { transform: translateY(0.5px); }
   .btn-secondary {
-    @apply bg-surface border border-border hover:bg-slate-700 text-text focus:ring-slate-500;
+    @apply bg-surface border border-border text-text focus-visible:ring-primary;
   }
+  .btn-secondary:hover { background-color: var(--accent-soft); border-color: var(--color-primary); }
+  .btn-ghost {
+    @apply bg-transparent text-textMuted focus-visible:ring-primary;
+  }
+  .btn-ghost:hover { background-color: var(--accent-soft); color: var(--color-text); }
   .card {
-    @apply bg-surface border border-border rounded-lg shadow-sm overflow-hidden flex flex-col;
+    @apply bg-surface border border-border overflow-hidden flex flex-col;
+    border-radius: 8px;
+    box-shadow: var(--elev-1);
   }
   .card-header {
     @apply px-4 py-3 border-b border-border flex items-center justify-between bg-black/5 dark:bg-white/5;
   }
-  
+
+  /* Consistent, always-visible focus ring for form controls in both themes. */
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: none;
+    border-color: var(--color-primary) !important;
+    box-shadow: var(--ring);
+  }
+
   .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
   }
   .custom-scrollbar::-webkit-scrollbar-track {
     background: transparent;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    @apply bg-border/80 rounded-full;
+    background-color: color-mix(in srgb, var(--color-textMuted) 45%, transparent);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    @apply bg-border;
+    background-color: color-mix(in srgb, var(--color-textMuted) 70%, transparent);
+    background-clip: padding-box;
   }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+}
+
+@layer utilities {
+  :root:not([data-theme="dark"]) .text-white:not(.btn-primary):not(.bg-primary),
+  :root:not([data-theme="dark"]) .text-slate-200,
+  :root:not([data-theme="dark"]) .text-slate-300,
+  :root:not([data-theme="dark"]) .text-slate-400 {
+    color: var(--color-textMuted) !important;
+  }
+
+  :root:not([data-theme="dark"]) h1.text-white,
+  :root:not([data-theme="dark"]) h2.text-white,
+  :root:not([data-theme="dark"]) h3.text-white,
+  :root:not([data-theme="dark"]) h4.text-white,
+  :root:not([data-theme="dark"]) .font-bold.text-white,
+  :root:not([data-theme="dark"]) .font-black.text-white {
+    color: var(--color-text) !important;
+  }
+
+  :root:not([data-theme="dark"]) .bg-slate-900,
+  :root:not([data-theme="dark"]) .bg-slate-800,
+  :root:not([data-theme="dark"]) .bg-slate-800\/50,
+  :root:not([data-theme="dark"]) .bg-slate-800\/60,
+  :root:not([data-theme="dark"]) .bg-slate-800\/70,
+  :root:not([data-theme="dark"]) .bg-slate-800\/80,
+  :root:not([data-theme="dark"]) .bg-slate-800\/40,
+  :root:not([data-theme="dark"]) .bg-slate-800\/30,
+  :root:not([data-theme="dark"]) .bg-slate-800\/10,
+  :root:not([data-theme="dark"]) .bg-slate-700,
+  :root:not([data-theme="dark"]) .bg-slate-700\/50,
+  :root:not([data-theme="dark"]) .bg-black\/20,
+  :root:not([data-theme="dark"]) .bg-black\/30,
+  :root:not([data-theme="dark"]) .bg-black\/10 {
+    background-color: var(--color-surfaceRaised) !important;
+  }
+
+  :root:not([data-theme="dark"]) .border-slate-700,
+  :root:not([data-theme="dark"]) .border-slate-700\/50,
+  :root:not([data-theme="dark"]) .border-slate-800 {
+    border-color: var(--color-border) !important;
+  }
+
+  :root:not([data-theme="dark"]) input,
+  :root:not([data-theme="dark"]) select,
+  :root:not([data-theme="dark"]) textarea {
+    color: var(--color-text) !important;
+    background-color: var(--color-surface) !important;
+    border-color: var(--color-border) !important;
+  }
+
+  :root:not([data-theme="dark"]) table thead.bg-slate-800,
+  :root:not([data-theme="dark"]) thead.bg-slate-800 {
+    background-color: #eef2f7 !important;
+  }
+
+  :root:not([data-theme="dark"]) .shadow-2xl,
+  :root:not([data-theme="dark"]) .shadow-lg {
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12) !important;
+  }
+
+  :root:not([data-theme="dark"]) .btn-primary,
+  :root:not([data-theme="dark"]) .bg-primary.text-white,
+  :root:not([data-theme="dark"]) .bg-blue-600.text-white,
+  :root:not([data-theme="dark"]) .bg-red-500.text-white,
+  :root:not([data-theme="dark"]) .bg-red-600.text-white {
+    color: #ffffff !important;
+  }
+
+  :root[data-theme="dark"] .btn-secondary:hover {
+    background-color: #334155 !important;
+  }
+
+  /* text-slate-100/50 are near-white "emphasis" text authored for dark
+     surfaces; without a remap they render nearly invisible on a light
+     background. Map them to the primary dark text token in light mode. */
+  :root:not([data-theme="dark"]) .text-slate-50,
+  :root:not([data-theme="dark"]) .text-slate-100 {
+    color: var(--color-text) !important;
+  }
+
+  /* Hover text authored to brighten on dark surfaces would turn near-white
+     on a light hover background. Remap to readable text in light mode. */
+  :root:not([data-theme="dark"]) .hover\:text-white:hover,
+  :root:not([data-theme="dark"]) .hover\:text-slate-200:hover,
+  :root:not([data-theme="dark"]) .hover\:text-slate-300:hover {
+    color: var(--color-text) !important;
+  }
+
+  /* Dark hover fills (bg-slate-700/800) become a subtle light hover so the
+     theme stays cohesive instead of flashing a dark chip in light mode. */
+  :root:not([data-theme="dark"]) .hover\:bg-slate-700:hover,
+  :root:not([data-theme="dark"]) .hover\:bg-slate-700\/50:hover,
+  :root:not([data-theme="dark"]) .hover\:bg-slate-800:hover,
+  :root:not([data-theme="dark"]) .hover\:bg-slate-800\/20:hover,
+  :root:not([data-theme="dark"]) .hover\:bg-slate-800\/80:hover,
+  :root:not([data-theme="dark"]) .hover\:bg-white\/5:hover {
+    background-color: color-mix(in srgb, var(--color-primary) 8%, var(--color-surfaceRaised)) !important;
+  }
+
+  /* Text intentionally placed on a solid accent/brand fill (avatars, role
+     chips) must stay white in BOTH themes. Use this instead of text-white
+     there, since the light-mode text-white remap would otherwise mute it. */
+  .text-on-accent { color: #ffffff !important; }
+
+  /* Accent text/icons: the brand blue (#3371e3) only reaches ~3.9:1 on the
+     dark canvas, which fails WCAG AA for small text. Lighten accent *text*
+     in dark mode (this does NOT touch bg-primary fills, which keep the brand
+     blue with white text). Applies to text-primary spans and icon fills. */
+  :root[data-theme="dark"] .text-primary {
+    color: #93c5fd !important;
+  }
+
+  /* Semantic accent TEXT (amber/cyan/emerald/rose/violet/sky) was authored at
+     -300/-400 shades for dark surfaces; those are near-invisible on the light
+     canvas (as low as 1.3:1). Remap to AA-safe shades of the same hue in
+     light mode only — the tint chip backgrounds (bg-*-500/10) are unaffected,
+     so status colors stay recognizable but readable. Dark mode keeps the
+     original bright shades. */
+  :root:not([data-theme="dark"]) .text-amber-300,
+  :root:not([data-theme="dark"]) .text-amber-400,
+  :root:not([data-theme="dark"]) .text-amber-500,
+  :root:not([data-theme="dark"]) .text-yellow-300 {
+    color: #78350f !important;
+  }
+  :root:not([data-theme="dark"]) .text-cyan-300,
+  :root:not([data-theme="dark"]) .text-cyan-400 {
+    color: #0e7490 !important;
+  }
+  :root:not([data-theme="dark"]) .text-emerald-400 {
+    color: #047857 !important;
+  }
+  :root:not([data-theme="dark"]) .text-rose-400,
+  :root:not([data-theme="dark"]) .text-red-300,
+  :root:not([data-theme="dark"]) .text-red-400 {
+    color: #be123c !important;
+  }
+  :root:not([data-theme="dark"]) .text-violet-300,
+  :root:not([data-theme="dark"]) .text-violet-400 {
+    color: #6d28d9 !important;
+  }
+  :root:not([data-theme="dark"]) .text-sky-300 {
+    color: #0369a1 !important;
+  }
+  :root:not([data-theme="dark"]) .text-blue-300,
+  :root:not([data-theme="dark"]) .text-blue-400,
+  :root:not([data-theme="dark"]) .text-blue-500 {
+    color: #1e3a8a !important;
+  }
+
+  /* Brand accent text is fine at large sizes on light, but the smallest
+     uppercase chips (~10px) on a bg-primary/10 tint land at ~4.35:1. Deepen
+     accent text in light mode so even the small chips clear AA; the button
+     fill (.bg-primary) is untouched and keeps the brand blue. */
+  :root:not([data-theme="dark"]) .text-primary {
+    color: #1e3a8a !important;
+  }
+}
+
+/* ── Login screen background ───────────────────────────────────────────
+   Theme-aware, token-driven surface with soft radial accents. Light-mode
+   first; a deeper, cooler wash renders under [data-theme="dark"]. */
+.login-bg {
+  background-color: var(--color-background);
+  background-image:
+    radial-gradient(48rem 48rem at 12% -12%, rgba(51, 113, 227, 0.10), transparent 60%),
+    radial-gradient(42rem 42rem at 108% 112%, rgba(51, 113, 227, 0.07), transparent 58%);
+}
+:root[data-theme="dark"] .login-bg {
+  background-image:
+    radial-gradient(48rem 48rem at 12% -12%, rgba(51, 113, 227, 0.22), transparent 60%),
+    radial-gradient(42rem 42rem at 108% 112%, rgba(139, 92, 246, 0.18), transparent 58%);
 }
 
 /* React Flow Controls & MiniMap Styling for Dark/Light Mode compatibility */
@@ -63,7 +284,7 @@
   border: 1px solid var(--color-border) !important;
   border-radius: 8px !important;
   overflow: hidden !important;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3) !important;
+  box-shadow: 0 4px 14px -4px rgba(15, 23, 42, 0.18) !important;
 }
 
 .react-flow__controls-button {
@@ -75,7 +296,7 @@
 }
 
 .react-flow__controls-button:hover {
-  background-color: rgba(255, 255, 255, 0.08) !important;
+  background-color: rgba(51, 113, 227, 0.08) !important;
   color: var(--color-text) !important;
 }
 
@@ -87,15 +308,14 @@
   background-color: var(--color-surface) !important;
   border: 1px solid var(--color-border) !important;
   border-radius: 8px !important;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3) !important;
+  box-shadow: 0 4px 14px -4px rgba(15, 23, 42, 0.18) !important;
 }
 
 .react-flow__minimap-mask {
-  fill: rgba(15, 23, 42, 0.6) !important;
+  fill: rgba(148, 163, 184, 0.35) !important;
 }
 
 .react-flow__minimap-node {
   fill: var(--color-primary) !important;
   rx: 4px !important;
 }
-

@@ -40,21 +40,23 @@ Status legend:
 | Auth / logout | UI-wired (cookie foundation) | HttpOnly session cookie is the source of auth truth (login/signup set it; `GET /api/auth/session` restores it; `POST /api/auth/logout` clears it). The localStorage bearer token is deprecated legacy/dev compatibility, still accepted in a transition mode. CSRF for cookie-auth mutations is a SameSite=Lax cookie + an allowed-origin check. Server-side session **revocation/versioning** is still future work (stateless HMAC token). |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
 | Project members / RBAC endpoints | backend-only | Role-checked member APIs exist and are tested. The in-app "Collaborators" panel is a disabled status surface and is **not** wired to these endpoints. |
-| Project-scoped datasets | backend-only | Upload with server-chosen storage key + sha256; no UI dataset manager. |
+| Project-scoped datasets | UI-wired (narrow Seurat path) | The Workspace Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. Uploads still use server-chosen storage keys + sha256, and public responses omit internal storage. |
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. |
 | QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the authenticated live-R proxy (`/api/r/*`). |
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
-| Durable jobs | UI-wired (read-only metadata + DEG launch) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1` jobs. Other job launch, cancel, retry, and checkpoint-load flows are not generally UI-wired. |
-| Job worker loop | backend-only (opt-in) | Off unless `ENABLE_JOB_WORKER="true"`; drains only registered, allowlisted handlers. |
+| Durable Seurat pipeline worker (`seurat.pipeline.v1`) | UI-wired (10x HDF5 only) | Workspace can upload/select one `tenx_h5` dataset, create/reuse a raw dataset analysis object, launch a durable Seurat preprocessing job, show logs/status/safe summary metadata, and hand the result to checkpoint load or DEG. See "Seurat pipeline path" below. |
+| Durable jobs | UI-wired (read-only metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1`; the Workspace Seurat panel can create `seurat.pipeline.v1` and result `checkpoint.load.v1` jobs. General job launch, cancel, and retry flows are not generally UI-wired. |
+| Job worker loop | backend-only (opt-in) | Off unless `ENABLE_JOB_WORKER="true"`; drains only registered, allowlisted handlers. The local `npm run dev` script explicitly preloads this env var so UI-wired durable workflows run end-to-end; use `npm run dev:no-worker` for UI/API/R only. |
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
-| Checkpoint artifacts | UI-wired (read-only metadata) | Immutable result checkpoint metadata per successful job can be listed. The UI does not load checkpoints. |
-| Checkpoint load worker (`checkpoint.load.v1`) | backend-only | Owner-only reattach of a server-selected checkpoint into live R; not wired into the UI. |
+| Checkpoint artifacts | UI-wired (read-only metadata + selected reattach) | Immutable result checkpoint metadata per successful job can be listed. The Workspace Seurat panel can request checkpoint reattach for its result object through `checkpoint.load.v1`; there is still no download route. |
+| Checkpoint load worker (`checkpoint.load.v1`) | UI-wired (Seurat result action) | Owner-only reattach of a server-selected checkpoint into live R. UI coverage is limited to the Seurat pipeline result panel; it is not a general checkpoint browser/launcher. |
 | Job artifacts (metadata) | UI-wired (read-only metadata) | Read-only, path/storage-key stripped from responses; no download route. Jobs & Artifacts renders sanitized metadata only. |
 | Analysis-object lineage DAG | UI-wired (read-only summary) | Edge model + parents/children/lineage read routes are surfaced as a bounded summary in Jobs & Artifacts. Mutations remain server/worker-driven. |
 | Provenance / figures / cache | UI-wired | Older `/api/db/*` routes still back the live gallery/cache path. Jobs & Artifacts also shows project-scoped provenance and figure metadata read-only. |
 | Runtime check / object inspect workers | backend-only | Read-only, metadata-only bridge operations. |
+| Default visual theme | UI-wired | The React shell is light-first by default with the existing dark toggle retained. |
 | Pathway enrichment | not implemented (product) | No durable workflow. A legacy authenticated R endpoint may still exist (see below). |
 | CellChat / cell-cell communication | not implemented (product) | No durable workflow. Legacy authenticated R endpoints may still exist (see below). |
 | Cell annotation | not implemented (product) | UI placeholder only. A legacy authenticated R endpoint may still exist (see below). |
@@ -82,6 +84,38 @@ durable worker path as its primary workflow:
 Neither path is removed. The UI migration does not add public downloads,
 generated reports/scripts, pathway enrichment, CellChat, or shared live R state.
 
+## Seurat pipeline path
+
+The first supported end-to-end local/dev pipeline is intentionally narrow:
+
+- **Supported input:** one uploaded 10x Genomics filtered feature-barcode matrix
+  HDF5 file, stored as dataset `fileType: "tenx_h5"`. Matrix Market folders/zips,
+  H5AD, H5Seurat, RDS, multi-sample batches, and public downloads are not part of
+  this v1 path.
+- **UI workflow:** Workspace lists/uploads `tenx_h5` datasets, creates or reuses a
+  DB-backed raw dataset analysis object with the same `datasetId`, launches a
+  project-scoped `seurat.pipeline.v1` job, shows job status/logs and sanitized
+  summary/checkpoint metadata, then can launch `checkpoint.load.v1` to reattach
+  the result object into the owner's private live R state before downstream DEG.
+- **R steps:** `Read10X_h5`, `CreateSeuratObject`, optional QC filtering,
+  `NormalizeData` or `SCTransform`, variable features, scaling, PCA, neighbors,
+  clusters, and UMAP. Parameter names are strictly allowlisted by
+  `backend/seuratPipeline.js` before job creation and again before R contact.
+- **Outputs:** a result `seurat` analysis object parented to the raw dataset
+  object, one internal `checkpoint` artifact, one metadata-only
+  `pipeline_summary` artifact, a lineage edge, and a job result link. Public API
+  responses do not expose dataset storage keys, checkpoint storage keys, local
+  paths, R state keys, matrices, embeddings, cell rows, or gene tables.
+- **Worker boundary:** Express blocks `/api/r/object/seurat-pipeline` from the
+  public R proxy before R contact. The endpoint is reachable only through the
+  allowlisted in-process worker bridge, which reconstructs the body from trusted
+  DB rows and server-allocated checkpoint keys.
+
+This is local/dev pipeline evidence, not hosted-service production readiness.
+There is no object storage, no public download route, no server-side session
+revocation, no general dataset manager, and no live R state shared across project
+members.
+
 ## Hidden/disabled features vs reachable R endpoints
 
 Pathway enrichment, CellChat, and cell annotation are **not
@@ -95,9 +129,10 @@ product workflow and should not be treated as a supported feature surface.
 
 By contrast, the internal worker-only R endpoints
 (`/api/r/object/pbmc-pipeline`, `/api/r/object/checkpoint-load`,
-`/api/r/object/deg-find-markers`) are **blocked** from the public proxy before
-any R contact (404, no existence leak); they run only through the in-process
-worker bridge. The current policy is pinned by `backend/r-proxy-policy.test.js`.
+`/api/r/object/deg-find-markers`, `/api/r/object/seurat-pipeline`) are
+**blocked** from the public proxy before any R contact (404, no existence leak);
+they run only through the in-process worker bridge. The current policy is pinned
+by `backend/r-proxy-policy.test.js`.
 
 ## RDS loading is a trusted-input boundary
 
@@ -172,18 +207,22 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
   and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
   lineage are visible as read-only metadata in Jobs & Artifacts. The DEG tab can
   launch `deg.find_markers.v1` worker jobs and read sanitized DEG summary
-  artifacts. Datasets, RBAC management, checkpoint loading, non-DEG worker job
-  launch/cancel flows, and artifact downloads remain backend-only or absent (see
-  the table above).
+  artifacts. The Workspace Seurat panel can list/upload `tenx_h5` datasets for
+  `seurat.pipeline.v1`, launch that job, and request checkpoint reattach for the
+  result object. General dataset management, RBAC management, generic worker job
+  launch/cancel/retry flows, and artifact downloads remain backend-only or absent
+  (see the table above).
 - localStorage may cache selected project/object IDs and UI preferences only; it
   is not authoritative for projects, analysis objects, lineage, jobs, roles, or
   checkpoints.
 - Live R state is private, transient, and keyed by server-derived user/object
   state. Project metadata visibility does not grant live R access.
 - The worker is opt-in and allowlisted. Registered handlers include PBMC
-  pipeline, checkpoint load, DEG marker finding, runtime check, and object
-  inspection. The DEG marker workflow is UI-wired for job launch/status/safe
-  summary metadata only; the other worker workflows remain backend-only.
+  pipeline, dataset-backed Seurat pipeline, checkpoint load, DEG marker finding,
+  runtime check, and object inspection. The DEG marker workflow is UI-wired for
+  job launch/status/safe summary metadata; the Seurat pipeline UI is wired only
+  for `tenx_h5` input plus result checkpoint reattach. PBMC pipeline, runtime
+  check, and object inspect worker launches remain backend-only.
 - There is no public artifact download surface, object storage, generated report
   export, arbitrary R execution, or shared project live R state.
 - R 4.5.x is the intended local development target; the Dockerfile pins R 4.5.3
@@ -198,9 +237,11 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
   and lineage are implemented in the backend. The React UI now includes a
   read-only Jobs & Artifacts / durable history surface for safe metadata
   visibility, and the DEG tab launches `deg.find_markers.v1` jobs and reads
-  bounded `deg_summary` metadata. General job launching, checkpoint loading,
-  artifact downloads, and lineage mutation are still not UI-wired. A passing backend suite
-  means the API/DB contract holds — **not** that a feature is surfaced in the UI.
+  bounded `deg_summary` metadata, and the Workspace Seurat panel launches the
+  narrow `seurat.pipeline.v1` path with result checkpoint reattach. General job
+  launching, artifact downloads, and lineage mutation are still not UI-wired. A
+  passing backend suite means the API/DB contract holds - **not** that every
+  backend feature is surfaced in the UI.
 - `npm run test:visual` is a **mocked** frontend visual smoke test: it renders
   the built UI with backend and R responses mocked in the browser. It checks
   rendering/layout and obvious UI regressions only, and is **not** integration
@@ -212,9 +253,20 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
   change the project/object UI flow. It proves the UI *model* wiring (what the
   app requests and how it renders responses); it does **not** prove real
   backend, auth, ownership, or tenant isolation.
-- The R/workflow checks (`test:r-state-proxy`, `test:pbmc-parent`,
-  `test:checkpoint-load`, `test:deg-markers`) exercise the hardened live paths
-  and require a real R/Seurat backend; they skip cleanly when Seurat is absent.
+- The R-worker suites (`*-worker.test.js`, part of `test:backend`) **mock the R
+  caller** with instant, unboxed responses, so they prove handler/bridge wiring
+  but **not** real R timing, serialization, or compute. Real end-to-end completion
+  of the durable Seurat pipeline against a live R backend — including worker-lease
+  renewal during the long R call — is covered by `npm run test:seurat-pipeline`.
+  The worker renews its claim lease from a timer while an R bridge call is in
+  flight, so long compute jobs do not lose their lease mid-run; the default
+  `JOB_WORKER_LEASE_SECONDS` is 120.
+- The R/workflow checks (`test:seurat-pipeline`, `test:r-state-proxy`,
+  `test:pbmc-parent`, `test:checkpoint-load`, `test:deg-markers`) exercise the
+  hardened live paths and require a real R/Seurat backend (`test:seurat-pipeline`
+  also needs `hdf5r` for 10x HDF5); they skip cleanly when R/Seurat is absent.
+  CI installs `hdf5r` and runs `test:seurat-pipeline` so the UI-wired Seurat
+  pipeline has a real R/worker regression gate in pull requests.
 - CI runs on `pull_request` and `workflow_dispatch` only. The security-critical
   suites are additionally named explicitly in the workflow so their regression
   coverage is auditable.

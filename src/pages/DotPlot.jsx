@@ -4,7 +4,7 @@ import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 
 // Removed API constant
-export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi }) {
+export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [dotData, setDotData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -147,22 +147,27 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     });
   }
 
+  const isDark = theme === 'dark';
+  const plotText = isDark ? '#94a3b8' : '#475569';
+  const plotGrid = isDark ? '#1e293b' : '#d8e0ea';
+  const axisTitle = isDark ? '#f8fafc' : '#334155';
   const layout = {
     autosize: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-    font: { color: '#94a3b8', size: 11, family: 'Inter, system-ui' },
+    font: { color: plotText, size: 11, family: 'Inter, system-ui' },
     margin: { l: 100, r: 80, t: 30, b: 80 },
     xaxis: { 
-      title: { text: 'Cluster ID', font: { size: 13, color: '#f8fafc' }, standoff: 20 },
+      title: { text: 'Cluster ID', font: { size: 13, color: axisTitle }, standoff: 20 },
+      type: 'category',
       tickangle: -45, 
-      gridcolor: '#1e293b',
+      gridcolor: plotGrid,
       zeroline: false
     },
     yaxis: { 
-      title: { text: 'Gene Symbol', font: { size: 13, color: '#f8fafc' }, standoff: 20 },
+      title: { text: 'Gene Symbol', font: { size: 13, color: axisTitle }, standoff: 20 },
       automargin: true, 
-      gridcolor: '#1e293b',
+      gridcolor: plotGrid,
       zeroline: false
     },
     showlegend: false,
@@ -173,7 +178,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
       <div className="px-8 pt-6 pb-4 border-b border-border flex items-start justify-between shrink-0">
         <div>
           <h2 className="text-2xl font-bold text-text tracking-tight">Dot Plot</h2>
-          <p className="text-textMuted text-sm">Bubble size = % cells expressing gene · Color = average expression.</p>
+          <p className="text-textMuted text-sm">Bubble size = % cells expressing gene; color = average expression.</p>
         </div>
         <div className="flex flex-col gap-2 items-end">
           <div className="relative flex items-center gap-2">

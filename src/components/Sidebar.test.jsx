@@ -96,4 +96,30 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /Session DAG, Transient live-R/i })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: /Full Reports, Future workflow/i })).toBeDisabled();
   });
+
+  it('uses a readable token-based selected state in light mode', () => {
+    render(
+      <Sidebar
+        activeTab="workspace"
+        {...baseProps}
+        theme="light"
+        workspaces={[{
+          id: 'ws-1',
+          name: 'Test WS',
+          type: 'personal',
+          projects: [{ id: 'proj_1', name: 'Project', role: 'owner' }],
+          selectedProjectId: 'proj_1',
+          objects: [],
+          selectedObjectIds: [],
+        }]}
+        selectedObjects={[]}
+      />
+    );
+
+    const workbench = screen.getByRole('button', { name: /Workbench, Backend project/i });
+    expect(workbench).toHaveClass('bg-primary/10');
+    expect(workbench).toHaveClass('border-primary/30');
+    expect(workbench).toHaveClass('text-text');
+    expect(workbench).not.toHaveClass('bg-slate-700');
+  });
 });

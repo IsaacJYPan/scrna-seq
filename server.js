@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const db = require('./backend/database');
 const config = require('./backend/config');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
+const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -172,8 +173,28 @@ function enforceCsrfForCookieAuth(req, res) {
   const origin = req.headers.origin
     || (req.headers.referer ? originOf(req.headers.referer) : '');
   if (config.isAllowedOrigin(origin)) return true;
+  // Same-origin requests are not a CSRF vector: a cross-site attacker's page cannot
+  // make the browser send an Origin equal to this server's own Host. When Express
+  // serves the built SPA itself (npm start, default :3000) the request is same-origin,
+  // so accept it even if the FRONTEND_ORIGIN allowlist only lists the dev origin
+  // (:5173). Cross-origin requests still require an explicit allowlist entry.
+  if (isSameOriginRequest(req, origin)) return true;
   res.status(403).json({ error: 'CSRF origin check failed.' });
   return false;
+}
+
+// True when the request's Origin host:port equals the Host the browser connected to
+// (the definition of same-origin for CSRF purposes). Requires a real Origin; a missing
+// Origin is treated as cross-origin (fails closed).
+function isSameOriginRequest(req, origin) {
+  if (!origin) return false;
+  const host = req.headers.host;
+  if (!host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
 }
 
 function originOf(url) {
@@ -320,8 +341,13 @@ function trustedRdsLoadEnabled(env = process.env) {
 // ownership re-verification, server-selected output key, or sanitized summary — and would
 // accept a client-controlled storage key/path. It is driven ONLY by the in-process worker
 // bridge, so it must be UNREACHABLE through the public proxy.
+//
+// POST /object/seurat-pipeline is the dataset-backed counterpart: it loads an uploaded
+// dataset from a server-resolved storage key, runs Seurat preprocessing, and saves a
+// checkpoint. It is worker-only for the same durable job/artifact/lineage reasons.
 const R_PROXY_INTERNAL_ONLY_PATHS = new Set([
-  '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers'
+  '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers',
+  '/object/seurat-pipeline'
 ]);
 
 function isInternalOnlyRProxyPath(rawPath) {
@@ -665,7 +691,7 @@ const signupRateLimiter = createRateLimiter();
 // because /api/r/* is a catch-all proxy we ALSO validate it here as defense-in-depth:
 // if a client ever sends a top-level `storage_key` through the proxy it is confined to
 // the vault before reaching R (and the r-path-drift guard stays satisfied).
-const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths', 'storage_key'];
+const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths', 'storage_key', 'dataset_storage_key'];
 
 // Middleware
 // CORS must allow credentials so the browser sends/stores the HttpOnly session
@@ -737,11 +763,7 @@ app.post('/api/auth/logout', (req, res) => {
   const { user, via } = resolveSessionUser(req);
   req.authVia = via;
   if (user && via === 'cookie') {
-    const origin = req.headers.origin
-      || (req.headers.referer ? originOf(req.headers.referer) : '');
-    if (!config.isAllowedOrigin(origin)) {
-      return res.status(403).json({ error: 'CSRF origin check failed.' });
-    }
+    if (!enforceCsrfForCookieAuth(req, res)) return undefined;
   }
   clearSessionCookie(res);
   return res.json({ success: true });
@@ -924,7 +946,6 @@ app.post('/api/analysis-objects', (req, res) => {
       return res.status(400).json({ error: 'Malformed dataset ID.' });
     }
   }
-
   try {
     const created = db.createAnalysisObjectForUser(req.user.id, {
       datasetId: body.datasetId,
@@ -1511,6 +1532,8 @@ function sendProjectResourceError(res, e, context) {
     case 'INVALID_METADATA':
     case 'INVALID_JOB_TYPE':
     case 'INVALID_PARAMETERS':
+    case 'UNKNOWN_PARAMETER':
+    case 'INVALID_PARAMETER':
     case 'INVALID_PACKAGES':
     case 'INVALID_PARENT_IDS':
     case 'INVALID_PLOT_TYPE':
@@ -1700,6 +1723,26 @@ app.post('/api/projects/:projectId/jobs', (req, res) => {
   if (body.datasetId !== undefined && body.datasetId !== null &&
       !isValidDatasetIdFormat(body.datasetId)) {
     return res.status(400).json({ error: 'Malformed dataset ID.' });
+  }
+
+  // Durable dataset-backed Seurat pipeline has a strict server-side parameter
+  // allowlist. Reject unknown/bad params at job creation, before any worker claim
+  // or R contact can happen.
+  if (body.jobType === 'seurat.pipeline.v1') {
+    try {
+      validateSeuratPipelineParams(body.parameters);
+    } catch (e) {
+      return res.status(400).json({ error: e.message || 'Invalid seurat.pipeline.v1 parameters.' });
+    }
+    if (body.resultAnalysisObjectId !== undefined && body.resultAnalysisObjectId !== null) {
+      return res.status(400).json({ error: 'Result analysis object is server-managed and must not be provided.' });
+    }
+    if (body.datasetId === undefined || body.datasetId === null) {
+      return res.status(400).json({ error: 'seurat.pipeline.v1 requires datasetId.' });
+    }
+    if (body.analysisObjectId === undefined || body.analysisObjectId === null) {
+      return res.status(400).json({ error: 'seurat.pipeline.v1 requires analysisObjectId for the raw dataset object.' });
+    }
   }
 
   try {
@@ -2147,19 +2190,57 @@ async function buildRuntimeDiagnostics() {
   return diagnostics;
 }
 
-function startPlumber() {
+function startPlumber(options = {}) {
+  const logger = options.logger || console;
+  const spawnFn = options.spawn || spawn;
   activeRscriptDiagnostic = findRscript();
   const rscript = activeRscriptDiagnostic.path;
   const plumberScript = path.join(__dirname, 'r-backend', 'run.R');
+
+  let readySettled = false;
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+
+  const resolveReadyOnce = () => {
+    if (readySettled) return;
+    readySettled = true;
+    resolveReady();
+  };
+  const rejectReadyOnce = (message) => {
+    if (readySettled) return;
+    readySettled = true;
+    rejectReady(new Error(message));
+  };
   
-  const rProcess = spawn(rscript, [plumberScript], {
+  const rProcess = spawnFn(rscript, [plumberScript], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, API_TOKEN, PLUMBER_PORT: String(PLUMBER_PORT) }
   });
 
-  rProcess.stdout.on('data', d => console.log(`[R] ${d.toString().trim()}`));
-  rProcess.stderr.on('data', d => console.log(`[R:err] ${d.toString().trim()}`));
-  rProcess.on('close', code => console.log(`R process exited with code ${code}`));
+  rProcess.ready = ready;
+  rProcess.stdout.on('data', d => {
+    const text = d.toString().trim();
+    if (typeof logger.log === 'function') logger.log(`[R] ${text}`);
+    else if (typeof logger.info === 'function') logger.info(`[R] ${text}`);
+    if (/Plumber API running/i.test(text)) resolveReadyOnce();
+  });
+  rProcess.stderr.on('data', d => {
+    const text = d.toString().trim();
+    if (typeof logger.log === 'function') logger.log(`[R:err] ${text}`);
+    else if (typeof logger.warn === 'function') logger.warn(`[R:err] ${text}`);
+    if (/address already in use|Failed to create server/i.test(text)) {
+      rejectReadyOnce('R backend failed to bind its configured port.');
+    }
+  });
+  rProcess.on('close', code => {
+    if (typeof logger.log === 'function') logger.log(`R process exited with code ${code}`);
+    else if (typeof logger.info === 'function') logger.info(`R process exited with code ${code}`);
+    rejectReadyOnce('R backend exited before it became ready.');
+  });
 
   // If Rscript cannot be spawned at all (e.g. not installed, or a bad
   // RSCRIPT_PATH), the child emits an 'error' event. Without a listener that
@@ -2168,18 +2249,73 @@ function startPlumber() {
   // diagnostics report R as unavailable and R suites skip), so log a clear,
   // actionable message and keep the Express server alive instead of crashing.
   rProcess.on('error', (err) => {
-    console.error(
+    logger.error(
       `[R] Failed to launch R Plumber backend via ${activeRscriptDiagnostic.source} ` +
       `("${rscript}"): ${err.message}`
     );
-    console.error(
+    logger.error(
       '[R] The web server will keep running, but R-backed analysis and /api/r/* ' +
       'will be unavailable until R is reachable. Install R 4.5.x + Seurat, or set ' +
       'RSCRIPT_PATH to a valid Rscript. Runtime diagnostics will report R as unavailable.'
     );
+    rejectReadyOnce('R backend process could not be launched.');
   });
 
   process.on('exit', () => rProcess.kill());
+  // Avoid an unhandled rejection when startPlumber is used in degraded mode without
+  // awaiting readiness. Callers that gate worker startup still await rProcess.ready.
+  ready.catch(() => {});
+  return rProcess;
+}
+
+async function startRBackendAndJobWorkerIfEnabled(env = process.env, deps = {}) {
+  const logger = deps.logger || console;
+  const rProcess = (deps.startPlumber || startPlumber)({ logger });
+  const config = parseJobWorkerConfig(env, { logger });
+  if (!config.enabled) {
+    if (typeof logger.info === 'function') {
+      logger.info('[worker] Job worker disabled. Set ENABLE_JOB_WORKER=true to drain durable jobs.');
+    }
+    return { rProcess, worker: null };
+  }
+
+  try {
+    if (!rProcess || !rProcess.ready || typeof rProcess.ready.then !== 'function') {
+      throw new Error('R backend readiness signal is unavailable.');
+    }
+    await rProcess.ready;
+    await waitForOwnedRHealth(deps.probeRHealth || probeRHealth, {
+      logger,
+      timeoutMs: deps.rHealthTimeoutMs,
+      intervalMs: deps.rHealthIntervalMs,
+    });
+  } catch {
+    if (typeof logger.error === 'function') {
+      logger.error('[worker] Job worker not started because the owned R backend is not ready. Check PLUMBER_PORT conflicts and R startup logs.');
+    }
+    return { rProcess, worker: null };
+  }
+
+  return { rProcess, worker: startJobWorkerIfEnabled(env, deps) };
+}
+
+async function waitForOwnedRHealth(probe = probeRHealth, opts = {}) {
+  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 30000;
+  const intervalMs = Number(opts.intervalMs) > 0 ? Number(opts.intervalMs) : 500;
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  do {
+    try {
+      const health = await probe();
+      if (health && health.status === 'ok') return health;
+      lastError = new Error('R backend health check did not return ok.');
+    } catch (err) {
+      lastError = err;
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  } while (Date.now() < deadline);
+  throw lastError || new Error('R backend health check failed.');
 }
 
 // ── Job worker (conservative, opt-in) ────────────────────────────────────────
@@ -2323,8 +2459,7 @@ if (require.main === module) {
   const httpServer = app.listen(PORT, () => {
     console.log(`Node.js Web Server running on http://localhost:${PORT}`);
     console.log(`Starting local R Plumber backend...`);
-    startPlumber();
-    startJobWorkerIfEnabled();
+    startRBackendAndJobWorkerIfEnabled();
   });
 
   // Stop the worker cleanly on shutdown so no tick is left mid-claim. A single
@@ -2382,6 +2517,9 @@ module.exports = {
   findRscript,
   buildRuntimeDiagnostics,
   // Exposed for tests: opt-in job worker startup/shutdown wiring
+  startPlumber,
+  startRBackendAndJobWorkerIfEnabled,
+  waitForOwnedRHealth,
   startJobWorkerIfEnabled,
   stopJobWorker,
   shutdownJobWorkerAndServer

@@ -74,6 +74,9 @@ playwright/snapshots/
 playwright-report/
 test-results/
 
+# Local Codex/debug run artifacts: logs, screenshots, PID files, scratch probes
+.codex-run/
+
 # Scratch / temporary R scripts — one-off debugging files
 scratch/
 
