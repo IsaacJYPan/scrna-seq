@@ -614,31 +614,43 @@ async function main() {
   const loadMs = Date.now() - t0;
   assert(`App loaded within ${PERFORMANCE_BUDGET_MS}ms`, loadMs < PERFORMANCE_BUDGET_MS, `took ${loadMs}ms`);
 
-  // ── Test 1a: Dark Mode (default) ───────────────────────────────────────────
-  section('STEP 2: Workspace — dark mode (default)');
-  await sleep(PAGE_SETTLE_MS);
-  await checkSnapshot(page, 'workspace_dark');
-  await checkOverflow(page, 'Workspace dark');
-  await runA11yAudit(page, 'Workspace dark');
+  // ── Test 1a: Default theme ────────────────────────────────────────────────
+  const initialTheme = await page.evaluate(() =>
+    document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'
+  );
+  const oppositeTheme = initialTheme === 'dark' ? 'light' : 'dark';
 
-  // ── Test 1b: Theme Toggle → Light Mode ────────────────────────────────────
-  section('STEP 3: Theme toggle (dark → light)');
-  const themeBtn = page.locator('nav button[title*="Light Mode"], nav button[title*="light"]').first();
+  section(`STEP 2: Workspace — ${initialTheme} mode (default)`);
+  await sleep(PAGE_SETTLE_MS);
+  await checkSnapshot(page, `workspace_${initialTheme}`);
+  await checkOverflow(page, `Workspace ${initialTheme}`);
+  await runA11yAudit(page, `Workspace ${initialTheme}`);
+
+  // ── Test 1b: Theme toggle to opposite mode ────────────────────────────────
+  section(`STEP 3: Theme toggle (${initialTheme} → ${oppositeTheme})`);
+  const targetTitle = oppositeTheme === 'dark' ? 'Dark Mode' : 'Light Mode';
+  const themeBtn = page.locator(`nav button[title*="${targetTitle}"]`).first();
   const themeBtnExists = await themeBtn.count() > 0;
   if (themeBtnExists) {
     await themeBtn.click();
     await sleep(800);
-    await checkSnapshot(page, 'workspace_light');
-    await checkOverflow(page, 'Workspace light');
-    // Toggle back to dark
-    const darkBtn = page.locator('nav button[title*="Dark Mode"], nav button[title*="dark"]').first();
-    if (await darkBtn.count() > 0) {
-      await darkBtn.click();
+    const activeTheme = await page.evaluate(() =>
+      document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'
+    );
+    assert(`Theme toggle switched to ${oppositeTheme}`, activeTheme === oppositeTheme, `current theme is ${activeTheme}`);
+    await checkSnapshot(page, `workspace_${activeTheme}`);
+    await checkOverflow(page, `Workspace ${activeTheme}`);
+    await runA11yAudit(page, `Workspace ${activeTheme}`);
+    // Toggle back to the default theme before continuing tab checks.
+    const restoreTitle = initialTheme === 'dark' ? 'Dark Mode' : 'Light Mode';
+    const restoreBtn = page.locator(`nav button[title*="${restoreTitle}"]`).first();
+    if (await restoreBtn.count() > 0) {
+      await restoreBtn.click();
       await sleep(500);
     }
-    pass('Theme toggle: dark ↔ light transitions without crash');
+    pass('Theme toggle: light/dark transition without crash');
   } else {
-    warn('Theme toggle button not found — skipping light mode snapshot');
+    warn('Theme toggle button not found — skipping opposite-theme snapshot');
   }
 
   // ── Test 2: Sidebar Collapse / Expand ─────────────────────────────────────

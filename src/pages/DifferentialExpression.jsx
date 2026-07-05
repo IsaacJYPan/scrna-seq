@@ -111,7 +111,7 @@ function badgeClass(tone = 'slate') {
   const tones = {
     blue: 'bg-primary/10 text-text border-primary/20',
     green: 'bg-success/10 text-success border-success/30',
-    amber: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+    amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
     rose: 'bg-danger/10 text-danger border-danger/30',
     slate: 'bg-slate-800 text-slate-300 border-slate-700',
   };
@@ -406,7 +406,7 @@ export default function DifferentialExpression({
         )}
 
         {!isDbBackedObject && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-300">
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
             Select a DB-backed analysis object (`ao_*`) before launching the durable DEG worker.
           </div>
         )}
@@ -639,7 +639,7 @@ export default function DifferentialExpression({
           )}
 
           {markersArtifact && (
-            <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-300">
+            <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
               Internal marker artifact <span className="font-mono">{markersArtifact.id}</span> exists for job bookkeeping. It is not downloadable, and no storage path or key is shown.
             </div>
           )}
