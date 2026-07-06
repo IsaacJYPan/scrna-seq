@@ -1544,10 +1544,10 @@ export default function Workspace({
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">
       {/* Header */}
-      <div className="px-8 pt-6 pb-4 flex justify-between items-end border-b border-border bg-slate-800/10">
-        <div>
-          <h2 className="text-2xl font-black text-text tracking-tighter flex items-center gap-3">
-            {currentWs.name}
+      <div className="px-4 pt-5 pb-4 flex justify-between items-end border-b border-border bg-slate-800/10 sm:px-8 sm:pt-6">
+        <div className="min-w-0">
+          <h2 className="text-xl font-black text-text tracking-tight flex min-w-0 items-center gap-2 sm:text-2xl sm:tracking-tighter sm:gap-3">
+            <span className="truncate">{currentWs.name}</span>
             {currentWs.type === 'personal'
               ? <Lock size={16} className="text-slate-400" />
               : <Globe size={16} className="text-primary" />}
@@ -1555,7 +1555,7 @@ export default function Workspace({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-8">
         <div className="max-w-5xl mx-auto space-y-12 animate-in fade-in slide-in-from-bottom-6">
           <WorkbenchOverview
             activeProject={activeProject}
