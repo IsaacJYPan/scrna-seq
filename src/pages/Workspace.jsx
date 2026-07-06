@@ -822,7 +822,7 @@ function WorkbenchOverview({
   );
 }
 
-function SeuratPipelinePanel({
+export function SeuratPipelinePanel({
   activeProjectId,
   selectedObject,
   currentWs,
@@ -1566,15 +1566,6 @@ export default function Workspace({
             rSessionId={rSessionId}
             setActiveTab={setActiveTab}
             setShowLoadModal={setShowLoadModal}
-          />
-
-          <SeuratPipelinePanel
-            activeProjectId={activeProjectId}
-            selectedObject={selectedObject}
-            currentWs={currentWs}
-            updateActiveWorkspace={updateActiveWorkspace}
-            onSelectAnalysisObject={onSelectAnalysisObject}
-            setActiveTab={setActiveTab}
           />
 
           {/* Stats Block */}

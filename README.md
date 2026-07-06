@@ -39,13 +39,14 @@ At a glance:
 - **UI-wired:** auth, organizations/projects, DB-backed analysis objects
   (`ao_*`), live R object state, QC/Normalize/PCA/Cluster/UMAP/plots, DEG through
   durable `deg.find_markers.v1` jobs and bounded summary artifacts, the narrow
-  10x HDF5 `seurat.pipeline.v1` Workspace flow with result checkpoint reattach,
+  10x HDF5 `seurat.pipeline.v1` Pipeline Manager flow with result checkpoint
+  reattach, declarative pipeline manifests for registered modules,
   provenance/figures/cache.
 - **Backend implemented with partial read-only UI visibility:** durable jobs,
   artifacts/checkpoints, and lineage exist in the backend, and the React UI now
   includes a read-only Jobs & Artifacts / durable history surface for safe
-  metadata visibility. DEG job launch is wired in the DEG tab, and the Workspace
-  Seurat panel can launch the supported 10x HDF5 pipeline plus checkpoint
+  metadata visibility. DEG job launch is wired in the DEG tab, and the Pipeline
+  Manager Seurat panel can launch the supported 10x HDF5 pipeline plus checkpoint
   reattach. Artifact downloads, general job launch/cancel/retry, and lineage
   mutation are still not UI-wired.
 - **Backend-only (implemented + tested, no UI yet):** project members/RBAC
