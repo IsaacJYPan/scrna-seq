@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText } from 'lucide-react';
+import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
 import Plot from 'react-plotly.js';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
@@ -306,24 +306,24 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const currentPlot = plotConfigs[activePlot];
 
   return (
-    <div className="h-full w-full p-8 overflow-y-auto bg-background custom-scrollbar">
+    <div className="h-full w-full p-4 sm:p-6 lg:p-8 overflow-y-auto bg-background custom-scrollbar">
       {/* Header */}
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex flex-col gap-4 mb-8 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">Quality Control</h2>
           <p className="text-textMuted">Set filtering thresholds and inspect cell quality distributions.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex w-full flex-col items-stretch gap-3 sm:flex-row sm:items-center lg:w-auto">
           {result && (
             <button
-              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
+              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center justify-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
             ><FileText size={15} /> View Step Script</button>
           )}
           <button
             onClick={runFiltering}
             disabled={filtering || !distributions}
-            className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-success border border-success hover:bg-success/30' : 'btn-primary'} flex items-center gap-2`}
+            className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-success border border-success hover:bg-success/30' : 'btn-primary'} flex items-center justify-center gap-2`}
           >
             {filtering && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
             {!filtering && (result || pipelineState?.qc) && <ShieldCheck size={18} />}
@@ -343,7 +343,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       {/* Summary Statistics Card */}
       {(result || pipelineState?.qcSummary || pipelineState?.qc) && (
         <div className={`card p-6 mb-6 border-t-4 ${result ? 'border-t-success' : 'border-t-primary/50'}`}>
-          <div className="flex items-center justify-between mb-5 border-b border-border pb-3">
+          <div className="flex flex-col gap-3 mb-5 border-b border-border pb-3 sm:flex-row sm:items-center sm:justify-between">
             <h3 className="font-semibold text-lg text-text">
               {result ? 'QC Filtering Summary' : 'QC Metrics Applied'}
             </h3>
@@ -354,7 +354,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             )}
           </div>
 
-          <div className="grid grid-cols-5 gap-4 font-mono text-sm">
+          <div className="grid grid-cols-1 gap-4 font-mono text-sm sm:grid-cols-2 xl:grid-cols-5">
             {(result?.result || pipelineState?.qcSummary) ? (
               <>
                 {/* Detailed stats from a fresh run or persisted summary */}
@@ -433,7 +433,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             Active Filter Applied
           </div>
         )}
-        <div className="flex items-center justify-between mb-5">
+        <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
           <h3 className="font-bold flex items-center gap-2 text-text">
             <SlidersHorizontal size={18} className="text-primary" /> Filtering Thresholds
           </h3>
@@ -441,7 +441,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             {pipelineState?.isSubset || datasetInfo?.parentObjId ? 'Subset Inherited Mode' : 'Manual Mode'}
           </span>
         </div>
-        <div className="grid grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
           <div>
             <label htmlFor="qc-mt" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Max MT %</label>
             <input id="qc-mt" type="number" step="0.5" value={mtCutoff}
@@ -474,10 +474,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
         <details className="mt-6 border-t border-border/50 pt-4 group">
           <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
-            <span className="text-primary group-open:rotate-90 transition-transform">▶</span>
-            ⚙️ Advanced Options
+            <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" aria-hidden="true" />
+            <Settings size={15} className="text-primary" aria-hidden="true" />
+            <span>Advanced Options</span>
           </summary>
-          <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-2 gap-6">
+          <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-1 gap-6 md:grid-cols-2">
             <div>
               <label htmlFor="qc-filter-features" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Filter Features</label>
               <input
@@ -549,7 +550,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
               </h3>
 
               <div className="space-y-6">
-                <div className="grid grid-cols-4 gap-4">
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
                   {/* Mitochondrial Block */}
                   <div className="col-span-1 p-4 bg-black/20 rounded-xl border border-border">
                     <h4 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">percent.mt</h4>

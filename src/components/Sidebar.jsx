@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Activity, Archive, BarChart3, CheckCircle2, ChevronDown, ChevronLeft,
   CircleDot, Clipboard as ClipboardList, Database, FileText, GitBranch,
@@ -23,7 +23,24 @@ export default function Sidebar({
   setTheme,
   figuresCount = 0,
 }) {
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(() => (
+    typeof window !== 'undefined' ? window.innerWidth < 900 : false
+  ));
+
+  useEffect(() => {
+    const collapseForNarrowViewport = () => {
+      if (window.innerWidth < 900) setIsCollapsed(true);
+    };
+    collapseForNarrowViewport();
+    window.addEventListener('resize', collapseForNarrowViewport);
+    return () => window.removeEventListener('resize', collapseForNarrowViewport);
+  }, []);
+
+  const collapseAfterMobileNavigation = () => {
+    if (typeof window !== 'undefined' && window.innerWidth < 900) {
+      setIsCollapsed(true);
+    }
+  };
 
   const personalWs = workspaces.filter(ws => ws.type === 'personal');
   const sharedWs = workspaces.filter(ws => ws.type === 'shared');
@@ -92,7 +109,11 @@ export default function Sidebar({
     const isDisabled = disabled || item.disabled;
     return (
       <button
-        onClick={() => !isDisabled && setActiveTab(item.id)}
+        onClick={() => {
+          if (isDisabled) return;
+          setActiveTab(item.id);
+          collapseAfterMobileNavigation();
+        }}
         disabled={isDisabled}
         title={item.status || item.label}
         aria-label={item.status ? `${item.label}, ${item.status}` : item.label}
@@ -155,11 +176,23 @@ export default function Sidebar({
   };
 
   return (
-    <div className="flex h-full flex-shrink-0 z-20 shadow-2xl relative">
+    <div className="flex h-full flex-shrink-0 z-20 shadow-2xl relative w-[72px] lg:w-auto">
       <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0">
         <div className="w-12 h-12 rounded-[24px] bg-primary flex items-center justify-center shadow-lg shadow-black/50 mb-1 hover:rounded-[16px] transition-all duration-200 cursor-pointer" title="BenchOne">
           <Microscope size={22} className="text-on-accent" />
         </div>
+
+        {isCollapsed && (
+          <button
+            type="button"
+            onClick={() => setIsCollapsed(false)}
+            aria-label="Expand sidebar"
+            className="w-12 h-8 rounded-md bg-surface border border-border text-textMuted hover:bg-black/5 hover:text-text dark:hover:bg-slate-700 transition-colors flex items-center justify-center shadow-sm"
+            title="Expand sidebar"
+          >
+            <Menu size={16} />
+          </button>
+        )}
 
         <div className="w-8 h-0.5 bg-black/10 dark:bg-slate-800 rounded-full my-1" />
 
@@ -203,11 +236,16 @@ export default function Sidebar({
         )}
       </nav>
 
-      <aside className={`bg-surface flex flex-col h-full select-none transition-all duration-300 overflow-hidden ${isCollapsed ? 'w-0 opacity-0' : 'w-60 opacity-100'}`}>
-        <div className="h-12 w-full flex items-center px-4 shadow-sm border-b border-border hover:bg-slate-700 transition-colors cursor-pointer group" onClick={() => setIsCollapsed(true)}>
-          <h1 className="text-[15px] font-black text-slate-100 truncate flex-1 leading-none">{currentWorkspace?.name || 'BenchOne'}</h1>
+      <aside className={`bg-surface flex flex-col h-full select-none transition-all duration-300 overflow-hidden ${isCollapsed ? 'w-0 opacity-0 pointer-events-none' : 'absolute left-[72px] top-0 z-40 w-[calc(100vw-72px)] max-w-60 opacity-100 shadow-2xl lg:static lg:left-auto lg:top-auto lg:z-auto lg:w-60 lg:max-w-none'}`}>
+        <button
+          type="button"
+          aria-label="Collapse sidebar"
+          className="h-12 w-full flex items-center px-4 shadow-sm border-b border-border hover:bg-slate-700 transition-colors cursor-pointer group text-left"
+          onClick={() => setIsCollapsed(true)}
+        >
+          <span className="text-[15px] font-black text-slate-100 truncate flex-1 leading-none">{currentWorkspace?.name || 'BenchOne'}</span>
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
-        </div>
+        </button>
 
         <div className="flex-1 overflow-y-auto px-2 py-4 space-y-5 custom-scrollbar">
           <div className="space-y-[2px]">
@@ -276,12 +314,6 @@ export default function Sidebar({
           <Wrench size={16} className="text-slate-400" />
         </div>
       </aside>
-
-      {isCollapsed && (
-        <button onClick={() => setIsCollapsed(false)} className="absolute left-[80px] top-4 w-8 h-8 bg-surface hover:bg-slate-700 text-slate-400 hover:text-white rounded-md shadow flex items-center justify-center transition-all z-30 border border-background">
-          <Menu size={16} />
-        </button>
-      )}
     </div>
   );
 }

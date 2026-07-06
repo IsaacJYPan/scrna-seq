@@ -137,6 +137,16 @@ async function checkOverflow(page, context) {
     document.querySelectorAll('*').forEach(el => {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
+      const style = window.getComputedStyle(el);
+      const isVisuallyHidden =
+        el.classList.contains('sr-only') ||
+        (
+          style.position === 'absolute' &&
+          style.overflow === 'hidden' &&
+          rect.width <= 2 &&
+          rect.height <= 2
+        );
+      if (isVisuallyHidden) return;
       // Skip elements inside collapsed/hidden containers (w-0, opacity-0, overflow-hidden with 0 width)
       let parent = el.parentElement;
       let hiddenByParent = false;
@@ -655,16 +665,14 @@ async function main() {
 
   // ── Test 2: Sidebar Collapse / Expand ─────────────────────────────────────
   section('STEP 4: Sidebar collapse / expand');
-  const collapseBtn = page.locator('aside button, aside div.cursor-pointer').filter({ hasText: '' }).first();
   // Click the workspace name header (collapses sidebar per Sidebar.jsx)
-  const sidebarHeader = page.locator('aside .cursor-pointer').first();
+  const sidebarHeader = page.locator('aside button[aria-label="Collapse sidebar"]').first();
   if (await sidebarHeader.count() > 0) {
     await sidebarHeader.click();
     await sleep(500);
     await checkSnapshot(page, 'sidebar_collapsed');
     await checkOverflow(page, 'Sidebar collapsed');
-    // Re-expand via the Menu button
-    const menuBtn = page.locator('button[class*="absolute"][class*="left-"]').first();
+    const menuBtn = page.locator('nav button[aria-label="Expand sidebar"]').first();
     if (await menuBtn.count() > 0) {
       await menuBtn.click();
       await sleep(500);
