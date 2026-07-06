@@ -155,6 +155,34 @@ CREATE INDEX IF NOT EXISTS idx_datasets_validation_status ON datasets(validation
 CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
 CREATE INDEX IF NOT EXISTS idx_datasets_sha256 ON datasets(sha256);
 
+-- Pipeline definitions and user-project active selection. Manifests are
+-- declarative module/tab definitions only; code, paths, endpoints, and R state
+-- stay outside the manifest contract. Selection is scoped by BOTH project and
+-- user so collaborators do not overwrite each other's active workflow.
+CREATE TABLE IF NOT EXISTS pipeline_definitions (
+  id            TEXT PRIMARY KEY,
+  project_id    TEXT REFERENCES projects(id),
+  owner_user_id BIGINT NOT NULL REFERENCES users(id),
+  visibility    TEXT NOT NULL DEFAULT 'user',
+  name          TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_def_project ON pipeline_definitions(project_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_def_owner ON pipeline_definitions(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_def_visibility ON pipeline_definitions(visibility);
+
+CREATE TABLE IF NOT EXISTS project_pipeline_selections (
+  project_id  TEXT NOT NULL REFERENCES projects(id),
+  user_id     BIGINT NOT NULL REFERENCES users(id),
+  pipeline_id TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_selection_user ON project_pipeline_selections(user_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_selection_pipeline ON project_pipeline_selections(pipeline_id);
+
 -- ── Analysis objects (server-owned identity; optional project association) ───
 CREATE TABLE IF NOT EXISTS analysis_objects (
   id                      TEXT PRIMARY KEY,

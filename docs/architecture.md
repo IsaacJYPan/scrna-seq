@@ -40,17 +40,18 @@ Status legend:
 | Auth / logout | UI-wired (cookie foundation) | HttpOnly session cookie is the source of auth truth (login/signup set it; `GET /api/auth/session` restores it; `POST /api/auth/logout` clears it). The localStorage bearer token is deprecated legacy/dev compatibility, still accepted in a transition mode. CSRF for cookie-auth mutations is a SameSite=Lax cookie + an allowed-origin check. Server-side session **revocation/versioning** is still future work (stateless HMAC token). |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
 | Project members / RBAC endpoints | backend-only | Role-checked member APIs exist and are tested. The in-app "Collaborators" panel is a disabled status surface and is **not** wired to these endpoints. |
-| Project-scoped datasets | UI-wired (narrow Seurat path) | The Workspace Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. Uploads still use server-chosen storage keys + sha256, and public responses omit internal storage. |
+| Project-scoped datasets | UI-wired (narrow Seurat path) | The Pipeline Manager Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. Uploads still use server-chosen storage keys + sha256, and public responses omit internal storage. |
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. |
+| Pipeline Manager / pipeline manifests | UI-wired (declarative registry) | A Pipeline Manager tab lets each user select an active pipeline within a project, upload declarative pipeline manifests, and populate pipeline-generated sidebar tabs from registered modules. Uploaded manifests may choose from registered module/view templates only; arbitrary code, endpoints, icons, storage keys, and paths are rejected before storage. |
 | QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the authenticated live-R proxy (`/api/r/*`). |
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
-| Durable Seurat pipeline worker (`seurat.pipeline.v1`) | UI-wired (10x HDF5 only) | Workspace can upload/select one `tenx_h5` dataset, create/reuse a raw dataset analysis object, launch a durable Seurat preprocessing job, show logs/status/safe summary metadata, and hand the result to checkpoint load or DEG. See "Seurat pipeline path" below. |
-| Durable jobs | UI-wired (read-only metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1`; the Workspace Seurat panel can create `seurat.pipeline.v1` and result `checkpoint.load.v1` jobs. General job launch, cancel, and retry flows are not generally UI-wired. |
+| Durable Seurat pipeline worker (`seurat.pipeline.v1`) | UI-wired (10x HDF5 only) | Pipeline Manager can upload/select one `tenx_h5` dataset, create/reuse a raw dataset analysis object, launch a durable Seurat preprocessing job, show logs/status/safe summary metadata, and hand the result to checkpoint load or DEG. See "Seurat pipeline path" below. |
+| Durable jobs | UI-wired (read-only metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1`; the Pipeline Manager Seurat panel can create `seurat.pipeline.v1` and result `checkpoint.load.v1` jobs. General job launch, cancel, and retry flows are not generally UI-wired. |
 | Job worker loop | backend-only (opt-in) | Off unless `ENABLE_JOB_WORKER="true"`; drains only registered, allowlisted handlers. The local `npm run dev` script explicitly preloads this env var so UI-wired durable workflows run end-to-end; use `npm run dev:no-worker` for UI/API/R only. |
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
-| Checkpoint artifacts | UI-wired (read-only metadata + selected reattach) | Immutable result checkpoint metadata per successful job can be listed. The Workspace Seurat panel can request checkpoint reattach for its result object through `checkpoint.load.v1`; there is still no download route. |
+| Checkpoint artifacts | UI-wired (read-only metadata + selected reattach) | Immutable result checkpoint metadata per successful job can be listed. The Pipeline Manager Seurat panel can request checkpoint reattach for its result object through `checkpoint.load.v1`; there is still no download route. |
 | Checkpoint load worker (`checkpoint.load.v1`) | UI-wired (Seurat result action) | Owner-only reattach of a server-selected checkpoint into live R. UI coverage is limited to the Seurat pipeline result panel; it is not a general checkpoint browser/launcher. |
 | Job artifacts (metadata) | UI-wired (read-only metadata) | Read-only, path/storage-key stripped from responses; no download route. Jobs & Artifacts renders sanitized metadata only. |
 | Analysis-object lineage DAG | UI-wired (read-only summary) | Edge model + parents/children/lineage read routes are surfaced as a bounded summary in Jobs & Artifacts. Mutations remain server/worker-driven. |
@@ -92,11 +93,12 @@ The first supported end-to-end local/dev pipeline is intentionally narrow:
   HDF5 file, stored as dataset `fileType: "tenx_h5"`. Matrix Market folders/zips,
   H5AD, H5Seurat, RDS, multi-sample batches, and public downloads are not part of
   this v1 path.
-- **UI workflow:** Workspace lists/uploads `tenx_h5` datasets, creates or reuses a
-  DB-backed raw dataset analysis object with the same `datasetId`, launches a
-  project-scoped `seurat.pipeline.v1` job, shows job status/logs and sanitized
-  summary/checkpoint metadata, then can launch `checkpoint.load.v1` to reattach
-  the result object into the owner's private live R state before downstream DEG.
+- **UI workflow:** Pipeline Manager lists/uploads `tenx_h5` datasets, creates or
+  reuses a DB-backed raw dataset analysis object with the same `datasetId`,
+  launches a project-scoped `seurat.pipeline.v1` job, shows job status/logs and
+  sanitized summary/checkpoint metadata, then can launch `checkpoint.load.v1` to
+  reattach the result object into the owner's private live R state before
+  downstream DEG.
 - **R steps:** `Read10X_h5`, `CreateSeuratObject`, optional QC filtering,
   `NormalizeData` or `SCTransform`, variable features, scaling, PCA, neighbors,
   clusters, and UMAP. Parameter names are strictly allowlisted by
@@ -110,6 +112,12 @@ The first supported end-to-end local/dev pipeline is intentionally narrow:
   public R proxy before R contact. The endpoint is reachable only through the
   allowlisted in-process worker bridge, which reconstructs the body from trusted
   DB rows and server-allocated checkpoint keys.
+- **Module boundary:** The default Seurat workflow is represented as a
+  declarative pipeline manifest whose tabs map to registered frontend module
+  templates and allowlisted job types. Most Seurat preprocessing steps still run
+  through the full `seurat.pipeline.v1` worker path; standalone durable workers
+  for every module step are future work. Uploaded manifests cannot introduce
+  arbitrary code execution or unregistered backend endpoints.
 
 This is local/dev pipeline evidence, not hosted-service production readiness.
 There is no object storage, no public download route, no server-side session
@@ -207,11 +215,11 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
   and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
   lineage are visible as read-only metadata in Jobs & Artifacts. The DEG tab can
   launch `deg.find_markers.v1` worker jobs and read sanitized DEG summary
-  artifacts. The Workspace Seurat panel can list/upload `tenx_h5` datasets for
-  `seurat.pipeline.v1`, launch that job, and request checkpoint reattach for the
-  result object. General dataset management, RBAC management, generic worker job
-  launch/cancel/retry flows, and artifact downloads remain backend-only or absent
-  (see the table above).
+  artifacts. The Pipeline Manager Seurat panel can list/upload `tenx_h5`
+  datasets for `seurat.pipeline.v1`, launch that job, and request checkpoint
+  reattach for the result object. General dataset management, RBAC management,
+  generic worker job launch/cancel/retry flows, and artifact downloads remain
+  backend-only or absent (see the table above).
 - localStorage may cache selected project/object IDs and UI preferences only; it
   is not authoritative for projects, analysis objects, lineage, jobs, roles, or
   checkpoints.
@@ -237,7 +245,7 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
   and lineage are implemented in the backend. The React UI now includes a
   read-only Jobs & Artifacts / durable history surface for safe metadata
   visibility, and the DEG tab launches `deg.find_markers.v1` jobs and reads
-  bounded `deg_summary` metadata, and the Workspace Seurat panel launches the
+  bounded `deg_summary` metadata, and the Pipeline Manager Seurat panel launches the
   narrow `seurat.pipeline.v1` path with result checkpoint reattach. General job
   launching, artifact downloads, and lineage mutation are still not UI-wired. A
   passing backend suite means the API/DB contract holds - **not** that every

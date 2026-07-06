@@ -15,6 +15,12 @@ const {
   validateSeuratPipelineParams,
   assertSupportedSeuratPipelineDataset,
 } = require('./seuratPipeline');
+const {
+  DEFAULT_PIPELINE_ID,
+  validatePipelineManifest,
+  getDefaultPipelineManifest,
+  isBuiltInPipelineId,
+} = require('./pipelineManifests');
 
 let db;
 
@@ -313,6 +319,39 @@ function initDatabase(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_datasets_validation_status ON datasets(validation_status);
     CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
     CREATE INDEX IF NOT EXISTS idx_datasets_sha256 ON datasets(sha256);
+
+    -- Pipeline definitions and user-project active selection. Definitions are
+    -- declarative manifests over registered modules only; they do not carry code,
+    -- endpoints, storage paths, or R state. The active selection is intentionally
+    -- keyed by (project_id, user_id), so one collaborator's workflow choice does
+    -- not change another collaborator's sidebar.
+    CREATE TABLE IF NOT EXISTS pipeline_definitions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      owner_user_id INTEGER NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'user',
+      name TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id),
+      FOREIGN KEY (owner_user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pipeline_def_project ON pipeline_definitions(project_id);
+    CREATE INDEX IF NOT EXISTS idx_pipeline_def_owner ON pipeline_definitions(owner_user_id);
+    CREATE INDEX IF NOT EXISTS idx_pipeline_def_visibility ON pipeline_definitions(visibility);
+
+    CREATE TABLE IF NOT EXISTS project_pipeline_selections (
+      project_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      pipeline_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, user_id),
+      FOREIGN KEY (project_id) REFERENCES projects(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pipeline_selection_user ON project_pipeline_selections(user_id);
+    CREATE INDEX IF NOT EXISTS idx_pipeline_selection_pipeline ON project_pipeline_selections(pipeline_id);
 
     -- ── Job Artifacts & Checkpoints (durable output metadata) ──────────
     -- The durable, metadata-FIRST record of what a (future real) job handler
@@ -2418,6 +2457,155 @@ function removeProjectMember(projectId, targetUserId, actorRole) {
 // key / storage uri / sha256 / size are set by the server (via the upload flow),
 // never accepted from the client. file_type / upload_status / validation_status
 // are constrained to the allow-lists below.
+
+// Pipeline definitions and user-project selection. Definitions are declarative
+// manifests over registered modules only. Selection is scoped by BOTH project and
+// user so collaborators can inspect different workflows without changing one
+// another's sidebar.
+
+const PIPELINE_DEFINITION_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const PIPELINE_DEFINITION_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const PIPELINE_SELECTION_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const PIPELINE_VISIBILITIES = new Set(['user', 'project']);
+
+function generatePipelineDefinitionId() {
+  return `pipe_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function isValidPipelineDefinitionId(id) {
+  return typeof id === 'string' && /^pipe_[0-9a-f]+$/.test(id);
+}
+
+function rowToPipelineDefinition(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    ownerUserId: row.owner_user_id,
+    visibility: row.visibility,
+    name: row.name,
+    manifest: JSON.parse(row.manifest_json || '{}'),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toPublicPipelineDefinition(definition) {
+  if (!definition) return null;
+  return {
+    id: definition.id,
+    projectId: definition.projectId,
+    visibility: definition.visibility,
+    name: definition.name,
+    manifest: definition.manifest,
+    createdAt: definition.createdAt,
+    updatedAt: definition.updatedAt,
+  };
+}
+
+function defaultPipelineDefinitionPublic(projectId) {
+  return {
+    id: DEFAULT_PIPELINE_ID,
+    projectId: projectId || null,
+    visibility: 'builtin',
+    name: 'Default Seurat scRNA-seq Pipeline',
+    manifest: getDefaultPipelineManifest(),
+    builtin: true,
+  };
+}
+
+function getAccessiblePipelineDefinitionRow(userId, projectId, pipelineId) {
+  if (isBuiltInPipelineId(pipelineId)) return { builtin: true };
+  if (!isValidPipelineDefinitionId(pipelineId)) return null;
+  return db.prepare(`
+    SELECT * FROM pipeline_definitions
+    WHERE id = ?
+      AND project_id = ?
+      AND (owner_user_id = ? OR visibility = 'project')
+  `).get(String(pipelineId), String(projectId), Number(userId));
+}
+
+function listProjectPipelineDefinitions(userId, projectId) {
+  requireProjectRole(userId, projectId, PIPELINE_DEFINITION_READ_ROLES);
+  const rows = db.prepare(`
+    SELECT * FROM pipeline_definitions
+    WHERE project_id = ?
+      AND (owner_user_id = ? OR visibility = 'project')
+    ORDER BY updated_at DESC, id DESC
+  `).all(String(projectId), Number(userId));
+  return [
+    defaultPipelineDefinitionPublic(projectId),
+    ...rows.map(row => toPublicPipelineDefinition(rowToPipelineDefinition(row))),
+  ];
+}
+
+function createProjectPipelineDefinition(userId, projectId, input = {}) {
+  requireProjectRole(userId, projectId, PIPELINE_DEFINITION_WRITE_ROLES);
+  if (input.id !== undefined || input.projectId !== undefined || input.project_id !== undefined
+      || input.ownerUserId !== undefined || input.owner_user_id !== undefined) {
+    throw codedError('INVALID_PIPELINE_DEFINITION', 'Pipeline definition identity and ownership are server-controlled.');
+  }
+  const visibility = input.visibility === undefined ? 'user' : String(input.visibility);
+  if (!PIPELINE_VISIBILITIES.has(visibility)) {
+    throw codedError('INVALID_PIPELINE_DEFINITION', 'Pipeline visibility must be user or project.');
+  }
+  const manifest = validatePipelineManifest(input.manifest);
+  const id = generatePipelineDefinitionId();
+  db.prepare(`
+    INSERT INTO pipeline_definitions
+      (id, project_id, owner_user_id, visibility, name, manifest_json)
+    VALUES
+      (@id, @projectId, @ownerUserId, @visibility, @name, @manifestJson)
+  `).run({
+    id,
+    projectId: String(projectId),
+    ownerUserId: Number(userId),
+    visibility,
+    name: manifest.name,
+    manifestJson: JSON.stringify(manifest),
+  });
+  return toPublicPipelineDefinition(rowToPipelineDefinition(
+    db.prepare('SELECT * FROM pipeline_definitions WHERE id = ?').get(id)
+  ));
+}
+
+function getProjectPipelineSelection(userId, projectId) {
+  requireProjectRole(userId, projectId, PIPELINE_SELECTION_ROLES);
+  const row = db.prepare(
+    'SELECT * FROM project_pipeline_selections WHERE project_id = ? AND user_id = ?'
+  ).get(String(projectId), Number(userId));
+  const requestedId = row?.pipeline_id || DEFAULT_PIPELINE_ID;
+  const accessible = getAccessiblePipelineDefinitionRow(userId, projectId, requestedId);
+  const pipelineId = accessible ? requestedId : DEFAULT_PIPELINE_ID;
+  const definition = isBuiltInPipelineId(pipelineId)
+    ? defaultPipelineDefinitionPublic(projectId)
+    : toPublicPipelineDefinition(rowToPipelineDefinition(accessible));
+  return {
+    projectId: String(projectId),
+    userId: Number(userId),
+    pipelineId,
+    definition,
+    updatedAt: row?.updated_at || null,
+  };
+}
+
+function setProjectPipelineSelection(userId, projectId, pipelineId) {
+  requireProjectRole(userId, projectId, PIPELINE_SELECTION_ROLES);
+  if (typeof pipelineId !== 'string' || pipelineId === '') {
+    throw codedError('INVALID_PIPELINE_SELECTION', 'pipelineId is required.');
+  }
+  const accessible = getAccessiblePipelineDefinitionRow(userId, projectId, pipelineId);
+  if (!accessible) {
+    throw codedError('PIPELINE_NOT_FOUND', 'Pipeline definition not found.');
+  }
+  db.prepare(`
+    INSERT INTO project_pipeline_selections (project_id, user_id, pipeline_id, updated_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(project_id, user_id)
+    DO UPDATE SET pipeline_id = excluded.pipeline_id, updated_at = excluded.updated_at
+  `).run(String(projectId), Number(userId), String(pipelineId));
+  return getProjectPipelineSelection(userId, projectId);
+}
 
 const ALLOWED_DATASET_FILE_TYPES = new Set([
   'tenx_zip', 'tenx_h5', 'seurat_rds', 'h5seurat', 'h5ad',
@@ -5096,6 +5284,14 @@ module.exports = {
   addProjectMemberByEmail,
   updateProjectMemberRole,
   removeProjectMember,
+  // Pipeline definitions and active user-project selection
+  generatePipelineDefinitionId,
+  isValidPipelineDefinitionId,
+  toPublicPipelineDefinition,
+  listProjectPipelineDefinitions,
+  createProjectPipelineDefinition,
+  getProjectPipelineSelection,
+  setProjectPipelineSelection,
   // Datasets (project-scoped)
   isValidDatasetFileType,
   isValidDatasetUploadStatus,

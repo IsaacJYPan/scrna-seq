@@ -1,11 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Activity, Archive, BarChart3, CheckCircle2, ChevronDown, ChevronLeft,
-  CircleDot, Clipboard as ClipboardList, Database, FileText, GitBranch,
-  Grid3x3, Layers, LayoutPanelTop, Lock, LogOut, Menu, MessageSquare,
-  Microscope, Moon, Network, ScatterChart, Search, Sparkles, Sun,
-  Terminal, Users, Wrench,
+  CheckCircle2, ChevronDown, ChevronLeft, Database, LayoutPanelTop,
+  Lock, LogOut, Menu, Microscope, Moon, Sun, Users, Wrench,
 } from 'lucide-react';
+import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 
 export default function Sidebar({
   activeTab,
@@ -19,6 +17,7 @@ export default function Sidebar({
   user,
   onLogout,
   pipelineState = {},
+  activePipeline = null,
   theme = 'dark',
   setTheme,
   figuresCount = 0,
@@ -49,40 +48,7 @@ export default function Sidebar({
   const hasProject = !!currentWorkspace?.selectedProjectId || (currentWorkspace?.projects || []).length > 0;
   const backendConnected = typeof apiStatus === 'string' && /connected/i.test(apiStatus) && !/disconnected/i.test(apiStatus);
 
-  const pipelineItems = [
-    { id: 'qc', label: 'Quality Control', icon: Activity, done: pipelineState.qc },
-    { id: 'normalize', label: 'Normalize', icon: Sparkles, done: pipelineState.normalize },
-    { id: 'integrate', label: 'Integration', icon: Layers, done: pipelineState.integrate, status: 'Optional live-R' },
-    { id: 'pca', label: 'PCA', icon: BarChart3, done: pipelineState.pca },
-    { id: 'cluster', label: 'Cluster', icon: Network, done: pipelineState.cluster },
-    { id: 'umap', label: 'UMAP', icon: Layers, done: pipelineState.umap },
-  ];
-
-  const exploreItems = [
-    { id: 'featureplot', label: 'Feature Plot', icon: ScatterChart },
-    { id: 'geneviewer', label: 'Gene Expression', icon: BarChart3 },
-    { id: 'heatmap', label: 'Heatmap', icon: Grid3x3 },
-    { id: 'dotplot', label: 'Dot Plot', icon: CircleDot },
-  ];
-
-  const markerItems = [
-    { id: 'deg', label: 'Markers / DEG', icon: FileText, status: 'Durable worker' },
-    { id: 'annotate', label: 'Cell Annotation', icon: Sparkles, disabled: true, status: 'Not integrated' },
-    { id: 'enrichment', label: 'Pathway Enrichment', icon: Microscope, disabled: true, status: 'Future workflow' },
-    { id: 'cellchat', label: 'CellChat', icon: MessageSquare, disabled: true, status: 'Future workflow' },
-    { id: 'customscript', label: 'Custom Script', icon: Terminal, disabled: true, status: 'Disabled' },
-  ];
-
-  const historyItems = [
-    { id: 'history', label: 'Jobs & Artifacts', icon: Archive, status: 'Read-only' },
-    { id: 'lineage', label: 'Session DAG', icon: GitBranch, status: 'Transient live-R' },
-  ];
-
-  const reportItems = [
-    { id: 'publication', label: 'Reports / Export', icon: LayoutPanelTop, status: 'Figures only' },
-    { id: 'validation', label: 'Validation', icon: ClipboardList },
-    { id: 'reports-future', label: 'Full Reports', icon: FileText, disabled: true, status: 'Future workflow' },
-  ];
+  const pipelineSections = buildPipelineSidebarSections(activePipeline, pipelineState);
 
   const handleAddWorkspace = () => {
     if (!setWorkspaces || !setActiveWsIndex) return;
@@ -125,7 +91,7 @@ export default function Sidebar({
           }
         `}
       >
-        <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />
+        {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />}
         <span className="min-w-0 flex-1 text-left">
           <span className="block truncate">{item.label}</span>
           {item.status && (
@@ -251,46 +217,26 @@ export default function Sidebar({
           <div className="space-y-[2px]">
             <SectionLabel>Project</SectionLabel>
             <NavButton item={{ id: 'workspace', label: 'Workbench', icon: Database, status: hasProject ? 'Backend project' : 'Select project' }} />
+            <NavButton item={{ id: 'pipeline-manager', label: 'Pipeline Manager', icon: LayoutPanelTop, status: hasProject ? 'User scoped' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
               <SectionLabel>Data / Object</SectionLabel>
-              <NavButton item={{ id: 'inspect', label: 'Inspect', icon: Search }} disabled={!hasData} />
+              <NavButton item={{ id: 'publication', label: 'Reports / Export', icon: LayoutPanelTop, status: 'Figures only' }} disabled={!hasData} />
+              <NavButton item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
             </div>
           </div>
 
-          <div className="space-y-[2px]">
-            <SectionLabel>Live R Pipeline</SectionLabel>
-            {pipelineItems.map(item => (
-              <NavButton key={item.id} item={item} disabled={!hasData} />
-            ))}
-          </div>
-
-          <div className="space-y-[2px]">
-            <SectionLabel>Explore</SectionLabel>
-            {exploreItems.map(item => (
-              <NavButton key={item.id} item={item} disabled={!hasData} />
-            ))}
-          </div>
-
-          <div className="space-y-[2px]">
-            <SectionLabel>Markers</SectionLabel>
-            {markerItems.map(item => (
-              <NavButton key={item.id} item={item} disabled={!hasData} />
-            ))}
-          </div>
-
-          <div className="space-y-[2px]">
-            <SectionLabel>Durable History</SectionLabel>
-            {historyItems.map(item => (
-              <NavButton key={item.id} item={item} disabled={item.id === 'history' ? !hasProject : false} />
-            ))}
-          </div>
-
-          <div className="space-y-[2px]">
-            <SectionLabel>Reports / Export</SectionLabel>
-            {reportItems.map(item => (
-              <NavButton key={item.id} item={item} disabled={item.id === 'validation' ? !hasData : false} />
-            ))}
-          </div>
+          {pipelineSections.map(section => (
+            <div key={section.id} className="space-y-[2px]">
+              <SectionLabel>{section.label}</SectionLabel>
+              {section.items.map(item => (
+                <NavButton
+                  key={item.id}
+                  item={item}
+                  disabled={(item.requiresObject && !hasData) || (item.requiresProject && !hasProject)}
+                />
+              ))}
+            </div>
+          ))}
 
           {currentWorkspace?.type === 'shared' && (
             <div className="pt-2 border-t border-border/50">
