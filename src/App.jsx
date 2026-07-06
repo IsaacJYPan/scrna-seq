@@ -20,7 +20,9 @@ import BatchIntegration from './pages/BatchIntegration';
 import Collaborators from './pages/Collaborators';
 import Inspect from './pages/Inspect';
 import Diagnostics from './pages/Diagnostics';
+import PipelineManager from './pages/PipelineManager';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
+import { getDefaultPipelineManifest } from './pipelines/pipelineRegistry';
 
 import {
   saveProvenance,
@@ -149,6 +151,7 @@ export default function App() {
     clusterCount: 0,
     clusterDims: 15  // default dims; updated when clustering runs
   });
+  const [activePipeline, setActivePipeline] = useState(() => getDefaultPipelineManifest());
 
   // Gate that blocks per-page cache hydration until after the R session
   // restore attempt completes (success or no saved session). Without this
@@ -209,6 +212,24 @@ export default function App() {
   const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
   const datasetInfo = selectedObjects.length > 0 ? selectedObjects[0] : (currentWs.objects[0] || null);
   const currentProvId = currentWs.branches[currentWs.activeBranch];
+  const activeProjectIdForPipeline = currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
+
+  useEffect(() => {
+    if (!user?.email || !activeProjectIdForPipeline || !window.electronAPI?.getProjectPipelineSelection) {
+      setActivePipeline(getDefaultPipelineManifest());
+      return undefined;
+    }
+    let cancelled = false;
+    window.electronAPI.getProjectPipelineSelection(activeProjectIdForPipeline)
+      .then(selection => {
+        if (cancelled) return;
+        setActivePipeline(selection?.definition?.manifest || getDefaultPipelineManifest());
+      })
+      .catch(() => {
+        if (!cancelled) setActivePipeline(getDefaultPipelineManifest());
+      });
+    return () => { cancelled = true; };
+  }, [activeProjectIdForPipeline, user?.email]);
 
   const [apiStatus, setApiStatus] = useState('Checking backend');
   const [provenanceRecords, setProvenanceRecords] = useState([]);
@@ -913,6 +934,15 @@ export default function App() {
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
+        <ErrorBoundary key="pipeline-manager"><TabContent id="pipeline-manager" activeTab={activeTab}>
+          <PipelineManager
+            {...props}
+            activePipeline={activePipeline}
+            onPipelineSelectionChanged={setActivePipeline}
+            setActiveTab={setActiveTab}
+            onSelectAnalysisObject={handleSelectAnalysisObject}
+          />
+        </TabContent></ErrorBoundary>
         <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
@@ -956,6 +986,7 @@ export default function App() {
         user={user}
         onLogout={handleLogout}
         pipelineState={pipelineState}
+        activePipeline={activePipeline}
         theme={theme}
         setTheme={setTheme}
         figuresCount={figuresCount}

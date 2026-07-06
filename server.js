@@ -1523,6 +1523,7 @@ function sendProjectResourceError(res, e, context) {
     case 'JOB_NOT_FOUND':
     case 'PROVENANCE_NOT_FOUND':
     case 'FIGURE_NOT_FOUND':
+    case 'PIPELINE_NOT_FOUND':
       return res.status(404).json({ error: e.message });
     case 'FORBIDDEN':
       return res.status(403).json({ error: e.message });
@@ -1538,6 +1539,9 @@ function sendProjectResourceError(res, e, context) {
     case 'INVALID_PARENT_IDS':
     case 'INVALID_PLOT_TYPE':
     case 'INVALID_OWNER':
+    case 'INVALID_PIPELINE_DEFINITION':
+    case 'INVALID_PIPELINE_MANIFEST':
+    case 'INVALID_PIPELINE_SELECTION':
       return res.status(400).json({ error: e.message });
     default:
       console.error(`[${context}]`, e);
@@ -1566,6 +1570,53 @@ function rejectProjectResourceFields(req, res, { extra = [] } = {}) {
   }
   return false;
 }
+
+app.get('/api/projects/:projectId/pipeline-definitions', (req, res) => {
+  try {
+    res.json(db.listProjectPipelineDefinitions(req.user.id, req.params.projectId));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectPipelines');
+  }
+});
+
+app.post('/api/projects/:projectId/pipeline-definitions', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (body.id !== undefined || body.projectId !== undefined || body.project_id !== undefined
+      || body.ownerUserId !== undefined || body.owner_user_id !== undefined) {
+    return res.status(400).json({ error: 'Pipeline definition identity and ownership are server-controlled.' });
+  }
+  try {
+    const created = db.createProjectPipelineDefinition(req.user.id, req.params.projectId, {
+      manifest: body.manifest,
+      visibility: body.visibility,
+    });
+    res.status(201).json(created);
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectPipelines');
+  }
+});
+
+app.get('/api/projects/:projectId/pipeline-selection', (req, res) => {
+  try {
+    res.json(db.getProjectPipelineSelection(req.user.id, req.params.projectId));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectPipelines');
+  }
+});
+
+app.put('/api/projects/:projectId/pipeline-selection', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (body.projectId !== undefined || body.project_id !== undefined
+      || body.userId !== undefined || body.user_id !== undefined
+      || body.ownerUserId !== undefined || body.owner_user_id !== undefined) {
+    return res.status(400).json({ error: 'Pipeline selection scope is server-controlled.' });
+  }
+  try {
+    res.json(db.setProjectPipelineSelection(req.user.id, req.params.projectId, body.pipelineId));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectPipelines');
+  }
+});
 
 app.post('/api/projects/:projectId/analysis-objects', (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
