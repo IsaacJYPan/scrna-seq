@@ -63,16 +63,13 @@ describe('Sidebar component', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: /Pathway Enrichment/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /CellChat/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Custom Script/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Cell Annotation/i })).toBeDisabled();
-    expect(screen.getByText(/Not integrated/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/Future workflow/i).length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText(/Disabled/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Pathway Enrichment/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /CellChat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Custom Script/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Cell Annotation/i })).not.toBeInTheDocument();
   });
 
-  it('shows pipeline foundation sections with honest backend and legacy status labels', () => {
+  it('shows pipeline-generated sections and utility pipeline manager entry', () => {
     render(
       <Sidebar
         activeTab="workspace"
@@ -90,11 +87,24 @@ describe('Sidebar component', () => {
       />
     );
 
-    expect(screen.getByText(/Live R Pipeline/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Markers \/ DEG, Durable worker/i })).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: /Jobs & Artifacts, Read-only/i })).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: /Session DAG, Transient live-R/i })).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: /Full Reports, Future workflow/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Pipeline Manager, User scoped/i })).not.toBeDisabled();
+    expect(screen.getByText(/Default Seurat scRNA-seq Pipeline/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Markers \/ DEG/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Jobs & Artifacts/i })).not.toBeDisabled();
+  });
+
+  it('does not require icons for pipeline-generated tabs', () => {
+    const { container } = render(
+      <Sidebar
+        activeTab="workspace"
+        {...baseProps}
+        selectedObjects={[{ id: 'ao_abc123' }]}
+      />
+    );
+
+    const qcButton = screen.getByRole('button', { name: /Quality Control/i });
+    expect(qcButton.querySelector('svg')).toBeNull();
+    expect(container.textContent).toContain('Quality Control');
   });
 
   it('uses a readable token-based selected state in light mode', () => {

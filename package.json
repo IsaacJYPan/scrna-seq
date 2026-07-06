@@ -18,7 +18,7 @@
     "test:checkpoint-load": "Rscript scripts/verify_checkpoint_load.R",
     "test:deg-markers": "Rscript scripts/verify_deg_find_markers.R",
     "test:frontend": "vitest run src/",
-    "test:backend": "vitest run backend/ --environment node",
+    "test:backend": "vitest run backend/ --environment node --fileParallelism=false --silent=passed-only",
     "test:backend:postgres": "vitest run backend/postgres-contract.test.js --environment node",
     "init:postgres": "node scripts/init-postgres.js",
     "test:visual": "node scripts/test_visual_ux.js",
