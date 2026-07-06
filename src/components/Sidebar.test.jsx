@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
 import Sidebar from './Sidebar';
 
 describe('Sidebar component', () => {
@@ -121,5 +121,86 @@ describe('Sidebar component', () => {
     expect(workbench).toHaveClass('border-primary/30');
     expect(workbench).toHaveClass('text-text');
     expect(workbench).not.toHaveClass('bg-slate-700');
+  });
+
+  it('keeps the collapsed sidebar reopen control inside the left rail', () => {
+    render(
+      <Sidebar
+        activeTab="workspace"
+        {...baseProps}
+        selectedObjects={[]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Collapse sidebar/i }));
+
+    const expandButton = screen.getByRole('button', { name: /Expand sidebar/i });
+    expect(expandButton).toHaveClass('w-12');
+    expect(expandButton).not.toHaveClass('absolute');
+
+    fireEvent.click(expandButton);
+
+    expect(screen.getByRole('button', { name: /Collapse sidebar/i })).toBeInTheDocument();
+  });
+
+  it('starts collapsed on narrow viewports', () => {
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: 500,
+    });
+
+    try {
+      render(
+        <Sidebar
+          activeTab="workspace"
+          {...baseProps}
+          selectedObjects={[]}
+        />
+      );
+
+      expect(screen.getByRole('button', { name: /Expand sidebar/i })).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', {
+        configurable: true,
+        writable: true,
+        value: originalInnerWidth,
+      });
+    }
+  });
+
+  it('collapses after selecting a nav item on narrow viewports', () => {
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: 500,
+    });
+
+    const setActiveTab = vi.fn();
+
+    try {
+      render(
+        <Sidebar
+          activeTab="workspace"
+          {...baseProps}
+          setActiveTab={setActiveTab}
+          selectedObjects={[{ id: 'ao_abc123' }]}
+        />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /Expand sidebar/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Quality Control/i }));
+
+      expect(setActiveTab).toHaveBeenCalledWith('qc');
+      expect(screen.getByRole('button', { name: /Expand sidebar/i })).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', {
+        configurable: true,
+        writable: true,
+        value: originalInnerWidth,
+      });
+    }
   });
 });

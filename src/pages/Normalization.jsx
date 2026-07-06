@@ -1,4 +1,4 @@
-import { Sparkles, AlertTriangle, FileText } from 'lucide-react';
+import { AlertTriangle, ChevronRight, FileText, Settings, Sparkles } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
@@ -52,23 +52,23 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
   }
 
   return (
-    <div className="h-full w-full p-8 overflow-y-auto bg-background custom-scrollbar">
-      <div className="flex justify-between items-center mb-8">
+    <div className="h-full w-full p-4 sm:p-6 lg:p-8 overflow-y-auto bg-background custom-scrollbar">
+      <div className="flex flex-col gap-4 mb-8 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Normalization</h2>
           <p className="text-textMuted">Normalize counts and identify highly variable features.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex w-full flex-col items-stretch gap-3 sm:flex-row sm:items-center lg:w-auto">
           {result && (
             <button
-              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
+              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center justify-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
             ><FileText size={15} /> View Step Script</button>
           )}
           <button
             onClick={() => runNormalization(false)}
             disabled={running}
-            className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center gap-2`}
+            className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center justify-center gap-2`}
           >
             {running && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
             {!running && result && <Sparkles size={16} />}
@@ -99,7 +99,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
           <h3 className="font-bold flex items-center gap-2 text-white mb-5">
             <Sparkles size={18} className="text-primary" /> Normalization Parameters
           </h3>
-          <div className="grid grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
             <div>
               <label htmlFor="norm-method" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Method</label>
               <select
@@ -138,10 +138,11 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
 
           <details className="mt-6 border-t border-border/50 pt-4 group">
             <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">
-              <span className="text-primary group-open:rotate-90 transition-transform">▶</span>
-              ⚙️ Advanced Options
+              <ChevronRight size={14} className="text-primary group-open:rotate-90 transition-transform" aria-hidden="true" />
+              <Settings size={15} className="text-primary" aria-hidden="true" />
+              <span>Advanced Options</span>
             </summary>
-            <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-2 gap-6">
+            <div className="mt-4 p-4 bg-black/10 rounded-lg border border-border/50 grid grid-cols-1 gap-6 md:grid-cols-2">
               <div>
                 <label htmlFor="norm-regress" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Vars to Regress</label>
                 <input
@@ -172,13 +173,13 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
 
       {result && (
         <div className="card p-6 border-t-4 border-t-success bg-success/5 animate-in fade-in slide-in-from-bottom-2">
-          <div className="flex items-center gap-3 border-b border-border/50 pb-3 mb-5">
+          <div className="flex flex-col gap-3 border-b border-border/50 pb-3 mb-5 sm:flex-row sm:items-center">
             <div className="w-8 h-8 rounded-full bg-success/20 flex items-center justify-center text-success">
               <Sparkles size={16} />
             </div>
             <h3 className="font-semibold text-lg text-text">Normalization Complete</h3>
           </div>
-          <div className="grid grid-cols-3 gap-4 font-mono text-sm">
+          <div className="grid grid-cols-1 gap-4 font-mono text-sm sm:grid-cols-3">
             <div className="p-4 bg-black/5 dark:bg-black/20 border border-border/50 rounded text-center shadow-inner">
               <div className="text-[10px] text-textMuted uppercase tracking-wider mb-1">Method</div>
               <div className="text-primary font-bold">{result.result?.method || method}</div>
