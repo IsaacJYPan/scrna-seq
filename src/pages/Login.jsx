@@ -214,7 +214,7 @@ export default function Login({ onLogin, theme = 'light', setTheme }) {
             <p className="text-[11px] text-textMuted uppercase font-semibold tracking-wider">
               {mode === 'login'
                 ? 'Credentials verified via PBKDF2-SHA512'
-                : 'Passwords hashed with 100k PBKDF2 iterations'}
+                : 'Passwords hashed with 600k PBKDF2 iterations'}
             </p>
           </div>
         </div>

@@ -7,11 +7,12 @@
  */
 
 const serverModule = require('../server.js');
-const db = require('./database');
+const db = require('./pgDatabase');
 
 const { app, issueSession } = serverModule;
 
-function startServer() {
+async function startServer() {
+  await serverModule.initAppDatabase();
   return new Promise((resolve) => {
     const server = app.listen(0, '127.0.0.1', () => resolve(server));
   });
@@ -23,8 +24,8 @@ function baseUrl(server) {
 }
 
 /** Create a user directly in the DB and mint a valid session token for them. */
-function createUserWithToken({ email, password = 'password123', displayName = 'Test User' }) {
-  const user = db.createUser(email, password, displayName);
+async function createUserWithToken({ email, password = 'password123', displayName = 'Test User' }) {
+  const user = await db.createUser(email, password, displayName);
   if (user.error) throw new Error(user.error);
   const token = issueSession(user);
   return { user, token };

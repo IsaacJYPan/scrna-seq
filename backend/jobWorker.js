@@ -1,7 +1,7 @@
 // ── Minimal job worker drain loop ────────────────────────────────────────────
 //
 // The smallest production-oriented worker that consumes the durable job-worker
-// coordination contract shipped in database.js (claim / lease / heartbeat /
+// coordination contract shipped in pgDatabase.js (claim / lease / heartbeat /
 // complete / fail / release / reap). It proves a queued job can be claimed,
 // heartbeated, completed or failed, protected from duplicate workers, and handled
 // safely after cancellation or lease expiry — with durable status + logs.
@@ -33,7 +33,7 @@
 //   already started.
 
 const crypto = require('crypto');
-const database = require('./database');
+const database = require('./pgDatabase');
 const rWorkerBridge = require('./rWorkerBridge');
 const { validatePbmcPipelineParams, allocateCheckpointStorageKey } = require('./pbmcPipeline');
 const { validateDegFindMarkersParams, allocateDegResultStorageKey } = require('./degFindMarkers');
@@ -140,8 +140,8 @@ function parseJobWorkerConfig(env = {}, opts = {}) {
  * NOT put secrets, tokens, or filesystem paths into thrown error messages or logs.
  */
 async function genericNoopHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'noop handler: no pipeline execution in this branch.' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'noop handler: no pipeline execution in this branch.' });
   return { result: { ok: true, handled: 'generic', noop: true } };
 }
 
@@ -159,16 +159,16 @@ async function genericNoopHandler(ctx) {
  * completeJobByWorker keeps the link the checkpoint helper already made.
  */
 async function checkpointNoopHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'checkpoint.noop handler: creating placeholder, metadata-only checkpoint (no R/Seurat execution).' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'checkpoint.noop handler: creating placeholder, metadata-only checkpoint (no R/Seurat execution).' });
 
-  const checkpoint = ctx.createCheckpoint({
+  const checkpoint = await ctx.createCheckpoint({
     objectType: 'generic',
     displayName: 'Placeholder checkpoint (no pipeline execution)',
     metadata: { placeholder: true, checkpoint: true, source: 'checkpoint.noop', scientific_output: false }
   });
 
-  const artifact = ctx.createArtifact({
+  const artifact = await ctx.createArtifact({
     artifactType: 'checkpoint',
     resultAnalysisObjectId: checkpoint.id,
     name: 'Placeholder checkpoint metadata',
@@ -177,7 +177,7 @@ async function checkpointNoopHandler(ctx) {
     metadata: { placeholder: true, scientific_output: false }
   });
 
-  ctx.log({ level: 'info', message: `checkpoint.noop handler: recorded checkpoint ${checkpoint.id} and artifact ${artifact.id} (metadata-only).` });
+  await ctx.log({ level: 'info', message: `checkpoint.noop handler: recorded checkpoint ${checkpoint.id} and artifact ${artifact.id} (metadata-only).` });
 
   // The checkpoint helper already linked result_analysis_object_id on the job; return
   // it so completion is explicit (completeJobByWorker re-validates the same id).
@@ -204,8 +204,8 @@ async function checkpointNoopHandler(ctx) {
  * leaks raw R errors/stacks/internal URLs.
  */
 async function rRuntimeCheckHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'r.runtime.check handler: invoking allowlisted, metadata-only R runtime check (no pipeline execution).' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'r.runtime.check handler: invoking allowlisted, metadata-only R runtime check (no pipeline execution).' });
 
   const descriptor = await ctx.runRBridgeOperation({
     job: ctx.job,
@@ -218,7 +218,7 @@ async function rRuntimeCheckHandler(ctx) {
     callR: ctx.callR,
   });
 
-  const artifact = ctx.createArtifact({
+  const artifact = await ctx.createArtifact({
     artifactType: descriptor.artifactType, // 'r_runtime_check'
     name: descriptor.name,
     description: descriptor.description,
@@ -226,7 +226,7 @@ async function rRuntimeCheckHandler(ctx) {
     metadata: descriptor.metadata,
   });
 
-  ctx.log({ level: 'info', message: `r.runtime.check handler: recorded metadata-only artifact ${artifact.id} (operational inspection, not a scientific output).` });
+  await ctx.log({ level: 'info', message: `r.runtime.check handler: recorded metadata-only artifact ${artifact.id} (operational inspection, not a scientific output).` });
 
   // No result analysis object / checkpoint: this is a non-mutating inspection.
   return {
@@ -259,8 +259,8 @@ async function rRuntimeCheckHandler(ctx) {
  * Bridge errors arrive pre-sanitized (safe message + code).
  */
 async function rObjectInspectHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'r.object.inspect handler: validating object ownership before any R contact (read-only inspection, no pipeline execution).' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'r.object.inspect handler: validating object ownership before any R contact (read-only inspection, no pipeline execution).' });
 
   const job = ctx.job;
   const objectId = job.analysisObjectId;
@@ -277,7 +277,7 @@ async function rObjectInspectHandler(ctx) {
   if (typeof ctx.verifyAnalysisObjectOwner !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
@@ -305,7 +305,7 @@ async function rObjectInspectHandler(ctx) {
     callR: ctx.callR,
   });
 
-  const artifact = ctx.createArtifact({
+  const artifact = await ctx.createArtifact({
     artifactType: descriptor.artifactType, // 'r_object_inspection'
     // Associate the artifact with the inspected object (defaults to the job's own
     // analysis object, which is already same-scope) — metadata link only, not access.
@@ -315,7 +315,7 @@ async function rObjectInspectHandler(ctx) {
     metadata: descriptor.metadata,
   });
 
-  ctx.log({ level: 'info', message: `r.object.inspect handler: recorded metadata-only artifact ${artifact.id} (read-only inspection, not a scientific output).` });
+  await ctx.log({ level: 'info', message: `r.object.inspect handler: recorded metadata-only artifact ${artifact.id} (read-only inspection, not a scientific output).` });
 
   // No result analysis object / checkpoint: this is a non-mutating inspection.
   return {
@@ -351,8 +351,8 @@ async function rObjectInspectHandler(ctx) {
  * arrive pre-sanitized (no raw R error/stack/internal URL/state key).
  */
 async function pbmcPipelineHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: validating ownership + parameters before any R contact.' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: validating ownership + parameters before any R contact.' });
 
   const job = ctx.job;
   const objectId = job.analysisObjectId;
@@ -368,7 +368,7 @@ async function pbmcPipelineHandler(ctx) {
   if (typeof ctx.verifyAnalysisObjectOwner !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
@@ -388,7 +388,7 @@ async function pbmcPipelineHandler(ctx) {
   //    traversal-free; the R backend confines it to its vault). Never logged/exposed.
   const checkpointStorageKey = allocateCheckpointStorageKey(job.id);
 
-  ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: parameters valid; invoking allowlisted PBMC pipeline on a copy of the input object (parent unchanged).' });
+  await ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: parameters valid; invoking allowlisted PBMC pipeline on a copy of the input object (parent unchanged).' });
 
   // 6. Run the allowlisted, mutating bridge op. Object context + params body are all
   //    server-derived; the bridge ignores raw job input for routing.
@@ -419,7 +419,7 @@ async function pbmcPipelineHandler(ctx) {
   //    together or none do — a failure can never leave a failed job linked to a result
   //    object/edge with missing artifacts. The parent is never mutated; result metadata
   //    records provenance WITHOUT implying a download.
-  const completion = ctx.completePbmcPipelineResult({
+  const completion = await ctx.completePbmcPipelineResult({
     result: {
       objectType: descriptor.resultObjectType || 'seurat',
       displayName: 'PBMC pipeline result',
@@ -459,7 +459,7 @@ async function pbmcPipelineHandler(ctx) {
   const checkpointArtifact = completion.checkpointArtifact;
   const summaryArtifact = completion.summaryArtifact;
 
-  ctx.log({ level: 'info', message: `pbmc.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id} (parent ${objectId} unchanged).` });
+  await ctx.log({ level: 'info', message: `pbmc.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id} (parent ${objectId} unchanged).` });
 
   return {
     resultAnalysisObjectId: resultObject.id,
@@ -475,8 +475,8 @@ async function pbmcPipelineHandler(ctx) {
 }
 
 async function seuratPipelineHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'seurat.pipeline.v1 handler: resolving dataset + parameters before any R contact.' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'seurat.pipeline.v1 handler: resolving dataset + parameters before any R contact.' });
 
   const job = ctx.job;
   const datasetId = job.datasetId;
@@ -494,14 +494,14 @@ async function seuratPipelineHandler(ctx) {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
 
-  const dataset = ctx.getDatasetForProject(job.ownerUserId, job.projectId, datasetId);
+  const dataset = await ctx.getDatasetForProject(job.ownerUserId, job.projectId, datasetId);
   if (!dataset) throw codedHandlerError('DATASET_NOT_FOUND', 'Dataset not found.');
   try {
     assertSupportedSeuratPipelineDataset(dataset);
   } catch (err) {
     throw codedHandlerError(err.code || 'DATASET_NOT_READY', err.message || 'Dataset is not ready for analysis.');
   }
-  const inputObject = ctx.getProjectAnalysisObject(job.ownerUserId, job.projectId, objectId);
+  const inputObject = await ctx.getProjectAnalysisObject(job.ownerUserId, job.projectId, objectId);
   if (!inputObject) throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   if (inputObject.datasetId !== datasetId) {
     throw codedHandlerError('INVALID_PARAMETERS', 'Seurat pipeline input object must reference the same dataset as the job.');
@@ -530,7 +530,7 @@ async function seuratPipelineHandler(ctx) {
   } catch (err) {
     const status = Number.isInteger(err && err.rStatus) ? err.rStatus : null;
     const rCode = typeof (err && err.rCode) === 'string' && err.rCode ? err.rCode : null;
-    ctx.log({
+    await ctx.log({
       level: 'error',
       message: `seurat.pipeline.v1 handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
     });
@@ -542,7 +542,7 @@ async function seuratPipelineHandler(ctx) {
     throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Pipeline did not produce a durable checkpoint.');
   }
 
-  const completion = ctx.completeSeuratPipelineResult({
+  const completion = await ctx.completeSeuratPipelineResult({
     source: {
       displayName: 'Dataset input',
       metadata: {
@@ -600,7 +600,7 @@ async function seuratPipelineHandler(ctx) {
   const checkpointArtifact = completion.checkpointArtifact;
   const summaryArtifact = completion.summaryArtifact;
 
-  ctx.log({ level: 'info', message: `seurat.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id}.` });
+  await ctx.log({ level: 'info', message: `seurat.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id}.` });
 
   return {
     resultAnalysisObjectId: resultObject.id,
@@ -645,8 +645,8 @@ async function seuratPipelineHandler(ctx) {
  * makes two workers unable to duplicate it. Bridge errors arrive pre-sanitized.
  */
 async function checkpointLoadHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'checkpoint.load.v1 handler: validating ownership + resolving checkpoint before any R contact.' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'checkpoint.load.v1 handler: validating ownership + resolving checkpoint before any R contact.' });
 
   const job = ctx.job;
   const objectId = job.analysisObjectId;
@@ -665,7 +665,7 @@ async function checkpointLoadHandler(ctx) {
     || typeof ctx.getLoadableCheckpoint !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
@@ -682,9 +682,9 @@ async function checkpointLoadHandler(ctx) {
   //    INVALID_*) that fail the job terminally WITHOUT contacting R. The internal storage
   //    key it returns is SECRET — it is passed only to the server-controlled bridge and
   //    is never logged or placed in artifact metadata.
-  const checkpoint = ctx.getLoadableCheckpoint(job.projectId || null, objectId, job.ownerUserId);
+  const checkpoint = await ctx.getLoadableCheckpoint(job.projectId || null, objectId, job.ownerUserId);
 
-  ctx.log({ level: 'info', message: 'checkpoint.load.v1 handler: checkpoint resolved; loading into the owner\'s private live R session (no new object/edge).' });
+  await ctx.log({ level: 'info', message: 'checkpoint.load.v1 handler: checkpoint resolved; loading into the owner\'s private live R session (no new object/edge).' });
 
   // 5. Run the allowlisted, mutating bridge op. Object context + checkpoint coordinates
   //    are all server-derived; the bridge ignores raw job input for routing/storage key.
@@ -714,7 +714,7 @@ async function checkpointLoadHandler(ctx) {
   // 7. Record ONE metadata-only checkpoint_load summary artifact. The internal storage
   //    key/path and the R state key are NEVER placed in metadata; checksum/size are the
   //    already-public integrity descriptors of the source checkpoint artifact.
-  const artifact = ctx.createArtifact({
+  const artifact = await ctx.createArtifact({
     artifactType: descriptor.artifactType, // 'checkpoint_load'
     name: descriptor.name,
     description: descriptor.description,
@@ -728,7 +728,7 @@ async function checkpointLoadHandler(ctx) {
     },
   });
 
-  ctx.log({ level: 'info', message: `checkpoint.load.v1 handler: recorded metadata-only artifact ${artifact.id} (live-state reattach; no new analysis object or lineage edge).` });
+  await ctx.log({ level: 'info', message: `checkpoint.load.v1 handler: recorded metadata-only artifact ${artifact.id} (live-state reattach; no new analysis object or lineage edge).` });
 
   // No result analysis object / checkpoint / lineage edge: this is a live-state reattach.
   return {
@@ -766,8 +766,8 @@ async function checkpointLoadHandler(ctx) {
  * pre-sanitized (no raw R error/stack/internal URL/state key).
  */
 async function degFindMarkersHandler(ctx) {
-  ctx.heartbeat();
-  ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: validating ownership + parameters before any R contact.' });
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: validating ownership + parameters before any R contact.' });
 
   const job = ctx.job;
   const objectId = job.analysisObjectId;
@@ -783,7 +783,7 @@ async function degFindMarkersHandler(ctx) {
   if (typeof ctx.verifyAnalysisObjectOwner !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (!ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId)) {
+  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
@@ -803,7 +803,7 @@ async function degFindMarkersHandler(ctx) {
   //    traversal-free; the R backend confines it to its vault). Never logged/exposed.
   const resultStorageKey = allocateDegResultStorageKey(job.id);
 
-  ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: parameters valid; running allowlisted DEG over the existing live object (no new object/edge, object not mutated).' });
+  await ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: parameters valid; running allowlisted DEG over the existing live object (no new object/edge, object not mutated).' });
 
   // 6. Run the allowlisted DEG bridge op. Object context + params body are all server-
   //    derived; the bridge ignores raw job input for routing/storage key.
@@ -830,7 +830,7 @@ async function degFindMarkersHandler(ctx) {
   //    local_internal full-table artifact (server-allocated key + checksum/size, key stripped
   //    from public reads) and the metadata-only summary artifact (resolved params + bounded
   //    summary). NO result analysis object and NO lineage edge are created.
-  const completion = ctx.completeDegFindMarkersResult({
+  const completion = await ctx.completeDegFindMarkersResult({
     markersArtifact: {
       artifactType: 'deg_markers',
       name: 'DEG marker table',
@@ -868,7 +868,7 @@ async function degFindMarkersHandler(ctx) {
   const markersArtifact = completion.markersArtifact;
   const summaryArtifact = completion.summaryArtifact;
 
-  ctx.log({ level: 'info', message: `deg.find_markers.v1 handler: recorded marker table ${markersArtifact.id} + summary ${summaryArtifact.id} (object ${objectId} not mutated; no new object/edge).` });
+  await ctx.log({ level: 'info', message: `deg.find_markers.v1 handler: recorded marker table ${markersArtifact.id} + summary ${summaryArtifact.id} (object ${objectId} not mutated; no new object/edge).` });
 
   // No result analysis object / checkpoint / lineage edge: DEG is an output-producing analysis.
   return {
@@ -907,7 +907,7 @@ const DEFAULT_HANDLERS = Object.freeze({
  * called explicitly (server startup does this only when ENABLE_JOB_WORKER=true).
  *
  * Options:
- *   - db                 coordination helpers (defaults to ./database); injectable for tests
+ *   - db                 coordination helpers (defaults to ./pgDatabase); injectable for tests
  *   - workerId           this worker's id (defaults to a fresh generated id)
  *   - pollIntervalMs     delay between idle ticks in start() (default 1000)
  *   - leaseSeconds       claim lease length passed to claim/heartbeat (default 30)
@@ -921,9 +921,9 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - rBridgeConfig      { port, token } for the default R caller (server wires PLUMBER_PORT
  *                        + API_TOKEN here so the in-process worker can reach the local R backend)
  *   - logger             { info, warn, error } (default console)
- *   - now                optional clock: a function (or string) returning a SQLite
- *                        'YYYY-MM-DD HH:MM:SS' timestamp, so tests drive lease timing
- *                        deterministically. Omit in production to use the DB clock.
+ *   - now                optional clock: a function (or string) returning a timestamp,
+ *                        so tests drive lease timing deterministically. Omit in
+ *                        production to use the DB clock.
  */
 function createJobWorker(options = {}) {
   const {
@@ -974,9 +974,9 @@ function createJobWorker(options = {}) {
 
   /** Best-effort durable progress log; swallows CLAIM_LOST so logging never crashes
    *  a tick (the job may have been canceled/reaped between claim and log). */
-  function safeWorkerLog(jobId, claimToken, entry, nowTs) {
+  async function safeWorkerLog(jobId, claimToken, entry, nowTs) {
     try {
-      db.appendJobLogByWorker(jobId, workerId, claimToken, entry, withNow({}, nowTs));
+      await db.appendJobLogByWorker(jobId, workerId, claimToken, entry, withNow({}, nowTs));
       return true;
     } catch (err) {
       if (err && (err.code === 'CLAIM_LOST' || err.code === 'JOB_NOT_FOUND')) return false;
@@ -1012,7 +1012,7 @@ function createJobWorker(options = {}) {
     // 1. Recover expired leases FIRST so a crashed worker's job becomes claimable.
     let reaped = { requeued: [], failed: [] };
     try {
-      reaped = db.reapExpiredJobs(withNow({}, nowTs));
+      reaped = await db.reapExpiredJobs(withNow({}, nowTs));
     } catch (err) {
       log.error(`[worker ${workerId}] reap failed: ${err && err.code ? err.code : err.message}`);
     }
@@ -1020,7 +1020,7 @@ function createJobWorker(options = {}) {
     // 2. Claim one eligible queued job (single-winner; null if none available).
     let job;
     try {
-      job = db.claimNextJob(workerId, withNow({ leaseSeconds }, nowTs));
+      job = await db.claimNextJob(workerId, withNow({ leaseSeconds }, nowTs));
     } catch (err) {
       log.error(`[worker ${workerId}] claim failed: ${err && err.code ? err.code : err.message}`);
       return { status: 'error', phase: 'claim', reaped };
@@ -1028,7 +1028,7 @@ function createJobWorker(options = {}) {
     if (!job) return { status: 'idle', reaped };
 
     const { id: jobId, jobType, claimToken } = job;
-    safeWorkerLog(jobId, claimToken, { level: 'info', message: `Claimed by worker (type=${jobType}).` }, nowTs);
+    await safeWorkerLog(jobId, claimToken, { level: 'info', message: `Claimed by worker (type=${jobType}).` }, nowTs);
     log.info(`[worker ${workerId}] claimed ${jobId} (${jobType})`);
 
     const handler = handlers[jobType];
@@ -1039,12 +1039,12 @@ function createJobWorker(options = {}) {
     // Heartbeat once up front so the lease covers the handler's run. If the claim is
     // already gone (canceled/reaped between claim and now), bail without resurrecting.
     try {
-      db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, nowTs));
+      await db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, nowTs));
     } catch (err) {
       return asClaimLoss(err, 'pre-handler-heartbeat', jobId, jobType, reaped);
     }
 
-    safeWorkerLog(jobId, claimToken, { level: 'info', message: 'Handler started.' }, nowTs);
+    await safeWorkerLog(jobId, claimToken, { level: 'info', message: 'Handler started.' }, nowTs);
 
     const ctx = {
       job,
@@ -1087,7 +1087,9 @@ function createJobWorker(options = {}) {
         const renewEveryMs = Math.max(5000, Math.floor((leaseSeconds * 1000) / 2));
         const renewTimer = setInterval(() => {
           try {
-            db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs()));
+            void Promise.resolve(db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs()))).catch(() => {
+              clearInterval(renewTimer);
+            });
           } catch {
             // Claim lost (canceled/reaped) — stop renewing; the guarded completion
             // will refuse to resurrect the job. Do not throw from the timer.
@@ -1137,7 +1139,7 @@ function createJobWorker(options = {}) {
       completeOpts.resultAnalysisObjectId = outcome.resultAnalysisObjectId;
     }
     try {
-      db.completeJobByWorker(jobId, workerId, claimToken, completeOpts);
+      await db.completeJobByWorker(jobId, workerId, claimToken, completeOpts);
     } catch (err) {
       return asClaimLoss(err, 'complete', jobId, jobType, reaped);
     }
@@ -1145,11 +1147,11 @@ function createJobWorker(options = {}) {
     return { status: 'completed', jobId, jobType, result: outcome && outcome.result, reaped };
   }
 
-  function failUnsupported(jobId, jobType, claimToken, nowTs, reaped) {
+  async function failUnsupported(jobId, jobType, claimToken, nowTs, reaped) {
     log.warn(`[worker ${workerId}] unsupported job type '${jobType}' for ${jobId}; failing.`);
     const opts = withNow({ log: { level: 'error', message: `Unsupported job type '${jobType}'.` } }, nowTs);
     try {
-      db.failJobByWorker(
+      await db.failJobByWorker(
         jobId, workerId, claimToken,
         { code: UNSUPPORTED_JOB_TYPE, message: `No handler registered for job type '${jobType}'.` },
         opts
@@ -1160,7 +1162,7 @@ function createJobWorker(options = {}) {
     return { status: 'unsupported', jobId, jobType, reaped };
   }
 
-  function failHandlerError(jobId, jobType, claimToken, handlerErr, nowTs, reaped) {
+  async function failHandlerError(jobId, jobType, claimToken, handlerErr, nowTs, reaped) {
     // If the handler failed BECAUSE the claim was lost (e.g. a cooperative
     // ctx.heartbeat() detected cancellation), do not try to fail the job — it is no
     // longer ours.
@@ -1174,7 +1176,7 @@ function createJobWorker(options = {}) {
     log.error(`[worker ${workerId}] handler error for ${jobId}: ${message}`);
     const opts = withNow({ log: { level: 'error', message: 'Handler failed.' } }, nowTs);
     try {
-      db.failJobByWorker(jobId, workerId, claimToken, { code: 'HANDLER_ERROR', message }, opts);
+      await db.failJobByWorker(jobId, workerId, claimToken, { code: 'HANDLER_ERROR', message }, opts);
     } catch (err) {
       return asClaimLoss(err, 'fail-handler', jobId, jobType, reaped);
     }

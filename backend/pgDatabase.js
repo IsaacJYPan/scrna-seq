@@ -1,27 +1,16 @@
 /**
- * Postgres data layer (hosted-service database foundation).
+ * Postgres data layer for the app runtime.
  *
- * STATUS: this is the Postgres path's foundation, not yet the app runtime.
- * server.js still runs on backend/database.js (SQLite) during the transition
- * (see docs/architecture.md → "Database backend"). This module:
- *   - owns the async `pg` connection (pool) from backend/config.js,
+ * This module:
+ *   - owns the async `pg` connection pool from backend/config.js,
  *   - applies backend/pg/schema.sql idempotently,
- *   - implements the CORE durable-entity helpers (users, orgs/projects/members,
- *     analysis objects, jobs + state machine, artifacts + immutability) that the
- *     Postgres contract test exercises, proving the schema + invariants hold on
- *     real Postgres.
+ *   - implements the durable metadata helpers used by Express and the worker.
  *
- * It deliberately mirrors the SQLite security invariants:
+ * It preserves the app's security invariants:
  *   - identity is server-generated (org_/proj_/ds_/ao_/job_/art_ ids),
  *   - ownership/role/status/storage are server-set, never client-supplied,
- *   - the job state machine is the SAME allow-list as database.js,
+ *   - the job state machine uses an explicit allow-list,
  *   - public projections strip claim_token / worker internals / storage_uri.
- *
- * The remaining provenance/figures/cache and worker claim/lease surface is
- * intentionally NOT duplicated here yet; porting it is a later branch (see
- * docs). `pg` is lazy-required inside connect() so importing this module never
- * throws when the dependency or a live database is absent (the contract test
- * skips cleanly).
  */
 
 'use strict';
@@ -32,12 +21,22 @@ const crypto = require('crypto');
 
 const config = require('./config');
 const passwords = require('./passwords');
+const {
+  validateSeuratPipelineParams,
+  assertSupportedSeuratPipelineDataset,
+} = require('./seuratPipeline');
+const {
+  DEFAULT_PIPELINE_ID,
+  validatePipelineManifest,
+  getDefaultPipelineManifest,
+  isBuiltInPipelineId,
+} = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
 
 let pool = null;
 
-// ── Job state machine (mirror of backend/database.js) ───────────────────────
+// ── Job state machine ───────────────────────────────────────────────────────
 const JOB_STATUSES = new Set([
   'created', 'queued', 'running', 'waiting_for_user', 'completed', 'failed', 'canceled'
 ]);
@@ -72,6 +71,7 @@ const ALLOWED_JOB_TYPES = new Set([
   'r.runtime.check',
   'r.object.inspect',
   'pbmc.pipeline.v1',
+  'seurat.pipeline.v1',
   'checkpoint.load.v1',
   'deg.find_markers.v1'
 ]);
@@ -98,6 +98,20 @@ const LINEAGE_MAX_NODES = 500;
 const LINEAGE_MAX_DEPTH = 64;
 const AO_ID_RE = /^ao_[0-9a-f]+$/;
 const JOB_ID_RE = /^job_[0-9a-f]+$/;
+const PIPELINE_ID_RE = /^pipe_[0-9a-f]+$/;
+const WORKER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+const DEFAULT_LEASE_SECONDS = 120;
+const MAX_NAME_LENGTH = 200;
+const MAX_DESCRIPTION_LENGTH = 2000;
+const PIPELINE_DEFINITION_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const PIPELINE_DEFINITION_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const PIPELINE_SELECTION_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const PIPELINE_VISIBILITIES = new Set(['user', 'project']);
+const PROVENANCE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const PROVENANCE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const FIGURE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
+const FIGURE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
+const ALLOWED_ANALYSIS_SUMMARY_FIELDS = ['cells', 'features', 'density'];
 
 function validateJobTransition(fromStatus, toStatus) {
   if (!JOB_STATUSES.has(fromStatus) || !JOB_STATUSES.has(toStatus)) return false;
@@ -118,8 +132,112 @@ function assertPlainObject(value, code, message) {
 
 function parseJson(value, fallback) {
   if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value === 'object') return value;
   return JSON.parse(value);
 }
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function requireOwnerEmail(userEmail) {
+  const normalized = normalizeEmail(userEmail);
+  if (!normalized) {
+    throw new Error('An owner email is required for this user-scoped operation.');
+  }
+  return normalized;
+}
+
+function normalizeName(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeTimestamp(value) {
+  if (value instanceof Date) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+    const d = new Date(normalized);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return new Date();
+}
+
+function normalizeWorkerNow(opts = {}) {
+  return opts.now !== undefined ? normalizeTimestamp(opts.now) : new Date();
+}
+
+function normalizeLeaseSeconds(v) {
+  if (v === undefined) return DEFAULT_LEASE_SECONDS;
+  if (!Number.isInteger(v) || v < 1) {
+    throw codedError('INVALID_LEASE', 'leaseSeconds must be a positive integer.');
+  }
+  return v;
+}
+
+function requireWorkerId(workerId) {
+  if (typeof workerId !== 'string' || !WORKER_ID_PATTERN.test(workerId)) {
+    throw codedError('INVALID_WORKER', 'A valid worker id is required.');
+  }
+  return workerId;
+}
+
+function requireClaimToken(token) {
+  if (typeof token !== 'string' || token === '') {
+    throw codedError('INVALID_CLAIM_TOKEN', 'A claim token is required.');
+  }
+  return token;
+}
+
+function addSeconds(date, seconds) {
+  return new Date(date.getTime() + seconds * 1000);
+}
+
+function isValidObjectType(objectType) {
+  return typeof objectType === 'string' && ALLOWED_OBJECT_TYPES.has(objectType);
+}
+
+function isValidJobType(jobType) {
+  return typeof jobType === 'string' && ALLOWED_JOB_TYPES.has(jobType);
+}
+
+function isValidJobStatus(status) {
+  return typeof status === 'string' && JOB_STATUSES.has(status);
+}
+
+function isValidRole(role) {
+  return typeof role === 'string' && PROJECT_ROLES.has(role);
+}
+
+function isValidDatasetFileType(fileType) {
+  return typeof fileType === 'string' && ALLOWED_DATASET_FILE_TYPES.has(fileType);
+}
+
+function isValidDatasetUploadStatus(status) {
+  return typeof status === 'string' && DATASET_UPLOAD_STATUSES.has(status);
+}
+
+function isValidDatasetValidationStatus(status) {
+  return typeof status === 'string' && DATASET_VALIDATION_STATUSES.has(status);
+}
+
+function isValidArtifactType(t) { return ALLOWED_ARTIFACT_TYPES.has(t); }
+function isValidArtifactStorageKind(k) { return ALLOWED_ARTIFACT_STORAGE_KINDS.has(k); }
+function isValidArtifactStatus(s) { return ALLOWED_ARTIFACT_STATUSES.has(s); }
+function isValidEdgeType(t) { return ALLOWED_EDGE_TYPES.has(t); }
+function isValidParentRole(r) { return ALLOWED_PARENT_ROLES.has(r); }
+
+function generateAnalysisObjectId() { return genId('ao'); }
+function generateJobId() { return genId('job'); }
+function generateClaimToken() { return `wct_${crypto.randomBytes(18).toString('hex')}`; }
+function generateOrganizationId() { return genId('org'); }
+function generateProjectId() { return genId('proj'); }
+function generateDatasetId() { return genId('ds'); }
+function generatePipelineDefinitionId() { return genId('pipe'); }
+function isValidPipelineDefinitionId(id) { return typeof id === 'string' && PIPELINE_ID_RE.test(id); }
+function generateProvenanceId() { return genId('prov'); }
+function generateFigureId() { return genId('fig'); }
+function generateJobArtifactId() { return genId('art'); }
+function generateAnalysisObjectEdgeId() { return genId('aoe'); }
 
 function sanitizeDatasetFilename(name) {
   if (typeof name !== 'string') return null;
@@ -190,8 +308,7 @@ function isConfigured() {
 
 async function connect() {
   if (pool) return pool;
-  // Lazy require so a missing `pg` module or missing database never breaks
-  // importing this file (or the SQLite backend test run).
+  // Lazy require so importing this file does not attempt a database connection.
   const { Pool } = require('pg');
   pool = new Pool(config.postgresConfig());
   return pool;
@@ -215,6 +332,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      project_pipeline_selections, pipeline_definitions,
       analysis_object_edges, job_artifacts, jobs, analysis_objects,
       datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance, users
@@ -232,6 +350,206 @@ async function close() {
 }
 
 // ── Users / auth ────────────────────────────────────────────────────────────
+async function saveProvenance(envelope) {
+  const prov = envelope.provenance || {};
+  const owner = requireOwnerEmail(envelope.userEmail || prov.userEmail);
+  const id = String(prov.id || '');
+  const existing = await query('SELECT user_email FROM provenance WHERE id = $1', [id]);
+  if (existing.rows[0] && normalizeEmail(existing.rows[0].user_email) !== owner) {
+    throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
+  }
+  await query(
+    `INSERT INTO provenance
+       (id, user_email, timestamp, language, language_version, packages, script,
+        parameters, parent_ids, operation)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (id) DO UPDATE SET
+       user_email = EXCLUDED.user_email,
+       timestamp = EXCLUDED.timestamp,
+       language = EXCLUDED.language,
+       language_version = EXCLUDED.language_version,
+       packages = EXCLUDED.packages,
+       script = EXCLUDED.script,
+       parameters = EXCLUDED.parameters,
+       parent_ids = EXCLUDED.parent_ids,
+       operation = EXCLUDED.operation`,
+    [
+      id,
+      owner,
+      String(prov.timestamp || ''),
+      String(prov.language || ''),
+      String(prov.languageVersion || ''),
+      JSON.stringify(prov.packages || []),
+      String(prov.script || ''),
+      JSON.stringify(prov.parameters || {}),
+      JSON.stringify(prov.parentIds || []),
+      String(prov.operation || 'unknown')
+    ]
+  );
+  return id;
+}
+
+function rowToProvenance(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    userEmail: row.user_email,
+    timestamp: row.timestamp,
+    language: row.language,
+    languageVersion: row.language_version,
+    packages: parseJson(row.packages, []),
+    script: row.script,
+    parameters: parseJson(row.parameters, {}),
+    parentIds: parseJson(row.parent_ids, []),
+    operation: row.operation || 'unknown'
+  };
+}
+
+async function getProvenance(id, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const { rows } = await query('SELECT * FROM provenance WHERE id = $1 AND user_email = $2', [String(id), owner]);
+  return rowToProvenance(rows[0]);
+}
+
+async function getAllProvenance(userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const { rows } = await query('SELECT * FROM provenance WHERE user_email = $1 ORDER BY created_at DESC', [owner]);
+  return rows.map(rowToProvenance);
+}
+
+async function getProvenanceChain(id, userEmail) {
+  requireOwnerEmail(userEmail);
+  const visited = new Set();
+  const ordered = [];
+  async function walk(currentId) {
+    if (visited.has(currentId)) return;
+    visited.add(currentId);
+    const prov = await getProvenance(currentId, userEmail);
+    if (!prov) return;
+    for (const parentId of prov.parentIds) await walk(parentId);
+    ordered.push(prov);
+  }
+  await walk(id);
+  return ordered;
+}
+
+async function deleteProvenance(id, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  await query('DELETE FROM results_cache WHERE provenance_id = $1 AND user_email = $2', [String(id), owner]);
+  const res = await query('DELETE FROM provenance WHERE id = $1 AND user_email = $2', [String(id), owner]);
+  return res.rowCount > 0;
+}
+
+function makeCacheKey(operation, params, dataVersion, parentIds = [], userEmail = '') {
+  const payload = JSON.stringify({ operation, params, dataVersion, parentIds, userEmail: normalizeEmail(userEmail) });
+  return crypto.createHash('sha256').update(payload).digest('hex').substring(0, 16);
+}
+
+async function getCachedResult(cacheKey, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const { rows } = await query(
+    'SELECT * FROM results_cache WHERE cache_key = $1 AND user_email = $2',
+    [String(cacheKey), owner]
+  );
+  if (!rows[0]) return null;
+  return {
+    cacheKey: rows[0].cache_key,
+    provenanceId: rows[0].provenance_id,
+    result: parseJson(rows[0].result_data, null)
+  };
+}
+
+async function setCachedResult(cacheKey, provenanceId, resultData, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const prov = await query('SELECT id FROM provenance WHERE id = $1 AND user_email = $2', [String(provenanceId), owner]);
+  if (!prov.rows[0]) throw new Error('Cannot cache result for provenance owned by another user.');
+  await query(
+    `INSERT INTO results_cache (cache_key, user_email, provenance_id, result_data)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (cache_key) DO UPDATE SET
+       user_email = EXCLUDED.user_email,
+       provenance_id = EXCLUDED.provenance_id,
+       result_data = EXCLUDED.result_data,
+       created_at = now()`,
+    [String(cacheKey), owner, String(provenanceId), JSON.stringify(resultData)]
+  );
+}
+
+async function clearCache(userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  await query('DELETE FROM results_cache WHERE user_email = $1', [owner]);
+}
+
+function assertSafeFigureFilePath(filePath) {
+  if (filePath === undefined || filePath === null || filePath === '') return '';
+  if (typeof filePath !== 'string') throw new Error('Figure file path must be a string.');
+  if (filePath.includes('\0')) throw new Error('Figure file path is invalid.');
+  if (filePath.split(/[\\/]+/).includes('..')) throw new Error('Figure file path must not contain path traversal segments.');
+  return filePath;
+}
+
+async function saveFigure(record) {
+  const userEmail = requireOwnerEmail(record.userEmail);
+  const safeFilePath = assertSafeFigureFilePath(record.filePath);
+  const existing = await query('SELECT user_email FROM figure_collection WHERE id = $1', [String(record.id)]);
+  if (existing.rows[0] && normalizeEmail(existing.rows[0].user_email) !== userEmail) {
+    throw new Error('Cannot replace a figure owned by another user.');
+  }
+  await query(
+    `INSERT INTO figure_collection
+       (id, user_email, object_id, plot_type, title, params_json, file_path,
+        file_format, thumbnail_b64)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (id) DO UPDATE SET
+       user_email = EXCLUDED.user_email,
+       object_id = EXCLUDED.object_id,
+       plot_type = EXCLUDED.plot_type,
+       title = EXCLUDED.title,
+       params_json = EXCLUDED.params_json,
+       file_path = EXCLUDED.file_path,
+       file_format = EXCLUDED.file_format,
+       thumbnail_b64 = EXCLUDED.thumbnail_b64`,
+    [
+      String(record.id),
+      userEmail,
+      record.objectId || '',
+      record.plotType || 'Unknown',
+      record.title || '',
+      JSON.stringify(record.params || {}),
+      safeFilePath || '',
+      record.fileFormat || 'png',
+      record.thumbnailB64 || ''
+    ]
+  );
+  return record.id;
+}
+
+async function getFiguresByUser(email) {
+  const owner = requireOwnerEmail(email);
+  const { rows } = await query(
+    'SELECT * FROM figure_collection WHERE user_email = $1 ORDER BY created_at DESC',
+    [owner]
+  );
+  return rows.map(r => ({
+    id: r.id,
+    userEmail: r.user_email,
+    objectId: r.object_id,
+    plotType: r.plot_type,
+    title: r.title,
+    params: parseJson(r.params_json, {}),
+    filePath: r.file_path,
+    fileFormat: r.file_format,
+    thumbnailB64: r.thumbnail_b64,
+    createdAt: r.created_at
+  }));
+}
+
+async function deleteFigure(id, userEmail) {
+  const owner = requireOwnerEmail(userEmail);
+  const res = await query('DELETE FROM figure_collection WHERE id = $1 AND user_email = $2', [String(id), owner]);
+  return res.rowCount > 0;
+}
+
 async function createUser(email, password, displayName) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   const salt = passwords.newSalt();
@@ -245,7 +563,7 @@ async function createUser(email, password, displayName) {
     );
     const u = rows[0];
     // node-postgres returns BIGINT as a string to avoid precision loss; user ids
-    // are small and the app treats them as numbers (matching the SQLite layer).
+    // are small and the app treats them as numbers.
     return { id: Number(u.id), email: u.email, displayName: u.display_name, createdAt: u.created_at };
   } catch (err) {
     if (err && err.code === '23505') {
@@ -435,6 +753,347 @@ async function listProjectMembers(projectId) {
   }));
 }
 
+async function createOrganizationForUser(ownerUserId, input = {}) {
+  const owner = Number(ownerUserId);
+  if (!Number.isInteger(owner) || owner <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid authenticated user is required.');
+  }
+  const name = normalizeName(input.name);
+  if (!name) throw codedError('INVALID_NAME', 'Organization name is required.');
+  if (name.length > MAX_NAME_LENGTH) {
+    throw codedError('INVALID_NAME', `Organization name must be at most ${MAX_NAME_LENGTH} characters.`);
+  }
+  const id = generateOrganizationId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('INSERT INTO organizations (id, name, owner_user_id) VALUES ($1, $2, $3)', [id, name, owner]);
+    await client.query("INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'owner')", [id, owner]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return getOrganizationForUser(id, owner);
+}
+
+async function getOrganizationForUser(organizationId, userId) {
+  if (typeof organizationId !== 'string' || organizationId === '') return null;
+  const { rows } = await query(
+    `SELECT o.id, o.name, o.owner_user_id, o.created_at, o.updated_at, m.role AS role
+       FROM organizations o
+       JOIN organization_members m ON m.organization_id = o.id
+      WHERE o.id = $1 AND m.user_id = $2`,
+    [organizationId, Number(userId)]
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    ownerUserId: Number(row.owner_user_id),
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function listOrganizationsForUser(userId) {
+  const { rows } = await query(
+    `SELECT o.id, o.name, o.owner_user_id, o.created_at, o.updated_at, m.role AS role
+       FROM organizations o
+       JOIN organization_members m ON m.organization_id = o.id
+      WHERE m.user_id = $1
+      ORDER BY o.created_at DESC, o.id DESC`,
+    [Number(userId)]
+  );
+  return rows.map(row => ({
+    id: row.id,
+    name: row.name,
+    ownerUserId: Number(row.owner_user_id),
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+async function verifyOrganizationMember(userId, organizationId) {
+  if (typeof organizationId !== 'string' || organizationId === '') return null;
+  const { rows } = await query(
+    'SELECT organization_id, user_id, role FROM organization_members WHERE organization_id = $1 AND user_id = $2',
+    [organizationId, Number(userId)]
+  );
+  if (!rows[0]) return null;
+  return { organizationId: rows[0].organization_id, userId: Number(rows[0].user_id), role: rows[0].role };
+}
+
+async function requireOrganizationRole(userId, organizationId, allowedRoles) {
+  const membership = await verifyOrganizationMember(userId, organizationId);
+  if (!membership) throw codedError('NOT_FOUND', 'Organization not found.');
+  const allowed = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+  if (!allowed.includes(membership.role)) {
+    throw codedError('FORBIDDEN', 'You do not have permission to perform this action.');
+  }
+  return membership;
+}
+
+async function addOrganizationMember(organizationId, userId, role) {
+  if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
+  const uid = Number(userId);
+  if (!Number.isInteger(uid) || uid <= 0) throw codedError('INVALID_OWNER', 'A valid user id is required.');
+  if (await verifyOrganizationMember(uid, organizationId)) {
+    throw codedError('ALREADY_MEMBER', 'User is already a member of this organization.');
+  }
+  await query(
+    'INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3)',
+    [String(organizationId), uid, role]
+  );
+  return { organizationId: String(organizationId), userId: uid, role };
+}
+
+async function createProjectForUser(userId, input = {}) {
+  const creator = Number(userId);
+  if (!Number.isInteger(creator) || creator <= 0) throw codedError('INVALID_OWNER', 'A valid authenticated user is required.');
+  const organizationId = typeof input.organizationId === 'string' ? input.organizationId : '';
+  if (!organizationId) throw codedError('INVALID_ORG', 'organizationId is required.');
+  await requireOrganizationRole(creator, organizationId, ['owner', 'admin']);
+  const name = normalizeName(input.name);
+  if (!name) throw codedError('INVALID_NAME', 'Project name is required.');
+  if (name.length > MAX_NAME_LENGTH) throw codedError('INVALID_NAME', `Project name must be at most ${MAX_NAME_LENGTH} characters.`);
+  const description = input.description == null ? '' : String(input.description);
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw codedError('INVALID_DESCRIPTION', `Project description must be at most ${MAX_DESCRIPTION_LENGTH} characters.`);
+  }
+  const id = generateProjectId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'INSERT INTO projects (id, organization_id, name, description, created_by_user_id) VALUES ($1, $2, $3, $4, $5)',
+      [id, organizationId, name, description, creator]
+    );
+    await client.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner')", [id, creator]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return getProjectForUser(id, creator);
+}
+
+async function updateProject(projectId, input = {}) {
+  const sets = [];
+  const params = [];
+  if (input.name !== undefined) {
+    const name = normalizeName(input.name);
+    if (!name) throw codedError('INVALID_NAME', 'Project name is required.');
+    if (name.length > MAX_NAME_LENGTH) throw codedError('INVALID_NAME', `Project name must be at most ${MAX_NAME_LENGTH} characters.`);
+    params.push(name); sets.push(`name = $${params.length}`);
+  }
+  if (input.description !== undefined) {
+    const description = input.description == null ? '' : String(input.description);
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      throw codedError('INVALID_DESCRIPTION', `Project description must be at most ${MAX_DESCRIPTION_LENGTH} characters.`);
+    }
+    params.push(description); sets.push(`description = $${params.length}`);
+  }
+  if (sets.length === 0) throw codedError('NO_FIELDS', 'No updatable fields provided.');
+  params.push(String(projectId));
+  await query(`UPDATE projects SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length}`, params);
+}
+
+async function getProjectMember(projectId, userId) {
+  const { rows } = await query(
+    'SELECT project_id, user_id, role FROM project_members WHERE project_id = $1 AND user_id = $2',
+    [String(projectId), Number(userId)]
+  );
+  if (!rows[0]) return null;
+  return { projectId: rows[0].project_id, userId: Number(rows[0].user_id), role: rows[0].role };
+}
+
+async function countProjectOwners(projectId) {
+  const { rows } = await query(
+    "SELECT COUNT(*)::int AS n FROM project_members WHERE project_id = $1 AND role = 'owner'",
+    [String(projectId)]
+  );
+  return Number(rows[0]?.n || 0);
+}
+
+async function addProjectMemberByEmail(projectId, email, role, actorRole) {
+  if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
+  if (role === 'owner' && actorRole !== 'owner') throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
+  if (typeof email !== 'string' || !email.trim()) throw codedError('INVALID_EMAIL', 'A member email is required.');
+  const user = await getUserByEmail(email);
+  if (!user) throw codedError('USER_NOT_FOUND', 'No user found with that email.');
+  if (await getProjectMember(projectId, user.id)) throw codedError('ALREADY_MEMBER', 'User is already a member of this project.');
+  await query('INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3)', [String(projectId), user.id, role]);
+  return { userId: user.id, email: user.email, displayName: user.displayName, role };
+}
+
+async function updateProjectMemberRole(projectId, targetUserId, role, actorRole) {
+  if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
+  const member = await getProjectMember(projectId, targetUserId);
+  if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
+  if (role === 'owner' && member.role !== 'owner' && actorRole !== 'owner') {
+    throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
+  }
+  if (member.role === 'owner' && role !== 'owner' && actorRole !== 'owner') {
+    throw codedError('FORBIDDEN', 'Only an owner can demote an owner.');
+  }
+  if (member.role === 'owner' && role !== 'owner' && (await countProjectOwners(projectId)) <= 1) {
+    throw codedError('LAST_OWNER', 'Cannot demote the last owner of the project.');
+  }
+  await query('UPDATE project_members SET role = $1, updated_at = now() WHERE project_id = $2 AND user_id = $3', [
+    role, String(projectId), Number(targetUserId)
+  ]);
+  return getProjectMember(projectId, targetUserId);
+}
+
+async function removeProjectMember(projectId, targetUserId, actorRole) {
+  const member = await getProjectMember(projectId, targetUserId);
+  if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
+  if (member.role === 'owner' && actorRole !== 'owner') {
+    throw codedError('FORBIDDEN', 'Only an owner can remove an owner.');
+  }
+  if (member.role === 'owner' && (await countProjectOwners(projectId)) <= 1) {
+    throw codedError('LAST_OWNER', 'Cannot remove the last owner of the project.');
+  }
+  await query('DELETE FROM project_members WHERE project_id = $1 AND user_id = $2', [String(projectId), Number(targetUserId)]);
+  return true;
+}
+
+function rowToPipelineDefinition(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    ownerUserId: Number(row.owner_user_id),
+    visibility: row.visibility,
+    name: row.name,
+    manifest: parseJson(row.manifest_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toPublicPipelineDefinition(definition) {
+  if (!definition) return null;
+  return {
+    id: definition.id,
+    projectId: definition.projectId,
+    visibility: definition.visibility,
+    name: definition.name,
+    manifest: definition.manifest,
+    createdAt: definition.createdAt,
+    updatedAt: definition.updatedAt,
+  };
+}
+
+function defaultPipelineDefinitionPublic(projectId) {
+  return {
+    id: DEFAULT_PIPELINE_ID,
+    projectId: projectId || null,
+    visibility: 'builtin',
+    name: 'Default Seurat scRNA-seq Pipeline',
+    manifest: getDefaultPipelineManifest(),
+    builtin: true,
+  };
+}
+
+async function getAccessiblePipelineDefinitionRow(userId, projectId, pipelineId) {
+  if (isBuiltInPipelineId(pipelineId)) return { builtin: true };
+  if (!isValidPipelineDefinitionId(pipelineId)) return null;
+  const { rows } = await query(
+    `SELECT * FROM pipeline_definitions
+      WHERE id = $1
+        AND project_id = $2
+        AND (owner_user_id = $3 OR visibility = 'project')`,
+    [String(pipelineId), String(projectId), Number(userId)]
+  );
+  return rows[0] || null;
+}
+
+async function listProjectPipelineDefinitions(userId, projectId) {
+  await requireProjectRole(userId, projectId, PIPELINE_DEFINITION_READ_ROLES);
+  const { rows } = await query(
+    `SELECT * FROM pipeline_definitions
+      WHERE project_id = $1
+        AND (owner_user_id = $2 OR visibility = 'project')
+      ORDER BY updated_at DESC, id DESC`,
+    [String(projectId), Number(userId)]
+  );
+  return [
+    defaultPipelineDefinitionPublic(projectId),
+    ...rows.map(row => toPublicPipelineDefinition(rowToPipelineDefinition(row))),
+  ];
+}
+
+async function createProjectPipelineDefinition(userId, projectId, input = {}) {
+  await requireProjectRole(userId, projectId, PIPELINE_DEFINITION_WRITE_ROLES);
+  if (input.id !== undefined || input.projectId !== undefined || input.project_id !== undefined
+      || input.ownerUserId !== undefined || input.owner_user_id !== undefined) {
+    throw codedError('INVALID_PIPELINE_DEFINITION', 'Pipeline definition identity and ownership are server-controlled.');
+  }
+  const visibility = input.visibility === undefined ? 'user' : String(input.visibility);
+  if (!PIPELINE_VISIBILITIES.has(visibility)) {
+    throw codedError('INVALID_PIPELINE_DEFINITION', 'Pipeline visibility must be user or project.');
+  }
+  const manifest = validatePipelineManifest(input.manifest);
+  const id = generatePipelineDefinitionId();
+  const { rows } = await query(
+    `INSERT INTO pipeline_definitions
+       (id, project_id, owner_user_id, visibility, name, manifest_json)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING *`,
+    [id, String(projectId), Number(userId), visibility, manifest.name, JSON.stringify(manifest)]
+  );
+  return toPublicPipelineDefinition(rowToPipelineDefinition(rows[0]));
+}
+
+async function getProjectPipelineSelection(userId, projectId) {
+  await requireProjectRole(userId, projectId, PIPELINE_SELECTION_ROLES);
+  const { rows } = await query(
+    'SELECT * FROM project_pipeline_selections WHERE project_id = $1 AND user_id = $2',
+    [String(projectId), Number(userId)]
+  );
+  const requestedId = rows[0]?.pipeline_id || DEFAULT_PIPELINE_ID;
+  const accessible = await getAccessiblePipelineDefinitionRow(userId, projectId, requestedId);
+  const pipelineId = accessible ? requestedId : DEFAULT_PIPELINE_ID;
+  const definition = isBuiltInPipelineId(pipelineId)
+    ? defaultPipelineDefinitionPublic(projectId)
+    : toPublicPipelineDefinition(rowToPipelineDefinition(accessible));
+  return {
+    projectId: String(projectId),
+    userId: Number(userId),
+    pipelineId,
+    definition,
+    updatedAt: rows[0]?.updated_at || null,
+  };
+}
+
+async function setProjectPipelineSelection(userId, projectId, pipelineId) {
+  await requireProjectRole(userId, projectId, PIPELINE_SELECTION_ROLES);
+  if (typeof pipelineId !== 'string' || pipelineId === '') {
+    throw codedError('INVALID_PIPELINE_SELECTION', 'pipelineId is required.');
+  }
+  const accessible = await getAccessiblePipelineDefinitionRow(userId, projectId, pipelineId);
+  if (!accessible) throw codedError('PIPELINE_NOT_FOUND', 'Pipeline definition not found.');
+  await query(
+    `INSERT INTO project_pipeline_selections (project_id, user_id, pipeline_id, updated_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (project_id, user_id)
+     DO UPDATE SET pipeline_id = EXCLUDED.pipeline_id, updated_at = EXCLUDED.updated_at`,
+    [String(projectId), Number(userId), String(pipelineId)]
+  );
+  return getProjectPipelineSelection(userId, projectId);
+}
+
 // -- Datasets ----------------------------------------------------------------
 function rowToDataset(row) {
   if (!row) return null;
@@ -557,6 +1216,81 @@ async function verifyDatasetProjectAccess(userId, datasetId, allowedRoles = DATA
 }
 
 // ── Analysis objects ────────────────────────────────────────────────────────
+async function updateDatasetForProject(userId, projectId, datasetId, input = {}) {
+  await requireProjectRole(userId, projectId, DATASET_WRITE_ROLES);
+  const existing = await getDatasetRow(datasetId, projectId);
+  if (!existing) throw codedError('NOT_FOUND', 'Dataset not found.');
+
+  const sets = [];
+  const params = [];
+  let nextUpload = existing.uploadStatus;
+  let nextValidation = existing.validationStatus;
+
+  if (input.uploadStatus !== undefined) {
+    if (!isValidDatasetUploadStatus(input.uploadStatus)) throw codedError('INVALID_UPLOAD_STATUS', 'Invalid upload_status.');
+    nextUpload = input.uploadStatus;
+    params.push(input.uploadStatus); sets.push(`upload_status = $${params.length}`);
+  }
+  if (input.validationStatus !== undefined) {
+    if (!isValidDatasetValidationStatus(input.validationStatus)) throw codedError('INVALID_VALIDATION_STATUS', 'Invalid validation_status.');
+    nextValidation = input.validationStatus;
+    params.push(input.validationStatus); sets.push(`validation_status = $${params.length}`);
+  }
+  assertDatasetStatusCombo(nextUpload, nextValidation);
+  if (input.validationErrors !== undefined) {
+    params.push(normalizeValidationErrors(input.validationErrors)); sets.push(`validation_errors = $${params.length}`);
+  }
+  if (input.metadata !== undefined) {
+    assertPlainObject(input.metadata, 'INVALID_METADATA', 'metadata must be a plain JSON object.');
+    params.push(JSON.stringify(input.metadata)); sets.push(`metadata = $${params.length}`);
+  }
+  if (input.originalFilename !== undefined) {
+    params.push(sanitizeDatasetFilename(input.originalFilename)); sets.push(`original_filename = $${params.length}`);
+  }
+  if (sets.length === 0) throw codedError('NO_FIELDS', 'No updatable fields provided.');
+  params.push(String(datasetId), String(projectId));
+  await query(
+    `UPDATE datasets SET ${sets.join(', ')}, updated_at = now()
+      WHERE id = $${params.length - 1} AND project_id = $${params.length}`,
+    params
+  );
+  return getDatasetRow(datasetId, projectId);
+}
+
+async function markDatasetUploaded(projectId, datasetId, { internalStorageKey, storageUri = null, sha256, fileSizeBytes }) {
+  await query(
+    `UPDATE datasets
+        SET upload_status = 'uploaded',
+            internal_storage_key = $1,
+            storage_uri = $2,
+            sha256 = $3,
+            file_size_bytes = $4,
+            updated_at = now()
+      WHERE id = $5 AND project_id = $6`,
+    [
+      internalStorageKey != null ? String(internalStorageKey) : null,
+      storageUri != null ? String(storageUri) : null,
+      sha256 != null ? String(sha256) : null,
+      Number.isFinite(fileSizeBytes) ? fileSizeBytes : null,
+      String(datasetId),
+      String(projectId)
+    ]
+  );
+  return getDatasetRow(datasetId, projectId);
+}
+
+async function markDatasetUploadFailed(projectId, datasetId) {
+  await query(
+    `UPDATE datasets
+        SET upload_status = 'failed',
+            validation_status = CASE WHEN validation_status = 'valid' THEN 'invalid' ELSE validation_status END,
+            updated_at = now()
+      WHERE id = $1 AND project_id = $2`,
+    [String(datasetId), String(projectId)]
+  );
+  return getDatasetRow(datasetId, projectId);
+}
+
 async function createAnalysisObject(ownerUserId, input = {}) {
   const owner = Number(ownerUserId);
   if (!Number.isInteger(owner) || owner <= 0) {
@@ -648,6 +1382,12 @@ async function listAnalysisObjectsForUser(ownerUserId, filters = {}) {
     allParams
   );
   return rows.map(rowToAnalysisObject);
+}
+
+const createAnalysisObjectForUser = createAnalysisObject;
+
+async function verifyAnalysisObjectOwner(ownerUserId, objectId) {
+  return !!(await getAnalysisObjectForUser(objectId, ownerUserId));
 }
 
 async function getProjectAnalysisObjectRow(objectId, projectId) {
@@ -749,6 +1489,33 @@ async function getProjectAnalysisObject(userId, projectId, objectId) {
 }
 
 // ── Jobs ────────────────────────────────────────────────────────────────────
+async function updateProjectAnalysisObjectSummary(userId, projectId, objectId, summary = {}) {
+  await requireProjectRole(userId, projectId, ANALYSIS_WRITE_ROLES);
+  const pid = String(projectId);
+  const existing = await getProjectAnalysisObjectRow(objectId, pid);
+  if (!existing) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  const input = summary && typeof summary === 'object' && !Array.isArray(summary) ? summary : {};
+  const cleanSummary = {};
+  for (const field of ALLOWED_ANALYSIS_SUMMARY_FIELDS) {
+    const value = input[field];
+    if (value === undefined || value === null) continue;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) {
+      throw codedError('INVALID_METADATA', `Summary field '${field}' must be a non-negative number.`);
+    }
+    cleanSummary[field] = n;
+  }
+  const metadata = existing.metadata && typeof existing.metadata === 'object' ? existing.metadata : {};
+  const prevSummary = metadata.summary && typeof metadata.summary === 'object' && !Array.isArray(metadata.summary)
+    ? metadata.summary : {};
+  const nextMetadata = { ...metadata, summary: { ...prevSummary, ...cleanSummary } };
+  await query(
+    'UPDATE analysis_objects SET metadata_json = $1, updated_at = now() WHERE id = $2 AND project_id = $3',
+    [JSON.stringify(nextMetadata), String(objectId), pid]
+  );
+  return getProjectAnalysisObjectRow(objectId, pid);
+}
+
 async function createJob(ownerUserId, input = {}) {
   const owner = Number(ownerUserId);
   if (!Number.isInteger(owner) || owner <= 0) {
@@ -758,6 +1525,10 @@ async function createJob(ownerUserId, input = {}) {
   if (!ALLOWED_JOB_TYPES.has(jobType)) {
     throw codedError('INVALID_JOB_TYPE',
       `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
+  }
+  if (jobType === 'seurat.pipeline.v1') {
+    throw codedError('INVALID_JOB_TYPE',
+      'seurat.pipeline.v1 jobs must be created through a project-scoped dataset.');
   }
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
@@ -791,6 +1562,12 @@ async function createJob(ownerUserId, input = {}) {
     ]
   );
   return rowToJob(rows[0]);
+}
+
+const createJobForUser = createJob;
+
+async function verifyJobOwner(ownerUserId, jobId) {
+  return !!(await getJobForUser(jobId, ownerUserId));
 }
 
 function rowToJob(row) {
@@ -880,8 +1657,12 @@ async function createProjectJob(userId, projectId, input = {}) {
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
   let analysisObjectId = null;
+  let analysisObject = null;
   if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
-    if (typeof input.analysisObjectId !== 'string' || !(await getProjectAnalysisObjectRow(input.analysisObjectId, pid))) {
+    analysisObject = typeof input.analysisObjectId === 'string'
+      ? await getProjectAnalysisObjectRow(input.analysisObjectId, pid)
+      : null;
+    if (!analysisObject) {
       throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
     }
     analysisObjectId = input.analysisObjectId;
@@ -894,11 +1675,26 @@ async function createProjectJob(userId, projectId, input = {}) {
     resultAnalysisObjectId = input.resultAnalysisObjectId;
   }
   let datasetId = null;
+  let dataset = null;
   if (input.datasetId !== undefined && input.datasetId !== null) {
-    if (typeof input.datasetId !== 'string' || !(await getDatasetRow(input.datasetId, pid))) {
+    dataset = typeof input.datasetId === 'string' ? await getDatasetRow(input.datasetId, pid) : null;
+    if (!dataset) {
       throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
     }
     datasetId = input.datasetId;
+  }
+  if (jobType === 'seurat.pipeline.v1') {
+    if (!datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.pipeline.v1 requires datasetId.');
+    }
+    if (!analysisObjectId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.pipeline.v1 requires an input analysisObjectId for lineage.');
+    }
+    if (analysisObject.datasetId !== datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.pipeline.v1 input analysisObjectId must reference the same datasetId.');
+    }
+    validateSeuratPipelineParams(parameters);
+    assertSupportedSeuratPipelineDataset(dataset);
   }
   const id = genId('job');
   const { rows } = await query(
@@ -937,6 +1733,32 @@ async function listProjectJobs(userId, projectId, filters = {}) {
 async function getProjectJob(userId, projectId, jobId) {
   await requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
   return getProjectJobRow(jobId, projectId);
+}
+
+async function cancelProjectJob(userId, projectId, jobId) {
+  const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  const pid = String(projectId);
+  const job = await getProjectJobRow(jobId, pid);
+  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (membership.role === 'analyst' && job.ownerUserId !== membership.userId) {
+    throw codedError('FORBIDDEN', 'Analysts can only cancel their own jobs.');
+  }
+  if (TERMINAL_JOB_STATUSES.has(job.status)) {
+    throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
+  }
+  const logs = [...job.logs, normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' })];
+  await query(
+    `UPDATE jobs SET
+       status = 'canceled',
+       logs_json = $1,
+       updated_at = now(),
+       canceled_at = now(),
+       claim_token = NULL,
+       lease_expires_at = NULL
+     WHERE id = $2 AND project_id = $3`,
+    [JSON.stringify(logs), String(jobId), pid]
+  );
+  return getProjectJobRow(jobId, pid);
 }
 
 /**
@@ -1027,7 +1849,472 @@ async function appendJobLogForUser(ownerUserId, jobId, entry) {
   return rowToJob(rows[0]);
 }
 
+async function cancelJobForUser(ownerUserId, jobId) {
+  const owner = Number(ownerUserId);
+  const job = await getJobForUser(jobId, owner);
+  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (TERMINAL_JOB_STATUSES.has(job.status)) {
+    throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
+  }
+  const logs = [...job.logs, normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' })];
+  const { rows } = await query(
+    `UPDATE jobs SET
+       status = 'canceled',
+       logs_json = $1,
+       updated_at = now(),
+       canceled_at = now(),
+       claim_token = NULL,
+       lease_expires_at = NULL
+     WHERE id = $2 AND owner_user_id = $3
+     RETURNING *`,
+    [JSON.stringify(logs), String(jobId), owner]
+  );
+  return rowToJob(rows[0]);
+}
+
 // ── Job artifacts (metadata-first; result-checkpoint immutability) ───────────
+async function getProjectProvenanceRow(provenanceId, projectId) {
+  if (typeof provenanceId !== 'string' || provenanceId === '') return null;
+  const { rows } = await query(
+    'SELECT * FROM provenance WHERE id = $1 AND project_id = $2',
+    [String(provenanceId), String(projectId)]
+  );
+  return rowToProjectProvenance(rows[0]);
+}
+
+async function getProjectFigureRow(figureId, projectId) {
+  if (typeof figureId !== 'string' || figureId === '') return null;
+  const { rows } = await query(
+    'SELECT * FROM figure_collection WHERE id = $1 AND project_id = $2',
+    [String(figureId), String(projectId)]
+  );
+  return rowToProjectFigure(rows[0]);
+}
+
+function rowToProjectProvenance(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    createdByUserId: Number(row.created_by_user_id),
+    datasetId: row.dataset_id,
+    analysisObjectId: row.analysis_object_id,
+    jobId: row.job_id,
+    resultAnalysisObjectId: row.result_analysis_object_id,
+    timestamp: row.timestamp,
+    language: row.language,
+    languageVersion: row.language_version,
+    packages: parseJson(row.packages, []),
+    script: row.script,
+    parameters: parseJson(row.parameters, {}),
+    parentIds: parseJson(row.parent_ids, []),
+    operation: row.operation || 'unknown',
+    createdAt: row.created_at
+  };
+}
+
+function rowToProjectFigure(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    createdByUserId: Number(row.created_by_user_id),
+    analysisObjectId: row.analysis_object_id,
+    jobId: row.job_id,
+    provenanceId: row.provenance_id,
+    datasetId: row.dataset_id,
+    plotType: row.plot_type,
+    title: row.title,
+    params: parseJson(row.params_json, {}),
+    fileFormat: row.file_format,
+    thumbnailB64: row.thumbnail_b64,
+    createdAt: row.created_at
+  };
+}
+
+async function resolveSameProjectRefs(pid, input, { allowResult = false, allowProvenanceRef = false, allowParents = false } = {}) {
+  const out = {};
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (typeof input.datasetId !== 'string' || !(await getDatasetRow(input.datasetId, pid))) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    out.datasetId = input.datasetId;
+  }
+  if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
+    if (typeof input.analysisObjectId !== 'string' || !(await getProjectAnalysisObjectRow(input.analysisObjectId, pid))) {
+      throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+    }
+    out.analysisObjectId = input.analysisObjectId;
+  }
+  if (input.jobId !== undefined && input.jobId !== null) {
+    if (typeof input.jobId !== 'string' || !(await getProjectJobRow(input.jobId, pid))) {
+      throw codedError('JOB_NOT_FOUND', 'Job not found.');
+    }
+    out.jobId = input.jobId;
+  }
+  if (allowResult && input.resultAnalysisObjectId !== undefined && input.resultAnalysisObjectId !== null) {
+    if (typeof input.resultAnalysisObjectId !== 'string' || !(await getProjectAnalysisObjectRow(input.resultAnalysisObjectId, pid))) {
+      throw codedError('RESULT_OBJECT_NOT_FOUND', 'Result analysis object not found.');
+    }
+    out.resultAnalysisObjectId = input.resultAnalysisObjectId;
+  }
+  if (allowProvenanceRef && input.provenanceId !== undefined && input.provenanceId !== null) {
+    if (typeof input.provenanceId !== 'string' || !(await getProjectProvenanceRow(input.provenanceId, pid))) {
+      throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
+    }
+    out.provenanceId = input.provenanceId;
+  }
+  if (allowParents && input.parentIds !== undefined && input.parentIds !== null) {
+    if (!Array.isArray(input.parentIds)) throw codedError('INVALID_PARENT_IDS', 'parentIds must be an array.');
+    for (const parentId of input.parentIds) {
+      if (typeof parentId !== 'string' || !(await getProjectProvenanceRow(parentId, pid))) {
+        throw codedError('PARENT_NOT_FOUND', 'Parent provenance record not found.');
+      }
+    }
+    out.parentIds = input.parentIds.map(String);
+  }
+  return out;
+}
+
+async function createProjectProvenance(userId, projectId, input = {}) {
+  const membership = await requireProjectRole(userId, projectId, PROVENANCE_WRITE_ROLES);
+  const actor = membership.userId;
+  const pid = String(projectId);
+  const parameters = input.parameters === undefined ? {} : input.parameters;
+  assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
+  const packages = input.packages === undefined ? [] : input.packages;
+  if (!Array.isArray(packages)) throw codedError('INVALID_PACKAGES', 'packages must be an array.');
+  const refs = await resolveSameProjectRefs(pid, input, { allowResult: true, allowParents: true });
+  const id = generateProvenanceId();
+  const { rows } = await query(
+    `INSERT INTO provenance
+       (id, user_email, project_id, created_by_user_id, dataset_id, analysis_object_id, job_id,
+        result_analysis_object_id, timestamp, language, language_version, packages, script,
+        parameters, parent_ids, operation)
+     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     RETURNING *`,
+    [
+      id, pid, Number(actor), refs.datasetId || null, refs.analysisObjectId || null,
+      refs.jobId || null, refs.resultAnalysisObjectId || null,
+      input.timestamp != null ? String(input.timestamp) : new Date().toISOString(),
+      input.language != null ? String(input.language) : '',
+      input.languageVersion != null ? String(input.languageVersion) : '',
+      JSON.stringify(packages),
+      input.script != null ? String(input.script) : '',
+      JSON.stringify(parameters),
+      JSON.stringify(refs.parentIds || []),
+      input.operation != null ? String(input.operation) : 'unknown'
+    ]
+  );
+  return rowToProjectProvenance(rows[0]);
+}
+
+async function listProjectProvenance(userId, projectId, filters = {}) {
+  await requireProjectRole(userId, projectId, PROVENANCE_READ_ROLES);
+  const clauses = ['project_id = $1'];
+  const params = [String(projectId)];
+  const allowed = { datasetId: 'dataset_id', analysisObjectId: 'analysis_object_id', jobId: 'job_id', operation: 'operation' };
+  for (const [field, column] of Object.entries(allowed)) {
+    if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
+  }
+  const { rows } = await query(`SELECT * FROM provenance WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`, params);
+  return rows.map(rowToProjectProvenance);
+}
+
+async function getProjectProvenance(userId, projectId, provenanceId) {
+  await requireProjectRole(userId, projectId, PROVENANCE_READ_ROLES);
+  return getProjectProvenanceRow(provenanceId, projectId);
+}
+
+async function createProjectFigure(userId, projectId, input = {}) {
+  const membership = await requireProjectRole(userId, projectId, FIGURE_WRITE_ROLES);
+  const actor = membership.userId;
+  const pid = String(projectId);
+  const params = input.params === undefined ? {} : input.params;
+  assertPlainObject(params, 'INVALID_PARAMETERS', 'params must be a plain JSON object.');
+  const plotType = input.plotType === undefined || input.plotType === null ? 'Unknown' : input.plotType;
+  if (typeof plotType !== 'string' || plotType === '') throw codedError('INVALID_PLOT_TYPE', 'plotType must be a non-empty string.');
+  const refs = await resolveSameProjectRefs(pid, input, { allowProvenanceRef: true });
+  const id = generateFigureId();
+  const { rows } = await query(
+    `INSERT INTO figure_collection
+       (id, user_email, project_id, created_by_user_id, analysis_object_id, job_id, provenance_id,
+        dataset_id, plot_type, title, params_json, file_path, file_format, thumbnail_b64)
+     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, $12)
+     RETURNING *`,
+    [
+      id, pid, Number(actor), refs.analysisObjectId || null, refs.jobId || null,
+      refs.provenanceId || null, refs.datasetId || null, plotType,
+      input.title != null ? String(input.title) : '',
+      JSON.stringify(params),
+      input.fileFormat != null ? String(input.fileFormat) : 'png',
+      input.thumbnailB64 != null ? String(input.thumbnailB64) : ''
+    ]
+  );
+  return rowToProjectFigure(rows[0]);
+}
+
+async function listProjectFigures(userId, projectId, filters = {}) {
+  await requireProjectRole(userId, projectId, FIGURE_READ_ROLES);
+  const clauses = ['project_id = $1'];
+  const params = [String(projectId)];
+  const allowed = {
+    analysisObjectId: 'analysis_object_id',
+    jobId: 'job_id',
+    provenanceId: 'provenance_id',
+    datasetId: 'dataset_id',
+    plotType: 'plot_type'
+  };
+  for (const [field, column] of Object.entries(allowed)) {
+    if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
+  }
+  const { rows } = await query(`SELECT * FROM figure_collection WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`, params);
+  return rows.map(rowToProjectFigure);
+}
+
+async function getProjectFigure(userId, projectId, figureId) {
+  await requireProjectRole(userId, projectId, FIGURE_READ_ROLES);
+  return getProjectFigureRow(figureId, projectId);
+}
+
+const CHECKPOINT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
+
+function isSafeInternalStorageKey(key) {
+  if (typeof key !== 'string' || key === '') return false;
+  if (/^([/\\]|[A-Za-z]:[/\\]|\\\\)/.test(key)) return false;
+  if (/(^|[/\\])\.\.([/\\]|$)/.test(key)) return false;
+  if (key.includes('\\') || key.includes('\0')) return false;
+  return CHECKPOINT_KEY_RE.test(key);
+}
+
+function normalizeChecksumSha256(value) {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(s) ? s : undefined;
+}
+
+function normalizeArtifactSizeBytes(value) {
+  if (value === undefined || value === null) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return undefined;
+  const i = Math.floor(n);
+  if (i < 0 || i > 1e15) return undefined;
+  return i;
+}
+
+function assertArtifactMetadata(metadata) {
+  assertPlainObject(metadata, 'INVALID_METADATA', 'metadata must be a plain JSON object.');
+}
+
+async function getJobArtifactRowById(id) {
+  if (typeof id !== 'string' || id === '') return null;
+  const { rows } = await query('SELECT * FROM job_artifacts WHERE id = $1', [String(id)]);
+  return rowToJobArtifact(rows[0]);
+}
+
+async function resolveArtifactRefs(jobRow, input = {}) {
+  const pid = jobRow.project_id || null;
+  const owner = Number(jobRow.owner_user_id);
+  const out = {
+    datasetId: jobRow.dataset_id || null,
+    analysisObjectId: jobRow.analysis_object_id || null,
+    resultAnalysisObjectId: jobRow.result_analysis_object_id || null,
+    provenanceId: null,
+    figureId: null
+  };
+
+  async function resolveAo(id, code, label) {
+    if (typeof id !== 'string') throw codedError(code, `${label} not found.`);
+    const ok = pid
+      ? !!(await getProjectAnalysisObjectRow(id, pid))
+      : !!(await getAnalysisObjectForUser(id, owner));
+    if (!ok) throw codedError(code, `${label} not found.`);
+    return id;
+  }
+
+  if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
+    out.analysisObjectId = await resolveAo(input.analysisObjectId, 'ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object');
+  }
+  if (input.resultAnalysisObjectId !== undefined && input.resultAnalysisObjectId !== null) {
+    out.resultAnalysisObjectId = await resolveAo(input.resultAnalysisObjectId, 'RESULT_OBJECT_NOT_FOUND', 'Result analysis object');
+  }
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (!pid || typeof input.datasetId !== 'string' || !(await getDatasetRow(input.datasetId, pid))) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    out.datasetId = input.datasetId;
+  }
+  if (input.provenanceId !== undefined && input.provenanceId !== null) {
+    if (!pid || typeof input.provenanceId !== 'string' || !(await getProjectProvenanceRow(input.provenanceId, pid))) {
+      throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
+    }
+    out.provenanceId = input.provenanceId;
+  }
+  if (input.figureId !== undefined && input.figureId !== null) {
+    if (!pid || typeof input.figureId !== 'string' || !(await getProjectFigureRow(input.figureId, pid))) {
+      throw codedError('FIGURE_NOT_FOUND', 'Figure not found.');
+    }
+    out.figureId = input.figureId;
+  }
+  return out;
+}
+
+async function insertJobArtifactRow(client, {
+  id,
+  jobRow,
+  refs,
+  artifactType,
+  name = null,
+  description = null,
+  mimeType = null,
+  storageKind = 'metadata_only',
+  storageUri = null,
+  checksumSha256 = null,
+  sizeBytes = null,
+  status = 'available',
+  metadata = {}
+}) {
+  await client.query(
+    `INSERT INTO job_artifacts
+       (id, project_id, job_id, dataset_id, analysis_object_id, result_analysis_object_id,
+        provenance_id, figure_id, created_by_user_id, artifact_type, name, description,
+        mime_type, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+    [
+      id,
+      jobRow.project_id || null,
+      jobRow.id,
+      refs.datasetId || null,
+      refs.analysisObjectId || null,
+      refs.resultAnalysisObjectId || null,
+      refs.provenanceId || null,
+      refs.figureId || null,
+      Number(jobRow.owner_user_id),
+      artifactType,
+      name,
+      description,
+      mimeType,
+      storageKind,
+      storageUri,
+      checksumSha256,
+      sizeBytes,
+      status,
+      JSON.stringify(metadata)
+    ]
+  );
+}
+
+async function insertJobArtifact(jobRow, input = {}) {
+  const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : 'other_metadata';
+  if (!isValidArtifactType(artifactType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE',
+      `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const storageKind = input.storageKind === undefined || input.storageKind === null
+    ? 'metadata_only' : String(input.storageKind);
+  if (!isValidArtifactStorageKind(storageKind)) {
+    throw codedError('INVALID_STORAGE_KIND',
+      `Invalid storageKind. Allowed: ${[...ALLOWED_ARTIFACT_STORAGE_KINDS].join(', ')}.`);
+  }
+  const status = input.status === undefined || input.status === null ? 'available' : String(input.status);
+  if (!isValidArtifactStatus(status)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  assertArtifactMetadata(metadata);
+  const refs = await resolveArtifactRefs(jobRow, input);
+  const id = generateJobArtifactId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await insertJobArtifactRow(client, {
+      id,
+      jobRow,
+      refs,
+      artifactType,
+      name: input.name != null ? String(input.name) : null,
+      description: input.description != null ? String(input.description) : null,
+      mimeType: input.mimeType != null ? String(input.mimeType) : null,
+      storageKind,
+      status,
+      metadata
+    });
+  } finally {
+    client.release();
+  }
+  return getJobArtifactRowById(id);
+}
+
+async function createJobArtifactByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  return insertJobArtifact(row, input);
+}
+
+async function createCheckpointArtifactForJobByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : 'checkpoint';
+  if (!isValidArtifactType(artifactType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE',
+      `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const storageKind = input.storageKind === undefined || input.storageKind === null ? 'local_internal' : String(input.storageKind);
+  if (storageKind !== 'local_internal') {
+    throw codedError('INVALID_STORAGE_KIND',
+      'createCheckpointArtifactForJobByWorker only records local_internal storage; use createJobArtifactByWorker for metadata-only artifacts.');
+  }
+  if (!isSafeInternalStorageKey(input.internalStorageKey)) {
+    throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
+  }
+  const checksum = normalizeChecksumSha256(input.checksumSha256);
+  if (checksum === undefined) throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
+  const sizeBytes = normalizeArtifactSizeBytes(input.sizeBytes);
+  if (sizeBytes === undefined) throw codedError('INVALID_SIZE', 'sizeBytes must be a non-negative integer.');
+  const status = input.status === undefined || input.status === null ? 'available' : String(input.status);
+  if (!isValidArtifactStatus(status)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  assertArtifactMetadata(metadata);
+  const refs = await resolveArtifactRefs(row, input);
+  const id = generateJobArtifactId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await insertJobArtifactRow(client, {
+      id,
+      jobRow: row,
+      refs,
+      artifactType,
+      name: input.name != null ? String(input.name) : null,
+      description: input.description != null ? String(input.description) : null,
+      mimeType: input.mimeType != null ? String(input.mimeType) : null,
+      storageKind,
+      storageUri: input.internalStorageKey,
+      checksumSha256: checksum,
+      sizeBytes,
+      status,
+      metadata
+    });
+  } finally {
+    client.release();
+  }
+  return getJobArtifactRowById(id);
+}
+
 async function createArtifact(job, input = {}) {
   const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : 'other_metadata';
   if (!ALLOWED_ARTIFACT_TYPES.has(artifactType)) {
@@ -1434,6 +2721,836 @@ async function getProjectAnalysisObjectLineage(userId, projectId, objectId) {
   return { ...graph, projectId: pid, rootObjectId: root.lineageRootId || root.id };
 }
 
+async function getJobRowById(id) {
+  if (typeof id !== 'string' || id === '') return null;
+  const { rows } = await query('SELECT * FROM jobs WHERE id = $1', [String(id)]);
+  return rows[0] || null;
+}
+
+function rowToWorkerJob(row) {
+  if (!row) return null;
+  return {
+    ...rowToJob(row),
+    workerId: row.worker_id,
+    claimToken: row.claim_token,
+    leaseExpiresAt: row.lease_expires_at,
+    heartbeatAt: row.heartbeat_at,
+    lockedAt: row.locked_at,
+    attempts: Number(row.attempts || 0),
+    maxAttempts: Number(row.max_attempts || 1),
+    priority: Number(row.priority || 0),
+    lastWorkerError: row.last_worker_error ? parseJson(row.last_worker_error, null) : null
+  };
+}
+
+async function getWorkerJob(jobId) {
+  return rowToWorkerJob(await getJobRowById(jobId));
+}
+
+function workerHoldsClaim(row, workerId, claimToken, now) {
+  const lease = row && row.lease_expires_at ? normalizeTimestamp(row.lease_expires_at) : null;
+  return !!row
+    && row.status === 'running'
+    && row.worker_id === workerId
+    && typeof row.claim_token === 'string'
+    && row.claim_token === claimToken
+    && lease
+    && lease.getTime() > now.getTime();
+}
+
+async function claimNextJob(workerId, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const now = normalizeWorkerNow(opts);
+  const leaseSeconds = normalizeLeaseSeconds(opts.leaseSeconds);
+  const claimToken = generateClaimToken();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query(
+      `SELECT id FROM jobs
+        WHERE status = 'queued' AND attempts < max_attempts
+        ORDER BY priority DESC, created_at ASC, id ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED`
+    );
+    if (!found.rows[0]) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const id = found.rows[0].id;
+    const updated = await client.query(
+      `UPDATE jobs SET
+         status = 'running',
+         worker_id = $1,
+         claim_token = $2,
+         attempts = attempts + 1,
+         locked_at = $3,
+         heartbeat_at = $3,
+         lease_expires_at = $4,
+         started_at = COALESCE(started_at, $3),
+         updated_at = $3
+       WHERE id = $5 AND status = 'queued' AND attempts < max_attempts
+       RETURNING *`,
+      [wid, claimToken, now, addSeconds(now, leaseSeconds), id]
+    );
+    await client.query('COMMIT');
+    return rowToWorkerJob(updated.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function heartbeatJob(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const leaseSeconds = normalizeLeaseSeconds(opts.leaseSeconds);
+  if (!(await getJobRowById(jobId))) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  const { rows } = await query(
+    `UPDATE jobs SET heartbeat_at = $1, lease_expires_at = $2, updated_at = $1
+      WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+        AND status = 'running' AND lease_expires_at > $1
+      RETURNING *`,
+    [now, addSeconds(now, leaseSeconds), String(jobId), wid, token]
+  );
+  if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return rowToWorkerJob(rows[0]);
+}
+
+async function completeJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  if (!validateJobTransition(row.status, 'completed')) throw codedError('INVALID_TRANSITION', `Cannot complete a job in status '${row.status}'.`);
+  let resultId = row.result_analysis_object_id;
+  if (opts.resultAnalysisObjectId !== undefined && opts.resultAnalysisObjectId !== null) {
+    if (typeof opts.resultAnalysisObjectId !== 'string' ||
+        !(await getAnalysisObjectForUser(opts.resultAnalysisObjectId, Number(row.owner_user_id)))) {
+      throw codedError('RESULT_OBJECT_NOT_FOUND', 'Result analysis object not found.');
+    }
+    resultId = opts.resultAnalysisObjectId;
+  }
+  const logs = opts.log !== undefined
+    ? [...parseJson(row.logs_json, []), normalizeJobLogEntry(opts.log)]
+    : parseJson(row.logs_json, []);
+  const { rows } = await query(
+    `UPDATE jobs SET
+       status = 'completed',
+       result_analysis_object_id = $1,
+       logs_json = $2,
+       completed_at = $3,
+       heartbeat_at = $3,
+       updated_at = $3,
+       claim_token = NULL,
+       lease_expires_at = NULL
+     WHERE id = $4 AND worker_id = $5 AND claim_token = $6
+       AND status = 'running' AND lease_expires_at > $3
+     RETURNING *`,
+    [resultId == null ? null : String(resultId), JSON.stringify(logs), now, String(jobId), wid, token]
+  );
+  if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return rowToWorkerJob(rows[0]);
+}
+
+async function failJobByWorker(jobId, workerId, claimToken, error, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  if (!validateJobTransition(row.status, 'failed')) throw codedError('INVALID_TRANSITION', `Cannot fail a job in status '${row.status}'.`);
+  const errObj = normalizeJobError(error === undefined || error === null ? { message: 'Job failed.' } : error);
+  const errJson = JSON.stringify(errObj);
+  const logs = opts.log !== undefined
+    ? [...parseJson(row.logs_json, []), normalizeJobLogEntry(opts.log)]
+    : parseJson(row.logs_json, []);
+  const { rows } = await query(
+    `UPDATE jobs SET
+       status = 'failed',
+       error_json = $1,
+       last_worker_error = $1,
+       logs_json = $2,
+       completed_at = $3,
+       heartbeat_at = $3,
+       updated_at = $3,
+       claim_token = NULL,
+       lease_expires_at = NULL
+     WHERE id = $4 AND worker_id = $5 AND claim_token = $6
+       AND status = 'running' AND lease_expires_at > $3
+     RETURNING *`,
+    [errJson, JSON.stringify(logs), now, String(jobId), wid, token]
+  );
+  if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return rowToWorkerJob(rows[0]);
+}
+
+async function releaseJob(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  if (!validateJobTransition(row.status, 'queued')) throw codedError('INVALID_TRANSITION', `Cannot release a job in status '${row.status}'.`);
+  const logs = opts.log !== undefined ? [...parseJson(row.logs_json, []), normalizeJobLogEntry(opts.log)] : parseJson(row.logs_json, []);
+  const { rows } = await query(
+    `UPDATE jobs SET
+       status = 'queued',
+       worker_id = NULL,
+       claim_token = NULL,
+       locked_at = NULL,
+       lease_expires_at = NULL,
+       heartbeat_at = $1,
+       attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+       logs_json = $2,
+       updated_at = $1
+     WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+       AND status = 'running' AND lease_expires_at > $1
+     RETURNING *`,
+    [now, JSON.stringify(logs), String(jobId), wid, token]
+  );
+  if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return rowToWorkerJob(rows[0]);
+}
+
+async function appendJobLogByWorker(jobId, workerId, claimToken, entry, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  const logs = [...parseJson(row.logs_json, []), normalizeJobLogEntry(entry)];
+  const { rows } = await query(
+    `UPDATE jobs SET logs_json = $1, updated_at = $2
+      WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+        AND status = 'running' AND lease_expires_at > $2
+      RETURNING *`,
+    [JSON.stringify(logs), now, String(jobId), wid, token]
+  );
+  if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return rowToWorkerJob(rows[0]);
+}
+
+async function reapExpiredJobs(opts = {}) {
+  const now = normalizeWorkerNow(opts);
+  const { rows } = await query(
+    `SELECT id, attempts, max_attempts FROM jobs
+      WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $1`,
+    [now]
+  );
+  const requeued = [];
+  const failed = [];
+  for (const row of rows) {
+    if (Number(row.attempts) < Number(row.max_attempts)) {
+      const lastErr = JSON.stringify(normalizeJobError({ code: 'LEASE_EXPIRED', message: 'Worker lease expired; job re-queued for another claim.' }));
+      const res = await query(
+        `UPDATE jobs SET status = 'queued', worker_id = NULL, claim_token = NULL,
+           locked_at = NULL, lease_expires_at = NULL, heartbeat_at = $1,
+           last_worker_error = $2, updated_at = $1
+         WHERE id = $3 AND status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $1`,
+        [now, lastErr, row.id]
+      );
+      if (res.rowCount === 1) requeued.push(row.id);
+    } else {
+      const errJson = JSON.stringify(normalizeJobError({ code: 'LEASE_EXPIRED', message: 'Worker lease expired and the claim budget is exhausted; job failed.' }));
+      const res = await query(
+        `UPDATE jobs SET status = 'failed', error_json = $1, last_worker_error = $1,
+           completed_at = $2, heartbeat_at = $2, claim_token = NULL,
+           lease_expires_at = NULL, updated_at = $2
+         WHERE id = $3 AND status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $2`,
+        [errJson, now, row.id]
+      );
+      if (res.rowCount === 1) failed.push(row.id);
+    }
+  }
+  return { requeued, failed };
+}
+
+async function setJobScheduling(jobId, opts = {}) {
+  const id = String(jobId);
+  const row = await getJobRowById(id);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  const sets = [];
+  const params = [];
+  if (opts.priority !== undefined) {
+    if (!Number.isInteger(opts.priority)) throw codedError('INVALID_PRIORITY', 'priority must be an integer.');
+    params.push(opts.priority); sets.push(`priority = $${params.length}`);
+  }
+  if (opts.maxAttempts !== undefined) {
+    if (!Number.isInteger(opts.maxAttempts) || opts.maxAttempts < 1) throw codedError('INVALID_MAX_ATTEMPTS', 'maxAttempts must be a positive integer.');
+    params.push(opts.maxAttempts); sets.push(`max_attempts = $${params.length}`);
+  }
+  if (opts.createdAt !== undefined) {
+    params.push(normalizeTimestamp(opts.createdAt)); sets.push(`created_at = $${params.length}`);
+  }
+  if (sets.length === 0) return rowToWorkerJob(row);
+  params.push(id);
+  await query(`UPDATE jobs SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length}`, params);
+  return getWorkerJob(id);
+}
+
+async function createCheckpointForJobByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.result_analysis_object_id) {
+    throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
+  }
+
+  const owner = Number(row.owner_user_id);
+  const pid = row.project_id || null;
+  const objectType = input.objectType === undefined || input.objectType === null
+    ? 'generic' : String(input.objectType).trim();
+  if (!isValidObjectType(objectType)) {
+    throw codedError('INVALID_OBJECT_TYPE', `Invalid objectType. Allowed: ${[...ALLOWED_OBJECT_TYPES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  assertPlainObject(metadata, 'INVALID_METADATA', 'metadata must be a plain JSON object.');
+
+  const parentObjectId = input.parentObjectId !== undefined && input.parentObjectId !== null
+    ? String(input.parentObjectId)
+    : (row.analysis_object_id || null);
+  let lineageRootId = null;
+  if (parentObjectId) {
+    const parent = pid ? await getProjectAnalysisObjectRow(parentObjectId, pid)
+                       : await getAnalysisObjectForUser(parentObjectId, owner);
+    if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    lineageRootId = parent.lineageRootId || parent.id;
+  }
+
+  let datasetId = row.dataset_id || null;
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    if (!pid || typeof input.datasetId !== 'string' || !(await getDatasetRow(input.datasetId, pid))) {
+      throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+    }
+    datasetId = input.datasetId;
+  }
+
+  const id = generateAnalysisObjectId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO analysis_objects
+         (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id,
+          object_type, display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL)`,
+      [
+        id,
+        owner,
+        pid,
+        datasetId,
+        parentObjectId,
+        lineageRootId || id,
+        objectType,
+        input.displayName != null ? String(input.displayName) : null,
+        JSON.stringify(metadata)
+      ]
+    );
+    const linked = await client.query(
+      `UPDATE jobs SET result_analysis_object_id = $1, updated_at = $2
+       WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+         AND status = 'running' AND lease_expires_at > $2
+         AND result_analysis_object_id IS NULL`,
+      [id, now, String(jobId), wid, token]
+    );
+    if (linked.rowCount !== 1) {
+      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    }
+    if (parentObjectId) {
+      await insertLineageEdgeRow(client, {
+        projectId: pid,
+        parentObjectId,
+        childObjectId: id,
+        jobId: String(jobId),
+        edgeType: 'checkpoint',
+        parentRole: 'primary',
+        metadata: {},
+        createdByUserId: owner
+      });
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return pid ? getProjectAnalysisObjectRow(id, pid) : getAnalysisObjectForUser(id, owner);
+}
+
+function validateLocalInternalArtifactSpec(input, {
+  defaultArtifactType = 'checkpoint',
+  artifactTypeRequired = false,
+  helperName = 'worker completion'
+} = {}) {
+  const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : defaultArtifactType;
+  if ((artifactTypeRequired && !artifactType) || !isValidArtifactType(artifactType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE',
+      `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const storageKind = input.storageKind === undefined || input.storageKind === null ? 'local_internal' : String(input.storageKind);
+  if (storageKind !== 'local_internal') {
+    throw codedError('INVALID_STORAGE_KIND', `${helperName} records a local_internal artifact.`);
+  }
+  if (!isSafeInternalStorageKey(input.internalStorageKey)) {
+    throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
+  }
+  const checksum = normalizeChecksumSha256(input.checksumSha256);
+  if (checksum === undefined || checksum === null) {
+    throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
+  }
+  const sizeBytes = normalizeArtifactSizeBytes(input.sizeBytes);
+  if (sizeBytes === undefined || sizeBytes === null) {
+    throw codedError('INVALID_SIZE', 'sizeBytes must be a non-negative integer.');
+  }
+  const status = input.status === undefined || input.status === null ? 'available' : String(input.status);
+  if (!isValidArtifactStatus(status)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  assertArtifactMetadata(metadata);
+  return { artifactType, storageKind, storageUri: input.internalStorageKey, checksumSha256: checksum, sizeBytes, status, metadata };
+}
+
+function validateMetadataOnlyArtifactSpec(input, {
+  defaultArtifactType = '',
+  artifactTypeRequired = true
+} = {}) {
+  const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : defaultArtifactType;
+  if ((artifactTypeRequired && !artifactType) || !isValidArtifactType(artifactType)) {
+    throw codedError('INVALID_ARTIFACT_TYPE',
+      `Invalid artifactType. Allowed: ${[...ALLOWED_ARTIFACT_TYPES].join(', ')}.`);
+  }
+  const storageKind = input.storageKind === undefined || input.storageKind === null ? 'metadata_only' : String(input.storageKind);
+  if (!isValidArtifactStorageKind(storageKind)) {
+    throw codedError('INVALID_STORAGE_KIND', `Invalid storageKind. Allowed: ${[...ALLOWED_ARTIFACT_STORAGE_KINDS].join(', ')}.`);
+  }
+  const status = input.status === undefined || input.status === null ? 'available' : String(input.status);
+  if (!isValidArtifactStatus(status)) {
+    throw codedError('INVALID_ARTIFACT_STATUS', `Invalid status. Allowed: ${[...ALLOWED_ARTIFACT_STATUSES].join(', ')}.`);
+  }
+  const metadata = input.metadata === undefined ? {} : input.metadata;
+  assertArtifactMetadata(metadata);
+  return { artifactType, storageKind, status, metadata };
+}
+
+async function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.result_analysis_object_id) throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
+
+  const owner = Number(row.owner_user_id);
+  const pid = row.project_id || null;
+  const result = input.result && typeof input.result === 'object' ? input.result : {};
+  const objectType = result.objectType === undefined || result.objectType === null ? 'generic' : String(result.objectType).trim();
+  if (!isValidObjectType(objectType)) {
+    throw codedError('INVALID_OBJECT_TYPE', `Invalid objectType. Allowed: ${[...ALLOWED_OBJECT_TYPES].join(', ')}.`);
+  }
+  const resultMetadata = result.metadata === undefined ? {} : result.metadata;
+  assertPlainObject(resultMetadata, 'INVALID_METADATA', 'metadata must be a plain JSON object.');
+  const cpSpec = validateLocalInternalArtifactSpec(
+    input.checkpointArtifact && typeof input.checkpointArtifact === 'object' ? input.checkpointArtifact : {},
+    { defaultArtifactType: 'checkpoint', helperName: 'completePbmcPipelineResultByWorker' }
+  );
+  const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  const smSpec = validateMetadataOnlyArtifactSpec(sm);
+
+  const parentObjectId = result.parentObjectId !== undefined && result.parentObjectId !== null
+    ? String(result.parentObjectId)
+    : (row.analysis_object_id || null);
+  let lineageRootId = null;
+  if (parentObjectId) {
+    const parent = pid ? await getProjectAnalysisObjectRow(parentObjectId, pid)
+                       : await getAnalysisObjectForUser(parentObjectId, owner);
+    if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    lineageRootId = parent.lineageRootId || parent.id;
+  }
+  const datasetId = row.dataset_id || null;
+  const resultId = generateAnalysisObjectId();
+  const checkpointArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO analysis_objects
+         (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+          display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL)`,
+      [
+        resultId,
+        owner,
+        pid,
+        datasetId,
+        parentObjectId,
+        lineageRootId || resultId,
+        objectType,
+        result.displayName != null ? String(result.displayName) : null,
+        JSON.stringify(resultMetadata)
+      ]
+    );
+    const linkInfo = await client.query(
+      `UPDATE jobs SET result_analysis_object_id = $1, updated_at = $2
+       WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+         AND status = 'running' AND lease_expires_at > $2
+         AND result_analysis_object_id IS NULL`,
+      [resultId, now, String(jobId), wid, token]
+    );
+    if (linkInfo.rowCount !== 1) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    if (parentObjectId) {
+      await insertLineageEdgeRow(client, {
+        projectId: pid,
+        parentObjectId,
+        childObjectId: resultId,
+        jobId: String(jobId),
+        edgeType: 'checkpoint',
+        parentRole: 'primary',
+        metadata: {},
+        createdByUserId: owner
+      });
+    }
+    await insertJobArtifactRow(client, {
+      id: checkpointArtifactId,
+      jobRow: row,
+      refs: { datasetId, analysisObjectId: parentObjectId, resultAnalysisObjectId: resultId },
+      artifactType: cpSpec.artifactType,
+      name: input.checkpointArtifact && input.checkpointArtifact.name != null ? String(input.checkpointArtifact.name) : null,
+      description: input.checkpointArtifact && input.checkpointArtifact.description != null ? String(input.checkpointArtifact.description) : null,
+      storageKind: cpSpec.storageKind,
+      storageUri: cpSpec.storageUri,
+      checksumSha256: cpSpec.checksumSha256,
+      sizeBytes: cpSpec.sizeBytes,
+      status: cpSpec.status,
+      metadata: cpSpec.metadata
+    });
+    await insertJobArtifactRow(client, {
+      id: summaryArtifactId,
+      jobRow: row,
+      refs: { datasetId, analysisObjectId: parentObjectId, resultAnalysisObjectId: resultId },
+      artifactType: smSpec.artifactType,
+      name: sm.name != null ? String(sm.name) : null,
+      description: sm.description != null ? String(sm.description) : null,
+      storageKind: smSpec.storageKind,
+      status: smSpec.status,
+      metadata: smSpec.metadata
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return {
+    resultObject: pid ? await getProjectAnalysisObjectRow(resultId, pid) : await getAnalysisObjectForUser(resultId, owner),
+    checkpointArtifact: await getJobArtifactRowById(checkpointArtifactId),
+    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
+async function completeSeuratPipelineResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.result_analysis_object_id) throw codedError('CHECKPOINT_EXISTS', 'Job already has a result checkpoint object.');
+  if (!row.project_id || !row.dataset_id || !row.analysis_object_id || !(await getDatasetRow(row.dataset_id, row.project_id))) {
+    throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+  }
+
+  const owner = Number(row.owner_user_id);
+  const pid = row.project_id;
+  const datasetId = row.dataset_id;
+  const result = input.result && typeof input.result === 'object' ? input.result : {};
+  const resultMetadata = result.metadata === undefined ? {} : result.metadata;
+  assertPlainObject(resultMetadata, 'INVALID_METADATA', 'metadata must be a plain JSON object.');
+  const cpSpec = validateLocalInternalArtifactSpec(
+    input.checkpointArtifact && typeof input.checkpointArtifact === 'object' ? input.checkpointArtifact : {},
+    { defaultArtifactType: 'checkpoint', helperName: 'completeSeuratPipelineResultByWorker' }
+  );
+  const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  const smSpec = validateMetadataOnlyArtifactSpec(sm);
+
+  const sourceId = row.analysis_object_id;
+  const sourceObject = await getProjectAnalysisObjectRow(sourceId, pid);
+  if (!sourceObject || sourceObject.datasetId !== datasetId) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const resultId = generateAnalysisObjectId();
+  const checkpointArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO analysis_objects
+         (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id, object_type,
+          display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'seurat', $7, NULL, NULL, $8, NULL)`,
+      [
+        resultId,
+        owner,
+        pid,
+        datasetId,
+        sourceId,
+        sourceObject.lineageRootId || sourceId,
+        result.displayName != null ? String(result.displayName) : 'Seurat pipeline result',
+        JSON.stringify(resultMetadata)
+      ]
+    );
+    const linkInfo = await client.query(
+      `UPDATE jobs SET result_analysis_object_id = $1, updated_at = $2
+       WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+         AND status = 'running' AND lease_expires_at > $2
+         AND result_analysis_object_id IS NULL`,
+      [resultId, now, String(jobId), wid, token]
+    );
+    if (linkInfo.rowCount !== 1) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    await insertLineageEdgeRow(client, {
+      projectId: pid,
+      parentObjectId: sourceId,
+      childObjectId: resultId,
+      jobId: String(jobId),
+      edgeType: 'checkpoint',
+      parentRole: 'primary',
+      metadata: { source: 'dataset', datasetId },
+      createdByUserId: owner
+    });
+    await insertJobArtifactRow(client, {
+      id: checkpointArtifactId,
+      jobRow: row,
+      refs: { datasetId, analysisObjectId: sourceId, resultAnalysisObjectId: resultId },
+      artifactType: cpSpec.artifactType,
+      name: input.checkpointArtifact && input.checkpointArtifact.name != null ? String(input.checkpointArtifact.name) : null,
+      description: input.checkpointArtifact && input.checkpointArtifact.description != null ? String(input.checkpointArtifact.description) : null,
+      storageKind: cpSpec.storageKind,
+      storageUri: cpSpec.storageUri,
+      checksumSha256: cpSpec.checksumSha256,
+      sizeBytes: cpSpec.sizeBytes,
+      status: cpSpec.status,
+      metadata: cpSpec.metadata
+    });
+    await insertJobArtifactRow(client, {
+      id: summaryArtifactId,
+      jobRow: row,
+      refs: { datasetId, analysisObjectId: sourceId, resultAnalysisObjectId: resultId },
+      artifactType: smSpec.artifactType,
+      name: sm.name != null ? String(sm.name) : null,
+      description: sm.description != null ? String(sm.description) : null,
+      storageKind: smSpec.storageKind,
+      status: smSpec.status,
+      metadata: smSpec.metadata
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return {
+    sourceObject: await getProjectAnalysisObjectRow(sourceId, pid),
+    resultObject: await getProjectAnalysisObjectRow(resultId, pid),
+    checkpointArtifact: await getJobArtifactRowById(checkpointArtifactId),
+    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
+async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  const existing = await query(
+    "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'deg_markers' LIMIT 1",
+    [String(row.id)]
+  );
+  if (existing.rows[0]) throw codedError('DEG_RESULT_EXISTS', 'Job already has a DEG marker result artifact.');
+
+  const tbl = input.markersArtifact && typeof input.markersArtifact === 'object' ? input.markersArtifact : {};
+  const tblSpec = validateLocalInternalArtifactSpec(tbl, {
+    defaultArtifactType: 'deg_markers',
+    helperName: 'completeDegFindMarkersResultByWorker'
+  });
+  const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  const smSpec = validateMetadataOnlyArtifactSpec(sm, { defaultArtifactType: 'deg_summary', artifactTypeRequired: false });
+  const markersArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+  const refs = {
+    datasetId: row.dataset_id || null,
+    analysisObjectId: row.analysis_object_id || null,
+    resultAnalysisObjectId: row.result_analysis_object_id || null
+  };
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const claimRow = await client.query(
+      `SELECT 1 FROM jobs
+       WHERE id = $1 AND worker_id = $2 AND claim_token = $3
+         AND status = 'running' AND lease_expires_at > $4`,
+      [String(row.id), wid, token, now]
+    );
+    if (!claimRow.rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    const duplicate = await client.query(
+      "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'deg_markers' LIMIT 1",
+      [String(row.id)]
+    );
+    if (duplicate.rows[0]) throw codedError('DEG_RESULT_EXISTS', 'Job already has a DEG marker result artifact.');
+    await insertJobArtifactRow(client, {
+      id: markersArtifactId,
+      jobRow: row,
+      refs,
+      artifactType: tblSpec.artifactType,
+      name: tbl.name != null ? String(tbl.name) : null,
+      description: tbl.description != null ? String(tbl.description) : null,
+      mimeType: tbl.mimeType != null ? String(tbl.mimeType) : null,
+      storageKind: tblSpec.storageKind,
+      storageUri: tblSpec.storageUri,
+      checksumSha256: tblSpec.checksumSha256,
+      sizeBytes: tblSpec.sizeBytes,
+      status: tblSpec.status,
+      metadata: tblSpec.metadata
+    });
+    await insertJobArtifactRow(client, {
+      id: summaryArtifactId,
+      jobRow: row,
+      refs,
+      artifactType: smSpec.artifactType,
+      name: sm.name != null ? String(sm.name) : null,
+      description: sm.description != null ? String(sm.description) : null,
+      storageKind: smSpec.storageKind,
+      status: smSpec.status,
+      metadata: smSpec.metadata
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return {
+    markersArtifact: await getJobArtifactRowById(markersArtifactId),
+    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
+async function getLoadableCheckpointForAnalysisObject(projectId, analysisObjectId, ownerUserId) {
+  if (typeof analysisObjectId !== 'string' || analysisObjectId === '') {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const owner = Number(ownerUserId);
+  if (!Number.isInteger(owner) || owner <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid owner user id is required.');
+  }
+  const pid = projectId === undefined || projectId === null || projectId === '' ? null : String(projectId);
+  const obj = await getAnalysisObjectForUser(analysisObjectId, owner);
+  if (!obj) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  const objProjectId = obj.projectId || null;
+  if (pid) {
+    if (objProjectId !== pid) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  } else if (objProjectId) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const { rows } = await query(
+    `SELECT * FROM job_artifacts
+     WHERE result_analysis_object_id = $1
+       AND artifact_type = 'checkpoint'
+       AND storage_kind = 'local_internal'
+       AND status = 'available'
+     ORDER BY created_at ASC, id ASC`,
+    [analysisObjectId]
+  );
+  const candidates = rows.map(rowToJobArtifact).filter((a) => (a.projectId || null) === objProjectId);
+  if (candidates.length === 0) {
+    throw codedError('NO_CHECKPOINT_ARTIFACT', 'No loadable checkpoint for this analysis object.');
+  }
+  if (candidates.length > 1) {
+    throw codedError('AMBIGUOUS_CHECKPOINT', 'Multiple loadable checkpoints; refusing to choose.');
+  }
+  const artifact = candidates[0];
+  if (!isSafeInternalStorageKey(artifact.storageUri)) {
+    throw codedError('INVALID_STORAGE_KEY', 'Checkpoint storage key is missing or unsafe.');
+  }
+  const checksum = normalizeChecksumSha256(artifact.checksumSha256);
+  if (checksum === undefined || checksum === null) {
+    throw codedError('INVALID_CHECKSUM', 'Checkpoint checksum is missing or invalid.');
+  }
+  const sizeBytes = normalizeArtifactSizeBytes(artifact.sizeBytes);
+  if (sizeBytes === undefined || sizeBytes === null) {
+    throw codedError('INVALID_SIZE', 'Checkpoint size is missing or invalid.');
+  }
+  return {
+    analysisObjectId,
+    projectId: objProjectId,
+    checkpointArtifactId: artifact.id,
+    internalStorageKey: artifact.storageUri,
+    checksumSha256: checksum,
+    sizeBytes
+  };
+}
+
+async function createLineageEdgesForChild(actorUserId, childObjectId, parents = []) {
+  if (!Array.isArray(parents) || parents.length === 0) {
+    throw codedError('INVALID_PARENTS', 'parents must be a non-empty array.');
+  }
+  const p = await connect();
+  const client = await p.connect();
+  const createdIds = [];
+  try {
+    await client.query('BEGIN');
+    for (const parent of parents) {
+      const edge = await createLineageEdge(actorUserId, { ...parent, childObjectId });
+      createdIds.push(edge.id);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  const { rows } = await query(
+    `SELECT * FROM analysis_object_edges WHERE id = ANY($1::text[])
+     ORDER BY created_at ASC, id ASC`,
+    [createdIds]
+  );
+  return rows.map(rowToAnalysisObjectEdge);
+}
+
 module.exports = {
   // lifecycle
   isConfigured,
@@ -1453,10 +3570,50 @@ module.exports = {
   ALLOWED_ARTIFACT_TYPES,
   validateJobTransition,
   genId,
+  isValidObjectType,
+  generateAnalysisObjectId,
+  isValidJobType,
+  isValidJobStatus,
+  generateJobId,
+  generateClaimToken,
+  isValidRole,
+  generateOrganizationId,
+  generateProjectId,
+  generatePipelineDefinitionId,
+  isValidPipelineDefinitionId,
+  isValidDatasetFileType,
+  isValidDatasetUploadStatus,
+  isValidDatasetValidationStatus,
+  generateDatasetId,
+  sanitizeDatasetFilename,
+  generateProvenanceId,
+  generateFigureId,
+  isValidArtifactType,
+  isValidArtifactStorageKind,
+  isValidArtifactStatus,
+  generateJobArtifactId,
+  isSafeInternalStorageKey,
+  isValidEdgeType,
+  isValidParentRole,
+  generateAnalysisObjectEdgeId,
   // users
   createUser,
   getUserByEmail,
   verifyUser,
+  // owner-scoped provenance / cache / figures
+  saveProvenance,
+  getProvenance,
+  getAllProvenance,
+  getProvenanceChain,
+  deleteProvenance,
+  makeCacheKey,
+  getCachedResult,
+  setCachedResult,
+  clearCache,
+  saveFigure,
+  assertSafeFigureFilePath,
+  getFiguresByUser,
+  deleteFigure,
   // orgs / projects / members
   createOrganization,
   getOrganization,
@@ -1469,34 +3626,79 @@ module.exports = {
   getProjectForUser,
   listProjectsForUser,
   listProjectMembers,
+  createOrganizationForUser,
+  getOrganizationForUser,
+  listOrganizationsForUser,
+  verifyOrganizationMember,
+  requireOrganizationRole,
+  addOrganizationMember,
+  createProjectForUser,
+  updateProject,
+  getProjectMember,
+  countProjectOwners,
+  addProjectMemberByEmail,
+  updateProjectMemberRole,
+  removeProjectMember,
+  // pipeline definitions
+  toPublicPipelineDefinition,
+  listProjectPipelineDefinitions,
+  createProjectPipelineDefinition,
+  getProjectPipelineSelection,
+  setProjectPipelineSelection,
   // datasets
   createDatasetForProject,
   listDatasetsForProject,
   getDatasetForProject,
   verifyDatasetProjectAccess,
+  updateDatasetForProject,
+  markDatasetUploaded,
+  markDatasetUploadFailed,
   rowToDataset,
   toPublicDataset,
   // analysis objects
   createAnalysisObject,
+  createAnalysisObjectForUser,
+  verifyAnalysisObjectOwner,
   getAnalysisObjectForUser,
   listAnalysisObjectsForUser,
   createProjectAnalysisObject,
   listProjectAnalysisObjects,
   getProjectAnalysisObject,
+  updateProjectAnalysisObjectSummary,
   rowToAnalysisObject,
   toPublicAnalysisObject,
   // jobs
   createJob,
+  createJobForUser,
+  verifyJobOwner,
+  cancelJobForUser,
   getJobForUser,
   listJobsForUser,
   createProjectJob,
   listProjectJobs,
   getProjectJob,
+  cancelProjectJob,
   transitionJobStatus,
   updateJobStatusForUser,
   appendJobLogForUser,
+  getWorkerJob,
+  claimNextJob,
+  heartbeatJob,
+  completeJobByWorker,
+  failJobByWorker,
+  releaseJob,
+  appendJobLogByWorker,
+  reapExpiredJobs,
+  setJobScheduling,
   rowToJob,
   toPublicJob,
+  // project provenance / figures
+  createProjectProvenance,
+  listProjectProvenance,
+  getProjectProvenance,
+  createProjectFigure,
+  listProjectFigures,
+  getProjectFigure,
   // artifacts
   createArtifact,
   createResultCheckpoint,
@@ -1504,15 +3706,24 @@ module.exports = {
   listProjectArtifacts,
   listProjectJobArtifacts,
   getProjectArtifact,
+  createJobArtifactByWorker,
+  createCheckpointArtifactForJobByWorker,
+  createCheckpointForJobByWorker,
+  completePbmcPipelineResultByWorker,
+  completeSeuratPipelineResultByWorker,
+  completeDegFindMarkersResultByWorker,
+  getLoadableCheckpointForAnalysisObject,
   rowToJobArtifact,
   toPublicJobArtifact,
   // lineage
   createLineageEdge,
+  createLineageEdgesForChild,
   lineageEdgeWouldCreateCycle,
   listLineageParents,
   listLineageChildren,
   listProjectAnalysisObjectParents,
   listProjectAnalysisObjectChildren,
   getProjectAnalysisObjectLineage,
+  buildLineageGraph,
   rowToAnalysisObjectEdge
 };

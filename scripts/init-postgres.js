@@ -11,9 +11,8 @@
  *   # or with PGHOST/PGUSER/PGPASSWORD/PGDATABASE set
  *   npm run init:postgres
  *
- * This does NOT migrate existing SQLite dev data. Local SQLite state is
- * disposable dev/test data (see docs/architecture.md → "Database backend");
- * a fresh Postgres database starts empty and users/projects are re-created
+ * This does NOT migrate existing SQLite dev data.
+ * A fresh Postgres database starts empty and users/projects are re-created
  * through the normal signup/create flows.
  */
 

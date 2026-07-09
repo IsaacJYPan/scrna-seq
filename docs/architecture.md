@@ -29,7 +29,7 @@ confuse "implemented and tested" with "usable in the UI".
 Status legend:
 
 - **UI-wired** — reachable and used through the React app today.
-- **backend-only** — implemented and tested in Express/SQLite (and covered by
+- **backend-only** — implemented and tested in Express/Postgres (and covered by
   CI backend tests), but no React UI surfaces it yet.
 - **legacy/prototype** — older path still present; kept for now, not the
   intended durable product workflow.
@@ -66,7 +66,7 @@ Status legend:
 | Artifact downloads | not implemented | No public download route; responses never expose storage paths/keys. |
 | Object storage | not implemented | Local vault only; no external object storage. |
 | Secure cookie sessions | backend-wired (transitional) | HttpOnly + SameSite + Secure-in-production session cookie is set on login/signup and accepted on every route; frontend restores via `/api/auth/session`. localStorage bearer is deprecated fallback. Session revocation/versioning not yet implemented. |
-| Postgres database path | backend-only (expanded foundation) | `backend/pgDatabase.js` + `backend/pg/schema.sql` provide a broader Postgres data layer + schema for users, projects/members, datasets, analysis objects, project jobs/logs/artifacts, and lineage. SQLite is still the app runtime; this is not a full runtime cutover. See "Database backend" below. |
+| Postgres database runtime | backend-wired | `backend/pgDatabase.js` + `backend/pg/schema.sql` are the app metadata runtime for users, projects/members, datasets, analysis objects, project jobs/logs/artifacts, provenance, figures/cache, and lineage. See "Database backend" below. |
 | Shared project live R state | not implemented | Collaboration is via durable metadata, never a shared live R session. |
 
 ## DEG paths (two implementations)
@@ -154,33 +154,29 @@ checkpoint loading is a separate internal path for server-created checkpoints.
 
 ## Database backend
 
-The app is mid-migration from SQLite to Postgres for the hosted service.
+The app runtime is Postgres-only.
 
-- **Runtime today:** SQLite (`backend/database.js`), loaded by `server.js`. This
-  is the temporary local/test fallback, not the intended hosted-service database.
-- **Postgres foundation:** `backend/pg/schema.sql` is the Postgres translation of
-  the durable schema (same tables, server-owned identity, role/scope columns, job
-  state-machine + worker-coordination columns, artifact immutability, lineage DAG).
-  `backend/pgDatabase.js` is an async `pg` data layer implementing a broader
-  parity slice for users, orgs/projects/members, datasets, analysis objects,
-  project-scoped jobs/logs/artifacts, and lineage reads/edges, with public
-  projections that strip claim tokens, worker internals, storage keys/URIs, and
-  object hashes. Provenance, figures/cache, and worker claim/lease helpers are
-  still not fully ported.
-- **Backend selection** is via `DATABASE_BACKEND` (`sqlite` | `postgres`) or
-  inferred from `DATABASE_URL` (see `backend/config.js`). Selecting `postgres`
-  does not yet switch the running server — porting the full route/DB call surface
-  off synchronous better-sqlite3 onto the async `pg` layer is the next branch.
+- **Runtime today:** `server.js` loads `backend/pgDatabase.js`; startup refuses
+  to run without `DATABASE_URL` or `PG*` connection settings.
+- **Schema/data layer:** `backend/pg/schema.sql` is the durable schema for
+  server-owned identity, role/scope columns, job state-machine + worker
+  coordination, artifact immutability, provenance/figures/cache, and lineage DAG.
+  `backend/pgDatabase.js` is the async `pg` data layer for users,
+  orgs/projects/members, datasets, analysis objects, project jobs/logs/artifacts,
+  provenance, figures/cache, and lineage. Public projections strip claim tokens,
+  worker internals, storage keys/URIs, object hashes, and raw paths.
+- **Backend selection:** `DATABASE_BACKEND` is accepted for readable summaries but
+  always resolves to `postgres`; SQLite is no longer a runtime option.
 - **Schema init:** `npm run init:postgres` applies `schema.sql` idempotently
-  (`DATABASE_URL` or `PG*` env). It does **not** migrate existing SQLite dev data:
-  local SQLite state is disposable dev/test data (gitignored `*.db`), so a fresh
-  Postgres database starts empty and users/projects are re-created through the
-  normal signup/create flows.
+  (`DATABASE_URL` or `PG*` env). Existing SQLite dev data is not migrated; a
+  fresh Postgres database starts empty and users/projects are re-created through
+  the normal signup/create flows.
 - **Local Postgres:** `docker compose up postgres` (localhost-only) or any local
   Postgres; then `DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna npm run init:postgres`.
-- **Evidence:** `backend/postgres-contract.test.js` runs against a real Postgres
-  (CI service + `npm run test:backend:postgres`) and SKIPS cleanly when no
-  Postgres is configured, so the default SQLite `npm run test:backend` stays green.
+- **Evidence:** `npm run test:backend` includes the config contract,
+  real-Postgres database contract, and live Express runtime smoke test. The
+  Postgres-specific tests skip when no database is configured, but the server
+  itself does not.
 
 ## State & storage boundaries
 
@@ -238,11 +234,10 @@ The app is mid-migration from SQLite to Postgres for the hosted service.
 
 ## Testing & CI notes
 
-- `npm run test:backend` runs the full `backend/*.test.js` suite. These are
-  **backend contract tests**: they exercise the real Express + SQLite stack,
-  including backend contract coverage for worker coordination, datasets, RBAC,
-  and the durable jobs/artifacts/lineage APIs. Durable jobs, artifacts/checkpoints,
-  and lineage are implemented in the backend. The React UI now includes a
+- `npm run test:backend` runs the Postgres backend contract/runtime suite:
+  config boundaries, the real `pgDatabase` contract, and a live Express HTTP
+  smoke path against Postgres. Durable jobs, artifacts/checkpoints, and lineage
+  are implemented in the backend. The React UI now includes a
   read-only Jobs & Artifacts / durable history surface for safe metadata
   visibility, and the DEG tab launches `deg.find_markers.v1` jobs and reads
   bounded `deg_summary` metadata, and the Pipeline Manager Seurat panel launches the

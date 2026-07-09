@@ -2,7 +2,7 @@
  * Centralized runtime configuration + environment boundaries.
  *
  * This module is the single, documented place that reads process.env for the
- * hosted-service configuration surface: database backend selection, session /
+ * hosted-service configuration surface: Postgres connection, session /
  * cookie settings, allowed browser origins, the internal R backend URL, the job
  * worker knobs, storage roots, and upload limits. It exists so hosted deployment
  * behavior is legible and validated in ONE place instead of being scattered
@@ -57,17 +57,13 @@ function isProduction() {
 }
 
 // ── Database backend selection ──────────────────────────────────────────────
-// The app is mid-migration from SQLite (local/test) to Postgres (hosted). The
-// backend is chosen explicitly by DATABASE_BACKEND, else inferred: a present
-// DATABASE_URL implies Postgres, otherwise SQLite. SQLite remains the default
-// so local dev / the existing SQLite backend test suite are unaffected unless a
-// deployment opts into Postgres.
+// The app runtime is Postgres-only. DATABASE_BACKEND is accepted for readable
+// summaries, but any value resolves to Postgres; SQLite is no longer a runtime
+// option.
 function databaseBackend() {
   const raw = trimmed(process.env.DATABASE_BACKEND).toLowerCase();
   if (raw === 'postgres' || raw === 'postgresql' || raw === 'pg') return 'postgres';
-  if (raw === 'sqlite') return 'sqlite';
-  if (trimmed(process.env.DATABASE_URL)) return 'postgres';
-  return 'sqlite';
+  return 'postgres';
 }
 
 function databaseUrl() {
@@ -237,7 +233,7 @@ function validateProductionConfig() {
   if (!trimmed(process.env.SESSION_SECRET)) {
     errors.push('SESSION_SECRET must be set in production.');
   }
-  if (databaseBackend() === 'postgres' && !hasPostgresConnection()) {
+  if (!hasPostgresConnection()) {
     errors.push('DATABASE_URL (or PGHOST/PGDATABASE) must be set for the Postgres backend.');
   }
   if (!trimmed(process.env.FRONTEND_ORIGIN) && !trimmed(process.env.FRONTEND_URL)) {

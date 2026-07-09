@@ -1,6 +1,6 @@
 /**
  * Config module contract (unit-only). Verifies environment boundaries:
- * backend selection, cookie/secure defaults, allowed-origin parsing, the
+ * Postgres-only database selection, cookie/secure defaults, allowed-origin parsing, the
  * production validation gate, and that summary() never leaks secrets.
  */
 
@@ -19,18 +19,20 @@ beforeEach(() => { KEYS.forEach((k) => { SAVED[k] = process.env[k]; delete proce
 afterEach(() => { KEYS.forEach((k) => { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }); });
 
 describe('database backend selection', () => {
-  it('defaults to sqlite with no config', () => {
-    expect(config.databaseBackend()).toBe('sqlite');
+  it('defaults to postgres with no config', () => {
+    expect(config.databaseBackend()).toBe('postgres');
+    expect(config.hasPostgresConnection()).toBe(false);
   });
   it('infers postgres when DATABASE_URL is present', () => {
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
     expect(config.databaseBackend()).toBe('postgres');
     expect(config.hasPostgresConnection()).toBe(true);
   });
-  it('honors an explicit DATABASE_BACKEND=sqlite even with a URL', () => {
+  it('ignores legacy DATABASE_BACKEND=sqlite even with a URL', () => {
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
     process.env.DATABASE_BACKEND = 'sqlite';
-    expect(config.databaseBackend()).toBe('sqlite');
+    expect(config.databaseBackend()).toBe('postgres');
+    expect(config.hasPostgresConnection()).toBe(true);
   });
   it('builds a pg config from PG* vars when no URL is set', () => {
     process.env.PGHOST = 'db.internal';

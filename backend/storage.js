@@ -33,8 +33,8 @@ function vaultRoot() {
   return resolveRoot(process.env.VAULT_ROOT, ['vault']);
 }
 
-// Durable data root (SQLite db, uploads, and — via projectStorageKey — durable
-// project resources). Defaults to ./data to match server.js's DB_DIR.
+// Durable data root (uploads and, via projectStorageKey, durable project
+// resources). Defaults to ./data.
 function storageRoot() {
   return resolveRoot(process.env.STORAGE_ROOT, ['data']);
 }
