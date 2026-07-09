@@ -62,9 +62,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   // angle shift (Plotly keeps its own state while the div stays mounted).
   const initialCamera3D = React.useRef(params2.camera3D || null);
 
-  // resultNComponents: in-session state that mirrors savedResultNComponents
-  // We initialize from the persisted value so traces render correctly after hydration.
-  const [resultNComponents] = useState(() => savedResultNComponents);
+  // Mirrors persisted completion metadata so the primary action reflects a
+  // successful run immediately after setParam2('resultNComponents', ...).
+  const resultNComponents = savedResultNComponents;
 
   // Keep dims in sync if the user re-clusters with different dims
   useEffect(() => {
@@ -336,7 +336,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <input
               id="umap-neighbors"
               type="number" value={nNeighbors} min={5} max={100}
-              onChange={e => setParam2('nNeighbors', parseInt(e.target.value))}
+              onChange={e => setParam('nNeighbors', parseInt(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
             <p className="text-[10px] text-textMuted mt-1">Local vs global structure</p>
@@ -346,7 +346,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <input
               id="umap-dist"
               type="number" value={minDist} min={0.01} max={1.0} step={0.05}
-              onChange={e => setParam2('minDist', parseFloat(e.target.value))}
+              onChange={e => setParam('minDist', parseFloat(e.target.value))}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
             <p className="text-[10px] text-textMuted mt-1">Packing density</p>
