@@ -1,13 +1,9 @@
 /**
  * Shared password hashing / verification.
  *
- * The hash string format is IDENTICAL to backend/database.js
- * (`$pbkdf2-sha512$i=<iters>$<salt>$<hash>`, 600k iterations, sha512, 64 bytes)
- * so a user row created through the Postgres data layer is verifiable by the
- * same rules as a SQLite user row, and vice versa. Extracted into its own module
- * so the Postgres foundation (backend/pgDatabase.js) does not duplicate — and
- * cannot drift from — the credential contract. The SQLite database.js keeps its
- * own inline copy for now; both are pinned to this format by the auth tests.
+ * The hash string format is the app credential contract:
+ * `$pbkdf2-sha512$i=<iters>$<salt>$<hash>`, 600k iterations, sha512, 64 bytes.
+ * It lives here so backend/pgDatabase.js does not duplicate credential logic.
  */
 
 'use strict';
@@ -44,7 +40,7 @@ function timingSafeEqualHex(a, b) {
 
 /**
  * Verify a plaintext password against a stored hash. `storedHash` may be null
- * (user not found) — in that case equivalent PBKDF2 work is still spent so the
+ * (user not found). In that case equivalent PBKDF2 work is still spent so the
  * not-found branch is not measurably faster. Returns a boolean.
  */
 function verifyPassword(password, storedHash) {
@@ -60,10 +56,7 @@ function verifyPassword(password, storedHash) {
     const attemptHash = crypto.pbkdf2Sync(password, salt, iters, 64, 'sha512').toString('hex');
     return timingSafeEqualHex(attemptHash, hashData);
   }
-  // Legacy (pre-format) hash: 100k iterations, salt supplied separately by the
-  // caller is not available here, so a bare legacy hash cannot be verified by
-  // this shared helper. New (Postgres) users are always created in the new
-  // format, so this only matters for migrated legacy SQLite rows.
+  // Legacy bare hashes are unsupported because their salt is not available here.
   return false;
 }
 

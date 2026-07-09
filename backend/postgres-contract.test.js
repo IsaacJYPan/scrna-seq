@@ -13,11 +13,9 @@
  *   - public sanitization (claim_token/worker internals + storage_uri stripped).
  *
  * GATING: the whole suite is SKIPPED unless a Postgres connection is configured
- * (DATABASE_URL or PG* env). So the default local `npm run test:backend`
- * (SQLite, no Postgres) stays green, while CI — which provisions a Postgres
- * service and sets DATABASE_URL — runs it for real. If DATABASE_URL is set but
- * the server is unreachable, the suite FAILS loudly (a real misconfiguration),
- * rather than silently passing.
+ * (DATABASE_URL or PG* env). The app server itself requires Postgres to start;
+ * the skip exists only so local test commands can run without a local database.
+ * If DATABASE_URL is set but the server is unreachable, the suite FAILS loudly.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
