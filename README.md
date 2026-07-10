@@ -4,14 +4,14 @@ A local/development-oriented single-cell RNA-seq analysis workbench:
 
 - React/Vite browser app.
 - Express API server for auth, project/object/job metadata, uploads, and R proxying.
-- SQLite for local metadata/cache/provenance/job state, with a **Postgres path**
-  in progress for the hosted service (`backend/pgDatabase.js` + `backend/pg/schema.sql`).
+- Postgres for metadata/cache/provenance/job state
+  (`backend/pgDatabase.js` + `backend/pg/schema.sql`).
 - R Plumber/Seurat backend for computation.
 
 This repository is not a production-complete multi-tenant service. Treat it as a
 local or trusted-environment workbench while the production boundaries are still
 being hardened. Infrastructure is moving toward a hosted-service-ready shape:
-Postgres over SQLite, HttpOnly cookie sessions over localStorage bearer tokens,
+Postgres, HttpOnly cookie sessions over localStorage bearer tokens,
 and centralized environment/config validation (`backend/config.js`). Data is
 sensitive by default — no public downloads, no shared live R state, and no raw
 storage paths/keys in responses.
@@ -58,8 +58,8 @@ At a glance:
   HttpOnly cookie sessions (login/signup set the cookie; `/api/auth/session`
   restores; `/api/auth/logout` clears; cookie auth is preferred while the
   localStorage bearer remains a deprecated fallback), an expanded Postgres data
-  layer + schema proven by a real-Postgres contract test (SQLite still the
-  runtime), server-owned storage-key hardening, and centralized config validation.
+  runtime data layer + schema proven by real-Postgres contract/runtime tests,
+  server-owned storage-key hardening, and centralized config validation.
 - **Not implemented (product):** pathway enrichment, CellChat, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
   object storage, server-side session revocation, shared project live R state.
@@ -92,30 +92,31 @@ Fast checks (no R backend required):
 ```bash
 npm run lint
 npm run build
-npm run test:backend    # backend CONTRACT tests (incl. backend-only subsystems), SQLite
+npm run test:backend    # full Postgres backend suite (DB-backed suites skip without DATABASE_URL)
 npm run test:frontend
 ```
 
-### Postgres (hosted-service database path)
+### Postgres Database
 
-SQLite is the current runtime; Postgres is the hosted-service target. To develop
-or test against Postgres locally:
+Postgres is required for the app runtime. To develop or test locally:
 
 ```bash
 docker compose up -d postgres      # localhost-only Postgres (or use any local PG)
 export DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna
 npm run init:postgres              # apply backend/pg/schema.sql (idempotent)
-npm run test:backend:postgres      # real-Postgres contract test
+npm run test:backend:postgres      # full real-Postgres backend suite (backend/*.test.js)
 ```
 
-The Postgres contract test skips cleanly when `DATABASE_URL`/`PG*` is not set, so
-the default `npm run test:backend` (SQLite) is unaffected. The Postgres adapter
-now covers a broader parity slice for projects, datasets, analysis objects,
-jobs/artifacts, and lineage, but it is still not the Express runtime backend.
-Configuration is read and validated in `backend/config.js`; see `.env.example`
-for cookie, storage-root, and upload-limit requirements.
-Existing local SQLite data is disposable dev/test data and is **not** migrated —
-a fresh Postgres database starts empty.
+`test:backend` runs every `backend/*.test.js`. DB-backed suites (auth, RBAC,
+datasets, analysis objects, the job-worker contract, artifacts/checkpoints,
+lineage, the R-proxy gates, and the mocked-R pipeline handlers) each reset the
+schema per test via `resetSchemaForTests()` and skip cleanly when
+`DATABASE_URL`/`PG*` is not set; suites with no DB dependency (pure validators,
+serializers, config) always run. The server itself requires Postgres before it
+starts. Configuration is read and
+validated in `backend/config.js`; see `.env.example` for cookie, storage-root,
+and upload-limit requirements.
+Existing local SQLite data is not migrated; a fresh Postgres database starts empty.
 
 R/workflow checks for the hardened, live paths (require a real R/Seurat backend;
 they skip cleanly when Seurat is unavailable):

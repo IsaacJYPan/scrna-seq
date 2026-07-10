@@ -1,9 +1,7 @@
 name: CI Pipeline
 
 # Private-repo GitHub Actions minutes are limited, so the full CI suite runs
-# on pull requests (which already test the merge result) plus manual dispatch.
-# The post-merge push-to-main run is intentionally omitted to avoid a duplicate
-# full run of the same code; trigger it by hand via workflow_dispatch if needed.
+# on pull requests plus manual dispatch.
 on:
   pull_request:
     branches:
@@ -17,15 +15,13 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/scrna_test
+  NODE_ENV: test
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
-    # Postgres service for the hosted-service database contract test. The rest of
-    # the backend suite still runs against SQLite (the current runtime); this
-    # provisions a real Postgres so backend/postgres-contract.test.js proves the
-    # schema + pgDatabase layer on Postgres instead of skipping.
     services:
       postgres:
         image: postgres:16
@@ -86,319 +82,39 @@ jobs:
         run: npm run test:frontend
 
       - name: Run Backend Tests
-        # Backend CONTRACT tests: they exercise the real Express + SQLite stack,
-        # including subsystems that are backend-only and NOT surfaced in the React
-        # UI yet (durable jobs, worker coordination, artifacts/checkpoints, lineage
-        # DAG, datasets, RBAC management). A green run proves the API/DB contract
-        # holds — not that a feature is wired into the UI. See the "Implemented vs
-        # UI-wired" table in README.md.
+        # The FULL backend suite (backend/*.test.js) against the real Postgres
+        # service: per-user isolation, auth (cookie/bearer/rate-limit/credentials),
+        # org/project RBAC, datasets, analysis-objects, the durable job-worker
+        # claim/lease/heartbeat contract, artifacts/checkpoints, lineage DAG, the
+        # R-proxy ownership/policy/diagnostics gates, and the mocked-R pipeline
+        # worker handlers (pbmc/seurat/deg/checkpoint-load/object-inspect/bridge).
+        # Every DB-backed suite resets the schema via resetSchemaForTests(), so no
+        # separate init step is needed. Suites with no DB dependency (pure
+        # validators, serializers, config) run unconditionally; DB/HTTP suites skip
+        # only when DATABASE_URL is unset (never in CI).
         run: npm run test:backend
 
-      - name: Run Postgres Contract Test
-        # Hosted-service database foundation (evidence label: Postgres contract).
-        # Applies backend/pg/schema.sql to the Postgres service and runs the
-        # contract test (auth, project RBAC, server-generated ids, analysis-object
-        # ownership, job state machine, artifact result-checkpoint immutability,
-        # public sanitization). SQLite remains the app runtime; this proves the
-        # Postgres path is real and green before it becomes the runtime.
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/scrna_test
-          NODE_ENV: test
-        run: |
-          npm run init:postgres
-          npm run test:backend:postgres
-
-      - name: Run Security Tests
-        # Per-user DB isolation + analysis-object identity/ownership, the
-        # R-proxy X-Object-ID ownership contract, and durable job ownership /
-        # status-machine enforcement. These guard the regression where a stale
-        # pre-rebase branch reintroduced unscoped cross-user deletes and
-        # client-controlled R state keys.
-        #
-        # Also runs the pre-collaboration security cleanup regressions:
-        #   auth-ratelimit      (finding 1: 429 on rapid login/signup)
-        #   r-diagnostic-gate   (finding 2: //__test, %2F__test gated to 404)
-        #   r-path-drift        (finding 4: R validate_path fields vs Node allowlist)
-        #   auth-credentials    (finding 7: generic 401, no user-enumeration message)
-        #   security/analysis-objects (findings 5, 6, 9: figure path, owner-required helpers, datasetId caveat)
-        #   organizations       (org/project membership + authorization foundation:
-        #                        404-vs-403 access rules, server-controlled ids/owner/role,
-        #                        last-owner invariant, owner/admin-only mutations)
-        #   datasets            (project-scoped datasets: role-checked create/read/update,
-        #                        404-vs-403 access rules, server-controlled ids/owner/storage,
-        #                        file_type/status allow-lists, upload sha256/size + server-chosen
-        #                        storage key, and datasetId verification on analysis objects/jobs)
-        #   project-analysis-resources (project-scoped analysis objects/jobs: role-checked
-        #                        create + project-member metadata/history reads, 404-vs-403
-        #                        access rules, server-controlled ids/owner/project/status,
-        #                        same-project dataset/parent/lineage/result references, cancel
-        #                        policy by role, and proof that project membership does NOT
-        #                        widen R object/state ownership)
-        #   project-provenance-figures (project-scoped provenance/figure metadata: role-checked
-        #                        append-only create + project-member reads, 404-vs-403 access
-        #                        rules, server-controlled ids/owner/project/actor, same-project
-        #                        dataset/object/job/result/provenance/parent references, NO figure
-        #                        file_path/storage-key acceptance and no raw path in responses,
-        #                        legacy NULL-project rows not leaked, and proof that referencing
-        #                        an object in metadata does NOT widen R object/state ownership)
-        #   jobs-worker-contract (durable job-worker coordination contract/schema: idempotent
-        #                        additive migration + legacy-row readability, single-winner
-        #                        claim, priority/created_at ordering, terminal/canceled jobs
-        #                        unclaimable, lease expiry recovery (requeue vs fail by
-        #                        max_attempts), heartbeat/complete/fail/release restricted to the
-        #                        claim-token-holding worker, cancel voiding a live claim, the
-        #                        running→queued re-queue edge, claim_token never exposed by read
-        #                        APIs, and proof worker activity does NOT widen R object ownership;
-        #                        NO worker runs — contract + schema only)
-        #   job-worker          (minimal worker drain over the contract: idle no-op,
-        #                        claim→heartbeat→complete of a supported `generic` noop
-        #                        handler with durable logs, handler-error failure, unsupported
-        #                        job type claimed-then-failed (UNSUPPORTED_JOB_TYPE, terminal),
-        #                        single-winner claim, canceled-queued unclaimable, cancel-during-
-        #                        handler claim-loss no-op (not resurrected), expired-lease reap
-        #                        requeue/fail + stale worker cannot complete after reap, live
-        #                        lease untouched, claim_token never exposed by owner reads,
-        #                        clean start/stop with no leaked timers, worker disabled by
-        #                        default, and proof processing a job does NOT widen R object
-        #                        ownership)
-        #   job-worker-runtime  (worker RUNTIME hardening: deterministic + safe env config
-        #                        parsing (ENABLE_JOB_WORKER exact "true" only; invalid
-        #                        poll/lease fall back to documented defaults with a sanitized
-        #                        warning that never echoes the raw value), opt-in startup
-        #                        wiring (no worker unless enabled, importing the server does
-        #                        not start one, single-loop idempotency, config passthrough,
-        #                        no claim-token/secret exposure), safe stop (no-worker / double
-        #                        stop), graceful shutdown (awaits worker stop, bounded by a
-        #                        timeout so it never hangs, exits non-zero on stop failure with
-        #                        a sanitized log, leaks no timers), and DB busy_timeout init;
-        #                        NO R execution, NO artifacts, NO shared R state)
-        #   job-artifacts-checkpoints (durable artifact/checkpoint METADATA model: idempotent
-        #                        additive job_artifacts migration + indexes, artifact-type/
-        #                        storage-kind/status allow-lists, server-generated art_ ids with
-        #                        client id/project/creator/storage-uri/checksum/size ignored,
-        #                        same-scope-only references (no cross-project/owner leak),
-        #                        claim-guarded worker-only create (no public create route),
-        #                        single immutable result checkpoint object per successful job
-        #                        (CHECKPOINT_EXISTS / no duplicate by two workers; failed/
-        #                        canceled jobs create none), checkpoint.noop placeholder handler
-        #                        end-to-end with metadata-only artifact + durable logs while
-        #                        generic stays a noop and unsupported types still fail terminally,
-        #                        role-checked project read routes (404-vs-403, 400 malformed ids),
-        #                        no storage_uri/path/storage-key/claim-token/worker-internal in
-        #                        responses, legacy NULL-project artifacts not leaked, and proof a
-        #                        co-member reading a checkpoint cannot access it via /api/r/*;
-        #                        NO download, NO object storage, NO real R/Seurat outputs)
-        #   r-worker-bridge     (minimal worker-to-R bridge: ONE allowlisted, read-only,
-        #                        metadata-only R operation (r.runtime.check → R /health) invoked
-        #                        through server-controlled code — arbitrary operation names,
-        #                        client-supplied R code/path/endpoint/method/state-key all
-        #                        ignored/rejected (input is server-derived); explicit timeout +
-        #                        sanitized errors (no raw R error/stack/internal URL leaks); one
-        #                        metadata-only r_runtime_check artifact on success with NO
-        #                        checkpoint/result object, NO analysis-object access, NO mutation;
-        #                        failed/canceled/claim-lost jobs finalize no artifact and two
-        #                        workers cannot duplicate one; role-checked project artifact reads
-        #                        omit storage-uri/path/state-key/claim-token/worker/R-URL; and
-        #                        proof the bridge does NOT widen live-R object access for a project
-        #                        co-member (membership ≠ live-R ownership); NO public bridge/worker
-        #                        route, NO download, NO arbitrary R, NO real R/Seurat pipeline)
-        #   r-object-inspect    (read-only worker-to-R object inspection: ONE allowlisted,
-        #                        read-only, metadata-only operation (r.object.inspect → R
-        #                        GET /object/inspect) over server-derived object context — the
-        #                        object id comes from the TRUSTED job row, the X-Object-ID /
-        #                        R state key is SERVER-derived (never client-provided), and
-        #                        arbitrary operation/code/path/endpoint/method/state-key are
-        #                        impossible (default caller also defense-in-depth target-allowlists);
-        #                        the live-R object OWNER gate (verifyAnalysisObjectOwner) runs
-        #                        BEFORE any R contact so a project co-member/admin cannot inspect
-        #                        another user's live object (membership ≠ live-R access), with
-        #                        cross-project 404, legacy-object 404, malformed 400, unknown 404,
-        #                        viewer 403, and missing-object fail-before-R; inspection mutates
-        #                        NOTHING and creates NO checkpoint/result object (object byte-stable
-        #                        across repeats); ONE metadata-only r_object_inspection artifact on
-        #                        success with sanitized bounded summary (no expression/cell/gene/
-        #                        embedding/path/state-key/serialized data); failed/canceled/claim-
-        #                        lost jobs finalize no artifact and two workers cannot duplicate one;
-        #                        role-checked project artifact reads omit storage-uri/path/state-key/
-        #                        claim-token/worker/R-URL; deriveRStateKey stays server-derived and
-        #                        /api/r/* still rejects a co-member's cross-user object id; NO
-        #                        download, NO object storage, NO arbitrary R, NO real R/Seurat pipeline)
-        #   analysis-object-lineage-dag (DAG-ready analysis-object lineage edge model:
-        #                        idempotent additive analysis_object_edges migration + indexes
-        #                        (incl. the COALESCE(job_id,'') unique index), one-time idempotent
-        #                        backfill of existing single-parent links as derived_from edges with
-        #                        cross-project links NOT backfilled, server-generated aoe_ ids with
-        #                        client project/creator/internal fields ignored, malformed ids 400 /
-        #                        unknown-or-cross-scope refs 404 / self-parent 400 / duplicate 409 /
-        #                        direct+indirect cycle 409, branching (two children of one parent)
-        #                        and multi-parent children representable + traversable, checkpoint
-        #                        completion creating exactly one job-linked checkpoint edge while
-        #                        failed/canceled/claim-lost/duplicate completions create none,
-        #                        role-checked read-only parents/children/lineage routes (404-vs-403,
-        #                        400 malformed, cross-project/legacy-NULL-project objects not leaked),
-        #                        responses omitting storage-uri/path/state-key/claim-token/worker
-        #                        internals, deterministic bounded graph, and proof a co-member who can
-        #                        read lineage still cannot use a checkpoint object via /api/r/*; the
-        #                        single-parent parent_object_id/lineage_root_id stay compatibility/
-        #                        fast-path fields; NO named branches, NO merge/integration semantics,
-        #                        NO mutating R/Seurat pipeline, NO download/object storage)
-        #   pbmc-pipeline-worker (first production-integrated scientific pipeline: the existing
-        #                        PBMC/Seurat preprocessing path wrapped as ONE allowlisted
-        #                        `pbmc.pipeline.v1` worker job + `r.pbmc.pipeline.v1` bridge op.
-        #                        Scope: only this type added; generic/checkpoint.noop/r.runtime.check/
-        #                        r.object.inspect unchanged; unsupported types still terminal; NO
-        #                        DEG/pathway/CellChat registered; NO public worker/R-bridge/download
-        #                        route. Params: fixed server-side allowlist (defaults recorded;
-        #                        unknown rejected; strings never coerced so no param becomes R code/
-        #                        path/function; invalid → failed-before-R; resolved params in safe
-        #                        metadata). Ownership: input object id from the TRUSTED job row; the
-        #                        job creator must OWN the live object (verifyAnalysisObjectOwner)
-        #                        BEFORE any R contact and the X-Object-ID is SERVER-derived
-        #                        (deriveRObjectStateKey) — a co-member/admin/viewer/non-member/cross-
-        #                        project/legacy/malformed object cannot run it. Bridge: only the
-        #                        allowlisted op runs; arbitrary op/code/path/endpoint/method/state-key
-        #                        rejected/impossible; the params body is server-rebuilt from the
-        #                        allowlist + a SERVER-allocated checkpoint key; sanitized errors (no
-        #                        R URL/token/state-key/stack leak). Success: completes via the worker
-        #                        contract creating EXACTLY one result object + one parent→result
-        #                        checkpoint edge + one local_internal checkpoint artifact (checksum/
-        #                        size; storage_uri stripped from public reads) + one metadata-only
-        #                        pipeline_summary artifact; links result_analysis_object_id; same
-        #                        project/lineage-root; parent unchanged. Failure/cancel/claim-loss/
-        #                        absent-checkpoint create NO successful result/edge/artifact and two
-        #                        workers cannot duplicate one; checkpoint key is server-controlled +
-        #                        traversal-proof; NO download route; NO arbitrary R)
-        #   checkpoint-load-live-r-state (allowlisted checkpoint load / reattach into the
-        #                        OWNER's private live R session: ONE `checkpoint.load.v1`
-        #                        worker job + `r.checkpoint.load.v1` bridge op + internal
-        #                        POST /object/checkpoint-load. Scope: only this type/op added;
-        #                        existing handlers unchanged; NO DEG/pathway/CellChat/download
-        #                        type/op; NO public worker/R-bridge/download route. Selection:
-        #                        a SERVER-selected loadable checkpoint (artifact_type checkpoint
-        #                        + storage_kind local_internal + safe internal key + checksum/
-        #                        size, linked via result_analysis_object_id) — zero →
-        #                        NO_CHECKPOINT_ARTIFACT, >1 → AMBIGUOUS_CHECKPOINT (deterministic
-        #                        reject), wrong type/kind filtered out; the public projection
-        #                        still strips storage_uri. Ownership: OWNER-ONLY v1 — the job
-        #                        creator must OWN the object (verifyAnalysisObjectOwner) BEFORE any
-        #                        R contact and the X-Object-ID is SERVER-derived; a co-member/admin
-        #                        (membership ≠ live R)/viewer/non-member/cross-project/malformed
-        #                        object cannot load it. Block: direct authenticated
-        #                        /api/r/object/checkpoint-load is 404 BEFORE R for every method/odd
-        #                        spelling with no job/artifact/side effect; unauthenticated stays
-        #                        401; the pbmc block + ownership behavior still hold. Bridge: only
-        #                        the allowlisted op runs; the body is server-rebuilt from the
-        #                        SERVER-selected internal key + expected checksum/size — NO client
-        #                        storage key/path/endpoint/method/state-key; sanitized errors (no R
-        #                        URL/token/state-key/stack/path leak). Success: completes via the
-        #                        worker contract recording ONE metadata-only checkpoint_load summary
-        #                        artifact (live_state_mutation true, scientific_output false) and
-        #                        NO new result object / lineage edge / checkpoint artifact; a
-        #                        follow-up r.object.inspect addresses the SAME canonical key.
-        #                        Failure/cancel/claim-loss/missing-checkpoint create NO successful
-        #                        load artifact and two workers cannot duplicate one; storage key
-        #                        stays internal/private)
-        #   deg-find-markers-worker (allowlisted DEG / marker finding over the OWNER's private
-        #                        live R object: ONE `deg.find_markers.v1` worker job +
-        #                        `r.deg.find_markers.v1` bridge op + internal POST
-        #                        /object/deg-find-markers. Scope: only this type/op added;
-        #                        existing handlers unchanged; NO pathway-enrichment/CellChat
-        #                        type/op; the legacy find_markers/deg analytical types stay
-        #                        UNREGISTERED handlers (still fail terminally); NO public worker/
-        #                        R-bridge/download route. Params: fixed server-side allowlist
-        #                        (backend/degFindMarkers.js) — defaults recorded; unknown rejected;
-        #                        strings restricted to fixed enums (groupBy/assay/testUse) so no
-        #                        param becomes R code/path/function; invalid → failed-before-R;
-        #                        resolved params in safe metadata; top-marker summary bounded
-        #                        [5,50]. Ownership: OWNER-ONLY v1 — the job creator must OWN the
-        #                        object (verifyAnalysisObjectOwner) BEFORE any R contact and the
-        #                        X-Object-ID is SERVER-derived; a co-member/admin (membership ≠
-        #                        live R)/viewer/non-member/cross-project/legacy/malformed object
-        #                        cannot run it. Block: direct authenticated
-        #                        /api/r/object/deg-find-markers is 404 BEFORE R for every method/
-        #                        odd spelling with no job/artifact/side effect; unauthenticated
-        #                        stays 401; the pbmc + checkpoint-load blocks still hold. Bridge:
-        #                        only the allowlisted op runs; the body is server-rebuilt from the
-        #                        allowlisted params + a SERVER-allocated result key — NO client
-        #                        storage key/path/endpoint/method/state-key; sanitized errors (no R
-        #                        URL/token/state-key/stack/path leak). Output/non-mutation: DEG is
-        #                        an OUTPUT analysis — it creates NO new analysis object and NO
-        #                        lineage edge and does not mutate the live object; on success it
-        #                        records EXACTLY one local_internal `deg_markers` full-table
-        #                        artifact (server key + checksum/size; storage_uri stripped from
-        #                        public reads; NO download) + one metadata-only `deg_summary`
-        #                        artifact (resolved params + bounded safe-column top-N preview) in
-        #                        ONE atomic transaction. Failure/cancel/claim-loss/missing-table/
-        #                        bad-checksum create NO successful DEG artifact and a duplicate
-        #                        completion is refused (DEG_RESULT_EXISTS); the summary sanitizer
-        #                        hard-caps rows and drops raw matrices/cell/embedding/path/state-key)
-        #   r-proxy-policy      (pins the R-proxy path policy: the three internal
-        #                        worker-only endpoints (pbmc-pipeline/checkpoint-load/
-        #                        deg-find-markers) are blocked with a no-leak 404 BEFORE R
-        #                        for every method/odd spelling, auth precedes the block, and
-        #                        the legacy live-R analytical endpoints (deg/cellchat/
-        #                        cellchat-infer/enrichment/annotate-clusters) stay reachable
-        #                        behind auth — documenting current legacy reachability, NOT
-        #                        endorsing it as a product workflow)
-        # NOTE: every backend/*.test.js already runs in the "Run Backend Tests"
-        # step (npm run test:backend); this step names the security-critical
-        # suites explicitly so the regression coverage is auditable.
-        run: npx vitest run backend/security.test.js backend/server-security.test.js backend/analysis-objects.test.js backend/r-proxy-ownership.test.js backend/r-proxy-policy.test.js backend/jobs.test.js backend/jobs-worker-contract.test.js backend/job-worker.test.js backend/job-worker-runtime.test.js backend/job-artifacts-checkpoints.test.js backend/r-worker-bridge.test.js backend/r-object-inspect.test.js backend/analysis-object-lineage-dag.test.js backend/pbmc-pipeline-worker.test.js backend/checkpoint-load-live-r-state.test.js backend/deg-find-markers-worker.test.js backend/organizations.test.js backend/datasets.test.js backend/project-analysis-resources.test.js backend/project-provenance-figures.test.js backend/pipeline-manifests.test.js backend/auth-ratelimit.test.js backend/auth-credentials.test.js backend/r-diagnostic-gate.test.js backend/r-path-drift.test.js --environment node --fileParallelism=false --silent=passed-only
-
       - name: Run R State Proxy Isolation Test
-        # Live Express + R Plumber check proving DB-backed per-object R state
-        # isolation (malformed/unknown/cross-user X-Object-ID rejected before
-        # reaching R). Requires the R backend set up above.
+        # Live Express + R check for owner-scoped DB-backed R object state.
         run: npm run test:r-state-proxy
 
       - name: Run PBMC Pipeline Parent-Immutability Smoke Test
-        # Live Rscript + Seurat check that the pbmc.pipeline.v1 copy-on-modify path
-        # leaves the parent object UNCHANGED at the object level while the derived copy
-        # gains the new state (the Node tests only assert this at the DB-row level).
-        # Reuses the R env set up above; SKIPs cleanly if Seurat is unavailable.
         run: npm run test:pbmc-parent
 
       - name: Download PBMC3k Sample Data
-        # Provides the real 10x MTX tutorial input that verify_seurat_pipeline.js
-        # converts to HDF5. Without this, the Seurat pipeline smoke intentionally
-        # skips and CI would not exercise the live worker/R path.
         run: node scripts/download_sample_data.js
 
       - name: Run Seurat Pipeline End-to-End Smoke Test
-        # Live Node worker + R Plumber + Seurat check for the UI-wired
-        # seurat.pipeline.v1 path. Converts the bundled PBMC3k MTX data to a real
-        # 10x HDF5 file, runs the actual worker/bridge/R pipeline at the default
-        # worker lease, and verifies tutorial counts plus public no-path-leak
-        # projections. This is the regression gate mocked worker tests cannot provide.
         run: npm run test:seurat-pipeline
 
       - name: Run Checkpoint-Load Reattach Smoke Test
-        # Live Rscript + Seurat check of the checkpoint.load.v1 R-side reattach path: a
-        # checksum-verified RDS bundle (list(global=<Seurat>, raw=...)) is verified BEFORE
-        # readRDS, validated for shape/class, and restored into the TARGET session only
-        # (a different object key is left untouched); mismatched checksum / unrecognized
-        # bundle / non-Seurat global are rejected. Mirrors r-backend/plumber.R
-        # POST /object/checkpoint-load. Reuses the R env above; SKIPs cleanly if Seurat is
-        # unavailable.
         run: npm run test:checkpoint-load
 
       - name: Run DEG Find-Markers Smoke Test
-        # Live Rscript + Seurat check of the deg.find_markers.v1 R-side path: FindAllMarkers
-        # over a small synthetic object with two clear groups produces markers, writes the full
-        # table to a file with a sha256 checksum, builds a BOUNDED top-N-per-group summary, and
-        # leaves the input object's identities/metadata UNCHANGED (DEG runs on a copy — no live
-        # mutation); a missing/single-identity group field fails safely. Mirrors r-backend/
-        # plumber.R POST /object/deg-find-markers. Reuses the R env above; SKIPs cleanly if
-        # Seurat is unavailable.
         run: npm run test:deg-markers
 
       - name: Run Visual/UX Tests
-        # MOCKED frontend visual smoke test: renders the built UI with backend + R
-        # responses mocked in the browser. Checks rendering/layout and obvious UI
-        # regressions only — it does NOT verify real backend, R, project/object,
-        # job, artifact, or tenant behavior, and is not integration/security
-        # evidence. The db-flow variant (test:visual:db-flow) is a fully-mocked,
-        # browser-dependent local pre-merge smoke and is intentionally NOT run here.
+        # Mocked frontend visual smoke test; it checks UI rendering/layout.
         run: npm run test:visual
 
       - name: Build Application

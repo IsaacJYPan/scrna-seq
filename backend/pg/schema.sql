@@ -1,18 +1,17 @@
 -- ============================================================================
--- Postgres schema for the scRNA-seq Workbench (hosted-service database path).
+-- Postgres schema for the scRNA-seq Workbench runtime.
 --
--- This is the Postgres translation of the durable schema currently created by
--- backend/database.js (SQLite). It preserves the SAME table set, server-owned
--- identity, role/scope columns, the job state-machine columns, worker
--- coordination columns, artifact immutability semantics, and lineage DAG model.
+-- This preserves the app's server-owned identity, role/scope columns, job
+-- state-machine columns, worker coordination columns, artifact immutability
+-- semantics, provenance/figure/cache tables, and lineage DAG model.
 --
--- Differences vs the SQLite DDL, all semantics-preserving:
---   * users.id uses GENERATED ALWAYS AS IDENTITY (was INTEGER AUTOINCREMENT).
---   * timestamps are TIMESTAMPTZ DEFAULT now() (was TEXT datetime('now')).
---   * JSON payload columns stay TEXT (JSON stored as a string) to mirror the
---     SQLite helpers exactly; JSONB is a documented future optimization.
+-- Notes:
+--   * users.id uses GENERATED ALWAYS AS IDENTITY.
+--   * timestamps are TIMESTAMPTZ DEFAULT now().
+--   * JSON payload columns stay TEXT (JSON stored as a string); JSONB is a
+--     documented future optimization.
 --   * one-result-checkpoint-per-job immutability is enforced by a PARTIAL UNIQUE
---     INDEX (SQLite enforces this in the helper layer / CHECKPOINT_EXISTS).
+--     INDEX.
 --
 -- Applied idempotently by scripts/init-postgres.js (CREATE TABLE IF NOT EXISTS /
 -- CREATE INDEX IF NOT EXISTS). Server-generated ids (org_/proj_/ds_/ao_/job_/
@@ -288,9 +287,8 @@ CREATE INDEX IF NOT EXISTS idx_job_artifacts_type ON job_artifacts(artifact_type
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_status ON job_artifacts(status);
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_project_job ON job_artifacts(project_id, job_id);
 CREATE INDEX IF NOT EXISTS idx_job_artifacts_created ON job_artifacts(created_at);
--- Artifact immutability: at most ONE result checkpoint per job. In SQLite this
--- invariant is enforced in the helper layer (CHECKPOINT_EXISTS); Postgres makes
--- it a hard partial-unique constraint so two racing workers cannot both write a
+-- Artifact immutability: at most ONE result checkpoint per job. This hard
+-- partial-unique constraint prevents two racing workers from both writing a
 -- result checkpoint for the same job.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_job_artifacts_one_checkpoint
   ON job_artifacts(job_id)

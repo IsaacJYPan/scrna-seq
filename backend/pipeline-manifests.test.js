@@ -1,29 +1,31 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const config = require('./config');
+const db = require('./pgDatabase');
 const {
-  initDatabase, closeDatabase,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
-} = require('./database');
+} = db;
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const { DEFAULT_PIPELINE_ID } = require('./pipelineManifests');
 
+const CONFIGURED = config.hasPostgresConnection();
+
 let server;
 
-beforeAll(async () => { server = await startServer(); });
-afterAll(() => { if (server) server.close(); });
+beforeAll(async () => { if (!CONFIGURED) return; server = await startServer(); });
+afterAll(async () => { if (!CONFIGURED) return; if (server) await new Promise((resolve) => server.close(resolve)); await db.close(); });
 
-beforeEach(() => { initDatabase(':memory:'); });
-afterEach(() => { closeDatabase(); });
+beforeEach(async () => { if (!CONFIGURED) return; await db.resetSchemaForTests(); });
 
-function users() {
-  const alice = createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' });
-  const bob = createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
-  const dave = createUserWithToken({ email: 'dave@example.com', displayName: 'Dave' });
+async function users() {
+  const alice = await createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' });
+  const bob = await createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
+  const dave = await createUserWithToken({ email: 'dave@example.com', displayName: 'Dave' });
   return { alice, bob, dave };
 }
 
-function seedProject(ownerUserId) {
-  const org = createOrganizationForUser(ownerUserId, { name: 'Acme Labs' });
+async function seedProject(ownerUserId) {
+  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme Labs' });
   return createProjectForUser(ownerUserId, { organizationId: org.id, name: 'Project X' });
 }
 
@@ -40,11 +42,11 @@ const manifest = (over = {}) => ({
   ...over,
 });
 
-describe('project pipeline definitions and user-project selection', () => {
+describe.skipIf(!CONFIGURED)('project pipeline definitions and user-project selection', () => {
   it('defaults each project member to the built-in Seurat pipeline', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
 
     const aliceSelection = await api(server, `/api/projects/${proj.id}/pipeline-selection`, { token: alice.token });
     const bobSelection = await api(server, `/api/projects/${proj.id}/pipeline-selection`, { token: bob.token });
@@ -57,9 +59,9 @@ describe('project pipeline definitions and user-project selection', () => {
   });
 
   it('keeps active pipeline selection scoped to user plus project', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'admin');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'admin');
 
     const created = await api(server, `/api/projects/${proj.id}/pipeline-definitions`, {
       method: 'POST',
@@ -83,8 +85,8 @@ describe('project pipeline definitions and user-project selection', () => {
   });
 
   it('requires route-backed tab ids and stores validated UI templates', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
 
     const badRoute = await api(server, `/api/projects/${proj.id}/pipeline-definitions`, {
       method: 'POST',
@@ -138,8 +140,8 @@ describe('project pipeline definitions and user-project selection', () => {
   });
 
   it('rejects unsafe uploaded manifest fields before storage', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
 
     for (const badTab of [
       { id: 'inspect', label: 'Inspect', moduleKey: 'inspectObject', icon: 'Activity' },
@@ -157,8 +159,8 @@ describe('project pipeline definitions and user-project selection', () => {
   });
 
   it('does not leak pipeline routes to non-members', async () => {
-    const { alice, dave } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice, dave } = await users();
+    const proj = await seedProject(alice.user.id);
 
     expect((await api(server, `/api/projects/${proj.id}/pipeline-definitions`, { token: dave.token })).status).toBe(404);
     expect((await api(server, `/api/projects/${proj.id}/pipeline-selection`, { token: dave.token })).status).toBe(404);

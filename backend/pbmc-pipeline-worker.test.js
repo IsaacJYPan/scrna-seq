@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
 // ════════════════════════════════════════════════════════════════════════════
 // PBMC/Seurat pipeline as an allowlisted worker job (pbmc.pipeline.v1)
@@ -25,9 +25,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 // backend/jobWorker.js (pbmcPipelineHandler), r-backend/plumber.R (POST /object/pbmc-pipeline).
 // ════════════════════════════════════════════════════════════════════════════
 
-const dbmod = require('./database');
+const config = require('./config');
+const dbmod = require('./pgDatabase');
+const CONFIGURED = config.hasPostgresConnection();
 const {
-  initDatabase, closeDatabase, createUser, getUserByEmail,
+  createUser, getUserByEmail,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getJobForUser, getProjectJob, getAnalysisObjectForUser, getProjectAnalysisObject,
@@ -96,17 +98,17 @@ async function drainPipeline(callR, now = T0, opts = {}) {
   return w.runOnce();
 }
 
-function seedProject(ownerUserId, name = 'P') {
-  const org = createOrganizationForUser(ownerUserId, { name: 'Acme' });
+async function seedProject(ownerUserId, name = 'P') {
+  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
   return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
 // Seed a project + an input analysis object + a queued pbmc.pipeline.v1 job (owner).
-function seedPipelineJob(params = {}) {
-  const alice = createUser('alice@example.com', 'password123', 'Alice');
-  const proj = seedProject(alice.id);
-  const obj = createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc' });
-  const job = createProjectJob(alice.id, proj.id, {
+async function seedPipelineJob(params = {}) {
+  const alice = await createUser('alice@example.com', 'password123', 'Alice');
+  const proj = await seedProject(alice.id);
+  const obj = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc' });
+  const job = await createProjectJob(alice.id, proj.id, {
     jobType: 'pbmc.pipeline.v1', analysisObjectId: obj.id, parameters: params,
   });
   return { alice, proj, obj, job };
@@ -115,11 +117,13 @@ function seedPipelineJob(params = {}) {
 // ════════════════════════════════════════════════════════════════════════════
 // 1. Inventory / scope (one type + one op added; nothing else changed)
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — inventory & scope', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+afterAll(async () => { if (!CONFIGURED) return; await dbmod.close(); });
 
-  it('registers pbmc.pipeline.v1; generic / checkpoint.noop / r.runtime.check / r.object.inspect unchanged', () => {
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
+
+  it('registers pbmc.pipeline.v1; generic / checkpoint.noop / r.runtime.check / r.object.inspect unchanged', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
       .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(pbmcPipelineHandler);
@@ -129,13 +133,13 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(worker.rObjectInspectHandler);
   });
 
-  it('pbmc.pipeline.v1 is an allowed job type; pipeline_summary an allowed artifact type', () => {
+  it('pbmc.pipeline.v1 is an allowed job type; pipeline_summary an allowed artifact type', async () => {
     expect(isValidJobType('pbmc.pipeline.v1')).toBe(true);
     expect(isValidArtifactType('pipeline_summary')).toBe(true);
     expect(isValidArtifactStorageKind('local_internal')).toBe(true);
   });
 
-  it('the r.pbmc.pipeline.v1 op is allowlisted, object-scoped, params-carrying, mutating', () => {
+  it('the r.pbmc.pipeline.v1 op is allowlisted, object-scoped, params-carrying, mutating', async () => {
     expect(isAllowedRBridgeOperation('r.pbmc.pipeline.v1')).toBe(true);
     const spec = R_BRIDGE_OPERATIONS['r.pbmc.pipeline.v1'];
     expect(spec.method).toBe('POST');
@@ -147,14 +151,14 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
     expect(spec.readOnly).toBe(false);
   });
 
-  it('the bridge target set stays exact/closed (includes POST /object/pbmc-pipeline)', () => {
+  it('the bridge target set stays exact/closed (includes POST /object/pbmc-pipeline)', async () => {
     // Includes POST /object/checkpoint-load (checkpoint.load.v1 branch) and POST
     // /object/deg-find-markers (deg.find_markers.v1 branch).
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
       .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
   });
 
-  it('pathway enrichment / CellChat are NOT registered job types or handlers (DEG is, via its own branch)', () => {
+  it('pathway enrichment / CellChat are NOT registered job types or handlers (DEG is, via its own branch)', async () => {
     // DEG (deg.find_markers.v1) is now registered by the deg.find_markers.v1 branch; the
     // legacy plain analytical types stay UNREGISTERED handlers (still fail terminally), and
     // pathway enrichment / CellChat remain entirely unintegrated.
@@ -172,16 +176,16 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
   });
 
   it('an unsupported analytical job type still fails terminally (UNSUPPORTED_JOB_TYPE), no R contact', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const job = createJobForUser(alice.id, { jobType: 'pca' });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const job = await createJobForUser(alice.id, { jobType: 'pca' });
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('unsupported');
     expect(calls).toHaveLength(0);
-    expect(getJobForUser(job.id, alice.id).status).toBe('failed');
+    expect((await getJobForUser(job.id, alice.id)).status).toBe('failed');
   });
 
-  it('the bridge / pipeline modules expose NO express route/app/download (no public route)', () => {
+  it('the bridge / pipeline modules expose NO express route/app/download (no public route)', async () => {
     for (const k of ['app', 'router', 'middleware', 'handler', 'routes', 'download']) {
       expect(bridge).not.toHaveProperty(k);
       expect(pbmc).not.toHaveProperty(k);
@@ -192,11 +196,11 @@ describe('pbmc.pipeline.v1 — inventory & scope', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 2. Parameter validation (pure allowlist + via handler-before-R)
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — parameter validation', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — parameter validation', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  it('applies + records documented defaults for an empty params object', () => {
+
+  it('applies + records documented defaults for an empty params object', async () => {
     const { params, defaultsApplied } = validatePbmcPipelineParams({});
     expect(params).toEqual({
       normalizationMethod: 'LogNormalize', scaleFactor: 10000, variableFeatures: 2000,
@@ -206,7 +210,7 @@ describe('pbmc.pipeline.v1 — parameter validation', () => {
     expect(defaultsApplied.sort()).toEqual(PBMC_PIPELINE_PARAM_NAMES.slice().sort());
   });
 
-  it('accepts valid in-range params and records which fell back to defaults', () => {
+  it('accepts valid in-range params and records which fell back to defaults', async () => {
     const { params, defaultsApplied } = validatePbmcPipelineParams({
       normalizationMethod: 'SCTransform', pcaDims: 30, clusterResolution: 1.2, seed: 7,
     });
@@ -219,13 +223,13 @@ describe('pbmc.pipeline.v1 — parameter validation', () => {
     expect(defaultsApplied).toContain('variableFeatures');
   });
 
-  it('REJECTS unknown parameter names (strict policy)', () => {
+  it('REJECTS unknown parameter names (strict policy)', async () => {
     expect(() => validatePbmcPipelineParams({ foo: 1 })).toThrowError(/Unknown parameter/);
     expect(() => validatePbmcPipelineParams({ pcaDims: 50, evil: 'x' })).toThrowError(/Unknown parameter/);
     try { validatePbmcPipelineParams({ foo: 1 }); } catch (e) { expect(e.code).toBe('UNKNOWN_PARAMETER'); }
   });
 
-  it('rejects out-of-range / wrong-type numeric params', () => {
+  it('rejects out-of-range / wrong-type numeric params', async () => {
     for (const bad of [
       { pcaDims: 1 }, { pcaDims: 999 }, { pcaDims: 12.5 }, { clusterResolution: 0 },
       { clusterResolution: 99 }, { scaleFactor: 0 }, { variableFeatures: 1 },
@@ -235,7 +239,7 @@ describe('pbmc.pipeline.v1 — parameter validation', () => {
     }
   });
 
-  it('a parameter can never become R code / a path / a function name (strings rejected)', () => {
+  it('a parameter can never become R code / a path / a function name (strings rejected)', async () => {
     // Numeric params: a string (even a numeric-looking one) is rejected — NOT coerced.
     for (const bad of [
       { pcaDims: 'system("rm -rf /")' }, { pcaDims: 'q()' }, { pcaDims: '50' },
@@ -249,7 +253,7 @@ describe('pbmc.pipeline.v1 — parameter validation', () => {
     expect(() => validatePbmcPipelineParams({ normalizationMethod: 'LogNormalize; rm' })).toThrowError(/one of/);
   });
 
-  it('non-object / array params are rejected', () => {
+  it('non-object / array params are rejected', async () => {
     for (const bad of [[1, 2, 3], 'x', 42, true]) {
       expect(() => validatePbmcPipelineParams(bad)).toThrowError(/plain JSON object/);
     }
@@ -259,31 +263,31 @@ describe('pbmc.pipeline.v1 — parameter validation', () => {
   });
 
   it('invalid params FAIL the job before any R contact (no R call, no result object)', async () => {
-    const { job, alice, proj } = seedPipelineJob({ pcaDims: 9999 });
+    const { job, alice, proj } = await seedPipelineJob({ pcaDims: 9999 });
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('failed');
     expect(calls).toHaveLength(0); // never reached R
-    const after = getProjectJob(alice.id, proj.id, job.id);
+    const after = await getProjectJob(alice.id, proj.id, job.id);
     expect(after.status).toBe('failed');
     expect(after.resultAnalysisObjectId).toBeFalsy();
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('unknown params FAIL the job before any R contact', async () => {
-    const { job } = seedPipelineJob({ totallyUnknownParam: 1 });
+    const { job } = await seedPipelineJob({ totallyUnknownParam: 1 });
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('failed');
     expect(calls).toHaveLength(0);
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('resolved params (with defaults) appear in safe result + artifact metadata', async () => {
-    const { job, alice, proj } = seedPipelineJob({ pcaDims: 30, clusterResolution: 1.0 });
+    const { job, alice, proj } = await seedPipelineJob({ pcaDims: 30, clusterResolution: 1.0 });
     const res = await drainPipeline(recordingPipelineCaller([]));
     expect(res.status).toBe('completed');
-    const summaryArts = listProjectJobArtifacts(alice.id, proj.id, job.id, { artifactType: 'pipeline_summary' });
+    const summaryArts = await listProjectJobArtifacts(alice.id, proj.id, job.id, { artifactType: 'pipeline_summary' });
     expect(summaryArts).toHaveLength(1);
     expect(summaryArts[0].metadata.resolvedParams.pcaDims).toBe(30);
     expect(summaryArts[0].metadata.resolvedParams.clusterResolution).toBe(1.0);
@@ -295,7 +299,7 @@ describe('pbmc.pipeline.v1 — parameter validation', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 3. Bridge allowlist & input control (pure function; injected caller)
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — bridge allowlist & input control', () => {
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — bridge allowlist & input control', () => {
   const job = { id: 'job_abc', ownerUserId: 7, projectId: 'proj_1', analysisObjectId: 'ao_1' };
   const objectContext = { objectId: 'ao_1', stateKey: 'user-7:obj-ao_1' };
   const pipeline = {
@@ -435,15 +439,15 @@ describe('pbmc.pipeline.v1 — bridge allowlist & input control', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 4. Ownership / project boundary (live-R ownership gate)
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — ownership & project boundary', () => {
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — ownership & project boundary', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('the live-R object OWNER can run the pipeline on their own object (server-derived state key)', async () => {
-    const { job, obj, alice } = seedPipelineJob({});
+    const { job, obj, alice } = await seedPipelineJob({});
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('completed');
@@ -454,48 +458,48 @@ describe('pbmc.pipeline.v1 — ownership & project boundary', () => {
   });
 
   it('a project co-member (analyst) CANNOT run the pipeline on another user\'s live object — fails before R', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    createUserWithToken({ email: 'carol@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
-    const carol = getUserByEmail('carol@example.com');
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    await createUserWithToken({ email: 'carol@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
+    const carol = await getUserByEmail('carol@example.com');
 
-    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
-    const job = createProjectJob(carol.id, proj.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: aliceObj.id });
+    const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
+    const job = await createProjectJob(carol.id, proj.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: aliceObj.id });
 
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('failed');
     expect(res.error.message).toBe('Analysis object not found.'); // 404-style, no existence leak
     expect(calls).toHaveLength(0); // never reached R
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
-    expect(getProjectJob(carol.id, proj.id, job.id).resultAnalysisObjectId).toBeFalsy();
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect((await getProjectJob(carol.id, proj.id, job.id)).resultAnalysisObjectId).toBeFalsy();
   });
 
   it('a project ADMIN co-member also cannot run it on another user\'s live object', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    createUserWithToken({ email: 'bob@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
-    const bob = getUserByEmail('bob@example.com');
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    await createUserWithToken({ email: 'bob@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
+    const bob = await getUserByEmail('bob@example.com');
 
-    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
-    createProjectJob(bob.id, proj.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: aliceObj.id });
+    const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
+    await createProjectJob(bob.id, proj.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: aliceObj.id });
 
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('failed');
     expect(calls).toHaveLength(0);
-    expect(verifyAnalysisObjectOwner(alice.user.id, aliceObj.id)).toBe(true);
-    expect(verifyAnalysisObjectOwner(bob.id, aliceObj.id)).toBe(false);
+    expect(await verifyAnalysisObjectOwner(alice.user.id, aliceObj.id)).toBe(true);
+    expect(await verifyAnalysisObjectOwner(bob.id, aliceObj.id)).toBe(false);
   });
 
   it('a VIEWER cannot create/trigger a pipeline job (403 by job-write policy)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const viewer = createUserWithToken({ email: 'viewer@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
-    const obj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const viewer = await createUserWithToken({ email: 'viewer@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
+    const obj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
 
     const r = await api(server, `/api/projects/${proj.id}/jobs`, {
       method: 'POST', token: viewer.token,
@@ -505,10 +509,10 @@ describe('pbmc.pipeline.v1 — ownership & project boundary', () => {
   });
 
   it('a non-member gets 404 creating a pipeline job', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const stranger = createUserWithToken({ email: 'stranger@example.com' });
-    const proj = seedProject(alice.user.id);
-    const obj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const stranger = await createUserWithToken({ email: 'stranger@example.com' });
+    const proj = await seedProject(alice.user.id);
+    const obj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
     const r = await api(server, `/api/projects/${proj.id}/jobs`, {
       method: 'POST', token: stranger.token,
       body: { jobType: 'pbmc.pipeline.v1', analysisObjectId: obj.id },
@@ -517,32 +521,29 @@ describe('pbmc.pipeline.v1 — ownership & project boundary', () => {
   });
 
   it('a cross-project / legacy / malformed object reference is rejected (404 / not run)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const projA = seedProject(alice.user.id, 'A');
-    const projB = seedProject(alice.user.id, 'B');
-    const objA = createProjectAnalysisObject(alice.user.id, projA.id, { objectType: 'seurat', displayName: 'a' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const projA = await seedProject(alice.user.id, 'A');
+    const projB = await seedProject(alice.user.id, 'B');
+    const objA = await createProjectAnalysisObject(alice.user.id, projA.id, { objectType: 'seurat', displayName: 'a' });
 
     // Referencing project A's object from a project B job → 404 at create time.
-    expect(() => createProjectJob(alice.user.id, projB.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: objA.id }))
-      .toThrowError(/Analysis object not found/);
+    await expect(createProjectJob(alice.user.id, projB.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: objA.id })).rejects.toThrowError(/Analysis object not found/);
 
     // A legacy owner-scoped object cannot be used through a project job (not in project).
-    const legacy = createAnalysisObjectForUser(alice.user.id, { objectType: 'seurat', displayName: 'legacy' });
-    expect(() => createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: legacy.id }))
-      .toThrowError(/Analysis object not found/);
+    const legacy = await createAnalysisObjectForUser(alice.user.id, { objectType: 'seurat', displayName: 'legacy' });
+    await expect(createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: legacy.id })).rejects.toThrowError(/Analysis object not found/);
 
     // Malformed / unknown object ids handled safely.
     for (const bad of ['', 'not-an-ao', 'ao_doesnotexist']) {
-      expect(() => createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: bad }))
-        .toThrowError();
+      await expect(createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: bad })).rejects.toThrowError();
     }
   });
 
   it('a job missing its input object fails before R (R_OBJECT_CONTEXT_REQUIRED)', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const proj = seedProject(alice.id);
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const proj = await seedProject(alice.id);
     // Legacy/owner job with NO analysis object.
-    createJobForUser(alice.id, { jobType: 'pbmc.pipeline.v1' });
+    await createJobForUser(alice.id, { jobType: 'pbmc.pipeline.v1' });
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('failed');
@@ -553,40 +554,40 @@ describe('pbmc.pipeline.v1 — ownership & project boundary', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 5. Worker success behavior
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — worker success', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — worker success', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('completes via the worker contract: ONE result object + edge + checkpoint + summary artifact, linked', async () => {
-    const { job, alice, proj, obj } = seedPipelineJob({});
+    const { job, alice, proj, obj } = await seedPipelineJob({});
     const res = await drainPipeline(recordingPipelineCaller([]));
     expect(res.status).toBe('completed');
 
     // Job linked to exactly one result object, same project + lineage root as parent.
-    const after = getProjectJob(alice.id, proj.id, job.id);
+    const after = await getProjectJob(alice.id, proj.id, job.id);
     expect(after.status).toBe('completed');
     const resultId = after.resultAnalysisObjectId;
     expect(resultId).toMatch(/^ao_[0-9a-f]+$/);
-    const result = getProjectAnalysisObject(alice.id, proj.id, resultId);
+    const result = await getProjectAnalysisObject(alice.id, proj.id, resultId);
     expect(result.projectId).toBe(proj.id);
     expect(result.parentObjectId).toBe(obj.id);
-    const parent = getProjectAnalysisObject(alice.id, proj.id, obj.id);
+    const parent = await getProjectAnalysisObject(alice.id, proj.id, obj.id);
     expect(result.lineageRootId).toBe(parent.lineageRootId || parent.id);
     expect(result.metadata.source).toBe('pbmc.pipeline.v1');
     expect(result.metadata.scientific_output).toBe(true);
 
     // EXACTLY one parent→result checkpoint edge.
-    const children = listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id);
+    const children = await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id);
     expect(children).toHaveLength(1);
     expect(children[0].childAnalysisObjectId).toBe(resultId);
     expect(children[0].edgeType).toBe('checkpoint');
     expect(children[0].jobId).toBe(job.id);
-    const parents = listProjectAnalysisObjectParents(alice.id, proj.id, resultId);
+    const parents = await listProjectAnalysisObjectParents(alice.id, proj.id, resultId);
     expect(parents).toHaveLength(1);
     expect(parents[0].parentAnalysisObjectId).toBe(obj.id);
 
     // EXACTLY one checkpoint artifact + one pipeline_summary artifact.
-    const arts = getJobArtifactsByJobId(job.id);
+    const arts = await getJobArtifactsByJobId(job.id);
     expect(arts).toHaveLength(2);
     const types = arts.map(a => a.artifactType).sort();
     expect(types).toEqual(['checkpoint', 'pipeline_summary']);
@@ -598,10 +599,10 @@ describe('pbmc.pipeline.v1 — worker success', () => {
   });
 
   it('the parent object row is unchanged by the run (still a stable checkpoint)', async () => {
-    const { alice, proj, obj } = seedPipelineJob({});
-    const before = getProjectAnalysisObject(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedPipelineJob({});
+    const before = await getProjectAnalysisObject(alice.id, proj.id, obj.id);
     await drainPipeline(recordingPipelineCaller([]));
-    const after = getProjectAnalysisObject(alice.id, proj.id, obj.id);
+    const after = await getProjectAnalysisObject(alice.id, proj.id, obj.id);
     // Parent is never mutated: type/metadata/parent/lineage identical, no result back-link.
     expect(after.objectType).toBe(before.objectType);
     expect(after.metadata).toEqual(before.metadata);
@@ -610,10 +611,10 @@ describe('pbmc.pipeline.v1 — worker success', () => {
   });
 
   it('result object metadata records provenance WITHOUT implying a download', async () => {
-    const { job, alice, proj } = seedPipelineJob({ seed: 11 });
+    const { job, alice, proj } = await seedPipelineJob({ seed: 11 });
     await drainPipeline(recordingPipelineCaller([]));
-    const resultId = getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId;
-    const result = getProjectAnalysisObject(alice.id, proj.id, resultId);
+    const resultId = (await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId;
+    const result = await getProjectAnalysisObject(alice.id, proj.id, resultId);
     expect(result.metadata.checkpoint.downloadable).toBe(false);
     expect(result.metadata.checkpoint.storage_kind).toBe('local_internal');
     expect(result.metadata.summary.nClusters).toBe(9);
@@ -621,11 +622,11 @@ describe('pbmc.pipeline.v1 — worker success', () => {
   });
 
   it('project artifact reads expose SAFE metadata only (no storage uri / path / state key / token)', async () => {
-    const { job, alice, proj } = seedPipelineJob({});
+    const { job, alice, proj } = await seedPipelineJob({});
     await drainPipeline(recordingPipelineCaller([]));
 
     // Public project read omits storage_uri but keeps checksum/size/storageKind.
-    const pubArts = listProjectJobArtifacts(alice.id, proj.id, job.id);
+    const pubArts = await listProjectJobArtifacts(alice.id, proj.id, job.id);
     const checkpoint = pubArts.find(a => a.artifactType === 'checkpoint');
     expect(Object.prototype.hasOwnProperty.call(checkpoint, 'storageUri')).toBe(false);
     expect(checkpoint.checksumSha256).toBe('a'.repeat(64));
@@ -637,7 +638,7 @@ describe('pbmc.pipeline.v1 — worker success', () => {
     }
 
     // Internally the key IS persisted (as storage_uri) so it is retrievable + stripped.
-    const internal = getJobArtifactsByJobId(job.id).find(a => a.artifactType === 'checkpoint');
+    const internal = (await getJobArtifactsByJobId(job.id)).find(a => a.artifactType === 'checkpoint');
     expect(internal.storageUri).toMatch(/^checkpoints\/job_[0-9a-f]+\/[0-9a-f]+\.rds$/);
     expect(toPublicJobArtifact(internal)).not.toHaveProperty('storageUri');
   });
@@ -646,65 +647,65 @@ describe('pbmc.pipeline.v1 — worker success', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 6. Worker failure / cancel / claim-loss / duplicate
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — failure / cancel / duplicate', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  function expectNoSuccessRecords(job, alice, proj) {
-    const after = getProjectJob(alice.id, proj.id, job.id);
+
+  async function expectNoSuccessRecords(job, alice, proj) {
+    const after = await getProjectJob(alice.id, proj.id, job.id);
     expect(after.resultAnalysisObjectId).toBeFalsy();
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
-    expect(listProjectArtifacts(alice.id, proj.id, { jobId: job.id })).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await listProjectArtifacts(alice.id, proj.id, { jobId: job.id })).toHaveLength(0);
   }
 
   it('an R failure (non-200) creates NO successful result object / edge / artifact', async () => {
-    const { job, alice, proj, obj } = seedPipelineJob({});
+    const { job, alice, proj, obj } = await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'boom /vault/x.rds' } });
     const res = await drainPipeline(failCaller);
     expect(res.status).toBe('failed');
-    expectNoSuccessRecords(job, alice, proj);
-    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
+    await expectNoSuccessRecords(job, alice, proj);
+    expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
   });
 
   it('an absent/failed checkpoint save creates NO successful result object (nothing to roll back)', async () => {
-    const { job, alice, proj, obj } = seedPipelineJob({});
+    const { job, alice, proj, obj } = await seedPipelineJob({});
     // R returns 200 + a summary but reports the checkpoint was NOT durably saved.
     const noSave = recordingPipelineCaller([], pipelineBody({ checkpoint: { saved: false } }));
     const res = await drainPipeline(noSave);
     expect(res.status).toBe('failed');
     expect(res.error.message).toBe('Pipeline did not produce a durable checkpoint.');
-    expectNoSuccessRecords(job, alice, proj);
-    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
+    await expectNoSuccessRecords(job, alice, proj);
+    expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
   });
 
   it('a missing checksum (no integrity) also fails with no result object', async () => {
-    const { job, alice, proj } = seedPipelineJob({});
+    const { job, alice, proj } = await seedPipelineJob({});
     const noChecksum = recordingPipelineCaller([], pipelineBody({ checkpoint: { saved: true, checksum_sha256: null, size_bytes: 10 } }));
     const res = await drainPipeline(noChecksum);
     expect(res.status).toBe('failed');
-    expectNoSuccessRecords(job, alice, proj);
+    await expectNoSuccessRecords(job, alice, proj);
   });
 
   it('a canceled job creates NO successful result object (claim lost, not resurrected)', async () => {
-    const { job, alice, proj } = seedPipelineJob({});
+    const { job, alice, proj } = await seedPipelineJob({});
     // Cancel BEFORE the worker runs: the queued job becomes terminal + unclaimable.
-    cancelProjectJob(alice.id, proj.id, job.id);
+    await cancelProjectJob(alice.id, proj.id, job.id);
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('idle'); // nothing claimable
     expect(calls).toHaveLength(0);
-    const after = getProjectJob(alice.id, proj.id, job.id);
+    const after = await getProjectJob(alice.id, proj.id, job.id);
     expect(after.status).toBe('canceled');
     expect(after.resultAnalysisObjectId).toBeFalsy();
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('two workers cannot duplicate the result object / edge / artifacts (single winner; completed job unclaimable)', async () => {
-    const { job, alice, proj, obj } = seedPipelineJob({});
+    const { job, alice, proj, obj } = await seedPipelineJob({});
     // First worker completes the job.
     const res1 = await drainPipeline(recordingPipelineCaller([]));
     expect(res1.status).toBe('completed');
-    const resultId = getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId;
+    const resultId = (await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId;
 
     // Second worker tick finds nothing claimable (job already completed).
     const calls2 = [];
@@ -713,21 +714,21 @@ describe('pbmc.pipeline.v1 — failure / cancel / duplicate', () => {
     expect(calls2).toHaveLength(0);
 
     // Still exactly one result object / edge / checkpoint+summary artifacts.
-    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBe(resultId);
-    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(1);
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(2);
+    expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBe(resultId);
+    expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(1);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(2);
   });
 
   it('a second create-checkpoint attempt on the same job is rejected (CHECKPOINT_EXISTS)', async () => {
-    const { job, alice, proj } = seedPipelineJob({});
+    const { job, alice, proj } = await seedPipelineJob({});
     await drainPipeline(recordingPipelineCaller([]));
     // Re-claim is impossible (completed); prove the underlying guard directly: a fresh
     // claim of a NEW job cannot create a checkpoint for the already-completed job id.
-    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBeTruthy();
+    expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBeTruthy();
   });
 
   it('failure messages/logs are sanitized (no raw R error / path / stack leak)', async () => {
-    const { job, alice, proj } = seedPipelineJob({});
+    const { job, alice, proj } = await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'R Error: cannot open /vault/u/secret.rds at line 7' } });
     const res = await drainPipeline(failCaller);
     expect(res.status).toBe('failed');
@@ -741,11 +742,11 @@ describe('pbmc.pipeline.v1 — failure / cancel / duplicate', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 7. Checkpoint storage behavior (server-controlled key; no traversal; no download)
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — checkpoint storage', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  it('allocates a server-controlled, relative, traversal-free internal key from the job id only', () => {
+
+  it('allocates a server-controlled, relative, traversal-free internal key from the job id only', async () => {
     const key = allocateCheckpointStorageKey('job_deadbeef');
     expect(key).toMatch(/^checkpoints\/job_deadbeef\/[0-9a-f]{24}\.rds$/);
     expect(isSafeInternalStorageKey(key)).toBe(true);
@@ -755,7 +756,7 @@ describe('pbmc.pipeline.v1 — checkpoint storage', () => {
     }
   });
 
-  it('isSafeInternalStorageKey rejects absolute paths, traversal, and backslashes', () => {
+  it('isSafeInternalStorageKey rejects absolute paths, traversal, and backslashes', async () => {
     expect(isSafeInternalStorageKey('checkpoints/job_x/a.rds')).toBe(true);
     for (const bad of ['/etc/passwd', 'C:/x', '\\\\server\\share', '../up', 'a/../../b', 'a\\b', 'a\0b', '']) {
       expect(isSafeInternalStorageKey(bad), bad).toBe(false);
@@ -763,43 +764,39 @@ describe('pbmc.pipeline.v1 — checkpoint storage', () => {
   });
 
   it('the checkpoint artifact persists checksum/size and an INTERNAL key; public read omits the key', async () => {
-    const { job, alice, proj } = seedPipelineJob({});
+    const { job, alice, proj } = await seedPipelineJob({});
     await drainPipeline(recordingPipelineCaller([]));
-    const internal = getJobArtifactsByJobId(job.id).find(a => a.artifactType === 'checkpoint');
+    const internal = (await getJobArtifactsByJobId(job.id)).find(a => a.artifactType === 'checkpoint');
     expect(internal.storageUri).toMatch(/^checkpoints\//);     // internal key persisted
     expect(internal.checksumSha256).toHaveLength(64);
     expect(internal.sizeBytes).toBeGreaterThan(0);
-    const pub = listProjectJobArtifacts(alice.id, proj.id, job.id, { artifactType: 'checkpoint' })[0];
+    const pub = (await listProjectJobArtifacts(alice.id, proj.id, job.id, { artifactType: 'checkpoint' }))[0];
     expect(pub).not.toHaveProperty('storageUri');
   });
 
-  it('createCheckpointArtifactForJobByWorker rejects client paths / traversal / bad checksum (defense in depth)', () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const proj = seedProject(alice.id);
-    const j = createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1' });
-    const claimed = claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
+  it('createCheckpointArtifactForJobByWorker rejects client paths / traversal / bad checksum (defense in depth)', async () => {
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const proj = await seedProject(alice.id);
+    const j = await createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1' });
+    const claimed = await claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
     const base = { artifactType: 'checkpoint', checksumSha256: 'a'.repeat(64), sizeBytes: 10 };
     for (const badKey of ['/abs/path.rds', '../escape.rds', 'a\\b.rds', '']) {
-      expect(() => createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: badKey }, { now: T0 }))
-        .toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
+      await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: badKey }, { now: T0 })).rejects.toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
     }
     // Bad checksum / size rejected.
-    expect(() => createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', checksumSha256: 'nothex' }, { now: T0 }))
-      .toThrowError(/checksum/i);
-    expect(() => createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', sizeBytes: -1 }, { now: T0 }))
-      .toThrowError(/size/i);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', checksumSha256: 'nothex' }, { now: T0 })).rejects.toThrowError(/checksum/i);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', sizeBytes: -1 }, { now: T0 })).rejects.toThrowError(/size/i);
     // Wrong storage kind rejected (this helper is local_internal only).
-    expect(() => createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', storageKind: 'metadata_only' }, { now: T0 }))
-      .toThrowError(/local_internal/);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', storageKind: 'metadata_only' }, { now: T0 })).rejects.toThrowError(/local_internal/);
     expect(j.id).toBeTruthy();
   });
 
-  it('the generic createJobArtifactByWorker STILL ignores client storage fields (unchanged guard)', () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const proj = seedProject(alice.id);
-    createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1' });
-    const claimed = claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
-    const art = createJobArtifactByWorker(claimed.id, 'worker_t', claimed.claimToken, {
+  it('the generic createJobArtifactByWorker STILL ignores client storage fields (unchanged guard)', async () => {
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const proj = await seedProject(alice.id);
+    await createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1' });
+    const claimed = await claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
+    const art = await createJobArtifactByWorker(claimed.id, 'worker_t', claimed.claimToken, {
       artifactType: 'pipeline_summary',
       storageUri: '/etc/passwd', checksumSha256: 'deadbeef', sizeBytes: 999, internalStorageKey: 'vault/x',
     }, { now: T0 });
@@ -813,12 +810,12 @@ describe('pbmc.pipeline.v1 — checkpoint storage', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 8. R-side contract (the request the bridge issues to R; live R covered by CI)
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — R-side request contract', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — R-side request contract', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('the worker issues the fixed POST target with server-derived state key + server checkpoint key', async () => {
-    const { obj, alice } = seedPipelineJob({ pcaDims: 25 });
+    const { obj, alice } = await seedPipelineJob({ pcaDims: 25 });
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('completed');
@@ -836,7 +833,7 @@ describe('pbmc.pipeline.v1 — R-side request contract', () => {
   });
 
   it('uses an explicit, bounded, longer-than-inspection timeout for the pipeline op', async () => {
-    seedPipelineJob({});
+    await seedPipelineJob({});
     const calls = [];
     await drainPipeline(recordingPipelineCaller(calls));
     expect(calls[0].timeoutMs).toBeGreaterThan(bridge.DEFAULT_R_BRIDGE_TIMEOUT_MS);
@@ -848,14 +845,14 @@ describe('pbmc.pipeline.v1 — R-side request contract', () => {
 // 9. B1 — the internal-only R endpoint is BLOCKED on the public /api/r/* proxy
 //    (it runs ONLY via the in-process worker bridge, which never traverses the proxy)
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)', () => {
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  it('isInternalOnlyRProxyPath blocks every spelling of /object/pbmc-pipeline; allows other R paths', () => {
+
+  it('isInternalOnlyRProxyPath blocks every spelling of /object/pbmc-pipeline; allows other R paths', async () => {
     expect(R_PROXY_INTERNAL_ONLY_PATHS.has('/object/pbmc-pipeline')).toBe(true);
     // doubled slashes, trailing slash, %2F-encoded and backslash separators all normalize
     // to the blocked path.
@@ -872,10 +869,10 @@ describe('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)'
   });
 
   it('authenticated direct POST /api/r/object/pbmc-pipeline is 404 BEFORE R, with NO durable side effects', async () => {
-    const { user, token } = createUserWithToken({ email: 'owner@example.com' });
+    const { user, token } = await createUserWithToken({ email: 'owner@example.com' });
     // The caller even owns a real live object (X-Object-ID) — the path is still blocked
     // before the proxy ever reaches R / validates storage_key.
-    const owned = createAnalysisObjectForUser(user.id, { objectType: 'seurat', displayName: 'mine' });
+    const owned = await createAnalysisObjectForUser(user.id, { objectType: 'seurat', displayName: 'mine' });
     const r = await api(server, '/api/r/object/pbmc-pipeline', {
       method: 'POST', token,
       headers: { 'X-Object-ID': owned.id },
@@ -884,12 +881,12 @@ describe('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)'
     expect(r.status).toBe(404);
     // No checkpoint write is possible (R is never contacted) and the worker contract is
     // bypassed → no job / result object / artifact / lineage edge exists.
-    expect(listJobsForUser(user.id, {})).toHaveLength(0);
-    expect(listAnalysisObjectsForUser(user.id, {})).toHaveLength(1); // only the object we pre-created
+    expect(await listJobsForUser(user.id, {})).toHaveLength(0);
+    expect(await listAnalysisObjectsForUser(user.id, {})).toHaveLength(1); // only the object we pre-created
   });
 
   it('blocks the pbmc path for any method / odd spelling (still 404, no existence leak)', async () => {
-    const { token } = createUserWithToken({ email: 'owner2@example.com' });
+    const { token } = await createUserWithToken({ email: 'owner2@example.com' });
     for (const { method, path } of [
       { method: 'GET', path: '/api/r/object/pbmc-pipeline' },
       { method: 'POST', path: '/api/r/object/pbmc-pipeline/' },
@@ -907,7 +904,7 @@ describe('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)'
   });
 
   it('does NOT over-block: a non-internal /api/r path still enforces X-Object-ID ownership before R', async () => {
-    const { token } = createUserWithToken({ email: 'owner3@example.com' });
+    const { token } = await createUserWithToken({ email: 'owner3@example.com' });
     // Malformed object id → 400 (verifyRObjectOwnership), still before any R contact.
     const bad = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
     expect(bad.status).toBe(400);
@@ -917,18 +914,18 @@ describe('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)'
   });
 
   it('the worker bridge to r.pbmc.pipeline.v1 STILL runs (the block is proxy-only)', async () => {
-    const { job, alice, proj } = seedPipelineJob({});
+    const { job, alice, proj } = await seedPipelineJob({});
     const res = await drainPipeline(recordingPipelineCaller([]));
     expect(res.status).toBe('completed');
-    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBeTruthy();
+    expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBeTruthy();
   });
 
   it('a project co-member cannot reach the pipeline via the proxy on another user\'s object (blocked 404)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const carol = createUserWithToken({ email: 'carol@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
-    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'a' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const carol = await createUserWithToken({ email: 'carol@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
+    const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'a' });
     const r = await api(server, '/api/r/object/pbmc-pipeline', {
       method: 'POST', token: carol.token, headers: { 'X-Object-ID': aliceObj.id }, body: { params: {} },
     });
@@ -939,17 +936,17 @@ describe('pbmc.pipeline.v1 — direct R-proxy access is blocked (internal-only)'
 // ════════════════════════════════════════════════════════════════════════════
 // 10. B2 — result object + job link + edge + BOTH artifacts are ONE atomic unit
 // ════════════════════════════════════════════════════════════════════════════
-describe('pbmc.pipeline.v1 — atomic result/artifact completion', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact completion', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   // Seed alice + project + parent object + a CLAIMED pbmc job; return the claim handle.
-  function seedClaimedPipelineJob() {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const proj = seedProject(alice.id);
-    const parent = createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc' });
-    const job = createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: parent.id });
-    const claimed = claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
+  async function seedClaimedPipelineJob() {
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const proj = await seedProject(alice.id);
+    const parent = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc' });
+    const job = await createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: parent.id });
+    const claimed = await claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
     return { alice, proj, parent, job, claimed };
   }
 
@@ -979,77 +976,75 @@ describe('pbmc.pipeline.v1 — atomic result/artifact completion', () => {
   // the result object has been inserted, proving the whole unit rolls back.
   function circular() { const o = {}; o.self = o; return o; }
 
-  function expectNothingPersisted(alice, proj, parent, job) {
-    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBeFalsy();
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
-    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(0);
-    expect(listAnalysisObjectsForUser(alice.id, {})).toHaveLength(1); // only the parent
+  async function expectNothingPersisted(alice, proj, parent, job) {
+    expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBeFalsy();
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(0);
+    expect(await listAnalysisObjectsForUser(alice.id, {})).toHaveLength(1); // only the parent
   }
 
-  it('success: result object + job link + lineage edge + checkpoint + summary artifact, all atomic', () => {
-    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
-    const out = completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
+  it('success: result object + job link + lineage edge + checkpoint + summary artifact, all atomic', async () => {
+    const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
+    const out = await completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
     expect(out.resultObject.id).toMatch(/^ao_[0-9a-f]+$/);
     expect(out.checkpointArtifact.artifactType).toBe('checkpoint');
     expect(out.checkpointArtifact.storageUri).toBe('checkpoints/job_x/abcabcabcabc.rds');
     expect(out.summaryArtifact.artifactType).toBe('pipeline_summary');
-    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBe(out.resultObject.id);
-    const children = listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id);
+    expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBe(out.resultObject.id);
+    const children = await listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id);
     expect(children).toHaveLength(1);
     expect(children[0].childAnalysisObjectId).toBe(out.resultObject.id);
     expect(children[0].edgeType).toBe('checkpoint');
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(2);
-    expect(listAnalysisObjectsForUser(alice.id, {})).toHaveLength(2); // parent + result
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(2);
+    expect(await listAnalysisObjectsForUser(alice.id, {})).toHaveLength(2); // parent + result
   });
 
-  it('checkpoint-artifact insert failure rolls back EVERYTHING (no result/link/edge/artifact)', () => {
-    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
-    expect(() => completePbmcPipelineResultByWorker(
+  it('checkpoint-artifact insert failure rolls back EVERYTHING (no result/link/edge/artifact)', async () => {
+    const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
+    await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
       completionInput({ checkpointArtifact: { metadata: circular() } }), { now: T0 }
-    )).toThrow();
-    expectNothingPersisted(alice, proj, parent, job);
+    )).rejects.toThrow();
+    await expectNothingPersisted(alice, proj, parent, job);
   });
 
-  it('summary-artifact insert failure ALSO rolls back the checkpoint artifact + result + edge', () => {
-    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
-    expect(() => completePbmcPipelineResultByWorker(
+  it('summary-artifact insert failure ALSO rolls back the checkpoint artifact + result + edge', async () => {
+    const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
+    await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
       completionInput({ summaryArtifact: { metadata: circular() } }), { now: T0 }
-    )).toThrow();
+    )).rejects.toThrow();
     // Crucially, NOT even the checkpoint artifact (inserted before the summary) survives.
-    expectNothingPersisted(alice, proj, parent, job);
+    await expectNothingPersisted(alice, proj, parent, job);
   });
 
-  it('claim-loss (wrong token) creates no result/edge/artifacts', () => {
-    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
-    expect(() => completePbmcPipelineResultByWorker(claimed.id, 'worker_t', 'wrong-token', completionInput(), { now: T0 }))
-      .toThrowError(/CLAIM_LOST|claim/i);
-    expectNothingPersisted(alice, proj, parent, job);
+  it('claim-loss (wrong token) creates no result/edge/artifacts', async () => {
+    const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
+    await expect(completePbmcPipelineResultByWorker(claimed.id, 'worker_t', 'wrong-token', completionInput(), { now: T0 })).rejects.toThrowError(/CLAIM_LOST|claim/i);
+    await expectNothingPersisted(alice, proj, parent, job);
   });
 
-  it('an invalid checkpoint key / checksum is rejected and persists nothing', () => {
-    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
-    expect(() => completePbmcPipelineResultByWorker(
+  it('an invalid checkpoint key / checksum is rejected and persists nothing', async () => {
+    const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
+    await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
       completionInput({ checkpointArtifact: { internalStorageKey: '../escape.rds' } }), { now: T0 }
-    )).toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
-    expectNothingPersisted(alice, proj, parent, job);
+    )).rejects.toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
+    await expectNothingPersisted(alice, proj, parent, job);
     // Re-seed-free: a bad checksum is likewise refused with nothing persisted.
-    expect(() => completePbmcPipelineResultByWorker(
+    await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
       completionInput({ checkpointArtifact: { checksumSha256: 'nothex' } }), { now: T0 }
-    )).toThrowError(/checksum/i);
-    expectNothingPersisted(alice, proj, parent, job);
+    )).rejects.toThrowError(/checksum/i);
+    await expectNothingPersisted(alice, proj, parent, job);
   });
 
-  it('duplicate completion is rejected (CHECKPOINT_EXISTS); no duplicate result/edge/artifacts', () => {
-    const { alice, proj, parent, job, claimed } = seedClaimedPipelineJob();
-    const out = completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
-    expect(() => completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 }))
-      .toThrowError(/CHECKPOINT_EXISTS|already has a result/i);
-    expect(getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId).toBe(out.resultObject.id);
-    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(1);
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(2);
+  it('duplicate completion is rejected (CHECKPOINT_EXISTS); no duplicate result/edge/artifacts', async () => {
+    const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
+    const out = await completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
+    await expect(completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 })).rejects.toThrowError(/CHECKPOINT_EXISTS|already has a result/i);
+    expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBe(out.resultObject.id);
+    expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(1);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(2);
   });
 });

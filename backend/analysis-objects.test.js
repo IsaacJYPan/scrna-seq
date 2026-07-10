@@ -1,30 +1,33 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const config = require('./config');
+const db = require('./pgDatabase');
 const {
-  initDatabase, closeDatabase, saveProvenance,
+  saveProvenance,
   createOrganizationForUser, createProjectForUser, createDatasetForProject
-} = require('./database');
+} = db;
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 // Create a project owned by `userId` plus a dataset in it, returning the dataset.
 // Used to exercise datasetId verification on analysis-object creation.
-function makeDataset(userId, fileType = 'seurat_rds') {
-  const org = createOrganizationForUser(userId, { name: 'Org' });
-  const proj = createProjectForUser(userId, { organizationId: org.id, name: 'Proj' });
+async function makeDataset(userId, fileType = 'seurat_rds') {
+  const org = await createOrganizationForUser(userId, { name: 'Org' });
+  const proj = await createProjectForUser(userId, { organizationId: org.id, name: 'Proj' });
   return createDatasetForProject(userId, proj.id, { fileType });
 }
 
 let server;
 
-beforeAll(async () => { server = await startServer(); });
-afterAll(() => { if (server) server.close(); });
+beforeAll(async () => { if (!CONFIGURED) return; server = await startServer(); });
+afterAll(async () => { if (!CONFIGURED) return; if (server) await new Promise((resolve) => server.close(resolve)); await db.close(); });
 
-beforeEach(() => { initDatabase(':memory:'); });
-afterEach(() => { closeDatabase(); });
+beforeEach(async () => { if (!CONFIGURED) return; await db.resetSchemaForTests(); });
 
-function users() {
-  const alice = createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' });
-  const bob = createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
+async function users() {
+  const alice = await createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' });
+  const bob = await createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
   return { alice, bob };
 }
 
@@ -42,7 +45,7 @@ function makeProvenance(id) {
   };
 }
 
-describe('analysis-objects API', () => {
+describe.skipIf(!CONFIGURED)('analysis-objects API', () => {
   it('requires auth on every route', async () => {
     expect((await api(server, '/api/analysis-objects')).status).toBe(401);
     expect((await api(server, '/api/analysis-objects', { method: 'POST', body: { objectType: 'seurat' } })).status).toBe(401);
@@ -50,7 +53,7 @@ describe('analysis-objects API', () => {
   });
 
   it('lets a user create an object with a server-assigned id', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', displayName: 'QC filtered object' }
@@ -63,7 +66,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects a client-provided object id', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { id: 'ao_client_chosen', objectType: 'seurat' }
@@ -73,7 +76,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects body-provided owner/user fields', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     for (const field of ['userId', 'user_id', 'ownerUserId', 'owner_user_id']) {
       const res = await api(server, '/api/analysis-objects', {
         method: 'POST', token: alice.token,
@@ -84,7 +87,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects an invalid object type', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'not-a-real-type' }
@@ -94,7 +97,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects invalid metadata (array, null, scalar)', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     for (const metadata of [[], null, 'string', 42]) {
       const res = await api(server, '/api/analysis-objects', {
         method: 'POST', token: alice.token,
@@ -105,7 +108,7 @@ describe('analysis-objects API', () => {
   });
 
   it('lists only the authenticated user objects', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'seurat' } });
     await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'matrix' } });
     await api(server, '/api/analysis-objects', { method: 'POST', token: bob.token, body: { objectType: 'seurat' } });
@@ -120,7 +123,7 @@ describe('analysis-objects API', () => {
   });
 
   it('supports objectType filtering scoped to the user', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'seurat' } });
     await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'matrix' } });
 
@@ -130,7 +133,7 @@ describe('analysis-objects API', () => {
   });
 
   it('lets a user read their own object but not another user object', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const created = await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'seurat' } });
     const id = created.data.id;
 
@@ -143,14 +146,14 @@ describe('analysis-objects API', () => {
   });
 
   it('sets lineage_root_id to the object own id for a root object', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const created = await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'seurat' } });
     expect(created.data.lineageRootId).toBe(created.data.id);
     expect(created.data.parentObjectId).toBeNull();
   });
 
   it('inherits lineage root when creating a child of an owned parent', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const root = await api(server, '/api/analysis-objects', { method: 'POST', token: alice.token, body: { objectType: 'seurat' } });
     const child = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
@@ -169,7 +172,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects a child whose parent belongs to another user', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const bobObj = await api(server, '/api/analysis-objects', { method: 'POST', token: bob.token, body: { objectType: 'seurat' } });
 
     const res = await api(server, '/api/analysis-objects', {
@@ -180,7 +183,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects a child with an unknown parent id', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', parentObjectId: 'ao_does_not_exist' }
@@ -189,9 +192,9 @@ describe('analysis-objects API', () => {
   });
 
   it('links a provenance record the user owns and rejects another user provenance', async () => {
-    const { alice, bob } = users();
-    saveProvenance({ userEmail: alice.user.email, provenance: makeProvenance('prov-alice') });
-    saveProvenance({ userEmail: bob.user.email, provenance: makeProvenance('prov-bob') });
+    const { alice, bob } = await users();
+    await saveProvenance({ userEmail: alice.user.email, provenance: makeProvenance('prov-alice') });
+    await saveProvenance({ userEmail: bob.user.email, provenance: makeProvenance('prov-bob') });
 
     const ok = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
@@ -208,7 +211,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects client-provided storage/state fields and omits storage metadata from public responses', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     for (const field of ['storageUri', 'storage_uri', 'storageKey', 'storage_key', 'internalStorageKey', 'objectHash', 'path', 'stateKey']) {
       const res = await api(server, '/api/analysis-objects', {
         method: 'POST', token: alice.token,
@@ -245,7 +248,7 @@ describe('analysis-objects API', () => {
   // datasetId remains optional/nullable, but if supplied it must reference a real
   // dataset whose project the caller can write to (owner/admin/analyst).
   it('accepts a null/absent datasetId (still optional)', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token, body: { objectType: 'seurat' }
     });
@@ -254,8 +257,8 @@ describe('analysis-objects API', () => {
   });
 
   it('accepts a real, accessible datasetId and records it', async () => {
-    const { alice } = users();
-    const ds = makeDataset(alice.user.id);
+    const { alice } = await users();
+    const ds = await makeDataset(alice.user.id);
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', datasetId: ds.id }
@@ -265,7 +268,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects a malformed datasetId with 400', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', datasetId: 'dataset-abc' }
@@ -275,7 +278,7 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects a well-formed but unknown datasetId with 404', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', datasetId: 'ds_deadbeefdeadbeefdeadbeef' }
@@ -284,8 +287,8 @@ describe('analysis-objects API', () => {
   });
 
   it('rejects a datasetId from another user\'s project with 404 (no leak)', async () => {
-    const { alice, bob } = users();
-    const bobDs = makeDataset(bob.user.id);
+    const { alice, bob } = await users();
+    const bobDs = await makeDataset(bob.user.id);
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', datasetId: bobDs.id }
@@ -294,8 +297,8 @@ describe('analysis-objects API', () => {
   });
 
   it('keeps datasetId-filtered listing owner-scoped', async () => {
-    const { alice } = users();
-    const ds = makeDataset(alice.user.id);
+    const { alice } = await users();
+    const ds = await makeDataset(alice.user.id);
     await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: ds.id }
     });

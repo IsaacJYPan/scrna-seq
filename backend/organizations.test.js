@@ -1,15 +1,19 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const config = require('./config');
+const db = require('./pgDatabase');
 const {
-  initDatabase, closeDatabase, createUser,
+  createUser,
   createOrganizationForUser, createProjectForUser,
   verifyOrganizationMember, requireOrganizationRole,
   verifyProjectMember, requireProjectRole,
   listOrganizationsForUser, listProjectsForUser,
   addProjectMemberByEmail, updateProjectMemberRole, removeProjectMember,
   countProjectOwners, getProjectMember, isValidRole, addOrganizationMember
-} = require('./database');
+} = db;
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 // There is intentionally no org-member management *route* in this branch, so the
 // HTTP tests seed extra org members directly through the DB helper a future
@@ -22,16 +26,15 @@ const addOrgMemberDirect = addOrgMember;
 
 let server;
 
-beforeAll(async () => { server = await startServer(); });
-afterAll(() => { if (server) server.close(); });
+beforeAll(async () => { if (!CONFIGURED) return; server = await startServer(); });
+afterAll(async () => { if (!CONFIGURED) return; if (server) await new Promise((resolve) => server.close(resolve)); await db.close(); });
 
-beforeEach(() => { initDatabase(':memory:'); });
-afterEach(() => { closeDatabase(); });
+beforeEach(async () => { if (!CONFIGURED) return; await db.resetSchemaForTests(); });
 
-function users() {
-  const alice = createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' });
-  const bob = createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
-  const carol = createUserWithToken({ email: 'carol@example.com', displayName: 'Carol' });
+async function users() {
+  const alice = await createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' });
+  const bob = await createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
+  const carol = await createUserWithToken({ email: 'carol@example.com', displayName: 'Carol' });
   return { alice, bob, carol };
 }
 
@@ -46,7 +49,7 @@ async function createProject(token, organizationId, body = {}) {
 }
 
 // ── HTTP: authentication ───────────────────────────────────────────────────
-describe('org/project API — authentication', () => {
+describe.skipIf(!CONFIGURED)('org/project API — authentication', () => {
   it('rejects unauthenticated access on every org/project/member route', async () => {
     const routes = [
       ['GET', '/api/organizations'],
@@ -69,9 +72,9 @@ describe('org/project API — authentication', () => {
 });
 
 // ── HTTP: organizations ────────────────────────────────────────────────────
-describe('organizations API', () => {
+describe.skipIf(!CONFIGURED)('organizations API', () => {
   it('lets an authenticated user create an organization with a server id', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await createOrg(alice.token, { name: 'Acme Labs' });
     expect(res.status).toBe(201);
     expect(res.data.id).toMatch(/^org_[0-9a-f]+$/);
@@ -80,20 +83,20 @@ describe('organizations API', () => {
   });
 
   it('makes the creator an owner member', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const org = (await createOrg(alice.token)).data;
     expect(org.role).toBe('owner');
-    expect(verifyOrganizationMember(alice.user.id, org.id).role).toBe('owner');
+    expect((await verifyOrganizationMember(alice.user.id, org.id)).role).toBe('owner');
   });
 
   it('rejects a blank name', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const res = await createOrg(alice.token, { name: '   ' });
     expect(res.status).toBe(400);
   });
 
   it('rejects client-provided id / owner / role fields', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     for (const body of [
       { name: 'X', id: 'org_hax' },
       { name: 'X', ownerUserId: bob.user.id },
@@ -108,7 +111,7 @@ describe('organizations API', () => {
   });
 
   it('lists only organizations the user belongs to', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     await createOrg(alice.token, { name: 'Alice Org' });
     await createOrg(alice.token, { name: 'Alice Org 2' });
     await createOrg(bob.token, { name: 'Bob Org' });
@@ -121,7 +124,7 @@ describe('organizations API', () => {
   });
 
   it('returns 404 reading an organization the user does not belong to', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     expect((await api(server, `/api/organizations/${org.id}`, { token: alice.token })).status).toBe(200);
     expect((await api(server, `/api/organizations/${org.id}`, { token: bob.token })).status).toBe(404);
@@ -130,9 +133,9 @@ describe('organizations API', () => {
 });
 
 // ── HTTP: projects ─────────────────────────────────────────────────────────
-describe('projects API', () => {
+describe.skipIf(!CONFIGURED)('projects API', () => {
   it('lets an org owner create a project; creator becomes project owner', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const org = (await createOrg(alice.token)).data;
     const res = await createProject(alice.token, org.id, { name: 'scRNA pilot', description: 'pilot run' });
     expect(res.status).toBe(201);
@@ -145,38 +148,38 @@ describe('projects API', () => {
   });
 
   it('lets an org admin create a project', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     // Make bob an org admin directly (no org-member route in this branch).
-    addOrgMember(org.id, bob.user.id, 'admin');
+    await addOrgMember(org.id, bob.user.id, 'admin');
     const res = await createProject(bob.token, org.id);
     expect(res.status).toBe(201);
   });
 
   it('returns 404 when a non-member tries to create a project in an org', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     const res = await createProject(bob.token, org.id);
     expect(res.status).toBe(404); // never reveal the org exists
   });
 
   it('returns 403 when an org viewer/analyst tries to create a project', async () => {
-    const { alice, bob, carol } = users();
+    const { alice, bob, carol } = await users();
     const org = (await createOrg(alice.token)).data;
-    addOrgMember(org.id, bob.user.id, 'viewer');
-    addOrgMember(org.id, carol.user.id, 'analyst');
+    await addOrgMember(org.id, bob.user.id, 'viewer');
+    await addOrgMember(org.id, carol.user.id, 'analyst');
     expect((await createProject(bob.token, org.id)).status).toBe(403);
     expect((await createProject(carol.token, org.id)).status).toBe(403);
   });
 
   it('rejects a project create with a missing/unknown org', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     expect((await api(server, '/api/projects', { method: 'POST', token: alice.token, body: { name: 'X' } })).status).toBe(400);
     expect((await createProject(alice.token, 'org_missing')).status).toBe(404);
   });
 
   it('rejects client-provided id / creator / owner / role fields on create', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     for (const extra of [
       { id: 'proj_hax' },
@@ -192,7 +195,7 @@ describe('projects API', () => {
   });
 
   it('lists only projects the user is a member of', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     await createProject(alice.token, org.id, { name: 'P1' });
     await createProject(alice.token, org.id, { name: 'P2' });
@@ -204,7 +207,7 @@ describe('projects API', () => {
   });
 
   it('returns 404 reading a project the user is not a member of', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     const proj = (await createProject(alice.token, org.id)).data;
     expect((await api(server, `/api/projects/${proj.id}`, { token: alice.token })).status).toBe(200);
@@ -213,7 +216,7 @@ describe('projects API', () => {
   });
 
   it('lets owner/admin update a project but a viewer cannot', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     const proj = (await createProject(alice.token, org.id)).data;
 
@@ -235,7 +238,7 @@ describe('projects API', () => {
   });
 
   it('returns 404 (not 403) when a non-member tries to update a project', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const org = (await createOrg(alice.token)).data;
     const proj = (await createProject(alice.token, org.id)).data;
     const res = await api(server, `/api/projects/${proj.id}`, {
@@ -245,7 +248,7 @@ describe('projects API', () => {
   });
 
   it('rejects a project update with no updatable fields', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const org = (await createOrg(alice.token)).data;
     const proj = (await createProject(alice.token, org.id)).data;
     const res = await api(server, `/api/projects/${proj.id}`, { method: 'PATCH', token: alice.token, body: {} });
@@ -253,7 +256,7 @@ describe('projects API', () => {
   });
 
   it('rejects reparenting / server-controlled fields on update', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const org = (await createOrg(alice.token)).data;
     const proj = (await createProject(alice.token, org.id)).data;
     for (const body of [{ organizationId: 'org_other' }, { id: 'proj_other' }, { createdByUserId: 999 }]) {
@@ -264,9 +267,9 @@ describe('projects API', () => {
 });
 
 // ── HTTP: project membership management ─────────────────────────────────────
-describe('project members API', () => {
+describe.skipIf(!CONFIGURED)('project members API', () => {
   async function setup() {
-    const u = users();
+    const u = await users();
     const org = (await createOrg(u.alice.token)).data;
     const proj = (await createProject(u.alice.token, org.id)).data;
     return { ...u, org, proj };
@@ -314,7 +317,7 @@ describe('project members API', () => {
     });
 
     // Admin (bob) can add a member — recreate a 4th user to add.
-    createUser('dave@example.com', 'password123', 'Dave');
+    await createUser('dave@example.com', 'password123', 'Dave');
     const adminAdd = await api(server, `/api/projects/${proj.id}/members`, {
       method: 'POST', token: bob.token, body: { email: 'dave@example.com', role: 'viewer' }
     });
@@ -343,7 +346,7 @@ describe('project members API', () => {
       method: 'DELETE', token: alice.token
     });
     expect(removed.status).toBe(200);
-    expect(getProjectMember(proj.id, bob.user.id)).toBeNull();
+    expect(await getProjectMember(proj.id, bob.user.id)).toBeNull();
   });
 
   it('refuses to remove or demote the last owner (409)', async () => {
@@ -425,7 +428,7 @@ describe('project members API', () => {
     expect((await addMember(alice.token, proj.id, 'bob@example.com', 'admin')).status).toBe(201);
     const res = await patchMemberRole(bob.token, proj.id, bob.user.id, 'owner');
     expect(res.status).toBe(403);
-    expect(getProjectMember(proj.id, bob.user.id).role).toBe('admin'); // unchanged
+    expect((await getProjectMember(proj.id, bob.user.id)).role).toBe('admin'); // unchanged
   });
 
   it('forbids an admin from promoting another member to owner (403)', async () => {
@@ -434,13 +437,13 @@ describe('project members API', () => {
     expect((await addMember(alice.token, proj.id, 'carol@example.com', 'viewer')).status).toBe(201);
     const res = await patchMemberRole(bob.token, proj.id, carol.user.id, 'owner');
     expect(res.status).toBe(403);
-    expect(getProjectMember(proj.id, carol.user.id).role).toBe('viewer'); // unchanged
+    expect((await getProjectMember(proj.id, carol.user.id)).role).toBe('viewer'); // unchanged
   });
 
   it('forbids an admin from adding a new member directly as owner (403)', async () => {
     const { alice, bob, proj } = await setup();
     expect((await addMember(alice.token, proj.id, 'bob@example.com', 'admin')).status).toBe(201);
-    createUser('dave@example.com', 'password123', 'Dave');
+    await createUser('dave@example.com', 'password123', 'Dave');
     const res = await addMember(bob.token, proj.id, 'dave@example.com', 'owner');
     expect(res.status).toBe(403);
   });
@@ -450,20 +453,20 @@ describe('project members API', () => {
     // alice (owner) grants bob a second owner seat, and makes carol an admin.
     expect((await addMember(alice.token, proj.id, 'bob@example.com', 'owner')).status).toBe(201);
     expect((await addMember(alice.token, proj.id, 'carol@example.com', 'admin')).status).toBe(201);
-    expect(countProjectOwners(proj.id)).toBe(2);
+    expect(await countProjectOwners(proj.id)).toBe(2);
     const res = await patchMemberRole(carol.token, proj.id, bob.user.id, 'admin');
     expect(res.status).toBe(403); // not 409 — admin may never demote an owner
-    expect(getProjectMember(proj.id, bob.user.id).role).toBe('owner'); // unchanged
+    expect((await getProjectMember(proj.id, bob.user.id)).role).toBe('owner'); // unchanged
   });
 
   it('forbids an admin from removing an owner even when multiple owners exist (403)', async () => {
     const { alice, bob, carol, proj } = await setup();
     expect((await addMember(alice.token, proj.id, 'bob@example.com', 'owner')).status).toBe(201);
     expect((await addMember(alice.token, proj.id, 'carol@example.com', 'admin')).status).toBe(201);
-    expect(countProjectOwners(proj.id)).toBe(2);
+    expect(await countProjectOwners(proj.id)).toBe(2);
     const res = await removeMember(carol.token, proj.id, bob.user.id);
     expect(res.status).toBe(403);
-    expect(getProjectMember(proj.id, bob.user.id).role).toBe('owner'); // unchanged
+    expect((await getProjectMember(proj.id, bob.user.id)).role).toBe('owner'); // unchanged
   });
 
   it('lets an owner promote another member to owner', async () => {
@@ -472,24 +475,24 @@ describe('project members API', () => {
     const res = await patchMemberRole(alice.token, proj.id, bob.user.id, 'owner');
     expect(res.status).toBe(200);
     expect(res.data.role).toBe('owner');
-    expect(countProjectOwners(proj.id)).toBe(2);
+    expect(await countProjectOwners(proj.id)).toBe(2);
   });
 
   it('lets an owner demote and remove a non-last owner', async () => {
     const { alice, bob, proj } = await setup();
     expect((await addMember(alice.token, proj.id, 'bob@example.com', 'owner')).status).toBe(201);
-    expect(countProjectOwners(proj.id)).toBe(2);
+    expect(await countProjectOwners(proj.id)).toBe(2);
 
     const demoted = await patchMemberRole(alice.token, proj.id, bob.user.id, 'admin');
     expect(demoted.status).toBe(200);
     expect(demoted.data.role).toBe('admin');
-    expect(countProjectOwners(proj.id)).toBe(1);
+    expect(await countProjectOwners(proj.id)).toBe(1);
 
     // Re-promote and then remove the second owner.
     expect((await patchMemberRole(alice.token, proj.id, bob.user.id, 'owner')).status).toBe(200);
     const removed = await removeMember(alice.token, proj.id, bob.user.id);
     expect(removed.status).toBe(200);
-    expect(getProjectMember(proj.id, bob.user.id)).toBeNull();
+    expect(await getProjectMember(proj.id, bob.user.id)).toBeNull();
   });
 
   it('still returns 409 when an owner would remove or demote the last owner', async () => {
@@ -511,11 +514,11 @@ describe('project members API', () => {
 // ── DB helper layer ─────────────────────────────────────────────────────────
 // Direct helper tests (not only HTTP) covering the authorization predicates and
 // membership invariants, mirroring backend/jobs.test.js's helper-layer suite.
-describe('org/project DB helpers', () => {
-  function setup() {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const bob = createUser('bob@example.com', 'password123', 'Bob');
-    const carol = createUser('carol@example.com', 'password123', 'Carol');
+describe.skipIf(!CONFIGURED)('org/project DB helpers', () => {
+  async function setup() {
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const bob = await createUser('bob@example.com', 'password123', 'Bob');
+    const carol = await createUser('carol@example.com', 'password123', 'Carol');
     return { alice, bob, carol };
   }
 
@@ -524,106 +527,106 @@ describe('org/project DB helpers', () => {
     for (const r of ['superuser', '', null, undefined, 'Owner']) expect(isValidRole(r)).toBe(false);
   });
 
-  it('creates an org with the creator as owner member', () => {
-    const { alice } = setup();
-    const org = createOrganizationForUser(alice.id, { name: 'Acme' });
+  it('creates an org with the creator as owner member', async () => {
+    const { alice } = await setup();
+    const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
     expect(org.id).toMatch(/^org_[0-9a-f]+$/);
     expect(org.role).toBe('owner');
-    expect(verifyOrganizationMember(alice.id, org.id).role).toBe('owner');
+    expect((await verifyOrganizationMember(alice.id, org.id)).role).toBe('owner');
   });
 
-  it('requireOrganizationRole distinguishes 404 (non-member) from 403 (wrong role)', () => {
-    const { alice, bob, carol } = setup();
-    const org = createOrganizationForUser(alice.id, { name: 'Acme' });
-    addOrgMemberDirect(org.id, bob.id, 'viewer');
+  it('requireOrganizationRole distinguishes 404 (non-member) from 403 (wrong role)', async () => {
+    const { alice, bob, carol } = await setup();
+    const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
+    await addOrgMemberDirect(org.id, bob.id, 'viewer');
 
-    expect(() => requireOrganizationRole(carol.id, org.id, ['owner'])).toThrow(/not found/i); // non-member
+    await expect(requireOrganizationRole(carol.id, org.id, ['owner'])).rejects.toThrow(/not found/i); // non-member
     try {
-      requireOrganizationRole(bob.id, org.id, ['owner', 'admin']);
+      await requireOrganizationRole(bob.id, org.id, ['owner', 'admin']);
       throw new Error('should have thrown');
     } catch (e) {
       expect(e.code).toBe('FORBIDDEN'); // member, wrong role
     }
-    expect(requireOrganizationRole(alice.id, org.id, ['owner']).role).toBe('owner');
+    expect((await requireOrganizationRole(alice.id, org.id, ['owner'])).role).toBe('owner');
   });
 
-  it('createProjectForUser enforces org owner/admin and seeds an owner member', () => {
-    const { alice, bob } = setup();
-    const org = createOrganizationForUser(alice.id, { name: 'Acme' });
-    addOrgMemberDirect(org.id, bob.id, 'viewer');
+  it('createProjectForUser enforces org owner/admin and seeds an owner member', async () => {
+    const { alice, bob } = await setup();
+    const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
+    await addOrgMemberDirect(org.id, bob.id, 'viewer');
 
-    const proj = createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
+    const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
     expect(proj.role).toBe('owner');
-    expect(verifyProjectMember(alice.id, proj.id).role).toBe('owner');
+    expect((await verifyProjectMember(alice.id, proj.id)).role).toBe('owner');
 
     // Org viewer cannot create a project (FORBIDDEN), non-member → NOT_FOUND.
-    expect(() => createProjectForUser(bob.id, { organizationId: org.id, name: 'P2' }))
-      .toThrow(/permission/i);
-    expect(() => createProjectForUser(99999, { organizationId: org.id, name: 'P3' }))
-      .toThrow(); // invalid owner / not found
+    await expect(createProjectForUser(bob.id, { organizationId: org.id, name: 'P2' }))
+      .rejects.toThrow(/permission/i);
+    await expect(createProjectForUser(99999, { organizationId: org.id, name: 'P3' }))
+      .rejects.toThrow(); // invalid owner / not found
   });
 
-  it('scopes listings to membership', () => {
-    const { alice, bob } = setup();
-    const orgA = createOrganizationForUser(alice.id, { name: 'A' });
-    createOrganizationForUser(bob.id, { name: 'B' });
-    createProjectForUser(alice.id, { organizationId: orgA.id, name: 'PA' });
+  it('scopes listings to membership', async () => {
+    const { alice, bob } = await setup();
+    const orgA = await createOrganizationForUser(alice.id, { name: 'A' });
+    await createOrganizationForUser(bob.id, { name: 'B' });
+    await createProjectForUser(alice.id, { organizationId: orgA.id, name: 'PA' });
 
-    expect(listOrganizationsForUser(alice.id)).toHaveLength(1);
-    expect(listProjectsForUser(alice.id)).toHaveLength(1);
-    expect(listProjectsForUser(bob.id)).toHaveLength(0);
+    expect(await listOrganizationsForUser(alice.id)).toHaveLength(1);
+    expect(await listProjectsForUser(alice.id)).toHaveLength(1);
+    expect(await listProjectsForUser(bob.id)).toHaveLength(0);
   });
 
-  it('enforces the last-owner invariant on demote and remove', () => {
-    const { alice, bob } = setup();
-    const org = createOrganizationForUser(alice.id, { name: 'Acme' });
-    const proj = createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
+  it('enforces the last-owner invariant on demote and remove', async () => {
+    const { alice } = await setup();
+    const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
+    const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
 
     // alice is the acting owner throughout (actorRole 'owner').
-    expect(() => updateProjectMemberRole(proj.id, alice.id, 'admin', 'owner')).toThrow(/last owner/i);
-    expect(() => removeProjectMember(proj.id, alice.id, 'owner')).toThrow(/last owner/i);
-    expect(countProjectOwners(proj.id)).toBe(1);
+    await expect(updateProjectMemberRole(proj.id, alice.id, 'admin', 'owner')).rejects.toThrow(/last owner/i);
+    await expect(removeProjectMember(proj.id, alice.id, 'owner')).rejects.toThrow(/last owner/i);
+    expect(await countProjectOwners(proj.id)).toBe(1);
 
     // With a second owner, the original can be demoted/removed.
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'owner', 'owner');
-    expect(countProjectOwners(proj.id)).toBe(2);
-    expect(updateProjectMemberRole(proj.id, alice.id, 'admin', 'owner').role).toBe('admin');
-    expect(countProjectOwners(proj.id)).toBe(1);
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'owner', 'owner');
+    expect(await countProjectOwners(proj.id)).toBe(2);
+    expect((await updateProjectMemberRole(proj.id, alice.id, 'admin', 'owner')).role).toBe('admin');
+    expect(await countProjectOwners(proj.id)).toBe(1);
   });
 
-  it('rejects duplicate and unknown-email member adds', () => {
-    const { alice, bob } = setup();
-    const org = createOrganizationForUser(alice.id, { name: 'Acme' });
-    const proj = createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
+  it('rejects duplicate and unknown-email member adds', async () => {
+    const { alice } = await setup();
+    const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
+    const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
 
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer');
-    expect(() => addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer')).toThrow(/already a member/i);
-    expect(() => addProjectMemberByEmail(proj.id, 'nobody@example.com', 'viewer')).toThrow(/no user/i);
-    expect(() => addProjectMemberByEmail(proj.id, 'bob@example.com', 'superuser')).toThrow(/invalid role/i);
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer');
+    await expect(addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer')).rejects.toThrow(/already a member/i);
+    await expect(addProjectMemberByEmail(proj.id, 'nobody@example.com', 'viewer')).rejects.toThrow(/no user/i);
+    await expect(addProjectMemberByEmail(proj.id, 'bob@example.com', 'superuser')).rejects.toThrow(/invalid role/i);
   });
 
-  it('enforces owner-only owner operations at the helper layer (fail closed)', () => {
-    const { alice, bob, carol } = setup();
-    const org = createOrganizationForUser(alice.id, { name: 'Acme' });
-    const proj = createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
-    addProjectMemberByEmail(proj.id, 'carol@example.com', 'owner', 'owner'); // second owner
+  it('enforces owner-only owner operations at the helper layer (fail closed)', async () => {
+    const { alice, bob, carol } = await setup();
+    const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
+    const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
+    await addProjectMemberByEmail(proj.id, 'carol@example.com', 'owner', 'owner'); // second owner
 
     // A non-owner actor (admin) may not grant, demote, or remove an owner.
-    const forbids = (fn) => {
-      try { fn(); throw new Error('should have thrown'); }
+    const forbids = async (fn) => {
+      try { await fn(); throw new Error('should have thrown'); }
       catch (e) { expect(e.code).toBe('FORBIDDEN'); }
     };
-    forbids(() => addProjectMemberByEmail(proj.id, 'bob@example.com', 'owner', 'admin'));
-    forbids(() => updateProjectMemberRole(proj.id, bob.id, 'owner', 'admin'));   // promote → owner
-    forbids(() => updateProjectMemberRole(proj.id, carol.id, 'admin', 'admin')); // demote owner
-    forbids(() => removeProjectMember(proj.id, carol.id, 'admin'));              // remove owner
+    await forbids(() => addProjectMemberByEmail(proj.id, 'bob@example.com', 'owner', 'admin'));
+    await forbids(() => updateProjectMemberRole(proj.id, bob.id, 'owner', 'admin'));   // promote → owner
+    await forbids(() => updateProjectMemberRole(proj.id, carol.id, 'admin', 'admin')); // demote owner
+    await forbids(() => removeProjectMember(proj.id, carol.id, 'admin'));              // remove owner
 
     // Fail closed: a missing actorRole is treated as non-owner.
-    forbids(() => updateProjectMemberRole(proj.id, carol.id, 'admin'));
+    await forbids(() => updateProjectMemberRole(proj.id, carol.id, 'admin'));
 
     // The owner actor can perform the same operations.
-    expect(updateProjectMemberRole(proj.id, carol.id, 'admin', 'owner').role).toBe('admin');
-    expect(countProjectOwners(proj.id)).toBe(1);
+    expect((await updateProjectMemberRole(proj.id, carol.id, 'admin', 'owner')).role).toBe('admin');
+    expect(await countProjectOwners(proj.id)).toBe(1);
   });
 });

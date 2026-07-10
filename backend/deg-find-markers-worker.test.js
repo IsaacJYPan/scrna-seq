@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
 // ════════════════════════════════════════════════════════════════════════════
 // DEG / marker finding as an allowlisted worker job
@@ -30,9 +30,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 // (POST /object/deg-find-markers), server.js (isInternalOnlyRProxyPath).
 // ════════════════════════════════════════════════════════════════════════════
 
-const dbmod = require('./database');
+const config = require('./config');
+const dbmod = require('./pgDatabase');
+const CONFIGURED = config.hasPostgresConnection();
 const {
-  initDatabase, closeDatabase, createUser,
+  createUser,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getProjectJob,
@@ -120,26 +122,26 @@ async function drain(callR, now = T0, opts = {}) {
   return w.runOnce();
 }
 
-function seedProject(ownerUserId, name = 'P') {
-  const org = createOrganizationForUser(ownerUserId, { name: 'Acme' });
+async function seedProject(ownerUserId, name = 'P') {
+  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
   return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
 // Seed alice + project + an owned analysis object that DEG runs over. (The R call is faked,
 // so the object only needs to exist + be owned; no real live R state is needed here.)
-function seedDegInput() {
-  const alice = createUser('alice@example.com', 'password123', 'Alice');
-  const proj = seedProject(alice.id);
-  const obj = createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc-clustered' });
+async function seedDegInput() {
+  const alice = await createUser('alice@example.com', 'password123', 'Alice');
+  const proj = await seedProject(alice.id);
+  const obj = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc-clustered' });
   return { alice, proj, obj };
 }
 
-function seedDegJob(creatorId, projId, objectId, extra = {}) {
+async function seedDegJob(creatorId, projId, objectId, extra = {}) {
   return createProjectJob(creatorId, projId, { jobType: 'deg.find_markers.v1', analysisObjectId: objectId, ...extra });
 }
 
-function degArtifacts(jobId) {
-  const arts = getJobArtifactsByJobId(jobId);
+async function degArtifacts(jobId) {
+  const arts = await getJobArtifactsByJobId(jobId);
   return {
     markers: arts.filter((a) => a.artifactType === 'deg_markers'),
     summary: arts.filter((a) => a.artifactType === 'deg_summary'),
@@ -150,11 +152,13 @@ function degArtifacts(jobId) {
 // ════════════════════════════════════════════════════════════════════════════
 // 1. Scope / registration (one type + one op added; nothing else changed)
 // ════════════════════════════════════════════════════════════════════════════
-describe('deg.find_markers.v1 — inventory & scope', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+afterAll(async () => { if (!CONFIGURED) return; await dbmod.close(); });
 
-  it('registers deg.find_markers.v1 alongside the existing handlers (existing handlers unchanged)', () => {
+describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — inventory & scope', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
+
+  it('registers deg.find_markers.v1 alongside the existing handlers (existing handlers unchanged)', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
       .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['deg.find_markers.v1']).toBe(degFindMarkersHandler);
@@ -164,13 +168,13 @@ describe('deg.find_markers.v1 — inventory & scope', () => {
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(worker.rObjectInspectHandler);
   });
 
-  it('deg.find_markers.v1 is an allowed job type; deg_markers + deg_summary allowed artifact types', () => {
+  it('deg.find_markers.v1 is an allowed job type; deg_markers + deg_summary allowed artifact types', async () => {
     expect(isValidJobType('deg.find_markers.v1')).toBe(true);
     expect(isValidArtifactType('deg_markers')).toBe(true);
     expect(isValidArtifactType('deg_summary')).toBe(true);
   });
 
-  it('the r.deg.find_markers.v1 op is allowlisted, object-scoped, param-carrying, NON-mutating', () => {
+  it('the r.deg.find_markers.v1 op is allowlisted, object-scoped, param-carrying, NON-mutating', async () => {
     expect(isAllowedRBridgeOperation('r.deg.find_markers.v1')).toBe(true);
     const spec = R_BRIDGE_OPERATIONS['r.deg.find_markers.v1'];
     expect(spec.method).toBe('POST');
@@ -182,14 +186,14 @@ describe('deg.find_markers.v1 — inventory & scope', () => {
     expect(spec.mutating).toBe(false);
   });
 
-  it('the bridge op/target sets stay exact/closed (adds only the DEG op/target)', () => {
+  it('the bridge op/target sets stay exact/closed (adds only the DEG op/target)', async () => {
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
       .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
       .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
   });
 
-  it('NO pathway enrichment / CellChat job types or bridge ops are added', () => {
+  it('NO pathway enrichment / CellChat job types or bridge ops are added', async () => {
     for (const t of ['enrichment', 'cellchat', 'cellchat.infer',
       'enrichment.ora.v1', 'cellchat.infer.v1', 'pathway.enrichment.v1']) {
       expect(DEFAULT_HANDLERS[t]).toBeUndefined();
@@ -200,7 +204,7 @@ describe('deg.find_markers.v1 — inventory & scope', () => {
     }
   });
 
-  it('the legacy "find_markers" / "deg" analytical types remain UNREGISTERED handlers (still fail terminally)', () => {
+  it('the legacy "find_markers" / "deg" analytical types remain UNREGISTERED handlers (still fail terminally)', async () => {
     // find_markers stays an allowed job TYPE (legacy) but has no worker HANDLER; 'deg' is not a type.
     expect(DEFAULT_HANDLERS.find_markers).toBeUndefined();
     expect(DEFAULT_HANDLERS.deg).toBeUndefined();
@@ -208,8 +212,8 @@ describe('deg.find_markers.v1 — inventory & scope', () => {
   });
 
   it('an unsupported job type still fails terminally (UNSUPPORTED_JOB_TYPE), no R contact', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    createJobForUser(alice.id, { jobType: 'find_markers' });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    await createJobForUser(alice.id, { jobType: 'find_markers' });
     const calls = [];
     const res = await drain(degCaller(calls));
     expect(res.status).toBe('unsupported');
@@ -220,8 +224,8 @@ describe('deg.find_markers.v1 — inventory & scope', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 2. Parameter validation (fixed allowlist; invalid fails before R)
 // ════════════════════════════════════════════════════════════════════════════
-describe('validateDegFindMarkersParams — fixed allowlist', () => {
-  it('applies + records all defaults when no params are supplied', () => {
+describe.skipIf(!CONFIGURED)('validateDegFindMarkersParams — fixed allowlist', () => {
+  it('applies + records all defaults when no params are supplied', async () => {
     const { params, defaultsApplied } = validateDegFindMarkersParams(undefined);
     expect(params).toEqual({
       groupBy: 'seurat_clusters', assay: 'RNA', onlyPositive: true,
@@ -231,7 +235,7 @@ describe('validateDegFindMarkersParams — fixed allowlist', () => {
     expect(defaultsApplied.sort()).toEqual([...DEG_FIND_MARKERS_PARAM_NAMES].sort());
   });
 
-  it('accepts valid params and records which were defaulted', () => {
+  it('accepts valid params and records which were defaulted', async () => {
     const { params, defaultsApplied } = validateDegFindMarkersParams({
       groupBy: 'ident', assay: 'SCT', onlyPositive: false, minPct: 0.25,
       logfcThreshold: 1.0, testUse: 'wilcox', maxCellsPerIdent: 500,
@@ -245,14 +249,12 @@ describe('validateDegFindMarkersParams — fixed allowlist', () => {
     expect(defaultsApplied).toHaveLength(0);
   });
 
-  it('rejects unknown parameter names (strict)', () => {
-    expect(() => validateDegFindMarkersParams({ rCode: 'system("rm -rf /")' }))
-      .toThrowError(/Unknown parameter/);
-    expect(() => validateDegFindMarkersParams({ topMarkersPerCluster: 10, extra: 1 }))
-      .toThrowError(/Unknown parameter/);
+  it('rejects unknown parameter names (strict)', async () => {
+    expect(() => validateDegFindMarkersParams({ rCode: 'system("rm -rf /")' })).toThrowError(/Unknown parameter/);
+    expect(() => validateDegFindMarkersParams({ topMarkersPerCluster: 10, extra: 1 })).toThrowError(/Unknown parameter/);
   });
 
-  it('rejects invalid numeric params (type / range / NaN)', () => {
+  it('rejects invalid numeric params (type / range / NaN)', async () => {
     expect(() => validateDegFindMarkersParams({ minPct: 2 })).toThrowError(/between 0 and 1/);
     expect(() => validateDegFindMarkersParams({ logfcThreshold: -1 })).toThrowError(/between 0 and 10/);
     expect(() => validateDegFindMarkersParams({ minPct: NaN })).toThrowError(/finite number/);
@@ -260,13 +262,13 @@ describe('validateDegFindMarkersParams — fixed allowlist', () => {
     expect(() => validateDegFindMarkersParams({ topMarkersPerCluster: 7.5 })).toThrowError(/integer/);
   });
 
-  it('rejects string-where-number (no coercion → nothing string-like flows to R)', () => {
+  it('rejects string-where-number (no coercion → nothing string-like flows to R)', async () => {
     expect(() => validateDegFindMarkersParams({ minPct: '0.5' })).toThrowError(/finite number/);
     expect(() => validateDegFindMarkersParams({ maxCellsPerIdent: '500' })).toThrowError(/finite number/);
     expect(() => validateDegFindMarkersParams({ randomSeed: '42; system("x")' })).toThrowError(/finite number/);
   });
 
-  it('restricts string params to fixed enum allowlists (no arbitrary metadata column / R function / test)', () => {
+  it('restricts string params to fixed enum allowlists (no arbitrary metadata column / R function / test)', async () => {
     expect(() => validateDegFindMarkersParams({ groupBy: 'orig.ident' })).toThrowError(/must be one of/);
     expect(() => validateDegFindMarkersParams({ groupBy: 'system("x")' })).toThrowError(/must be one of/);
     expect(() => validateDegFindMarkersParams({ assay: 'integrated' })).toThrowError(/must be one of/);
@@ -275,7 +277,7 @@ describe('validateDegFindMarkersParams — fixed allowlist', () => {
     expect(() => validateDegFindMarkersParams({ testUse: 'roc' })).toThrowError(/must be one of/);
   });
 
-  it('rejects boolean coercion + wrong-shaped containers', () => {
+  it('rejects boolean coercion + wrong-shaped containers', async () => {
     expect(() => validateDegFindMarkersParams({ onlyPositive: 'true' })).toThrowError(/boolean/);
     expect(() => validateDegFindMarkersParams({ onlyPositive: 1 })).toThrowError(/boolean/);
     expect(() => validateDegFindMarkersParams([])).toThrowError(/plain JSON object/);
@@ -283,66 +285,66 @@ describe('validateDegFindMarkersParams — fixed allowlist', () => {
     expect(() => validateDegFindMarkersParams(5)).toThrowError(/plain JSON object/);
   });
 
-  it('the top-marker summary limit is bounded [5, 50]', () => {
+  it('the top-marker summary limit is bounded [5, 50]', async () => {
     expect(DEG_FIND_MARKERS_PARAM_SPEC.topMarkersPerCluster.min).toBe(5);
     expect(DEG_FIND_MARKERS_PARAM_SPEC.topMarkersPerCluster.max).toBe(50);
     expect(() => validateDegFindMarkersParams({ topMarkersPerCluster: 51 })).toThrowError(/between 5 and 50/);
     expect(validateDegFindMarkersParams({ topMarkersPerCluster: 50 }).params.topMarkersPerCluster).toBe(50);
   });
 
-  it('intOrNull params accept explicit null', () => {
+  it('intOrNull params accept explicit null', async () => {
     const { params } = validateDegFindMarkersParams({ maxCellsPerIdent: null, randomSeed: null });
     expect(params.maxCellsPerIdent).toBeNull();
     expect(params.randomSeed).toBeNull();
   });
 });
 
-describe('allocateDegResultStorageKey — server-controlled internal key', () => {
-  it('builds a safe relative key from a well-formed job id only', () => {
+describe.skipIf(!CONFIGURED)('allocateDegResultStorageKey — server-controlled internal key', () => {
+  it('builds a safe relative key from a well-formed job id only', async () => {
     const key = allocateDegResultStorageKey('job_abc123');
     expect(key).toMatch(/^vault\/deg\/job_abc123\/[0-9a-f]{24}\.csv$/);
     expect(dbmod.isSafeInternalStorageKey(key)).toBe(true);
   });
-  it('refuses anything but a server-generated job id (no client input contributes)', () => {
+  it('refuses anything but a server-generated job id (no client input contributes)', async () => {
     for (const bad of ['', 'nope', '../../etc', 'job_../x', 5, null]) {
       expect(() => allocateDegResultStorageKey(bad)).toThrowError(/server-generated job id/);
     }
   });
-  it('is unique per call', () => {
+  it('is unique per call', async () => {
     expect(allocateDegResultStorageKey('job_abc123')).not.toBe(allocateDegResultStorageKey('job_abc123'));
   });
 });
 
-describe('deg.find_markers.v1 — parameter validation at the worker (fail before R)', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — parameter validation at the worker (fail before R)', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('unknown params fail the job BEFORE any R contact (no artifact)', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id, { parameters: { bogus: 1 } });
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id, { parameters: { bogus: 1 } });
     const calls = [];
     const res = await drain(degCaller(calls), T0);
     expect(res.status).toBe('failed');
     expect(calls.filter((c) => c.path === '/object/deg-find-markers')).toHaveLength(0);
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('invalid numeric params fail the job BEFORE any R contact (no artifact)', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id, { parameters: { minPct: 5 } });
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id, { parameters: { minPct: 5 } });
     const calls = [];
     const res = await drain(degCaller(calls), T0);
     expect(res.status).toBe('failed');
     expect(calls.filter((c) => c.path === '/object/deg-find-markers')).toHaveLength(0);
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('resolved params (incl. defaults) appear in the safe artifact metadata on success', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id, { parameters: { topMarkersPerCluster: 15 } });
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id, { parameters: { topMarkersPerCluster: 15 } });
     const res = await drain(degCaller([]), T0);
     expect(res.status).toBe('completed');
-    const { summary, markers } = degArtifacts(job.id);
+    const { summary, markers } = await degArtifacts(job.id);
     expect(summary[0].metadata.resolvedParams.topMarkersPerCluster).toBe(15);
     expect(summary[0].metadata.resolvedParams.testUse).toBe('wilcox');
     expect(Array.isArray(summary[0].metadata.defaultsApplied)).toBe(true);
@@ -353,14 +355,14 @@ describe('deg.find_markers.v1 — parameter validation at the worker (fail befor
 // ════════════════════════════════════════════════════════════════════════════
 // 3. Public R-proxy block (direct /api/r/object/deg-find-markers is internal-only)
 // ════════════════════════════════════════════════════════════════════════════
-describe('deg.find_markers.v1 — direct R-proxy access is blocked (internal-only)', () => {
+describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — direct R-proxy access is blocked (internal-only)', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  it('isInternalOnlyRProxyPath blocks every spelling of /object/deg-find-markers; allows other R paths', () => {
+
+  it('isInternalOnlyRProxyPath blocks every spelling of /object/deg-find-markers; allows other R paths', async () => {
     expect(R_PROXY_INTERNAL_ONLY_PATHS.has('/object/deg-find-markers')).toBe(true);
     for (const p of [
       '/object/deg-find-markers', '/object/deg-find-markers/', '//object/deg-find-markers',
@@ -377,8 +379,8 @@ describe('deg.find_markers.v1 — direct R-proxy access is blocked (internal-onl
   });
 
   it('authenticated direct POST /api/r/object/deg-find-markers is 404 BEFORE R, with NO side effects', async () => {
-    const { user, token } = createUserWithToken({ email: 'owner@example.com' });
-    const owned = createAnalysisObjectForUser(user.id, { objectType: 'seurat', displayName: 'mine' });
+    const { user, token } = await createUserWithToken({ email: 'owner@example.com' });
+    const owned = await createAnalysisObjectForUser(user.id, { objectType: 'seurat', displayName: 'mine' });
     const r = await api(server, '/api/r/object/deg-find-markers', {
       method: 'POST', token,
       headers: { 'X-Object-ID': owned.id },
@@ -386,12 +388,12 @@ describe('deg.find_markers.v1 — direct R-proxy access is blocked (internal-onl
       body: { params: {}, storage_key: 'vault/owner_example_com/evil.csv' },
     });
     expect(r.status).toBe(404);
-    expect(listJobsForUser(user.id, {})).toHaveLength(0);
-    expect(listAnalysisObjectsForUser(user.id, {})).toHaveLength(1); // only the pre-created object
+    expect(await listJobsForUser(user.id, {})).toHaveLength(0);
+    expect(await listAnalysisObjectsForUser(user.id, {})).toHaveLength(1); // only the pre-created object
   });
 
   it('blocks the deg path for any method / odd spelling (still 404, no leak)', async () => {
-    const { token } = createUserWithToken({ email: 'owner2@example.com' });
+    const { token } = await createUserWithToken({ email: 'owner2@example.com' });
     for (const { method, path } of [
       { method: 'GET', path: '/api/r/object/deg-find-markers' },
       { method: 'POST', path: '/api/r/object/deg-find-markers/' },
@@ -410,7 +412,7 @@ describe('deg.find_markers.v1 — direct R-proxy access is blocked (internal-onl
   });
 
   it('does NOT over-block: a non-internal /api/r path still enforces X-Object-ID ownership before R', async () => {
-    const { token } = createUserWithToken({ email: 'owner3@example.com' });
+    const { token } = await createUserWithToken({ email: 'owner3@example.com' });
     const bad = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
     expect(bad.status).toBe(400);
     const unknown = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
@@ -418,7 +420,7 @@ describe('deg.find_markers.v1 — direct R-proxy access is blocked (internal-onl
   });
 
   it('existing pbmc + checkpoint-load proxy blocks still 404', async () => {
-    const { token } = createUserWithToken({ email: 'owner4@example.com' });
+    const { token } = await createUserWithToken({ email: 'owner4@example.com' });
     for (const p of ['/api/r/object/pbmc-pipeline', '/api/r/object/checkpoint-load']) {
       const r = await api(server, p, { method: 'POST', token, body: {} });
       expect(r.status, p).toBe(404);
@@ -426,11 +428,11 @@ describe('deg.find_markers.v1 — direct R-proxy access is blocked (internal-onl
   });
 
   it('a project co-member is blocked at the proxy for the deg path (404, no run/leak)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const carol = createUserWithToken({ email: 'carol@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
-    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'a' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const carol = await createUserWithToken({ email: 'carol@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
+    const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'a' });
     const r = await api(server, '/api/r/object/deg-find-markers', {
       method: 'POST', token: carol.token, headers: { 'X-Object-ID': aliceObj.id }, body: { params: {} },
     });
@@ -441,9 +443,9 @@ describe('deg.find_markers.v1 — direct R-proxy access is blocked (internal-onl
 // ════════════════════════════════════════════════════════════════════════════
 // 4. Bridge / input control (server-built body; no client storage key/path)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.deg.find_markers.v1 — bridge allowlist & input control', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('r.deg.find_markers.v1 — bridge allowlist & input control', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   const job = { id: 'job_abc', ownerUserId: 1, projectId: 'proj_1', parameters: {} };
 
@@ -547,13 +549,13 @@ describe('r.deg.find_markers.v1 — bridge allowlist & input control', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 5. Worker success (two artifacts; no result object / lineage edge)
 // ════════════════════════════════════════════════════════════════════════════
-describe('deg.find_markers.v1 — worker success', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker success', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('runs DEG on the owner\'s object, completes, records ONE deg_markers + ONE deg_summary artifact', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     const calls = [];
     const res = await drain(degCaller(calls), T0);
     expect(res.status).toBe('completed');
@@ -565,7 +567,7 @@ describe('deg.find_markers.v1 — worker success', () => {
     expect(degReqs[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, obj.id));
     expect(degReqs[0].body.storage_key).toMatch(/^vault\/deg\/job_[0-9a-f]+\/[0-9a-f]{24}\.csv$/);
 
-    const { markers, summary, all } = degArtifacts(job.id);
+    const { markers, summary, all } = await degArtifacts(job.id);
     expect(all).toHaveLength(2);
     expect(markers).toHaveLength(1);
     expect(summary).toHaveLength(1);
@@ -593,23 +595,23 @@ describe('deg.find_markers.v1 — worker success', () => {
   });
 
   it('creates NO new analysis object and NO lineage edge (DEG is an output analysis)', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    seedDegJob(alice.id, proj.id, obj.id);
-    const before = listAnalysisObjectsForUser(alice.id, {}).length;
+    const { alice, proj, obj } = await seedDegInput();
+    await seedDegJob(alice.id, proj.id, obj.id);
+    const before = (await listAnalysisObjectsForUser(alice.id, {})).length;
     const res = await drain(degCaller([]), T0);
     expect(res.status).toBe('completed');
     // The completed DEG job did not link a result object, create a child object, or an edge.
-    expect(listAnalysisObjectsForUser(alice.id, {})).toHaveLength(before);
-    expect(listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
+    expect(await listAnalysisObjectsForUser(alice.id, {})).toHaveLength(before);
+    expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
     expect(res.result.markersArtifactId).toBeTruthy();
     expect(res.result.summaryArtifactId).toBeTruthy();
   });
 
   it('public artifact metadata never leaks the storage key/path, R state key, or raw data', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     await drain(degCaller([]), T0);
-    const { markers, summary } = degArtifacts(job.id);
+    const { markers, summary } = await degArtifacts(job.id);
     const pubMarkers = JSON.stringify(dbmod.toPublicJobArtifact(markers[0]));
     const pubSummary = JSON.stringify(dbmod.toPublicJobArtifact(summary[0]));
     for (const blob of [pubMarkers, pubSummary]) {
@@ -621,19 +623,19 @@ describe('deg.find_markers.v1 — worker success', () => {
   });
 
   it('logs are sanitized (no storage key / R state key in durable logs)', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     await drain(degCaller([]), T0);
-    const wjob = dbmod.getWorkerJob ? dbmod.getWorkerJob(job.id) : null;
-    const logs = JSON.stringify((wjob && wjob.logs) || dbmod.getProjectJob(alice.id, proj.id, job.id).logs || []);
+    const wjob = dbmod.getWorkerJob ? await dbmod.getWorkerJob(job.id) : null;
+    const logs = JSON.stringify((wjob && wjob.logs) || (await getProjectJob(alice.id, proj.id, job.id)).logs || []);
     expect(logs).not.toContain('deg/job_');
     expect(logs).not.toContain(deriveRObjectStateKey(alice.id, obj.id));
   });
 
   it('a duplicate completion cannot duplicate the success artifacts (DEG_RESULT_EXISTS)', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
-    const claimed = claimNextJob('worker_A', { leaseSeconds: 30, now: T0 });
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
+    const claimed = await claimNextJob('worker_A', { leaseSeconds: 30, now: T0 });
     expect(claimed.id).toBe(job.id);
     const input = {
       markersArtifact: {
@@ -644,169 +646,168 @@ describe('deg.find_markers.v1 — worker success', () => {
       summaryArtifact: { artifactType: 'deg_summary', storageKind: 'metadata_only', metadata: {} },
     };
     // First completion succeeds.
-    completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 });
+    await completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 });
     // A second completion (duplicate) is refused — no duplicate artifacts.
-    expect(() => completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 }))
-      .toThrowError(/DEG marker result/);
-    expect(degArtifacts(job.id).markers).toHaveLength(1);
-    expect(degArtifacts(job.id).summary).toHaveLength(1);
+    await expect(completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 })).rejects.toThrowError(/DEG marker result/);
+    expect((await degArtifacts(job.id)).markers).toHaveLength(1);
+    expect((await degArtifacts(job.id)).summary).toHaveLength(1);
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
 // 6. Worker failure / cancel (no successful artifacts)
 // ════════════════════════════════════════════════════════════════════════════
-describe('deg.find_markers.v1 — worker failure / cancel', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker failure / cancel', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('an R failure (non-200) fails the job and records NO DEG artifact', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     const res = await drain(degCaller([], { status: 500, body: { error: 'boom' } }), T0);
     expect(res.status).toBe('failed');
-    expect(degArtifacts(job.id).all).toHaveLength(0);
-    expect(getProjectJob(alice.id, proj.id, job.id).status).toBe('failed');
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
+    expect((await getProjectJob(alice.id, proj.id, job.id)).status).toBe('failed');
   });
 
   it('an R result with saved:false fails the job and records NO DEG artifact', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     const body = degBody({ result: { saved: false, checksum_sha256: null, size_bytes: 0, n_rows: 0 } });
     const res = await drain(degCaller([], { status: 200, body }), T0);
     expect(res.status).toBe('failed');
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('a missing checksum (write produced no integrity) fails the job and records NO DEG artifact', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     const body = degBody({ result: { saved: true, checksum_sha256: 'not-hex', size_bytes: 1, n_rows: 1 } });
     const res = await drain(degCaller([], { status: 200, body }), T0);
     expect(res.status).toBe('failed');
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('a canceled job creates no successful DEG artifact (claim lost mid-run, not resurrected)', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     const cancelingCaller = async (req) => {
-      if (req.path === '/object/deg-find-markers') cancelProjectJob(alice.id, proj.id, job.id);
+      if (req.path === '/object/deg-find-markers') await cancelProjectJob(alice.id, proj.id, job.id);
       return { status: 200, body: degBody() };
     };
     const res = await drain(cancelingCaller, T0);
     expect(['claim_lost', 'failed']).toContain(res.status);
-    expect(getProjectJob(alice.id, proj.id, job.id).status).toBe('canceled');
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await getProjectJob(alice.id, proj.id, job.id)).status).toBe('canceled');
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('a duplicate worker cannot claim a running DEG job (single-winner) → no duplicate artifact', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
-    const claimed = claimNextJob('worker_A', { leaseSeconds: 30, now: T0 });
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
+    const claimed = await claimNextJob('worker_A', { leaseSeconds: 30, now: T0 });
     expect(claimed.id).toBe(job.id);
     const res = await drain(degCaller([]), T0, { workerId: 'worker_B' });
     expect(res.status).toBe('idle');
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('a claim lost before completion does not write artifacts (stale worker cannot complete)', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
-    const claimed = claimNextJob('worker_A', { leaseSeconds: 30, now: T0 });
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
+    const claimed = await claimNextJob('worker_A', { leaseSeconds: 30, now: T0 });
     // Cancel voids the claim; a stale completion attempt is refused (CLAIM_LOST), no artifacts.
-    cancelProjectJob(alice.id, proj.id, job.id);
-    expect(() => completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, {
+    await cancelProjectJob(alice.id, proj.id, job.id);
+    await expect(completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, {
       markersArtifact: { artifactType: 'deg_markers', storageKind: 'local_internal', internalStorageKey: 'deg/job_x/t.csv', checksumSha256: 'a'.repeat(64), sizeBytes: 1, metadata: {} },
       summaryArtifact: { artifactType: 'deg_summary', storageKind: 'metadata_only', metadata: {} },
-    }, { now: T0 })).toThrowError(/claim/i);
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    }, { now: T0 })).rejects.toThrowError(/claim/i);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
 // 7. Authorization & ownership (owner-only v1; viewer/non-member/co-member/cross-project)
 // ════════════════════════════════════════════════════════════════════════════
-describe('deg.find_markers.v1 — authorization & ownership', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — authorization & ownership', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('the OWNER can create + run a DEG job for their own object', async () => {
-    const { alice, proj, obj } = seedDegInput();
-    const job = seedDegJob(alice.id, proj.id, obj.id);
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
     const res = await drain(degCaller([]), T0);
     expect(res.status).toBe('completed');
     expect(res.jobId).toBe(job.id);
   });
 
   it('a VIEWER cannot create a DEG job (FORBIDDEN; viewers cannot create jobs)', async () => {
-    const { proj, obj } = seedDegInput();
-    const viewer = createUser('viewer@example.com', 'password123', 'Viewer');
-    addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
+    const { proj, obj } = await seedDegInput();
+    const viewer = await createUser('viewer@example.com', 'password123', 'Viewer');
+    await addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
     let err;
-    try { seedDegJob(viewer.id, proj.id, obj.id); } catch (e) { err = e; }
+    try { await seedDegJob(viewer.id, proj.id, obj.id); } catch (e) { err = e; }
     expect(err && err.code).toBe('FORBIDDEN');
   });
 
   it('a NON-MEMBER cannot create a DEG job (404, no project existence leak)', async () => {
-    const { proj, obj } = seedDegInput();
-    const stranger = createUser('stranger@example.com', 'password123', 'Stranger');
+    const { proj, obj } = await seedDegInput();
+    const stranger = await createUser('stranger@example.com', 'password123', 'Stranger');
     let err;
-    try { seedDegJob(stranger.id, proj.id, obj.id); } catch (e) { err = e; }
+    try { await seedDegJob(stranger.id, proj.id, obj.id); } catch (e) { err = e; }
     expect(err && err.code).toBe('NOT_FOUND');
   });
 
   it('a co-member ANALYST who does NOT own the object is rejected BEFORE R contact (job fails, no R, no artifact)', async () => {
-    const { proj, obj } = seedDegInput();
-    const carol = createUser('carol@example.com', 'password123', 'Carol');
-    addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
+    const { proj, obj } = await seedDegInput();
+    const carol = await createUser('carol@example.com', 'password123', 'Carol');
+    await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
     // Carol CAN create the job (object is in her project) but the worker owner-gate fails it.
-    const job = seedDegJob(carol.id, proj.id, obj.id);
+    const job = await seedDegJob(carol.id, proj.id, obj.id);
     const calls = [];
     const res = await drain(degCaller(calls), T0);
     expect(res.status).toBe('failed');
     expect(calls.filter((c) => c.path === '/object/deg-find-markers')).toHaveLength(0); // never reached R
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('a co-member ADMIN who does NOT own the object is ALSO rejected before R contact (membership ≠ live R)', async () => {
-    const { proj, obj } = seedDegInput();
-    const bob = createUser('bob@example.com', 'password123', 'Bob');
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
-    const job = seedDegJob(bob.id, proj.id, obj.id);
+    const { proj, obj } = await seedDegInput();
+    const bob = await createUser('bob@example.com', 'password123', 'Bob');
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
+    const job = await seedDegJob(bob.id, proj.id, obj.id);
     const calls = [];
     const res = await drain(degCaller(calls), T0);
     expect(res.status).toBe('failed');
     expect(calls.filter((c) => c.path === '/object/deg-find-markers')).toHaveLength(0);
-    expect(degArtifacts(job.id).all).toHaveLength(0);
+    expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
   it('a cross-project object cannot be referenced by a DEG job (404 at creation)', async () => {
-    const { alice, proj, obj } = seedDegInput(); // eslint-disable-line no-unused-vars
-    const otherProj = seedProject(alice.id, 'Other');
-    expect(() => seedDegJob(alice.id, otherProj.id, obj.id)).toThrowError(/not found/i);
+    const { alice, proj, obj } = await seedDegInput(); // eslint-disable-line no-unused-vars
+    const otherProj = await seedProject(alice.id, 'Other');
+    await expect(seedDegJob(alice.id, otherProj.id, obj.id)).rejects.toThrowError(/not found/i);
   });
 
-  it('a malformed / unknown object id is rejected at job creation (404)', () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const proj = seedProject(alice.id);
-    expect(() => seedDegJob(alice.id, proj.id, 'ao_nope')).toThrowError(/not found/i);
+  it('a malformed / unknown object id is rejected at job creation (404)', async () => {
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const proj = await seedProject(alice.id);
+    await expect(seedDegJob(alice.id, proj.id, 'ao_nope')).rejects.toThrowError(/not found/i);
   });
 
   it('a legacy owner-scoped object is not usable through a project DEG job (no project leak)', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const proj = seedProject(alice.id);
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const proj = await seedProject(alice.id);
     // Owner-scoped (no project) object cannot be referenced by a project job in proj.
-    const legacy = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'legacy' });
-    expect(() => seedDegJob(alice.id, proj.id, legacy.id)).toThrowError(/not found/i);
+    const legacy = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'legacy' });
+    await expect(seedDegJob(alice.id, proj.id, legacy.id)).rejects.toThrowError(/not found/i);
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
 // 8. sanitizeDegSummary / sanitizeDegResultInfo (no raw data ever survives)
 // ════════════════════════════════════════════════════════════════════════════
-describe('sanitizeDegSummary — bounded, metadata-only, safe columns only', () => {
-  it('keeps only the allowlisted structural + safe-column fields; drops everything else', () => {
+describe.skipIf(!CONFIGURED)('sanitizeDegSummary — bounded, metadata-only, safe columns only', () => {
+  it('keeps only the allowlisted structural + safe-column fields; drops everything else', async () => {
     const out = sanitizeDegSummary({
       summary: {
         group_by: 'seurat_clusters', test_use: 'wilcox', assay: 'RNA',
@@ -838,14 +839,14 @@ describe('sanitizeDegSummary — bounded, metadata-only, safe columns only', () 
     expect(blob).not.toContain('embeddings');
   });
 
-  it('hard-caps the top-marker rows even if R returns an unbounded table', () => {
+  it('hard-caps the top-marker rows even if R returns an unbounded table', async () => {
     const huge = [];
     for (let i = 0; i < 5000; i++) huge.push({ group: '0', gene: `G${i}`, avg_log2FC: 1, pct_1: 0.5, pct_2: 0.1, p_val_adj: 0.01, rank: i });
     const out = sanitizeDegSummary({ summary: { top_markers: huge } });
     expect(out.topMarkers.length).toBeLessThanOrEqual(2000);
   });
 
-  it('drops NaN/Infinity/oversized numeric stats', () => {
+  it('drops NaN/Infinity/oversized numeric stats', async () => {
     const out = sanitizeDegSummary({ summary: { top_markers: [
       { group: '0', gene: 'X', avg_log2FC: Infinity, pct_1: NaN, pct_2: 1e20, p_val_adj: 'bad', rank: -1 },
     ] } });
@@ -854,12 +855,12 @@ describe('sanitizeDegSummary — bounded, metadata-only, safe columns only', () 
   });
 });
 
-describe('sanitizeDegResultInfo — file integrity only, never the path/key', () => {
-  it('keeps saved + checksum + size + rows; never a path/key', () => {
+describe.skipIf(!CONFIGURED)('sanitizeDegResultInfo — file integrity only, never the path/key', () => {
+  it('keeps saved + checksum + size + rows; never a path/key', async () => {
     expect(sanitizeDegResultInfo({ result: { saved: true, checksum_sha256: 'b'.repeat(64), size_bytes: 99, n_rows: 7, storage_key: '/vault/x.csv' } }))
       .toEqual({ saved: true, checksumSha256: 'b'.repeat(64), sizeBytes: 99, nRows: 7 });
   });
-  it('a not-saved / garbage body collapses safely', () => {
+  it('a not-saved / garbage body collapses safely', async () => {
     expect(sanitizeDegResultInfo({ result: { saved: false, checksum_sha256: 'nothex', size_bytes: -1 } }))
       .toEqual({ saved: false, checksumSha256: null, sizeBytes: null, nRows: null });
     expect(sanitizeDegResultInfo(null)).toEqual({ saved: false, checksumSha256: null, sizeBytes: null, nRows: null });
