@@ -314,16 +314,24 @@ describe.skipIf(!CONFIGURED)('job worker — start/stop lifecycle (fake timers, 
   });
 
   it('start() then stop() runs ticks then leaves no live timer', async () => {
+    // Under fake timers the real Postgres driver's async substrate is frozen, so a real
+    // claim could never settle inside advanceTimersByTimeAsync. This test only exercises
+    // the worker's timer loop (start schedules ticks; stop cancels them, leaving no live
+    // timer), so a microtask-resolvable stub db with an idle claim is sufficient and
+    // deterministic — real claim/heartbeat SQL is covered by jobs-worker-contract.
     vi.useFakeTimers();
-    await newGenericJob();
-    const spy = spyDb(dbmod);
+    const stub = {
+      reapExpiredJobs: async () => ({ requeued: [], failed: [] }),
+      claimNextJob: async () => null,
+    };
+    const spy = spyDb(stub);
     const w = createJobWorker({ db: spy, pollIntervalMs: 1000, now: () => T0, logger: silentLogger() });
 
     expect(w.isRunning()).toBe(false);
     w.start();
     expect(w.isRunning()).toBe(true);
 
-    await vi.advanceTimersByTimeAsync(1); // run the first tick (claims + completes)
+    await vi.advanceTimersByTimeAsync(1); // run the first tick (a claim attempt)
     expect(spy._calls.claim).toBeGreaterThanOrEqual(1);
 
     await w.stop();
@@ -336,6 +344,8 @@ describe.skipIf(!CONFIGURED)('job worker — start/stop lifecycle (fake timers, 
   });
 
   it('start() is idempotent and stop() is safe to call twice', async () => {
+    // Timers are never advanced here (the scheduled tick never fires), so this only
+    // asserts start()/stop() bookkeeping — no db work happens.
     vi.useFakeTimers();
     const w = createJobWorker({ db: dbmod, pollIntervalMs: 1000, now: () => T0, logger: silentLogger() });
     w.start();
@@ -382,9 +392,24 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
   });
 
   it('heartbeats repeatedly (renewing the lease) while a slow R call is awaited', async () => {
+    // Under fake timers the real Postgres driver's async substrate is frozen, so a real
+    // claim/heartbeat could never settle inside advanceTimersByTimeAsync. This test
+    // isolates the worker's lease-renewal TIMER behaviour, so a microtask-resolvable stub
+    // db (an already-claimed job) is sufficient and deterministic — the renewal simply
+    // calls db.heartbeatJob on its interval, which the spy counts.
     vi.useFakeTimers();
-    const job = await createJobForUser(alice.id, { jobType: 'generic' });
-    expect(job).toBeTruthy();
+    const claimed = {
+      id: 'job_lease', jobType: 'generic', ownerUserId: alice.id,
+      claimToken: 'wct_lease', projectId: null, analysisObjectId: null, status: 'running',
+    };
+    const stubDb = {
+      reapExpiredJobs: async () => ({ requeued: [], failed: [] }),
+      claimNextJob: async () => claimed,
+      appendJobLogByWorker: async () => ({}),
+      heartbeatJob: async () => ({ status: 'running' }),
+      completeJobByWorker: async () => ({ status: 'completed' }),
+      failJobByWorker: async () => ({ status: 'failed' }),
+    };
 
     // A bridge whose runRBridgeOperation blocks until we release it, so we can advance
     // fake time (firing the renewal interval) while the handler is inside the call.
@@ -399,7 +424,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
       },
     };
 
-    const spy = spyDb(dbmod);
+    const spy = spyDb(stubDb);
     const w = createJobWorker({
       db: spy,
       rBridge: fakeBridge,

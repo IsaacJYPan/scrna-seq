@@ -235,7 +235,7 @@ describe.skipIf(!CONFIGURED)('getLoadableCheckpointForAnalysisObject — selecti
     const alice = await createUser('alice@example.com', 'password123', 'Alice');
     const proj = await seedProject(alice.id);
     const obj = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'plain' });
-    await expect(await getLoadableCheckpointForAnalysisObject(proj.id, obj.id, alice.id)).rejects.toThrowError(/No loadable checkpoint/);
+    await expect(getLoadableCheckpointForAnalysisObject(proj.id, obj.id, alice.id)).rejects.toThrowError(/No loadable checkpoint/);
   });
 
   it('rejects when the only associated artifact is the WRONG type (pipeline_summary) — filtered out', async () => {
@@ -258,7 +258,7 @@ describe.skipIf(!CONFIGURED)('getLoadableCheckpointForAnalysisObject — selecti
     // A metadata-only 'checkpoint' artifact linked as result → wrong storage kind, never loadable.
     await createJobArtifactByWorker(claimed.id, 'worker_meta', claimed.claimToken,
       { artifactType: 'checkpoint', resultAnalysisObjectId: obj.id, storageKind: 'metadata_only' }, { now: T0 });
-    await expect(await getLoadableCheckpointForAnalysisObject(proj.id, obj.id, alice.id)).rejects.toThrowError(/No loadable checkpoint/);
+    await expect(getLoadableCheckpointForAnalysisObject(proj.id, obj.id, alice.id)).rejects.toThrowError(/No loadable checkpoint/);
   });
 
   it('rejects AMBIGUOUS checkpoints (two local_internal checkpoint artifacts) deterministically', async () => {
@@ -271,7 +271,7 @@ describe.skipIf(!CONFIGURED)('getLoadableCheckpointForAnalysisObject — selecti
       internalStorageKey: 'checkpoints/job_dup/second.rds',
       checksumSha256: 'b'.repeat(64), sizeBytes: 999,
     }, { now: T0 });
-    await expect(await getLoadableCheckpointForAnalysisObject(proj.id, resultObjectId, alice.id)).rejects.toThrowError(/Multiple loadable checkpoints/);
+    await expect(getLoadableCheckpointForAnalysisObject(proj.id, resultObjectId, alice.id)).rejects.toThrowError(/Multiple loadable checkpoints/);
   });
 
   it('rejects a non-owner (owner-only v1): a co-member cannot resolve another user\'s checkpoint', async () => {
@@ -279,20 +279,20 @@ describe.skipIf(!CONFIGURED)('getLoadableCheckpointForAnalysisObject — selecti
     const carol = await createUser('carol@example.com', 'password123', 'Carol');
     await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
     // Carol is a project member but does NOT own the result object → 404-style rejection.
-    await expect(await getLoadableCheckpointForAnalysisObject(proj.id, resultObjectId, carol.id)).rejects.toThrowError(/Analysis object not found/);
+    await expect(getLoadableCheckpointForAnalysisObject(proj.id, resultObjectId, carol.id)).rejects.toThrowError(/Analysis object not found/);
   });
 
   it('rejects a cross-project object (object exists but not in the given project)', async () => {
     const { alice, resultObjectId } = await seedLoadableCheckpoint();
     const otherProj = await seedProject(alice.id, 'Other');
-    await expect(await getLoadableCheckpointForAnalysisObject(otherProj.id, resultObjectId, alice.id)).rejects.toThrowError(/Analysis object not found/);
+    await expect(getLoadableCheckpointForAnalysisObject(otherProj.id, resultObjectId, alice.id)).rejects.toThrowError(/Analysis object not found/);
   });
 
   it('rejects malformed / unknown object ids (no existence leak)', async () => {
     const alice = await createUser('alice@example.com', 'password123', 'Alice');
     const proj = await seedProject(alice.id);
-    await expect(await getLoadableCheckpointForAnalysisObject(proj.id, '', alice.id)).rejects.toThrowError(/not found/);
-    await expect(await getLoadableCheckpointForAnalysisObject(proj.id, 'ao_nope', alice.id)).rejects.toThrowError(/not found/);
+    await expect(getLoadableCheckpointForAnalysisObject(proj.id, '', alice.id)).rejects.toThrowError(/not found/);
+    await expect(getLoadableCheckpointForAnalysisObject(proj.id, 'ao_nope', alice.id)).rejects.toThrowError(/not found/);
   });
 });
 
@@ -516,7 +516,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — worker success', () => {
     await drain(pipelineThenLoadCaller([]), T0);
 
     // Public projection strips storage_uri; metadata never contains the internal key/path/state key.
-    const pub = await listProjectJobArtifacts(alice.id, proj.id, ljob.id)[0];
+    const pub = (await listProjectJobArtifacts(alice.id, proj.id, ljob.id))[0];
     const blob = JSON.stringify(pub);
     expect(pub).not.toHaveProperty('storageUri');
     expect(blob).not.toContain(checkpointArt.storageUri);
@@ -544,7 +544,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — worker success', () => {
     expect(inspectReqs).toHaveLength(1);
     // Inspect addressed the SAME canonical key the load mutated.
     expect(inspectReqs[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, resultObjectId));
-    const art = await getJobArtifactsByJobId(inspectJob.id)[0];
+    const art = (await getJobArtifactsByJobId(inspectJob.id))[0];
     expect(art.metadata.object.exists).toBe(true);
   });
 });
@@ -591,7 +591,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — failure / cancel / claim-lo
     const ljob = await seedLoadJob(alice.id, proj.id, resultObjectId);
     // R caller cancels the job mid-flight (claim is voided), then returns success.
     const cancelingCaller = async (req) => {
-      if (req.path === '/object/checkpoint-load') cancelProjectJob(alice.id, proj.id, ljob.id);
+      if (req.path === '/object/checkpoint-load') await cancelProjectJob(alice.id, proj.id, ljob.id);
       return { status: 200, body: req.path === '/object/checkpoint-load' ? loadBody() : pipelineBody() };
     };
     const res = await drain(cancelingCaller, T0);

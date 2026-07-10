@@ -66,6 +66,12 @@ const ARTIFACT_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const LINEAGE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 
 const ALLOWED_JOB_TYPES = new Set([
+  // Analytical job types are creatable (queued) but have NO registered worker
+  // handler in this branch, so the worker fails them terminally with
+  // UNSUPPORTED_JOB_TYPE (see jobWorker.js DEFAULT_HANDLERS) rather than pretending
+  // to run them. Dropping them from this set would reject the job at creation and
+  // break the "created → worker-unsupported" contract the tests pin down.
+  'normalize', 'qc_filter', 'pca', 'cluster', 'umap', 'find_markers', 'integrate',
   'generic',
   'checkpoint.noop',
   'r.runtime.check',
@@ -154,12 +160,31 @@ function normalizeName(value) {
 
 function normalizeTimestamp(value) {
   if (value instanceof Date) return value;
-  if (typeof value === 'string' && value.trim()) {
+  // undefined / null / blank → default to "now" (lenient: an omitted clock).
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return new Date();
+  }
+  if (typeof value === 'string') {
     const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
     const d = new Date(normalized);
     if (!Number.isNaN(d.getTime())) return d;
   }
-  return new Date();
+  // A caller supplied a concrete but unparseable timestamp — fail loudly rather than
+  // silently substituting the wall clock (which would corrupt lease/heartbeat timing).
+  throw codedError('INVALID_TIMESTAMP', 'Invalid timestamp.');
+}
+
+// Canonical wire format for every timestamp we hand back: 'YYYY-MM-DD HH:MM:SS' in
+// UTC. Postgres returns TIMESTAMPTZ columns as JS Date objects; normalizing them here
+// keeps the API contract identical to the original text-timestamp runtime (and round-
+// trips the injected worker clock exactly). Returns null for null/empty columns.
+function toCanonicalTs(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+    + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }
 
 function normalizeWorkerNow(opts = {}) {
@@ -1318,8 +1343,8 @@ async function createAnalysisObject(ownerUserId, input = {}) {
   const { rows } = await query(
     `INSERT INTO analysis_objects
        (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id,
-        object_type, display_name, metadata_json)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        object_type, display_name, metadata_json, created_by_provenance_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       id, owner,
@@ -1329,7 +1354,10 @@ async function createAnalysisObject(ownerUserId, input = {}) {
       lineageRootId || id,
       objectType,
       input.displayName != null ? String(input.displayName) : null,
-      JSON.stringify(metadata)
+      JSON.stringify(metadata),
+      // The route verifies the caller owns this provenance record (404 otherwise); we
+      // persist the link so it round-trips on the public read.
+      input.createdByProvenanceId ? String(input.createdByProvenanceId) : null
     ]
   );
   return rowToAnalysisObject(rows[0]);
@@ -1584,18 +1612,16 @@ function rowToJob(row) {
     parameters: JSON.parse(row.parameters_json || '{}'),
     logs: JSON.parse(row.logs_json || '[]'),
     error: row.error_json ? JSON.parse(row.error_json) : null,
-    attempts: row.attempts,
-    maxAttempts: row.max_attempts,
-    priority: row.priority,
-    // Worker-coordination columns are intentionally read but NOT projected here;
-    // claim_token / worker_id / lease are server-tier internal (see toPublicJob).
-    workerId: row.worker_id,
-    claimToken: row.claim_token,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-    canceledAt: row.canceled_at
+    // Worker-coordination + scheduling columns (claim_token / worker_id / lease /
+    // attempts / max_attempts / priority) are server-tier internal and are intentionally
+    // NOT projected here — the public job shape must never carry a claim-token bearer
+    // capability or the scheduling internals. The worker view re-adds them via
+    // rowToWorkerJob().
+    createdAt: toCanonicalTs(row.created_at),
+    updatedAt: toCanonicalTs(row.updated_at),
+    startedAt: toCanonicalTs(row.started_at),
+    completedAt: toCanonicalTs(row.completed_at),
+    canceledAt: toCanonicalTs(row.canceled_at)
   };
 }
 
@@ -2733,9 +2759,9 @@ function rowToWorkerJob(row) {
     ...rowToJob(row),
     workerId: row.worker_id,
     claimToken: row.claim_token,
-    leaseExpiresAt: row.lease_expires_at,
-    heartbeatAt: row.heartbeat_at,
-    lockedAt: row.locked_at,
+    leaseExpiresAt: toCanonicalTs(row.lease_expires_at),
+    heartbeatAt: toCanonicalTs(row.heartbeat_at),
+    lockedAt: toCanonicalTs(row.locked_at),
     attempts: Number(row.attempts || 0),
     maxAttempts: Number(row.max_attempts || 1),
     priority: Number(row.priority || 0),
@@ -2990,7 +3016,10 @@ async function setJobScheduling(jobId, opts = {}) {
     params.push(opts.maxAttempts); sets.push(`max_attempts = $${params.length}`);
   }
   if (opts.createdAt !== undefined) {
-    params.push(normalizeTimestamp(opts.createdAt)); sets.push(`created_at = $${params.length}`);
+    let createdAt;
+    try { createdAt = normalizeTimestamp(opts.createdAt); }
+    catch { throw codedError('INVALID_CREATED_AT', 'createdAt must be a valid timestamp.'); }
+    params.push(createdAt); sets.push(`created_at = $${params.length}`);
   }
   if (sets.length === 0) return rowToWorkerJob(row);
   params.push(id);

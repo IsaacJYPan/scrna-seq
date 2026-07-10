@@ -527,15 +527,15 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — ownership & project boundary'
     const objA = await createProjectAnalysisObject(alice.user.id, projA.id, { objectType: 'seurat', displayName: 'a' });
 
     // Referencing project A's object from a project B job → 404 at create time.
-    await expect(await createProjectJob(alice.user.id, projB.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: objA.id })).rejects.toThrowError(/Analysis object not found/);
+    await expect(createProjectJob(alice.user.id, projB.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: objA.id })).rejects.toThrowError(/Analysis object not found/);
 
     // A legacy owner-scoped object cannot be used through a project job (not in project).
     const legacy = await createAnalysisObjectForUser(alice.user.id, { objectType: 'seurat', displayName: 'legacy' });
-    await expect(await createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: legacy.id })).rejects.toThrowError(/Analysis object not found/);
+    await expect(createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: legacy.id })).rejects.toThrowError(/Analysis object not found/);
 
     // Malformed / unknown object ids handled safely.
     for (const bad of ['', 'not-an-ao', 'ao_doesnotexist']) {
-      await expect(await createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: bad })).rejects.toThrowError();
+      await expect(createProjectJob(alice.user.id, projA.id, { jobType: 'pbmc.pipeline.v1', analysisObjectId: bad })).rejects.toThrowError();
     }
   });
 
@@ -613,7 +613,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — worker success', () => {
   it('result object metadata records provenance WITHOUT implying a download', async () => {
     const { job, alice, proj } = await seedPipelineJob({ seed: 11 });
     await drainPipeline(recordingPipelineCaller([]));
-    const resultId = await getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId;
+    const resultId = (await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId;
     const result = await getProjectAnalysisObject(alice.id, proj.id, resultId);
     expect(result.metadata.checkpoint.downloadable).toBe(false);
     expect(result.metadata.checkpoint.storage_kind).toBe('local_internal');
@@ -638,7 +638,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — worker success', () => {
     }
 
     // Internally the key IS persisted (as storage_uri) so it is retrievable + stripped.
-    const internal = await getJobArtifactsByJobId(job.id).find(a => a.artifactType === 'checkpoint');
+    const internal = (await getJobArtifactsByJobId(job.id)).find(a => a.artifactType === 'checkpoint');
     expect(internal.storageUri).toMatch(/^checkpoints\/job_[0-9a-f]+\/[0-9a-f]+\.rds$/);
     expect(toPublicJobArtifact(internal)).not.toHaveProperty('storageUri');
   });
@@ -705,7 +705,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
     // First worker completes the job.
     const res1 = await drainPipeline(recordingPipelineCaller([]));
     expect(res1.status).toBe('completed');
-    const resultId = await getProjectJob(alice.id, proj.id, job.id).resultAnalysisObjectId;
+    const resultId = (await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId;
 
     // Second worker tick finds nothing claimable (job already completed).
     const calls2 = [];
@@ -766,11 +766,11 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
   it('the checkpoint artifact persists checksum/size and an INTERNAL key; public read omits the key', async () => {
     const { job, alice, proj } = await seedPipelineJob({});
     await drainPipeline(recordingPipelineCaller([]));
-    const internal = await getJobArtifactsByJobId(job.id).find(a => a.artifactType === 'checkpoint');
+    const internal = (await getJobArtifactsByJobId(job.id)).find(a => a.artifactType === 'checkpoint');
     expect(internal.storageUri).toMatch(/^checkpoints\//);     // internal key persisted
     expect(internal.checksumSha256).toHaveLength(64);
     expect(internal.sizeBytes).toBeGreaterThan(0);
-    const pub = await listProjectJobArtifacts(alice.id, proj.id, job.id, { artifactType: 'checkpoint' })[0];
+    const pub = (await listProjectJobArtifacts(alice.id, proj.id, job.id, { artifactType: 'checkpoint' }))[0];
     expect(pub).not.toHaveProperty('storageUri');
   });
 
@@ -781,13 +781,13 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
     const claimed = await claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
     const base = { artifactType: 'checkpoint', checksumSha256: 'a'.repeat(64), sizeBytes: 10 };
     for (const badKey of ['/abs/path.rds', '../escape.rds', 'a\\b.rds', '']) {
-      await expect(await createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: badKey }, { now: T0 })).rejects.toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
+      await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: badKey }, { now: T0 })).rejects.toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
     }
     // Bad checksum / size rejected.
-    await expect(await createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', checksumSha256: 'nothex' }, { now: T0 })).rejects.toThrowError(/checksum/i);
-    await expect(await createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', sizeBytes: -1 }, { now: T0 })).rejects.toThrowError(/size/i);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', checksumSha256: 'nothex' }, { now: T0 })).rejects.toThrowError(/checksum/i);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', sizeBytes: -1 }, { now: T0 })).rejects.toThrowError(/size/i);
     // Wrong storage kind rejected (this helper is local_internal only).
-    await expect(await createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', storageKind: 'metadata_only' }, { now: T0 })).rejects.toThrowError(/local_internal/);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', storageKind: 'metadata_only' }, { now: T0 })).rejects.toThrowError(/local_internal/);
     expect(j.id).toBeTruthy();
   });
 

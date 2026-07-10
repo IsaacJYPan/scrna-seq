@@ -239,9 +239,9 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
   it('heartbeat fails for a non-owning worker or a wrong claim token', async () => {
     await newJob();
     const c = await claimNextJob('w1', { now: T0, leaseSeconds: 30 });
-    await expect(await heartbeatJob(c.id, 'w2', c.claimToken, { now: T0_PLUS_10 }))
+    await expect(heartbeatJob(c.id, 'w2', c.claimToken, { now: T0_PLUS_10 }))
       .rejects.toThrow(/no longer holds/i);
-    await expect(await heartbeatJob(c.id, 'w1', 'wct_wrongtoken', { now: T0_PLUS_10 }))
+    await expect(heartbeatJob(c.id, 'w1', 'wct_wrongtoken', { now: T0_PLUS_10 }))
       .rejects.toThrow(/no longer holds/i);
     // The real holder still can.
     expect((await heartbeatJob(c.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).status).toBe('running');
@@ -250,7 +250,7 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
   it('heartbeat after the lease has already expired is rejected (claim lost)', async () => {
     await newJob();
     const c = await claimNextJob('w1', { now: T0, leaseSeconds: 30 });
-    await expect(await heartbeatJob(c.id, 'w1', c.claimToken, { now: LATER }))
+    await expect(heartbeatJob(c.id, 'w1', c.claimToken, { now: LATER }))
       .rejects.toThrow(/no longer holds/i);
   });
 
@@ -265,11 +265,11 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
   it('only the owning worker can complete, fail, or release a job', async () => {
     await newJob();
     const c = await claimNextJob('w1', { now: T0, leaseSeconds: 30 });
-    await expect(await completeJobByWorker(c.id, 'intruder', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
-    await expect(await failJobByWorker(c.id, 'intruder', c.claimToken, { message: 'x' }, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
-    await expect(await releaseJob(c.id, 'intruder', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(completeJobByWorker(c.id, 'intruder', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(failJobByWorker(c.id, 'intruder', c.claimToken, { message: 'x' }, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(releaseJob(c.id, 'intruder', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
     // Wrong token, right worker → also rejected.
-    await expect(await completeJobByWorker(c.id, 'w1', 'wct_nope', { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(completeJobByWorker(c.id, 'w1', 'wct_nope', { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
     // Still running and held by w1.
     expect((await getWorkerJob(c.id)).status).toBe('running');
   });
@@ -284,7 +284,7 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
     expect(done.leaseExpiresAt).toBeNull();
     expect(done.logs.some(l => l.message === 'finished')).toBe(true);
     // A second completion is rejected (claim already cleared → not running/held).
-    await expect(await completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_20 })).rejects.toThrow(/no longer holds/i);
+    await expect(completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_20 })).rejects.toThrow(/no longer holds/i);
   });
 
   it('completing can link a result analysis object owned by the job owner, and rejects a foreign one', async () => {
@@ -293,7 +293,7 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
     await newJob(); // owned by alice
     const c = await claimNextJob('w1', { now: T0, leaseSeconds: 30 });
 
-    await expect(await completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_10, resultAnalysisObjectId: bobObj.id }))
+    await expect(completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_10, resultAnalysisObjectId: bobObj.id }))
       .rejects.toThrow(/result analysis object not found/i);
     const done = await completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_20, resultAnalysisObjectId: resultObj.id });
     expect(done.resultAnalysisObjectId).toBe(resultObj.id);
@@ -350,18 +350,18 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
 
   it('setJobScheduling validates its inputs', async () => {
     const job = await newJob();
-    await expect(await setJobScheduling(job.id, { priority: 1.5 })).rejects.toThrow(/priority/i);
-    await expect(await setJobScheduling(job.id, { maxAttempts: 0 })).rejects.toThrow(/maxAttempts/i);
-    await expect(await setJobScheduling(job.id, { createdAt: 'not-a-timestamp' })).rejects.toThrow(/createdAt/i);
-    await expect(await setJobScheduling('job_missing', { priority: 1 })).rejects.toThrow(/not found/i);
+    await expect(setJobScheduling(job.id, { priority: 1.5 })).rejects.toThrow(/priority/i);
+    await expect(setJobScheduling(job.id, { maxAttempts: 0 })).rejects.toThrow(/maxAttempts/i);
+    await expect(setJobScheduling(job.id, { createdAt: 'not-a-timestamp' })).rejects.toThrow(/createdAt/i);
+    await expect(setJobScheduling('job_missing', { priority: 1 })).rejects.toThrow(/not found/i);
   });
 
   it('rejects malformed worker input', async () => {
     await newJob();
-    await expect(await claimNextJob('', { now: T0 })).rejects.toThrow(/worker id/i);
-    await expect(await claimNextJob('bad id with spaces', { now: T0 })).rejects.toThrow(/worker id/i);
-    await expect(await claimNextJob('w1', { now: 'bogus' })).rejects.toThrow(/timestamp/i);
-    await expect(await claimNextJob('w1', { now: T0, leaseSeconds: 0 })).rejects.toThrow(/leaseSeconds/i);
+    await expect(claimNextJob('', { now: T0 })).rejects.toThrow(/worker id/i);
+    await expect(claimNextJob('bad id with spaces', { now: T0 })).rejects.toThrow(/worker id/i);
+    await expect(claimNextJob('w1', { now: 'bogus' })).rejects.toThrow(/timestamp/i);
+    await expect(claimNextJob('w1', { now: T0, leaseSeconds: 0 })).rejects.toThrow(/leaseSeconds/i);
   });
 });
 
@@ -383,10 +383,10 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — cancel makes worker behav
     expect(canceled.status).toBe('canceled');
     expect(canceled.canceledAt).toBeTruthy();
 
-    await expect(await heartbeatJob(c.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
-    await expect(await completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
-    await expect(await failJobByWorker(c.id, 'w1', c.claimToken, { message: 'x' }, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
-    await expect(await releaseJob(c.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(heartbeatJob(c.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(failJobByWorker(c.id, 'w1', c.claimToken, { message: 'x' }, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(releaseJob(c.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
     // Stays canceled — the worker can never resurrect it.
     expect((await getJobForUser(c.id, alice.id)).status).toBe('canceled');
   });
@@ -401,8 +401,8 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — cancel makes worker behav
     const canceled = await cancelProjectJob(alice.id, proj.id, created.id);
     expect(canceled.status).toBe('canceled');
 
-    await expect(await heartbeatJob(created.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
-    await expect(await completeJobByWorker(created.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(heartbeatJob(created.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
+    await expect(completeJobByWorker(created.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
     expect((await getProjectJob(alice.id, proj.id, created.id)).status).toBe('canceled');
   });
 });

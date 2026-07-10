@@ -24,7 +24,7 @@ describe.skipIf(!CONFIGURED)('pgDatabase.js tests', () => {
   });
 
   it('should initialize the database and create tables', async () => {
-    await expect(await saveFigure({
+    await expect(saveFigure({
       id: 'test-init-id',
       userEmail: 'test@example.com',
       objectId: 'obj-1',

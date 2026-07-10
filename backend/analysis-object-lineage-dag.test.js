@@ -84,9 +84,9 @@ describe.skipIf(!CONFIGURED)('lineage edges — createLineageEdge helper', () =>
     const proj = await seedProject(alice.id);
     const a = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
     const b = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
-    await expect(await createLineageEdge(alice.id, { parentObjectId: 'not-an-id', childObjectId: b.id })).rejects.toThrowError(/Malformed parent/);
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: 'nope' })).rejects.toThrowError(/Malformed child/);
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, jobId: 'bad' })).rejects.toThrowError(/Malformed job/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: 'not-an-id', childObjectId: b.id })).rejects.toThrowError(/Malformed parent/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: 'nope' })).rejects.toThrowError(/Malformed child/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, jobId: 'bad' })).rejects.toThrowError(/Malformed job/);
     try { await createLineageEdge(alice.id, { parentObjectId: 'x', childObjectId: b.id }); }
     catch (e) { expect(e.code).toBe('INVALID_PARENT_ID'); }
   });
@@ -99,13 +99,13 @@ describe.skipIf(!CONFIGURED)('lineage edges — createLineageEdge helper', () =>
     const bInB = await createProjectAnalysisObject(alice.id, projB.id, { objectType: 'seurat' });
 
     // unknown (well-formed) ids
-    await expect(await createLineageEdge(alice.id, { parentObjectId: 'ao_deadbeef', childObjectId: b.id })).rejects.toThrowError(/Parent analysis object not found/);
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: 'ao_deadbeef' })).rejects.toThrowError(/Child analysis object not found/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: 'ao_deadbeef', childObjectId: b.id })).rejects.toThrowError(/Parent analysis object not found/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: 'ao_deadbeef' })).rejects.toThrowError(/Child analysis object not found/);
     // cross-project parent/child (different scopes) → 404
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: bInB.id })).rejects.toThrowError(/Child analysis object not found/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: bInB.id })).rejects.toThrowError(/Child analysis object not found/);
     // job in another project
     const jobB = await createProjectJob(alice.id, projB.id, { jobType: 'checkpoint.noop' });
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, jobId: jobB.id })).rejects.toThrowError(/Job not found/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, jobId: jobB.id })).rejects.toThrowError(/Job not found/);
   });
 
   it('rejects a self-parent edge (SELF_PARENT → 400)', async () => {
@@ -121,9 +121,9 @@ describe.skipIf(!CONFIGURED)('lineage edges — createLineageEdge helper', () =>
     const proj = await seedProject(alice.id);
     const a = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
     const b = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, edgeType: 'nope' })).rejects.toThrowError(/Invalid edgeType/);
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, parentRole: 'nope' })).rejects.toThrowError(/Invalid parentRole/);
-    await expect(await createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, metadata: [1, 2] })).rejects.toThrowError(/metadata must be a plain JSON object/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, edgeType: 'nope' })).rejects.toThrowError(/Invalid edgeType/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, parentRole: 'nope' })).rejects.toThrowError(/Invalid parentRole/);
+    await expect(createLineageEdge(alice.id, { parentObjectId: a.id, childObjectId: b.id, metadata: [1, 2] })).rejects.toThrowError(/metadata must be a plain JSON object/);
   });
 
   it('rejects a duplicate edge (DUPLICATE_EDGE → 409)', async () => {
@@ -315,7 +315,7 @@ describe.skipIf(!CONFIGURED)('lineage edges — checkpoint integration', () => {
     const proj = await seedProject(alice.id);
     const parent = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
     const job = await createProjectJob(alice.id, proj.id, { jobType: 'checkpoint.noop', analysisObjectId: parent.id });
-    dbmod.cancelProjectJob(alice.id, proj.id, job.id);
+    await dbmod.cancelProjectJob(alice.id, proj.id, job.id);
     const res = await drainOnce();
     expect(res.status).toBe('idle');
     const after = await getProjectJob(alice.id, proj.id, job.id);
@@ -330,15 +330,15 @@ describe.skipIf(!CONFIGURED)('lineage edges — checkpoint integration', () => {
     const c = await claim('worker_a');
 
     // A worker that does not hold the claim cannot create a checkpoint/edge.
-    expect(() => createCheckpointForJobByWorker(c.id, 'worker_b', 'wct_bogus', {}, { now: T0 }))
-      .toThrowError(/no longer holds a valid claim/);
+    await expect(createCheckpointForJobByWorker(c.id, 'worker_b', 'wct_bogus', {}, { now: T0 }))
+      .rejects.toThrowError(/no longer holds a valid claim/);
     expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(0);
 
     // The real holder succeeds exactly once (one edge); a second attempt is refused.
     const cp = await createCheckpointForJobByWorker(c.id, 'worker_a', c.claimToken, {}, { now: T0 });
     expect(await listProjectAnalysisObjectParents(alice.id, proj.id, cp.id)).toHaveLength(1);
-    expect(() => createCheckpointForJobByWorker(c.id, 'worker_a', c.claimToken, {}, { now: T0 }))
-      .toThrowError(/already has a result checkpoint/);
+    await expect(createCheckpointForJobByWorker(c.id, 'worker_a', c.claimToken, {}, { now: T0 }))
+      .rejects.toThrowError(/already has a result checkpoint/);
     // Still exactly one edge total off the parent.
     expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(1);
   });
@@ -455,7 +455,7 @@ describe.skipIf(!CONFIGURED)('lineage routes — authorization & exposure', () =
     const alice = await createUserWithToken({ email: 'alice@example.com' });
     const proj = await seedProject(alice.user.id);
     // A legacy owner-scoped checkpoint job with an input object — its edge is NULL-project.
-    const legacyParent = dbmod.createAnalysisObjectForUser(alice.user.id, { objectType: 'seurat' });
+    const legacyParent = await dbmod.createAnalysisObjectForUser(alice.user.id, { objectType: 'seurat' });
     await createJobForUser(alice.user.id, { jobType: 'checkpoint.noop' });
     // Drive the worker to produce a legacy checkpoint whose parent is the legacy object:
     const c = await claim();
@@ -538,8 +538,8 @@ describe.skipIf(!CONFIGURED)('lineage edges — R object/state ownership unchang
     const lin = await api(server, `/api/projects/${proj.id}/analysis-objects/${cpId}/lineage`, { token: bob.token });
     expect(lin.status).toBe(200);
     // …but R object ownership stays creator-keyed.
-    expect(dbmod.verifyAnalysisObjectOwner(alice.user.id, cpId)).toBe(true);
-    expect(dbmod.verifyAnalysisObjectOwner(bob.user.id, cpId)).toBe(false);
+    expect(await dbmod.verifyAnalysisObjectOwner(alice.user.id, cpId)).toBe(true);
+    expect(await dbmod.verifyAnalysisObjectOwner(bob.user.id, cpId)).toBe(false);
     const res = await api(server, '/api/r/health', { token: bob.token, headers: { 'X-Object-ID': cpId } });
     expect(res.status).toBe(404);
   });
