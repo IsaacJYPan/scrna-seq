@@ -20,6 +20,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const config = require('./config');
+const storage = require('./storage');
 const passwords = require('./passwords');
 const {
   validateSeuratPipelineParams,
@@ -79,6 +80,7 @@ const ALLOWED_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
   'checkpoint.load.v1',
+  'checkpoint.fork.v1',
   'deg.find_markers.v1'
 ]);
 const ALLOWED_DATASET_FILE_TYPES = new Set([
@@ -90,12 +92,13 @@ const DATASET_VALIDATION_STATUSES = new Set(['pending', 'valid', 'invalid', 'ski
 const ALLOWED_ARTIFACT_TYPES = new Set([
   'checkpoint', 'metrics', 'log', 'figure', 'script_fragment', 'other_metadata',
   'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_load',
-  'deg_markers', 'deg_summary', 'result_checkpoint'
+  'checkpoint_fork', 'deg_markers', 'deg_summary', 'result_checkpoint'
 ]);
 const ALLOWED_ARTIFACT_STORAGE_KINDS = new Set(['metadata_only', 'local_internal']);
 const ALLOWED_ARTIFACT_STATUSES = new Set(['available', 'pending', 'error']);
 const ALLOWED_EDGE_TYPES = new Set([
-  'derived_from', 'checkpoint', 'branch', 'integration_input', 'comparison_input', 'manual_link'
+  'derived_from', 'checkpoint', 'checkpoint_fork', 'branch', 'integration_input',
+  'comparison_input', 'manual_link'
 ]);
 const ALLOWED_PARENT_ROLES = new Set([
   'primary', 'secondary', 'reference', 'query', 'control', 'case', 'input'
@@ -1722,6 +1725,17 @@ async function createProjectJob(userId, projectId, input = {}) {
     validateSeuratPipelineParams(parameters);
     assertSupportedSeuratPipelineDataset(dataset);
   }
+  if (jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1') {
+    if (!analysisObjectId) {
+      throw codedError('INVALID_PARAMETERS', `${jobType} requires a source analysisObjectId.`);
+    }
+    if (Object.keys(parameters).length > 0) {
+      throw codedError('INVALID_PARAMETERS', `${jobType} does not accept client parameters.`);
+    }
+  }
+  if (jobType === 'checkpoint.load.v1' && analysisObject.ownerUserId !== owner) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
   const id = genId('job');
   const { rows } = await query(
     `INSERT INTO jobs
@@ -2113,6 +2127,16 @@ function isSafeInternalStorageKey(key) {
   return CHECKPOINT_KEY_RE.test(key);
 }
 
+function assertProjectArtifactStorageKey(jobRow, key, kind) {
+  if (!jobRow.project_id) return;
+  if (!storage.isProjectStorageKey(key, {
+    projectId: jobRow.project_id,
+    kind,
+  })) {
+    throw codedError('INVALID_STORAGE_KEY', 'Durable artifact key is outside the job project scope.');
+  }
+}
+
 function normalizeChecksumSha256(value) {
   if (value === undefined || value === null) return null;
   const s = String(value).trim().toLowerCase();
@@ -2305,6 +2329,7 @@ async function createCheckpointArtifactForJobByWorker(jobId, workerId, claimToke
   if (!isSafeInternalStorageKey(input.internalStorageKey)) {
     throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
   }
+  assertProjectArtifactStorageKey(row, input.internalStorageKey, 'checkpoints');
   const checksum = normalizeChecksumSha256(input.checksumSha256);
   if (checksum === undefined) throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
   const sizeBytes = normalizeArtifactSizeBytes(input.sizeBytes);
@@ -3203,6 +3228,7 @@ async function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, i
     input.checkpointArtifact && typeof input.checkpointArtifact === 'object' ? input.checkpointArtifact : {},
     { defaultArtifactType: 'checkpoint', helperName: 'completePbmcPipelineResultByWorker' }
   );
+  assertProjectArtifactStorageKey(row, cpSpec.storageUri, 'checkpoints');
   const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
   const smSpec = validateMetadataOnlyArtifactSpec(sm);
 
@@ -3324,6 +3350,7 @@ async function completeSeuratPipelineResultByWorker(jobId, workerId, claimToken,
     input.checkpointArtifact && typeof input.checkpointArtifact === 'object' ? input.checkpointArtifact : {},
     { defaultArtifactType: 'checkpoint', helperName: 'completeSeuratPipelineResultByWorker' }
   );
+  assertProjectArtifactStorageKey(row, cpSpec.storageUri, 'checkpoints');
   const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
   const smSpec = validateMetadataOnlyArtifactSpec(sm);
 
@@ -3433,6 +3460,7 @@ async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken,
     defaultArtifactType: 'deg_markers',
     helperName: 'completeDegFindMarkersResultByWorker'
   });
+  assertProjectArtifactStorageKey(row, tblSpec.storageUri, 'artifacts');
   const sm = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
   const smSpec = validateMetadataOnlyArtifactSpec(sm, { defaultArtifactType: 'deg_summary', artifactTypeRequired: false });
   const markersArtifactId = generateJobArtifactId();
@@ -3497,6 +3525,51 @@ async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken,
   };
 }
 
+async function resolveCheckpointArtifact(analysisObjectId, projectId) {
+  const { rows } = await query(
+    `SELECT * FROM job_artifacts
+     WHERE result_analysis_object_id = $1
+       AND artifact_type = 'checkpoint'
+       AND storage_kind = 'local_internal'
+       AND status = 'available'
+     ORDER BY created_at ASC, id ASC`,
+    [analysisObjectId]
+  );
+  const candidates = rows.map(rowToJobArtifact).filter((artifact) =>
+    (artifact.projectId || null) === (projectId || null));
+  if (candidates.length === 0) {
+    throw codedError('NO_CHECKPOINT_ARTIFACT', 'No loadable checkpoint for this analysis object.');
+  }
+  if (candidates.length > 1) {
+    throw codedError('AMBIGUOUS_CHECKPOINT', 'Multiple loadable checkpoints; refusing to choose.');
+  }
+  const artifact = candidates[0];
+  if (!isSafeInternalStorageKey(artifact.storageUri)) {
+    throw codedError('INVALID_STORAGE_KEY', 'Checkpoint storage key is missing or unsafe.');
+  }
+  if (String(artifact.storageUri).startsWith('projects/')
+      && !storage.isProjectStorageKey(artifact.storageUri, {
+        projectId,
+        kind: 'checkpoints',
+      })) {
+    throw codedError('INVALID_STORAGE_KEY', 'Checkpoint storage key is outside the project scope.');
+  }
+  const checksum = normalizeChecksumSha256(artifact.checksumSha256);
+  if (checksum === undefined || checksum === null) {
+    throw codedError('INVALID_CHECKSUM', 'Checkpoint checksum is missing or invalid.');
+  }
+  const sizeBytes = normalizeArtifactSizeBytes(artifact.sizeBytes);
+  if (sizeBytes === undefined || sizeBytes === null) {
+    throw codedError('INVALID_SIZE', 'Checkpoint size is missing or invalid.');
+  }
+  return {
+    checkpointArtifactId: artifact.id,
+    internalStorageKey: artifact.storageUri,
+    checksumSha256: checksum,
+    sizeBytes,
+  };
+}
+
 async function getLoadableCheckpointForAnalysisObject(projectId, analysisObjectId, ownerUserId) {
   if (typeof analysisObjectId !== 'string' || analysisObjectId === '') {
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
@@ -3514,41 +3587,141 @@ async function getLoadableCheckpointForAnalysisObject(projectId, analysisObjectI
   } else if (objProjectId) {
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
-  const { rows } = await query(
-    `SELECT * FROM job_artifacts
-     WHERE result_analysis_object_id = $1
-       AND artifact_type = 'checkpoint'
-       AND storage_kind = 'local_internal'
-       AND status = 'available'
-     ORDER BY created_at ASC, id ASC`,
-    [analysisObjectId]
-  );
-  const candidates = rows.map(rowToJobArtifact).filter((a) => (a.projectId || null) === objProjectId);
-  if (candidates.length === 0) {
-    throw codedError('NO_CHECKPOINT_ARTIFACT', 'No loadable checkpoint for this analysis object.');
-  }
-  if (candidates.length > 1) {
-    throw codedError('AMBIGUOUS_CHECKPOINT', 'Multiple loadable checkpoints; refusing to choose.');
-  }
-  const artifact = candidates[0];
-  if (!isSafeInternalStorageKey(artifact.storageUri)) {
-    throw codedError('INVALID_STORAGE_KEY', 'Checkpoint storage key is missing or unsafe.');
-  }
-  const checksum = normalizeChecksumSha256(artifact.checksumSha256);
-  if (checksum === undefined || checksum === null) {
-    throw codedError('INVALID_CHECKSUM', 'Checkpoint checksum is missing or invalid.');
-  }
-  const sizeBytes = normalizeArtifactSizeBytes(artifact.sizeBytes);
-  if (sizeBytes === undefined || sizeBytes === null) {
-    throw codedError('INVALID_SIZE', 'Checkpoint size is missing or invalid.');
-  }
+  const checkpoint = await resolveCheckpointArtifact(analysisObjectId, objProjectId);
   return {
     analysisObjectId,
     projectId: objProjectId,
-    checkpointArtifactId: artifact.id,
-    internalStorageKey: artifact.storageUri,
-    checksumSha256: checksum,
-    sizeBytes
+    ...checkpoint,
+  };
+}
+
+async function getForkableCheckpointForAnalysisObject(userId, projectId, analysisObjectId) {
+  await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  if (typeof analysisObjectId !== 'string' || !AO_ID_RE.test(analysisObjectId)) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const sourceObject = await getProjectAnalysisObjectRow(analysisObjectId, String(projectId));
+  if (!sourceObject) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  const checkpoint = await resolveCheckpointArtifact(analysisObjectId, String(projectId));
+  return {
+    sourceAnalysisObject: sourceObject,
+    analysisObjectId,
+    projectId: String(projectId),
+    ...checkpoint,
+  };
+}
+
+async function completeCheckpointForkByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.job_type !== 'checkpoint.fork.v1' || !row.project_id || !row.analysis_object_id) {
+    throw codedError('INVALID_JOB_TYPE', 'A project checkpoint fork job is required.');
+  }
+  if (row.result_analysis_object_id) {
+    throw codedError('CHECKPOINT_EXISTS', 'Job already has a fork result object.');
+  }
+  const resultId = input.resultAnalysisObjectId;
+  if (typeof resultId !== 'string' || !AO_ID_RE.test(resultId)) {
+    throw codedError('INVALID_RESULT_OBJECT_ID', 'A server-generated result object id is required.');
+  }
+  const sourceObject = await getProjectAnalysisObjectRow(row.analysis_object_id, row.project_id);
+  if (!sourceObject) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  const checkpoint = await resolveCheckpointArtifact(sourceObject.id, row.project_id);
+  if (input.checkpointArtifactId !== checkpoint.checkpointArtifactId) {
+    throw codedError('INVALID_CHECKPOINT', 'Checkpoint selection changed before fork completion.');
+  }
+  const loaded = input.loaded === undefined ? {} : input.loaded;
+  assertPlainObject(loaded, 'INVALID_METADATA', 'loaded summary must be a plain JSON object.');
+  const resultMetadata = {
+    source: 'checkpoint.fork.v1',
+    sourceAnalysisObjectId: sourceObject.id,
+    sourceCheckpointArtifactId: checkpoint.checkpointArtifactId,
+    scientific_output: true,
+    liveState: 'attached',
+  };
+  const artifactId = generateJobArtifactId();
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT 1 FROM analysis_objects WHERE id = $1', [resultId]);
+    if (existing.rows[0]) throw codedError('CHECKPOINT_EXISTS', 'Fork result object already exists.');
+    await client.query(
+      `INSERT INTO analysis_objects
+         (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id,
+          object_type, display_name, storage_uri, object_hash, metadata_json,
+          created_by_provenance_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL)`,
+      [
+        resultId,
+        Number(row.owner_user_id),
+        row.project_id,
+        sourceObject.datasetId || null,
+        sourceObject.id,
+        sourceObject.lineageRootId || sourceObject.id,
+        sourceObject.objectType,
+        `Fork of ${sourceObject.displayName || sourceObject.id}`,
+        JSON.stringify(resultMetadata),
+      ]
+    );
+    const linked = await client.query(
+      `UPDATE jobs SET result_analysis_object_id = $1, updated_at = $2
+       WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+         AND status = 'running' AND lease_expires_at > $2
+         AND result_analysis_object_id IS NULL`,
+      [resultId, now, String(jobId), wid, token]
+    );
+    if (linked.rowCount !== 1) {
+      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    }
+    await insertLineageEdgeRow(client, {
+      projectId: row.project_id,
+      parentObjectId: sourceObject.id,
+      childObjectId: resultId,
+      jobId: String(jobId),
+      edgeType: 'checkpoint_fork',
+      parentRole: 'primary',
+      metadata: { checkpointArtifactId: checkpoint.checkpointArtifactId },
+      createdByUserId: Number(row.owner_user_id),
+    });
+    await insertJobArtifactRow(client, {
+      id: artifactId,
+      jobRow: row,
+      refs: {
+        datasetId: sourceObject.datasetId || null,
+        analysisObjectId: sourceObject.id,
+        resultAnalysisObjectId: resultId,
+      },
+      artifactType: 'checkpoint_fork',
+      name: 'Checkpoint fork summary',
+      description: 'Sanitized record of a durable checkpoint fork into a private live session.',
+      storageKind: 'metadata_only',
+      status: 'available',
+      metadata: {
+        sourceAnalysisObjectId: sourceObject.id,
+        resultAnalysisObjectId: resultId,
+        checkpointArtifactId: checkpoint.checkpointArtifactId,
+        live_state_mutation: true,
+        scientific_output: false,
+        loaded,
+      },
+    });
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  return {
+    resultObject: await getProjectAnalysisObjectRow(resultId, row.project_id),
+    artifact: await getJobArtifactRowById(artifactId),
   };
 }
 
@@ -3742,6 +3915,8 @@ module.exports = {
   completeSeuratPipelineResultByWorker,
   completeDegFindMarkersResultByWorker,
   getLoadableCheckpointForAnalysisObject,
+  getForkableCheckpointForAnalysisObject,
+  completeCheckpointForkByWorker,
   rowToJobArtifact,
   toPublicJobArtifact,
   // lineage

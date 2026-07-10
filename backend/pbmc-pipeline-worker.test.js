@@ -125,7 +125,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
 
   it('registers pbmc.pipeline.v1; generic / checkpoint.noop / r.runtime.check / r.object.inspect unchanged', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+      .toEqual(['checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS.generic).toBe(worker.genericNoopHandler);
     expect(DEFAULT_HANDLERS['checkpoint.noop']).toBe(worker.checkpointNoopHandler);
@@ -639,7 +639,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — worker success', () => {
 
     // Internally the key IS persisted (as storage_uri) so it is retrievable + stripped.
     const internal = (await getJobArtifactsByJobId(job.id)).find(a => a.artifactType === 'checkpoint');
-    expect(internal.storageUri).toMatch(/^checkpoints\/job_[0-9a-f]+\/[0-9a-f]+\.rds$/);
+    expect(internal.storageUri).toMatch(new RegExp(`^projects/${proj.id}/checkpoints/job_[0-9a-f]+/[0-9a-f]+\\.rds$`));
     expect(toPublicJobArtifact(internal)).not.toHaveProperty('storageUri');
   });
 });
@@ -747,8 +747,8 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
 
 
   it('allocates a server-controlled, relative, traversal-free internal key from the job id only', async () => {
-    const key = allocateCheckpointStorageKey('job_deadbeef');
-    expect(key).toMatch(/^checkpoints\/job_deadbeef\/[0-9a-f]{24}\.rds$/);
+    const key = allocateCheckpointStorageKey('proj_abc123', 'job_deadbeef');
+    expect(key).toMatch(/^projects\/proj_abc123\/checkpoints\/job_deadbeef\/[0-9a-f]{24}\.rds$/);
     expect(isSafeInternalStorageKey(key)).toBe(true);
     // A bad / client-shaped job id is refused.
     for (const bad of ['', 'evil', '../etc', 'job_x/../y']) {
@@ -767,7 +767,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
     const { job, alice, proj } = await seedPipelineJob({});
     await drainPipeline(recordingPipelineCaller([]));
     const internal = (await getJobArtifactsByJobId(job.id)).find(a => a.artifactType === 'checkpoint');
-    expect(internal.storageUri).toMatch(/^checkpoints\//);     // internal key persisted
+    expect(internal.storageUri).toMatch(new RegExp(`^projects/${proj.id}/checkpoints/`));
     expect(internal.checksumSha256).toHaveLength(64);
     expect(internal.sizeBytes).toBeGreaterThan(0);
     const pub = (await listProjectJobArtifacts(alice.id, proj.id, job.id, { artifactType: 'checkpoint' }))[0];
@@ -780,14 +780,15 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
     const j = await createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1' });
     const claimed = await claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
     const base = { artifactType: 'checkpoint', checksumSha256: 'a'.repeat(64), sizeBytes: 10 };
+    const validKey = `projects/${proj.id}/checkpoints/${claimed.id}/result.rds`;
     for (const badKey of ['/abs/path.rds', '../escape.rds', 'a\\b.rds', '']) {
       await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: badKey }, { now: T0 })).rejects.toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
     }
     // Bad checksum / size rejected.
-    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', checksumSha256: 'nothex' }, { now: T0 })).rejects.toThrowError(/checksum/i);
-    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', sizeBytes: -1 }, { now: T0 })).rejects.toThrowError(/size/i);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: validKey, checksumSha256: 'nothex' }, { now: T0 })).rejects.toThrowError(/checksum/i);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: validKey, sizeBytes: -1 }, { now: T0 })).rejects.toThrowError(/size/i);
     // Wrong storage kind rejected (this helper is local_internal only).
-    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: 'checkpoints/x.rds', storageKind: 'metadata_only' }, { now: T0 })).rejects.toThrowError(/local_internal/);
+    await expect(createCheckpointArtifactForJobByWorker(claimed.id, 'worker_t', claimed.claimToken, { ...base, internalStorageKey: validKey, storageKind: 'metadata_only' }, { now: T0 })).rejects.toThrowError(/local_internal/);
     expect(j.id).toBeTruthy();
   });
 
@@ -815,7 +816,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — R-side request contract', () 
 
 
   it('the worker issues the fixed POST target with server-derived state key + server checkpoint key', async () => {
-    const { obj, alice } = await seedPipelineJob({ pcaDims: 25 });
+    const { obj, alice, proj } = await seedPipelineJob({ pcaDims: 25 });
     const calls = [];
     const res = await drainPipeline(recordingPipelineCaller(calls));
     expect(res.status).toBe('completed');
@@ -824,7 +825,8 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — R-side request contract', () 
     expect(calls[0].path).toBe('/object/pbmc-pipeline');
     expect(calls[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, obj.id));
     // Server-allocated checkpoint key (never client-provided), tied to the job id.
-    expect(calls[0].body.storage_key).toMatch(/^checkpoints\/job_[0-9a-f]+\/[0-9a-f]+\.rds$/);
+    expect(calls[0].body.storage_key)
+      .toMatch(new RegExp(`^projects/${proj.id}/checkpoints/job_[0-9a-f]+/[0-9a-f]+\\.rds$`));
     // Resolved params (incl. the caller's pcaDims) are the body's only param fields.
     expect(calls[0].body.params.pcaDims).toBe(25);
     expect(Object.keys(calls[0].body.params).sort()).toEqual(PBMC_PIPELINE_PARAM_NAMES.slice().sort());
@@ -950,7 +952,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact comple
     return { alice, proj, parent, job, claimed };
   }
 
-  function completionInput(overrides = {}) {
+  function completionInput(projectId, overrides = {}) {
     return {
       result: {
         objectType: 'seurat', displayName: 'PBMC pipeline result',
@@ -959,7 +961,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact comple
       },
       checkpointArtifact: {
         artifactType: 'checkpoint', name: 'cp', storageKind: 'local_internal',
-        internalStorageKey: 'checkpoints/job_x/abcabcabcabc.rds',
+        internalStorageKey: `projects/${projectId}/checkpoints/job_x/abcabcabcabc.rds`,
         checksumSha256: 'a'.repeat(64), sizeBytes: 123, metadata: { k: 1 },
         ...(overrides.checkpointArtifact || {}),
       },
@@ -985,10 +987,10 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact comple
 
   it('success: result object + job link + lineage edge + checkpoint + summary artifact, all atomic', async () => {
     const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
-    const out = await completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
+    const out = await completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(proj.id), { now: T0 });
     expect(out.resultObject.id).toMatch(/^ao_[0-9a-f]+$/);
     expect(out.checkpointArtifact.artifactType).toBe('checkpoint');
-    expect(out.checkpointArtifact.storageUri).toBe('checkpoints/job_x/abcabcabcabc.rds');
+    expect(out.checkpointArtifact.storageUri).toBe(`projects/${proj.id}/checkpoints/job_x/abcabcabcabc.rds`);
     expect(out.summaryArtifact.artifactType).toBe('pipeline_summary');
     expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBe(out.resultObject.id);
     const children = await listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id);
@@ -1003,7 +1005,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact comple
     const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
     await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
-      completionInput({ checkpointArtifact: { metadata: circular() } }), { now: T0 }
+      completionInput(proj.id, { checkpointArtifact: { metadata: circular() } }), { now: T0 }
     )).rejects.toThrow();
     await expectNothingPersisted(alice, proj, parent, job);
   });
@@ -1012,7 +1014,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact comple
     const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
     await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
-      completionInput({ summaryArtifact: { metadata: circular() } }), { now: T0 }
+      completionInput(proj.id, { summaryArtifact: { metadata: circular() } }), { now: T0 }
     )).rejects.toThrow();
     // Crucially, NOT even the checkpoint artifact (inserted before the summary) survives.
     await expectNothingPersisted(alice, proj, parent, job);
@@ -1020,7 +1022,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact comple
 
   it('claim-loss (wrong token) creates no result/edge/artifacts', async () => {
     const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
-    await expect(completePbmcPipelineResultByWorker(claimed.id, 'worker_t', 'wrong-token', completionInput(), { now: T0 })).rejects.toThrowError(/CLAIM_LOST|claim/i);
+    await expect(completePbmcPipelineResultByWorker(claimed.id, 'worker_t', 'wrong-token', completionInput(proj.id), { now: T0 })).rejects.toThrowError(/CLAIM_LOST|claim/i);
     await expectNothingPersisted(alice, proj, parent, job);
   });
 
@@ -1028,21 +1030,21 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — atomic result/artifact comple
     const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
     await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
-      completionInput({ checkpointArtifact: { internalStorageKey: '../escape.rds' } }), { now: T0 }
+      completionInput(proj.id, { checkpointArtifact: { internalStorageKey: '../escape.rds' } }), { now: T0 }
     )).rejects.toThrowError(/INVALID_STORAGE_KEY|safe, relative/);
     await expectNothingPersisted(alice, proj, parent, job);
     // Re-seed-free: a bad checksum is likewise refused with nothing persisted.
     await expect(completePbmcPipelineResultByWorker(
       claimed.id, 'worker_t', claimed.claimToken,
-      completionInput({ checkpointArtifact: { checksumSha256: 'nothex' } }), { now: T0 }
+      completionInput(proj.id, { checkpointArtifact: { checksumSha256: 'nothex' } }), { now: T0 }
     )).rejects.toThrowError(/checksum/i);
     await expectNothingPersisted(alice, proj, parent, job);
   });
 
   it('duplicate completion is rejected (CHECKPOINT_EXISTS); no duplicate result/edge/artifacts', async () => {
     const { alice, proj, parent, job, claimed } = await seedClaimedPipelineJob();
-    const out = await completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 });
-    await expect(completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(), { now: T0 })).rejects.toThrowError(/CHECKPOINT_EXISTS|already has a result/i);
+    const out = await completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(proj.id), { now: T0 });
+    await expect(completePbmcPipelineResultByWorker(claimed.id, 'worker_t', claimed.claimToken, completionInput(proj.id), { now: T0 })).rejects.toThrowError(/CHECKPOINT_EXISTS|already has a result/i);
     expect((await getProjectJob(alice.id, proj.id, job.id)).resultAnalysisObjectId).toBe(out.resultObject.id);
     expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, parent.id)).toHaveLength(1);
     expect(await getJobArtifactsByJobId(job.id)).toHaveLength(2);

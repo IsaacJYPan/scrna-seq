@@ -9,9 +9,10 @@
 // SCOPE: the registry has grown beyond a noop. Registered handlers now include a
 // safe `generic` noop, a metadata-only `checkpoint.noop`, read-only R inspection
 // (`r.runtime.check`, `r.object.inspect`), and REAL scientific/R work:
-// `pbmc.pipeline.v1` (Seurat preprocessing on a COPY of the input object, writes a
-// checkpoint RDS), `checkpoint.load.v1` (mutates the OWNER's live R session), and
-// `deg.find_markers.v1` (DEG/FindAllMarkers). See DEFAULT_HANDLERS below for the
+// `pbmc.pipeline.v1` and `seurat.pipeline.v1` (preprocessing with a durable
+// checkpoint), `checkpoint.load.v1` (owner-only reattach), `checkpoint.fork.v1`
+// (new loader-owned object), and `deg.find_markers.v1` (DEG/FindAllMarkers). See
+// DEFAULT_HANDLERS below for the
 // authoritative list. Every other (otherwise valid) job type is intentionally
 // UNREGISTERED and is failed with UNSUPPORTED_JOB_TYPE — see the handler-registry
 // policy below. NO handler executes arbitrary/client-supplied R, and every R-facing
@@ -35,6 +36,7 @@
 const crypto = require('crypto');
 const database = require('./pgDatabase');
 const rWorkerBridge = require('./rWorkerBridge');
+const storage = require('./storage');
 const { validatePbmcPipelineParams, allocateCheckpointStorageKey } = require('./pbmcPipeline');
 const { validateDegFindMarkersParams, allocateDegResultStorageKey } = require('./degFindMarkers');
 const {
@@ -58,6 +60,15 @@ function codedHandlerError(code, message) {
   const err = new Error(message);
   err.code = code;
   return err;
+}
+
+async function discardUnrecordedProjectOutput(ctx, key) {
+  if (!storage.isProjectStorageKey(key) || typeof ctx.removeDurableObject !== 'function') return;
+  try {
+    await ctx.removeDurableObject(key);
+  } catch {
+    // Best effort only. Preserve the original handler error.
+  }
 }
 
 // Documented safe defaults for worker runtime config. These MUST match the values
@@ -385,30 +396,37 @@ async function pbmcPipelineHandler(ctx) {
   const { params, defaultsApplied } = validatePbmcPipelineParams(job.parameters);
 
   // 5. Server-allocate the internal checkpoint storage key (no client input; relative,
-  //    traversal-free; the R backend confines it to its vault). Never logged/exposed.
-  const checkpointStorageKey = allocateCheckpointStorageKey(job.id);
+  //    traversal-free; the R backend confines it to project storage). Never logged/exposed.
+  const checkpointStorageKey = allocateCheckpointStorageKey(job.projectId, job.id);
 
   await ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: parameters valid; invoking allowlisted PBMC pipeline on a copy of the input object (parent unchanged).' });
 
   // 6. Run the allowlisted, mutating bridge op. Object context + params body are all
   //    server-derived; the bridge ignores raw job input for routing.
-  const descriptor = await ctx.runRBridgeOperation({
-    job,
-    operation: 'r.pbmc.pipeline.v1',
-    actor: { userId: job.ownerUserId, projectId: job.projectId || null },
-    objectContext: { objectId, stateKey },
-    pipeline: { params, checkpointStorageKey },
-    input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
-    claimContext: { workerId: ctx.workerId },
-    logger: ctx.logger,
-    callR: ctx.callR,
-  });
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.pbmc.pipeline.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+      objectContext: { objectId, stateKey },
+      pipeline: { params, checkpointStorageKey },
+      input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (err) {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    throw err;
+  }
 
   // 7. A durable checkpoint MUST have been saved (with integrity) for success. If not,
   //    fail BEFORE creating any DB result — so a missing/failed save leaves no result
   //    object, edge, or artifact behind (nothing to roll back).
   const checkpoint = descriptor.checkpoint || {};
   if (checkpoint.saved !== true || typeof checkpoint.checksumSha256 !== 'string' || checkpoint.checksumSha256 === '') {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
     throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Pipeline did not produce a durable checkpoint.');
   }
 
@@ -419,7 +437,9 @@ async function pbmcPipelineHandler(ctx) {
   //    together or none do — a failure can never leave a failed job linked to a result
   //    object/edge with missing artifacts. The parent is never mutated; result metadata
   //    records provenance WITHOUT implying a download.
-  const completion = await ctx.completePbmcPipelineResult({
+  let completion;
+  try {
+    completion = await ctx.completePbmcPipelineResult({
     result: {
       objectType: descriptor.resultObjectType || 'seurat',
       displayName: 'PBMC pipeline result',
@@ -438,7 +458,7 @@ async function pbmcPipelineHandler(ctx) {
     checkpointArtifact: {
       artifactType: 'checkpoint',
       name: 'PBMC pipeline checkpoint',
-      description: 'Durable internal checkpoint of the PBMC pipeline result object (RDS on the R backend vault). No public download in this branch.',
+      description: 'Durable internal checkpoint of the PBMC pipeline result object. No public download in this branch.',
       storageKind: 'local_internal',
       internalStorageKey: checkpointStorageKey,
       checksumSha256: checkpoint.checksumSha256,
@@ -453,7 +473,11 @@ async function pbmcPipelineHandler(ctx) {
       storageKind: 'metadata_only',
       metadata: { ...descriptor.metadata, resolvedParams: params, defaultsApplied },
     },
-  });
+    });
+  } catch (err) {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    throw err;
+  }
 
   const resultObject = completion.resultObject;
   const checkpointArtifact = completion.checkpointArtifact;
@@ -508,7 +532,7 @@ async function seuratPipelineHandler(ctx) {
   }
 
   const { params, defaultsApplied } = validateSeuratPipelineParams(job.parameters);
-  const checkpointStorageKey = allocateSeuratCheckpointStorageKey(job.id);
+  const checkpointStorageKey = allocateSeuratCheckpointStorageKey(job.projectId, job.id);
 
   let descriptor;
   try {
@@ -534,15 +558,19 @@ async function seuratPipelineHandler(ctx) {
       level: 'error',
       message: `seurat.pipeline.v1 handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
     });
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
     throw err;
   }
 
   const checkpoint = descriptor.checkpoint || {};
   if (checkpoint.saved !== true || typeof checkpoint.checksumSha256 !== 'string' || checkpoint.checksumSha256 === '') {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
     throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Pipeline did not produce a durable checkpoint.');
   }
 
-  const completion = await ctx.completeSeuratPipelineResult({
+  let completion;
+  try {
+    completion = await ctx.completeSeuratPipelineResult({
     source: {
       displayName: 'Dataset input',
       metadata: {
@@ -570,7 +598,7 @@ async function seuratPipelineHandler(ctx) {
     checkpointArtifact: {
       artifactType: 'checkpoint',
       name: 'Seurat pipeline checkpoint',
-      description: 'Durable internal checkpoint of the Seurat pipeline result object (RDS on the R backend vault). No public download in this branch.',
+      description: 'Durable internal checkpoint of the Seurat pipeline result object. No public download in this branch.',
       storageKind: 'local_internal',
       internalStorageKey: checkpointStorageKey,
       checksumSha256: checkpoint.checksumSha256,
@@ -594,7 +622,11 @@ async function seuratPipelineHandler(ctx) {
         defaultsApplied,
       },
     },
-  });
+    });
+  } catch (err) {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    throw err;
+  }
 
   const resultObject = completion.resultObject;
   const checkpointArtifact = completion.checkpointArtifact;
@@ -737,6 +769,73 @@ async function checkpointLoadHandler(ctx) {
 }
 
 /**
+ * Fork a project checkpoint into a new object owned by the job creator. The
+ * source object is never attached to the creator's live key and is never changed.
+ */
+async function checkpointForkHandler(ctx) {
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'checkpoint.fork.v1 handler: resolving a project checkpoint before R contact.' });
+
+  const job = ctx.job;
+  const sourceObjectId = job.analysisObjectId;
+  if (!job.projectId || !sourceObjectId) {
+    throw codedHandlerError('PROJECT_CONTEXT_REQUIRED', 'Checkpoint fork requires a project and source object.');
+  }
+  if (typeof ctx.getForkableCheckpoint !== 'function'
+      || typeof ctx.allocateAnalysisObjectId !== 'function'
+      || typeof ctx.deriveRObjectStateKey !== 'function'
+      || typeof ctx.completeCheckpointFork !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Checkpoint fork is not configured.');
+  }
+
+  const checkpoint = await ctx.getForkableCheckpoint(
+    job.ownerUserId,
+    job.projectId,
+    sourceObjectId
+  );
+  const resultObjectId = ctx.allocateAnalysisObjectId();
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, resultObjectId);
+  if (!stateKey) throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Checkpoint fork is not configured.');
+
+  const descriptor = await ctx.runRBridgeOperation({
+    job,
+    operation: 'r.checkpoint.load.v1',
+    actor: { userId: job.ownerUserId, projectId: job.projectId },
+    objectContext: { objectId: resultObjectId, stateKey },
+    checkpoint: {
+      internalStorageKey: checkpoint.internalStorageKey,
+      checksumSha256: checkpoint.checksumSha256,
+      sizeBytes: checkpoint.sizeBytes,
+    },
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+  if (!descriptor.loaded || descriptor.loaded.loaded !== true) {
+    throw codedHandlerError('CHECKPOINT_LOAD_FAILED', 'Checkpoint did not load into the new private live session.');
+  }
+
+  const completed = await ctx.completeCheckpointFork({
+    resultAnalysisObjectId: resultObjectId,
+    checkpointArtifactId: checkpoint.checkpointArtifactId,
+    loaded: descriptor.loaded,
+  });
+  await ctx.log({
+    level: 'info',
+    message: `checkpoint.fork.v1 handler: created owned result object ${completed.resultObject.id} with source lineage.`,
+  });
+  return {
+    resultAnalysisObjectId: completed.resultObject.id,
+    result: {
+      ok: true,
+      handled: 'checkpoint.fork.v1',
+      resultAnalysisObjectId: completed.resultObject.id,
+      artifactId: completed.artifact.id,
+    },
+  };
+}
+
+/**
  * DEG / marker-finding handler (`deg.find_markers.v1`): runs the existing FindAllMarkers
  * path over the OWNER's existing live analysis object (usually one produced by
  * pbmc.pipeline.v1 → checkpoint.load.v1) as ONE allowlisted bridge operation. DEG is an
@@ -800,29 +899,36 @@ async function degFindMarkersHandler(ctx) {
   const { params, defaultsApplied } = validateDegFindMarkersParams(job.parameters);
 
   // 5. Server-allocate the internal result storage key (no client input; relative,
-  //    traversal-free; the R backend confines it to its vault). Never logged/exposed.
-  const resultStorageKey = allocateDegResultStorageKey(job.id);
+  //    traversal-free; the R backend confines it to project storage). Never logged/exposed.
+  const resultStorageKey = allocateDegResultStorageKey(job.projectId, job.id);
 
   await ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: parameters valid; running allowlisted DEG over the existing live object (no new object/edge, object not mutated).' });
 
   // 6. Run the allowlisted DEG bridge op. Object context + params body are all server-
   //    derived; the bridge ignores raw job input for routing/storage key.
-  const descriptor = await ctx.runRBridgeOperation({
-    job,
-    operation: 'r.deg.find_markers.v1',
-    actor: { userId: job.ownerUserId, projectId: job.projectId || null },
-    objectContext: { objectId, stateKey },
-    deg: { params, resultStorageKey },
-    input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
-    claimContext: { workerId: ctx.workerId },
-    logger: ctx.logger,
-    callR: ctx.callR,
-  });
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.deg.find_markers.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+      objectContext: { objectId, stateKey },
+      deg: { params, resultStorageKey },
+      input: job.parameters, // passed for completeness; the bridge IGNORES it for routing.
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (err) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
+    throw err;
+  }
 
   // 7. The full marker table MUST have been written (with integrity) for success. If not,
   //    fail BEFORE creating any DB artifact — so a missing/failed write leaves nothing behind.
   const result = descriptor.result || {};
   if (result.saved !== true || typeof result.checksumSha256 !== 'string' || result.checksumSha256 === '') {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
     throw codedHandlerError('DEG_RESULT_WRITE_FAILED', 'DEG run did not produce a durable marker table.');
   }
 
@@ -830,11 +936,13 @@ async function degFindMarkersHandler(ctx) {
   //    local_internal full-table artifact (server-allocated key + checksum/size, key stripped
   //    from public reads) and the metadata-only summary artifact (resolved params + bounded
   //    summary). NO result analysis object and NO lineage edge are created.
-  const completion = await ctx.completeDegFindMarkersResult({
+  let completion;
+  try {
+    completion = await ctx.completeDegFindMarkersResult({
     markersArtifact: {
       artifactType: 'deg_markers',
       name: 'DEG marker table',
-      description: 'Durable internal full DEG marker table (CSV on the R backend vault). No public download in this branch.',
+      description: 'Durable internal full DEG marker table. No public download in this branch.',
       storageKind: 'local_internal',
       mimeType: 'text/csv',
       internalStorageKey: resultStorageKey,
@@ -863,7 +971,11 @@ async function degFindMarkersHandler(ctx) {
         defaultsApplied,
       },
     },
-  });
+    });
+  } catch (err) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
+    throw err;
+  }
 
   const markersArtifact = completion.markersArtifact;
   const summaryArtifact = completion.summaryArtifact;
@@ -886,7 +998,8 @@ async function degFindMarkersHandler(ctx) {
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
 // inspection bridge, and allowlisted R/scientific handlers: `pbmc.pipeline.v1`,
-// `checkpoint.load.v1`, and `deg.find_markers.v1`. Other analytical job types
+// `seurat.pipeline.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`, and
+// `deg.find_markers.v1`. Other analytical job types
 // (normalize/qc_filter/pca/cluster/umap/integrate, pathway enrichment, CellChat)
 // remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
 // instead of pretending to run them.
@@ -898,6 +1011,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'pbmc.pipeline.v1': pbmcPipelineHandler,
   'seurat.pipeline.v1': seuratPipelineHandler,
   'checkpoint.load.v1': checkpointLoadHandler,
+  'checkpoint.fork.v1': checkpointForkHandler,
   'deg.find_markers.v1': degFindMarkersHandler,
 });
 
@@ -916,7 +1030,8 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - callR              R caller used by the bridge; injectable for tests. Defaults to a
  *                        real local-HTTP caller built from rBridgeConfig (used by every
  *                        R-facing handler — r.runtime.check, r.object.inspect,
- *                        pbmc.pipeline.v1, checkpoint.load.v1, deg.find_markers.v1;
+ *                        pbmc.pipeline.v1, seurat.pipeline.v1, checkpoint.load.v1,
+ *                        checkpoint.fork.v1, deg.find_markers.v1;
  *                        generic/checkpoint.noop never call R)
  *   - rBridgeConfig      { port, token } for the default R caller (server wires PLUMBER_PORT
  *                        + API_TOKEN here so the in-process worker can reach the local R backend)
@@ -940,6 +1055,7 @@ function createJobWorker(options = {}) {
     // deriveRStateKey so the client never controls the key. Tests inject a deriver
     // (the real server one or a deterministic fake).
     deriveRObjectStateKey,
+    storageProvider = storage.createLocalStorageProvider(),
     logger = console,
     now,
   } = options;
@@ -1070,8 +1186,11 @@ function createJobWorker(options = {}) {
       // summary artifact in ONE claim-guarded transaction (used only by the deg.find_markers.v1
       // handler) so one artifact can't commit without the other. Creates NO result object/edge.
       completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      removeDurableObject: (key) => storageProvider.remove(key),
       // R-bridge seam (used by every R-facing handler: r.runtime.check,
-      // r.object.inspect, pbmc.pipeline.v1, checkpoint.load.v1, deg.find_markers.v1).
+      // r.object.inspect, pbmc.pipeline.v1, seurat.pipeline.v1,
+      // checkpoint.load.v1, checkpoint.fork.v1, deg.find_markers.v1).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
       // reach R by any path other than this server-controlled one.
       //
@@ -1117,6 +1236,9 @@ function createJobWorker(options = {}) {
       // worker keeps that key private (it is not logged or placed in artifact metadata).
       getLoadableCheckpoint: (projectId, objectId, ownerUserId) =>
         db.getLoadableCheckpointForAnalysisObject(projectId, objectId, ownerUserId),
+      getForkableCheckpoint: (ownerUserId, projectId, objectId) =>
+        db.getForkableCheckpointForAnalysisObject(ownerUserId, projectId, objectId),
+      allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
       getDatasetForProject: (ownerUserId, projectId, datasetId) =>
         db.getDatasetForProject(ownerUserId, projectId, datasetId),
       getProjectAnalysisObject: (ownerUserId, projectId, objectId) =>
@@ -1227,6 +1349,7 @@ module.exports = {
   pbmcPipelineHandler,
   seuratPipelineHandler,
   checkpointLoadHandler,
+  checkpointForkHandler,
   degFindMarkersHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,

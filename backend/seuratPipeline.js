@@ -5,6 +5,7 @@
 // the worker; clients never provide paths or storage keys.
 
 const crypto = require('crypto');
+const { isProjectStorageKey, projectStorageFileKey } = require('./storage');
 
 function codedError(code, message) {
   const err = new Error(message);
@@ -92,12 +93,18 @@ function validateSeuratPipelineParams(input) {
   return { params, defaultsApplied };
 }
 
-function allocateSeuratCheckpointStorageKey(jobId) {
+function allocateSeuratCheckpointStorageKey(projectId, jobId) {
+  if (jobId === undefined) {
+    jobId = projectId;
+    projectId = null;
+  }
   if (typeof jobId !== 'string' || !/^job_[0-9a-f]+$/.test(jobId)) {
     throw codedError('INVALID_JOB_ID', 'A server-generated job id is required to allocate a checkpoint key.');
   }
   const token = crypto.randomBytes(12).toString('hex');
-  // R's validate_path(..., "vault") requires the key to resolve under ANALYSIS_ROOT/vault.
+  if (projectId) {
+    return projectStorageFileKey(String(projectId), 'checkpoints', jobId, `${token}.rds`);
+  }
   return `vault/checkpoints/${jobId}/${token}.rds`;
 }
 
@@ -114,8 +121,14 @@ function assertSupportedSeuratPipelineDataset(dataset) {
   if (typeof dataset.internalStorageKey !== 'string' || dataset.internalStorageKey === '') {
     throw codedError('INVALID_PARAMETERS', 'Dataset storage is not available for seurat.pipeline.v1.');
   }
-  if (!/^vault\//.test(dataset.internalStorageKey)) {
-    throw codedError('INVALID_PARAMETERS', 'Dataset storage is not vault-confined for seurat.pipeline.v1.');
+  const isLegacyVaultKey = /^vault\//.test(dataset.internalStorageKey);
+  const isDurableProjectKey = dataset.projectId
+    && isProjectStorageKey(dataset.internalStorageKey, {
+      projectId: dataset.projectId,
+      kind: 'datasets',
+    });
+  if (!isLegacyVaultKey && !isDurableProjectKey) {
+    throw codedError('INVALID_PARAMETERS', 'Dataset storage is not in the expected project storage scope.');
   }
 }
 

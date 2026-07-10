@@ -1,26 +1,24 @@
 /**
- * Storage roots + durable project-scoped storage key conventions.
+ * Internal durable storage.
  *
- * Hybrid storage posture:
- *  - user-private vault (VAULT_ROOT): transient live-R / session state. Private,
- *    per-user, NOT project-shared. Untouched by this module beyond exposing the
- *    root; live-R state keying stays server-derived in server.js / rWorkerBridge.
- *  - durable project-scoped storage: datasets, artifacts, checkpoints, reports,
- *    reproducibility bundles. These get a SERVER-GENERATED, project-scoped
- *    INTERNAL key via projectStorageKey(). The key is never client-supplied and
- *    never returned in a public API projection (the artifact/dataset serializers
- *    already strip storage_uri / internal_storage_key).
+ * Durable project files use opaque relative keys such as:
+ *   projects/<projectId>/checkpoints/<jobId>/<token>.rds
  *
- * This is a local-filesystem convention today. The key format is deliberately a
- * relative, provider-agnostic path ("projects/<projectId>/<kind>/<id>") so a
- * FUTURE object-storage backend (S3/GCS) can adopt the SAME key as an object
- * key under a bucket without changing callers. No object-storage provider,
- * no download surface, and no public path exposure are introduced here.
+ * Keys and absolute paths are server-owned. Public API responses must never
+ * include either one.
  */
 
 'use strict';
 
+const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
+
+function storageError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
 
 function resolveRoot(envValue, fallbackSegments) {
   const raw = envValue === undefined || envValue === null ? '' : String(envValue).trim();
@@ -28,87 +26,228 @@ function resolveRoot(envValue, fallbackSegments) {
   return path.join(process.cwd(), ...fallbackSegments);
 }
 
-// Per-user private vault (transient live-R state, uploaded working files).
 function vaultRoot() {
   return resolveRoot(process.env.VAULT_ROOT, ['vault']);
 }
 
-// Durable data root (uploads and, via projectStorageKey, durable project
-// resources). Defaults to ./data.
 function storageRoot() {
   return resolveRoot(process.env.STORAGE_ROOT, ['data']);
 }
 
-// Allow-list of durable, project-scoped resource kinds. Anything else is
-// rejected so a caller cannot invent an arbitrary key namespace.
 const PROJECT_STORAGE_KINDS = new Set([
   'datasets', 'artifacts', 'checkpoints', 'reports', 'bundles', 'figures'
 ]);
 
 function isSafeKeySegment(value) {
   if (typeof value !== 'string' || value === '') return false;
-  if (value.includes('\0')) return false;
-  if (value.includes('%')) return false;
-  // Server-generated ids are lowercase-hex-prefixed tokens (ds_/art_/ao_/job_/
-  // proj_...). Confine key segments to that safe alphabet so a key can never
-  // carry a path-traversal segment or separator even if a caller passes junk.
+  if (value.includes('\0') || value.includes('%')) return false;
   return /^[A-Za-z0-9._-]+$/.test(value) && value !== '.' && value !== '..';
 }
 
 function assertSafeStorageKey(key) {
-  if (typeof key !== 'string' || key === '' || key.includes('\0')) {
-    throw new Error('Invalid storage key.');
-  }
-  if (key.includes('%')) {
-    throw new Error('Invalid storage key.');
+  if (typeof key !== 'string' || key === '' || key.includes('\0') || key.includes('%')) {
+    throw storageError('INVALID_STORAGE_KEY', 'Invalid storage key.');
   }
   if (/^([/\\]|[A-Za-z]:|\\\\)/.test(key)) {
-    throw new Error('Storage key must be relative.');
+    throw storageError('INVALID_STORAGE_KEY', 'Storage key must be relative.');
   }
   if (key.includes('\\')) {
-    throw new Error('Storage key must use POSIX separators.');
+    throw storageError('INVALID_STORAGE_KEY', 'Storage key must use POSIX separators.');
   }
-
   const segments = key.split('/');
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
-    throw new Error('Storage key contains an unsafe path segment.');
+  if (segments.some((segment) => !isSafeKeySegment(segment))) {
+    throw storageError('INVALID_STORAGE_KEY', 'Storage key contains an unsafe path segment.');
   }
+  return segments;
 }
 
-/**
- * Build the INTERNAL, server-owned storage key for a durable project resource.
- * Throws on an unknown kind or an unsafe id/projectId segment. The returned key
- * is a relative POSIX-style path with no leading slash and no traversal, safe to
- * use as a filesystem sub-path OR a future object key. It must NEVER be returned
- * to a client.
- */
 function projectStorageKey(projectId, kind, id) {
   if (!PROJECT_STORAGE_KINDS.has(kind)) {
-    throw new Error(`Unknown project storage kind: ${kind}`);
+    throw storageError('INVALID_STORAGE_KIND', `Unknown project storage kind: ${kind}`);
   }
   if (!isSafeKeySegment(projectId)) {
-    throw new Error('Invalid projectId for storage key.');
+    throw storageError('INVALID_STORAGE_KEY', 'Invalid projectId for storage key.');
   }
   if (!isSafeKeySegment(id)) {
-    throw new Error('Invalid resource id for storage key.');
+    throw storageError('INVALID_STORAGE_KEY', 'Invalid resource id for storage key.');
   }
   return `projects/${projectId}/${kind}/${id}`;
 }
 
-/**
- * Resolve a storage key to an absolute filesystem path under storageRoot(),
- * verifying the result stays confined (defense-in-depth against traversal). The
- * absolute path is server-internal and must not be exposed in a response.
- */
-function resolveStoragePath(key) {
-  assertSafeStorageKey(key);
-  const root = storageRoot();
-  const abs = path.resolve(root, key);
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  if (abs !== root && !abs.startsWith(rootWithSep)) {
-    throw new Error('Resolved storage path escapes the storage root.');
+function projectStorageFileKey(projectId, kind, id, fileName) {
+  if (!isSafeKeySegment(fileName)) {
+    throw storageError('INVALID_STORAGE_KEY', 'Invalid file name for storage key.');
   }
-  return abs;
+  return `${projectStorageKey(projectId, kind, id)}/${fileName}`;
+}
+
+function parseProjectStorageKey(key) {
+  let segments;
+  try {
+    segments = assertSafeStorageKey(key);
+  } catch {
+    return null;
+  }
+  if (segments.length < 4 || segments[0] !== 'projects') return null;
+  if (!PROJECT_STORAGE_KINDS.has(segments[2])) return null;
+  return {
+    projectId: segments[1],
+    kind: segments[2],
+    resourceId: segments[3],
+    fileName: segments.length > 4 ? segments.slice(4).join('/') : null,
+  };
+}
+
+function isProjectStorageKey(key, { projectId, kind } = {}) {
+  const parsed = parseProjectStorageKey(key);
+  if (!parsed) return false;
+  if (projectId !== undefined && parsed.projectId !== String(projectId)) return false;
+  if (kind !== undefined && parsed.kind !== kind) return false;
+  return true;
+}
+
+function isInsideRoot(root, candidate) {
+  const rel = path.relative(root, candidate);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function hashFileSync(filePath) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let bytesRead;
+    do {
+      bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+function assertOrdinaryPathEntry(entryPath, { directory = false } = {}) {
+  const stat = fs.lstatSync(entryPath);
+  if (stat.isSymbolicLink()) {
+    throw storageError('UNSAFE_STORAGE_PATH', 'Durable storage cannot traverse a symbolic link or junction.');
+  }
+  if (directory ? !stat.isDirectory() : !stat.isFile()) {
+    throw storageError('UNSAFE_STORAGE_PATH', directory
+      ? 'Durable storage path contains a non-directory entry.'
+      : 'Durable storage object is not a regular file.');
+  }
+  return stat;
+}
+
+function createLocalStorageProvider(options = {}) {
+  const root = path.resolve(options.root || storageRoot());
+
+  function resolveKey(key) {
+    const segments = assertSafeStorageKey(key);
+    const absolutePath = path.resolve(root, ...segments);
+    if (!isInsideRoot(root, absolutePath) || absolutePath === root) {
+      throw storageError('INVALID_STORAGE_KEY', 'Resolved storage path escapes the storage root.');
+    }
+    return absolutePath;
+  }
+
+  function ensureRoot() {
+    fs.mkdirSync(root, { recursive: true });
+    assertOrdinaryPathEntry(root, { directory: true });
+  }
+
+  function ensureSafeParent(key) {
+    ensureRoot();
+    const absolutePath = resolveKey(key);
+    const parent = path.dirname(absolutePath);
+    const relativeParent = path.relative(root, parent);
+    let cursor = root;
+    for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
+      cursor = path.join(cursor, segment);
+      if (!fs.existsSync(cursor)) fs.mkdirSync(cursor);
+      assertOrdinaryPathEntry(cursor, { directory: true });
+    }
+    if (fs.existsSync(absolutePath)) assertOrdinaryPathEntry(absolutePath);
+    return absolutePath;
+  }
+
+  function prepareWrite(key) {
+    if (!isProjectStorageKey(key)) {
+      throw storageError('INVALID_STORAGE_KEY', 'Durable writes require a project-scoped storage key.');
+    }
+    return ensureSafeParent(key);
+  }
+
+  function putFileFromPath(sourcePath, key) {
+    const sourceStat = assertOrdinaryPathEntry(sourcePath);
+    const destination = prepareWrite(key);
+    if (fs.existsSync(destination)) {
+      throw storageError('STORAGE_OBJECT_EXISTS', 'Durable storage object already exists.');
+    }
+
+    const partial = `${destination}.partial-${crypto.randomBytes(8).toString('hex')}`;
+    try {
+      fs.copyFileSync(sourcePath, partial, fs.constants.COPYFILE_EXCL);
+      const fd = fs.openSync(partial, 'r+');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      const checksumSha256 = hashFileSync(partial);
+      fs.linkSync(partial, destination);
+      fs.unlinkSync(partial);
+      fs.unlinkSync(sourcePath);
+      return {
+        key,
+        checksumSha256,
+        sizeBytes: sourceStat.size,
+      };
+    } catch (error) {
+      try { if (fs.existsSync(partial)) fs.unlinkSync(partial); } catch { /* best effort */ }
+      throw error;
+    }
+  }
+
+  function inspect(key, expected = {}) {
+    const absolutePath = resolveKey(key);
+    if (!fs.existsSync(absolutePath)) {
+      throw storageError('STORAGE_OBJECT_MISSING', 'Durable storage object is missing.');
+    }
+    const stat = assertOrdinaryPathEntry(absolutePath);
+    if (expected.sizeBytes !== undefined && expected.sizeBytes !== null
+        && Number(expected.sizeBytes) !== stat.size) {
+      throw storageError('STORAGE_SIZE_MISMATCH', 'Durable storage object size does not match its record.');
+    }
+    const checksumSha256 = hashFileSync(absolutePath);
+    if (expected.checksumSha256
+        && String(expected.checksumSha256).toLowerCase() !== checksumSha256) {
+      throw storageError('STORAGE_CHECKSUM_MISMATCH', 'Durable storage object checksum does not match its record.');
+    }
+    return { key, sizeBytes: stat.size, checksumSha256 };
+  }
+
+  function remove(key) {
+    if (!isProjectStorageKey(key)) {
+      throw storageError('INVALID_STORAGE_KEY', 'Durable removal requires a project-scoped storage key.');
+    }
+    const absolutePath = resolveKey(key);
+    if (!fs.existsSync(absolutePath)) return false;
+    assertOrdinaryPathEntry(absolutePath);
+    fs.unlinkSync(absolutePath);
+    return true;
+  }
+
+  return Object.freeze({
+    kind: 'local',
+    root,
+    resolveKey,
+    prepareWrite,
+    putFileFromPath,
+    inspect,
+    remove,
+  });
+}
+
+function resolveStoragePath(key) {
+  return createLocalStorageProvider().resolveKey(key);
 }
 
 module.exports = {
@@ -116,7 +255,11 @@ module.exports = {
   vaultRoot,
   storageRoot,
   isSafeKeySegment,
-  projectStorageKey,
   assertSafeStorageKey,
-  resolveStoragePath
+  projectStorageKey,
+  projectStorageFileKey,
+  parseProjectStorageKey,
+  isProjectStorageKey,
+  createLocalStorageProvider,
+  resolveStoragePath,
 };

@@ -97,6 +97,77 @@ validate_path <- function(user_path, safe_dir = "vault") {
   return(real_path)
 }
 
+storage_root_path <- function() {
+  configured <- Sys.getenv("STORAGE_ROOT", unset = "")
+  if (nchar(trimws(configured)) > 0) return(configured)
+  analysis_root <- Sys.getenv("ANALYSIS_ROOT", unset = getwd())
+  file.path(analysis_root, "data")
+}
+
+validate_storage_key <- function(storage_key, for_write = FALSE) {
+  if (is.null(storage_key) || !is.character(storage_key) || length(storage_key) != 1 ||
+      nchar(trimws(storage_key)) == 0) {
+    stop("Access denied: storage key is required.")
+  }
+  if (grepl("%|\\\\|^/|^[A-Za-z]:|(^|/)\\.\\.?(/|$)", storage_key)) {
+    stop("Access denied: invalid storage key.")
+  }
+  segments <- strsplit(storage_key, "/", fixed = TRUE)[[1]]
+  allowed_kinds <- c("datasets", "artifacts", "checkpoints", "reports", "bundles", "figures")
+  if (length(segments) < 5 || segments[1] != "projects" ||
+      !(segments[3] %in% allowed_kinds) ||
+      any(!grepl("^[A-Za-z0-9._-]+$", segments))) {
+    stop("Access denied: invalid project storage key.")
+  }
+
+  root <- storage_root_path()
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  safe_root <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  safe_prefix <- paste0(safe_root, "/")
+  cursor <- safe_root
+  for (segment in head(segments, -1)) {
+    next_path <- file.path(cursor, segment)
+    if (!file.exists(next_path)) {
+      if (!isTRUE(for_write)) stop("Storage object parent is missing.")
+      if (!dir.create(next_path, recursive = FALSE, showWarnings = FALSE)) {
+        stop("Unable to create durable storage directory.")
+      }
+    }
+    if (!dir.exists(next_path)) stop("Storage path contains a non-directory entry.")
+    real_next <- normalizePath(next_path, winslash = "/", mustWork = TRUE)
+    if (!(real_next == safe_root || startsWith(real_next, safe_prefix))) {
+      stop("Access denied: storage key escapes the durable root.")
+    }
+    cursor <- real_next
+  }
+  file.path(cursor, tail(segments, 1))
+}
+
+resolve_internal_storage_key <- function(storage_key, for_write = FALSE) {
+  if (is.character(storage_key) && length(storage_key) == 1 && startsWith(storage_key, "projects/")) {
+    return(validate_storage_key(storage_key, for_write = for_write))
+  }
+  validate_path(storage_key, "vault")
+}
+
+atomic_save_rds <- function(value, destination) {
+  temp_path <- paste0(destination, ".partial-", Sys.getpid(), "-", sample.int(1000000000, 1))
+  completed <- FALSE
+  on.exit(if (!completed && file.exists(temp_path)) unlink(temp_path), add = TRUE)
+  saveRDS(value, file = temp_path)
+  if (!file.rename(temp_path, destination)) stop("Unable to finalize checkpoint file.")
+  completed <- TRUE
+}
+
+atomic_write_csv <- function(value, destination) {
+  temp_path <- paste0(destination, ".partial-", Sys.getpid(), "-", sample.int(1000000000, 1))
+  completed <- FALSE
+  on.exit(if (!completed && file.exists(temp_path)) unlink(temp_path), add = TRUE)
+  write.csv(value, file = temp_path, row.names = FALSE)
+  if (!file.rename(temp_path, destination)) stop("Unable to finalize result file.")
+  completed <- TRUE
+}
+
 validate_absolute_path <- function(user_path) {
   if (grepl("(^|[/\\\\])\\.\\.(|[/\\\\]|$)", user_path)) stop("Access denied: path traversal attempt using '..'")
   is_absolute <- grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)
@@ -705,11 +776,10 @@ function(req, res) {
     obj <- RunUMAP(obj, reduction = "pca", dims = 1:udims, n.components = umap_components,
                    n.neighbors = un, min.dist = umap_min_dist, seed.use = used_seed, verbose = FALSE)
 
-    # Durable checkpoint → SERVER-provided internal key, confined to the vault.
-    safe_path <- validate_path(storage_key, "vault")
-    dir.create(dirname(safe_path), recursive = TRUE, showWarnings = FALSE)
+    # Durable checkpoint: server-provided key confined to internal storage.
+    safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
     raw_for_bundle <- if (exists("raw_obj") && !is.null(raw_obj)) raw_obj else obj
-    saveRDS(list(global = obj, raw = raw_for_bundle), file = safe_path)
+    atomic_save_rds(list(global = obj, raw = raw_for_bundle), safe_path)
     size_bytes <- as.numeric(file.info(safe_path)$size)
     checksum <- tryCatch({
       if (requireNamespace("digest", quietly = TRUE)) {
@@ -825,7 +895,7 @@ function(req, res) {
     if (!requireNamespace("hdf5r", quietly = TRUE)) {
       stop("R package 'hdf5r' is not installed; cannot read 10x HDF5 (tenx_h5). Install 'hdf5r' on the R backend.")
     }
-    dataset_path <- validate_path(dataset_storage_key, "vault")
+    dataset_path <- resolve_internal_storage_key(dataset_storage_key)
     if (!file.exists(dataset_path)) stop("Dataset file not found.")
     mat <- Read10X_h5(filename = dataset_path)
     if (is.list(mat)) {
@@ -883,9 +953,8 @@ function(req, res) {
     obj <- RunUMAP(obj, reduction = "pca", dims = 1:udims, n.components = umap_components,
                    n.neighbors = un, min.dist = umap_min_dist, seed.use = used_seed, verbose = FALSE)
 
-    safe_path <- validate_path(storage_key, "vault")
-    dir.create(dirname(safe_path), recursive = TRUE, showWarnings = FALSE)
-    saveRDS(list(global = obj, raw = raw_obj), file = safe_path)
+    safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
+    atomic_save_rds(list(global = obj, raw = raw_obj), safe_path)
     size_bytes <- as.numeric(file.info(safe_path)$size)
     checksum <- tryCatch({
       if (requireNamespace("digest", quietly = TRUE)) {
@@ -968,10 +1037,10 @@ function(req, res) {
   expected_size <- if (!is.null(body$expected_size_bytes)) suppressWarnings(as.numeric(body$expected_size_bytes)[1]) else NULL
 
   tryCatch({
-    # SERVER-provided internal key, confined to the vault.
-    safe_path <- validate_path(storage_key, "vault")
+    # Server-provided key confined to internal storage.
+    safe_path <- resolve_internal_storage_key(storage_key)
     if (!grepl("\\.rds$", safe_path, ignore.case = TRUE)) {
-      stop("Only RDS checkpoints in the vault can be loaded.")
+      stop("Only RDS checkpoints can be loaded.")
     }
     if (!file.exists(safe_path)) stop("Checkpoint file not found.")
 
@@ -1174,10 +1243,9 @@ function(req, res) {
     # FindAllMarkers returns a `gene` column in modern Seurat; fall back to rownames.
     if (!"gene" %in% colnames(markers)) markers$gene <- rownames(markers)
 
-    # Write the FULL marker table to the SERVER-provided internal key, confined to the vault.
-    safe_path <- validate_path(storage_key, "vault")
-    dir.create(dirname(safe_path), recursive = TRUE, showWarnings = FALSE)
-    write.csv(markers, file = safe_path, row.names = FALSE)
+    # Write the full marker table to a server-provided key in internal storage.
+    safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
+    atomic_write_csv(markers, safe_path)
     size_bytes <- as.numeric(file.info(safe_path)$size)
     checksum <- tryCatch({
       if (requireNamespace("digest", quietly = TRUE)) {

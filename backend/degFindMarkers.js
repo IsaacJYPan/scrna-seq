@@ -26,6 +26,7 @@
 // intentionally NOT integrated here.
 
 const crypto = require('crypto');
+const { projectStorageFileKey } = require('./storage');
 
 /** Coded error so callers (route/handler) can branch + map to 400 / failed-job. */
 function codedError(code, message) {
@@ -152,15 +153,19 @@ function validateDegFindMarkersParams(input) {
 // there is NO public download route in this branch.
 const _JOB_ID_RE = /^job_[0-9a-f]+$/;
 
-function allocateDegResultStorageKey(jobId) {
+function allocateDegResultStorageKey(projectId, jobId) {
+  if (jobId === undefined) {
+    jobId = projectId;
+    projectId = null;
+  }
   if (typeof jobId !== 'string' || !_JOB_ID_RE.test(jobId)) {
     // Defense-in-depth: only ever build a key from a well-formed server job id.
     throw codedError('INVALID_JOB_ID', 'A server-generated job id is required to allocate a DEG result key.');
   }
   const token = crypto.randomBytes(12).toString('hex');
-  // R's validate_path(key, "vault") requires the key to resolve UNDER ANALYSIS_ROOT/vault;
-  // a key without the `vault/` prefix is rejected as a path-traversal attempt, so the DEG
-  // R run fails before writing. Prefix it, matching allocateSeuratCheckpointStorageKey.
+  if (projectId) {
+    return projectStorageFileKey(String(projectId), 'artifacts', jobId, `${token}.csv`);
+  }
   return `vault/deg/${jobId}/${token}.csv`;
 }
 

@@ -40,10 +40,10 @@ Status legend:
 | Auth / logout | UI-wired (cookie foundation) | HttpOnly session cookie is the source of auth truth (login/signup set it; `GET /api/auth/session` restores it; `POST /api/auth/logout` clears it). The localStorage bearer token is deprecated legacy/dev compatibility, still accepted in a transition mode. CSRF for cookie-auth mutations is a SameSite=Lax cookie + an allowed-origin check. Server-side session **revocation/versioning** is still future work (stateless HMAC token). |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
 | Project members / RBAC endpoints | backend-only | Role-checked member APIs exist and are tested. The in-app "Collaborators" panel is a disabled status surface and is **not** wired to these endpoints. |
-| Project-scoped datasets | UI-wired (narrow Seurat path) | The Pipeline Manager Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. Uploads still use server-chosen storage keys + sha256, and public responses omit internal storage. |
+| Project-scoped datasets | UI-wired (narrow Seurat path) | The Pipeline Manager Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. New uploads use server-owned project storage keys plus SHA-256 checksums, and public responses omit internal storage. |
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. |
-| Pipeline Manager / pipeline manifests | UI-wired (declarative registry) | A Pipeline Manager tab lets each user select an active pipeline within a project, upload declarative pipeline manifests, and populate pipeline-generated sidebar tabs from registered modules. Uploaded manifests may choose from registered module/view templates only; arbitrary code, endpoints, icons, storage keys, and paths are rejected before storage. |
+| Pipeline Manager / pipeline manifests | UI-wired (declarative registry) | A Pipeline Manager tab lets each user select an active pipeline within a project, upload declarative pipeline manifests, and populate pipeline-generated sidebar tabs from registered modules. Upload is currently allowed to project owners/admins/analysts, not a separate platform-developer role. Uploaded manifests may choose from registered modules/templates only; arbitrary code, endpoints, icons, storage keys, and paths are rejected. Parameter/result template declarations are validated and displayed, but there is not yet a fully generic template-driven execution/result renderer. |
 | QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the authenticated live-R proxy (`/api/r/*`). |
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
@@ -53,6 +53,7 @@ Status legend:
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
 | Checkpoint artifacts | UI-wired (read-only metadata + selected reattach) | Immutable result checkpoint metadata per successful job can be listed. The Pipeline Manager Seurat panel can request checkpoint reattach for its result object through `checkpoint.load.v1`; there is still no download route. |
 | Checkpoint load worker (`checkpoint.load.v1`) | UI-wired (Seurat result action) | Owner-only reattach of a server-selected checkpoint into live R. UI coverage is limited to the Seurat pipeline result panel; it is not a general checkpoint browser/launcher. |
+| Checkpoint fork worker (`checkpoint.fork.v1`) | backend-only | A project writer may load a member's durable checkpoint into a new analysis object and private live R key owned by the writer. It records source lineage and never attaches the source owner's live state. |
 | Job artifacts (metadata) | UI-wired (read-only metadata) | Read-only, path/storage-key stripped from responses; no download route. Jobs & Artifacts renders sanitized metadata only. |
 | Analysis-object lineage DAG | UI-wired (read-only summary) | Edge model + parents/children/lineage read routes are surfaced as a bounded summary in Jobs & Artifacts. Mutations remain server/worker-driven. |
 | Provenance / figures / cache | UI-wired | Older `/api/db/*` routes still back the live gallery/cache path. Jobs & Artifacts also shows project-scoped provenance and figure metadata read-only. |
@@ -64,7 +65,7 @@ Status legend:
 | Custom Script / arbitrary R execution | not implemented | Out of scope; no arbitrary-R endpoint. |
 | Reports / generated R scripts | not implemented | No supported report or script-export surface. Legacy live-R provenance script preview is copy-only and not a complete reproducibility export. |
 | Artifact downloads | not implemented | No public download route; responses never expose storage paths/keys. |
-| Object storage | not implemented | Local vault only; no external object storage. |
+| Object storage | not implemented | Local filesystem provider only; no external object storage. |
 | Secure cookie sessions | backend-wired (transitional) | HttpOnly + SameSite + Secure-in-production session cookie is set on login/signup and accepted on every route; frontend restores via `/api/auth/session`. localStorage bearer is deprecated fallback. Session revocation/versioning not yet implemented. |
 | Postgres database runtime | backend-wired | `backend/pgDatabase.js` + `backend/pg/schema.sql` are the app metadata runtime for users, projects/members, datasets, analysis objects, project jobs/logs/artifacts, provenance, figures/cache, and lineage. See "Database backend" below. |
 | Shared project live R state | not implemented | Collaboration is via durable metadata, never a shared live R session. |
@@ -90,7 +91,8 @@ generated reports/scripts, pathway enrichment, CellChat, or shared live R state.
 The first supported end-to-end local/dev pipeline is intentionally narrow:
 
 - **Supported input:** one uploaded 10x Genomics filtered feature-barcode matrix
-  HDF5 file, stored as dataset `fileType: "tenx_h5"`. Matrix Market folders/zips,
+  HDF5 file, stored as dataset `fileType: "tenx_h5"` under a server-owned
+  project storage key. Matrix Market folders/zips,
   H5AD, H5Seurat, RDS, multi-sample batches, and public downloads are not part of
   this v1 path.
 - **UI workflow:** Pipeline Manager lists/uploads `tenx_h5` datasets, creates or
@@ -195,17 +197,14 @@ The app runtime is Postgres-only.
   frontend no longer treats cached localStorage bearer/user data as login truth;
   it starts from `/api/auth/session`, while still sending the legacy bearer as a
   transition fallback.
-- Durable project resources use **server-owned, project-scoped storage keys**
-  (`backend/storage.js`, `projects/<projectId>/<kind>/<id>`): server-generated,
-  normalized POSIX-style, traversal-proof, never client-supplied, and never
-  returned in a public response (serializers strip `storage_uri`,
-  `internal_storage_key`, and object hashes). Storage key resolution rejects
-  absolute paths, Windows-style paths, NUL bytes, percent-encoded traversal, and
-  ambiguous path segments. Production config validation also rejects overlapping
-  storage/vault roots and malformed upload limits. This is a local filesystem
-  convention today; the key format is provider-agnostic so a future object-storage
-  backend can adopt it without changing callers. No object storage and no public
-  downloads are introduced.
+- `backend/storage.js` is the active local-filesystem provider for new durable
+  datasets, checkpoints, and DEG tables. It uses server-owned keys shaped as
+  `projects/<projectId>/<kind>/<id>/<file>` under `STORAGE_ROOT`. Writes are
+  finalized atomically, checked by size and SHA-256, and blocked from following
+  links outside the root. Keys are never client-supplied or returned publicly.
+  Existing `vault/...` records remain readable; they are not silently rewritten.
+  Production config rejects overlapping storage/vault roots and malformed upload
+  limits. No external object storage and no public downloads exist.
 - Backend projects, DB-backed analysis objects, jobs, artifacts, checkpoints,
   and lineage are the durable source of truth **at the API/DB layer**. Projects
   and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
@@ -222,13 +221,16 @@ The app runtime is Postgres-only.
 - Live R state is private, transient, and keyed by server-derived user/object
   state. Project metadata visibility does not grant live R access.
 - The worker is opt-in and allowlisted. Registered handlers include PBMC
-  pipeline, dataset-backed Seurat pipeline, checkpoint load, DEG marker finding,
-  runtime check, and object inspection. The DEG marker workflow is UI-wired for
+  pipeline, dataset-backed Seurat pipeline, checkpoint load, checkpoint fork,
+  DEG marker finding, runtime check, and object inspection. The DEG marker workflow is UI-wired for
   job launch/status/safe summary metadata; the Seurat pipeline UI is wired only
   for `tenx_h5` input plus result checkpoint reattach. PBMC pipeline, runtime
   check, and object inspect worker launches remain backend-only.
 - There is no public artifact download surface, object storage, generated report
   export, arbitrary R execution, or shared project live R state.
+- New local files survive application restarts when `STORAGE_ROOT` is persistent
+  and shared correctly with the R process. Legacy records also require `VAULT_ROOT`.
+  Metadata can outlive a missing file, and there is no startup reconciliation yet.
 - R 4.5.x is the intended local development target; the Dockerfile pins R 4.5.3
   with Bioconductor 3.22. Report if R 4.6.x is detected.
 
@@ -275,6 +277,8 @@ The app runtime is Postgres-only.
   `test:pbmc-parent`, `test:checkpoint-load`, `test:deg-markers`) exercise the
   hardened live paths and require a real R/Seurat backend (`test:seurat-pipeline`
   also needs `hdf5r` for 10x HDF5); they skip cleanly when R/Seurat is absent.
+  `test:r-storage` separately checks project-key validation, atomic RDS writes,
+  and link-escape blocking at the R storage boundary.
   CI installs `hdf5r` and runs `test:seurat-pipeline` so the UI-wired Seurat
   pipeline has a real R/worker regression gate in pull requests.
 - CI runs on `pull_request` and `workflow_dispatch` only. The security-critical
