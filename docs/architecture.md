@@ -234,10 +234,17 @@ The app runtime is Postgres-only.
 
 ## Testing & CI notes
 
-- `npm run test:backend` runs the Postgres backend contract/runtime suite:
-  config boundaries, the real `pgDatabase` contract, and a live Express HTTP
-  smoke path against Postgres. Durable jobs, artifacts/checkpoints, and lineage
-  are implemented in the backend. The React UI now includes a
+- `npm run test:backend` runs the FULL backend suite (`backend/*.test.js`)
+  against Postgres: config boundaries, the real `pgDatabase` contract, per-user
+  isolation, auth (cookie/bearer/rate-limit/credentials), org/project RBAC,
+  datasets, analysis objects, the durable job-worker claim/lease/heartbeat
+  contract, artifacts/checkpoints, the lineage DAG, the R-proxy
+  ownership/policy/diagnostics gates, and the mocked-R pipeline worker handlers.
+  Every DB-backed suite resets the schema per test via `resetSchemaForTests()`
+  and skips cleanly without `DATABASE_URL`; pure suites always run. (The SQLite-era
+  schema-migration/backfill and `busy_timeout` tests were removed with the
+  Postgres cutover — the Postgres schema ships every table from `pg/schema.sql`.)
+  Durable jobs, artifacts/checkpoints, and lineage are implemented in the backend. The React UI now includes a
   read-only Jobs & Artifacts / durable history surface for safe metadata
   visibility, and the DEG tab launches `deg.find_markers.v1` jobs and reads
   bounded `deg_summary` metadata, and the Pipeline Manager Seurat panel launches the

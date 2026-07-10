@@ -19,7 +19,7 @@
     "test:deg-markers": "Rscript scripts/verify_deg_find_markers.R",
     "test:frontend": "vitest run src/",
     "test:backend": "npm run test:backend:postgres",
-    "test:backend:postgres": "vitest run backend/config.test.js backend/postgres-contract.test.js backend/postgres-runtime.test.js --environment node --fileParallelism=false",
+    "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",
     "init:postgres": "node scripts/init-postgres.js",
     "test:visual": "node scripts/test_visual_ux.js",
     "test:visual:db-flow": "node scripts/test_db_backed_object_flow.js",

@@ -12,9 +12,11 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+const config = require('./config');
 const { startServer, serverModule } = require('./_http-test-utils');
-const db = require('./database');
+const db = require('./pgDatabase');
 
+const CONFIGURED = config.hasPostgresConnection();
 const { issueSession } = serverModule;
 const COOKIE_NAME = 'benchone_session';
 const ALLOWED_ORIGIN = 'http://localhost:5173'; // config default when FRONTEND_* unset
@@ -51,16 +53,20 @@ async function http(path, { method = 'GET', headers = {}, body } = {}) {
 }
 
 beforeAll(async () => {
+  if (!CONFIGURED) return;
+  await db.resetSchemaForTests();
   server = await startServer();
   const { port } = server.address();
   baseUrl = `http://127.0.0.1:${port}`;
 });
 
-afterAll(() => {
-  if (server) server.close();
+afterAll(async () => {
+  if (!CONFIGURED) return;
+  if (server) await new Promise((resolve) => server.close(resolve));
+  await db.close();
 });
 
-describe('cookie session issuance', () => {
+describe.skipIf(!CONFIGURED)('cookie session issuance', () => {
   it('sets an HttpOnly SameSite session cookie on signup', async () => {
     const email = uniqueEmail('signup');
     const { status, data, res } = await http('/api/auth/signup', {
@@ -89,7 +95,7 @@ describe('cookie session issuance', () => {
   });
 });
 
-describe('cookie session restore + protected access', () => {
+describe.skipIf(!CONFIGURED)('cookie session restore + protected access', () => {
   async function loginCookie(tag) {
     const email = uniqueEmail(tag);
     await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
@@ -121,7 +127,7 @@ describe('cookie session restore + protected access', () => {
   });
 });
 
-describe('CSRF protection for cookie-authenticated mutations', () => {
+describe.skipIf(!CONFIGURED)('CSRF protection for cookie-authenticated mutations', () => {
   async function loginCookie(tag) {
     const email = uniqueEmail(tag);
     await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
@@ -174,7 +180,7 @@ describe('CSRF protection for cookie-authenticated mutations', () => {
 
   it('exempts bearer-auth mutations from the CSRF origin check', async () => {
     const email = uniqueEmail('bearer-csrf');
-    const user = db.createUser(email, 'password123', 'B');
+    const user = await db.createUser(email, 'password123', 'B');
     const token = issueSession(user);
     const { status } = await http('/api/organizations', {
       method: 'POST',
@@ -185,14 +191,14 @@ describe('CSRF protection for cookie-authenticated mutations', () => {
   });
 });
 
-describe('logout + legacy bearer compatibility', () => {
+describe.skipIf(!CONFIGURED)('logout + legacy bearer compatibility', () => {
   it('prefers a valid cookie over a different valid legacy bearer token', async () => {
     const cookieEmail = uniqueEmail('cookie-wins');
     await http('/api/auth/signup', { method: 'POST', body: { email: cookieEmail, password: 'password123', displayName: 'Cookie' } });
     const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email: cookieEmail, password: 'password123' } });
     const cookie = getSessionCookie(loginRes);
 
-    const bearerUser = db.createUser(uniqueEmail('bearer-loses'), 'password123', 'Bearer');
+    const bearerUser = await db.createUser(uniqueEmail('bearer-loses'), 'password123', 'Bearer');
     const bearerToken = issueSession(bearerUser);
 
     const { status, data } = await http('/api/auth/session', {
@@ -240,7 +246,7 @@ describe('logout + legacy bearer compatibility', () => {
 
   it('still authenticates via the legacy bearer token', async () => {
     const email = uniqueEmail('bearer');
-    const user = db.createUser(email, 'password123', 'B');
+    const user = await db.createUser(email, 'password123', 'B');
     const token = issueSession(user);
     const { status, data } = await http('/api/auth/session', {
       headers: { Authorization: `Bearer ${token}` }

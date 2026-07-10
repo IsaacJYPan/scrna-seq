@@ -1,32 +1,34 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const config = require('./config');
+const db = require('./pgDatabase');
 const {
-  initDatabase, closeDatabase,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createDatasetForProject
-} = require('./database');
+} = db;
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 let server;
 
-beforeAll(async () => { server = await startServer(); });
-afterAll(() => { if (server) server.close(); });
+beforeAll(async () => { if (!CONFIGURED) return; server = await startServer(); });
+afterAll(async () => { if (!CONFIGURED) return; if (server) await new Promise((resolve) => server.close(resolve)); await db.close(); });
 
-beforeEach(() => { initDatabase(':memory:'); });
-afterEach(() => { closeDatabase(); });
+beforeEach(async () => { if (!CONFIGURED) return; await db.resetSchemaForTests(); });
 
-function users() {
-  const alice = createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' }); // owner
-  const bob = createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
-  const carol = createUserWithToken({ email: 'carol@example.com', displayName: 'Carol' });
-  const dave = createUserWithToken({ email: 'dave@example.com', displayName: 'Dave' }); // non-member
+async function users() {
+  const alice = await createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' }); // owner
+  const bob = await createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
+  const carol = await createUserWithToken({ email: 'carol@example.com', displayName: 'Carol' });
+  const dave = await createUserWithToken({ email: 'dave@example.com', displayName: 'Dave' }); // non-member
   return { alice, bob, carol, dave };
 }
 
 // Seed an org + project owned by `ownerUserId`. The owner is seeded as project
 // 'owner'. Returns the project.
-function seedProject(ownerUserId) {
-  const org = createOrganizationForUser(ownerUserId, { name: 'Acme Labs' });
+async function seedProject(ownerUserId) {
+  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme Labs' });
   return createProjectForUser(ownerUserId, { organizationId: org.id, name: 'Project X' });
 }
 
@@ -37,7 +39,7 @@ function addMember(projectId, email, role) {
 const validBody = (over = {}) => ({ fileType: 'seurat_rds', ...over });
 
 // ── 1. Authentication ──────────────────────────────────────────────────────
-describe('datasets API — authentication', () => {
+describe.skipIf(!CONFIGURED)('datasets API — authentication', () => {
   it('rejects unauthenticated access on every dataset route', async () => {
     const routes = [
       ['GET', '/api/projects/proj_x/datasets'],
@@ -53,12 +55,12 @@ describe('datasets API — authentication', () => {
 });
 
 // ── 2–4. Create authorization by role ───────────────────────────────────────
-describe('datasets API — create authorization', () => {
+describe.skipIf(!CONFIGURED)('datasets API — create authorization', () => {
   it('lets owner/admin/analyst create a dataset (201)', async () => {
-    const { alice, bob, carol } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'admin');
-    addMember(proj.id, 'carol@example.com', 'analyst');
+    const { alice, bob, carol } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'admin');
+    await addMember(proj.id, 'carol@example.com', 'analyst');
 
     for (const actor of [alice, bob, carol]) {
       const res = await api(server, `/api/projects/${proj.id}/datasets`, {
@@ -69,9 +71,9 @@ describe('datasets API — create authorization', () => {
   });
 
   it('forbids a viewer from creating a dataset (403)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
 
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: bob.token, body: validBody()
@@ -80,8 +82,8 @@ describe('datasets API — create authorization', () => {
   });
 
   it('returns 404 (no existence leak) when a non-member creates in a project', async () => {
-    const { alice, dave } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice, dave } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: dave.token, body: validBody()
     });
@@ -90,11 +92,11 @@ describe('datasets API — create authorization', () => {
 });
 
 // ── 5–6. Read authorization ─────────────────────────────────────────────────
-describe('datasets API — read authorization', () => {
+describe.skipIf(!CONFIGURED)('datasets API — read authorization', () => {
   it('lets any project member (incl. viewer) list/read dataset metadata', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
     const created = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody()
     });
@@ -110,8 +112,8 @@ describe('datasets API — read authorization', () => {
   });
 
   it('returns 404 when a non-member lists/reads', async () => {
-    const { alice, dave } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice, dave } = await users();
+    const proj = await seedProject(alice.user.id);
     const created = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody()
     });
@@ -121,10 +123,10 @@ describe('datasets API — read authorization', () => {
 });
 
 // ── 7–9. Server-controlled identity & rejected fields ───────────────────────
-describe('datasets API — server-controlled identity', () => {
+describe.skipIf(!CONFIGURED)('datasets API — server-controlled identity', () => {
   it('generates a ds_ id and never exposes the internal storage key', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody()
     });
@@ -138,8 +140,8 @@ describe('datasets API — server-controlled identity', () => {
   });
 
   it('rejects a client-provided id (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody({ id: 'ds_clientchosen' })
     });
@@ -148,8 +150,8 @@ describe('datasets API — server-controlled identity', () => {
   });
 
   it('rejects client-provided owner/user/project/path/storage fields (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const fields = [
       'projectId', 'project_id', 'ownerUserId', 'owner_user_id',
       'createdByUserId', 'created_by_user_id', 'userId', 'user_id',
@@ -167,10 +169,10 @@ describe('datasets API — server-controlled identity', () => {
 });
 
 // ── 10–12. Enum validation ──────────────────────────────────────────────────
-describe('datasets API — enum validation', () => {
+describe.skipIf(!CONFIGURED)('datasets API — enum validation', () => {
   it('rejects an invalid file_type (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: { fileType: 'exe' }
     });
@@ -179,8 +181,8 @@ describe('datasets API — enum validation', () => {
   });
 
   it('rejects an invalid upload_status (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody({ uploadStatus: 'done' })
     });
@@ -189,8 +191,8 @@ describe('datasets API — enum validation', () => {
   });
 
   it('rejects an invalid validation_status (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody({ validationStatus: 'great' })
     });
@@ -200,19 +202,19 @@ describe('datasets API — enum validation', () => {
 });
 
 // ── 13–15. Dataset resolution & malformed ids ───────────────────────────────
-describe('datasets API — resolution', () => {
+describe.skipIf(!CONFIGURED)('datasets API — resolution', () => {
   it('returns 404 for an unknown (well-formed) dataset id', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets/ds_deadbeefdeadbeefdeadbeef`, { token: alice.token });
     expect(res.status).toBe(404);
   });
 
   it('returns 404 for a dataset that belongs to another project', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id);
-    const orgB = createOrganizationForUser(alice.user.id, { name: 'Org B' });
-    const projB = createProjectForUser(alice.user.id, { organizationId: orgB.id, name: 'Project B' });
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id);
+    const orgB = await createOrganizationForUser(alice.user.id, { name: 'Org B' });
+    const projB = await createProjectForUser(alice.user.id, { organizationId: orgB.id, name: 'Project B' });
     const inB = await api(server, `/api/projects/${projB.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody()
     });
@@ -223,8 +225,8 @@ describe('datasets API — resolution', () => {
   });
 
   it('returns 400 for a malformed dataset id', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     for (const bad of ['not-an-id', 'ao_abc', 'ds_NOTHEX', 'ds_']) {
       const res = await api(server, `/api/projects/${proj.id}/datasets/${bad}`, { token: alice.token });
       expect(res.status, bad).toBe(400);
@@ -233,12 +235,12 @@ describe('datasets API — resolution', () => {
 });
 
 // ── 21. List filtering is project-scoped ────────────────────────────────────
-describe('datasets API — list filtering', () => {
+describe.skipIf(!CONFIGURED)('datasets API — list filtering', () => {
   it('filters within the project and cannot leak cross-project rows', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id);
-    const orgB = createOrganizationForUser(alice.user.id, { name: 'Org B' });
-    const projB = createProjectForUser(alice.user.id, { organizationId: orgB.id, name: 'Project B' });
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id);
+    const orgB = await createOrganizationForUser(alice.user.id, { name: 'Org B' });
+    const projB = await createProjectForUser(alice.user.id, { organizationId: orgB.id, name: 'Project B' });
 
     await api(server, `/api/projects/${projA.id}/datasets`, { method: 'POST', token: alice.token, body: validBody({ fileType: 'seurat_rds' }) });
     await api(server, `/api/projects/${projA.id}/datasets`, { method: 'POST', token: alice.token, body: validBody({ fileType: 'h5ad' }) });
@@ -258,10 +260,10 @@ describe('datasets API — list filtering', () => {
 });
 
 // ── 22. A pending/failed upload cannot be represented as valid ───────────────
-describe('datasets API — upload/validation status integrity', () => {
+describe.skipIf(!CONFIGURED)('datasets API — upload/validation status integrity', () => {
   it('refuses to create a dataset marked valid while upload is not uploaded (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token,
       body: validBody({ uploadStatus: 'pending', validationStatus: 'valid' })
@@ -271,8 +273,8 @@ describe('datasets API — upload/validation status integrity', () => {
   });
 
   it('a freshly registered dataset is pending/pending (not valid)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody()
     });
@@ -281,8 +283,8 @@ describe('datasets API — upload/validation status integrity', () => {
   });
 
   it('PATCH refuses to set validation_status=valid while upload is failed (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const created = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody({ uploadStatus: 'failed' })
     });
@@ -293,8 +295,8 @@ describe('datasets API — upload/validation status integrity', () => {
   });
 
   it('PATCH allows valid once upload_status is uploaded', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const created = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody()
     });
@@ -307,9 +309,9 @@ describe('datasets API — upload/validation status integrity', () => {
   });
 
   it('forbids a viewer from updating a dataset (403)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
     const created = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody()
     });
@@ -321,7 +323,7 @@ describe('datasets API — upload/validation status integrity', () => {
 });
 
 // ── Multipart upload: server-chosen storage, sha256/size recorded ───────────
-describe('datasets API — file upload', () => {
+describe.skipIf(!CONFIGURED)('datasets API — file upload', () => {
   async function uploadFile(projectId, token, { content, filename, fileType }) {
     const { port } = server.address();
     const form = new FormData();
@@ -338,8 +340,8 @@ describe('datasets API — file upload', () => {
 
   it('stores an uploaded file under a server-chosen key and records sha256 + size', async () => {
     const crypto = require('crypto');
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const content = 'gene,cell1,cell2\nGAPDH,1,2\n';
     const expectedSha = crypto.createHash('sha256').update(Buffer.from(content)).digest('hex');
 
@@ -356,9 +358,9 @@ describe('datasets API — file upload', () => {
   });
 
   it('forbids a viewer from uploading a dataset file (403)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
     const res = await uploadFile(proj.id, bob.token, {
       content: 'x', filename: 'counts.csv', fileType: 'count_matrix_csv'
     });
@@ -367,16 +369,16 @@ describe('datasets API — file upload', () => {
 });
 
 // ── 16–20. datasetId verification on analysis objects & jobs ────────────────
-describe('datasets — datasetId verification on analysis objects & jobs', () => {
+describe.skipIf(!CONFIGURED)('datasets — datasetId verification on analysis objects & jobs', () => {
   // Helper: create a dataset in a project the given user can write to.
-  function datasetFor(ownerUserId) {
-    const proj = seedProject(ownerUserId);
+  async function datasetFor(ownerUserId) {
+    const proj = await seedProject(ownerUserId);
     return createDatasetForProject(ownerUserId, proj.id, { fileType: 'seurat_rds' });
   }
 
   it('analysis object creation succeeds with a valid accessible datasetId', async () => {
-    const { alice } = users();
-    const ds = datasetFor(alice.user.id);
+    const { alice } = await users();
+    const ds = await datasetFor(alice.user.id);
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: ds.id }
     });
@@ -385,8 +387,8 @@ describe('datasets — datasetId verification on analysis objects & jobs', () =>
   });
 
   it('analysis object creation fails (404) with an inaccessible datasetId', async () => {
-    const { alice, bob } = users();
-    const bobDs = datasetFor(bob.user.id);
+    const { alice, bob } = await users();
+    const bobDs = await datasetFor(bob.user.id);
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: bobDs.id }
     });
@@ -394,8 +396,8 @@ describe('datasets — datasetId verification on analysis objects & jobs', () =>
   });
 
   it('job creation succeeds with a valid accessible datasetId', async () => {
-    const { alice } = users();
-    const ds = datasetFor(alice.user.id);
+    const { alice } = await users();
+    const ds = await datasetFor(alice.user.id);
     const res = await api(server, '/api/jobs', {
       method: 'POST', token: alice.token, body: { jobType: 'normalize', datasetId: ds.id }
     });
@@ -404,8 +406,8 @@ describe('datasets — datasetId verification on analysis objects & jobs', () =>
   });
 
   it('job creation fails (404) with an inaccessible datasetId', async () => {
-    const { alice, bob } = users();
-    const bobDs = datasetFor(bob.user.id);
+    const { alice, bob } = await users();
+    const bobDs = await datasetFor(bob.user.id);
     const res = await api(server, '/api/jobs', {
       method: 'POST', token: alice.token, body: { jobType: 'normalize', datasetId: bobDs.id }
     });
@@ -413,10 +415,10 @@ describe('datasets — datasetId verification on analysis objects & jobs', () =>
   });
 
   it('a viewer cannot create an analysis object or job using the dataset (403)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
-    const ds = createDatasetForProject(alice.user.id, proj.id, { fileType: 'seurat_rds' });
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
+    const ds = await createDatasetForProject(alice.user.id, proj.id, { fileType: 'seurat_rds' });
 
     const ao = await api(server, '/api/analysis-objects', {
       method: 'POST', token: bob.token, body: { objectType: 'seurat', datasetId: ds.id }
@@ -430,7 +432,7 @@ describe('datasets — datasetId verification on analysis objects & jobs', () =>
   });
 
   it('a malformed datasetId on analysis object/job creation returns 400', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const ao = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: 'bad-id' }
     });

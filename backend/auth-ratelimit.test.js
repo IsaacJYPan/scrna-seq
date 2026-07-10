@@ -12,8 +12,11 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 
-const { initDatabase, closeDatabase } = require('./database');
+const config = require('./config');
+const db = require('./pgDatabase');
 const { startServer, api, serverModule } = require('./_http-test-utils');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 let server;
 let prev;
@@ -21,6 +24,7 @@ let prev;
 const MAX = 3;
 
 beforeAll(async () => {
+  if (!CONFIGURED) return;
   prev = {
     max: process.env.AUTH_RATE_LIMIT_MAX,
     windowMs: process.env.AUTH_RATE_LIMIT_WINDOW_MS,
@@ -33,21 +37,22 @@ beforeAll(async () => {
   server = await startServer();
 });
 
-afterAll(() => {
-  if (server) server.close();
+afterAll(async () => {
+  if (!CONFIGURED) return;
+  if (server) await new Promise((resolve) => server.close(resolve));
+  await db.close();
   if (prev.max === undefined) delete process.env.AUTH_RATE_LIMIT_MAX; else process.env.AUTH_RATE_LIMIT_MAX = prev.max;
   if (prev.windowMs === undefined) delete process.env.AUTH_RATE_LIMIT_WINDOW_MS; else process.env.AUTH_RATE_LIMIT_WINDOW_MS = prev.windowMs;
   if (prev.disabled === undefined) delete process.env.DISABLE_RATE_LIMIT; else process.env.DISABLE_RATE_LIMIT = prev.disabled;
 });
 
-beforeEach(() => {
-  initDatabase(':memory:');
+beforeEach(async () => {
+  if (!CONFIGURED) return;
+  await db.resetSchemaForTests();
   // Clear limiter state so counts never leak between tests.
   serverModule.loginRateLimiter.reset();
   serverModule.signupRateLimiter.reset();
 });
-
-afterEach(() => closeDatabase());
 
 function signup(email) {
   return api(server, '/api/auth/signup', {
@@ -60,7 +65,7 @@ function login(email, password = 'password123') {
   return api(server, '/api/auth/login', { method: 'POST', body: { email, password } });
 }
 
-describe('auth rate limiting', () => {
+describe.skipIf(!CONFIGURED)('auth rate limiting', () => {
   it('allows normal signup/login below the limit', async () => {
     const s = await signup('normal@example.com');
     expect(s.status).toBe(201);
@@ -115,7 +120,7 @@ describe('auth rate limiting', () => {
 // rate limiting — otherwise a stray env var silently disables a security
 // control. Would fail before the fix: the old guard was a bare
 // `DISABLE_RATE_LIMIT === 'true'` check with no NODE_ENV gate.
-describe('rate-limit disable behavior across environments', () => {
+describe.skipIf(!CONFIGURED)('rate-limit disable behavior across environments', () => {
   let prevNodeEnv;
 
   beforeEach(() => {

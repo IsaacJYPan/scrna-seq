@@ -2,7 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
+const config = require('./config');
 const { startServer, createUserWithToken, db, serverModule } = require('./_http-test-utils');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 let server;
 let baseUrl;
@@ -12,18 +15,20 @@ function url(requestPath) {
 }
 
 beforeAll(async () => {
-  db.initDatabase(':memory:');
+  if (!CONFIGURED) return;
+  await db.resetSchemaForTests();
   server = await startServer();
   const { port } = server.address();
   baseUrl = `http://127.0.0.1:${port}`;
 });
 
 afterAll(async () => {
+  if (!CONFIGURED) return;
   await new Promise((resolve) => server.close(resolve));
-  db.closeDatabase();
+  await db.close();
 });
 
-describe('API fallback routing', () => {
+describe.skipIf(!CONFIGURED)('API fallback routing', () => {
   it('returns JSON 404 for unknown /api routes instead of SPA HTML', async () => {
     const res = await fetch(url('/api/definitely-not-a-real-route'));
     const text = await res.text();
@@ -47,9 +52,9 @@ describe('API fallback routing', () => {
   });
 });
 
-describe('runtime diagnostics route', () => {
+describe.skipIf(!CONFIGURED)('runtime diagnostics route', () => {
   it('reports server-detected Rscript metadata and the R 4.5.x target without hardcoded R 4.5.1', async () => {
-    const { token } = createUserWithToken({ email: 'diagnostics@example.com' });
+    const { token } = await createUserWithToken({ email: 'diagnostics@example.com' });
     const originalRscriptPath = process.env.RSCRIPT_PATH;
     const originalRscript = process.env.RSCRIPT;
     delete process.env.RSCRIPT_PATH;

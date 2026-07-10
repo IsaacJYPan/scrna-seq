@@ -10,11 +10,14 @@
  * Would fail before the fix: the `//__test` and `%2F__test` variants were not
  * recognized as diagnostic and so were not gated.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
-const { initDatabase, closeDatabase } = require('./database');
+const config = require('./config');
+const db = require('./pgDatabase');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const serverModule = require('../server.js');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 const { isDiagnosticRProxyPath, isProductionDiagnosticRProxyPath } = serverModule.default || serverModule;
 
@@ -53,7 +56,7 @@ describe('isDiagnosticRProxyPath (normalized helper)', () => {
   });
 });
 
-describe('R diagnostic gate (HTTP) returns 404 for all variants when disabled', () => {
+describe.skipIf(!CONFIGURED)('R diagnostic gate (HTTP) returns 404 for all variants when disabled', () => {
   let server;
   let prevDiag;
   let prevNodeEnv;
@@ -65,17 +68,17 @@ describe('R diagnostic gate (HTTP) returns 404 for all variants when disabled', 
     server = await startServer();
   });
 
-  afterAll(() => {
-    if (server) server.close();
+  afterAll(async () => {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    await db.close();
     if (prevDiag === undefined) delete process.env.ENABLE_R_TEST_DIAGNOSTICS; else process.env.ENABLE_R_TEST_DIAGNOSTICS = prevDiag;
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
   });
 
-  beforeEach(() => {
-    initDatabase(':memory:');
-    token = createUserWithToken({ email: 'diag@example.com', displayName: 'Diag' }).token;
+  beforeEach(async () => {
+    await db.resetSchemaForTests();
+    token = (await createUserWithToken({ email: 'diag@example.com', displayName: 'Diag' })).token;
   });
-  afterEach(() => closeDatabase());
 
   const variants = [
     '/api/r/__test/state-key',

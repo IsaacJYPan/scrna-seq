@@ -13,8 +13,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import serverModule from '../server.js';
 
-const database = require('./database');
+const config = require('./config');
+const db = require('./pgDatabase');
 const { app } = serverModule;
+
+const CONFIGURED = config.hasPostgresConnection();
 
 let server;
 let baseUrl;
@@ -63,10 +66,11 @@ function provenanceEnvelope(id) {
 }
 
 beforeAll(async () => {
-  // Swap the server's DB to an isolated in-memory instance. server.js holds the
-  // database module (not the handle), and initDatabase reassigns the internal
-  // singleton, so all routes now hit this clean DB.
-  database.initDatabase(':memory:');
+  if (!CONFIGURED) return;
+  // Start from a clean Postgres schema so all routes hit a known-empty DB.
+  // server.js holds the database module (not a handle), so routes share this
+  // same pgDatabase singleton/pool.
+  await db.resetSchemaForTests();
   await new Promise((resolve) => {
     server = app.listen(0, () => {
       const { port } = server.address();
@@ -77,11 +81,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!CONFIGURED) return;
   await new Promise((resolve) => server.close(resolve));
-  database.closeDatabase();
+  await db.close();
 });
 
-describe('HTTP auth: protected routes reject unauthenticated access', () => {
+describe.skipIf(!CONFIGURED)('HTTP auth: protected routes reject unauthenticated access', () => {
   const protectedRoutes = [
     ['GET', '/api/db/provenance'],
     ['POST', '/api/db/provenance'],
@@ -111,7 +116,7 @@ describe('HTTP auth: protected routes reject unauthenticated access', () => {
   });
 });
 
-describe('HTTP authorization: two-user route isolation', () => {
+describe.skipIf(!CONFIGURED)('HTTP authorization: two-user route isolation', () => {
   let tokenA;
   let tokenB;
 

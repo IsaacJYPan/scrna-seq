@@ -9,7 +9,6 @@
  *   - stopJobWorker          — safe stop (no worker / double stop) (server.js)
  *   - shutdownJobWorkerAndServer — awaits worker stop, bounded by timeout, no leaked
  *                                  timers, sanitized failure handling (server.js)
- *   - DB busy_timeout init    — proof the single-process lock softening is applied
  *
  * SCOPE: this is runtime wiring hardening only. These tests do not execute the
  * registered R/scientific handlers or create scientific artifacts; they verify the
@@ -17,7 +16,6 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-const dbmod = require('./database');
 const worker = require('./jobWorker');
 const { parseJobWorkerConfig, parsePositiveIntOrNull, JOB_WORKER_DEFAULTS } = worker;
 
@@ -423,11 +421,7 @@ describe('shutdownJobWorkerAndServer — awaits worker stop, bounded, no leaks',
   });
 });
 
-describe('database init — busy_timeout hardening is applied', () => {
-  afterEach(() => dbmod.closeDatabase());
-
-  it('sets busy_timeout=5000 on a fresh database', () => {
-    dbmod.initDatabase(':memory:');
-    expect(dbmod.getPragma('busy_timeout')).toBe(5000);
-  });
-});
+// NOTE: the SQLite-era "busy_timeout hardening" test was removed with the
+// Postgres migration — busy_timeout/getPragma are SQLite-only concepts that do
+// not exist in the Postgres runtime (concurrency is handled by the row-level
+// claim/lease contract exercised in jobs-worker-contract.test.js).
