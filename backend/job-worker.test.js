@@ -171,7 +171,7 @@ describe.skipIf(!CONFIGURED)('job worker — unsupported job types', () => {
     // UNSUPPORTED_JOB_TYPE); only the noop, the metadata-only checkpoint placeholder,
     // the two metadata-only R bridge operations, and the first real pipeline
     // (pbmc.pipeline.v1) are runnable in this branch.
-    expect(Object.keys(DEFAULT_HANDLERS).sort()).toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+    expect(Object.keys(DEFAULT_HANDLERS).sort()).toEqual(['checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
   });
 });
 

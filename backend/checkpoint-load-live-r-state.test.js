@@ -155,7 +155,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — inventory & scope', () => {
 
   it('registers checkpoint.load.v1 alongside the existing handlers (existing handlers unchanged)', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+      .toEqual(['checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(checkpointLoadHandler);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(worker.pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(worker.rObjectInspectHandler);
@@ -268,7 +268,7 @@ describe.skipIf(!CONFIGURED)('getLoadableCheckpointForAnalysisObject — selecti
     const claimed = await claimNextJob('worker_dup', { leaseSeconds: 30, now: T0 });
     await createCheckpointArtifactForJobByWorker(claimed.id, 'worker_dup', claimed.claimToken, {
       artifactType: 'checkpoint', resultAnalysisObjectId: resultObjectId,
-      internalStorageKey: 'checkpoints/job_dup/second.rds',
+      internalStorageKey: `projects/${proj.id}/checkpoints/job_dup/second.rds`,
       checksumSha256: 'b'.repeat(64), sizeBytes: 999,
     }, { now: T0 });
     await expect(getLoadableCheckpointForAnalysisObject(proj.id, resultObjectId, alice.id)).rejects.toThrowError(/Multiple loadable checkpoints/);
@@ -656,29 +656,20 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — authorization & ownership',
     expect(err && err.code).toBe('NOT_FOUND');
   });
 
-  it('a co-member ANALYST who does NOT own the object is rejected BEFORE R contact (job fails, no R, no artifact)', async () => {
+  it('a co-member ANALYST who does NOT own the object is rejected at job creation', async () => {
     const { proj, resultObjectId } = await seedLoadableCheckpoint();
     const carol = await createUser('carol@example.com', 'password123', 'Carol');
     await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
-    // Carol CAN create the job (the object is in her project) but the worker owner-gate fails it.
-    const ljob = await seedLoadJob(carol.id, proj.id, resultObjectId);
-    const calls = [];
-    const res = await drain(pipelineThenLoadCaller(calls), T0);
-    expect(res.status).toBe('failed');
-    expect(calls.filter((c) => c.path === '/object/checkpoint-load')).toHaveLength(0); // never reached R
-    expect((await getJobArtifactsByJobId(ljob.id)).filter((a) => a.artifactType === 'checkpoint_load')).toHaveLength(0);
+    await expect(seedLoadJob(carol.id, proj.id, resultObjectId))
+      .rejects.toMatchObject({ code: 'ANALYSIS_OBJECT_NOT_FOUND' });
   });
 
   it('a co-member ADMIN who does NOT own the object is ALSO rejected before R contact (membership ≠ live R)', async () => {
     const { proj, resultObjectId } = await seedLoadableCheckpoint();
     const bob = await createUser('bob@example.com', 'password123', 'Bob');
     await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
-    const ljob = await seedLoadJob(bob.id, proj.id, resultObjectId);
-    const calls = [];
-    const res = await drain(pipelineThenLoadCaller(calls), T0);
-    expect(res.status).toBe('failed');
-    expect(calls.filter((c) => c.path === '/object/checkpoint-load')).toHaveLength(0);
-    expect((await getJobArtifactsByJobId(ljob.id)).filter((a) => a.artifactType === 'checkpoint_load')).toHaveLength(0);
+    await expect(seedLoadJob(bob.id, proj.id, resultObjectId))
+      .rejects.toMatchObject({ code: 'ANALYSIS_OBJECT_NOT_FOUND' });
   });
 
   it('a cross-project object cannot be referenced by a load job (404 at creation)', async () => {

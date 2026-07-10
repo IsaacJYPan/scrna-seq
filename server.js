@@ -9,6 +9,7 @@ const crypto = require('crypto');
 
 const db = require('./backend/pgDatabase');
 const config = require('./backend/config');
+const storage = require('./backend/storage');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
 
@@ -37,6 +38,7 @@ const VAULT_DIR = config.vaultRoot();
 for (const dir of [UPLOAD_DIR, VAULT_DIR]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
+const durableStorage = storage.createLocalStorageProvider({ root: DB_DIR });
 
 let appDatabaseReady = null;
 function initAppDatabase() {
@@ -466,30 +468,22 @@ function sanitizeIdSegment(value) {
   return seg;
 }
 
-// Store an uploaded dataset file under a SERVER-CHOSEN key inside the controlled
-// vault root. The client never influences the storage location: the path is
-// derived from the authenticated user's vault, the (server-generated) project and
-// dataset ids, and a sanitized, display-only filename. Returns the internal
-// storage key (vault-relative posix path) plus the computed sha256 and byte size.
-function storeDatasetFile(file, user, projectId, datasetId) {
+// Store an uploaded dataset under a server-owned project key. The client never
+// controls the key or final path.
+function storeDatasetFile(file, projectId, datasetId) {
   const safeName = (db.sanitizeDatasetFilename(file.originalname) || 'upload.bin')
     .replace(/[^a-zA-Z0-9._-]/g, '_');
-  const root = path.join(
-    getUserVaultDir(user), 'datasets',
-    sanitizeIdSegment(projectId), sanitizeIdSegment(datasetId)
+  const key = storage.projectStorageFileKey(
+    sanitizeIdSegment(projectId),
+    'datasets',
+    sanitizeIdSegment(datasetId),
+    safeName
   );
-  const destination = path.join(root, safeName);
-  if (!isInsidePath(destination, root) || !isInsidePath(destination, getUserVaultDir(user))) {
-    throw new Error('Invalid dataset storage destination.');
-  }
-  fs.mkdirSync(root, { recursive: true });
-  const buf = fs.readFileSync(file.path);
-  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
-  fs.renameSync(file.path, destination);
+  const stored = durableStorage.putFileFromPath(file.path, key);
   return {
-    internalStorageKey: toPosixPath(path.relative(process.cwd(), destination)),
-    sha256,
-    fileSizeBytes: buf.length
+    internalStorageKey: stored.key,
+    sha256: stored.checksumSha256,
+    fileSizeBytes: stored.sizeBytes
   };
 }
 
@@ -1454,11 +1448,15 @@ app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, async (req,
     // records sha256 + size. A storage failure leaves the record `failed`, never
     // a misleading `uploaded`/`valid`.
     if (req.file) {
+      let stored = null;
       try {
-        const stored = storeDatasetFile(req.file, req.user, req.params.projectId, dataset.id);
+        stored = storeDatasetFile(req.file, req.params.projectId, dataset.id);
         dataset = await db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
       } catch (storageErr) {
         console.error('[Datasets] Storage failed:', storageErr);
+        if (stored && stored.internalStorageKey) {
+          try { durableStorage.remove(stored.internalStorageKey); } catch { /* best effort */ }
+        }
         await db.markDatasetUploadFailed(req.params.projectId, dataset.id);
         cleanupDatasetReqFile(req);
         return res.status(500).json({ error: 'Dataset file storage failed.' });

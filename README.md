@@ -60,6 +60,10 @@ At a glance:
   localStorage bearer remains a deprecated fallback), an expanded Postgres data
   runtime data layer + schema proven by real-Postgres contract/runtime tests,
   server-owned storage-key hardening, and centralized config validation.
+- **Durable local storage:** new dataset, checkpoint, and DEG files use
+  server-owned project keys under `STORAGE_ROOT`. Existing private-vault records
+  remain readable. Project writers can fork a member's durable checkpoint into a
+  new object that they own, without sharing live R state.
 - **Not implemented (product):** pathway enrichment, CellChat, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
   object storage, server-side session revocation, shared project live R state.
@@ -118,10 +122,16 @@ validated in `backend/config.js`; see `.env.example` for cookie, storage-root,
 and upload-limit requirements.
 Existing local SQLite data is not migrated; a fresh Postgres database starts empty.
 
+Postgres metadata and scientific files are durable when both Postgres and
+`STORAGE_ROOT` are persisted and shared with the R process. Existing private-vault
+records also require `VAULT_ROOT` while they remain in use. There is no startup file
+reconciliation, object storage, or byte-download API yet.
+
 R/workflow checks for the hardened, live paths (require a real R/Seurat backend;
 they skip cleanly when Seurat is unavailable):
 
 ```bash
+npm run test:r-storage
 npm run test:r-state-proxy
 npm run test:seurat-pipeline
 npm run test:pbmc-parent
