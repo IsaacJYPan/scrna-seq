@@ -359,7 +359,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — object/project/owner validati
     await createUserWithToken({ email: 'carol@example.com' });
     const proj = await seedProject(alice.user.id);
     await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
-    const carol = dbmod.getUserByEmail('carol@example.com');
+    const carol = await dbmod.getUserByEmail('carol@example.com');
 
     // Alice owns a live analysis object in the project.
     const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
@@ -372,7 +372,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — object/project/owner validati
     expect(res.error.message).toBe('Analysis object not found.'); // 404-style, no existence leak
     expect(calls).toHaveLength(0); // never reached R
     // No successful artifact for the rejected job.
-    const jobs = dbmod.listJobsForUser(carol.id, { jobType: 'r.object.inspect' });
+    const jobs = await dbmod.listJobsForUser(carol.id, { jobType: 'r.object.inspect' });
     expect(await getJobArtifactsByJobId(jobs[0].id)).toHaveLength(0);
   });
 
@@ -381,7 +381,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — object/project/owner validati
     await createUserWithToken({ email: 'bob@example.com' });
     const proj = await seedProject(alice.user.id);
     await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner'); // even an admin
-    const bob = dbmod.getUserByEmail('bob@example.com');
+    const bob = await dbmod.getUserByEmail('bob@example.com');
 
     const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
     await createProjectJob(bob.id, proj.id, { jobType: 'r.object.inspect', analysisObjectId: aliceObj.id });
@@ -593,7 +593,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — worker integration', () => {
 
   it('a canceled job (mid-call) finalizes NO artifact and is not resurrected', async () => {
     const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
-    const cancelMidCall = async () => { cancelJobForUser(alice.id, job.id); return { status: 200, body: inspectBody() }; };
+    const cancelMidCall = async () => { await cancelJobForUser(alice.id, job.id); return { status: 200, body: inspectBody() }; };
     const res = await drainInspect(cancelMidCall);
 
     expect(res.status).toBe('claim_lost');
@@ -608,7 +608,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — worker integration', () => {
     expect(stale.id).toBe(job.id);
     await reapExpiredJobs({ now: LATER });
 
-    await expect(await createJobArtifactByWorker(job.id, 'worker_stale', stale.claimToken,
+    await expect(createJobArtifactByWorker(job.id, 'worker_stale', stale.claimToken,
         { artifactType: 'r_object_inspection', storageKind: 'metadata_only', metadata: {} }, { now: LATER })).rejects.toThrow(/claim/i);
     expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });

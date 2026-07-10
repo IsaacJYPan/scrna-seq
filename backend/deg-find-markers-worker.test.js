@@ -597,7 +597,7 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker success', () => {
   it('creates NO new analysis object and NO lineage edge (DEG is an output analysis)', async () => {
     const { alice, proj, obj } = await seedDegInput();
     await seedDegJob(alice.id, proj.id, obj.id);
-    const before = await listAnalysisObjectsForUser(alice.id, {}).length;
+    const before = (await listAnalysisObjectsForUser(alice.id, {})).length;
     const res = await drain(degCaller([]), T0);
     expect(res.status).toBe('completed');
     // The completed DEG job did not link a result object, create a child object, or an edge.
@@ -626,8 +626,8 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker success', () => {
     const { alice, proj, obj } = await seedDegInput();
     const job = await seedDegJob(alice.id, proj.id, obj.id);
     await drain(degCaller([]), T0);
-    const wjob = dbmod.getWorkerJob ? dbmod.getWorkerJob(job.id) : null;
-    const logs = JSON.stringify((wjob && wjob.logs) || dbmod.getProjectJob(alice.id, proj.id, job.id).logs || []);
+    const wjob = dbmod.getWorkerJob ? await dbmod.getWorkerJob(job.id) : null;
+    const logs = JSON.stringify((wjob && wjob.logs) || (await getProjectJob(alice.id, proj.id, job.id)).logs || []);
     expect(logs).not.toContain('deg/job_');
     expect(logs).not.toContain(deriveRObjectStateKey(alice.id, obj.id));
   });
@@ -646,9 +646,9 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker success', () => {
       summaryArtifact: { artifactType: 'deg_summary', storageKind: 'metadata_only', metadata: {} },
     };
     // First completion succeeds.
-    completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 });
+    await completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 });
     // A second completion (duplicate) is refused — no duplicate artifacts.
-    await expect(await completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 })).rejects.toThrowError(/DEG marker result/);
+    await expect(completeDegFindMarkersResultByWorker(job.id, 'worker_A', claimed.claimToken, input, { now: T0 })).rejects.toThrowError(/DEG marker result/);
     expect((await degArtifacts(job.id)).markers).toHaveLength(1);
     expect((await degArtifacts(job.id)).summary).toHaveLength(1);
   });
@@ -692,7 +692,7 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker failure / cancel', 
     const { alice, proj, obj } = await seedDegInput();
     const job = await seedDegJob(alice.id, proj.id, obj.id);
     const cancelingCaller = async (req) => {
-      if (req.path === '/object/deg-find-markers') cancelProjectJob(alice.id, proj.id, job.id);
+      if (req.path === '/object/deg-find-markers') await cancelProjectJob(alice.id, proj.id, job.id);
       return { status: 200, body: degBody() };
     };
     const res = await drain(cancelingCaller, T0);

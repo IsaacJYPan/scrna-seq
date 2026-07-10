@@ -71,7 +71,7 @@ describe.skipIf(!CONFIGURED)('security data isolation', () => {
     await setCachedResult(aliceKey, 'prov-alice', { points: [1, 2, 3] }, 'alice@example.com');
     expect((await getCachedResult(aliceKey, 'alice@example.com'))?.result).toEqual({ points: [1, 2, 3] });
     expect(await getCachedResult(aliceKey, 'bob@example.com')).toBeNull();
-    await expect(await setCachedResult(aliceKey, 'prov-bob', {}, 'alice@example.com')).rejects.toThrow(/another user/i);
+    await expect(setCachedResult(aliceKey, 'prov-bob', {}, 'alice@example.com')).rejects.toThrow(/another user/i);
 
     await clearCache('bob@example.com');
     expect(await getCachedResult(aliceKey, 'alice@example.com')).not.toBeNull();
@@ -90,7 +90,7 @@ describe.skipIf(!CONFIGURED)('security data isolation', () => {
       thumbnailB64: ''
     });
 
-    await expect(await saveFigure({
+    await expect(saveFigure({
       id: 'fig-shared-id',
       userEmail: 'bob@example.com',
       objectId: 'obj-2',
@@ -119,18 +119,18 @@ describe.skipIf(!CONFIGURED)('security data isolation', () => {
     await saveProvenance({ userEmail: 'bob@example.com', provenance: provenance('prov-bob') });
 
     // The headline footgun: no longer returns every user's provenance.
-    await expect(await getAllProvenance()).rejects.toThrow(/owner email is required/i);
-    await expect(await getAllProvenance('')).rejects.toThrow(/owner email is required/i);
-    await expect(await getAllProvenance('   ')).rejects.toThrow(/owner email is required/i);
+    await expect(getAllProvenance()).rejects.toThrow(/owner email is required/i);
+    await expect(getAllProvenance('')).rejects.toThrow(/owner email is required/i);
+    await expect(getAllProvenance('   ')).rejects.toThrow(/owner email is required/i);
 
     // The rest of the user-scoped family fails loudly too.
-    await expect(await getProvenance('prov-alice')).rejects.toThrow(/owner email is required/i);
-    await expect(await getProvenanceChain('prov-alice')).rejects.toThrow(/owner email is required/i);
-    await expect(await deleteProvenance('prov-alice')).rejects.toThrow(/owner email is required/i);
-    await expect(await getCachedResult('any-key')).rejects.toThrow(/owner email is required/i);
-    await expect(await setCachedResult('any-key', 'prov-alice', {})).rejects.toThrow(/owner email is required/i);
-    await expect(await clearCache()).rejects.toThrow(/owner email is required/i);
-    await expect(await deleteFigure('fig-x')).rejects.toThrow(/owner email is required/i);
+    await expect(getProvenance('prov-alice')).rejects.toThrow(/owner email is required/i);
+    await expect(getProvenanceChain('prov-alice')).rejects.toThrow(/owner email is required/i);
+    await expect(deleteProvenance('prov-alice')).rejects.toThrow(/owner email is required/i);
+    await expect(getCachedResult('any-key')).rejects.toThrow(/owner email is required/i);
+    await expect(setCachedResult('any-key', 'prov-alice', {})).rejects.toThrow(/owner email is required/i);
+    await expect(clearCache()).rejects.toThrow(/owner email is required/i);
+    await expect(deleteFigure('fig-x')).rejects.toThrow(/owner email is required/i);
 
     // saveProvenance is owner-scoped too: an owner-less write must fail loudly
     // rather than persist an unreadable, orphaned row.
@@ -162,11 +162,11 @@ describe.skipIf(!CONFIGURED)('security data isolation', () => {
     expect(await getFiguresByUser('alice@example.com')).toHaveLength(0);
 
     // Safe relative and absolute server-written paths are still accepted.
-    await expect(await saveFigure({
+    await expect(saveFigure({
       id: 'fig-ok-rel', userEmail: 'alice@example.com', plotType: 'UMAP', params: {},
       filePath: 'exports/user-1/UMAP_20260101_000000_abcd.png', fileFormat: 'png', thumbnailB64: ''
     })).resolves.not.toThrow();
-    await expect(await saveFigure({
+    await expect(saveFigure({
       id: 'fig-ok-abs', userEmail: 'alice@example.com', plotType: 'UMAP', params: {},
       filePath: '/srv/app/exports/user-1/UMAP_20260101_000000_efgh.png', fileFormat: 'png', thumbnailB64: ''
     })).resolves.not.toThrow();

@@ -540,7 +540,7 @@ describe.skipIf(!CONFIGURED)('org/project DB helpers', () => {
     const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
     await addOrgMemberDirect(org.id, bob.id, 'viewer');
 
-    await expect(await requireOrganizationRole(carol.id, org.id, ['owner'])).rejects.toThrow(/not found/i); // non-member
+    await expect(requireOrganizationRole(carol.id, org.id, ['owner'])).rejects.toThrow(/not found/i); // non-member
     try {
       await requireOrganizationRole(bob.id, org.id, ['owner', 'admin']);
       throw new Error('should have thrown');
@@ -560,9 +560,9 @@ describe.skipIf(!CONFIGURED)('org/project DB helpers', () => {
     expect((await verifyProjectMember(alice.id, proj.id)).role).toBe('owner');
 
     // Org viewer cannot create a project (FORBIDDEN), non-member → NOT_FOUND.
-    await expect(await createProjectForUser(bob.id, { organizationId: org.id, name: 'P2' }))
+    await expect(createProjectForUser(bob.id, { organizationId: org.id, name: 'P2' }))
       .rejects.toThrow(/permission/i);
-    await expect(await createProjectForUser(99999, { organizationId: org.id, name: 'P3' }))
+    await expect(createProjectForUser(99999, { organizationId: org.id, name: 'P3' }))
       .rejects.toThrow(); // invalid owner / not found
   });
 
@@ -583,8 +583,8 @@ describe.skipIf(!CONFIGURED)('org/project DB helpers', () => {
     const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
 
     // alice is the acting owner throughout (actorRole 'owner').
-    await expect(await updateProjectMemberRole(proj.id, alice.id, 'admin', 'owner')).rejects.toThrow(/last owner/i);
-    await expect(await removeProjectMember(proj.id, alice.id, 'owner')).rejects.toThrow(/last owner/i);
+    await expect(updateProjectMemberRole(proj.id, alice.id, 'admin', 'owner')).rejects.toThrow(/last owner/i);
+    await expect(removeProjectMember(proj.id, alice.id, 'owner')).rejects.toThrow(/last owner/i);
     expect(await countProjectOwners(proj.id)).toBe(1);
 
     // With a second owner, the original can be demoted/removed.
@@ -600,9 +600,9 @@ describe.skipIf(!CONFIGURED)('org/project DB helpers', () => {
     const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
 
     await addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer');
-    await expect(await addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer')).rejects.toThrow(/already a member/i);
-    await expect(await addProjectMemberByEmail(proj.id, 'nobody@example.com', 'viewer')).rejects.toThrow(/no user/i);
-    await expect(await addProjectMemberByEmail(proj.id, 'bob@example.com', 'superuser')).rejects.toThrow(/invalid role/i);
+    await expect(addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer')).rejects.toThrow(/already a member/i);
+    await expect(addProjectMemberByEmail(proj.id, 'nobody@example.com', 'viewer')).rejects.toThrow(/no user/i);
+    await expect(addProjectMemberByEmail(proj.id, 'bob@example.com', 'superuser')).rejects.toThrow(/invalid role/i);
   });
 
   it('enforces owner-only owner operations at the helper layer (fail closed)', async () => {

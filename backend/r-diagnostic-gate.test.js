@@ -10,7 +10,7 @@
  * Would fail before the fix: the `//__test` and `%2F__test` variants were not
  * recognized as diagnostic and so were not gated.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 
 const config = require('./config');
 const db = require('./pgDatabase');
@@ -78,6 +78,14 @@ describe.skipIf(!CONFIGURED)('R diagnostic gate (HTTP) returns 404 for all varia
   beforeEach(async () => {
     await db.resetSchemaForTests();
     token = (await createUserWithToken({ email: 'diag@example.com', displayName: 'Diag' })).token;
+  });
+
+  // Individual cases flip NODE_ENV to 'production' to prove the gate. Restore the env
+  // after EACH case so the next beforeEach's resetSchemaForTests() is not blocked by the
+  // production guard (which correctly refuses to wipe a production schema).
+  afterEach(() => {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevDiag === undefined) delete process.env.ENABLE_R_TEST_DIAGNOSTICS; else process.env.ENABLE_R_TEST_DIAGNOSTICS = prevDiag;
   });
 
   const variants = [

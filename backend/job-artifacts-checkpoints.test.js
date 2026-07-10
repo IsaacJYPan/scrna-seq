@@ -65,7 +65,7 @@ describe.skipIf(!CONFIGURED)('job artifacts — worker-facing create helper', ()
   it('generates server-side art_ ids and ignores client-supplied identity/storage fields', async () => {
     const proj = await seedProject(alice.id);
     const job = await createProjectJob(alice.id, proj.id, { jobType: 'checkpoint.noop' });
-    const claimed = claim();
+    const claimed = await claim();
     const art = await createJobArtifactByWorker(claimed.id, 'worker_t', claimed.claimToken, {
       artifactType: 'metrics',
       // Hostile/ignored fields — none of these may take effect:
@@ -95,11 +95,11 @@ describe.skipIf(!CONFIGURED)('job artifacts — worker-facing create helper', ()
     await seedProject(alice.id);
     const proj2 = await seedProject(alice.id, 'P2'); // ensure a project context for the job
     const job = await createProjectJob(alice.id, proj2.id, { jobType: 'checkpoint.noop' });
-    const c = claim();
+    const c = await claim();
     const base = { artifactType: 'metrics' };
-    await expect(await createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { ...base, artifactType: 'totally_invalid' }, { now: T0 })).rejects.toThrowError(/Invalid artifactType/);
-    await expect(await createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { ...base, storageKind: 'object_storage' }, { now: T0 })).rejects.toThrowError(/Invalid storageKind/);
-    await expect(await createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { ...base, status: 'totally_invalid' }, { now: T0 })).rejects.toThrowError(/Invalid status/);
+    await expect(createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { ...base, artifactType: 'totally_invalid' }, { now: T0 })).rejects.toThrowError(/Invalid artifactType/);
+    await expect(createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { ...base, storageKind: 'object_storage' }, { now: T0 })).rejects.toThrowError(/Invalid storageKind/);
+    await expect(createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { ...base, status: 'totally_invalid' }, { now: T0 })).rejects.toThrowError(/Invalid status/);
     // object_storage is intentionally NOT accepted in this branch (no object storage).
     expect(job).toBeTruthy();
   });
@@ -107,9 +107,9 @@ describe.skipIf(!CONFIGURED)('job artifacts — worker-facing create helper', ()
   it('only the claim-holding worker can create an artifact (CLAIM_LOST otherwise)', async () => {
     const proj = await seedProject(alice.id);
     await createProjectJob(alice.id, proj.id, { jobType: 'checkpoint.noop' });
-    const c = claim('worker_a');
+    const c = await claim('worker_a');
     // A different worker with a bogus token cannot write.
-    await expect(await createJobArtifactByWorker(c.id, 'worker_b', 'wct_bogus', { artifactType: 'metrics' }, { now: T0 })).rejects.toThrowError(/no longer holds a valid claim/);
+    await expect(createJobArtifactByWorker(c.id, 'worker_b', 'wct_bogus', { artifactType: 'metrics' }, { now: T0 })).rejects.toThrowError(/no longer holds a valid claim/);
     // The real holder can.
     const art = await createJobArtifactByWorker(c.id, 'worker_a', c.claimToken, { artifactType: 'metrics' }, { now: T0 });
     expect(art.id).toMatch(/^art_/);
@@ -122,14 +122,14 @@ describe.skipIf(!CONFIGURED)('job artifacts — worker-facing create helper', ()
     const dsB = await createDatasetForProject(alice.id, projB.id, { fileType: 'seurat_rds' });
 
     await createProjectJob(alice.id, projA.id, { jobType: 'checkpoint.noop' });
-    const c = claim();
-    await expect(await createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { artifactType: 'metrics', analysisObjectId: aoB.id }, { now: T0 })).rejects.toThrowError(/Analysis object not found/);
-    await expect(await createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { artifactType: 'metrics', datasetId: dsB.id }, { now: T0 })).rejects.toThrowError(/Dataset not found/);
+    const c = await claim();
+    await expect(createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { artifactType: 'metrics', analysisObjectId: aoB.id }, { now: T0 })).rejects.toThrowError(/Analysis object not found/);
+    await expect(createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { artifactType: 'metrics', datasetId: dsB.id }, { now: T0 })).rejects.toThrowError(/Dataset not found/);
   });
 
   it('a legacy owner-scoped job creates a NULL-project artifact', async () => {
     await createJobForUser(alice.id, { jobType: 'checkpoint.noop' });
-    const c = claim();
+    const c = await claim();
     const art = await createJobArtifactByWorker(c.id, 'worker_t', c.claimToken, { artifactType: 'log' }, { now: T0 });
     expect(art.projectId).toBeNull();
     expect(art.createdByUserId).toBe(alice.id);
@@ -156,7 +156,7 @@ describe.skipIf(!CONFIGURED)('job checkpoints — result analysis object', () =>
     const proj = await seedProject(alice.id);
     const parent = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
     const job = await createProjectJob(alice.id, proj.id, { jobType: 'checkpoint.noop', analysisObjectId: parent.id });
-    const c = claim();
+    const c = await claim();
 
     const cp = await createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, {
       objectType: 'generic', metadata: { placeholder: true }
@@ -183,17 +183,17 @@ describe.skipIf(!CONFIGURED)('job checkpoints — result analysis object', () =>
   it('refuses a second checkpoint for the same job (CHECKPOINT_EXISTS)', async () => {
     const proj = await seedProject(alice.id);
     await createProjectJob(alice.id, proj.id, { jobType: 'checkpoint.noop' });
-    const c = claim();
+    const c = await claim();
     await createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, {}, { now: T0 });
-    await expect(await createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, {}, { now: T0 })).rejects.toThrowError(/already has a result checkpoint/);
+    await expect(createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, {}, { now: T0 })).rejects.toThrowError(/already has a result checkpoint/);
   });
 
   it('two workers cannot both create a result object for the same job', async () => {
     const proj = await seedProject(alice.id);
     await createProjectJob(alice.id, proj.id, { jobType: 'checkpoint.noop' });
-    const c = claim('worker_a');
+    const c = await claim('worker_a');
     // Worker B never held the claim → CLAIM_LOST, no object created.
-    await expect(await createCheckpointForJobByWorker(c.id, 'worker_b', 'wct_bogus', {}, { now: T0 })).rejects.toThrowError(/no longer holds a valid claim/);
+    await expect(createCheckpointForJobByWorker(c.id, 'worker_b', 'wct_bogus', {}, { now: T0 })).rejects.toThrowError(/no longer holds a valid claim/);
     // Worker A succeeds exactly once.
     const cp = await createCheckpointForJobByWorker(c.id, 'worker_a', c.claimToken, {}, { now: T0 });
     expect(cp.id).toMatch(/^ao_/);
@@ -205,9 +205,9 @@ describe.skipIf(!CONFIGURED)('job checkpoints — result analysis object', () =>
     const aoB = await createProjectAnalysisObject(alice.id, projB.id, { objectType: 'seurat' });
     const dsB = await createDatasetForProject(alice.id, projB.id, { fileType: 'seurat_rds' });
     await createProjectJob(alice.id, projA.id, { jobType: 'checkpoint.noop' });
-    const c = claim();
-    await expect(await createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, { parentObjectId: aoB.id }, { now: T0 })).rejects.toThrowError(/Parent analysis object not found/);
-    await expect(await createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, { datasetId: dsB.id }, { now: T0 })).rejects.toThrowError(/Dataset not found/);
+    const c = await claim();
+    await expect(createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, { parentObjectId: aoB.id }, { now: T0 })).rejects.toThrowError(/Parent analysis object not found/);
+    await expect(createCheckpointForJobByWorker(c.id, 'worker_t', c.claimToken, { datasetId: dsB.id }, { now: T0 })).rejects.toThrowError(/Dataset not found/);
   });
 
   it('a failed (unsupported) job creates no result object', async () => {
@@ -455,7 +455,7 @@ describe.skipIf(!CONFIGURED)('project artifacts — cross-project & legacy isola
     // Seed one checkpoint artifact in A.
     await createProjectJob(alice.user.id, projA.id, { jobType: 'checkpoint.noop' });
     await drainOnce();
-    const artA = await listProjectArtifacts(alice.user.id, projA.id)[0];
+    const artA = (await listProjectArtifacts(alice.user.id, projA.id))[0];
 
     // Project B lists nothing, and cannot read A's artifact by id (404).
     const listB = await api(server, `/api/projects/${projB.id}/artifacts`, { token: alice.token });

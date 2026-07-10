@@ -289,13 +289,13 @@ describe.skipIf(!CONFIGURED)('jobs status machine & helpers', () => {
     const { alice } = await setup();
     const job = await createJobForUser(alice.id, { jobType: 'normalize' });
     // queued -> completed is not allowed (must go through running).
-    await expect(await updateJobStatusForUser(alice.id, job.id, 'completed')).rejects.toThrow(/transition/i);
+    await expect(updateJobStatusForUser(alice.id, job.id, 'completed')).rejects.toThrow(/transition/i);
   });
 
   it('refuses to update a job the user does not own', async () => {
     const { alice, bob } = await setup();
     const job = await createJobForUser(alice.id, { jobType: 'normalize' });
-    await expect(await updateJobStatusForUser(bob.id, job.id, 'running')).rejects.toThrow(/not found/i);
+    await expect(updateJobStatusForUser(bob.id, job.id, 'running')).rejects.toThrow(/not found/i);
     expect(await verifyJobOwner(bob.id, job.id)).toBe(false);
     expect(await verifyJobOwner(alice.id, job.id)).toBe(true);
   });
@@ -331,7 +331,7 @@ describe.skipIf(!CONFIGURED)('jobs status machine & helpers', () => {
     const bobObj = await createAnalysisObjectForUser(bob.id, { objectType: 'seurat' });
     const job = await createJobForUser(alice.id, { jobType: 'normalize' });
     await updateJobStatusForUser(alice.id, job.id, 'running');
-    await expect(await updateJobStatusForUser(alice.id, job.id, 'completed', {
+    await expect(updateJobStatusForUser(alice.id, job.id, 'completed', {
       resultAnalysisObjectId: bobObj.id
     })).rejects.toThrow(/result analysis object not found/i);
   });
