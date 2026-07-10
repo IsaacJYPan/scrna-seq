@@ -1,41 +1,47 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
-const { 
-  initDatabase, closeDatabase, saveProvenance, getProvenance, 
-  saveFigure, getFiguresByUser, deleteFigure 
-} = require('./database');
+const config = require('./config');
+const db = require('./pgDatabase');
 
-describe('database.js tests', () => {
-  beforeEach(() => {
-    // Initialize an in-memory database for testing
-    initDatabase(':memory:');
+const {
+  saveProvenance, getProvenance,
+  saveFigure, getFiguresByUser, deleteFigure
+} = db;
+
+const CONFIGURED = config.hasPostgresConnection();
+
+describe.skipIf(!CONFIGURED)('pgDatabase.js tests', () => {
+  beforeAll(async () => {
+    await db.resetSchemaForTests();
   });
 
-  afterEach(() => {
-    closeDatabase();
+  afterAll(async () => {
+    await db.close();
   });
 
-  it('should initialize the database and create tables', () => {
-    expect(() => {
-      saveFigure({
-        id: 'test-init-id',
-        userEmail: 'test@example.com',
-        objectId: 'obj-1',
-        plotType: 'UMAP',
-        title: 'Test UMAP',
-        params: {},
-        filePath: '/tmp/test.png',
-        fileFormat: 'png',
-        thumbnailB64: 'base64str'
-      });
-    }).not.toThrow();
+  beforeEach(async () => {
+    await db.resetSchemaForTests();
+  });
 
-    const figures = getFiguresByUser('test@example.com');
+  it('should initialize the database and create tables', async () => {
+    await expect(await saveFigure({
+      id: 'test-init-id',
+      userEmail: 'test@example.com',
+      objectId: 'obj-1',
+      plotType: 'UMAP',
+      title: 'Test UMAP',
+      params: {},
+      filePath: '/tmp/test.png',
+      fileFormat: 'png',
+      thumbnailB64: 'base64str'
+    })).resolves.not.toThrow();
+
+    const figures = await getFiguresByUser('test@example.com');
     expect(figures.length).toBe(1);
     expect(figures[0].id).toBe('test-init-id');
   });
 
-  it('should save and retrieve a provenance record', () => {
+  it('should save and retrieve a provenance record', async () => {
     const record = {
       id: 'prov-1',
       timestamp: new Date().toISOString(),
@@ -52,10 +58,10 @@ describe('database.js tests', () => {
     };
 
     // user-owned helpers now require an owner email (see finding 6).
-    const insertedId = saveProvenance({ userEmail: 'owner@example.com', provenance: record, result: { message: "success" } });
+    const insertedId = await saveProvenance({ userEmail: 'owner@example.com', provenance: record, result: { message: "success" } });
     expect(insertedId).toBe('prov-1');
 
-    const retrieved = getProvenance('prov-1', 'owner@example.com');
+    const retrieved = await getProvenance('prov-1', 'owner@example.com');
     expect(retrieved).not.toBeNull();
     expect(retrieved.id).toBe('prov-1');
     expect(retrieved.operation).toEqual('RunUMAP');
@@ -63,7 +69,7 @@ describe('database.js tests', () => {
     // Note: getProvenance does not return the result (that goes to cache)
   });
 
-  it('should perform CRUD on the figure gallery', () => {
+  it('should perform CRUD on the figure gallery', async () => {
     const figure = {
       id: 'fig-1',
       userEmail: 'test2@example.com',
@@ -77,18 +83,18 @@ describe('database.js tests', () => {
     };
 
     // Create
-    saveFigure(figure);
-    
+    await saveFigure(figure);
+
     // Read
-    let figures = getFiguresByUser('test2@example.com', 'obj-1');
+    let figures = await getFiguresByUser('test2@example.com', 'obj-1');
     expect(figures.length).toBe(1);
     expect(figures[0].plotType).toBe('FeaturePlot');
 
     // Delete (user-owned helper now requires an owner email — see finding 6)
-    deleteFigure('fig-1', 'test2@example.com');
-    
+    await deleteFigure('fig-1', 'test2@example.com');
+
     // Verify Delete
-    figures = getFiguresByUser('test2@example.com', 'obj-1');
+    figures = await getFiguresByUser('test2@example.com', 'obj-1');
     expect(figures.length).toBe(0);
   });
 });

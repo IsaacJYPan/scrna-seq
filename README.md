@@ -92,7 +92,7 @@ Fast checks (no R backend required):
 ```bash
 npm run lint
 npm run build
-npm run test:backend    # Postgres backend contract/runtime tests
+npm run test:backend    # full Postgres backend suite (DB-backed suites skip without DATABASE_URL)
 npm run test:frontend
 ```
 
@@ -104,11 +104,16 @@ Postgres is required for the app runtime. To develop or test locally:
 docker compose up -d postgres      # localhost-only Postgres (or use any local PG)
 export DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna
 npm run init:postgres              # apply backend/pg/schema.sql (idempotent)
-npm run test:backend:postgres      # real-Postgres contract/runtime tests
+npm run test:backend:postgres      # full real-Postgres backend suite (backend/*.test.js)
 ```
 
-The Postgres tests skip cleanly when `DATABASE_URL`/`PG*` is not set, but the
-server itself requires Postgres before it starts. Configuration is read and
+`test:backend` runs every `backend/*.test.js`. DB-backed suites (auth, RBAC,
+datasets, analysis objects, the job-worker contract, artifacts/checkpoints,
+lineage, the R-proxy gates, and the mocked-R pipeline handlers) each reset the
+schema per test via `resetSchemaForTests()` and skip cleanly when
+`DATABASE_URL`/`PG*` is not set; suites with no DB dependency (pure validators,
+serializers, config) always run. The server itself requires Postgres before it
+starts. Configuration is read and
 validated in `backend/config.js`; see `.env.example` for cookie, storage-root,
 and upload-limit requirements.
 Existing local SQLite data is not migrated; a fresh Postgres database starts empty.

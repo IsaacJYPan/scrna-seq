@@ -1,12 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
-const dbmod = require('./database');
+const config = require('./config');
+const dbmod = require('./pgDatabase');
 const {
-  initDatabase, closeDatabase, createUser, createOrganizationForUser, createProjectForUser,
+  createUser, createOrganizationForUser, createProjectForUser,
   createDatasetForProject, markDatasetUploaded, createProjectJob, createProjectAnalysisObject, getProjectJob,
   getProjectAnalysisObject, listProjectAnalysisObjectParents, getJobArtifactsByJobId,
   listProjectJobArtifacts, isValidJobType,
 } = dbmod;
+
+const CONFIGURED = config.hasPostgresConnection();
 const {
   validateSeuratPipelineParams, SEURAT_PIPELINE_PARAM_NAMES,
 } = require('./seuratPipeline');
@@ -22,35 +25,34 @@ const T0 = '2030-01-01 00:00:00';
 function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
 let server;
-beforeAll(async () => { server = await startServer(); });
-afterAll(() => { if (server) server.close(); });
-beforeEach(() => { initDatabase(':memory:'); });
-afterEach(() => { closeDatabase(); });
+beforeAll(async () => { if (!CONFIGURED) return; server = await startServer(); });
+afterAll(async () => { if (!CONFIGURED) return; if (server) await new Promise((resolve) => server.close(resolve)); await dbmod.close(); });
+beforeEach(async () => { if (!CONFIGURED) return; await dbmod.resetSchemaForTests(); });
 
-function seedProject(ownerUserId) {
-  const org = createOrganizationForUser(ownerUserId, { name: 'Org' });
+async function seedProject(ownerUserId) {
+  const org = await createOrganizationForUser(ownerUserId, { name: 'Org' });
   return createProjectForUser(ownerUserId, { organizationId: org.id, name: 'Project' });
 }
 
-function seedUploadedTenxH5Job(params = {}) {
-  const alice = createUser('alice@example.com', 'password123', 'Alice');
-  const proj = seedProject(alice.id);
-  const ds = createDatasetForProject(alice.id, proj.id, {
+async function seedUploadedTenxH5Job(params = {}) {
+  const alice = await createUser('alice@example.com', 'password123', 'Alice');
+  const proj = await seedProject(alice.id);
+  const ds = await createDatasetForProject(alice.id, proj.id, {
     fileType: 'tenx_h5',
     originalFilename: 'sample_filtered_feature_bc_matrix.h5',
   });
-  const uploaded = markDatasetUploaded(proj.id, ds.id, {
+  const uploaded = await markDatasetUploaded(proj.id, ds.id, {
     internalStorageKey: `vault/alice/datasets/${proj.id}/${ds.id}/sample.h5`,
     sha256: 'b'.repeat(64),
     fileSizeBytes: 1234,
   });
-  const inputObject = createProjectAnalysisObject(alice.id, proj.id, {
+  const inputObject = await createProjectAnalysisObject(alice.id, proj.id, {
     objectType: 'matrix',
     datasetId: uploaded.id,
     displayName: 'Raw 10x HDF5 dataset',
     metadata: { source: 'dataset', fileType: 'tenx_h5' },
   });
-  const job = createProjectJob(alice.id, proj.id, {
+  const job = await createProjectJob(alice.id, proj.id, {
     jobType: 'seurat.pipeline.v1',
     datasetId: uploaded.id,
     analysisObjectId: inputObject.id,
@@ -109,17 +111,17 @@ describe('seurat.pipeline.v1 inventory and validation', () => {
   });
 });
 
-describe('seurat.pipeline.v1 project job creation boundary', () => {
+describe.skipIf(!CONFIGURED)('seurat.pipeline.v1 project job creation boundary', () => {
   it('rejects unknown params at the API before a job is created', async () => {
-    const { user, token } = createUserWithToken({ email: 'route-owner@example.com' });
-    const proj = seedProject(user.id);
-    const ds = createDatasetForProject(user.id, proj.id, { fileType: 'tenx_h5' });
-    markDatasetUploaded(proj.id, ds.id, {
+    const { user, token } = await createUserWithToken({ email: 'route-owner@example.com' });
+    const proj = await seedProject(user.id);
+    const ds = await createDatasetForProject(user.id, proj.id, { fileType: 'tenx_h5' });
+    await markDatasetUploaded(proj.id, ds.id, {
       internalStorageKey: `vault/route/datasets/${proj.id}/${ds.id}/sample.h5`,
       sha256: 'c'.repeat(64),
       fileSizeBytes: 1,
     });
-    const inputObject = createProjectAnalysisObject(user.id, proj.id, {
+    const inputObject = await createProjectAnalysisObject(user.id, proj.id, {
       objectType: 'matrix',
       datasetId: ds.id,
     });
@@ -133,7 +135,7 @@ describe('seurat.pipeline.v1 project job creation boundary', () => {
   });
 
   it('rejects legacy owner-scoped creation for the dataset-backed pipeline type', async () => {
-    const { token } = createUserWithToken({ email: 'legacy-owner@example.com' });
+    const { token } = await createUserWithToken({ email: 'legacy-owner@example.com' });
     const res = await api(server, '/api/jobs', {
       method: 'POST',
       token,
@@ -143,9 +145,9 @@ describe('seurat.pipeline.v1 project job creation boundary', () => {
   });
 });
 
-describe('seurat.pipeline.v1 bridge and worker outputs', () => {
+describe.skipIf(!CONFIGURED)('seurat.pipeline.v1 bridge and worker outputs', () => {
   it('bridge builds a fixed R request from server-side dataset/checkpoint keys only', async () => {
-    const { job, dataset } = seedUploadedTenxH5Job({ pcaDims: 20 });
+    const { job, dataset } = await seedUploadedTenxH5Job({ pcaDims: 20 });
     const calls = [];
     const descriptor = await runRBridgeOperation({
       job,
@@ -170,39 +172,39 @@ describe('seurat.pipeline.v1 bridge and worker outputs', () => {
   });
 
   it('worker success creates source object, result object, lineage edge, checkpoint, summary, and job link', async () => {
-    const { alice, proj, dataset, inputObject, job } = seedUploadedTenxH5Job({ seed: 9 });
+    const { alice, proj, dataset, inputObject, job } = await seedUploadedTenxH5Job({ seed: 9 });
     const calls = [];
     const res = await drain(recordingCaller(calls));
     expect(res.status).toBe('completed');
 
-    const after = getProjectJob(alice.id, proj.id, job.id);
+    const after = await getProjectJob(alice.id, proj.id, job.id);
     expect(after.resultAnalysisObjectId).toMatch(/^ao_/);
-    const result = getProjectAnalysisObject(alice.id, proj.id, after.resultAnalysisObjectId);
+    const result = await getProjectAnalysisObject(alice.id, proj.id, after.resultAnalysisObjectId);
     expect(result.datasetId).toBe(dataset.id);
     expect(result.metadata.source).toBe('seurat.pipeline.v1');
     expect(result.metadata.resolvedParams.seed).toBe(9);
 
-    const parents = listProjectAnalysisObjectParents(alice.id, proj.id, result.id);
+    const parents = await listProjectAnalysisObjectParents(alice.id, proj.id, result.id);
     expect(parents).toHaveLength(1);
     expect(parents[0].parentAnalysisObjectId).toBe(inputObject.id);
     expect(parents[0].edgeType).toBe('checkpoint');
 
-    const artifacts = getJobArtifactsByJobId(job.id);
+    const artifacts = await getJobArtifactsByJobId(job.id);
     expect(artifacts.map(a => a.artifactType).sort()).toEqual(['checkpoint', 'pipeline_summary']);
-    const publicArtifacts = listProjectJobArtifacts(alice.id, proj.id, job.id);
+    const publicArtifacts = await listProjectJobArtifacts(alice.id, proj.id, job.id);
     expect(JSON.stringify(publicArtifacts)).not.toContain(dataset.internalStorageKey);
     expect(JSON.stringify(publicArtifacts)).not.toContain('storageUri');
   });
 
   it('worker failure before durable checkpoint creates no successful outputs and logs safe R diagnostics', async () => {
-    const { alice, proj, job } = seedUploadedTenxH5Job({});
+    const { alice, proj, job } = await seedUploadedTenxH5Job({});
     const res = await drain(async () => ({ status: 500, body: { error: 'raw path /vault/x', code: 'missing_hdf5r' } }));
     expect(res.status).toBe('failed');
-    const failed = getProjectJob(alice.id, proj.id, job.id);
+    const failed = await getProjectJob(alice.id, proj.id, job.id);
     expect(failed.resultAnalysisObjectId).toBeFalsy();
     expect(JSON.stringify(failed.logs)).toContain('status=500');
     expect(JSON.stringify(failed.logs)).toContain('missing_hdf5r');
     expect(JSON.stringify(failed.logs)).not.toContain('/vault/x');
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 });

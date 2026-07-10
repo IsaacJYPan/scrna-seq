@@ -82,7 +82,16 @@ jobs:
         run: npm run test:frontend
 
       - name: Run Backend Tests
-        # Real-Postgres backend contract/runtime tests against the CI database.
+        # The FULL backend suite (backend/*.test.js) against the real Postgres
+        # service: per-user isolation, auth (cookie/bearer/rate-limit/credentials),
+        # org/project RBAC, datasets, analysis-objects, the durable job-worker
+        # claim/lease/heartbeat contract, artifacts/checkpoints, lineage DAG, the
+        # R-proxy ownership/policy/diagnostics gates, and the mocked-R pipeline
+        # worker handlers (pbmc/seurat/deg/checkpoint-load/object-inspect/bridge).
+        # Every DB-backed suite resets the schema via resetSchemaForTests(), so no
+        # separate init step is needed. Suites with no DB dependency (pure
+        # validators, serializers, config) run unconditionally; DB/HTTP suites skip
+        # only when DATABASE_URL is unset (never in CI).
         run: npm run test:backend
 
       - name: Run R State Proxy Isolation Test

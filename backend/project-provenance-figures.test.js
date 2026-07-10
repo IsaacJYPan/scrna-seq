@@ -1,31 +1,33 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
+const config = require('./config');
+const db = require('./pgDatabase');
 const {
-  initDatabase, closeDatabase,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createDatasetForProject, saveProvenance, saveFigure,
   verifyAnalysisObjectOwner
-} = require('./database');
+} = db;
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 let server;
 
-beforeAll(async () => { server = await startServer(); });
-afterAll(() => { if (server) server.close(); });
+beforeAll(async () => { if (!CONFIGURED) return; server = await startServer(); });
+afterAll(async () => { if (!CONFIGURED) return; if (server) await new Promise((resolve) => server.close(resolve)); await db.close(); });
 
-beforeEach(() => { initDatabase(':memory:'); });
-afterEach(() => { closeDatabase(); });
+beforeEach(async () => { if (!CONFIGURED) return; await db.resetSchemaForTests(); });
 
-function users() {
-  const alice = createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' }); // owner
-  const bob = createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
-  const carol = createUserWithToken({ email: 'carol@example.com', displayName: 'Carol' });
-  const dave = createUserWithToken({ email: 'dave@example.com', displayName: 'Dave' }); // non-member
+async function users() {
+  const alice = await createUserWithToken({ email: 'alice@example.com', displayName: 'Alice' }); // owner
+  const bob = await createUserWithToken({ email: 'bob@example.com', displayName: 'Bob' });
+  const carol = await createUserWithToken({ email: 'carol@example.com', displayName: 'Carol' });
+  const dave = await createUserWithToken({ email: 'dave@example.com', displayName: 'Dave' }); // non-member
   return { alice, bob, carol, dave };
 }
 
-function seedProject(ownerUserId, name = 'Project X') {
-  const org = createOrganizationForUser(ownerUserId, { name: 'Acme Labs' });
+async function seedProject(ownerUserId, name = 'Project X') {
+  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme Labs' });
   return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
@@ -52,7 +54,7 @@ async function createJob(projectId, token, body = { jobType: 'normalize' }) {
 }
 
 // ── 1. Authentication ───────────────────────────────────────────────────────
-describe('project provenance/figures — authentication', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — authentication', () => {
   it('rejects unauthenticated access on every provenance/figure route', async () => {
     const routes = [
       ['GET', '/api/projects/proj_x/provenance'],
@@ -70,10 +72,10 @@ describe('project provenance/figures — authentication', () => {
 });
 
 // ── 2. Non-member access → 404 (no existence leak) ──────────────────────────
-describe('project provenance/figures — non-member access (404, no leak)', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — non-member access (404, no leak)', () => {
   it('non-member cannot list/read/create project provenance', async () => {
-    const { alice, dave } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice, dave } = await users();
+    const proj = await seedProject(alice.user.id);
     const created = await createProv(proj.id, alice.token);
     expect((await api(server, `/api/projects/${proj.id}/provenance`, { token: dave.token })).status).toBe(404);
     expect((await api(server, `/api/projects/${proj.id}/provenance/${created.data.id}`, { token: dave.token })).status).toBe(404);
@@ -81,8 +83,8 @@ describe('project provenance/figures — non-member access (404, no leak)', () =
   });
 
   it('non-member cannot list/read/create project figures', async () => {
-    const { alice, dave } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice, dave } = await users();
+    const proj = await seedProject(alice.user.id);
     const created = await createFig(proj.id, alice.token, { plotType: 'UMAP' });
     expect((await api(server, `/api/projects/${proj.id}/figures`, { token: dave.token })).status).toBe(404);
     expect((await api(server, `/api/projects/${proj.id}/figures/${created.data.id}`, { token: dave.token })).status).toBe(404);
@@ -91,11 +93,11 @@ describe('project provenance/figures — non-member access (404, no leak)', () =
 });
 
 // ── 3. Viewer read access (read yes, create no) ─────────────────────────────
-describe('project provenance/figures — viewer read access', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — viewer read access', () => {
   it('viewer can list/read project provenance but cannot create (403)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
     const created = await createProv(proj.id, alice.token, { operation: 'normalize', script: 'NormalizeData(obj)' });
 
     const list = await api(server, `/api/projects/${proj.id}/provenance`, { token: bob.token });
@@ -111,9 +113,9 @@ describe('project provenance/figures — viewer read access', () => {
   });
 
   it('viewer can list/read project figures but cannot create (403)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
     const created = await createFig(proj.id, alice.token, { plotType: 'UMAP', title: 'Clusters' });
 
     const list = await api(server, `/api/projects/${proj.id}/figures`, { token: bob.token });
@@ -130,12 +132,12 @@ describe('project provenance/figures — viewer read access', () => {
 });
 
 // ── 4. Create authorization by role ─────────────────────────────────────────
-describe('project provenance/figures — create authorization', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — create authorization', () => {
   it('owner/admin/analyst can create project provenance (201) with server-set identity', async () => {
-    const { alice, bob, carol } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'admin');
-    addMember(proj.id, 'carol@example.com', 'analyst');
+    const { alice, bob, carol } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'admin');
+    await addMember(proj.id, 'carol@example.com', 'analyst');
     for (const actor of [alice, bob, carol]) {
       const res = await createProv(proj.id, actor.token, { operation: 'cluster' });
       expect(res.status, actor.user.email).toBe(201);
@@ -146,10 +148,10 @@ describe('project provenance/figures — create authorization', () => {
   });
 
   it('owner/admin/analyst can create project figures (201) with server-set identity', async () => {
-    const { alice, bob, carol } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'admin');
-    addMember(proj.id, 'carol@example.com', 'analyst');
+    const { alice, bob, carol } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'admin');
+    await addMember(proj.id, 'carol@example.com', 'analyst');
     for (const actor of [alice, bob, carol]) {
       const res = await createFig(proj.id, actor.token, { plotType: 'FeaturePlot' });
       expect(res.status, actor.user.email).toBe(201);
@@ -161,10 +163,10 @@ describe('project provenance/figures — create authorization', () => {
 });
 
 // ── 5. Server-controlled identity & rejected fields ─────────────────────────
-describe('project provenance/figures — server-controlled identity', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — server-controlled identity', () => {
   it('provenance: rejects client-provided id/owner/creator/actor/project fields (400)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
     const fields = {
       id: 'prov_clientchosen',
       projectId: 'proj_other', project_id: 'proj_other',
@@ -180,8 +182,8 @@ describe('project provenance/figures — server-controlled identity', () => {
   });
 
   it('figure: rejects client-provided id/owner/creator/actor/project fields (400)', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
     const fields = {
       id: 'fig_clientchosen',
       projectId: 'proj_other', project_id: 'proj_other',
@@ -197,9 +199,9 @@ describe('project provenance/figures — server-controlled identity', () => {
   });
 
   it('server sets project_id from the route, not the body', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id, 'A');
-    const projB = seedProject(alice.user.id, 'B');
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id, 'A');
+    const projB = await seedProject(alice.user.id, 'B');
     const prov = await createProv(projA.id, alice.token);
     expect(prov.data.projectId).toBe(projA.id);
     const fig = await createFig(projA.id, alice.token, { plotType: 'UMAP' });
@@ -211,10 +213,10 @@ describe('project provenance/figures — server-controlled identity', () => {
 });
 
 // ── 6. SECURITY: figure file_path / storage key / raw path is never accepted ─
-describe('project figures — no file path / storage key surface', () => {
+describe.skipIf(!CONFIGURED)('project figures — no file path / storage key surface', () => {
   it('rejects every client-supplied file path / storage key field (400)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const pathFields = [
       'filePath', 'file_path', 'storageKey', 'storage_key', 'storageUri', 'storage_uri',
       'internalStorageKey', 'internal_storage_key', 'path'
@@ -226,8 +228,8 @@ describe('project figures — no file path / storage key surface', () => {
   });
 
   it('figure API responses never expose a raw filesystem path', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const created = await createFig(proj.id, alice.token, { plotType: 'UMAP', title: 'Clusters' });
     expect(created.status).toBe(201);
 
@@ -249,11 +251,11 @@ describe('project figures — no file path / storage key surface', () => {
 });
 
 // ── 7. References cannot cross the project ──────────────────────────────────
-describe('project provenance/figures — references stay within the project', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — references stay within the project', () => {
   it('provenance same-project dataset/object/job/result references succeed (201)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
-    const ds = datasetIn(alice.user.id, proj.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
+    const ds = await datasetIn(alice.user.id, proj.id);
     const ao = await createAO(proj.id, alice.token);
     const job = await createJob(proj.id, alice.token);
     const res = await createProv(proj.id, alice.token, {
@@ -271,10 +273,10 @@ describe('project provenance/figures — references stay within the project', ()
   });
 
   it('a two-project member cannot reference project B dataset/object/job from project A provenance (404)', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id, 'A');
-    const projB = seedProject(alice.user.id, 'B');
-    const dsB = datasetIn(alice.user.id, projB.id);
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id, 'A');
+    const projB = await seedProject(alice.user.id, 'B');
+    const dsB = await datasetIn(alice.user.id, projB.id);
     const aoB = await createAO(projB.id, alice.token);
     const jobB = await createJob(projB.id, alice.token);
 
@@ -285,9 +287,9 @@ describe('project provenance/figures — references stay within the project', ()
   });
 
   it('provenance parentIds must be same-project provenance', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id, 'A');
-    const projB = seedProject(alice.user.id, 'B');
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id, 'A');
+    const projB = await seedProject(alice.user.id, 'B');
     const parentA = await createProv(projA.id, alice.token);
     const parentB = await createProv(projB.id, alice.token);
 
@@ -299,9 +301,9 @@ describe('project provenance/figures — references stay within the project', ()
   });
 
   it('figure same-project object/job/provenance/dataset references succeed (201)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
-    const ds = datasetIn(alice.user.id, proj.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
+    const ds = await datasetIn(alice.user.id, proj.id);
     const ao = await createAO(proj.id, alice.token);
     const job = await createJob(proj.id, alice.token);
     const prov = await createProv(proj.id, alice.token);
@@ -320,9 +322,9 @@ describe('project provenance/figures — references stay within the project', ()
   });
 
   it('a two-project member cannot reference project B object/job/provenance from project A figure (404)', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id, 'A');
-    const projB = seedProject(alice.user.id, 'B');
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id, 'A');
+    const projB = await seedProject(alice.user.id, 'B');
     const aoB = await createAO(projB.id, alice.token);
     const jobB = await createJob(projB.id, alice.token);
     const provB = await createProv(projB.id, alice.token);
@@ -333,8 +335,8 @@ describe('project provenance/figures — references stay within the project', ()
   });
 
   it('unknown (well-formed) references return 404', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     expect((await createProv(proj.id, alice.token, { datasetId: 'ds_deadbeefdeadbeefdeadbeef' })).status).toBe(404);
     expect((await createProv(proj.id, alice.token, { analysisObjectId: 'ao_deadbeefdeadbeefdeadbeef' })).status).toBe(404);
     expect((await createProv(proj.id, alice.token, { jobId: 'job_deadbeefdeadbeefdeadbeef' })).status).toBe(404);
@@ -343,9 +345,9 @@ describe('project provenance/figures — references stay within the project', ()
   });
 
   it('cross-project reads return 404', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id, 'A');
-    const projB = seedProject(alice.user.id, 'B');
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id, 'A');
+    const projB = await seedProject(alice.user.id, 'B');
     const provB = await createProv(projB.id, alice.token);
     const figB = await createFig(projB.id, alice.token, { plotType: 'UMAP' });
 
@@ -355,10 +357,10 @@ describe('project provenance/figures — references stay within the project', ()
 });
 
 // ── 8. Malformed ids → 400 ──────────────────────────────────────────────────
-describe('project provenance/figures — malformed ids', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — malformed ids', () => {
   it('returns 400 for malformed provenance ids (path + reference fields)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     for (const bad of ['not-an-id', 'prov_NOTHEX', 'prov_', 'fig_abc']) {
       expect((await api(server, `/api/projects/${proj.id}/provenance/${bad}`, { token: alice.token })).status, bad).toBe(400);
     }
@@ -371,8 +373,8 @@ describe('project provenance/figures — malformed ids', () => {
   });
 
   it('returns 400 for malformed figure ids (path + reference fields)', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     for (const bad of ['not-an-id', 'fig_NOTHEX', 'fig_', 'prov_abc']) {
       expect((await api(server, `/api/projects/${proj.id}/figures/${bad}`, { token: alice.token })).status, bad).toBe(400);
     }
@@ -384,13 +386,13 @@ describe('project provenance/figures — malformed ids', () => {
 });
 
 // ── 9. Legacy NULL project_id rows do not leak into project routes ──────────
-describe('project provenance/figures — legacy NULL-project rows do not leak', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — legacy NULL-project rows do not leak', () => {
   it('legacy user-scoped provenance (NULL project_id) is invisible to project routes', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     // Seed a legacy, owner-scoped provenance row (no project_id) directly.
     const legacyId = 'prov_deadbeefdeadbeefdeadbeef';
-    saveProvenance({
+    await saveProvenance({
       userEmail: 'alice@example.com',
       provenance: {
         id: legacyId, timestamp: 't', language: 'R', languageVersion: '4.5',
@@ -410,10 +412,10 @@ describe('project provenance/figures — legacy NULL-project rows do not leak', 
   });
 
   it('legacy user-scoped figure (NULL project_id, with a file_path) is invisible to project routes', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     const legacyId = 'fig_deadbeefdeadbeefdeadbeef';
-    saveFigure({
+    await saveFigure({
       id: legacyId, userEmail: 'alice@example.com', plotType: 'UMAP', params: {},
       filePath: 'exports/user-1/UMAP_20260101_000000_abcd.png', fileFormat: 'png', thumbnailB64: ''
     });
@@ -429,11 +431,11 @@ describe('project provenance/figures — legacy NULL-project rows do not leak', 
 });
 
 // ── 10. Project list/read returns only that project's records ───────────────
-describe('project provenance/figures — project isolation of list/read', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — project isolation of list/read', () => {
   it('list returns only the route project\'s provenance and figures', async () => {
-    const { alice } = users();
-    const projA = seedProject(alice.user.id, 'A');
-    const projB = seedProject(alice.user.id, 'B');
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id, 'A');
+    const projB = await seedProject(alice.user.id, 'B');
     const provA = await createProv(projA.id, alice.token);
     await createProv(projB.id, alice.token);
     const figA = await createFig(projA.id, alice.token, { plotType: 'UMAP' });
@@ -449,11 +451,11 @@ describe('project provenance/figures — project isolation of list/read', () => 
 // ── 11. R boundary regression ───────────────────────────────────────────────
 // The most important constraint: associating an analysis object with a project
 // provenance/figure record (metadata) must NOT widen R object/session ownership.
-describe('project provenance/figures — R object/state ownership unchanged', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — R object/state ownership unchanged', () => {
   it('a co-member who can read figure metadata referencing an object still cannot use it via /api/r/*', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'admin'); // even an admin co-member
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'admin'); // even an admin co-member
     const ao = await createAO(proj.id, alice.token);
 
     // Bob (admin) creates a figure referencing Alice's object — allowed as metadata.
@@ -462,8 +464,8 @@ describe('project provenance/figures — R object/state ownership unchanged', ()
     expect(fig.data.analysisObjectId).toBe(ao.data.id);
 
     // R object ownership is still creator-keyed, NOT project-member-keyed.
-    expect(verifyAnalysisObjectOwner(alice.user.id, ao.data.id)).toBe(true);
-    expect(verifyAnalysisObjectOwner(bob.user.id, ao.data.id)).toBe(false);
+    expect(await verifyAnalysisObjectOwner(alice.user.id, ao.data.id)).toBe(true);
+    expect(await verifyAnalysisObjectOwner(bob.user.id, ao.data.id)).toBe(false);
 
     // Supplying that object id as an X-Object-ID to the R proxy is rejected before
     // the request can reach R — metadata visibility is not live R state access.
@@ -473,10 +475,10 @@ describe('project provenance/figures — R object/state ownership unchanged', ()
 });
 
 // ── 12. Owner-scoped provenance/figure routes unchanged ─────────────────────
-describe('project provenance/figures — owner-scoped routes unchanged', () => {
+describe.skipIf(!CONFIGURED)('project provenance/figures — owner-scoped routes unchanged', () => {
   it('existing owner-scoped provenance routes still function and stay disjoint', async () => {
-    const { alice } = users();
-    const proj = seedProject(alice.user.id);
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
     // Owner-scoped create (client-supplied id, user_email-keyed).
     const env = {
       provenance: {
@@ -495,7 +497,7 @@ describe('project provenance/figures — owner-scoped routes unchanged', () => {
   });
 
   it('existing owner-scoped figure routes still function', async () => {
-    const { alice } = users();
+    const { alice } = await users();
     const saved = await api(server, '/api/db/figures', {
       method: 'POST', token: alice.token,
       body: { id: 'fig_legacyowner0001', plotType: 'UMAP', params: {}, fileFormat: 'png' }
@@ -520,11 +522,11 @@ function legacyProvBody(id, script, operation = 'pwned') {
   };
 }
 
-describe('project provenance — legacy owner-scoped save cannot clobber project rows', () => {
+describe.skipIf(!CONFIGURED)('project provenance — legacy owner-scoped save cannot clobber project rows', () => {
   it('a project viewer cannot overwrite/hijack a project provenance record via legacy POST /api/db/provenance', async () => {
-    const { alice, bob } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'viewer');
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'viewer');
 
     const created = await createProv(proj.id, alice.token, { operation: 'normalize', script: 'NormalizeData(obj)' });
     expect(created.status).toBe(201);
@@ -560,10 +562,10 @@ describe('project provenance — legacy owner-scoped save cannot clobber project
   });
 
   it('even the creating owner/admin/analyst cannot mutate a project provenance row via the legacy route', async () => {
-    const { alice, bob, carol } = users();
-    const proj = seedProject(alice.user.id);
-    addMember(proj.id, 'bob@example.com', 'admin');
-    addMember(proj.id, 'carol@example.com', 'analyst');
+    const { alice, bob, carol } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'admin');
+    await addMember(proj.id, 'carol@example.com', 'analyst');
 
     for (const actor of [alice, bob, carol]) {
       const created = await createProv(proj.id, actor.token, { operation: 'cluster', script: 'orig' });
@@ -585,7 +587,7 @@ describe('project provenance — legacy owner-scoped save cannot clobber project
   });
 
   it('legacy owner-scoped provenance create/update still works, but cross-user overwrite is blocked', async () => {
-    const { alice, bob } = users();
+    const { alice, bob } = await users();
     const legacyId = 'prov_legacyowner0002';
 
     // Create own owner-scoped row, then update it (same id, same owner) — both 200.
