@@ -88,27 +88,27 @@ async function main() {
     throw new Error('h5 conversion failed');
   }
 
-  const db = require('../backend/database');
+  const db = require('../backend/pgDatabase');
   const { createJobWorker } = require('../backend/jobWorker');
-  db.initDatabase(':memory:');
+  await db.initSchema();
 
-  const owner = db.createUser(`seurat-verify-${stamp}@example.com`, 'password123', 'Verifier');
-  const org = db.createOrganizationForUser(owner.id, { name: 'Verify Org' });
-  const project = db.createProjectForUser(owner.id, { organizationId: org.id, name: 'Verify Project' });
-  const dataset = db.createDatasetForProject(owner.id, project.id, {
+  const owner = await db.createUser(`seurat-verify-${stamp}@example.com`, 'password123', 'Verifier');
+  const org = await db.createOrganizationForUser(owner.id, { name: 'Verify Org' });
+  const project = await db.createProjectForUser(owner.id, { organizationId: org.id, name: 'Verify Project' });
+  const dataset = await db.createDatasetForProject(owner.id, project.id, {
     fileType: 'tenx_h5', originalFilename: 'pbmc3k.h5',
   });
   const bytes = fs.readFileSync(h5Abs);
-  db.markDatasetUploaded(project.id, dataset.id, {
+  await db.markDatasetUploaded(project.id, dataset.id, {
     internalStorageKey: h5Rel,
     sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
     fileSizeBytes: bytes.length,
   });
-  const inputObject = db.createProjectAnalysisObject(owner.id, project.id, {
+  const inputObject = await db.createProjectAnalysisObject(owner.id, project.id, {
     objectType: 'matrix', datasetId: dataset.id, displayName: 'Raw 10x HDF5',
     metadata: { source: 'dataset', fileType: 'tenx_h5' },
   });
-  const job = db.createProjectJob(owner.id, project.id, {
+  const job = await db.createProjectJob(owner.id, project.id, {
     jobType: 'seurat.pipeline.v1', datasetId: dataset.id, analysisObjectId: inputObject.id, parameters: {},
   });
   console.log(`INFO seeded job ${job.id}`);
@@ -119,10 +119,10 @@ async function main() {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
 
-  const cleanup = () => {
+  const cleanup = async () => {
     try { if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(plumber.pid), '/T', '/F'], { stdio: 'ignore' }); else plumber.kill('SIGTERM'); } catch { /* ignore */ }
     try { fs.rmSync(vaultAbs, { recursive: true, force: true }); } catch { /* ignore */ }
-    try { db.closeDatabase(); } catch { /* ignore */ }
+    try { await db.close(); } catch { /* ignore */ }
   };
 
   try {
@@ -134,15 +134,15 @@ async function main() {
     const result = await worker.runOnce();
     assert(result.status === 'completed', 'worker completed the seurat.pipeline.v1 job', result.status);
 
-    const done = db.getProjectJob(owner.id, project.id, job.id);
+    const done = await db.getProjectJob(owner.id, project.id, job.id);
     assert(done.status === 'completed', 'job status is completed');
     assert(typeof done.resultAnalysisObjectId === 'string' && done.resultAnalysisObjectId.startsWith('ao_'),
       'job produced a result analysis object', String(done.resultAnalysisObjectId));
 
-    const resultObj = db.getProjectAnalysisObject(owner.id, project.id, done.resultAnalysisObjectId);
+    const resultObj = await db.getProjectAnalysisObject(owner.id, project.id, done.resultAnalysisObjectId);
     assert(resultObj && resultObj.objectType === 'seurat', 'result object is a seurat object');
 
-    const artifacts = db.getJobArtifactsByJobId(job.id);
+    const artifacts = await db.getJobArtifactsByJobId(job.id);
     const types = artifacts.map((a) => a.artifactType).sort();
     assert(JSON.stringify(types) === JSON.stringify(['checkpoint', 'pipeline_summary']),
       'job created checkpoint + pipeline_summary artifacts', JSON.stringify(types));
@@ -153,14 +153,14 @@ async function main() {
     assert(summary && summary.nClusters === 9, 'summary nClusters matches tutorial (9)', String(summary && summary.nClusters));
 
     // No storage path/key leak in the public projection.
-    const publicArtifacts = JSON.stringify(db.listProjectJobArtifacts(owner.id, project.id, job.id));
+    const publicArtifacts = JSON.stringify(await db.listProjectJobArtifacts(owner.id, project.id, job.id));
     assert(!publicArtifacts.includes(h5Rel) && !publicArtifacts.includes('vault/') && !publicArtifacts.includes('storageUri')
       && !publicArtifacts.includes('internalStorageKey'),
       'public artifact projection leaks no storage path/key');
 
     console.log(`\nALL ${passCount} CHECKS PASSED`);
   } finally {
-    cleanup();
+    await cleanup();
   }
 }
 

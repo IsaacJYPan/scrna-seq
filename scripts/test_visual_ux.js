@@ -892,7 +892,7 @@ async function main() {
           const saveToGalleryBtn = page.locator('button:has-text("Save to Figure Gallery")').first();
           if (await saveToGalleryBtn.count() > 0) {
             await saveToGalleryBtn.click();
-            await sleep(2000); // Wait for R backend generation and SQLite IPC
+            await sleep(2000); // Wait for R backend generation and API state
             
             const galleryBtn = page.locator('aside button:has-text("Reports / Export"), aside button:has-text("Figures")').first();
             await galleryBtn.click();

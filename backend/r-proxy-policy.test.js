@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
 // Pins the CURRENT R-proxy path policy so future changes are deliberate and
 // visible in review. Two classes of `/api/r/*` paths:
@@ -19,8 +19,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 // NOT issue an authenticated request to a reachable legacy endpoint here, since
 // that would attempt to proxy to a (non-running) R backend.
 
-const { initDatabase, closeDatabase } = require('./database');
+const config = require('./config');
+const db = require('./pgDatabase');
 const { startServer, createUserWithToken, api, serverModule } = require('./_http-test-utils');
+
+const CONFIGURED = config.hasPostgresConnection();
 
 const { isInternalOnlyRProxyPath, R_PROXY_INTERNAL_ONLY_PATHS } = serverModule;
 
@@ -46,21 +49,24 @@ let server;
 let prevTrustedRdsLoad;
 
 beforeAll(async () => {
+  if (!CONFIGURED) return;
   prevTrustedRdsLoad = process.env.ALLOW_TRUSTED_RDS_LOAD;
   server = await startServer();
 });
 
-afterAll(() => {
-  if (server) server.close();
+afterAll(async () => {
+  if (!CONFIGURED) return;
+  if (server) await new Promise((resolve) => server.close(resolve));
+  await db.close();
   if (prevTrustedRdsLoad === undefined) delete process.env.ALLOW_TRUSTED_RDS_LOAD;
   else process.env.ALLOW_TRUSTED_RDS_LOAD = prevTrustedRdsLoad;
 });
 
-beforeEach(() => {
-  initDatabase(':memory:');
+beforeEach(async () => {
+  if (!CONFIGURED) return;
+  await db.resetSchemaForTests();
   delete process.env.ALLOW_TRUSTED_RDS_LOAD;
 });
-afterEach(() => { closeDatabase(); });
 
 describe('isInternalOnlyRProxyPath classifier (source of truth for the block)', () => {
   it('exposes exactly the worker-only paths', () => {
@@ -84,9 +90,9 @@ describe('isInternalOnlyRProxyPath classifier (source of truth for the block)', 
   });
 });
 
-describe('R proxy HTTP policy', () => {
+describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
   it('blocks internal worker-only endpoints with a no-leak 404 for an authenticated user', async () => {
-    const { token } = createUserWithToken({ email: 'owner@example.com' });
+    const { token } = await createUserWithToken({ email: 'owner@example.com' });
     for (const p of INTERNAL_ONLY) {
       for (const method of ['GET', 'POST', 'PUT', 'DELETE']) {
         const res = await api(server, `/api/r${p}`, { method, token });
@@ -117,7 +123,7 @@ describe('R proxy HTTP policy', () => {
   });
 
   it('blocks public RDS loading by default before any R contact', async () => {
-    const { user, token } = createUserWithToken({ email: 'owner@example.com' });
+    const { user, token } = await createUserWithToken({ email: 'owner@example.com' });
     const res = await api(server, '/api/r/load-rds', {
       method: 'POST',
       token,
@@ -128,7 +134,7 @@ describe('R proxy HTTP policy', () => {
   });
 
   it('does not reveal path-validation details when RDS loading is disabled', async () => {
-    const { token } = createUserWithToken({ email: 'owner@example.com' });
+    const { token } = await createUserWithToken({ email: 'owner@example.com' });
     const res = await api(server, '/api/r/load-rds', {
       method: 'POST',
       token,

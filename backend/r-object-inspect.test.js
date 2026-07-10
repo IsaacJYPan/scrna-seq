@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
 // ════════════════════════════════════════════════════════════════════════════
 // Read-only worker-to-R object inspection (r.object.inspect)
@@ -17,9 +17,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 // (rObjectInspectHandler), r-backend/plumber.R (GET /object/inspect).
 // ════════════════════════════════════════════════════════════════════════════
 
-const dbmod = require('./database');
+const config = require('./config');
+const dbmod = require('./pgDatabase');
+const CONFIGURED = config.hasPostgresConnection();
 const {
-  initDatabase, closeDatabase, createUser,
+  createUser,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getJobForUser, getAnalysisObjectForUser, verifyAnalysisObjectOwner,
@@ -81,19 +83,21 @@ async function drainInspect(callR, now = T0, opts = {}) {
   return w.runOnce();
 }
 
-function seedProject(ownerUserId, name = 'P') {
-  const org = createOrganizationForUser(ownerUserId, { name: 'Acme' });
+async function seedProject(ownerUserId, name = 'P') {
+  const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
   return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // 1. Scope / registration (exactly one new type added; nothing else changed)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.object.inspect — scope & registration', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+afterAll(async () => { if (!CONFIGURED) return; await dbmod.close(); });
 
-  it('registers r.object.inspect; generic / checkpoint.noop / r.runtime.check unchanged', () => {
+describe.skipIf(!CONFIGURED)('r.object.inspect — scope & registration', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
+
+  it('registers r.object.inspect; generic / checkpoint.noop / r.runtime.check unchanged', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
       .toEqual(['checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(rObjectInspectHandler);
@@ -103,12 +107,12 @@ describe('r.object.inspect — scope & registration', () => {
     expect(DEFAULT_HANDLERS['r.runtime.check']).toBe(worker.rRuntimeCheckHandler);
   });
 
-  it('r.object.inspect is an allowed job type and r_object_inspection an allowed artifact type', () => {
+  it('r.object.inspect is an allowed job type and r_object_inspection an allowed artifact type', async () => {
     expect(isValidJobType('r.object.inspect')).toBe(true);
     expect(isValidArtifactType('r_object_inspection')).toBe(true);
   });
 
-  it('the r.object.inspect operation is allowlisted, read-only, object-scoped', () => {
+  it('the r.object.inspect operation is allowlisted, read-only, object-scoped', async () => {
     expect(isAllowedRBridgeOperation('r.object.inspect')).toBe(true);
     const spec = R_BRIDGE_OPERATIONS['r.object.inspect'];
     expect(spec.method).toBe('GET');
@@ -119,7 +123,7 @@ describe('r.object.inspect — scope & registration', () => {
     expect(spec.readOnly).toBe(true);
   });
 
-  it('r.runtime.check is still allowlisted and unchanged (no object context)', () => {
+  it('r.runtime.check is still allowlisted and unchanged (no object context)', async () => {
     expect(isAllowedRBridgeOperation('r.runtime.check')).toBe(true);
     const spec = R_BRIDGE_OPERATIONS['r.runtime.check'];
     expect(spec.method).toBe('GET');
@@ -128,18 +132,18 @@ describe('r.object.inspect — scope & registration', () => {
   });
 
   it('an unsupported analytical job type still fails terminally (UNSUPPORTED_JOB_TYPE), no R contact', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const job = createJobForUser(alice.id, { jobType: 'pca' });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const job = await createJobForUser(alice.id, { jobType: 'pca' });
     const calls = [];
     const res = await drainInspect(recordingInspectCaller(calls));
     expect(res.status).toBe('unsupported');
     expect(calls).toHaveLength(0);
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.status).toBe('failed');
     expect(after.error.code).toBe('UNSUPPORTED_JOB_TYPE');
   });
 
-  it('the bridge module exposes NO express route/app (no public R bridge / download route)', () => {
+  it('the bridge module exposes NO express route/app (no public R bridge / download route)', async () => {
     for (const k of ['app', 'router', 'middleware', 'handler', 'routes', 'download']) {
       expect(bridge).not.toHaveProperty(k);
     }
@@ -149,7 +153,7 @@ describe('r.object.inspect — scope & registration', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 2. Bridge allowlist & input control (pure function; injected caller)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.object.inspect — bridge allowlist & input control', () => {
+describe.skipIf(!CONFIGURED)('r.object.inspect — bridge allowlist & input control', () => {
   const job = { id: 'job_abc', ownerUserId: 7, projectId: null, analysisObjectId: 'ao_1' };
   const objectContext = { objectId: 'ao_1', stateKey: 'user-7:obj-ao_1' };
 
@@ -310,7 +314,7 @@ describe('r.object.inspect — bridge allowlist & input control', () => {
     expect(descriptor.metadata.read_only).toBe(true);
   });
 
-  it('the summary sanitizers cap counts and name lists and drop unsafe values', () => {
+  it('the summary sanitizers cap counts and name lists and drop unsafe values', async () => {
     expect(sanitizeCount(2700)).toBe(2700);
     expect(sanitizeCount(-1)).toBeNull();
     expect(sanitizeCount('5')).toBeNull();
@@ -325,17 +329,17 @@ describe('r.object.inspect — bridge allowlist & input control', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 3. Object / project / owner validation (live-R ownership boundary)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.object.inspect — object/project/owner validation', () => {
+describe.skipIf(!CONFIGURED)('r.object.inspect — object/project/owner validation', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('the live-R object OWNER can inspect their own object (server-derived state key)', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'aliceObj' });
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'aliceObj' });
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
 
     const calls = [];
     const res = await drainInspect(recordingInspectCaller(calls));
@@ -345,22 +349,22 @@ describe('r.object.inspect — object/project/owner validation', () => {
     // The X-Object-ID is the SERVER-derived key — identical to what /api/r/* would send.
     expect(calls[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, obj.id));
 
-    const arts = getJobArtifactsByJobId(job.id);
+    const arts = await getJobArtifactsByJobId(job.id);
     expect(arts).toHaveLength(1);
     expect(arts[0].artifactType).toBe('r_object_inspection');
   });
 
   it('a project co-member (analyst) CANNOT inspect another user\'s live object — fails before R', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    createUserWithToken({ email: 'carol@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
-    const carol = dbmod.getUserByEmail('carol@example.com');
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    await createUserWithToken({ email: 'carol@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
+    const carol = await dbmod.getUserByEmail('carol@example.com');
 
     // Alice owns a live analysis object in the project.
-    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
+    const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
     // Carol (analyst co-member) creates a project inspect job against ALICE's object.
-    createProjectJob(carol.id, proj.id, { jobType: 'r.object.inspect', analysisObjectId: aliceObj.id });
+    await createProjectJob(carol.id, proj.id, { jobType: 'r.object.inspect', analysisObjectId: aliceObj.id });
 
     const calls = [];
     const res = await drainInspect(recordingInspectCaller(calls));
@@ -368,35 +372,35 @@ describe('r.object.inspect — object/project/owner validation', () => {
     expect(res.error.message).toBe('Analysis object not found.'); // 404-style, no existence leak
     expect(calls).toHaveLength(0); // never reached R
     // No successful artifact for the rejected job.
-    const jobs = dbmod.listJobsForUser(carol.id, { jobType: 'r.object.inspect' });
-    expect(getJobArtifactsByJobId(jobs[0].id)).toHaveLength(0);
+    const jobs = await dbmod.listJobsForUser(carol.id, { jobType: 'r.object.inspect' });
+    expect(await getJobArtifactsByJobId(jobs[0].id)).toHaveLength(0);
   });
 
   it('a project ADMIN co-member also cannot inspect another user\'s live object', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    createUserWithToken({ email: 'bob@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner'); // even an admin
-    const bob = dbmod.getUserByEmail('bob@example.com');
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    await createUserWithToken({ email: 'bob@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner'); // even an admin
+    const bob = await dbmod.getUserByEmail('bob@example.com');
 
-    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
-    createProjectJob(bob.id, proj.id, { jobType: 'r.object.inspect', analysisObjectId: aliceObj.id });
+    const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'aliceObj' });
+    await createProjectJob(bob.id, proj.id, { jobType: 'r.object.inspect', analysisObjectId: aliceObj.id });
 
     const calls = [];
     const res = await drainInspect(recordingInspectCaller(calls));
     expect(res.status).toBe('failed');
     expect(calls).toHaveLength(0);
     // Ownership is still creator-keyed, not project-member-keyed.
-    expect(verifyAnalysisObjectOwner(alice.user.id, aliceObj.id)).toBe(true);
-    expect(verifyAnalysisObjectOwner(bob.id, aliceObj.id)).toBe(false);
+    expect(await verifyAnalysisObjectOwner(alice.user.id, aliceObj.id)).toBe(true);
+    expect(await verifyAnalysisObjectOwner(bob.id, aliceObj.id)).toBe(false);
   });
 
   it('a VIEWER cannot create/trigger an inspect job (403 by job policy)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const viewer = createUserWithToken({ email: 'viewer@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
-    const obj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const viewer = await createUserWithToken({ email: 'viewer@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
+    const obj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
 
     const r = await api(server, `/api/projects/${proj.id}/jobs`, {
       method: 'POST', token: viewer.token,
@@ -406,11 +410,11 @@ describe('r.object.inspect — object/project/owner validation', () => {
   });
 
   it('a cross-project object reference is rejected with 404', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const projA = seedProject(alice.user.id, 'A');
-    const objA = createProjectAnalysisObject(alice.user.id, projA.id, { objectType: 'seurat', displayName: 'a' });
-    const orgB = createOrganizationForUser(alice.user.id, { name: 'B' });
-    const projB = createProjectForUser(alice.user.id, { organizationId: orgB.id, name: 'B' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const projA = await seedProject(alice.user.id, 'A');
+    const objA = await createProjectAnalysisObject(alice.user.id, projA.id, { objectType: 'seurat', displayName: 'a' });
+    const orgB = await createOrganizationForUser(alice.user.id, { name: 'B' });
+    const projB = await createProjectForUser(alice.user.id, { organizationId: orgB.id, name: 'B' });
 
     const r = await api(server, `/api/projects/${projB.id}/jobs`, {
       method: 'POST', token: alice.token,
@@ -420,9 +424,9 @@ describe('r.object.inspect — object/project/owner validation', () => {
   });
 
   it('a legacy owner-scoped object cannot be referenced by a project inspect job (404)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const proj = seedProject(alice.user.id);
-    const legacyObj = createAnalysisObjectForUser(alice.user.id, { objectType: 'seurat', displayName: 'legacy' }); // no project
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const proj = await seedProject(alice.user.id);
+    const legacyObj = await createAnalysisObjectForUser(alice.user.id, { objectType: 'seurat', displayName: 'legacy' }); // no project
 
     const r = await api(server, `/api/projects/${proj.id}/jobs`, {
       method: 'POST', token: alice.token,
@@ -432,8 +436,8 @@ describe('r.object.inspect — object/project/owner validation', () => {
   });
 
   it('a malformed object ID is rejected with 400; an unknown well-formed one with 404', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const proj = seedProject(alice.user.id);
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const proj = await seedProject(alice.user.id);
 
     const malformed = await api(server, `/api/projects/${proj.id}/jobs`, {
       method: 'POST', token: alice.token,
@@ -449,19 +453,19 @@ describe('r.object.inspect — object/project/owner validation', () => {
   });
 
   it('an inspect job WITHOUT an analysis object fails safely BEFORE R contact', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect' }); // no analysisObjectId
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect' }); // no analysisObjectId
     const calls = [];
     const res = await drainInspect(recordingInspectCaller(calls));
     expect(res.status).toBe('failed');
     expect(calls).toHaveLength(0);
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('client-supplied object/state/owner/project overrides in parameters are ignored', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
-    createJobForUser(alice.id, {
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
+    await createJobForUser(alice.id, {
       jobType: 'r.object.inspect',
       analysisObjectId: obj.id,
       parameters: {
@@ -483,30 +487,30 @@ describe('r.object.inspect — object/project/owner validation', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 4. Read-only / mutation safety
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.object.inspect — read-only / no mutation', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('r.object.inspect — read-only / no mutation', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   it('inspection creates NO result analysis object / checkpoint and does not mutate the object', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
-    const before = getAnalysisObjectForUser(obj.id, alice.id);
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
+    const before = await getAnalysisObjectForUser(obj.id, alice.id);
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
 
     const res = await drainInspect(recordingInspectCaller([]));
     expect(res.status).toBe('completed');
 
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.resultAnalysisObjectId).toBeFalsy(); // no checkpoint / result object
 
     // The inspected object is byte-for-byte unchanged (status/lineage/metadata/etc.).
-    expect(getAnalysisObjectForUser(obj.id, alice.id)).toEqual(before);
+    expect(await getAnalysisObjectForUser(obj.id, alice.id)).toEqual(before);
   });
 
   it('only ever calls the read-only GET /object/inspect target (never a mutating endpoint)', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
-    createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
+    await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
     const calls = [];
     await drainInspect(recordingInspectCaller(calls));
     expect(calls).toHaveLength(1);
@@ -515,49 +519,49 @@ describe('r.object.inspect — read-only / no mutation', () => {
   });
 
   it('repeated inspection does not change object state (object stable across two jobs)', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
-    const before = getAnalysisObjectForUser(obj.id, alice.id);
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
+    const before = await getAnalysisObjectForUser(obj.id, alice.id);
 
-    const job1 = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const job1 = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
     expect((await drainInspect(recordingInspectCaller([]))).status).toBe('completed');
-    const job2 = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const job2 = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
     expect((await drainInspect(recordingInspectCaller([]))).status).toBe('completed');
 
-    expect(getAnalysisObjectForUser(obj.id, alice.id)).toEqual(before);
+    expect(await getAnalysisObjectForUser(obj.id, alice.id)).toEqual(before);
     // Each job recorded exactly one artifact; neither created a checkpoint.
-    expect(getJobArtifactsByJobId(job1.id)).toHaveLength(1);
-    expect(getJobArtifactsByJobId(job2.id)).toHaveLength(1);
-    expect(getJobForUser(job1.id, alice.id).resultAnalysisObjectId).toBeFalsy();
-    expect(getJobForUser(job2.id, alice.id).resultAnalysisObjectId).toBeFalsy();
+    expect(await getJobArtifactsByJobId(job1.id)).toHaveLength(1);
+    expect(await getJobArtifactsByJobId(job2.id)).toHaveLength(1);
+    expect((await getJobForUser(job1.id, alice.id)).resultAnalysisObjectId).toBeFalsy();
+    expect((await getJobForUser(job2.id, alice.id)).resultAnalysisObjectId).toBeFalsy();
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
 // 5. Worker integration (claim → bridge → exactly-one artifact through contract)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.object.inspect — worker integration', () => {
+describe.skipIf(!CONFIGURED)('r.object.inspect — worker integration', () => {
   let alice, obj;
-  beforeEach(() => {
-    initDatabase(':memory:');
-    alice = createUser('alice@example.com', 'password123', 'Alice');
-    obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
+  beforeEach(async () => {
+    await dbmod.resetSchemaForTests();
+    alice = await createUser('alice@example.com', 'password123', 'Alice');
+    obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
   });
-  afterEach(() => { closeDatabase(); });
+
 
   it('a successful inspection completes through the worker contract with EXACTLY one metadata-only artifact', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
     const calls = [];
     const res = await drainInspect(recordingInspectCaller(calls));
 
     expect(res.status).toBe('completed');
     expect(res.result).toMatchObject({ ok: true, handled: 'r.object.inspect', operation: 'r.object.inspect' });
 
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.status).toBe('completed');
     expect(after.resultAnalysisObjectId).toBeFalsy();
 
-    const arts = getJobArtifactsByJobId(job.id);
+    const arts = await getJobArtifactsByJobId(job.id);
     expect(arts).toHaveLength(1);
     expect(arts[0].id).toBe(res.result.artifactId);
     expect(arts[0].artifactType).toBe('r_object_inspection');
@@ -575,79 +579,77 @@ describe('r.object.inspect — worker integration', () => {
   });
 
   it('a failed R call fails the job with a sanitized error and NO successful artifact', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
     const leaky = async () => { throw new Error('connect ECONNREFUSED http://127.0.0.1:8000/object/inspect'); };
     const res = await drainInspect(leaky);
 
     expect(res.status).toBe('failed');
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.status).toBe('failed');
     const blob = JSON.stringify(after);
     for (const f of ['ECONNREFUSED', 'http://', '127.0.0.1', '8000']) expect(blob).not.toContain(f);
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('a canceled job (mid-call) finalizes NO artifact and is not resurrected', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
-    const cancelMidCall = async () => { cancelJobForUser(alice.id, job.id); return { status: 200, body: inspectBody() }; };
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const cancelMidCall = async () => { await cancelJobForUser(alice.id, job.id); return { status: 200, body: inspectBody() }; };
     const res = await drainInspect(cancelMidCall);
 
     expect(res.status).toBe('claim_lost');
-    expect(getJobForUser(job.id, alice.id).status).toBe('canceled');
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect((await getJobForUser(job.id, alice.id)).status).toBe('canceled');
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('claim loss (reaped lease) before the artifact write prevents finalizing any artifact', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
-    setJobScheduling(job.id, { maxAttempts: 2 });
-    const stale = claimNextJob('worker_stale', { now: T0, leaseSeconds: 30 });
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    await setJobScheduling(job.id, { maxAttempts: 2 });
+    const stale = await claimNextJob('worker_stale', { now: T0, leaseSeconds: 30 });
     expect(stale.id).toBe(job.id);
-    reapExpiredJobs({ now: LATER });
+    await reapExpiredJobs({ now: LATER });
 
-    expect(() =>
-      createJobArtifactByWorker(job.id, 'worker_stale', stale.claimToken,
-        { artifactType: 'r_object_inspection', storageKind: 'metadata_only', metadata: {} }, { now: LATER })
-    ).toThrow(/claim/i);
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    await expect(createJobArtifactByWorker(job.id, 'worker_stale', stale.claimToken,
+        { artifactType: 'r_object_inspection', storageKind: 'metadata_only', metadata: {} }, { now: LATER })).rejects.toThrow(/claim/i);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('two workers cannot create duplicate artifacts for the same inspect job', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const job = await createJobForUser(alice.id, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
     const a = createJobWorker({ db: dbmod, workerId: 'worker_a', now: () => T0, logger: silentLogger(), callR: recordingInspectCaller([]), deriveRObjectStateKey });
     const b = createJobWorker({ db: dbmod, workerId: 'worker_b', now: () => T0, logger: silentLogger(), callR: recordingInspectCaller([]), deriveRObjectStateKey });
 
     const resA = await a.runOnce();
     const resB = await b.runOnce();
     expect([resA.status, resB.status].sort()).toEqual(['completed', 'idle']);
-    expect(getJobForUser(job.id, alice.id).status).toBe('completed');
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(1);
+    expect((await getJobForUser(job.id, alice.id)).status).toBe('completed');
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(1);
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
 // 6. Artifact public exposure (project-scoped HTTP reads; no leaks)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.object.inspect — artifact public exposure', () => {
+describe.skipIf(!CONFIGURED)('r.object.inspect — artifact public exposure', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
+
 
   // Drive a project inspect job (owned by the object owner) to completion.
   async function seedInspectArtifact(projectId, ownerUserId) {
-    const obj = createProjectAnalysisObject(ownerUserId, projectId, { objectType: 'seurat', displayName: 'o' });
-    const job = createProjectJob(ownerUserId, projectId, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
+    const obj = await createProjectAnalysisObject(ownerUserId, projectId, { objectType: 'seurat', displayName: 'o' });
+    const job = await createProjectJob(ownerUserId, projectId, { jobType: 'r.object.inspect', analysisObjectId: obj.id });
     const res = await drainInspect(recordingInspectCaller([]));
-    const arts = listProjectArtifacts(ownerUserId, projectId);
+    const arts = await listProjectArtifacts(ownerUserId, projectId);
     return { obj, job, artifact: arts[0], res };
   }
 
   it('every project member role (incl. viewer) can read the r_object_inspection metadata', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const viewer = createUserWithToken({ email: 'viewer@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const viewer = await createUserWithToken({ email: 'viewer@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
     const { job, artifact, res } = await seedInspectArtifact(proj.id, alice.user.id);
     expect(res.status).toBe('completed');
     expect(artifact.artifactType).toBe('r_object_inspection');
@@ -671,9 +673,9 @@ describe('r.object.inspect — artifact public exposure', () => {
   });
 
   it('a non-member receives 404 (no existence leak)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const dave = createUserWithToken({ email: 'dave@example.com' });
-    const proj = seedProject(alice.user.id);
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const dave = await createUserWithToken({ email: 'dave@example.com' });
+    const proj = await seedProject(alice.user.id);
     const { job, artifact } = await seedInspectArtifact(proj.id, alice.user.id);
 
     expect((await api(server, `/api/projects/${proj.id}/artifacts`, { token: dave.token })).status).toBe(404);
@@ -682,8 +684,8 @@ describe('r.object.inspect — artifact public exposure', () => {
   });
 
   it('the public artifact response exposes NO raw R output / state key / path / URL / token / worker internals / stacks', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const proj = seedProject(alice.user.id);
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const proj = await seedProject(alice.user.id);
     const { obj, artifact } = await seedInspectArtifact(proj.id, alice.user.id);
 
     const one = await api(server, `/api/projects/${proj.id}/artifacts/${artifact.id}`, { token: alice.token });
@@ -709,14 +711,14 @@ describe('r.object.inspect — artifact public exposure', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 7. R boundary regression (deriveRStateKey / verifyRObjectOwnership / /api/r/*)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r.object.inspect — R boundary unchanged', () => {
+describe.skipIf(!CONFIGURED)('r.object.inspect — R boundary unchanged', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  it('deriveRStateKey stays server-derived: the new helper matches the session-facing wrapper', () => {
+
+  it('deriveRStateKey stays server-derived: the new helper matches the session-facing wrapper', async () => {
     for (const [id, objId] of [[5, 'ao_abc'], [42, null], [7, 'ao_deadbeef']]) {
       expect(deriveRObjectStateKey(id, objId)).toBe(deriveRStateKey({ id }, objId));
     }
@@ -724,21 +726,21 @@ describe('r.object.inspect — R boundary unchanged', () => {
     expect(deriveRObjectStateKey(5)).toBe('user-5');
   });
 
-  it('verifyRObjectOwnership remains owner-verifying (membership ≠ ownership)', () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const bob = createUser('bob@example.com', 'password123', 'Bob');
-    const obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
-    expect(verifyAnalysisObjectOwner(alice.id, obj.id)).toBe(true);
-    expect(verifyAnalysisObjectOwner(bob.id, obj.id)).toBe(false);
+  it('verifyRObjectOwnership remains owner-verifying (membership ≠ ownership)', async () => {
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const bob = await createUser('bob@example.com', 'password123', 'Bob');
+    const obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', displayName: 'o' });
+    expect(await verifyAnalysisObjectOwner(alice.id, obj.id)).toBe(true);
+    expect(await verifyAnalysisObjectOwner(bob.id, obj.id)).toBe(false);
   });
 
   it('/api/r/* still rejects a project co-member supplying another user\'s object id (404, before R)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const bob = createUserWithToken({ email: 'bob@example.com' });
-    const org = createOrganizationForUser(alice.user.id, { name: 'Acme' });
-    const proj = createProjectForUser(alice.user.id, { organizationId: org.id, name: 'P' });
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
-    const aliceObj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const bob = await createUserWithToken({ email: 'bob@example.com' });
+    const org = await createOrganizationForUser(alice.user.id, { name: 'Acme' });
+    const proj = await createProjectForUser(alice.user.id, { organizationId: org.id, name: 'P' });
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
+    const aliceObj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', displayName: 'o' });
 
     // Bob is a project admin, but Alice's live R object is still not his to address.
     const r = await api(server, '/api/r/health', { token: bob.token, headers: { 'X-Object-ID': aliceObj.id } });

@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const db = require('./backend/database');
+const db = require('./backend/pgDatabase');
 const config = require('./backend/config');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
@@ -28,14 +28,28 @@ if (!process.env.SESSION_SECRET) {
   console.warn('[Auth] SESSION_SECRET is not set. Using an ephemeral signing secret for this process.');
 }
 
-// Init Database
-const DB_DIR = path.join(process.cwd(), 'data');
+// Init durable storage roots. The app database is Postgres-only and initialized
+// asynchronously at startup/request time.
+const DB_DIR = config.storageRoot();
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
-db.initDatabase(path.join(DB_DIR, 'dashboard.db'));
 const UPLOAD_DIR = path.join(DB_DIR, 'uploads');
-const VAULT_DIR = path.join(process.cwd(), 'vault');
+const VAULT_DIR = config.vaultRoot();
 for (const dir of [UPLOAD_DIR, VAULT_DIR]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+let appDatabaseReady = null;
+function initAppDatabase() {
+  if (!appDatabaseReady) {
+    if (!config.hasPostgresConnection()) {
+      appDatabaseReady = Promise.reject(
+        new Error('Postgres is required. Set DATABASE_URL or PGHOST/PGDATABASE before starting the app.')
+      );
+      return appDatabaseReady;
+    }
+    appDatabaseReady = db.initSchema();
+  }
+  return appDatabaseReady;
 }
 
 function base64UrlJson(value) {
@@ -58,7 +72,7 @@ function issueSession(user) {
   return `${payload}.${signPayload(payload)}`;
 }
 
-function verifySession(token) {
+async function verifySession(token) {
   if (!token || typeof token !== 'string') return null;
   const [payload, signature] = token.split('.');
   if (!payload || !signature) return null;
@@ -82,7 +96,7 @@ function verifySession(token) {
   const now = Math.floor(Date.now() / 1000);
   if (!parsed.email || !parsed.sub || !parsed.exp || parsed.exp < now) return null;
 
-  const user = db.getUserByEmail(parsed.email);
+  const user = await db.getUserByEmail(parsed.email);
   if (!user || String(user.id) !== String(parsed.sub)) return null;
   return user;
 }
@@ -144,15 +158,15 @@ function clearSessionCookie(res) {
 // Resolve the authenticated user from the cookie first, then the legacy bearer
 // header. `req.authVia` records which transport won so the CSRF check can apply
 // only to cookie-authenticated (browser-auto-sent) mutations.
-function resolveSessionUser(req) {
+async function resolveSessionUser(req) {
   const cookieToken = getCookieToken(req);
   if (cookieToken) {
-    const user = verifySession(cookieToken);
+    const user = await verifySession(cookieToken);
     if (user) return { user, via: 'cookie' };
   }
   const bearer = getBearerToken(req);
   if (bearer) {
-    const user = verifySession(bearer);
+    const user = await verifySession(bearer);
     if (user) return { user, via: 'bearer' };
   }
   return { user: null, via: null };
@@ -205,10 +219,10 @@ function originOf(url) {
   }
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   if (req.method === 'OPTIONS') return next();
 
-  const { user, via } = resolveSessionUser(req);
+  const { user, via } = await resolveSessionUser(req);
   if (!user) {
     return res.status(401).json({ error: 'Authentication required' });
   }
@@ -581,7 +595,7 @@ function isValidArtifactIdFormat(value) {
 // success the verified canonical id is stashed on req.verifiedObjectId, and the
 // proxy derives the R state key from it. With no X-Object-ID, the request falls
 // through to the legacy user-scoped key.
-function verifyRObjectOwnership(req, res, next) {
+async function verifyRObjectOwnership(req, res, next) {
   const rawObjectId = req.headers['x-object-id'];
 
   if (rawObjectId === undefined || rawObjectId === null || String(rawObjectId).trim() === '') {
@@ -594,7 +608,7 @@ function verifyRObjectOwnership(req, res, next) {
   }
 
   // Mandatory DB ownership check — rejected before the request can reach R.
-  if (!db.verifyAnalysisObjectOwner(req.user.id, objectId)) {
+  if (!(await db.verifyAnalysisObjectOwner(req.user.id, objectId))) {
     // 404 (not 403) so we never reveal that another user's object exists.
     return res.status(404).json({ error: 'Analysis object not found.' });
   }
@@ -705,15 +719,25 @@ app.use(cors({
   },
   credentials: true
 }));
+
+app.use(async (req, res, next) => {
+  try {
+    await initAppDatabase();
+    next();
+  } catch (err) {
+    console.error('[DB] Postgres initialization failed:', err && err.message ? err.message : err);
+    res.status(503).json({ error: 'Database unavailable' });
+  }
+});
 // Do not use express.json() globally, as it consumes the body stream and breaks http-proxy-middleware for POST requests.
 // ── Auth Endpoints ────────────────────────────────────────────────────────
 app.use('/api/auth', express.json());
-app.post('/api/auth/signup', signupRateLimiter, (req, res) => {
+app.post('/api/auth/signup', signupRateLimiter, async (req, res) => {
   const validated = validateSignupBody(req.body || {});
   if (validated.error) return res.status(400).json({ error: validated.error });
 
   try {
-    const user = db.createUser(validated.email, validated.password, validated.displayName);
+    const user = await db.createUser(validated.email, validated.password, validated.displayName);
     if (user.error) return res.status(409).json({ error: user.error });
 
     // Set the HttpOnly session cookie (preferred, hosted-service auth) AND return
@@ -727,12 +751,12 @@ app.post('/api/auth/signup', signupRateLimiter, (req, res) => {
   }
 });
 
-app.post('/api/auth/login', loginRateLimiter, (req, res) => {
+app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
   const validated = validateLoginBody(req.body || {});
   if (validated.error) return res.status(400).json({ error: validated.error });
 
   try {
-    const user = db.verifyUser(validated.email, validated.password);
+    const user = await db.verifyUser(validated.email, validated.password);
     if (user.error) return res.status(401).json({ error: 'Invalid email or password.' });
 
     // Set the HttpOnly session cookie (preferred) AND return the token in JSON
@@ -759,8 +783,8 @@ app.get('/api/auth/session', requireAuth, (req, res) => {
 // removed. CSRF: only a cookie-authenticated logout is origin-checked (bearer
 // logout, used by legacy/dev, is not a CSRF vector); an unauthenticated call
 // simply clears any cookie and returns success.
-app.post('/api/auth/logout', (req, res) => {
-  const { user, via } = resolveSessionUser(req);
+app.post('/api/auth/logout', async (req, res) => {
+  const { user, via } = await resolveSessionUser(req);
   req.authVia = via;
   if (user && via === 'cookie') {
     if (!enforceCsrfForCookieAuth(req, res)) return undefined;
@@ -788,14 +812,14 @@ app.get('/api/runtime/diagnostics', async (req, res) => {
 app.use('/api/db', express.json());
 app.use('/api/db', requireAuth);
 
-app.get('/api/db/provenance', (req, res) => {
-  res.json(db.getAllProvenance(req.user.email));
+app.get('/api/db/provenance', async (req, res) => {
+  res.json(await db.getAllProvenance(req.user.email));
 });
 
-app.post('/api/db/provenance', (req, res) => {
+app.post('/api/db/provenance', async (req, res) => {
   const env = { ...req.body, userEmail: req.user.email };
   try {
-    const id = db.saveProvenance(env);
+    const id = await db.saveProvenance(env);
     res.json({ id });
   } catch (e) {
     // A row owned by another user — or a project-scoped row — is reported as a
@@ -807,33 +831,33 @@ app.post('/api/db/provenance', (req, res) => {
   }
 });
 
-app.get('/api/db/provenance/:id', (req, res) => {
-  res.json(db.getProvenance(req.params.id, req.user.email));
+app.get('/api/db/provenance/:id', async (req, res) => {
+  res.json(await db.getProvenance(req.params.id, req.user.email));
 });
 
-app.get('/api/db/provenance-chain/:id', (req, res) => {
-  res.json(db.getProvenanceChain(req.params.id, req.user.email));
+app.get('/api/db/provenance-chain/:id', async (req, res) => {
+  res.json(await db.getProvenanceChain(req.params.id, req.user.email));
 });
 
-app.delete('/api/db/provenance/:id', (req, res) => {
-  res.json({ success: db.deleteProvenance(req.params.id, req.user.email) });
+app.delete('/api/db/provenance/:id', async (req, res) => {
+  res.json({ success: await db.deleteProvenance(req.params.id, req.user.email) });
 });
 
-app.get('/api/db/figures', (req, res) => {
-  res.json(db.getFiguresByUser(req.user.email));
+app.get('/api/db/figures', async (req, res) => {
+  res.json(await db.getFiguresByUser(req.user.email));
 });
 
-app.post('/api/db/figures', (req, res) => {
+app.post('/api/db/figures', async (req, res) => {
   try {
-    const id = db.saveFigure({ ...req.body, userEmail: req.user.email });
+    const id = await db.saveFigure({ ...req.body, userEmail: req.user.email });
     res.json({ id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.delete('/api/db/figures/:id', (req, res) => {
-  res.json({ success: db.deleteFigure(req.params.id, req.user.email) });
+app.delete('/api/db/figures/:id', async (req, res) => {
+  res.json({ success: await db.deleteFigure(req.params.id, req.user.email) });
 });
 
 // Cache Endpoints
@@ -842,22 +866,22 @@ app.post('/api/db/cache-key', (req, res) => {
   res.json({ key: db.makeCacheKey(operation, params, dataVersion, parentIds, req.user.email) });
 });
 
-app.get('/api/db/cache/:key', (req, res) => {
-  res.json(db.getCachedResult(req.params.key, req.user.email));
+app.get('/api/db/cache/:key', async (req, res) => {
+  res.json(await db.getCachedResult(req.params.key, req.user.email));
 });
 
-app.post('/api/db/cache/:key', (req, res) => {
+app.post('/api/db/cache/:key', async (req, res) => {
   const { provenanceId, resultData } = req.body;
   try {
-    db.setCachedResult(req.params.key, provenanceId, resultData, req.user.email);
+    await db.setCachedResult(req.params.key, provenanceId, resultData, req.user.email);
     res.json({ success: true });
   } catch (e) {
     res.status(403).json({ error: e.message });
   }
 });
 
-app.delete('/api/db/cache', (req, res) => {
-  db.clearCache(req.user.email);
+app.delete('/api/db/cache', async (req, res) => {
+  await db.clearCache(req.user.email);
   res.json({ success: true });
 });
 
@@ -910,7 +934,7 @@ function rejectAnalysisObjectStorageFields(body, res) {
   return false;
 }
 
-app.post('/api/analysis-objects', (req, res) => {
+app.post('/api/analysis-objects', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
 
   // Object ids are server-issued. Reject any client attempt to choose one.
@@ -928,12 +952,12 @@ app.post('/api/analysis-objects', (req, res) => {
   // Validate linked-resource ownership before creating anything. 404 (not 403)
   // so we never reveal that another user's resource exists.
   if (body.parentObjectId !== undefined && body.parentObjectId !== null) {
-    if (typeof body.parentObjectId !== 'string' || !db.getAnalysisObjectForUser(body.parentObjectId, req.user.id)) {
+    if (typeof body.parentObjectId !== 'string' || !(await db.getAnalysisObjectForUser(body.parentObjectId, req.user.id))) {
       return res.status(404).json({ error: 'Parent analysis object not found.' });
     }
   }
   if (body.createdByProvenanceId !== undefined && body.createdByProvenanceId !== null) {
-    if (typeof body.createdByProvenanceId !== 'string' || !db.getProvenance(body.createdByProvenanceId, req.user.email)) {
+    if (typeof body.createdByProvenanceId !== 'string' || !(await db.getProvenance(body.createdByProvenanceId, req.user.email))) {
       return res.status(404).json({ error: 'Provenance record not found.' });
     }
   }
@@ -947,7 +971,7 @@ app.post('/api/analysis-objects', (req, res) => {
     }
   }
   try {
-    const created = db.createAnalysisObjectForUser(req.user.id, {
+    const created = await db.createAnalysisObjectForUser(req.user.id, {
       datasetId: body.datasetId,
       parentObjectId: body.parentObjectId,
       objectType: body.objectType,
@@ -967,18 +991,18 @@ app.post('/api/analysis-objects', (req, res) => {
   }
 });
 
-app.get('/api/analysis-objects', (req, res) => {
+app.get('/api/analysis-objects', async (req, res) => {
   const filters = {
     datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
     parentObjectId: typeof req.query.parentObjectId === 'string' ? req.query.parentObjectId : undefined,
     lineageRootId: typeof req.query.lineageRootId === 'string' ? req.query.lineageRootId : undefined,
     objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
   };
-  res.json(db.listAnalysisObjectsForUser(req.user.id, filters).map(db.toPublicAnalysisObject));
+  res.json((await db.listAnalysisObjectsForUser(req.user.id, filters)).map(db.toPublicAnalysisObject));
 });
 
-app.get('/api/analysis-objects/:id', (req, res) => {
-  const obj = db.getAnalysisObjectForUser(req.params.id, req.user.id);
+app.get('/api/analysis-objects/:id', async (req, res) => {
+  const obj = await db.getAnalysisObjectForUser(req.params.id, req.user.id);
   if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
   res.json(db.toPublicAnalysisObject(obj));
 });
@@ -991,7 +1015,7 @@ app.get('/api/analysis-objects/:id', (req, res) => {
 app.use('/api/jobs', express.json());
 app.use('/api/jobs', requireAuth);
 
-app.post('/api/jobs', (req, res) => {
+app.post('/api/jobs', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
 
   // Job ids are server-issued. Reject any client attempt to choose one.
@@ -1017,13 +1041,13 @@ app.post('/api/jobs', (req, res) => {
   }
 
   try {
-    const created = db.createJobForUser(req.user.id, {
+    const created = await db.createJobForUser(req.user.id, {
       analysisObjectId: body.analysisObjectId,
       datasetId: body.datasetId,
       jobType: body.jobType,
       parameters: body.parameters
     });
-    res.status(201).json(created);
+    res.status(201).json(db.toPublicJob(created));
   } catch (e) {
     if (e.code === 'ANALYSIS_OBJECT_NOT_FOUND' || e.code === 'DATASET_NOT_FOUND') return res.status(404).json({ error: e.message });
     if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message });
@@ -1035,32 +1059,32 @@ app.post('/api/jobs', (req, res) => {
   }
 });
 
-app.get('/api/jobs', (req, res) => {
+app.get('/api/jobs', async (req, res) => {
   const filters = {
     status: typeof req.query.status === 'string' ? req.query.status : undefined,
     jobType: typeof req.query.jobType === 'string' ? req.query.jobType : undefined,
     analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
     resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined
   };
-  res.json(db.listJobsForUser(req.user.id, filters));
+  res.json((await db.listJobsForUser(req.user.id, filters)).map(db.toPublicJob));
 });
 
-app.get('/api/jobs/:id', (req, res) => {
-  const job = db.getJobForUser(req.params.id, req.user.id);
+app.get('/api/jobs/:id', async (req, res) => {
+  const job = await db.getJobForUser(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
-  res.json(job);
+  res.json(db.toPublicJob(job));
 });
 
-app.get('/api/jobs/:id/logs', (req, res) => {
-  const job = db.getJobForUser(req.params.id, req.user.id);
+app.get('/api/jobs/:id/logs', async (req, res) => {
+  const job = await db.getJobForUser(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
   res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
 });
 
-app.post('/api/jobs/:id/cancel', (req, res) => {
+app.post('/api/jobs/:id/cancel', async (req, res) => {
   try {
-    const job = db.cancelJobForUser(req.user.id, req.params.id);
-    res.json(job);
+    const job = await db.cancelJobForUser(req.user.id, req.params.id);
+    res.json(db.toPublicJob(job));
   } catch (e) {
     if (e.code === 'JOB_NOT_FOUND') return res.status(404).json({ error: e.message });
     if (e.code === 'JOB_NOT_CANCELABLE') return res.status(409).json({ error: e.message });
@@ -1136,30 +1160,30 @@ function rejectServerControlledFields(req, res, { rejectId = true, rejectRole = 
   return false;
 }
 
-app.post('/api/organizations', (req, res) => {
+app.post('/api/organizations', async (req, res) => {
   if (rejectServerControlledFields(req, res)) return;
   try {
-    const org = db.createOrganizationForUser(req.user.id, { name: req.body.name });
+    const org = await db.createOrganizationForUser(req.user.id, { name: req.body.name });
     res.status(201).json(org);
   } catch (e) {
     sendOrgProjectError(res, e, 'Organizations');
   }
 });
 
-app.get('/api/organizations', (req, res) => {
-  res.json(db.listOrganizationsForUser(req.user.id));
+app.get('/api/organizations', async (req, res) => {
+  res.json(await db.listOrganizationsForUser(req.user.id));
 });
 
-app.get('/api/organizations/:id', (req, res) => {
-  const org = db.getOrganizationForUser(req.params.id, req.user.id);
+app.get('/api/organizations/:id', async (req, res) => {
+  const org = await db.getOrganizationForUser(req.params.id, req.user.id);
   if (!org) return res.status(404).json({ error: 'Organization not found.' });
   res.json(org);
 });
 
-app.post('/api/projects', (req, res) => {
+app.post('/api/projects', async (req, res) => {
   if (rejectServerControlledFields(req, res)) return;
   try {
-    const project = db.createProjectForUser(req.user.id, {
+    const project = await db.createProjectForUser(req.user.id, {
       organizationId: req.body.organizationId,
       name: req.body.name,
       description: req.body.description
@@ -1170,40 +1194,40 @@ app.post('/api/projects', (req, res) => {
   }
 });
 
-app.get('/api/projects', (req, res) => {
-  res.json(db.listProjectsForUser(req.user.id));
+app.get('/api/projects', async (req, res) => {
+  res.json(await db.listProjectsForUser(req.user.id));
 });
 
-app.get('/api/projects/:id', (req, res) => {
-  const project = db.getProjectForUser(req.params.id, req.user.id);
+app.get('/api/projects/:id', async (req, res) => {
+  const project = await db.getProjectForUser(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found.' });
   res.json(project);
 });
 
-app.patch('/api/projects/:id', (req, res) => {
+app.patch('/api/projects/:id', async (req, res) => {
   // A project cannot be reparented to another org in this branch.
   if (rejectServerControlledFields(req, res, { extra: ['organizationId', 'organization_id'] })) return;
   try {
     // owner/admin only; not-a-member → 404, member without role → 403.
-    db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
-    db.updateProject(req.params.id, { name: req.body.name, description: req.body.description });
-    res.json(db.getProjectForUser(req.params.id, req.user.id));
+    await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
+    await db.updateProject(req.params.id, { name: req.body.name, description: req.body.description });
+    res.json(await db.getProjectForUser(req.params.id, req.user.id));
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
   }
 });
 
-app.get('/api/projects/:id/members', (req, res) => {
+app.get('/api/projects/:id/members', async (req, res) => {
   try {
     // Any project member (incl. viewer) may see the member list.
-    db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin', 'analyst', 'viewer']);
-    res.json(db.listProjectMembers(req.params.id));
+    await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin', 'analyst', 'viewer']);
+    res.json(await db.listProjectMembers(req.params.id));
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
   }
 });
 
-app.post('/api/projects/:id/members', (req, res) => {
+app.post('/api/projects/:id/members', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // Members are added by exact email; reject any attempt to name a user/row id.
   if (rejectServerControlledFields(req, res, { rejectRole: false, extra: ['userId', 'user_id', 'projectId', 'project_id'] })) return;
@@ -1213,15 +1237,15 @@ app.post('/api/projects/:id/members', (req, res) => {
   try {
     // owner/admin may manage members; the acting role is passed through so the
     // DB layer can enforce that only an owner grants the owner role.
-    const actor = db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
-    const member = db.addProjectMemberByEmail(req.params.id, body.email, body.role, actor.role);
+    const actor = await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
+    const member = await db.addProjectMemberByEmail(req.params.id, body.email, body.role, actor.role);
     res.status(201).json(member);
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
   }
 });
 
-app.patch('/api/projects/:id/members/:userId', (req, res) => {
+app.patch('/api/projects/:id/members/:userId', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   if (typeof body.role !== 'string') {
     return res.status(400).json({ error: 'A role is required.' });
@@ -1229,20 +1253,20 @@ app.patch('/api/projects/:id/members/:userId', (req, res) => {
   try {
     // owner/admin may manage members; the acting role is passed through so the
     // DB layer can enforce that only an owner grants or demotes the owner role.
-    const actor = db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
-    const updated = db.updateProjectMemberRole(req.params.id, Number(req.params.userId), body.role, actor.role);
+    const actor = await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
+    const updated = await db.updateProjectMemberRole(req.params.id, Number(req.params.userId), body.role, actor.role);
     res.json(updated);
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
   }
 });
 
-app.delete('/api/projects/:id/members/:userId', (req, res) => {
+app.delete('/api/projects/:id/members/:userId', async (req, res) => {
   try {
     // owner/admin may manage members; the acting role is passed through so the
     // DB layer can enforce that only an owner removes an owner.
-    const actor = db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
-    db.removeProjectMember(req.params.id, Number(req.params.userId), actor.role);
+    const actor = await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
+    await db.removeProjectMember(req.params.id, Number(req.params.userId), actor.role);
     res.json({ success: true });
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
@@ -1404,7 +1428,7 @@ function sendDatasetError(res, e, context = 'Datasets') {
   }
 }
 
-app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, (req, res) => {
+app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   if (rejectDatasetServerFields(req, res)) return;
 
@@ -1415,7 +1439,7 @@ app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, (req, res) 
   if (!verrs.ok) { cleanupDatasetReqFile(req); return res.status(400).json({ error: 'validation_errors must be valid JSON.' }); }
 
   try {
-    let dataset = db.createDatasetForProject(req.user.id, req.params.projectId, {
+    let dataset = await db.createDatasetForProject(req.user.id, req.params.projectId, {
       fileType,
       originalFilename: body.originalFilename !== undefined
         ? body.originalFilename
@@ -1432,10 +1456,10 @@ app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, (req, res) 
     if (req.file) {
       try {
         const stored = storeDatasetFile(req.file, req.user, req.params.projectId, dataset.id);
-        dataset = db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
+        dataset = await db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
       } catch (storageErr) {
         console.error('[Datasets] Storage failed:', storageErr);
-        db.markDatasetUploadFailed(req.params.projectId, dataset.id);
+        await db.markDatasetUploadFailed(req.params.projectId, dataset.id);
         cleanupDatasetReqFile(req);
         return res.status(500).json({ error: 'Dataset file storage failed.' });
       }
@@ -1447,25 +1471,25 @@ app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, (req, res) 
   }
 });
 
-app.get('/api/projects/:projectId/datasets', (req, res) => {
+app.get('/api/projects/:projectId/datasets', async (req, res) => {
   const filters = {};
   if (typeof req.query.fileType === 'string') filters.fileType = req.query.fileType;
   if (typeof req.query.uploadStatus === 'string') filters.uploadStatus = req.query.uploadStatus;
   if (typeof req.query.validationStatus === 'string') filters.validationStatus = req.query.validationStatus;
   try {
-    const rows = db.listDatasetsForProject(req.user.id, req.params.projectId, filters);
+    const rows = await db.listDatasetsForProject(req.user.id, req.params.projectId, filters);
     res.json(rows.map(db.toPublicDataset));
   } catch (e) {
     sendDatasetError(res, e);
   }
 });
 
-app.get('/api/projects/:projectId/datasets/:datasetId', (req, res) => {
+app.get('/api/projects/:projectId/datasets/:datasetId', async (req, res) => {
   if (!isValidDatasetIdFormat(req.params.datasetId)) {
     return res.status(400).json({ error: 'Malformed dataset ID.' });
   }
   try {
-    const dataset = db.getDatasetForProject(req.user.id, req.params.projectId, req.params.datasetId);
+    const dataset = await db.getDatasetForProject(req.user.id, req.params.projectId, req.params.datasetId);
     if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
     res.json(db.toPublicDataset(dataset));
   } catch (e) {
@@ -1473,14 +1497,14 @@ app.get('/api/projects/:projectId/datasets/:datasetId', (req, res) => {
   }
 });
 
-app.patch('/api/projects/:projectId/datasets/:datasetId', (req, res) => {
+app.patch('/api/projects/:projectId/datasets/:datasetId', async (req, res) => {
   if (!isValidDatasetIdFormat(req.params.datasetId)) {
     return res.status(400).json({ error: 'Malformed dataset ID.' });
   }
   if (rejectDatasetServerFields(req, res)) return;
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   try {
-    const updated = db.updateDatasetForProject(req.user.id, req.params.projectId, req.params.datasetId, {
+    const updated = await db.updateDatasetForProject(req.user.id, req.params.projectId, req.params.datasetId, {
       uploadStatus: body.uploadStatus,
       validationStatus: body.validationStatus,
       validationErrors: body.validationErrors,
@@ -1571,40 +1595,40 @@ function rejectProjectResourceFields(req, res, { extra = [] } = {}) {
   return false;
 }
 
-app.get('/api/projects/:projectId/pipeline-definitions', (req, res) => {
+app.get('/api/projects/:projectId/pipeline-definitions', async (req, res) => {
   try {
-    res.json(db.listProjectPipelineDefinitions(req.user.id, req.params.projectId));
+    res.json(await db.listProjectPipelineDefinitions(req.user.id, req.params.projectId));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectPipelines');
   }
 });
 
-app.post('/api/projects/:projectId/pipeline-definitions', (req, res) => {
+app.post('/api/projects/:projectId/pipeline-definitions', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   if (body.id !== undefined || body.projectId !== undefined || body.project_id !== undefined
       || body.ownerUserId !== undefined || body.owner_user_id !== undefined) {
     return res.status(400).json({ error: 'Pipeline definition identity and ownership are server-controlled.' });
   }
   try {
-    const created = db.createProjectPipelineDefinition(req.user.id, req.params.projectId, {
+    const created = await db.createProjectPipelineDefinition(req.user.id, req.params.projectId, {
       manifest: body.manifest,
       visibility: body.visibility,
     });
-    res.status(201).json(created);
+    res.status(201).json(db.toPublicJob(created));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectPipelines');
   }
 });
 
-app.get('/api/projects/:projectId/pipeline-selection', (req, res) => {
+app.get('/api/projects/:projectId/pipeline-selection', async (req, res) => {
   try {
-    res.json(db.getProjectPipelineSelection(req.user.id, req.params.projectId));
+    res.json(await db.getProjectPipelineSelection(req.user.id, req.params.projectId));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectPipelines');
   }
 });
 
-app.put('/api/projects/:projectId/pipeline-selection', (req, res) => {
+app.put('/api/projects/:projectId/pipeline-selection', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   if (body.projectId !== undefined || body.project_id !== undefined
       || body.userId !== undefined || body.user_id !== undefined
@@ -1612,13 +1636,13 @@ app.put('/api/projects/:projectId/pipeline-selection', (req, res) => {
     return res.status(400).json({ error: 'Pipeline selection scope is server-controlled.' });
   }
   try {
-    res.json(db.setProjectPipelineSelection(req.user.id, req.params.projectId, body.pipelineId));
+    res.json(await db.setProjectPipelineSelection(req.user.id, req.params.projectId, body.pipelineId));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectPipelines');
   }
 });
 
-app.post('/api/projects/:projectId/analysis-objects', (req, res) => {
+app.post('/api/projects/:projectId/analysis-objects', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // lineageRootId is server-derived; reject any client-supplied value alongside
   // the id/owner/creator/project fields.
@@ -1639,13 +1663,13 @@ app.post('/api/projects/:projectId/analysis-objects', (req, res) => {
   // created-by provenance is user-scoped: the caller must own it (404 otherwise),
   // exactly as the owner-scoped route enforces. Provenance has no project.
   if (body.createdByProvenanceId !== undefined && body.createdByProvenanceId !== null) {
-    if (typeof body.createdByProvenanceId !== 'string' || !db.getProvenance(body.createdByProvenanceId, req.user.email)) {
+    if (typeof body.createdByProvenanceId !== 'string' || !(await db.getProvenance(body.createdByProvenanceId, req.user.email))) {
       return res.status(404).json({ error: 'Provenance record not found.' });
     }
   }
 
   try {
-    const created = db.createProjectAnalysisObject(req.user.id, req.params.projectId, {
+    const created = await db.createProjectAnalysisObject(req.user.id, req.params.projectId, {
       datasetId: body.datasetId,
       parentObjectId: body.parentObjectId,
       objectType: body.objectType,
@@ -1659,7 +1683,7 @@ app.post('/api/projects/:projectId/analysis-objects', (req, res) => {
   }
 });
 
-app.get('/api/projects/:projectId/analysis-objects', (req, res) => {
+app.get('/api/projects/:projectId/analysis-objects', async (req, res) => {
   const filters = {
     datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
     parentObjectId: typeof req.query.parentObjectId === 'string' ? req.query.parentObjectId : undefined,
@@ -1667,18 +1691,18 @@ app.get('/api/projects/:projectId/analysis-objects', (req, res) => {
     objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
   };
   try {
-    res.json(db.listProjectAnalysisObjects(req.user.id, req.params.projectId, filters).map(db.toPublicAnalysisObject));
+    res.json((await db.listProjectAnalysisObjects(req.user.id, req.params.projectId, filters)).map(db.toPublicAnalysisObject));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectAnalysisObjects');
   }
 });
 
-app.get('/api/projects/:projectId/analysis-objects/:objectId', (req, res) => {
+app.get('/api/projects/:projectId/analysis-objects/:objectId', async (req, res) => {
   if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
     return res.status(400).json({ error: 'Malformed analysis object ID.' });
   }
   try {
-    const obj = db.getProjectAnalysisObject(req.user.id, req.params.projectId, req.params.objectId);
+    const obj = await db.getProjectAnalysisObject(req.user.id, req.params.projectId, req.params.objectId);
     if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
     res.json(db.toPublicAnalysisObject(obj));
   } catch (e) {
@@ -1694,7 +1718,7 @@ app.get('/api/projects/:projectId/analysis-objects/:objectId', (req, res) => {
 // identity fields and any storage/state/path field are rejected; only finite numeric
 // cells/features/density are read. project_id/object_id come from the route, never
 // the body. Non-member → 404, member lacking a write role → 403.
-app.patch('/api/projects/:projectId/analysis-objects/:objectId/summary', (req, res) => {
+app.patch('/api/projects/:projectId/analysis-objects/:objectId/summary', async (req, res) => {
   if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
     return res.status(400).json({ error: 'Malformed analysis object ID.' });
   }
@@ -1702,7 +1726,7 @@ app.patch('/api/projects/:projectId/analysis-objects/:objectId/summary', (req, r
   if (rejectProjectResourceFields(req, res)) return;
   if (rejectAnalysisObjectStorageFields(body, res)) return;
   try {
-    const updated = db.updateProjectAnalysisObjectSummary(
+    const updated = await db.updateProjectAnalysisObjectSummary(
       req.user.id, req.params.projectId, req.params.objectId,
       { cells: body.cells, features: body.features, density: body.density }
     );
@@ -1722,40 +1746,40 @@ app.patch('/api/projects/:projectId/analysis-objects/:objectId/summary', (req, r
 // claim token, or worker internal is ever in the edge or node projections. A
 // malformed object id is 400; an object in another project (or legacy NULL-project)
 // is 404; a non-member is 404; a member lacking the read role is 403.
-app.get('/api/projects/:projectId/analysis-objects/:objectId/parents', (req, res) => {
+app.get('/api/projects/:projectId/analysis-objects/:objectId/parents', async (req, res) => {
   if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
     return res.status(400).json({ error: 'Malformed analysis object ID.' });
   }
   try {
-    res.json(db.listProjectAnalysisObjectParents(req.user.id, req.params.projectId, req.params.objectId));
+    res.json(await db.listProjectAnalysisObjectParents(req.user.id, req.params.projectId, req.params.objectId));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectLineage');
   }
 });
 
-app.get('/api/projects/:projectId/analysis-objects/:objectId/children', (req, res) => {
+app.get('/api/projects/:projectId/analysis-objects/:objectId/children', async (req, res) => {
   if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
     return res.status(400).json({ error: 'Malformed analysis object ID.' });
   }
   try {
-    res.json(db.listProjectAnalysisObjectChildren(req.user.id, req.params.projectId, req.params.objectId));
+    res.json(await db.listProjectAnalysisObjectChildren(req.user.id, req.params.projectId, req.params.objectId));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectLineage');
   }
 });
 
-app.get('/api/projects/:projectId/analysis-objects/:objectId/lineage', (req, res) => {
+app.get('/api/projects/:projectId/analysis-objects/:objectId/lineage', async (req, res) => {
   if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
     return res.status(400).json({ error: 'Malformed analysis object ID.' });
   }
   try {
-    res.json(db.getProjectAnalysisObjectLineage(req.user.id, req.params.projectId, req.params.objectId));
+    res.json(await db.getProjectAnalysisObjectLineage(req.user.id, req.params.projectId, req.params.objectId));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectLineage');
   }
 });
 
-app.post('/api/projects/:projectId/jobs', (req, res) => {
+app.post('/api/projects/:projectId/jobs', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // Status is server-managed; a client cannot pick the initial status.
   if (body.status !== undefined) {
@@ -1797,20 +1821,20 @@ app.post('/api/projects/:projectId/jobs', (req, res) => {
   }
 
   try {
-    const created = db.createProjectJob(req.user.id, req.params.projectId, {
+    const created = await db.createProjectJob(req.user.id, req.params.projectId, {
       analysisObjectId: body.analysisObjectId,
       resultAnalysisObjectId: body.resultAnalysisObjectId,
       datasetId: body.datasetId,
       jobType: body.jobType,
       parameters: body.parameters
     });
-    res.status(201).json(created);
+    res.status(201).json(db.toPublicJob(created));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
   }
 });
 
-app.get('/api/projects/:projectId/jobs', (req, res) => {
+app.get('/api/projects/:projectId/jobs', async (req, res) => {
   const filters = {
     status: typeof req.query.status === 'string' ? req.query.status : undefined,
     jobType: typeof req.query.jobType === 'string' ? req.query.jobType : undefined,
@@ -1819,31 +1843,31 @@ app.get('/api/projects/:projectId/jobs', (req, res) => {
     datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined
   };
   try {
-    res.json(db.listProjectJobs(req.user.id, req.params.projectId, filters));
+    res.json((await db.listProjectJobs(req.user.id, req.params.projectId, filters)).map(db.toPublicJob));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
   }
 });
 
-app.get('/api/projects/:projectId/jobs/:jobId', (req, res) => {
+app.get('/api/projects/:projectId/jobs/:jobId', async (req, res) => {
   if (!isValidJobIdFormat(req.params.jobId)) {
     return res.status(400).json({ error: 'Malformed job ID.' });
   }
   try {
-    const job = db.getProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    const job = await db.getProjectJob(req.user.id, req.params.projectId, req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found.' });
-    res.json(job);
+    res.json(db.toPublicJob(job));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
   }
 });
 
-app.get('/api/projects/:projectId/jobs/:jobId/logs', (req, res) => {
+app.get('/api/projects/:projectId/jobs/:jobId/logs', async (req, res) => {
   if (!isValidJobIdFormat(req.params.jobId)) {
     return res.status(400).json({ error: 'Malformed job ID.' });
   }
   try {
-    const job = db.getProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    const job = await db.getProjectJob(req.user.id, req.params.projectId, req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found.' });
     res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
   } catch (e) {
@@ -1851,13 +1875,13 @@ app.get('/api/projects/:projectId/jobs/:jobId/logs', (req, res) => {
   }
 });
 
-app.post('/api/projects/:projectId/jobs/:jobId/cancel', (req, res) => {
+app.post('/api/projects/:projectId/jobs/:jobId/cancel', async (req, res) => {
   if (!isValidJobIdFormat(req.params.jobId)) {
     return res.status(400).json({ error: 'Malformed job ID.' });
   }
   try {
-    const job = db.cancelProjectJob(req.user.id, req.params.projectId, req.params.jobId);
-    res.json(job);
+    const job = await db.cancelProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    res.json(db.toPublicJob(job));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
   }
@@ -1868,7 +1892,7 @@ app.post('/api/projects/:projectId/jobs/:jobId/cancel', (req, res) => {
 // members by role. project_id comes from the route; the responsible actor from
 // the session. There is no update/delete route (provenance is append-only). R
 // execution/state is untouched — this is metadata only.
-app.post('/api/projects/:projectId/provenance', (req, res) => {
+app.post('/api/projects/:projectId/provenance', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // Reject server-controlled id/owner/creator/project fields, plus the actor email
   // (server-derived from the session, never the body).
@@ -1900,7 +1924,7 @@ app.post('/api/projects/:projectId/provenance', (req, res) => {
   }
 
   try {
-    const created = db.createProjectProvenance(req.user.id, req.params.projectId, {
+    const created = await db.createProjectProvenance(req.user.id, req.params.projectId, {
       datasetId: body.datasetId,
       analysisObjectId: body.analysisObjectId,
       jobId: body.jobId,
@@ -1920,7 +1944,7 @@ app.post('/api/projects/:projectId/provenance', (req, res) => {
   }
 });
 
-app.get('/api/projects/:projectId/provenance', (req, res) => {
+app.get('/api/projects/:projectId/provenance', async (req, res) => {
   const filters = {
     datasetId: typeof req.query.datasetId === 'string' ? req.query.datasetId : undefined,
     analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
@@ -1928,18 +1952,18 @@ app.get('/api/projects/:projectId/provenance', (req, res) => {
     operation: typeof req.query.operation === 'string' ? req.query.operation : undefined
   };
   try {
-    res.json(db.listProjectProvenance(req.user.id, req.params.projectId, filters));
+    res.json(await db.listProjectProvenance(req.user.id, req.params.projectId, filters));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectProvenance');
   }
 });
 
-app.get('/api/projects/:projectId/provenance/:provenanceId', (req, res) => {
+app.get('/api/projects/:projectId/provenance/:provenanceId', async (req, res) => {
   if (!isValidProvenanceIdFormat(req.params.provenanceId)) {
     return res.status(400).json({ error: 'Malformed provenance ID.' });
   }
   try {
-    const prov = db.getProjectProvenance(req.user.id, req.params.projectId, req.params.provenanceId);
+    const prov = await db.getProjectProvenance(req.user.id, req.params.projectId, req.params.provenanceId);
     if (!prov) return res.status(404).json({ error: 'Provenance record not found.' });
     res.json(prov);
   } catch (e) {
@@ -1958,7 +1982,7 @@ const REJECTED_FIGURE_PATH_FIELDS = [
   'internalStorageKey', 'internal_storage_key', 'path'
 ];
 
-app.post('/api/projects/:projectId/figures', (req, res) => {
+app.post('/api/projects/:projectId/figures', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // Reject server-controlled id/owner/creator/project fields, the actor email, and
   // — critically — any client-supplied file path / storage key.
@@ -1978,7 +2002,7 @@ app.post('/api/projects/:projectId/figures', (req, res) => {
   }
 
   try {
-    const created = db.createProjectFigure(req.user.id, req.params.projectId, {
+    const created = await db.createProjectFigure(req.user.id, req.params.projectId, {
       analysisObjectId: body.analysisObjectId,
       jobId: body.jobId,
       provenanceId: body.provenanceId,
@@ -1995,7 +2019,7 @@ app.post('/api/projects/:projectId/figures', (req, res) => {
   }
 });
 
-app.get('/api/projects/:projectId/figures', (req, res) => {
+app.get('/api/projects/:projectId/figures', async (req, res) => {
   const filters = {
     analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
     jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
@@ -2004,18 +2028,18 @@ app.get('/api/projects/:projectId/figures', (req, res) => {
     plotType: typeof req.query.plotType === 'string' ? req.query.plotType : undefined
   };
   try {
-    res.json(db.listProjectFigures(req.user.id, req.params.projectId, filters));
+    res.json(await db.listProjectFigures(req.user.id, req.params.projectId, filters));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectFigures');
   }
 });
 
-app.get('/api/projects/:projectId/figures/:figureId', (req, res) => {
+app.get('/api/projects/:projectId/figures/:figureId', async (req, res) => {
   if (!isValidFigureIdFormat(req.params.figureId)) {
     return res.status(400).json({ error: 'Malformed figure ID.' });
   }
   try {
-    const fig = db.getProjectFigure(req.user.id, req.params.projectId, req.params.figureId);
+    const fig = await db.getProjectFigure(req.user.id, req.params.projectId, req.params.figureId);
     if (!fig) return res.status(404).json({ error: 'Figure not found.' });
     res.json(fig);
   } catch (e) {
@@ -2031,7 +2055,7 @@ app.get('/api/projects/:projectId/figures/:figureId', (req, res) => {
 // path or storage key is ever exposed; claim tokens / worker internals are not in
 // the artifact model at all. Legacy NULL-project artifacts never appear (the
 // helpers always pin a real project_id).
-app.get('/api/projects/:projectId/artifacts', (req, res) => {
+app.get('/api/projects/:projectId/artifacts', async (req, res) => {
   const filters = {
     jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
     artifactType: typeof req.query.artifactType === 'string' ? req.query.artifactType : undefined,
@@ -2043,18 +2067,18 @@ app.get('/api/projects/:projectId/artifacts', (req, res) => {
     figureId: typeof req.query.figureId === 'string' ? req.query.figureId : undefined
   };
   try {
-    res.json(db.listProjectArtifacts(req.user.id, req.params.projectId, filters));
+    res.json(await db.listProjectArtifacts(req.user.id, req.params.projectId, filters));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectArtifacts');
   }
 });
 
-app.get('/api/projects/:projectId/artifacts/:artifactId', (req, res) => {
+app.get('/api/projects/:projectId/artifacts/:artifactId', async (req, res) => {
   if (!isValidArtifactIdFormat(req.params.artifactId)) {
     return res.status(400).json({ error: 'Malformed artifact ID.' });
   }
   try {
-    const artifact = db.getProjectArtifact(req.user.id, req.params.projectId, req.params.artifactId);
+    const artifact = await db.getProjectArtifact(req.user.id, req.params.projectId, req.params.artifactId);
     if (!artifact) return res.status(404).json({ error: 'Artifact not found.' });
     res.json(artifact);
   } catch (e) {
@@ -2062,7 +2086,7 @@ app.get('/api/projects/:projectId/artifacts/:artifactId', (req, res) => {
   }
 });
 
-app.get('/api/projects/:projectId/jobs/:jobId/artifacts', (req, res) => {
+app.get('/api/projects/:projectId/jobs/:jobId/artifacts', async (req, res) => {
   if (!isValidJobIdFormat(req.params.jobId)) {
     return res.status(400).json({ error: 'Malformed job ID.' });
   }
@@ -2072,7 +2096,7 @@ app.get('/api/projects/:projectId/jobs/:jobId/artifacts', (req, res) => {
     resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined
   };
   try {
-    res.json(db.listProjectJobArtifacts(req.user.id, req.params.projectId, req.params.jobId, filters));
+    res.json(await db.listProjectJobArtifacts(req.user.id, req.params.projectId, req.params.jobId, filters));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectArtifacts');
   }
@@ -2507,10 +2531,16 @@ if (require.main === module) {
   }
   console.log('[Config]', JSON.stringify(config.summary()));
 
-  const httpServer = app.listen(PORT, () => {
-    console.log(`Node.js Web Server running on http://localhost:${PORT}`);
-    console.log(`Starting local R Plumber backend...`);
-    startRBackendAndJobWorkerIfEnabled();
+  let httpServer = null;
+  initAppDatabase().then(() => {
+    httpServer = app.listen(PORT, () => {
+      console.log(`Node.js Web Server running on http://localhost:${PORT}`);
+      console.log(`Starting local R Plumber backend...`);
+      startRBackendAndJobWorkerIfEnabled();
+    });
+  }).catch((err) => {
+    console.error('[DB] Refusing to start; Postgres initialization failed:', err && err.message ? err.message : err);
+    process.exit(1);
   });
 
   // Stop the worker cleanly on shutdown so no tick is left mid-claim. A single
@@ -2556,6 +2586,7 @@ module.exports = {
   // Exposed for tests: HttpOnly cookie session foundation
   parseCookies,
   buildSessionCookie,
+  initAppDatabase,
   resolveSessionUser,
   requireAuth,
   // Exposed for tests: auth rate limiting + R path-field drift guard

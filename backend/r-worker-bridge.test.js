@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
 // ════════════════════════════════════════════════════════════════════════════
 // Minimal worker-to-R bridge (r.runtime.check)
@@ -10,9 +10,11 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 // live-R object access all remain out of reach. See backend/rWorkerBridge.js.
 // ════════════════════════════════════════════════════════════════════════════
 
-const dbmod = require('./database');
+const config = require('./config');
+const dbmod = require('./pgDatabase');
+const CONFIGURED = config.hasPostgresConnection();
 const {
-  initDatabase, closeDatabase, createUser,
+  createUser,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getJobForUser, verifyAnalysisObjectOwner,
@@ -52,8 +54,10 @@ async function drainR(callR, now = T0, opts = {}) {
 // ════════════════════════════════════════════════════════════════════════════
 // 1. Bridge unit behavior (pure function; injected caller — no real R, no DB)
 // ════════════════════════════════════════════════════════════════════════════
-describe('rWorkerBridge — operation allowlist & request derivation', () => {
-  it('exposes the r.runtime.check operation (read-only, no object access)', () => {
+afterAll(async () => { if (!CONFIGURED) return; await dbmod.close(); });
+
+describe.skipIf(!CONFIGURED)('rWorkerBridge — operation allowlist & request derivation', () => {
+  it('exposes the r.runtime.check operation (read-only, no object access)', async () => {
     // The allowlist now also contains r.object.inspect (covered in r-object-inspect.test.js);
     // r.runtime.check remains exactly as before — read-only /health, no object context.
     expect(Object.keys(R_BRIDGE_OPERATIONS)).toContain('r.runtime.check');
@@ -139,7 +143,7 @@ describe('rWorkerBridge — operation allowlist & request derivation', () => {
   });
 });
 
-describe('rWorkerBridge — error & metadata sanitization (no leaks)', () => {
+describe.skipIf(!CONFIGURED)('rWorkerBridge — error & metadata sanitization (no leaks)', () => {
   it('sanitizes a transport error: a raw URL/host message never escapes', async () => {
     const leakyCaller = async () => {
       throw new Error('connect ECONNREFUSED http://127.0.0.1:8000/health (internal stack at /srv/app/x.js:1)');
@@ -198,7 +202,7 @@ describe('rWorkerBridge — error & metadata sanitization (no leaks)', () => {
     }
   });
 
-  it('sanitizeRuntimeField strips unsafe chars and caps length; drops non-scalars', () => {
+  it('sanitizeRuntimeField strips unsafe chars and caps length; drops non-scalars', async () => {
     expect(sanitizeRuntimeField('ok')).toBe('ok');
     expect(sanitizeRuntimeField('a/b\\c<d>e')).toBe('abcde');
     expect(sanitizeRuntimeField('x'.repeat(500)).length).toBe(64);
@@ -206,7 +210,7 @@ describe('rWorkerBridge — error & metadata sanitization (no leaks)', () => {
     expect(sanitizeRuntimeField('')).toBeNull();
   });
 
-  it('createDefaultRCaller returns a function and never accepts caller-chosen R code', () => {
+  it('createDefaultRCaller returns a function and never accepts caller-chosen R code', async () => {
     const callR = createDefaultRCaller({ port: 8000, token: 't' });
     expect(typeof callR).toBe('function');
     // The bridge module surface is pure helpers — NO express app/router/route was added.
@@ -219,11 +223,11 @@ describe('rWorkerBridge — error & metadata sanitization (no leaks)', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 2. Scope / registration (exactly one new type; existing behavior unchanged)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r-bridge — scope & registration', () => {
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+describe.skipIf(!CONFIGURED)('r-bridge — scope & registration', () => {
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  it('registers the r.runtime.check bridge handler; generic & checkpoint.noop unchanged', () => {
+
+  it('registers the r.runtime.check bridge handler; generic & checkpoint.noop unchanged', async () => {
     // The registry also contains r.object.inspect (covered in r-object-inspect.test.js);
     // here we assert r.runtime.check and the pre-existing handlers are intact.
     expect(Object.keys(DEFAULT_HANDLERS)).toContain('r.runtime.check');
@@ -234,48 +238,48 @@ describe('r-bridge — scope & registration', () => {
     expect(DEFAULT_HANDLERS['checkpoint.noop']).toBe(worker.checkpointNoopHandler);
   });
 
-  it('r.runtime.check is an allowed job type and r_runtime_check an allowed artifact type', () => {
+  it('r.runtime.check is an allowed job type and r_runtime_check an allowed artifact type', async () => {
     expect(isValidJobType('r.runtime.check')).toBe(true);
     expect(isValidArtifactType('r_runtime_check')).toBe(true);
   });
 
   it('a still-unregistered analytical job type remains a terminal UNSUPPORTED_JOB_TYPE failure', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const job = createJobForUser(alice.id, { jobType: 'normalize' });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const job = await createJobForUser(alice.id, { jobType: 'normalize' });
     const calls = [];
     const res = await drainR(recordingHealthyCaller(calls));
     expect(res.status).toBe('unsupported');
     expect(calls).toHaveLength(0); // unsupported types never reach the R bridge
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.status).toBe('failed');
     expect(after.error.code).toBe('UNSUPPORTED_JOB_TYPE');
   });
 
   it('the generic noop still neither calls R nor creates artifacts', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const job = createJobForUser(alice.id, { jobType: 'generic' });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const job = await createJobForUser(alice.id, { jobType: 'generic' });
     const calls = [];
     const res = await drainR(recordingHealthyCaller(calls));
     expect(res.status).toBe('completed');
     expect(res.result).toEqual({ ok: true, handled: 'generic', noop: true });
     expect(calls).toHaveLength(0);
-    expect(getJobForUser(job.id, alice.id).resultAnalysisObjectId).toBeFalsy();
+    expect((await getJobForUser(job.id, alice.id)).resultAnalysisObjectId).toBeFalsy();
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
 // 3. Worker integration (claim → bridge → artifact through the contract)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r-bridge — worker integration', () => {
+describe.skipIf(!CONFIGURED)('r-bridge — worker integration', () => {
   let alice;
-  beforeEach(() => {
-    initDatabase(':memory:');
-    alice = createUser('alice@example.com', 'password123', 'Alice');
+  beforeEach(async () => {
+    await dbmod.resetSchemaForTests();
+    alice = await createUser('alice@example.com', 'password123', 'Alice');
   });
-  afterEach(() => { closeDatabase(); });
+
 
   it('completes a r.runtime.check job and records EXACTLY one metadata-only artifact (no checkpoint)', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    const job = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
     const calls = [];
     const res = await drainR(recordingHealthyCaller(calls));
 
@@ -286,13 +290,13 @@ describe('r-bridge — worker integration', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ method: 'GET', path: '/health' });
 
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.status).toBe('completed');
     // NON-mutating inspection: no checkpoint / result analysis object created.
     expect(after.resultAnalysisObjectId).toBeFalsy();
 
     // Exactly one metadata-only artifact of the allowlisted type.
-    const arts = getJobArtifactsByJobId(job.id);
+    const arts = await getJobArtifactsByJobId(job.id);
     expect(arts).toHaveLength(1);
     expect(arts[0].id).toBe(res.result.artifactId);
     expect(res.result.artifactId).toMatch(/^art_/);
@@ -308,7 +312,7 @@ describe('r-bridge — worker integration', () => {
   });
 
   it('operation input is SERVER-DERIVED: job parameters cannot redirect the R call', async () => {
-    createJobForUser(alice.id, {
+    await createJobForUser(alice.id, {
       jobType: 'r.runtime.check',
       parameters: { operation: 'r.exec', code: 'system("rm -rf /")', path: '/load-rds', endpoint: 'http://evil', method: 'POST' },
     });
@@ -321,14 +325,14 @@ describe('r-bridge — worker integration', () => {
   });
 
   it('a failed bridge call fails the job with a sanitized error and NO successful artifact', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    const job = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
     const leakyCaller = async () => { throw new Error('connect ECONNREFUSED http://127.0.0.1:8000/health'); };
     const res = await drainR(leakyCaller);
 
     expect(res.status).toBe('failed');
     expect(res.error.code).toBe('HANDLER_ERROR');
 
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.status).toBe('failed');
     // Sanitized: no raw URL/host/ECONNREFUSED in the durable error or logs.
     const blob = JSON.stringify(after);
@@ -336,11 +340,11 @@ describe('r-bridge — worker integration', () => {
       expect(blob).not.toContain(forbidden);
     }
     // No artifact was created for the failed job.
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('cancellation during the bridge handler is a claim-loss no-op (no artifact, not resurrected)', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    const job = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
     // The R call "succeeds", but the user cancels mid-run, so the subsequent
     // claim-guarded artifact write must fail with CLAIM_LOST and finalize nothing.
     const cancelMidCall = async (req) => {
@@ -350,29 +354,27 @@ describe('r-bridge — worker integration', () => {
     const res = await drainR(cancelMidCall);
 
     expect(res.status).toBe('claim_lost');
-    const after = getJobForUser(job.id, alice.id);
+    const after = await getJobForUser(job.id, alice.id);
     expect(after.status).toBe('canceled'); // NOT completed
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('claim loss (reaped lease) before artifact write prevents finalizing any artifact', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.runtime.check' });
-    setJobScheduling(job.id, { maxAttempts: 2 });
+    const job = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    await setJobScheduling(job.id, { maxAttempts: 2 });
     // A stale worker claims at T0; its lease is reaped at LATER inside the handler.
-    const stale = claimNextJob('worker_stale', { now: T0, leaseSeconds: 30 });
+    const stale = await claimNextJob('worker_stale', { now: T0, leaseSeconds: 30 });
     expect(stale.id).toBe(job.id);
-    reapExpiredJobs({ now: LATER }); // clears the stale claim → back to queued
+    await reapExpiredJobs({ now: LATER }); // clears the stale claim → back to queued
 
     // The stale worker now tries to write an artifact directly: it must be refused.
-    expect(() =>
-      dbmod.createJobArtifactByWorker(job.id, 'worker_stale', stale.claimToken,
-        { artifactType: 'r_runtime_check', storageKind: 'metadata_only', metadata: {} }, { now: LATER })
-    ).toThrow(/claim/i);
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(0);
+    await expect(dbmod.createJobArtifactByWorker(job.id, 'worker_stale', stale.claimToken,
+        { artifactType: 'r_runtime_check', storageKind: 'metadata_only', metadata: {} }, { now: LATER })).rejects.toThrow(/claim/i);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(0);
   });
 
   it('two workers cannot create duplicate artifacts for the same r.runtime.check job', async () => {
-    const job = createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    const job = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
     const callsA = []; const callsB = [];
     const a = createJobWorker({ db: dbmod, workerId: 'worker_a', now: () => T0, logger: silentLogger(), callR: recordingHealthyCaller(callsA) });
     const b = createJobWorker({ db: dbmod, workerId: 'worker_b', now: () => T0, logger: silentLogger(), callR: recordingHealthyCaller(callsB) });
@@ -381,40 +383,40 @@ describe('r-bridge — worker integration', () => {
     const resB = await b.runOnce();
 
     expect([resA.status, resB.status].sort()).toEqual(['completed', 'idle']); // exactly one winner
-    expect(getJobForUser(job.id, alice.id).status).toBe('completed');
+    expect((await getJobForUser(job.id, alice.id)).status).toBe('completed');
     // Exactly one artifact total for the job (the loser created none).
-    expect(getJobArtifactsByJobId(job.id)).toHaveLength(1);
+    expect(await getJobArtifactsByJobId(job.id)).toHaveLength(1);
   });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
 // 4. Artifact public exposure (project-scoped HTTP reads; no leaks)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r-bridge — artifact public exposure', () => {
+describe.skipIf(!CONFIGURED)('r-bridge — artifact public exposure', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  function seedProject(ownerUserId, name = 'P') {
-    const org = createOrganizationForUser(ownerUserId, { name: 'Acme' });
+
+  async function seedProject(ownerUserId, name = 'P') {
+    const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
     return createProjectForUser(ownerUserId, { organizationId: org.id, name });
   }
 
   // Drive a project r.runtime.check job to completion with an injected healthy caller.
   async function seedRArtifact(projectId, ownerUserId) {
-    const job = createProjectJob(ownerUserId, projectId, { jobType: 'r.runtime.check' });
+    const job = await createProjectJob(ownerUserId, projectId, { jobType: 'r.runtime.check' });
     const res = await drainR(recordingHealthyCaller([]));
-    const arts = listProjectArtifacts(ownerUserId, projectId);
+    const arts = await listProjectArtifacts(ownerUserId, projectId);
     return { job, artifact: arts[0], res };
   }
 
   it('every project member role (incl. viewer) can read the r_runtime_check artifact metadata', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const viewer = createUserWithToken({ email: 'viewer@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const viewer = await createUserWithToken({ email: 'viewer@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'viewer@example.com', 'viewer', 'owner');
     const { job, artifact } = await seedRArtifact(proj.id, alice.user.id);
 
     expect(artifact.artifactType).toBe('r_runtime_check');
@@ -438,9 +440,9 @@ describe('r-bridge — artifact public exposure', () => {
   });
 
   it('a non-member receives 404 (no existence leak)', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const dave = createUserWithToken({ email: 'dave@example.com' });
-    const proj = seedProject(alice.user.id);
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const dave = await createUserWithToken({ email: 'dave@example.com' });
+    const proj = await seedProject(alice.user.id);
     const { job, artifact } = await seedRArtifact(proj.id, alice.user.id);
 
     expect((await api(server, `/api/projects/${proj.id}/artifacts`, { token: dave.token })).status).toBe(404);
@@ -449,8 +451,8 @@ describe('r-bridge — artifact public exposure', () => {
   });
 
   it('the public artifact response omits storage uri / paths / state keys / worker internals / R URLs', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const proj = seedProject(alice.user.id);
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const proj = await seedProject(alice.user.id);
     const { artifact } = await seedRArtifact(proj.id, alice.user.id);
 
     const one = await api(server, `/api/projects/${proj.id}/artifacts/${artifact.id}`, { token: alice.token });
@@ -476,22 +478,22 @@ describe('r-bridge — artifact public exposure', () => {
 // ════════════════════════════════════════════════════════════════════════════
 // 5. Ownership / live-R boundary (membership ≠ live R object access)
 // ════════════════════════════════════════════════════════════════════════════
-describe('r-bridge — R ownership boundary unchanged', () => {
+describe.skipIf(!CONFIGURED)('r-bridge — R ownership boundary unchanged', () => {
   let server;
   beforeAll(async () => { server = await startServer(); });
   afterAll(() => { if (server) server.close(); });
-  beforeEach(() => { initDatabase(':memory:'); });
-  afterEach(() => { closeDatabase(); });
+  beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
-  function seedProject(ownerUserId, name = 'P') {
-    const org = createOrganizationForUser(ownerUserId, { name: 'Acme' });
+
+  async function seedProject(ownerUserId, name = 'P') {
+    const org = await createOrganizationForUser(ownerUserId, { name: 'Acme' });
     return createProjectForUser(ownerUserId, { organizationId: org.id, name });
   }
 
   it('r.runtime.check does NOT inspect or mutate any analysis object or create a checkpoint', async () => {
-    const alice = createUser('alice@example.com', 'password123', 'Alice');
-    const obj = createAnalysisObjectForUser(alice.id, { objectType: 'seurat', name: 'aliceObj' });
-    const job = createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    const alice = await createUser('alice@example.com', 'password123', 'Alice');
+    const obj = await createAnalysisObjectForUser(alice.id, { objectType: 'seurat', name: 'aliceObj' });
+    const job = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
 
     const calls = [];
     const res = await drainR(recordingHealthyCaller(calls));
@@ -504,27 +506,27 @@ describe('r-bridge — R ownership boundary unchanged', () => {
     expect(calls[0]).not.toHaveProperty('stateKey');
 
     // Object ownership unchanged; no result/checkpoint object was produced.
-    expect(verifyAnalysisObjectOwner(alice.id, obj.id)).toBe(true);
-    expect(getJobForUser(job.id, alice.id).resultAnalysisObjectId).toBeFalsy();
+    expect(await verifyAnalysisObjectOwner(alice.id, obj.id)).toBe(true);
+    expect((await getJobForUser(job.id, alice.id)).resultAnalysisObjectId).toBeFalsy();
   });
 
   it('running an r.runtime.check job does NOT widen R object access for a project co-member', async () => {
-    const alice = createUserWithToken({ email: 'alice@example.com' });
-    const bob = createUserWithToken({ email: 'bob@example.com' });
-    const proj = seedProject(alice.user.id);
-    addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner'); // even an admin co-member
+    const alice = await createUserWithToken({ email: 'alice@example.com' });
+    const bob = await createUserWithToken({ email: 'bob@example.com' });
+    const proj = await seedProject(alice.user.id);
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner'); // even an admin co-member
 
     // Alice owns a live analysis object in the project.
-    const obj = createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', name: 'aliceObj' });
+    const obj = await createProjectAnalysisObject(alice.user.id, proj.id, { objectType: 'seurat', name: 'aliceObj' });
 
     // Run a bridge job in the project.
-    createProjectJob(alice.user.id, proj.id, { jobType: 'r.runtime.check' });
+    await createProjectJob(alice.user.id, proj.id, { jobType: 'r.runtime.check' });
     const res = await drainR(recordingHealthyCaller([]));
     expect(res.status).toBe('completed');
 
     // R object ownership is still creator-keyed, NOT project-member-keyed.
-    expect(verifyAnalysisObjectOwner(alice.user.id, obj.id)).toBe(true);
-    expect(verifyAnalysisObjectOwner(bob.user.id, obj.id)).toBe(false);
+    expect(await verifyAnalysisObjectOwner(alice.user.id, obj.id)).toBe(true);
+    expect(await verifyAnalysisObjectOwner(bob.user.id, obj.id)).toBe(false);
 
     // Bob supplying Alice's object id as X-Object-ID is still rejected before reaching R.
     const r = await api(server, '/api/r/health', { token: bob.token, headers: { 'X-Object-ID': obj.id } });
