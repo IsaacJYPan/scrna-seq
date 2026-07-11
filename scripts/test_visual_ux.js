@@ -505,6 +505,27 @@ async function main() {
     });
   });
 
+  // The visual suite has no R backend. Mirror the loaded mock object so the
+  // startup state probe does not fall through to Vite's unavailable API proxy.
+  await page.route('**/pipeline-state*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        exists: true,
+        has_qc: true,
+        has_normalized: true,
+        has_integrated: false,
+        has_pca: true,
+        pca_dims: 15,
+        has_clusters: true,
+        n_clusters: 8,
+        has_umap: true
+      })
+    });
+  });
+
   await page.route('**/restore-session*', async route => {
     await route.fulfill({
       status: 200,
@@ -578,6 +599,23 @@ async function main() {
       headers: corsHeaders,
       body: JSON.stringify({
         genes: ['CD3E', 'CD4', 'CD8A', 'MS4A1']
+      })
+    });
+  });
+
+  await page.route('**/heatmap*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        genes: ['CD3E', 'MS4A1', 'LYZ'],
+        clusters: ['0', '1', '2'],
+        z: [
+          [1.2, 0.2, -0.4],
+          [-0.3, 1.5, 0.1],
+          [0.2, -0.2, 1.3]
+        ]
       })
     });
   });

@@ -339,7 +339,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           <button
             onClick={handleFiltering}
             disabled={filtering || !distributions || Boolean(validationError)}
-            className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-success border border-success hover:bg-success/30' : 'btn-primary'} flex items-center justify-center gap-2`}
+            className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-text border border-success hover:bg-success/30' : 'btn-primary'} flex items-center justify-center gap-2`}
           >
             {filtering && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
             {!filtering && (result || pipelineState?.qc) && <ShieldCheck size={18} />}
