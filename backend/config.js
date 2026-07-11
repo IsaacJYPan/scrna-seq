@@ -173,6 +173,7 @@ function resolveRoot(envValue, fallbackSegments) {
   return path.join(process.cwd(), ...fallbackSegments);
 }
 
+// Project-scoped durable files and temporary upload staging.
 function storageRoot() {
   return resolveRoot(process.env.STORAGE_ROOT, ['data']);
 }
