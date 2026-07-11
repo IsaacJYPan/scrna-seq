@@ -813,10 +813,69 @@ export default function App() {
       .finally(() => setSessionCheckDone(true));
   }, [user?.email, datasetInfo?.id, resetPipelineState]);
 
+  const pipelineProbeKeyRef = React.useRef(null);
+  const pipelineProbeAttachedRef = React.useRef(false);
+  const pipelineProbeAttemptsRef = React.useRef(0);
+  const [pipelineProbeRetry, setPipelineProbeRetry] = useState(0);
+  useEffect(() => {
+    const objectId = datasetInfo?.id;
+    if (!user?.email || !objectId || !sessionCheckDone) return;
+    const key = `${user.email}:${objectId}:${rSessionId || 'unknown'}`;
+    if (pipelineProbeKeyRef.current === key) {
+      if (pipelineProbeAttachedRef.current && datasetInfo?.liveState !== 'attached') {
+        patchActiveWorkspace(ws => ({
+          objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
+        }));
+      }
+      return;
+    }
+    pipelineProbeKeyRef.current = key;
+
+    window.electronAPI.apiRequest('/pipeline-state', {
+      headers: { 'X-Object-ID': objectId }
+    }).then(state => {
+      if (!state?.exists) {
+        pipelineProbeAttemptsRef.current = 0;
+        pipelineProbeAttachedRef.current = false;
+        resetPipelineState();
+        patchActiveWorkspace(ws => ({
+          objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'not_attached' } : object),
+        }));
+        return;
+      }
+      pipelineProbeAttemptsRef.current = 0;
+      pipelineProbeAttachedRef.current = true;
+      patchActiveWorkspace(ws => ({
+        objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
+      }));
+      setPipelineState(prev => ({
+        ...prev,
+        qc: Boolean(state.has_qc),
+        normalize: Boolean(state.has_normalized),
+        integrate: Boolean(state.has_integrated),
+        pca: Boolean(state.has_pca),
+        cluster: Boolean(state.has_clusters),
+        umap: Boolean(state.has_umap),
+        clusterCount: Number(state.n_clusters) || 0,
+        clusterDims: Number(state.pca_dims) || 15,
+      }));
+    }).catch(() => {
+      pipelineProbeKeyRef.current = null;
+      if (pipelineProbeAttemptsRef.current < 3) {
+        pipelineProbeAttemptsRef.current += 1;
+        window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
+      }
+    });
+  }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace]);
+
 
 
   // 3. Recalculate pipeline state when active node (currentProvId) changes
   useEffect(() => {
+    if (datasetInfo?.liveState !== 'attached') {
+      resetPipelineState();
+      return;
+    }
     if (!currentProvId || provenanceRecords.length === 0) {
       return;
     }
@@ -873,7 +932,7 @@ export default function App() {
     
     const nextState = computeState(currentProvId);
     setPipelineState(nextState);
-  }, [currentProvId, provenanceRecords]);
+  }, [currentProvId, provenanceRecords, datasetInfo?.liveState, resetPipelineState]);
   // ────────────────────────────────────────────────────────────────
 
   if (!isLoggedIn) return <Login onLogin={(u) => setUser(u || null)} theme={theme} setTheme={setTheme} />;

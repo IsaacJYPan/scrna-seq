@@ -92,10 +92,19 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetInfo, rSessionId, sessionReady]);
 
-  const mtCutoffNum = parseFloat(mtCutoff) || 0;
-  const minFeatNum = parseInt(minFeatures) || 0;
-  const maxFeatNum = parseInt(maxFeatures) || 0;
-  const minCountsNum = parseInt(minCounts) || 0;
+  const mtCutoffNum = Number(mtCutoff);
+  const minFeatNum = Number(minFeatures);
+  const maxFeatNum = Number(maxFeatures);
+  const minCountsNum = Number(minCounts);
+  const validationError = !Number.isFinite(mtCutoffNum) || mtCutoffNum <= 0 || mtCutoffNum > 100
+    ? 'Max MT % must be greater than 0 and no more than 100.'
+    : !Number.isInteger(minFeatNum) || minFeatNum < 0
+      ? 'Min Features must be a whole number of 0 or more.'
+      : !Number.isInteger(maxFeatNum) || maxFeatNum <= minFeatNum
+        ? 'Max Features must be a whole number greater than Min Features.'
+        : !Number.isInteger(minCountsNum) || minCountsNum < 0
+          ? 'Min Counts must be a whole number of 0 or more.'
+          : null;
 
   const endpoint = '/qc';
   const qcPayload = {
@@ -126,6 +135,13 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
     sessionReady,
     rSessionId
   });
+  const handleFiltering = () => {
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    runFiltering();
+  };
 
   // --- Compute stats from real distribution data ---
   const mtValues = React.useMemo(() => distributions?.percent_mt || [], [distributions]);
@@ -321,8 +337,8 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             ><FileText size={15} /> View Step Script</button>
           )}
           <button
-            onClick={runFiltering}
-            disabled={filtering || !distributions}
+            onClick={handleFiltering}
+            disabled={filtering || !distributions || Boolean(validationError)}
             className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-success border border-success hover:bg-success/30' : 'btn-primary'} flex items-center justify-center gap-2`}
           >
             {filtering && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
@@ -444,33 +460,34 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
           <div>
             <label htmlFor="qc-mt" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Max MT %</label>
-            <input id="qc-mt" type="number" step="0.5" value={mtCutoff}
+            <input id="qc-mt" type="number" min="0.1" max="100" step="0.5" value={mtCutoff} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('mtCutoff', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
             <p className="text-[10px] text-slate-400 mt-1">Cells above this % are removed</p>
           </div>
           <div>
             <label htmlFor="qc-minf" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Min Features</label>
-            <input id="qc-minf" type="number" value={minFeatures}
+            <input id="qc-minf" type="number" min="0" step="1" value={minFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
             <p className="text-[10px] text-slate-400 mt-1">nFeature_RNA lower bound</p>
           </div>
           <div>
             <label htmlFor="qc-maxf" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Max Features</label>
-            <input id="qc-maxf" type="number" value={maxFeatures}
+            <input id="qc-maxf" type="number" min="1" step="1" value={maxFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('maxFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
             <p className="text-[10px] text-slate-400 mt-1">nFeature_RNA upper bound</p>
           </div>
           <div>
             <label htmlFor="qc-minc" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Min Counts</label>
-            <input id="qc-minc" type="number" value={minCounts}
+            <input id="qc-minc" type="number" min="0" step="1" value={minCounts} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minCounts', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
             <p className="text-[10px] text-slate-400 mt-1">nCount_RNA lower bound</p>
           </div>
         </div>
+        {validationError && <p className="mt-4 text-sm text-danger" role="alert">{validationError}</p>}
 
         <details className="mt-6 border-t border-border/50 pt-4 group">
           <summary className="text-sm font-bold flex items-center gap-2 cursor-pointer text-slate-400 hover:text-white transition-colors list-none">

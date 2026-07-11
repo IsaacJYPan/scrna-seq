@@ -134,7 +134,7 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
               <option value={4}>Leiden</option>
               <option value={1}>Louvain</option>
             </select>
-            <p className="text-[10px] text-slate-400 mt-1">Leiden is generally preferred</p>
+            <p className="text-[10px] text-textMuted mt-1">Louvain is the default.</p>
           </div>
           <div>
             <label htmlFor="cluster-res" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Resolution</label>
