@@ -44,7 +44,14 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
   };
 
   const fetchFeaturePlot = async (g) => {
-    const target = g || gene;
+    const requested = String(g || geneInput).trim();
+    const target = geneList.find(item => item.toLowerCase() === requested.toLowerCase());
+    if (requested && !target) {
+      setError(`Gene "${requested}" was not found.`);
+      setPlotData(null);
+      setSuggestions([]);
+      return;
+    }
     if (!target) return;
     setLoading(true);
     setError(null);
@@ -171,12 +178,12 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
               className="bg-surface border border-border text-text text-sm px-3 py-2 rounded-lg w-52 focus:outline-none focus:border-primary"
             />
             {suggestions.length > 0 && (
-              <div className="absolute top-full left-0 mt-1 w-full bg-slate-800 border border-slate-700 rounded-lg shadow-2xl z-50 overflow-hidden">
+              <div className="absolute top-full left-0 mt-1 w-full bg-surface border border-border rounded-lg shadow-2xl z-50 overflow-hidden">
                 {suggestions.map(s => (
                   <button
                     key={s}
                     onClick={() => fetchFeaturePlot(s)}
-                    className="w-full text-left px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700 hover:text-white transition-colors"
+                    className="w-full text-left px-3 py-1.5 text-sm text-textMuted hover:bg-primary/10 hover:text-text transition-colors"
                   >
                     {s}
                   </button>

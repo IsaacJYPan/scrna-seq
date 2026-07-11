@@ -304,7 +304,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
                   {multiPaths.length} folder{multiPaths.length !== 1 ? 's' : ''} selected — edit sample names and metadata column below.
                 </p>
               </div>
-              <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
+              <button onClick={onClose} aria-label="Close dataset loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
                 <X size={16} />
               </button>
             </div>
@@ -470,7 +470,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
               <h3 className="text-lg font-black text-white tracking-tight">Load / Attach Object</h3>
               <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a DB-backed object and attach private live R state.</p>
             </div>
-            <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
+            <button onClick={onClose} aria-label="Close demo loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
               <X size={16} />
             </button>
           </div>
@@ -656,9 +656,10 @@ function scrubEmptyParams(params) {
   return out;
 }
 
-function pipelineStatus(done, hasObject, fallback = 'Requires loaded object') {
+function pipelineStatus(done, hasObject, liveAttached, fallback = 'Requires loaded object') {
   if (!hasObject) return { label: fallback, tone: 'slate' };
-  return done ? { label: 'Ready', tone: 'green' } : { label: 'Ready', tone: 'blue' };
+  if (!liveAttached) return { label: 'Attach object', tone: 'amber' };
+  return done ? { label: 'Complete', tone: 'green' } : { label: 'Not run', tone: 'blue' };
 }
 
 function WorkbenchOverview({
@@ -693,11 +694,11 @@ function WorkbenchOverview({
           : { label: 'Requires loaded object', tone: 'slate' },
       detail: 'DB-backed analysis object identity.',
     },
-    { label: 'Inspect', status: pipelineStatus(false, hasObject), detail: 'Live object metadata and subsetting.' },
-    { label: 'Quality control', status: pipelineStatus(pipelineState?.qc, hasObject), detail: 'Transient live-R workflow.' },
-    { label: 'Normalize', status: pipelineStatus(pipelineState?.normalize, hasObject), detail: 'Transient live-R workflow.' },
-    { label: 'PCA', status: pipelineStatus(pipelineState?.pca, hasObject), detail: 'Transient live-R workflow.' },
-    { label: 'Cluster / UMAP', status: !hasObject ? { label: 'Requires loaded object', tone: 'slate' } : pipelineState?.pca ? { label: 'Ready', tone: 'blue' } : { label: 'Requires PCA', tone: 'amber' }, detail: 'Live-R analysis and visualization.' },
+    { label: 'Inspect', status: pipelineStatus(liveAttached, hasObject, liveAttached), detail: 'Live object metadata and subsetting.' },
+    { label: 'Quality control', status: pipelineStatus(pipelineState?.qc, hasObject, liveAttached), detail: 'Transient live-R workflow.' },
+    { label: 'Normalize', status: pipelineStatus(pipelineState?.normalize, hasObject, liveAttached), detail: 'Transient live-R workflow.' },
+    { label: 'PCA', status: pipelineStatus(pipelineState?.pca, hasObject, liveAttached), detail: 'Transient live-R workflow.' },
+    { label: 'Cluster / UMAP', status: !hasObject ? { label: 'Requires loaded object', tone: 'slate' } : !liveAttached ? { label: 'Attach object', tone: 'amber' } : pipelineState?.pca ? { label: 'Ready', tone: 'blue' } : { label: 'Requires PCA', tone: 'amber' }, detail: 'Live-R analysis and visualization.' },
     {
       label: 'Markers / DEG',
       status: !hasObject
@@ -1507,7 +1508,7 @@ export default function Workspace({
   // ── Project Management ──────────────────────────────────────────
 
   const handleCreateProject = async () => {
-    if (!newProjectName.trim()) return;
+    if (!newProjectName.trim() || newProjectName.trim().length > 100) return;
     try {
       const project = await onCreateProject?.({ name: newProjectName.trim(), description: '' });
       if (project?.id) setActiveProjectId(project.id);
@@ -1618,11 +1619,16 @@ export default function Workspace({
                     value={newProjectName}
                     onChange={e => setNewProjectName(e.target.value)}
                     placeholder="Project Name"
-                    className="bg-slate-800 border border-slate-700 text-sm text-white px-3 py-1.5 rounded focus:outline-none focus:border-primary w-40"
+                    maxLength={100}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && newProjectName.trim()) handleCreateProject();
+                      if (e.key === 'Escape') setIsCreatingProject(false);
+                    }}
+                    className="bg-surface border border-border text-sm text-text px-3 py-1.5 rounded focus:outline-none focus:border-primary w-40"
                     autoFocus
                   />
-                  <button onClick={handleCreateProject} className="btn btn-primary text-xs px-3 py-1.5">Save</button>
-                  <button onClick={() => setIsCreatingProject(false)} className="text-slate-400 hover:text-white px-2"><X size={14} /></button>
+                  <button onClick={handleCreateProject} disabled={!newProjectName.trim()} className="btn btn-primary text-xs px-3 py-1.5">Save</button>
+                  <button onClick={() => setIsCreatingProject(false)} aria-label="Cancel project creation" className="text-textMuted hover:text-text px-2"><X size={14} /></button>
                 </div>
               ) : (
                 <button
