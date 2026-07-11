@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // react-plotly.js pulls in the full Plotly bundle; stub it so the QC page can
@@ -51,5 +51,16 @@ describe('QualityControl', () => {
     }).not.toThrow();
 
     expect(screen.getByText('No Dataset Loaded')).toBeInTheDocument();
+  });
+
+  it('blocks impossible filter ranges before calling the analysis endpoint', async () => {
+    const callApi = vi.fn(async () => ({ percent_mt: [1], nFeature_RNA: [100], nCount_RNA: [200] }));
+    render(<QualityControl {...baseProps({ callApi })} />);
+    await screen.findByText('Quality Control');
+    fireEvent.change(screen.getByLabelText('Min Features'), { target: { value: '6000' } });
+    fireEvent.change(screen.getByLabelText('Max Features'), { target: { value: '5000' } });
+    expect(screen.getByText(/Max Features must be/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Apply QC Filters/i })).toBeDisabled();
+    expect(callApi).toHaveBeenCalledTimes(1);
   });
 });

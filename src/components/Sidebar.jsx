@@ -220,7 +220,7 @@ export default function Sidebar({
             <NavButton item={{ id: 'pipeline-manager', label: 'Pipeline Manager', icon: LayoutPanelTop, status: hasProject ? 'User scoped' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
               <SectionLabel>Data / Object</SectionLabel>
-              <NavButton item={{ id: 'publication', label: 'Reports / Export', icon: LayoutPanelTop, status: 'Figures only' }} disabled={!hasData} />
+              <NavButton item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
               <NavButton item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
             </div>
           </div>

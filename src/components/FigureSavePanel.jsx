@@ -240,7 +240,7 @@ export default function FigureSavePanel({
               <p className="text-[11px] text-textMuted">{plotType} · Publication-quality export</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-textMuted hover:text-text transition-colors p-1 rounded hover:bg-white/10">
+          <button onClick={onClose} aria-label="Close figure editor" className="text-textMuted hover:text-text transition-colors p-1 rounded hover:bg-white/10">
             <X size={18} />
           </button>
         </div>
@@ -471,7 +471,7 @@ export default function FigureSavePanel({
               )}
               <button
                 onClick={handleSave}
-                disabled={saving}
+                disabled={saving || previewLoading || !previewB64 || Boolean(previewError)}
                 className="w-full btn btn-primary h-12 flex items-center justify-center gap-2 text-sm font-bold"
               >
                 {saving

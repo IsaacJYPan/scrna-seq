@@ -281,10 +281,10 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           <p className="text-textMuted">Uniform Manifold Approximation and Projection for visualization.</p>
         </div>
         <div className="flex gap-3">
-          <button
+          {result && activeTraces.length > 0 && <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => setSavePanelOpen(true)}
-            ><ImageDown size={15} /> Save Figure</button>
+            ><ImageDown size={15} /> Save Figure</button>}
           {result && (
             <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"

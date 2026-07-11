@@ -10,6 +10,11 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
     nFeatures: 2000,
   });
   const { method, scaleFactor, nFeatures, varsToRegress } = params;
+  const validationError = method === 'LogNormalize' && (!Number.isInteger(Number(scaleFactor)) || Number(scaleFactor) < 1)
+    ? 'Scale Factor must be a whole number greater than 0.'
+    : !Number.isInteger(Number(nFeatures)) || Number(nFeatures) < 1 || Number(nFeatures) > 100000
+      ? 'Variable Features must be a whole number from 1 to 100,000.'
+      : null;
   const endpoint = `/normalize?method=${method}&scale_factor=${scaleFactor}&nfeatures=${nFeatures}${varsToRegress ? `&vars_to_regress=${encodeURIComponent(varsToRegress)}` : ''}`;
 
   const { running, result, error, runStep: runNormalization } = usePipelineStep({
@@ -32,7 +37,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
           <Sparkles size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
-          <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
+          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
           <p className="text-textMuted">Load a dataset in the Workspace first.</p>
         </div>
       </div>
@@ -44,7 +49,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
           <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">QC Required</h2>
+          <h2 className="text-xl font-bold text-text mb-2">QC Required</h2>
           <p className="text-textMuted">Complete the Quality Control step before normalization. Running normalization on unfiltered data may produce unreliable results.</p>
         </div>
       </div>
@@ -55,7 +60,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
     <div className="h-full w-full p-4 sm:p-6 lg:p-8 overflow-y-auto bg-background custom-scrollbar">
       <div className="flex flex-col gap-4 mb-8 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Normalization</h2>
+          <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">Normalization</h2>
           <p className="text-textMuted">Normalize counts and identify highly variable features.</p>
         </div>
         <div className="flex w-full flex-col items-stretch gap-3 sm:flex-row sm:items-center lg:w-auto">
@@ -67,7 +72,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
           )}
           <button
             onClick={() => runNormalization(false)}
-            disabled={running}
+            disabled={running || Boolean(validationError)}
             className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center justify-center gap-2`}
           >
             {running && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
@@ -83,6 +88,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
           <span className="text-sm font-medium">{error}</span>
         </div>
       )}
+      {validationError && <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger text-sm" role="alert">{validationError}</div>}
 
       {pipelineState?.isSubset && !pipelineState?.qc && (
         <div className="card p-4 mb-6 bg-sky-500/10 border border-sky-500/30 text-sky-300 flex items-center gap-3">
@@ -96,7 +102,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
       {/* Parameters */}
       {!result && (
         <div className="card p-6 mb-8 border-l-4 border-l-primary">
-          <h3 className="font-bold flex items-center gap-2 text-white mb-5">
+          <h3 className="font-bold flex items-center gap-2 text-text mb-5">
             <Sparkles size={18} className="text-primary" /> Normalization Parameters
           </h3>
           <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
@@ -106,7 +112,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
                 id="norm-method"
                 value={method}
                 onChange={e => setParam('method', e.target.value)}
-                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
               >
                 <option value="LogNormalize">LogNormalize</option>
                 <option value="SCTransform">SCTransform (v2)</option>
@@ -117,10 +123,10 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
               <label htmlFor="norm-scale-factor" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Scale Factor</label>
               <input
                 id="norm-scale-factor"
-                type="number" value={scaleFactor}
+                type="number" min="1" step="1" value={scaleFactor} aria-invalid={Boolean(validationError)}
                 onChange={e => setParam('scaleFactor', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
                 disabled={method === 'SCTransform'}
-                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary disabled:opacity-40"
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary disabled:opacity-40"
               />
               <p className="text-[10px] text-slate-400 mt-1">{method === 'SCTransform' ? 'Not used with SCTransform' : 'Global scaling factor'}</p>
             </div>
@@ -128,9 +134,9 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
               <label htmlFor="norm-n-features" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Variable Features</label>
               <input
                 id="norm-n-features"
-                type="number" value={nFeatures}
+                type="number" min="1" max="100000" step="1" value={nFeatures} aria-invalid={Boolean(validationError)}
                 onChange={e => setParam('nFeatures', e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
-                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-white focus:outline-none focus:border-primary"
+                className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
               />
               <p className="text-[10px] text-slate-400 mt-1">Number of HVGs to select</p>
             </div>
