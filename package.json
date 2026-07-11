@@ -17,6 +17,7 @@
     "test:pbmc-parent": "Rscript scripts/verify_pbmc_parent_unmutated.R",
     "test:checkpoint-load": "Rscript scripts/verify_checkpoint_load.R",
     "test:deg-markers": "Rscript scripts/verify_deg_find_markers.R",
+    "test:r-storage": "Rscript r-backend/tests/test_storage_paths.R",
     "test:frontend": "vitest run src/",
     "test:backend": "npm run test:backend:postgres",
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",

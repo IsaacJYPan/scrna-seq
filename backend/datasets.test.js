@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
 const config = require('./config');
 const db = require('./pgDatabase');
+const storage = require('./storage');
 const {
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createDatasetForProject
@@ -355,6 +356,17 @@ describe.skipIf(!CONFIGURED)('datasets API — file upload', () => {
     expect(res.data.originalFilename).toBe('counts.csv');
     // The client never learns (or chooses) the server storage key.
     expect(res.data).not.toHaveProperty('internalStorageKey');
+
+    const internal = await db.getDatasetForProject(alice.user.id, proj.id, res.data.id);
+    expect(storage.isProjectStorageKey(internal.internalStorageKey, {
+      projectId: proj.id,
+      kind: 'datasets',
+    })).toBe(true);
+    const provider = storage.createLocalStorageProvider();
+    expect(provider.inspect(internal.internalStorageKey, {
+      checksumSha256: expectedSha,
+      sizeBytes: Buffer.byteLength(content),
+    })).toEqual(expect.objectContaining({ key: internal.internalStorageKey }));
   });
 
   it('forbids a viewer from uploading a dataset file (403)', async () => {

@@ -19,6 +19,7 @@
 //     relative, traversal-free path the R backend further confines to its vault.
 
 const crypto = require('crypto');
+const { projectStorageFileKey } = require('./storage');
 
 /** Coded error so callers (route/handler) can branch + map to 400 / failed-job. */
 function codedError(code, message) {
@@ -132,13 +133,20 @@ function validatePbmcPipelineParams(input) {
 // its vault via validate_path(), so it can never escape even if this changed.
 const _JOB_ID_RE = /^job_[0-9a-f]+$/;
 
-function allocateCheckpointStorageKey(jobId) {
+function allocateCheckpointStorageKey(projectId, jobId) {
+  if (jobId === undefined) {
+    jobId = projectId;
+    projectId = null;
+  }
   if (typeof jobId !== 'string' || !_JOB_ID_RE.test(jobId)) {
     // Defense-in-depth: only ever build a key from a well-formed server job id.
     throw codedError('INVALID_JOB_ID', 'A server-generated job id is required to allocate a checkpoint key.');
   }
   const token = crypto.randomBytes(12).toString('hex');
-  return `checkpoints/${jobId}/${token}.rds`;
+  if (projectId) {
+    return projectStorageFileKey(String(projectId), 'checkpoints', jobId, `${token}.rds`);
+  }
+  return `vault/checkpoints/${jobId}/${token}.rds`;
 }
 
 module.exports = {

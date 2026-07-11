@@ -87,7 +87,8 @@ jobs:
         # org/project RBAC, datasets, analysis-objects, the durable job-worker
         # claim/lease/heartbeat contract, artifacts/checkpoints, lineage DAG, the
         # R-proxy ownership/policy/diagnostics gates, and the mocked-R pipeline
-        # worker handlers (pbmc/seurat/deg/checkpoint-load/object-inspect/bridge).
+        # worker handlers (pbmc/seurat/deg/checkpoint-load/checkpoint-fork/
+        # object-inspect/bridge).
         # Every DB-backed suite resets the schema via resetSchemaForTests(), so no
         # separate init step is needed. Suites with no DB dependency (pure
         # validators, serializers, config) run unconditionally; DB/HTTP suites skip
@@ -109,6 +110,9 @@ jobs:
 
       - name: Run Checkpoint-Load Reattach Smoke Test
         run: npm run test:checkpoint-load
+
+      - name: Run Durable Storage Path Tests
+        run: npm run test:r-storage
 
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers

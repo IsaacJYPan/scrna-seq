@@ -4,8 +4,6 @@
 # the user-facing service — the Express server (server.js) is the auth/proxy
 # tier and all user traffic must go through it. The port below is therefore
 # bound to localhost only.
-version: '3.8'
-
 services:
   r-backend:
     build:
@@ -18,9 +16,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./exports:/app/exports
-      - ./r-backend/vault:/app/vault
+      - ./vault:/app/vault
     environment:
       - PORT=8000
+      - ANALYSIS_ROOT=/app
+      - STORAGE_ROOT=/app/data
     restart: unless-stopped
 
   # Local/dev + CI Postgres for the hosted-service database path. This is NOT a
