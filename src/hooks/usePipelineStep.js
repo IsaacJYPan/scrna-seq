@@ -1,5 +1,17 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 
+export function friendlyPipelineError(value) {
+  const message = String(value || '').trim();
+  if (!message) return 'The analysis could not run. Check the settings and try again.';
+  if (/no cells|0 cells|matched these filters/i.test(message)) {
+    return 'No cells matched these filters. Loosen the thresholds and try again.';
+  }
+  if (/backend exception|subscript|stack|traceback|simpleError|execution halted/i.test(message)) {
+    return 'The analysis could not run with these values. Check the settings and try again.';
+  }
+  return message;
+}
+
 // Simple deep equal for the specific structures used
 function deepEqual(obj1, obj2) {
   if (obj1 === obj2) return true;
@@ -95,7 +107,7 @@ export function usePipelineStep({
         setResult(data);
         if (onSuccess) onSuccess(data, isInitial);
       } else if (data?.error && !isInitial) {
-        setError(data.error);
+        setError(friendlyPipelineError(data.error));
       } else if (!data && !isInitial) {
         setError('R backend error. Check the console for details.');
       }
@@ -103,7 +115,7 @@ export function usePipelineStep({
       return data;
     } catch (e) {
       if (e.name === 'AbortError') return; // Ignore aborted requests
-      setError(e.message);
+      setError(friendlyPipelineError(e.message));
       setRunning(false);
     }
   }, [callApi, endpoint, memoPayload, memoIpcContext, onSuccess]);

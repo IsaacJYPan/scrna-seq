@@ -1007,6 +1007,37 @@ function(req, res) {
   })
 }
 
+#* Read-only completion flags for restoring the pipeline UI after a browser restart
+#* @get /pipeline-state
+function(req, res) {
+  if (is.null(global_obj)) return(list(exists = FALSE))
+  tryCatch({
+    has_normalized <- tryCatch({
+      assay_layers <- SeuratObject::Layers(global_obj[[DefaultAssay(global_obj)]])
+      any(assay_layers == "data" | startsWith(assay_layers, "data."))
+    }, error = function(e) FALSE)
+    has_pca <- "pca" %in% names(global_obj@reductions)
+    has_clusters <- "seurat_clusters" %in% colnames(global_obj@meta.data)
+    has_umap <- "umap" %in% names(global_obj@reductions)
+    qc_marker <- tryCatch(isTRUE(global_obj@misc$benchone_pipeline$qc), error = function(e) FALSE)
+    pca_dims <- if (has_pca) tryCatch(ncol(Embeddings(global_obj, "pca")), error = function(e) 15) else 15
+    list(
+      exists = TRUE,
+      has_qc = qc_marker || has_normalized || has_pca || has_clusters || has_umap,
+      has_normalized = has_normalized,
+      has_integrated = "harmony" %in% names(global_obj@reductions),
+      has_pca = has_pca,
+      pca_dims = pca_dims,
+      has_clusters = has_clusters,
+      n_clusters = if (has_clusters) length(unique(global_obj$seurat_clusters)) else 0,
+      has_umap = has_umap
+    )
+  }, error = function(e) {
+    res$status <- 500
+    list(error = "pipeline state inspection failed")
+  })
+}
+
 # ── Internal worker-bridge: load a durable checkpoint back into the live session ──────
 # Internal-only: reached ONLY via the in-process Node worker bridge (the allowlisted
 # `r.checkpoint.load.v1` operation calls this R backend directly). The public Express
@@ -1632,6 +1663,8 @@ function(res, req) {
     if (ncol(temp_obj) == 0) {
       stop("No cells passed the selected QC thresholds. Please loosen your filters.")
     }
+    if (is.null(temp_obj@misc$benchone_pipeline)) temp_obj@misc$benchone_pipeline <- list()
+    temp_obj@misc$benchone_pipeline$qc <- TRUE
     global_obj <<- temp_obj
   }, error = function(e) {
     stop("QC Filter Error: Likely no cells matched these thresholds. (", e$message, ")")

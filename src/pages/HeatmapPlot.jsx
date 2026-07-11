@@ -85,8 +85,9 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
           <p className="text-textMuted text-sm">Average expression of top marker genes per cluster.</p>
         </div>
         <div className="flex items-center gap-3">
-          <label className="text-xs text-textMuted font-bold uppercase tracking-wide">Top N per cluster</label>
+          <label htmlFor="heatmap-top-n" className="text-xs text-textMuted font-bold uppercase tracking-wide">Top N per cluster</label>
           <input
+            id="heatmap-top-n"
             type="number"
             min={1} max={20}
             value={topN}

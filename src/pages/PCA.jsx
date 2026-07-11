@@ -10,6 +10,10 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
   const setNpcs = (v) => setParam('npcs', v);
   // Separate local state for the input so every keystroke doesn't change ipcContext/endpoint
   const [inputNpcs, setInputNpcs] = React.useState(npcs);
+  const parsedNpcs = Number(inputNpcs);
+  const pcaValidationError = !Number.isInteger(parsedNpcs) || parsedNpcs < 5 || parsedNpcs > 100
+    ? 'Number of PCs must be a whole number from 5 to 100.'
+    : null;
   const [activeView, setActiveView] = useState('elbow');
 
   const { running, result, error, runStep: runPCA } = usePipelineStep({
@@ -97,7 +101,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
           )}
           <button
             onClick={() => runPCA()}
-            disabled={running}
+            disabled={running || Boolean(pcaValidationError)}
             className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center gap-2`}
           >
             {running && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
@@ -112,6 +116,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
           <span className="text-sm font-medium">{error}</span>
         </div>
       )}
+      {pcaValidationError && <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger text-sm" role="alert">{pcaValidationError}</div>}
 
       {/* Parameters */}
       {!result && !running && (
@@ -124,13 +129,18 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
             <input
               id="pca-npcs"
               type="number" value={inputNpcs} min={5} max={100}
-              onChange={e => setInputNpcs(e.target.value === '' ? '' : parseInt(e.target.value) || 0)}
+              onChange={e => {
+                const value = e.target.value === '' ? '' : Number(e.target.value);
+                setInputNpcs(value);
+                if (Number.isInteger(value) && value >= 5 && value <= 100) setNpcs(value);
+              }}
               onBlur={e => {
                 const v = parseInt(e.target.value) || 50;
                 setInputNpcs(v);
                 setNpcs(v);
               }}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
+              aria-invalid={Boolean(pcaValidationError)}
             />
             <p className="text-[10px] text-textMuted mt-1">Standard: 50. Use elbow plot to determine how many to keep downstream.</p>
           </div>

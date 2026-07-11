@@ -76,4 +76,11 @@ describe('UMAPView', () => {
     expect(await screen.findByRole('button', { name: /Re-compute UMAP/i })).toBeInTheDocument();
     expect(screen.getByText('Cluster 0')).toBeInTheDocument();
   });
+
+  it('does not offer figure saving before a UMAP result exists', async () => {
+    const callApi = vi.fn(async () => ({}));
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await waitFor(() => expect(callApi).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /Save Figure/i })).not.toBeInTheDocument();
+  });
 });

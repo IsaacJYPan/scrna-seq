@@ -48,6 +48,7 @@ describe('FigureSavePanel component', () => {
     );
 
     const saveButton = screen.getByRole('button', { name: /save to figure gallery/i });
+    await waitFor(() => expect(saveButton).toBeEnabled());
     
     act(() => {
       fireEvent.click(saveButton);
