@@ -6,7 +6,7 @@ const {
   createUser,
   createOrganizationForUser, createProjectForUser,
   verifyOrganizationMember, requireOrganizationRole,
-  verifyProjectMember, requireProjectRole,
+  verifyProjectMember,
   listOrganizationsForUser, listProjectsForUser,
   addProjectMemberByEmail, updateProjectMemberRole, removeProjectMember,
   countProjectOwners, getProjectMember, isValidRole, addOrganizationMember
@@ -330,6 +330,21 @@ describe.skipIf(!CONFIGURED)('project members API', () => {
     expect(analystAdd.status).toBe(403);
   });
 
+  it('enforces an admin demotion or removal on the very next mutation', async () => {
+    const { alice, bob, carol, proj } = await setup();
+    expect((await addMember(alice.token, proj.id, bob.user.email, 'admin')).status).toBe(201);
+    expect((await addMember(alice.token, proj.id, carol.user.email, 'viewer')).status).toBe(201);
+    await createUser('dave@example.com', 'password123', 'Dave');
+
+    expect((await patchMemberRole(alice.token, proj.id, bob.user.id, 'viewer')).status).toBe(200);
+    expect((await addMember(bob.token, proj.id, 'dave@example.com', 'viewer')).status).toBe(403);
+    expect((await patchMemberRole(bob.token, proj.id, carol.user.id, 'analyst')).status).toBe(403);
+    expect((await removeMember(bob.token, proj.id, carol.user.id)).status).toBe(403);
+
+    expect((await removeMember(alice.token, proj.id, bob.user.id)).status).toBe(200);
+    expect((await addMember(bob.token, proj.id, 'dave@example.com', 'viewer')).status).toBe(404);
+  });
+
   it('lets an owner change a member role and remove a member', async () => {
     const { alice, bob, proj } = await setup();
     await api(server, `/api/projects/${proj.id}/members`, {
@@ -400,6 +415,32 @@ describe.skipIf(!CONFIGURED)('project members API', () => {
         method: 'POST', token: alice.token, body: { email: 'bob@example.com', role: 'viewer', ...extra }
       });
       expect(res.status, JSON.stringify(extra)).toBe(400);
+    }
+  });
+
+  it('rejects body-provided identity fields on role update', async () => {
+    const { alice, bob, proj } = await setup();
+    expect((await addMember(alice.token, proj.id, 'bob@example.com', 'viewer')).status).toBe(201);
+    for (const extra of [{ userId: alice.user.id }, { projectId: 'proj_other' }, { email: 'alice@example.com' }]) {
+      const res = await api(server, `/api/projects/${proj.id}/members/${bob.user.id}`, {
+        method: 'PATCH', token: alice.token, body: { role: 'analyst', ...extra }
+      });
+      expect(res.status, JSON.stringify(extra)).toBe(400);
+    }
+    expect((await getProjectMember(proj.id, bob.user.id)).role).toBe('viewer');
+  });
+
+  it('rejects malformed member user ids before a membership mutation', async () => {
+    const { alice, proj } = await setup();
+    for (const target of ['not-a-number', '0', '-1', '1.5']) {
+      const update = await api(server, `/api/projects/${proj.id}/members/${target}`, {
+        method: 'PATCH', token: alice.token, body: { role: 'viewer' }
+      });
+      const remove = await api(server, `/api/projects/${proj.id}/members/${target}`, {
+        method: 'DELETE', token: alice.token
+      });
+      expect(update.status, `PATCH ${target}`).toBe(400);
+      expect(remove.status, `DELETE ${target}`).toBe(400);
     }
   });
 
@@ -599,9 +640,9 @@ describe.skipIf(!CONFIGURED)('org/project DB helpers', () => {
     const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
     const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
 
-    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer');
-    await expect(addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer')).rejects.toThrow(/already a member/i);
-    await expect(addProjectMemberByEmail(proj.id, 'nobody@example.com', 'viewer')).rejects.toThrow(/no user/i);
+    await addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer', 'owner');
+    await expect(addProjectMemberByEmail(proj.id, 'bob@example.com', 'viewer', 'owner')).rejects.toThrow(/already a member/i);
+    await expect(addProjectMemberByEmail(proj.id, 'nobody@example.com', 'viewer', 'owner')).rejects.toThrow(/no user/i);
     await expect(addProjectMemberByEmail(proj.id, 'bob@example.com', 'superuser')).rejects.toThrow(/invalid role/i);
   });
 
@@ -627,6 +668,21 @@ describe.skipIf(!CONFIGURED)('org/project DB helpers', () => {
 
     // The owner actor can perform the same operations.
     expect((await updateProjectMemberRole(proj.id, carol.id, 'admin', 'owner')).role).toBe('admin');
+    expect(await countProjectOwners(proj.id)).toBe(1);
+  });
+
+  it('serializes concurrent owner mutations so the project keeps an owner', async () => {
+    const { alice, bob } = await setup();
+    const org = await createOrganizationForUser(alice.id, { name: 'Acme' });
+    const proj = await createProjectForUser(alice.id, { organizationId: org.id, name: 'P' });
+    await addProjectMemberByEmail(proj.id, bob.email, 'owner', { userId: alice.id });
+
+    const outcomes = await Promise.allSettled([
+      updateProjectMemberRole(proj.id, alice.id, 'admin', { userId: bob.id }),
+      removeProjectMember(proj.id, bob.id, { userId: alice.id }),
+    ]);
+
+    expect(outcomes.filter(result => result.status === 'fulfilled')).toHaveLength(1);
     expect(await countProjectOwners(proj.id)).toBe(1);
   });
 });

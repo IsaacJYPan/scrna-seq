@@ -218,6 +218,7 @@ export default function Sidebar({
             <SectionLabel>Project</SectionLabel>
             <NavButton item={{ id: 'workspace', label: 'Workbench', icon: Database, status: hasProject ? 'Backend project' : 'Select project' }} />
             <NavButton item={{ id: 'pipeline-manager', label: 'Pipeline Manager', icon: LayoutPanelTop, status: hasProject ? 'User scoped' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project RBAC' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
               <SectionLabel>Data / Object</SectionLabel>
               <NavButton item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
@@ -237,12 +238,6 @@ export default function Sidebar({
               ))}
             </div>
           ))}
-
-          {currentWorkspace?.type === 'shared' && (
-            <div className="pt-2 border-t border-border/50">
-              <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: 'Demo only' }} />
-            </div>
-          )}
         </div>
 
         <div

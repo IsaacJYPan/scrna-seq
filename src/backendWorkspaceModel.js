@@ -89,7 +89,10 @@ export function mapBackendAnalysisObject(object, liveResult = {}) {
     lineageRootId: object.lineageRootId || null,
     metadata,
     isBackendAnalysisObject: true,
-    liveState: liveResult && Object.keys(liveResult).length > 0 ? 'attached' : (metadata.liveState || 'unknown'),
+    // Project metadata is durable and shared; it cannot establish whether this
+    // browser user's private R key is currently attached. Only a live response
+    // from the current session may mark the object attached.
+    liveState: liveResult && Object.keys(liveResult).length > 0 ? 'attached' : 'unknown',
   };
 }
 

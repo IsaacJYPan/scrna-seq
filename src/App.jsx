@@ -23,6 +23,7 @@ import Diagnostics from './pages/Diagnostics';
 import PipelineManager from './pages/PipelineManager';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { getDefaultPipelineManifest } from './pipelines/pipelineRegistry';
+import { hasAttachedLiveRObject } from './liveRState';
 
 import {
   saveProvenance,
@@ -611,6 +612,14 @@ export default function App() {
 
     if (forceOnlyIfCached) return null;
 
+    // Durable project objects are safe to browse without a live R attachment.
+    // Do not let hidden analysis tabs probe R merely because such an object is
+    // selected; only cached results may be read until this user's private live
+    // object has been attached explicitly.
+    if (!hasAttachedLiveRObject(datasetInfo)) {
+      return { error: 'No live R object is attached. Load or attach this object first.' };
+    }
+
     // 2. Fresh Fetch
     try {
       options.headers = options.headers || {};
@@ -668,7 +677,7 @@ export default function App() {
       console.error(err);
       return { error: err.message };
     }
-  }, [activeWsIndex, workspaces, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId]);
+  }, [markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
 
   const openProvenance = async (provId) => {
     const chain = await getProvenanceChain(provId);
@@ -964,6 +973,7 @@ export default function App() {
       openProvenance,
       currentWs,
       updateActiveWorkspace,
+      refreshProjects,
       pipelineState,
       theme,
       rSessionId,          // let components watch session changes directly
@@ -971,6 +981,7 @@ export default function App() {
       resetPipelineAfterSubset,
       // For per-object parameter persistence
       userEmail: user?.email ?? null,
+      userId: user?.id ?? null,
       objectId: datasetInfo?.id ?? null,
     };
 
@@ -1014,7 +1025,7 @@ export default function App() {
         <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.annotate} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.enrichment} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.cellchat} /></TabContent></ErrorBoundary>

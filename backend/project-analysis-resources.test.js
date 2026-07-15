@@ -4,7 +4,9 @@ const config = require('./config');
 const db = require('./pgDatabase');
 const {
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
-  createDatasetForProject, verifyAnalysisObjectOwner, verifyJobOwner
+  updateProjectMemberRole, removeProjectMember,
+  createDatasetForProject, createAnalysisObjectForUser,
+  verifyAnalysisObjectOwner, verifyJobOwner
 } = db;
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 
@@ -426,6 +428,36 @@ describe.skipIf(!CONFIGURED)('project analysis resources — references stay wit
     expect((await createJob(projA.id, alice.token, { jobType: 'normalize', resultAnalysisObjectId: aoB.data.id })).status).toBe(404);
   });
 
+  it('checkpoint forks reject client-controlled result and dataset fields at HTTP and DB boundaries', async () => {
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
+    const source = await createAO(proj.id, alice.token);
+    const forgedResult = await createAO(proj.id, alice.token);
+    const dataset = await createDatasetForProject(alice.user.id, proj.id, { fileType: 'seurat_rds' });
+
+    for (const body of [
+      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, resultAnalysisObjectId: forgedResult.data.id },
+      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, datasetId: dataset.id },
+      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, resultAnalysisObjectId: null },
+      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, datasetId: null },
+    ]) {
+      const response = await createJob(proj.id, alice.token, body);
+      expect(response.status).toBe(400);
+      expect(response.data.error).toMatch(/server-managed|derived from the source checkpoint/i);
+    }
+
+    await expect(db.createProjectJob(alice.user.id, proj.id, {
+      jobType: 'checkpoint.fork.v1',
+      analysisObjectId: source.data.id,
+      resultAnalysisObjectId: forgedResult.data.id,
+    })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
+    await expect(db.createProjectJob(alice.user.id, proj.id, {
+      jobType: 'checkpoint.fork.v1',
+      analysisObjectId: source.data.id,
+      datasetId: dataset.id,
+    })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
+  });
+
   it('cross-project object/job reads return 404', async () => {
     const { alice } = await users();
     const projA = await seedProject(alice.user.id, 'A');
@@ -605,5 +637,101 @@ describe.skipIf(!CONFIGURED)('project analysis resources — R state/object owne
     // a co-member does not.
     expect(await verifyJobOwner(alice.user.id, job.data.id)).toBe(true);
     expect(await verifyJobOwner(bob.user.id, job.data.id)).toBe(false);
+  });
+});
+
+describe.skipIf(!CONFIGURED)('project analysis resources — immediate revocation boundaries', () => {
+  it('keeps durable reads for viewers but blocks writes, live R use, and legacy route bypasses', async () => {
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, bob.user.email, 'analyst');
+    const object = await createAO(proj.id, bob.token);
+    const job = await createJob(proj.id, bob.token, {
+      jobType: 'r.object.inspect',
+      analysisObjectId: object.data.id,
+    });
+    const legacyChild = await createAnalysisObjectForUser(bob.user.id, {
+      objectType: 'seurat',
+      parentObjectId: object.data.id,
+    });
+    const legacyGrandchild = await createAnalysisObjectForUser(bob.user.id, {
+      objectType: 'seurat',
+      parentObjectId: legacyChild.id,
+    });
+    const projectDataset = await createDatasetForProject(bob.user.id, proj.id, {
+      fileType: 'seurat_rds',
+    });
+    const legacyDatasetObject = await createAnalysisObjectForUser(bob.user.id, {
+      objectType: 'seurat',
+      datasetId: projectDataset.id,
+    });
+    expect(object.status).toBe(201);
+    expect(job.status).toBe(201);
+
+    await updateProjectMemberRole(proj.id, bob.user.id, 'viewer', { userId: alice.user.id });
+
+    expect((await api(server, `/api/projects/${proj.id}/analysis-objects/${object.data.id}`, { token: bob.token })).status).toBe(200);
+    expect((await api(server, `/api/projects/${proj.id}/jobs/${job.data.id}`, { token: bob.token })).status).toBe(200);
+    expect((await createAO(proj.id, bob.token)).status).toBe(403);
+    expect((await createJob(proj.id, bob.token)).status).toBe(403);
+
+    const previousDiagnostics = process.env.ENABLE_R_TEST_DIAGNOSTICS;
+    process.env.ENABLE_R_TEST_DIAGNOSTICS = 'true';
+    try {
+      const r = await api(server, '/api/r/__test/state-key', {
+        token: bob.token,
+        headers: { 'X-Object-ID': object.data.id },
+      });
+      expect(r.status).toBe(403);
+
+      const descendantProxy = await api(server, '/api/r/__test/state-key', {
+        token: bob.token,
+        headers: { 'X-Object-ID': legacyGrandchild.id },
+      });
+      expect(descendantProxy.status).toBe(404);
+
+      const datasetProxy = await api(server, '/api/r/__test/state-key', {
+        token: bob.token,
+        headers: { 'X-Object-ID': legacyDatasetObject.id },
+      });
+      expect(datasetProxy.status).toBe(404);
+    } finally {
+      if (previousDiagnostics === undefined) delete process.env.ENABLE_R_TEST_DIAGNOSTICS;
+      else process.env.ENABLE_R_TEST_DIAGNOSTICS = previousDiagnostics;
+    }
+
+    expect((await api(server, `/api/analysis-objects/${object.data.id}`, { token: bob.token })).status).toBe(404);
+    expect((await api(server, `/api/analysis-objects/${legacyGrandchild.id}`, { token: bob.token })).status).toBe(404);
+    expect((await api(server, `/api/analysis-objects/${legacyDatasetObject.id}`, { token: bob.token })).status).toBe(404);
+    expect((await api(server, '/api/analysis-objects', { token: bob.token })).data).toEqual([]);
+    expect((await api(server, `/api/jobs/${job.data.id}`, { token: bob.token })).status).toBe(404);
+    expect((await api(server, `/api/jobs/${job.data.id}/logs`, { token: bob.token })).status).toBe(404);
+    expect((await api(server, `/api/jobs/${job.data.id}/cancel`, { method: 'POST', token: bob.token })).status).toBe(404);
+    expect((await api(server, '/api/jobs', { token: bob.token })).data).toEqual([]);
+    expect((await api(server, '/api/jobs', {
+      method: 'POST', token: bob.token,
+      body: { jobType: 'r.object.inspect', analysisObjectId: object.data.id },
+    })).status).toBe(404);
+    expect((await api(server, '/api/analysis-objects', {
+      method: 'POST', token: bob.token,
+      body: { objectType: 'seurat', parentObjectId: object.data.id },
+    })).status).toBe(404);
+
+    await removeProjectMember(proj.id, bob.user.id, { userId: alice.user.id });
+    expect((await api(server, `/api/projects/${proj.id}/analysis-objects/${object.data.id}`, { token: bob.token })).status).toBe(404);
+    expect((await api(server, `/api/projects/${proj.id}/jobs/${job.data.id}`, { token: bob.token })).status).toBe(404);
+
+    const diagnosticsBeforeRemovalCheck = process.env.ENABLE_R_TEST_DIAGNOSTICS;
+    process.env.ENABLE_R_TEST_DIAGNOSTICS = 'true';
+    try {
+      const r = await api(server, '/api/r/__test/state-key', {
+        token: bob.token,
+        headers: { 'X-Object-ID': object.data.id },
+      });
+      expect(r.status).toBe(404);
+    } finally {
+      if (diagnosticsBeforeRemovalCheck === undefined) delete process.env.ENABLE_R_TEST_DIAGNOSTICS;
+      else process.env.ENABLE_R_TEST_DIAGNOSTICS = diagnosticsBeforeRemovalCheck;
+    }
   });
 });

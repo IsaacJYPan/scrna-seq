@@ -148,6 +148,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.fork.v1', () => {
       sourceAnalysisObjectId: source.id,
       sourceCheckpointArtifactId: checkpoint.id,
     }));
+    expect(fork.metadata).not.toHaveProperty('liveState');
 
     const loadCall = calls.find((request) => request.path === '/object/checkpoint-load');
     expect(loadCall.body.storage_key).toBe(checkpoint.storageUri);
