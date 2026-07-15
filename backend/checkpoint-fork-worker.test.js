@@ -39,6 +39,7 @@ function pipelineBody() {
 function loadBody(overrides = {}) {
   return {
     loaded: true,
+    runtime_instance_id: 'checkpoint-fork-runtime-instance-0001',
     checksum_verified: true,
     class: 'Seurat',
     n_cells: 100,
@@ -231,7 +232,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.fork.v1', () => {
     })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
   });
 
-  it('does not create durable fork records when R rejects the checkpoint', async () => {
+  it('keeps an R checkpoint rejection indeterminate without durable fork records', async () => {
     const { project, source } = await seedProject();
     const carol = await db.createUser('carol@example.com', 'password123', 'Carol');
     await db.addProjectMemberByEmail(project.id, carol.email, 'analyst', 'owner');
@@ -243,7 +244,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.fork.v1', () => {
 
     const result = await drain(caller([], { status: 500, body: { error: 'rejected' } }));
 
-    expect(result.status).toBe('failed');
+    expect(result.status).toBe('indeterminate');
     expect((await db.getProjectJob(carol.id, project.id, job.id)).resultAnalysisObjectId)
       .toBeFalsy();
     expect(await db.listProjectJobArtifacts(carol.id, project.id, job.id)).toHaveLength(0);

@@ -363,10 +363,10 @@ describe.skipIf(!CONFIGURED)('datasets API — file upload', () => {
       kind: 'datasets',
     })).toBe(true);
     const provider = storage.createLocalStorageProvider();
-    expect(provider.inspect(internal.internalStorageKey, {
+    await expect(provider.inspect(internal.internalStorageKey, {
       checksumSha256: expectedSha,
       sizeBytes: Buffer.byteLength(content),
-    })).toEqual(expect.objectContaining({ key: internal.internalStorageKey }));
+    })).resolves.toEqual(expect.objectContaining({ key: internal.internalStorageKey }));
   });
 
   it('forbids a viewer from uploading a dataset file (403)', async () => {

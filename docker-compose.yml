@@ -1,9 +1,8 @@
-# Local/dev convenience: containerizes ONLY the R Plumber backend so you don't
-# have to install R/Seurat on the host. This is NOT a collaborator/production
-# deployment path. The R Plumber backend is NOT authenticated and must NOT be
-# the user-facing service — the Express server (server.js) is the auth/proxy
-# tier and all user traffic must go through it. The port below is therefore
-# bound to localhost only.
+# Local/dev convenience: containerizes the private R Plumber backend and Postgres.
+# This is NOT a collaborator/production deployment path. R requires an internal
+# token, but that token is a privileged service credential rather than end-user
+# authentication. Express remains the user-facing auth/proxy tier, and both ports
+# stay bound to localhost only.
 services:
   r-backend:
     build:
@@ -18,9 +17,18 @@ services:
       - ./exports:/app/exports
       - ./vault:/app/vault
     environment:
-      - PORT=8000
+      - PLUMBER_HOST=0.0.0.0
+      - PLUMBER_PORT=8000
+      # Use the same R_API_TOKEN in the web and standalone-worker environments.
+      # This fallback is local-only; replace it with a random secret.
+      - API_TOKEN=${R_API_TOKEN:-local-dev-r-token-change-me-0000000000000000}
       - ANALYSIS_ROOT=/app
       - STORAGE_ROOT=/app/data
+      - R_MAX_ACTIVE_SESSIONS=${R_MAX_ACTIVE_SESSIONS:-8}
+      - R_MAX_ACTIVE_SESSIONS_PER_USER=${R_MAX_ACTIVE_SESSIONS_PER_USER:-4}
+      - R_MAX_ACTIVE_SESSION_BYTES=${R_MAX_ACTIVE_SESSION_BYTES:-4294967296}
+      - R_MAX_ACTIVE_SESSION_BYTES_PER_USER=${R_MAX_ACTIVE_SESSION_BYTES_PER_USER:-2147483648}
+      - R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION=${R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION:-1073741824}
     restart: unless-stopped
 
   # Local/dev + CI Postgres for the hosted-service database path. This is NOT a

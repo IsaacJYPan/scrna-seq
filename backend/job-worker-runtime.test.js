@@ -96,6 +96,13 @@ describe('parseJobWorkerConfig — poll/lease parsing + fallback policy', () => 
     expect(cfg.leaseSeconds).toBe(45);
   });
 
+  it('accepts the exact 10-second mechanical lease floor without warning', () => {
+    const logger = recordingLogger();
+    const cfg = parseJobWorkerConfig({ JOB_WORKER_LEASE_SECONDS: '10' }, { logger });
+    expect(cfg.leaseSeconds).toBe(10);
+    expect(logger.warns).toEqual([]);
+  });
+
   it.each(['', '  ', 'abc', 'NaN', '0', '-5', '12.5', 'Infinity', '1e3 ms'])(
     'falls back to defaults + warns for invalid poll value (%j)',
     (val) => {
@@ -107,7 +114,7 @@ describe('parseJobWorkerConfig — poll/lease parsing + fallback policy', () => 
     }
   );
 
-  it.each(['', 'abc', '0', '-1', '3.5', 'Infinity'])(
+  it.each(['', 'abc', '0', '1', '5', '9', '-1', '3.5', 'Infinity'])(
     'falls back to defaults + warns for invalid lease value (%j)',
     (val) => {
       const logger = recordingLogger();

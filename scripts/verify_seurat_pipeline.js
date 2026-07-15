@@ -24,8 +24,9 @@ const crypto = require('crypto');
 
 const WORKSPACE = path.resolve(__dirname, '..');
 const PLUMBER_PORT = Number(process.env.PLUMBER_TEST_PORT || 18132);
-const API_TOKEN = 'verify-seurat-pipeline-token';
+const API_TOKEN = 'verify-seurat-pipeline-token-0000000000000000';
 const RUN_R = path.join(WORKSPACE, 'r-backend', 'run.R');
+const STORAGE_ROOT = path.join(WORKSPACE, 'data');
 
 function skip(reason) {
   console.log(`SKIP verify_seurat_pipeline: ${reason}`);
@@ -89,7 +90,7 @@ async function main() {
   }
 
   const db = require('../backend/pgDatabase');
-  const { createJobWorker } = require('../backend/jobWorker');
+  const { buildRChildEnv } = require('../backend/rRuntime');
   await db.initSchema();
 
   const owner = await db.createUser(`seurat-verify-${stamp}@example.com`, 'password123', 'Verifier');
@@ -115,11 +116,24 @@ async function main() {
 
   const plumber = spawn('Rscript', [RUN_R], {
     cwd: WORKSPACE,
-    env: { ...process.env, API_TOKEN, PLUMBER_PORT: String(PLUMBER_PORT) },
+    env: buildRChildEnv({
+      ...process.env,
+      ENABLE_R_TEST_DIAGNOSTICS: 'true',
+      R_TEST_SEURAT_DELAY_MS: '16000',
+    }, {
+      token: API_TOKEN,
+      port: PLUMBER_PORT,
+      storageRoot: STORAGE_ROOT,
+      analysisRoot: WORKSPACE,
+    }),
     stdio: ['ignore', 'inherit', 'inherit'],
   });
+  let workerProcess = null;
 
   const cleanup = async () => {
+    try {
+      if (workerProcess && workerProcess.exitCode === null) workerProcess.kill('SIGTERM');
+    } catch { /* ignore */ }
     try { if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(plumber.pid), '/T', '/F'], { stdio: 'ignore' }); else plumber.kill('SIGTERM'); } catch { /* ignore */ }
     try { fs.rmSync(vaultAbs, { recursive: true, force: true }); } catch { /* ignore */ }
     try { await db.close(); } catch { /* ignore */ }
@@ -129,10 +143,68 @@ async function main() {
     if (!(await waitForPlumber())) throw new Error('plumber did not become healthy');
     console.log(`INFO plumber healthy on :${PLUMBER_PORT}`);
 
-    // Default lease (120s) + in-flight renewal must carry the ~40s compute to completion.
-    const worker = createJobWorker({ db, rBridgeConfig: { port: PLUMBER_PORT, token: API_TOKEN } });
-    const result = await worker.runOnce();
-    assert(result.status === 'completed', 'worker completed the seurat.pipeline.v1 job', result.status);
+    // Run the real standalone process with a deliberately short lease. The pipeline
+    // exceeds that lease, so repeated heartbeat advances are required to prevent a
+    // competing reaper/worker from taking the job.
+    workerProcess = spawn(process.execPath, [path.join(WORKSPACE, 'worker.js'), '--once'], {
+      cwd: WORKSPACE,
+      env: {
+        ...process.env,
+        ENABLE_JOB_WORKER: 'true',
+        R_RUNTIME_MODE: 'external',
+        R_BACKEND_URL: `http://127.0.0.1:${PLUMBER_PORT}`,
+        R_API_TOKEN: API_TOKEN,
+        STORAGE_ROOT,
+        JOB_WORKER_HEALTH_PORT: '0',
+        JOB_WORKER_MIN_FREE_MEMORY_MB: '1',
+        JOB_WORKER_LEASE_SECONDS: '12',
+        JOB_WORKER_STARTUP_TIMEOUT_MS: '30000',
+      },
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    let workerExited = false;
+    let workerExitCode = null;
+    const workerExit = new Promise((resolve, reject) => {
+      workerProcess.once('error', reject);
+      workerProcess.once('exit', (code) => {
+        workerExited = true;
+        workerExitCode = code;
+        resolve(code);
+      });
+    });
+
+    const renewedHeartbeatValues = new Set();
+    let initialRunningHeartbeat = null;
+    let runningSince = null;
+    let competitorChecked = false;
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (!workerExited && Date.now() < deadline) {
+      const current = await db.getWorkerJob(job.id);
+      if (current && current.status === 'running' && runningSince === null) {
+        runningSince = Date.now();
+        initialRunningHeartbeat = current.heartbeatAt;
+      }
+      if (current && current.status === 'running' && current.heartbeatAt
+          && initialRunningHeartbeat && current.heartbeatAt !== initialRunningHeartbeat) {
+        renewedHeartbeatValues.add(current.heartbeatAt);
+      }
+      if (!competitorChecked && runningSince !== null && Date.now() - runningSince >= 14000) {
+        const reaped = await db.reapExpiredJobs();
+        assert(!reaped.requeued.includes(job.id) && !reaped.failed.includes(job.id),
+          'live heartbeat prevents lease reaping after the original deadline');
+        const competingClaim = await db.claimNextJob('worker_competing_probe', { leaseSeconds: 12 });
+        assert(competingClaim === null, 'a second worker cannot claim the heartbeating job');
+        competitorChecked = true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    if (!workerExited && Date.now() >= deadline) throw new Error('standalone worker timed out');
+    await workerExit;
+    assert(workerExitCode === 0, 'standalone worker process exited cleanly', String(workerExitCode));
+    assert(competitorChecked, 'competing reaper check ran after the original lease deadline');
+    assert(renewedHeartbeatValues.size >= 2,
+      'controlled long real-R call recorded at least two lease renewals',
+      String(renewedHeartbeatValues.size));
 
     const done = await db.getProjectJob(owner.id, project.id, job.id);
     assert(done.status === 'completed', 'job status is completed');
