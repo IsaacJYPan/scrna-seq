@@ -11,8 +11,9 @@ library(ggplot2)
 # ── Session ID ────────────────────────────────────────────────────
 # Generated fresh on every R process start. Used by the frontend to
 # detect restarts so cached pipeline steps are re-executed in R.
-r_session_id <- paste0(format(Sys.time(), "%Y%m%d%H%M%S"), "-",
-                       paste0(sample(c(letters, 0:9), 8, replace = TRUE), collapse = ""))
+r_runtime_instance_id <- paste0(format(Sys.time(), "%Y%m%d%H%M%S"), "-",
+                                paste0(sample(c(letters, 0:9), 16, replace = TRUE), collapse = ""))
+r_session_id <- r_runtime_instance_id
 cat("[R] Session ID:", r_session_id, "\n")
 
 # Holds the physical Seurat object for stateful processing
@@ -168,6 +169,211 @@ atomic_write_csv <- function(value, destination) {
   completed <- TRUE
 }
 
+# Durable worker completion receipts -------------------------------------------------
+#
+# A synchronous HTTP timeout/disconnect does not prove that an R operation stopped.
+# Every real worker output/live-state operation therefore writes one small signed
+# receipt, only after its file or private live-state mutation has succeeded. Node can
+# adopt that receipt after the bounded lease grace instead of rerunning R.
+COMPLETION_RECEIPT_VERSION <- 1L
+COMPLETION_RECEIPT_MAX_BYTES <- 128L * 1024L
+COMPLETION_RECEIPT_SIGNED_MAX_BYTES <- 96L * 1024L
+COMPLETION_RECEIPT_FILE_NAME <- "completion-receipt.json"
+COMPLETION_RECEIPT_HMAC_DOMAIN <- "BENCHONE_R_COMPLETION_RECEIPT_V1:"
+COMPLETION_RECEIPT_ALGORITHM <- "hmac-sha256"
+COMPLETION_RECEIPT_BINDING_KEYS <- c(
+  "version", "job_id", "job_type", "r_operation", "project_id",
+  "receipt_storage_key", "source_analysis_object_id", "source_dataset_id",
+  "source_checkpoint_artifact_id", "target_analysis_object_id", "output_storage_key"
+)
+
+is_scalar_string <- function(value, allow_null = FALSE) {
+  if (is.null(value)) return(isTRUE(allow_null))
+  is.character(value) && length(value) == 1 && !is.na(value) && nchar(value, type = "bytes") > 0
+}
+
+validate_receipt_optional_id <- function(value) {
+  if (is.null(value)) return(invisible(TRUE))
+  if (!is_scalar_string(value) || !grepl("^[A-Za-z0-9._-]+$", value) || nchar(value, type = "bytes") > 160) {
+    stop("Completion receipt binding is invalid.")
+  }
+  invisible(TRUE)
+}
+
+validate_completion_receipt_binding <- function(body, expected_job_types,
+                                                expected_r_operation,
+                                                expected_output_key = NULL) {
+  binding <- if (is.list(body)) body$completion_receipt else NULL
+  if (!is.list(binding) || is.null(names(binding)) ||
+      !setequal(names(binding), COMPLETION_RECEIPT_BINDING_KEYS) ||
+      length(names(binding)) != length(COMPLETION_RECEIPT_BINDING_KEYS)) {
+    stop("Completion receipt binding is required.")
+  }
+  if (!identical(as.integer(binding$version), COMPLETION_RECEIPT_VERSION) ||
+      !is_scalar_string(binding$job_id) ||
+      !is_scalar_string(binding$project_id) ||
+      !is_scalar_string(binding$job_type) || !(binding$job_type %in% expected_job_types) ||
+      !identical(binding$r_operation, expected_r_operation) ||
+      !grepl("^[A-Za-z0-9._-]+$", binding$job_id) ||
+      !grepl("^[A-Za-z0-9._-]+$", binding$project_id)) {
+    stop("Completion receipt binding is invalid.")
+  }
+  expected_receipt_key <- paste0(
+    "projects/", binding$project_id, "/artifacts/", binding$job_id, "/",
+    COMPLETION_RECEIPT_FILE_NAME
+  )
+  if (!identical(binding$receipt_storage_key, expected_receipt_key)) {
+    stop("Completion receipt binding is invalid.")
+  }
+  validate_receipt_optional_id(binding$source_analysis_object_id)
+  validate_receipt_optional_id(binding$source_dataset_id)
+  validate_receipt_optional_id(binding$source_checkpoint_artifact_id)
+  validate_receipt_optional_id(binding$target_analysis_object_id)
+  if (is.null(expected_output_key)) {
+    if (!is.null(binding$output_storage_key)) stop("Completion receipt binding is invalid.")
+  } else if (!is_scalar_string(binding$output_storage_key) ||
+             !identical(binding$output_storage_key, expected_output_key)) {
+    stop("Completion receipt binding is invalid.")
+  }
+  output_prefix <- paste0("projects/", binding$project_id, "/")
+  if (identical(binding$job_type, "pbmc.pipeline.v1")) {
+    if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
+        !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
+        !startsWith(binding$output_storage_key,
+                    paste0(output_prefix, "checkpoints/", binding$job_id, "/"))) {
+      stop("Completion receipt binding is invalid.")
+    }
+  } else if (identical(binding$job_type, "seurat.pipeline.v1")) {
+    if (is.null(binding$source_analysis_object_id) || is.null(binding$source_dataset_id) ||
+        !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
+        !startsWith(binding$output_storage_key,
+                    paste0(output_prefix, "checkpoints/", binding$job_id, "/"))) {
+      stop("Completion receipt binding is invalid.")
+    }
+  } else if (identical(binding$job_type, "deg.find_markers.v1")) {
+    if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
+        !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
+        !startsWith(binding$output_storage_key,
+                    paste0(output_prefix, "artifacts/", binding$job_id, "/"))) {
+      stop("Completion receipt binding is invalid.")
+    }
+  } else if (identical(binding$job_type, "checkpoint.load.v1")) {
+    if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
+        is.null(binding$source_checkpoint_artifact_id) ||
+        !identical(binding$target_analysis_object_id, binding$source_analysis_object_id)) {
+      stop("Completion receipt binding is invalid.")
+    }
+  } else if (identical(binding$job_type, "checkpoint.fork.v1")) {
+    if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
+        is.null(binding$source_checkpoint_artifact_id) || is.null(binding$target_analysis_object_id) ||
+        identical(binding$target_analysis_object_id, binding$source_analysis_object_id)) {
+      stop("Completion receipt binding is invalid.")
+    }
+  }
+  # Resolve now, before expensive work, so an unsafe receipt destination can never
+  # turn a successful operation into an unrecorded side effect.
+  resolve_internal_storage_key(binding$receipt_storage_key, for_write = TRUE)
+  binding
+}
+
+completion_receipt_safe_string <- function(value) {
+  clean <- gsub("[^A-Za-z0-9 ._:+-]", "", enc2utf8(as.character(value)[1]))
+  substr(clean, 1, 160)
+}
+
+completion_receipt_safe_value <- function(value, depth = 0L,
+                                          state = new.env(parent = emptyenv())) {
+  if (is.null(state$nodes)) state$nodes <- 0L
+  state$nodes <- state$nodes + 1L
+  if (depth > 7L || state$nodes > 6000L) stop("Completion receipt payload is too large.")
+  if (is.null(value)) return(NULL)
+
+  if (is.list(value)) {
+    if (length(value) > 256L) value <- value[seq_len(256L)]
+    value_names <- names(value)
+    if (!is.null(value_names) && any(nzchar(value_names))) {
+      if (any(!grepl("^[A-Za-z0-9._-]{1,64}$", value_names))) {
+        stop("Completion receipt payload is invalid.")
+      }
+      return(lapply(value, completion_receipt_safe_value,
+                    depth = depth + 1L, state = state))
+    }
+    return(lapply(unname(value), completion_receipt_safe_value,
+                  depth = depth + 1L, state = state))
+  }
+
+  if (length(value) > 256L) value <- value[seq_len(256L)]
+  if (length(value) > 1L) {
+    return(lapply(as.list(value), completion_receipt_safe_value,
+                  depth = depth + 1L, state = state))
+  }
+  if (length(value) == 0L || is.na(value[1])) return(NULL)
+  if (is.logical(value)) return(isTRUE(value[1]))
+  if (is.numeric(value) || is.integer(value)) {
+    number <- as.numeric(value[1])
+    if (!is.finite(number) || abs(number) > 9007199254740991) {
+      stop("Completion receipt payload is invalid.")
+    }
+    return(number)
+  }
+  if (is.character(value) || is.factor(value)) return(completion_receipt_safe_string(value))
+  stop("Completion receipt payload is invalid.")
+}
+
+atomic_write_completion_receipt <- function(binding, payload) {
+  if (!requireNamespace("jsonlite", quietly = TRUE) ||
+      !requireNamespace("digest", quietly = TRUE)) {
+    stop("Completion receipt dependencies are unavailable.")
+  }
+  token <- Sys.getenv("API_TOKEN", unset = "")
+  if (!is_scalar_string(token)) stop("Completion receipt signing is unavailable.")
+  safe_payload <- completion_receipt_safe_value(payload)
+  receipt <- c(binding, list(payload = safe_payload))
+  signed_receipt <- jsonlite::toJSON(
+    receipt, auto_unbox = TRUE, null = "null", na = "null", digits = NA
+  )
+  signed_bytes <- nchar(enc2utf8(signed_receipt), type = "bytes")
+  if (signed_bytes <= 0 || signed_bytes > COMPLETION_RECEIPT_SIGNED_MAX_BYTES) {
+    stop("Completion receipt payload is too large.")
+  }
+  signature <- digest::hmac(
+    key = token,
+    object = paste0(COMPLETION_RECEIPT_HMAC_DOMAIN, signed_receipt),
+    algo = "sha256",
+    serialize = FALSE
+  )
+  envelope <- list(
+    algorithm = COMPLETION_RECEIPT_ALGORITHM,
+    signed_receipt = signed_receipt,
+    signature = signature
+  )
+  envelope_json <- jsonlite::toJSON(
+    envelope, auto_unbox = TRUE, null = "null", na = "null", digits = NA
+  )
+  envelope_raw <- charToRaw(enc2utf8(envelope_json))
+  if (length(envelope_raw) <= 0L || length(envelope_raw) > COMPLETION_RECEIPT_MAX_BYTES) {
+    stop("Completion receipt is too large.")
+  }
+
+  destination <- resolve_internal_storage_key(binding$receipt_storage_key, for_write = TRUE)
+  if (file.exists(destination)) stop("Completion receipt already exists.")
+  temp_path <- paste0(destination, ".partial-", Sys.getpid(), "-", sample.int(1000000000, 1))
+  completed <- FALSE
+  con <- NULL
+  on.exit({
+    if (!is.null(con)) try(close(con), silent = TRUE)
+    if (!completed && file.exists(temp_path)) unlink(temp_path)
+  }, add = TRUE)
+  con <- file(temp_path, open = "wb")
+  writeBin(envelope_raw, con)
+  flush(con)
+  close(con)
+  con <- NULL
+  if (!file.rename(temp_path, destination)) stop("Unable to finalize completion receipt.")
+  completed <- TRUE
+  invisible(destination)
+}
+
 validate_absolute_path <- function(user_path) {
   if (grepl("(^|[/\\\\])\\.\\.(|[/\\\\]|$)", user_path)) stop("Access denied: path traversal attempt using '..'")
   is_absolute <- grepl("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)", user_path)
@@ -177,50 +383,251 @@ validate_absolute_path <- function(user_path) {
 
 # ── Session Management ──────────────────────────────────────────────
 active_sessions <- new.env(parent = emptyenv())
+active_session_clock <- 0
+
+session_limit_number <- function(name, default_value) {
+  raw <- Sys.getenv(name, unset = "")
+  parsed <- suppressWarnings(as.numeric(raw))
+  if (length(parsed) != 1 || is.na(parsed) || !is.finite(parsed) || parsed < 1) {
+    return(as.numeric(default_value))
+  }
+  floor(parsed)
+}
+
+active_session_limits <- function() {
+  list(
+    global_count = session_limit_number("R_MAX_ACTIVE_SESSIONS", 8),
+    per_user_count = session_limit_number("R_MAX_ACTIVE_SESSIONS_PER_USER", 4),
+    global_bytes = session_limit_number("R_MAX_ACTIVE_SESSION_BYTES", 4 * 1024^3),
+    per_user_bytes = session_limit_number("R_MAX_ACTIVE_SESSION_BYTES_PER_USER", 2 * 1024^3),
+    per_session_bytes = session_limit_number("R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION", 1024^3)
+  )
+}
+
+validate_internal_state_key <- function(value, allow_missing = FALSE) {
+  if (is.null(value) || (is.character(value) && length(value) == 1 && nchar(value) == 0)) {
+    if (isTRUE(allow_missing)) return(NULL)
+    stop("Invalid internal R state key.")
+  }
+  if (!is.character(value) || length(value) != 1 || is.na(value) ||
+      nchar(value, type = "bytes") > 160 ||
+      !grepl("^user-[0-9]+(:obj-[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$", value)) {
+    stop("Invalid internal R state key.")
+  }
+  value
+}
+
+active_session_owner <- function(sid) sub(":.*$", "", sid)
+
+active_session_size_bytes <- function(global_value, raw_value) {
+  global_size <- if (is.null(global_value)) 0 else as.numeric(object.size(global_value))
+  raw_size <- if (is.null(raw_value)) 0 else as.numeric(object.size(raw_value))
+  size <- global_size + raw_size
+  if (!is.finite(size) || size < 0) stop("Live R session size could not be measured safely.")
+  size
+}
+
+next_active_session_access <- function() {
+  active_session_clock <<- active_session_clock + 1
+  active_session_clock
+}
+
+session_entry_size <- function(entry) {
+  if (is.list(entry) && is.numeric(entry$size_bytes) && length(entry$size_bytes) == 1 &&
+      is.finite(entry$size_bytes) && entry$size_bytes >= 0) {
+    return(as.numeric(entry$size_bytes))
+  }
+  active_session_size_bytes(entry$global, entry$raw)
+}
+
+session_entry_access <- function(entry) {
+  if (is.list(entry) && is.numeric(entry$last_access) && length(entry$last_access) == 1 &&
+      is.finite(entry$last_access)) return(as.numeric(entry$last_access))
+  0
+}
+
+active_session_keys_for_owner <- function(owner) {
+  keys <- ls(envir = active_sessions, all.names = TRUE)
+  keys[vapply(keys, function(key) identical(active_session_owner(key), owner), logical(1))]
+}
+
+active_session_total_bytes <- function(keys = ls(envir = active_sessions, all.names = TRUE)) {
+  if (length(keys) == 0) return(0)
+  sum(vapply(keys, function(key) session_entry_size(active_sessions[[key]]), numeric(1)))
+}
+
+lru_active_session_key <- function(keys) {
+  if (length(keys) == 0) return(NULL)
+  access <- vapply(keys, function(key) session_entry_access(active_sessions[[key]]), numeric(1))
+  keys[order(access, keys)][1]
+}
+
+store_active_session <- function(sid, global_value, raw_value) {
+  sid <- validate_internal_state_key(sid)
+  # Never retain empty attacker-selected keys. A key begins consuming cache
+  # capacity only after it holds an actual live analysis object.
+  if (is.null(global_value) && is.null(raw_value)) {
+    if (exists(sid, envir = active_sessions, inherits = FALSE)) {
+      rm(list = sid, envir = active_sessions)
+    }
+    return(invisible(FALSE))
+  }
+
+  limits <- active_session_limits()
+  owner <- active_session_owner(sid)
+  size_bytes <- active_session_size_bytes(global_value, raw_value)
+  if (size_bytes > limits$per_session_bytes || size_bytes > limits$per_user_bytes ||
+      size_bytes > limits$global_bytes) {
+    stop("Live R session exceeds configured memory capacity.")
+  }
+
+  # Plan every eviction against a snapshot before mutating the environment. An
+  # oversized replacement or failed admission must leave the prior live object
+  # and every would-be eviction victim exactly intact.
+  remaining_keys <- setdiff(ls(envir = active_sessions, all.names = TRUE), sid)
+  victims <- character()
+  owner_keys <- remaining_keys[vapply(
+    remaining_keys,
+    function(key) identical(active_session_owner(key), owner),
+    logical(1)
+  )]
+  while (length(owner_keys) + 1 > limits$per_user_count ||
+         active_session_total_bytes(owner_keys) + size_bytes > limits$per_user_bytes) {
+    victim <- lru_active_session_key(owner_keys)
+    if (is.null(victim)) {
+      stop("Live R session exceeds configured per-user capacity.")
+    }
+    victims <- c(victims, victim)
+    remaining_keys <- setdiff(remaining_keys, victim)
+    owner_keys <- setdiff(owner_keys, victim)
+  }
+
+  while (length(remaining_keys) + 1 > limits$global_count ||
+         active_session_total_bytes(remaining_keys) + size_bytes > limits$global_bytes) {
+    victim <- lru_active_session_key(remaining_keys)
+    if (is.null(victim)) {
+      stop("Live R session exceeds configured global capacity.")
+    }
+    victims <- c(victims, victim)
+    remaining_keys <- setdiff(remaining_keys, victim)
+  }
+
+  replacement <- list(
+    global = global_value,
+    raw = raw_value,
+    owner = owner,
+    size_bytes = size_bytes,
+    last_access = next_active_session_access()
+  )
+  impacted <- unique(c(sid, victims))
+  prior <- lapply(impacted, function(key) {
+    if (exists(key, envir = active_sessions, inherits = FALSE)) active_sessions[[key]] else NULL
+  })
+  names(prior) <- impacted
+  tryCatch({
+    for (victim in unique(victims)) rm(list = victim, envir = active_sessions)
+    active_sessions[[sid]] <- replacement
+  }, error = function(commit_error) {
+    for (key in impacted) {
+      if (exists(key, envir = active_sessions, inherits = FALSE)) {
+        rm(list = key, envir = active_sessions)
+      }
+      if (!is.null(prior[[key]])) active_sessions[[key]] <- prior[[key]]
+    }
+    stop(commit_error)
+  })
+  invisible(TRUE)
+}
+
+load_active_session <- function(sid) {
+  sid <- validate_internal_state_key(sid)
+  if (!exists(sid, envir = active_sessions, inherits = FALSE)) return(NULL)
+  entry <- active_sessions[[sid]]
+  entry$last_access <- next_active_session_access()
+  entry$size_bytes <- session_entry_size(entry)
+  entry$owner <- active_session_owner(sid)
+  active_sessions[[sid]] <- entry
+  entry
+}
+
+request_has_valid_api_token <- function(req) {
+  expected_token <- Sys.getenv("API_TOKEN")
+  provided_token <- req$HTTP_X_API_TOKEN
+  is.character(expected_token) && length(expected_token) == 1 && nchar(expected_token) > 0 &&
+    is.character(provided_token) && length(provided_token) == 1 &&
+    identical(provided_token, expected_token)
+}
+
+authenticate_internal_request <- function(req, res) {
+  if (!request_has_valid_api_token(req)) {
+    res$status <- 403
+    return(FALSE)
+  }
+  req$benchone_authenticated <- TRUE
+  TRUE
+}
 
 #* @plumber
 function(pr) {
   pr %>% pr_hook("postroute", function(req, res) {
-    sid <- req$HTTP_X_OBJECT_ID
-    if (is.null(sid) || nchar(sid) == 0) sid <- "DEFAULT"
-    # Save the current state of global variables back to the session cache
-    active_sessions[[sid]] <- list(global = global_obj, raw = raw_obj)
+    if (!isTRUE(req$benchone_authenticated) ||
+        !isTRUE(req$benchone_session_loaded) ||
+        !isTRUE(req$benchone_session_persist)) return(invisible(NULL))
+    sid <- validate_internal_state_key(req$HTTP_X_OBJECT_ID)
+    # Save only through the global/per-user count and byte budget.
+    store_active_session(sid, global_obj, raw_obj)
+    invisible(NULL)
   })
 }
 
 #* @filter session_loader
 function(req, res) {
-  sid <- req$HTTP_X_OBJECT_ID
-  if (is.null(sid) || nchar(sid) == 0) sid <- "DEFAULT"
-  
-  if (exists(sid, envir = active_sessions)) {
-    sess <- active_sessions[[sid]]
+  req$benchone_session_loaded <- FALSE
+  req$benchone_session_persist <- FALSE
+  # Authenticate before even reading an attacker-selected session key. This is
+  # deliberately duplicated with the auth filter so filter declaration order
+  # cannot make OPTIONS or a rejected request allocate cache entries.
+  if (!authenticate_internal_request(req, res)) {
+    return(list(error = "Unauthorized: Invalid or missing API token"))
+  }
+  sid <- tryCatch(
+    validate_internal_state_key(req$HTTP_X_OBJECT_ID, allow_missing = TRUE),
+    error = identity
+  )
+  if (inherits(sid, "error")) {
+    res$status <- 400
+    return(list(error = "Invalid internal R state key"))
+  }
+  # Health/readiness calls omit X-Object-ID and never consume live-state cache.
+  if (is.null(sid)) {
+    global_obj <<- NULL
+    raw_obj <<- NULL
+    req$benchone_session_loaded <- TRUE
+    return(plumber::forward())
+  }
+
+  sess <- load_active_session(sid)
+  if (!is.null(sess)) {
     global_obj <<- sess$global
     raw_obj <<- sess$raw
   } else {
     global_obj <<- NULL
     raw_obj <<- NULL
   }
-  
+  req$benchone_session_loaded <- TRUE
+  req$benchone_session_persist <- TRUE
   plumber::forward()
 }
 
 # ── API Token Authentication Filter ─────────────────────────────────
 #* @filter auth
 function(req, res) {
-  expected_token <- Sys.getenv("API_TOKEN")
-  provided_token <- req$HTTP_X_API_TOKEN
-  # Allow OPTIONS requests through for CORS preflight
-  if (req$REQUEST_METHOD == "OPTIONS") {
-    plumber::forward()
-  } else {
-    # Fail secure: if API_TOKEN is not set in env, refuse all requests
-    if (is.null(expected_token) || nchar(expected_token) == 0 || is.null(provided_token) || provided_token != expected_token) {
-      res$status <- 403
-      return(list(error = "Unauthorized: Invalid or missing API token"))
-    }
-    plumber::forward()
+  # The private R service is called only by Express/the worker, not browsers;
+  # OPTIONS therefore requires the same service token as every other method.
+  if (!authenticate_internal_request(req, res)) {
+    return(list(error = "Unauthorized: Invalid or missing API token"))
   }
+  plumber::forward()
 }
 
 # ── Plumber API ───────────────────────────────────────────────────
@@ -262,6 +669,356 @@ function(res) {
   )
 }
 
+MAX_PLOT_FEATURES <- 50L
+MAX_QC_DISTRIBUTION_VALUES <- 5000L
+MAX_PLOT_PIXELS <- 8000000
+MAX_PUBLIC_CELL_VALUES <- 20000L
+MAX_PUBLIC_GENE_LIST <- 50000L
+MAX_PUBLIC_CLUSTERS <- 200L
+MAX_DOT_PLOT_GENES <- 50L
+MAX_HEATMAP_GENES <- 200L
+MAX_HEATMAP_CELLS <- 5000L
+MAX_PUBLIC_GENE_NAME_CHARS <- 256L
+MAX_PUBLIC_LABEL_CHARS <- 128L
+MAX_PUBLIC_GENE_LIST_BYTES <- 2000000L
+MAX_REGRESSION_VARIABLES <- 10L
+MAX_PUBLIC_PARAMETER_NAME_CHARS <- 128L
+MAX_NORMALIZE_SCALE_FACTOR <- 1000000L
+MAX_VARIABLE_FEATURES <- 10000L
+MAX_REDUCTION_DIMS <- 100L
+MAX_CLUSTER_RESOLUTION <- 5
+MAX_PUBLIC_PCA_FEATURES <- 10000L
+MAX_PUBLIC_BATCHES <- 100L
+MAX_PUBLIC_METADATA_COLUMNS <- 64L
+MAX_PUBLIC_METADATA_VALUES <- 1000L
+MAX_PUBLIC_MAPPING_ENTRIES <- 1000L
+MAX_PUBLIC_OBJECT_BYTES <- 512 * 1024 * 1024
+MAX_PUBLIC_DENSE_VALUES <- 50000000
+
+# Public browser-driven R operations are synchronous and can duplicate large
+# matrices or construct large neighbor graphs. Objects beyond this conservative
+# live-compute ceiling must use a durable queued job/artifact path instead.
+MAX_PUBLIC_SYNC_CELLS <- 100000L
+MAX_PUBLIC_SYNC_FEATURES <- 100000L
+
+bounded_plot_number <- function(value, default, minimum, maximum) {
+  parsed <- suppressWarnings(as.numeric(value))
+  if (length(parsed) != 1 || is.na(parsed) || !is.finite(parsed)) return(default)
+  min(max(parsed, minimum), maximum)
+}
+
+bounded_plot_features <- function(value) {
+  if (is.null(value) || length(value) == 0) return(NULL)
+  head(as.character(unlist(value, use.names = FALSE)), MAX_PLOT_FEATURES)
+}
+
+bounded_sample_indices <- function(total, maximum = MAX_QC_DISTRIBUTION_VALUES) {
+  total <- suppressWarnings(as.integer(total))
+  maximum <- suppressWarnings(as.integer(maximum))
+  if (length(total) != 1 || is.na(total) || total <= 0
+      || length(maximum) != 1 || is.na(maximum) || maximum <= 0) return(integer())
+  if (total <= maximum) return(seq_len(total))
+  unique(as.integer(round(seq(1, total, length.out = maximum))))
+}
+
+plot_pixel_budget_ok <- function(width, height, resolution) {
+  is.finite(width) && is.finite(height) && is.finite(resolution) &&
+    (width * height * resolution * resolution) <= MAX_PLOT_PIXELS
+}
+
+public_bounded_integer <- function(value, name, minimum, maximum) {
+  parsed <- suppressWarnings(as.numeric(value))
+  if (length(parsed) != 1 || is.na(parsed) || !is.finite(parsed)
+      || parsed != trunc(parsed) || parsed < minimum || parsed > maximum) {
+    stop(paste0(name, " must be a whole number from ", minimum, " to ", maximum, "."))
+  }
+  as.integer(parsed)
+}
+
+public_bounded_number <- function(value, name, minimum, maximum) {
+  parsed <- suppressWarnings(as.numeric(value))
+  if (length(parsed) != 1 || is.na(parsed) || !is.finite(parsed)
+      || parsed < minimum || parsed > maximum) {
+    stop(paste0(name, " must be a finite number from ", minimum, " to ", maximum, "."))
+  }
+  parsed
+}
+
+public_choice <- function(value, name, allowed) {
+  if (!is.atomic(value) || length(value) != 1 || is.na(value)) {
+    stop(paste0(name, " must be one of: ", paste(allowed, collapse = ", "), "."))
+  }
+  parsed <- as.character(value)
+  if (!(parsed %in% allowed)) {
+    stop(paste0(name, " must be one of: ", paste(allowed, collapse = ", "), "."))
+  }
+  parsed
+}
+
+public_optional_seed <- function(value) {
+  if (is.null(value) || length(value) == 0) return(NULL)
+  if (length(value) == 1 && !is.na(value) && identical(trimws(as.character(value)), "")) return(NULL)
+  public_bounded_integer(value, "seed", 0, .Machine$integer.max - 1L)
+}
+
+public_scalar_text <- function(value, name, maximum_chars = MAX_PUBLIC_PARAMETER_NAME_CHARS) {
+  if (!is.atomic(value) || length(value) != 1L || is.na(value)) {
+    stop(paste0(name, " must be one text value."))
+  }
+  parsed <- as.character(value)
+  if (!nzchar(trimws(parsed))
+      || nchar(parsed, type = "chars") > maximum_chars
+      || grepl("[[:cntrl:]]", parsed)) {
+    stop(paste0(name, " must be non-empty, contain no control characters, and be no longer than ",
+                maximum_chars, " characters."))
+  }
+  parsed
+}
+
+public_metadata_column <- function(object, value, name = "column") {
+  parsed <- public_scalar_text(value, name)
+  columns <- tryCatch(colnames(object@meta.data), error = function(e) character())
+  if (!(parsed %in% columns)) stop(paste0(name, " was not found in object metadata."))
+  parsed
+}
+
+public_gene_identifier <- function(value, name = "gene") {
+  if (!is.atomic(value) || length(value) != 1 || is.na(value)) {
+    stop(paste0(name, " must be a single gene identifier."))
+  }
+  parsed <- as.character(value)
+  if (nchar(trimws(parsed), type = "chars") == 0
+      || nchar(parsed, type = "chars") > MAX_PUBLIC_GENE_NAME_CHARS
+      || grepl("[[:cntrl:]]", parsed)) {
+    stop(paste0(name, " must be a non-empty gene identifier no longer than ",
+                MAX_PUBLIC_GENE_NAME_CHARS, " characters."))
+  }
+  parsed
+}
+
+bounded_public_labels <- function(value, maximum_chars = MAX_PUBLIC_LABEL_CHARS) {
+  labels <- as.character(value)
+  labels[is.na(labels)] <- ""
+  labels <- gsub("[[:cntrl:]]", "", labels)
+  substring(labels, 1L, maximum_chars)
+}
+
+public_identity_levels <- function(idents) {
+  values <- as.character(idents)
+  observed <- unique(values[!is.na(values)])
+  declared <- levels(idents)
+  if (is.null(declared)) return(observed)
+  c(declared[declared %in% observed], setdiff(observed, declared))
+}
+
+bounded_public_gene_names <- function(value,
+                                      maximum = MAX_PUBLIC_GENE_LIST,
+                                      maximum_bytes = MAX_PUBLIC_GENE_LIST_BYTES) {
+  genes <- as.character(value)
+  valid <- !is.na(genes) & nzchar(trimws(genes))
+  if (any(valid)) {
+    valid[valid] <- nchar(genes[valid], type = "chars") <= MAX_PUBLIC_GENE_NAME_CHARS &
+      !grepl("[[:cntrl:]]", genes[valid])
+  }
+  genes <- head(genes[valid], maximum)
+  if (length(genes) == 0) return(character())
+  encoded_bytes <- nchar(enc2utf8(genes), type = "bytes") + 3L
+  genes[cumsum(encoded_bytes) <= maximum_bytes]
+}
+
+public_csv_gene_list <- function(value, maximum = MAX_DOT_PLOT_GENES) {
+  if (!is.atomic(value) || length(value) != 1 || is.na(value)) {
+    stop("genes must be one comma-separated list.")
+  }
+  raw <- as.character(value)
+  if (nchar(raw, type = "chars") > maximum * (MAX_PUBLIC_GENE_NAME_CHARS + 1L)) {
+    stop(paste0("genes exceeds the maximum encoded length for ", maximum, " genes."))
+  }
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values <- values[values != ""]
+  if (length(values) == 0) stop("No genes provided.")
+  if (length(values) > maximum) stop(paste0("genes must contain at most ", maximum, " entries."))
+  values <- vapply(values, public_gene_identifier, character(1), name = "Each gene")
+  unique(unname(values))
+}
+
+public_csv_parameter_list <- function(value, name, maximum, allow_empty = TRUE) {
+  if (is.null(value) || length(value) == 0) {
+    if (allow_empty) return(character())
+    stop(paste0(name, " is required."))
+  }
+  if (!is.atomic(value) || length(value) != 1 || is.na(value)) {
+    stop(paste0(name, " must be one comma-separated list."))
+  }
+  raw <- as.character(value)
+  if (identical(trimws(raw), "") && allow_empty) return(character())
+  if (nchar(raw, type = "chars") > maximum * (MAX_PUBLIC_PARAMETER_NAME_CHARS + 1L)) {
+    stop(paste0(name, " exceeds the maximum encoded length."))
+  }
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values <- values[values != ""]
+  if (length(values) > maximum) stop(paste0(name, " must contain at most ", maximum, " entries."))
+  if (any(nchar(values, type = "chars") > MAX_PUBLIC_PARAMETER_NAME_CHARS)
+      || any(grepl("[[:cntrl:]]", values))) {
+    stop(paste0(name, " contains an invalid or overlong entry."))
+  }
+  unique(values)
+}
+
+# Deterministic, evenly spaced sampling with one anchor per observed group. This
+# keeps small clusters visible while enforcing a hard global response bound.
+bounded_group_sample_indices <- function(groups, maximum = MAX_PUBLIC_CELL_VALUES) {
+  maximum <- suppressWarnings(as.integer(maximum))
+  total <- length(groups)
+  if (length(maximum) != 1 || is.na(maximum) || maximum <= 0 || total == 0) return(integer())
+  if (total <= maximum) return(seq_len(total))
+  labels <- as.character(groups)
+  labels[is.na(labels)] <- "<NA>"
+  anchors <- match(unique(labels), labels)
+  if (length(anchors) >= maximum) return(sort(as.integer(head(anchors, maximum))))
+  candidates <- setdiff(seq_len(total), anchors)
+  remaining <- maximum - length(anchors)
+  sampled <- candidates[bounded_sample_indices(length(candidates), remaining)]
+  sort(as.integer(c(anchors, sampled)))
+}
+
+# Select a deterministic top-N marker set without dplyr's tie expansion. The
+# returned feature count is bounded even for pathological cluster counts.
+bounded_marker_features <- function(markers, top_n,
+                                    maximum = MAX_HEATMAP_GENES,
+                                    max_clusters = MAX_PUBLIC_CLUSTERS) {
+  top_n <- public_bounded_integer(top_n, "top_n", 1, 20)
+  if (!is.data.frame(markers) || !all(c("cluster", "gene") %in% names(markers))) {
+    stop("Marker results are missing required columns.")
+  }
+  score_column <- if ("avg_log2FC" %in% names(markers)) {
+    "avg_log2FC"
+  } else if ("avg_logFC" %in% names(markers)) {
+    "avg_logFC"
+  } else {
+    stop("Marker results are missing a fold-change column.")
+  }
+  cluster_values <- as.character(markers$cluster)
+  clusters <- head(unique(cluster_values[!is.na(cluster_values)]), max_clusters)
+  selected <- character()
+  for (cluster in clusters) {
+    rows <- which(cluster_values == cluster & !is.na(markers$gene))
+    if (length(rows) == 0) next
+    scores <- suppressWarnings(as.numeric(markers[[score_column]][rows]))
+    genes <- as.character(markers$gene[rows])
+    valid <- is.finite(scores) & !is.na(genes) & nzchar(genes) &
+      nchar(genes, type = "chars") <= MAX_PUBLIC_GENE_NAME_CHARS &
+      !grepl("[[:cntrl:]]", genes)
+    if (!any(valid)) next
+    scores <- scores[valid]
+    genes <- genes[valid]
+    order_idx <- order(-scores, genes, method = "radix")
+    selected <- unique(c(selected, head(genes[order_idx], top_n)))
+    if (length(selected) >= maximum) break
+  }
+  head(selected, maximum)
+}
+
+public_validation_response <- function(res, error) {
+  res$status <- 400
+  list(error = conditionMessage(error))
+}
+
+public_compute_admission <- function(object, operation) {
+  dimensions <- suppressWarnings(as.numeric(c(
+    n_features = nrow(object),
+    n_cells = ncol(object)
+  )))
+  if (length(dimensions) != 2L || any(!is.finite(dimensions))
+      || any(dimensions < 0) || any(dimensions != trunc(dimensions))) {
+    stop(paste0(operation, " requires an object with valid cell and feature dimensions."))
+  }
+  n_features <- dimensions[[1]]
+  n_cells <- dimensions[[2]]
+  if (n_cells > MAX_PUBLIC_SYNC_CELLS || n_features > MAX_PUBLIC_SYNC_FEATURES) {
+    stop(paste0(
+      operation, " exceeds the live synchronous compute limit of ",
+      MAX_PUBLIC_SYNC_CELLS, " cells and ", MAX_PUBLIC_SYNC_FEATURES,
+      " features. Use a durable queued job for larger objects."
+    ))
+  }
+  object_bytes <- suppressWarnings(as.numeric(object.size(object)))
+  if (length(object_bytes) != 1L || !is.finite(object_bytes) || object_bytes < 0
+      || object_bytes > MAX_PUBLIC_OBJECT_BYTES) {
+    stop(paste0(
+      operation, " exceeds the live synchronous in-memory object limit of ",
+      MAX_PUBLIC_OBJECT_BYTES, " bytes. Use a durable queued job for larger objects."
+    ))
+  }
+  list(
+    n_cells = as.integer(n_cells),
+    n_features = as.integer(n_features),
+    object_bytes = object_bytes
+  )
+}
+
+public_dense_allocation_admission <- function(admission, feature_count, operation,
+                                              maximum_values = MAX_PUBLIC_DENSE_VALUES) {
+  features <- suppressWarnings(as.numeric(feature_count))
+  if (!is.list(admission) || length(admission$n_cells) != 1L
+      || !is.finite(admission$n_cells) || admission$n_cells < 0
+      || length(features) != 1L || !is.finite(features)
+      || features != trunc(features) || features < 1
+      || length(maximum_values) != 1L || !is.finite(maximum_values)
+      || maximum_values < 1) {
+    stop(paste0(operation, " has an invalid dense-allocation estimate."))
+  }
+  dense_values <- as.numeric(admission$n_cells) * features
+  if (!is.finite(dense_values) || dense_values > maximum_values) {
+    stop(paste0(
+      operation, " exceeds the live synchronous dense-allocation limit of ",
+      format(maximum_values, scientific = FALSE),
+      " values. Use a durable queued job for larger objects."
+    ))
+  }
+  list(
+    n_cells = as.integer(admission$n_cells),
+    n_features = as.integer(features),
+    dense_values = dense_values
+  )
+}
+
+public_compute_admission_response <- function(res, error) {
+  res$status <- 413
+  list(error = conditionMessage(error))
+}
+
+#* Standalone worker readiness check. This route is private/worker-only at the
+#* Express boundary. A fresh random challenge filename proves this R process can
+#* see the worker's current durable mount; stale copied marker files do not pass.
+#* It returns no root path, probe content, or challenge value.
+#* @get /internal/worker-readiness
+function(req, res) {
+  nonce <- if (!is.null(req$HTTP_X_STORAGE_PROBE_NONCE)) {
+    tolower(as.character(req$HTTP_X_STORAGE_PROBE_NONCE)[1])
+  } else {
+    ""
+  }
+  expected <- "benchone-shared-storage-v1"
+  shared <- FALSE
+  if (grepl("^[0-9a-f]{32}$", nonce)) {
+    probe_path <- file.path(storage_root_path(), paste0(".benchone-worker-storage-probe-", nonce))
+    if (file.exists(probe_path) && !dir.exists(probe_path)) {
+      link_target <- Sys.readlink(probe_path)
+      if (length(link_target) == 1 && nchar(link_target) == 0) {
+        content <- tryCatch(readLines(probe_path, warn = FALSE, n = 1), error = function(e) character())
+        shared <- length(content) == 1 && identical(content[[1]], expected)
+      }
+    }
+  }
+  if (!shared) res$status <- 503
+  list(
+    status = if (shared) "ok" else "not_ready",
+    storage_shared = shared,
+    runtime_session_id = if (shared) r_runtime_instance_id else NULL
+  )
+}
+
 #* Return the R process session ID (changes on every restart)
 #* @get /session-id
 function(res) {
@@ -296,6 +1053,13 @@ function(req, res) {
 #* @get /qc-distributions
 function(res) {
   if (is.null(global_obj)) return(list(error = "No object loaded. Load data first."))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "QC distributions"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
   
   tryCatch({
     # Compute percent.mt if not already present
@@ -306,12 +1070,16 @@ function(res) {
     mt_vals <- as.numeric(global_obj$percent.mt)
     feature_vals <- as.numeric(global_obj$nFeature_RNA)
     count_vals <- as.numeric(global_obj$nCount_RNA)
+    total_cells <- length(mt_vals)
+    sample_idx <- bounded_sample_indices(total_cells)
     
     list(
-      percent_mt = round(mt_vals, 3),
-      nFeature_RNA = feature_vals,
-      nCount_RNA = count_vals,
-      n_cells = length(mt_vals)
+      percent_mt = round(mt_vals[sample_idx], 3),
+      nFeature_RNA = feature_vals[sample_idx],
+      nCount_RNA = count_vals[sample_idx],
+      n_cells = total_cells,
+      n_values = length(sample_idx),
+      sampled = total_cells > length(sample_idx)
     )
   }, error = function(e) { res$status <- 500; list(error = paste("Failed to compute QC distributions:", e$message))
   })
@@ -614,21 +1382,33 @@ function(res, path) {
 #* @get /object-info
 function(res) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Object inspection"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
   tryCatch({
     meta <- global_obj@meta.data
-    meta_cols <- lapply(colnames(meta), function(col) {
+    all_meta_names <- colnames(meta)
+    returned_meta_names <- head(all_meta_names, MAX_PUBLIC_METADATA_COLUMNS)
+    meta_cols <- lapply(returned_meta_names, function(col) {
       vals <- meta[[col]]
       if (is.numeric(vals)) {
-        list(name = col, type = "numeric", n_unique = length(unique(vals)),
-             min = round(min(vals, na.rm = TRUE), 4),
-             max = round(max(vals, na.rm = TRUE), 4),
-             mean = round(mean(vals, na.rm = TRUE), 4),
+        finite_vals <- vals[is.finite(vals)]
+        list(name = bounded_public_labels(col), type = "numeric", n_unique = length(unique(vals)),
+             min = if (length(finite_vals)) round(min(finite_vals), 4) else NULL,
+             max = if (length(finite_vals)) round(max(finite_vals), 4) else NULL,
+             mean = if (length(finite_vals)) round(mean(finite_vals), 4) else NULL,
              preview = NULL)
       } else {
         u_vals <- unique(vals)
         n_uq <- length(u_vals)
-        top <- if (n_uq < 50) head(names(sort(table(as.character(vals)), decreasing = TRUE)), 5) else NULL
-        list(name = col, type = if (is.factor(vals)) "factor" else "character",
+        top <- if (n_uq < 50) {
+          bounded_public_labels(head(names(sort(table(as.character(vals)), decreasing = TRUE)), 5))
+        } else NULL
+        list(name = bounded_public_labels(col), type = if (is.factor(vals)) "factor" else "character",
              n_unique = n_uq,
              min = NULL, max = NULL, mean = NULL, preview = top)
       }
@@ -637,8 +1417,11 @@ function(res) {
       n_cells = ncol(global_obj),
       n_features = nrow(global_obj),
       active_assay = DefaultAssay(global_obj),
-      assays = Assays(global_obj),
-      reductions = names(global_obj@reductions),
+      assays = as.list(head(bounded_public_labels(Assays(global_obj)), 64L)),
+      reductions = as.list(head(bounded_public_labels(names(global_obj@reductions)), 64L)),
+      n_meta_columns = length(all_meta_names),
+      returned_meta_columns = length(returned_meta_names),
+      meta_columns_truncated = length(all_meta_names) > length(returned_meta_names),
       meta_cols = meta_cols
     )
   }, error = function(e) { res$status <- 500; list(error = paste("object-info failed:", e$message)) })
@@ -749,6 +1532,9 @@ function(req, res) {
   }
 
   tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, "pbmc.pipeline.v1", "r.pbmc.pipeline.v1", storage_key
+    )
     # COPY-on-modify: mutating `obj` never touches global_obj (the parent).
     obj <- global_obj
     set.seed(used_seed)
@@ -794,8 +1580,9 @@ function(req, res) {
 
     cluster_counts <- table(obj$seurat_clusters)
 
-    # No mutation of global_obj. Return a sanitized, bounded summary only.
-    list(
+    # No mutation of global_obj. Publish the signed receipt only after the
+    # checkpoint and bounded response are complete.
+    response_out <- list(
       ok = TRUE,
       summary = list(
         n_cells = ncol(obj),
@@ -803,8 +1590,8 @@ function(req, res) {
         n_variable_features = length(VariableFeatures(obj)),
         n_pcs = npcs,
         n_clusters = length(cluster_counts),
-        cluster_sizes = as.integer(cluster_counts),
-        reductions = names(obj@reductions),
+        cluster_sizes = as.list(as.integer(cluster_counts)),
+        reductions = as.list(names(obj@reductions)),
         normalization_method = norm_method,
         resolution = cluster_res,
         used_seed = used_seed
@@ -819,6 +1606,8 @@ function(req, res) {
         r_version = as.character(getRversion())
       )
     )
+    atomic_write_completion_receipt(receipt_binding, response_out)
+    response_out
   }, error = function(e) {
     res$status <- 500
     # Log the real cause to stderr (captured by the Node parent as an [R:err] line) so
@@ -845,6 +1634,19 @@ function(req, res) {
     return(list(error = "Missing pipeline parameters."))
   }
   p <- body$params
+
+  # Deterministic lease-renewal coverage for the real-R CI smoke. This delay is
+  # carried through the narrow child environment only when diagnostics are
+  # explicitly enabled outside production; ordinary requests cannot set it.
+  diagnostics_enabled <- identical(Sys.getenv("ENABLE_R_TEST_DIAGNOSTICS"), "true") &&
+    !identical(Sys.getenv("NODE_ENV"), "production")
+  if (diagnostics_enabled) {
+    test_delay_ms <- suppressWarnings(as.integer(Sys.getenv("R_TEST_SEURAT_DELAY_MS", unset = "0")))
+    if (length(test_delay_ms) == 1 && !is.na(test_delay_ms)
+        && test_delay_ms > 0 && test_delay_ms <= 600000) {
+      Sys.sleep(test_delay_ms / 1000)
+    }
+  }
 
   as_int <- function(v, d, lo, hi) {
     x <- suppressWarnings(as.integer(v))
@@ -890,6 +1692,9 @@ function(req, res) {
   used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
 
   tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, "seurat.pipeline.v1", "r.seurat.pipeline.v1", storage_key
+    )
     # Read10X_h5 needs hdf5r (a Seurat *Suggests*, not a hard dependency). Fail with a
     # clear, actionable message if it is missing rather than a cryptic downstream error.
     if (!requireNamespace("hdf5r", quietly = TRUE)) {
@@ -968,7 +1773,7 @@ function(req, res) {
     saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
     cluster_counts <- table(obj$seurat_clusters)
 
-    list(
+    response_out <- list(
       ok = TRUE,
       summary = list(
         n_cells = ncol(obj),
@@ -979,8 +1784,8 @@ function(req, res) {
         n_variable_features = length(VariableFeatures(obj)),
         n_pcs = npcs,
         n_clusters = length(cluster_counts),
-        cluster_sizes = as.integer(cluster_counts),
-        reductions = names(obj@reductions),
+        cluster_sizes = as.list(as.integer(cluster_counts)),
+        reductions = as.list(names(obj@reductions)),
         normalization_method = norm_method,
         resolution = cluster_res,
         used_seed = used_seed
@@ -996,6 +1801,8 @@ function(req, res) {
         r_version = as.character(getRversion())
       )
     )
+    atomic_write_completion_receipt(receipt_binding, response_out)
+    response_out
   }, error = function(e) {
     res$status <- 500
     code <- classify_seurat_pipeline_error(e)
@@ -1011,6 +1818,13 @@ function(req, res) {
 #* @get /pipeline-state
 function(req, res) {
   if (is.null(global_obj)) return(list(exists = FALSE))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Pipeline state inspection"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
   tryCatch({
     has_normalized <- tryCatch({
       assay_layers <- SeuratObject::Layers(global_obj[[DefaultAssay(global_obj)]])
@@ -1068,6 +1882,10 @@ function(req, res) {
   expected_size <- if (!is.null(body$expected_size_bytes)) suppressWarnings(as.numeric(body$expected_size_bytes)[1]) else NULL
 
   tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, c("checkpoint.load.v1", "checkpoint.fork.v1"),
+      "r.checkpoint.load.v1", NULL
+    )
     # Server-provided key confined to internal storage.
     safe_path <- resolve_internal_storage_key(storage_key)
     if (!grepl("\\.rds$", safe_path, ignore.case = TRUE)) {
@@ -1129,12 +1947,13 @@ function(req, res) {
     seurat_ver <- tryCatch(as.character(utils::packageVersion("Seurat")), error = function(e) NULL)
     summary_out <- list(
       loaded = TRUE,
+      runtime_instance_id = r_runtime_instance_id,
       checksum_verified = checksum_verified,
       class = class(loaded_obj)[1],
       n_cells = ncol(loaded_obj),
       n_features = nrow(loaded_obj),
-      assays = tryCatch(Assays(loaded_obj), error = function(e) list()),
-      reductions = tryCatch(names(loaded_obj@reductions), error = function(e) list()),
+      assays = as.list(tryCatch(Assays(loaded_obj), error = function(e) character())),
+      reductions = as.list(tryCatch(names(loaded_obj@reductions), error = function(e) character())),
       n_meta_fields = length(meta_names),
       # NAMES only — never the per-cell values behind these columns.
       meta_fields = as.list(meta_names),
@@ -1145,9 +1964,36 @@ function(req, res) {
     # Reattach into the live session for THIS request's X-Object-ID (the LAST step). The
     # postroute hook persists global_obj/raw_obj for that key only — no other object key
     # is mutated.
+    sid <- validate_internal_state_key(req$HTTP_X_OBJECT_ID)
+    prior_global <- global_obj
+    prior_raw <- raw_obj
+    prior_cache_keys <- ls(envir = active_sessions, all.names = TRUE)
+    prior_cache <- lapply(prior_cache_keys, function(key) active_sessions[[key]])
+    names(prior_cache) <- prior_cache_keys
     global_obj <<- loaded_obj
     raw_obj <<- raw_loaded
 
+    # Persist this exact private target before publishing the receipt. If receipt
+    # publication reports a definite failure, restore the exact prior session so a
+    # 500 response cannot leave an unrecorded live-state mutation behind.
+    tryCatch(
+      {
+        store_active_session(sid, global_obj, raw_obj)
+        atomic_write_completion_receipt(receipt_binding, summary_out)
+      },
+      error = function(receipt_error) {
+        global_obj <<- prior_global
+        raw_obj <<- prior_raw
+        current_cache_keys <- ls(envir = active_sessions, all.names = TRUE)
+        if (length(current_cache_keys) > 0) {
+          rm(list = current_cache_keys, envir = active_sessions)
+        }
+        for (key in prior_cache_keys) {
+          active_sessions[[key]] <- prior_cache[[key]]
+        }
+        stop(receipt_error)
+      }
+    )
     summary_out
   }, error = function(e) {
     res$status <- 500
@@ -1231,6 +2077,9 @@ function(req, res) {
   top_n_val    <- as.integer(as_num(p$topMarkersPerCluster, 10, 5, 50))
 
   tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, "deg.find_markers.v1", "r.deg.find_markers.v1", storage_key
+    )
     # COPY-on-read: any identity change happens on `obj`, never global_obj (the live object).
     obj <- global_obj
 
@@ -1317,7 +2166,7 @@ function(req, res) {
       )
     })
 
-    list(
+    response_out <- list(
       ok = TRUE,
       summary = list(
         group_by = group_by,
@@ -1340,6 +2189,8 @@ function(req, res) {
         r_version = as.character(getRversion())
       )
     )
+    atomic_write_completion_receipt(receipt_binding, response_out)
+    response_out
     # NB: global_obj is never reassigned here, so the postroute hook persists the live
     # object UNCHANGED — DEG does not mutate live state.
   }, error = function(e) {
@@ -1356,13 +2207,31 @@ function(req, res) {
 #* @get /meta-values
 function(res, column) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
-  if (!column %in% colnames(global_obj@meta.data)) return(list(error = paste("Column not found:", column)))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Metadata values"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+  parsed_column <- tryCatch(
+    public_metadata_column(global_obj, column, "column"),
+    error = identity
+  )
+  if (inherits(parsed_column, "error")) return(public_validation_response(res, parsed_column))
+  column <- parsed_column
   vals <- as.character(global_obj@meta.data[[column]])
   counts_tbl <- sort(table(vals), decreasing = TRUE)
+  returned_names <- head(names(counts_tbl), MAX_PUBLIC_METADATA_VALUES)
   list(
     column = column,
     n_unique = length(counts_tbl),
-    values = lapply(names(counts_tbl), function(v) list(value = v, count = as.integer(counts_tbl[v])))
+    returned_count = length(returned_names),
+    truncated = length(counts_tbl) > length(returned_names),
+    values = lapply(seq_along(returned_names), function(index) list(
+      value = bounded_public_labels(returned_names[[index]]),
+      count = as.integer(counts_tbl[[returned_names[[index]]]])
+    ))
   )
 }
 
@@ -1419,34 +2288,49 @@ function(res, csv_path, key_column = "barcode", value_columns = "") {
 #* @parser json
 function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
-  
-  body <- req$body
-  source_col <- body$source_col
-  new_col <- body$new_col
-  mapping <- body$mapping
-  
-  if (is.null(source_col) || is.null(new_col) || is.null(mapping)) {
-    return(list(error = "Missing source_col, new_col, or mapping in request body"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Metadata mapping"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
   }
-  
-  tryCatch({
-    if (!source_col %in% colnames(global_obj@meta.data)) {
-      stop(paste("Source column not found:", source_col))
+
+  parsed <- tryCatch({
+    body <- req$body
+    if (!is.list(body) || !is.list(body$mapping)) {
+      stop("source_col, new_col, and a named mapping object are required.")
     }
-    
-    # Extract source values
+    source_col <- public_metadata_column(global_obj, body$source_col, "source_col")
+    new_col <- public_scalar_text(body$new_col, "new_col")
+    mapping <- body$mapping
+    mapping_names <- names(mapping)
+    if (length(mapping) < 1L || length(mapping) > MAX_PUBLIC_MAPPING_ENTRIES
+        || is.null(mapping_names) || length(mapping_names) != length(mapping)
+        || anyDuplicated(mapping_names)) {
+      stop(paste0("mapping must contain 1 to ", MAX_PUBLIC_MAPPING_ENTRIES,
+                  " uniquely named entries."))
+    }
+    safe_names <- vapply(
+      mapping_names, public_scalar_text, character(1), name = "mapping key"
+    )
+    safe_values <- vapply(
+      mapping, public_scalar_text, character(1), name = "mapping value"
+    )
+    names(safe_values) <- safe_names
+    list(source_col = source_col, new_col = new_col, mapping = safe_values)
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
+
+  source_col <- parsed$source_col
+  new_col <- parsed$new_col
+  mapping <- parsed$mapping
+
+  tryCatch({
     source_vals <- as.character(global_obj@meta.data[[source_col]])
-    
-    # Create the new mapped values, defaulting to NA or original value if not in mapping
-    # Here we default to NA for unmapped values, but we could also use the original
-    # We enforce as.character so that numbers are correctly typed as categorical metadata
-    mapped_vals <- as.character(unlist(lapply(source_vals, function(v) {
-      if (!is.null(mapping[[v]])) mapping[[v]] else NA
-    })))
-    
-    # Assign new column
+    mapped_vals <- unname(mapping[match(source_vals, names(mapping))])
     global_obj[[new_col]] <<- mapped_vals
-    
+
     list(
       message = paste0("Successfully added new metadata column: ", new_col),
       mapped_cells = sum(!is.na(mapped_vals))
@@ -1560,6 +2444,10 @@ function(res, req) {
 function(res, req) {
   path <- req$body$path
   tryCatch({
+    if (!identical(Sys.getenv("ALLOW_TRUSTED_RDS_LOAD"), "true")) {
+      res$status <- 403
+      return(list(error = "RDS loading is disabled. Set ALLOW_TRUSTED_RDS_LOAD=true only for trusted local/dev inputs."))
+    }
     safe_path <- validate_path(path, "vault")
     if (!file.exists(safe_path)) stop(paste("Session file not found:", safe_path))
     bundle <- readRDS(safe_path)
@@ -1619,26 +2507,44 @@ function(res, req) {
 #* @parser json
 function(res, req) {
   body <- req$body
-  mt_threshold <- body$mt_threshold
-  min_features <- body$min_features
-  max_features <- body$max_features
-  min_counts <- body$min_counts
-
-  # Rename to avoid collisions with Seurat column names in subset()
-  mt_limit   <- as.numeric(mt_threshold)
-  feat_min   <- as.numeric(min_features)
-  feat_max   <- as.numeric(max_features)
-  count_min  <- as.numeric(min_counts)
-  
-  # Treat feat_max = 0 as no limit for better UX, 
-  # unless user specifically wants to test empty sets
-  if (feat_max <= 0) feat_max <- 1e9
-
   if (is.null(global_obj)) return(list(error = "No object loaded"))
 
   # Use raw_obj as the base if available, otherwise fallback to global_obj
   target_base <- if (!is.null(raw_obj)) raw_obj else global_obj
-  
+  admission <- tryCatch(
+    public_compute_admission(target_base, "Quality control"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+  parsed <- tryCatch({
+    if (!is.list(body)) stop("QC parameters are required.")
+    mt_limit <- public_bounded_number(body$mt_threshold, "mt_threshold", 0, 100)
+    feat_min <- public_bounded_integer(
+      body$min_features, "min_features", 0, MAX_PUBLIC_SYNC_FEATURES
+    )
+    feat_max <- public_bounded_integer(
+      body$max_features, "max_features", 0, MAX_PUBLIC_SYNC_FEATURES
+    )
+    count_min <- public_bounded_number(body$min_counts, "min_counts", 0, 1e12)
+    if (feat_max > 0 && feat_max <= feat_min) {
+      stop("max_features must be 0 (no limit) or greater than min_features.")
+    }
+    list(
+      mt_limit = mt_limit,
+      feat_min = feat_min,
+      feat_max = if (feat_max == 0) 1e9 else feat_max,
+      count_min = count_min
+    )
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
+
+  mt_limit <- parsed$mt_limit
+  feat_min <- parsed$feat_min
+  feat_max <- parsed$feat_max
+  count_min <- parsed$count_min
+
   # Ensure percent.mt exists in baseline
   if (!"percent.mt" %in% colnames(target_base@meta.data)) {
     target_base[["percent.mt"]] <- PercentageFeatureSet(target_base, pattern = "^MT-")
@@ -1649,11 +2555,15 @@ function(res, req) {
   raw_features <- target_base$nFeature_RNA
   raw_counts   <- target_base$nCount_RNA
   
-  removed_mt_count      <- sum(raw_mt >= mt_limit)
-  removed_feature_count <- sum(raw_features <= feat_min | (feat_max < 1e9 & raw_features >= feat_max))
-  removed_count_count   <- sum(raw_counts <= count_min)
+  removed_mt_count      <- sum(raw_mt >= mt_limit, na.rm = TRUE)
+  removed_feature_count <- sum(
+    raw_features <= feat_min | (feat_max < 1e9 & raw_features >= feat_max),
+    na.rm = TRUE
+  )
+  removed_count_count   <- sum(raw_counts <= count_min, na.rm = TRUE)
   
-  keep_cells <- raw_features > feat_min &
+  keep_cells <- !is.na(raw_features) & !is.na(raw_mt) & !is.na(raw_counts) &
+                raw_features > feat_min &
                 raw_features < feat_max &
                 raw_mt < mt_limit &
                 raw_counts > count_min
@@ -1708,27 +2618,105 @@ function(res, req) {
 
 #* Normalize data and find variable features
 #* @get /normalize
-function(res, method = "LogNormalize", scale_factor = 10000, nfeatures = 2000) {
-  scale_factor <- as.numeric(scale_factor)
-  nfeatures <- as.numeric(nfeatures)
+function(res, method = "LogNormalize", scale_factor = 10000, nfeatures = 2000,
+         vars_to_regress = "") {
+  if (is.null(global_obj)) return(list(error = "No object"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Normalization"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+  parsed <- tryCatch({
+    list(
+      method = public_choice(method, "method", c("LogNormalize", "SCTransform")),
+      scale_factor = public_bounded_integer(
+        scale_factor, "scale_factor", 1, MAX_NORMALIZE_SCALE_FACTOR
+      ),
+      nfeatures = public_bounded_integer(nfeatures, "nfeatures", 1, MAX_VARIABLE_FEATURES),
+      vars_to_regress = public_csv_parameter_list(
+        vars_to_regress, "vars_to_regress", MAX_REGRESSION_VARIABLES
+      )
+    )
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
+  method <- parsed$method
+  scale_factor <- parsed$scale_factor
+  nfeatures <- parsed$nfeatures
+  vars_to_regress <- parsed$vars_to_regress
+  dense_feature_count <- if (method == "SCTransform") {
+    admission$n_features
+  } else if (length(vars_to_regress) > 0) {
+    min(nfeatures, admission$n_features)
+  } else {
+    NULL
+  }
+  if (!is.null(dense_feature_count)) {
+    dense_admission <- tryCatch(
+      public_dense_allocation_admission(
+        admission, dense_feature_count, paste0(method, " normalization")
+      ),
+      error = identity
+    )
+    if (inherits(dense_admission, "error")) {
+      return(public_compute_admission_response(res, dense_admission))
+    }
+  }
+  missing_regressors <- setdiff(vars_to_regress, colnames(global_obj@meta.data))
+  if (length(missing_regressors) > 0) {
+    res$status <- 400
+    return(list(error = paste0(
+      "vars_to_regress contains unknown metadata columns: ",
+      paste(missing_regressors, collapse = ", "), "."
+    )))
+  }
+  regressors_literal <- paste(
+    vapply(vars_to_regress, encodeString, character(1), quote = '"'),
+    collapse = ", "
+  )
+  regressors_script <- if (length(vars_to_regress) > 0) {
+    paste0("c(", regressors_literal, ")")
+  } else {
+    "NULL"
+  }
 
   if (method == "SCTransform") {
     script <- paste0(
       "# SCTransform normalization\n",
-      "obj <- SCTransform(obj, verbose = FALSE)\n"
+      "obj <- SCTransform(obj, vars.to.regress = ", regressors_script, ", verbose = FALSE)\n"
     )
-    if (is.null(global_obj)) return(list(error="No object"))
-    global_obj <<- SCTransform(global_obj, verbose = FALSE)
+    global_obj <<- SCTransform(
+      global_obj,
+      vars.to.regress = if (length(vars_to_regress) > 0) vars_to_regress else NULL,
+      verbose = FALSE
+    )
   } else {
     script <- paste0(
       "# Log-normalize data\n",
       "obj <- NormalizeData(obj, normalization.method = '", method, "', scale.factor = ", scale_factor, ")\n",
       "# Identify highly variable features\n",
-      "obj <- FindVariableFeatures(obj, selection.method = 'vst', nfeatures = ", nfeatures, ")\n"
+      "obj <- FindVariableFeatures(obj, selection.method = 'vst', nfeatures = ", nfeatures, ")\n",
+      if (length(vars_to_regress) > 0) {
+        paste0(
+          "# Regress bounded metadata covariates on variable features\n",
+          "obj <- ScaleData(obj, features = VariableFeatures(obj), vars.to.regress = ",
+          regressors_script, ", verbose = FALSE)\n"
+        )
+      } else {
+        ""
+      }
     )
-    if (is.null(global_obj)) return(list(error="No object"))
     global_obj <<- NormalizeData(global_obj, normalization.method = method, scale.factor = scale_factor)
     global_obj <<- FindVariableFeatures(global_obj, selection.method = "vst", nfeatures = nfeatures)
+    if (length(vars_to_regress) > 0) {
+      global_obj <<- ScaleData(
+        global_obj,
+        features = VariableFeatures(global_obj),
+        vars.to.regress = vars_to_regress,
+        verbose = FALSE
+      )
+    }
   }
 
   make_provenance(
@@ -1740,7 +2728,12 @@ function(res, method = "LogNormalize", scale_factor = 10000, nfeatures = 2000) {
     ),
     script_text = script,
     operation = "normalize",
-    parameters = list(method = method, scale_factor = scale_factor, nfeatures = nfeatures)
+    parameters = list(
+      method = method,
+      scale_factor = scale_factor,
+      nfeatures = nfeatures,
+      vars_to_regress = vars_to_regress
+    )
   )
 }
 
@@ -1752,25 +2745,81 @@ function(res, method = "LogNormalize", scale_factor = 10000, nfeatures = 2000) {
 #* @get /integrate
 function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
   if (is.null(global_obj)) return(list(error = "No object loaded. Please run Normalization first."))
-  if (!batch_col %in% colnames(global_obj@meta.data)) {
-    return(list(error = paste0("Batch column '", batch_col, "' not found in metadata. Available columns: ",
-                               paste(colnames(global_obj@meta.data), collapse = ", "))))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Batch integration"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
   }
+  parsed <- tryCatch({
+    parsed_method <- public_choice(
+      tolower(public_scalar_text(method, "method")),
+      "method",
+      c("harmony", "cca")
+    )
+    parsed_batch_col <- public_metadata_column(global_obj, batch_col, "batch_col")
+    raw_batch_values <- as.character(global_obj@meta.data[[parsed_batch_col]])
+    if (any(is.na(raw_batch_values)) || any(!nzchar(trimws(raw_batch_values)))
+        || any(nchar(raw_batch_values, type = "chars") > MAX_PUBLIC_LABEL_CHARS)
+        || any(grepl("[[:cntrl:]]", raw_batch_values))) {
+      stop("batch_col contains missing, empty, control-character, or overlong labels.")
+    }
+    observed_batches <- unique(raw_batch_values)
+    if (length(observed_batches) < 2L || length(observed_batches) > MAX_PUBLIC_BATCHES) {
+      stop(paste0("batch_col must contain 2 to ", MAX_PUBLIC_BATCHES,
+                  " observed batches."))
+    }
+    parsed_seed <- public_optional_seed(seed)
+    list(
+      method = parsed_method,
+      batch_col = parsed_batch_col,
+      batch_vals = observed_batches,
+      seed = if (is.null(parsed_seed)) sample.int(100000L, 1L) else parsed_seed
+    )
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
 
-  batch_vals <- unique(as.character(global_obj@meta.data[[batch_col]]))
-  if (length(batch_vals) < 2) {
-    return(list(error = paste0("Batch column '", batch_col, "' has only one unique value (",
-                               batch_vals[1], "). Integration requires at least 2 batches.")))
-  }
-
-  if (is.null(seed) || seed == "" || is.na(as.integer(seed))) {
-    used_seed <- sample.int(100000, 1)
-  } else {
-    used_seed <- as.integer(seed)
+  method <- parsed$method
+  batch_col <- parsed$batch_col
+  batch_vals <- parsed$batch_vals
+  used_seed <- parsed$seed
+  pca_features <- character()
+  pca_components <- 50L
+  if (method == "harmony" && !"pca" %in% names(global_obj@reductions)) {
+    pca_features <- head(
+      intersect(as.character(VariableFeatures(global_obj)), rownames(global_obj)),
+      MAX_PUBLIC_PCA_FEATURES
+    )
+    pca_components <- min(50L, length(pca_features) - 1L, admission$n_cells - 1L)
+    if (length(pca_features) < 2L || pca_components < 2L) {
+      res$status <- 400
+      return(list(error = "Harmony integration requires normalized variable features and at least 3 cells."))
+    }
+    dense_admission <- tryCatch(
+      public_dense_allocation_admission(
+        admission, length(pca_features), "Harmony PCA preparation"
+      ),
+      error = identity
+    )
+    if (inherits(dense_admission, "error")) {
+      return(public_compute_admission_response(res, dense_admission))
+    }
+  } else if (method == "cca") {
+    integration_feature_count <- min(2000L, admission$n_features)
+    dense_admission <- tryCatch(
+      public_dense_allocation_admission(
+        admission, integration_feature_count, "CCA integration"
+      ),
+      error = identity
+    )
+    if (inherits(dense_admission, "error")) {
+      return(public_compute_admission_response(res, dense_admission))
+    }
   }
 
   tryCatch({
-    if (tolower(method) == "harmony") {
+    if (method == "harmony") {
       # ── Harmony Integration ─────────────────────────────────────────
       if (!requireNamespace("harmony", quietly = TRUE)) {
         return(list(error = paste0(
@@ -1783,10 +2832,10 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
       # Ensure PCA exists; compute it if missing
       if (!"pca" %in% names(global_obj@reductions)) {
         cat("[Integrate] PCA not found — running ScaleData + RunPCA before Harmony...\n")
-        global_obj <<- ScaleData(global_obj, features = rownames(global_obj), verbose = FALSE)
+        global_obj <<- ScaleData(global_obj, features = pca_features, verbose = FALSE)
         set.seed(used_seed)
-        global_obj <<- RunPCA(global_obj, features = VariableFeatures(object = global_obj),
-                               npcs = 50, seed.use = used_seed, verbose = FALSE)
+        global_obj <<- RunPCA(global_obj, features = pca_features,
+                               npcs = pca_components, seed.use = used_seed, verbose = FALSE)
       }
 
       cat("[Integrate] Running Harmony on batch column '", batch_col, "'...\n")
@@ -1820,7 +2869,7 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
         parameters    = list(method = "harmony", batch_col = batch_col, seed = used_seed)
       )
 
-    } else if (tolower(method) == "cca") {
+    } else if (method == "cca") {
       # ── CCA Integration ─────────────────────────────────────────────
       cat("[Integrate] Running Seurat CCA integration on batch column '", batch_col, "'...\n")
 
@@ -1836,7 +2885,9 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
       })
 
       # Select integration features and find anchors
-      features <- SelectIntegrationFeatures(object.list = obj_list)
+      features <- SelectIntegrationFeatures(
+        object.list = obj_list, nfeatures = integration_feature_count
+      )
       anchors  <- FindIntegrationAnchors(object.list = obj_list, anchor.features = features, verbose = FALSE)
 
       # Integrate data
@@ -1844,9 +2895,19 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
 
       # Switch to integrated assay and re-run scaling + PCA
       DefaultAssay(global_obj) <<- "integrated"
-      global_obj <<- ScaleData(global_obj, verbose = FALSE)
+      integrated_pca_features <- head(rownames(global_obj), integration_feature_count)
+      global_obj <<- ScaleData(
+        global_obj, features = integrated_pca_features, verbose = FALSE
+      )
       set.seed(used_seed)
-      global_obj <<- RunPCA(global_obj, npcs = 50, seed.use = used_seed, verbose = FALSE)
+      integrated_pcs <- min(
+        50L, length(integrated_pca_features) - 1L, ncol(global_obj) - 1L
+      )
+      if (integrated_pcs < 2L) stop("Insufficient integrated cells/features for PCA.")
+      global_obj <<- RunPCA(
+        global_obj, features = integrated_pca_features, npcs = integrated_pcs,
+        seed.use = used_seed, verbose = FALSE
+      )
 
       script_text <- paste0(
         "# Seurat CCA Integration\n",
@@ -1893,33 +2954,68 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
 #* Run PCA on scaled data
 #* @get /pca
 function(res, npcs = 50, seed = "") {
-  npcs <- as.integer(npcs)
-
   if (is.null(global_obj)) return(list(error="No object"))
-  
-  # Auto-clamp parameters (max 100 to prevent math timeouts)
-  npcs <- min(npcs, ncol(global_obj) - 1, nrow(global_obj) - 1, 100, na.rm = TRUE)
-  if (npcs < 2) stop("Insufficient cells or features to run PCA.")
-
-  if (is.null(seed) || seed == "" || is.na(as.integer(seed))) {
-    used_seed <- sample.int(100000, 1)
-  } else {
-    used_seed <- as.integer(seed)
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "PCA"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+  parsed <- tryCatch({
+    requested_npcs <- public_bounded_integer(npcs, "npcs", 2, MAX_REDUCTION_DIMS)
+    parsed_seed <- public_optional_seed(seed)
+    list(
+      npcs = min(requested_npcs, admission$n_cells - 1L, admission$n_features - 1L),
+      seed = if (is.null(parsed_seed)) sample.int(100000L, 1L) else parsed_seed
+    )
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
+  npcs <- parsed$npcs
+  used_seed <- parsed$seed
+  if (npcs < 2L) {
+    res$status <- 400
+    return(list(error = "PCA requires at least 3 cells and 3 features."))
+  }
+  pca_features <- head(
+    intersect(as.character(VariableFeatures(global_obj)), rownames(global_obj)),
+    MAX_PUBLIC_PCA_FEATURES
+  )
+  if (length(pca_features) < 2L) {
+    res$status <- 400
+    return(list(error = "PCA requires normalized variable features. Run normalization first."))
+  }
+  npcs <- min(npcs, length(pca_features) - 1L)
+  if (npcs < 2L) {
+    res$status <- 400
+    return(list(error = "PCA requires at least 3 variable features."))
+  }
+  dense_admission <- tryCatch(
+    public_dense_allocation_admission(admission, length(pca_features), "PCA scaling"),
+    error = identity
+  )
+  if (inherits(dense_admission, "error")) {
+    return(public_compute_admission_response(res, dense_admission))
   }
 
   script <- paste0(
     "# Set seed for reproducibility\n",
     "set.seed(", used_seed, ")\n",
-    "# Scale the data\n",
-    "obj <- ScaleData(obj, features = rownames(object = obj))\n",
+    "# Scale only the bounded variable-feature set\n",
+    "pca.features <- head(VariableFeatures(obj), ", length(pca_features), ")\n",
+    "obj <- ScaleData(obj, features = pca.features)\n",
     "# Run PCA\n",
-    "obj <- RunPCA(obj, features = VariableFeatures(object = obj), npcs = ", npcs, ", seed.use = ", used_seed, ")\n"
+    "obj <- RunPCA(obj, features = pca.features, npcs = ", npcs,
+    ", seed.use = ", used_seed, ")\n"
   )
   
   tryCatch({
-    global_obj <<- ScaleData(global_obj, features = rownames(global_obj))
+    global_obj <<- ScaleData(global_obj, features = pca_features, verbose = FALSE)
     set.seed(used_seed)
-    global_obj <<- RunPCA(global_obj, features = VariableFeatures(object = global_obj), npcs = npcs, seed.use = used_seed, verbose=FALSE)
+    global_obj <<- RunPCA(
+      global_obj, features = pca_features, npcs = npcs,
+      seed.use = used_seed, verbose = FALSE
+    )
 
     # Extract true standard deviations safely
     actual_pcs <- length(global_obj[["pca"]]@stdev)
@@ -1932,8 +3028,8 @@ function(res, npcs = 50, seed = "") {
       pc_name <- paste0("PC_", i)
       srt_pos <- sort(ld[, pc_name], decreasing=TRUE)
       srt_neg <- sort(ld[, pc_name], decreasing=FALSE)
-      top_genes <- c(names(srt_pos)[1:5], names(srt_neg)[1:5])
-      loadings[[paste0("PC", i)]] <- top_genes
+      top_genes <- c(head(names(srt_pos), 5L), head(names(srt_neg), 5L))
+      loadings[[paste0("PC", i)]] <- bounded_public_labels(top_genes, MAX_PUBLIC_GENE_NAME_CHARS)
     }
 
     make_provenance(
@@ -1957,18 +3053,44 @@ function(res, npcs = 50, seed = "") {
 
 #* Find neighbors and cluster cells
 #* @get /cluster
-function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
-  dims <- as.integer(dims)
-  resolution <- as.numeric(resolution)
-  algorithm <- as.integer(algorithm)
+function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "",
+         k_param = 20, n_start = 10) {
+  if (is.null(global_obj)) return(list(error="No object"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Clustering"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+  parsed <- tryCatch({
+    parsed_algorithm <- public_bounded_integer(algorithm, "algorithm", 1, 4)
+    if (!(parsed_algorithm %in% c(1L, 4L))) {
+      stop("algorithm must be 1 (Louvain) or 4 (Leiden).")
+    }
+    list(
+      dims = public_bounded_integer(dims, "dims", 1, MAX_REDUCTION_DIMS),
+      resolution = public_bounded_number(
+        resolution, "resolution", 0.01, MAX_CLUSTER_RESOLUTION
+      ),
+      algorithm = parsed_algorithm,
+      seed = public_optional_seed(seed),
+      k_param = public_bounded_integer(k_param, "k_param", 2, 100),
+      n_start = public_bounded_integer(n_start, "n_start", 1, 100)
+    )
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
+  dims <- parsed$dims
+  resolution <- parsed$resolution
+  algorithm <- parsed$algorithm
+  k_param <- parsed$k_param
+  n_start <- parsed$n_start
   algo_name <- if (algorithm == 4) "Leiden" else "Louvain"
 
-  if (is.null(global_obj)) return(list(error="No object"))
-
-  if (is.null(seed) || seed == "" || is.na(as.integer(seed))) {
+  if (is.null(parsed$seed)) {
     used_seed <- sample.int(100000, 1)
   } else {
-    used_seed <- as.integer(seed)
+    used_seed <- parsed$seed
   }
 
   # Fallback if Leiden is requested but packages are missing
@@ -1985,6 +3107,9 @@ function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
   # Clamp dims
   available_dims <- ncol(Embeddings(global_obj, use_reduction))
   dims <- min(dims, available_dims)
+  k_param <- min(k_param, ncol(global_obj) - 1L)
+  if (dims < 1) return(list(error = "No reduction dimensions are available. Run PCA first."))
+  if (k_param < 2) return(list(error = "Insufficient cells for clustering."))
 
   cat("[Cluster] Using reduction:", use_reduction, "with", dims, "dims\n")
 
@@ -1992,27 +3117,39 @@ function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
     "# Set seed for reproducibility\n",
     "set.seed(", used_seed, ")\n",
     "# Find neighbors (reduction: ", use_reduction, ")\n",
-    "obj <- FindNeighbors(obj, reduction = '", use_reduction, "', dims = 1:", dims, ")\n",
+    "obj <- FindNeighbors(obj, reduction = '", use_reduction, "', dims = 1:", dims,
+    ", k.param = ", k_param, ")\n",
     "# Cluster cells\n",
-    "obj <- FindClusters(obj, algorithm = ", algorithm, ", resolution = ", resolution, ", random.seed = ", used_seed, ")\n"
+    "obj <- FindClusters(obj, algorithm = ", algorithm, ", resolution = ", resolution,
+    ", n.start = ", n_start, ", random.seed = ", used_seed, ")\n"
   )
 
   set.seed(used_seed)
-  global_obj <<- FindNeighbors(global_obj, reduction = use_reduction, dims = 1:dims)
-  global_obj <<- FindClusters(global_obj, algorithm = algorithm, resolution = resolution, random.seed = used_seed)
+  global_obj <<- FindNeighbors(
+    global_obj, reduction = use_reduction, dims = 1:dims, k.param = k_param
+  )
+  global_obj <<- FindClusters(
+    global_obj, algorithm = algorithm, resolution = resolution,
+    n.start = n_start, random.seed = used_seed
+  )
 
   # Read actual cluster outcomes
   cluster_counts <- table(global_obj$seurat_clusters)
+  cluster_summary <- head(cluster_counts, MAX_PUBLIC_CLUSTERS)
   
   make_provenance(
     result = list(
       message = paste0(algo_name, " clustering complete. ", length(cluster_counts), " clusters identified."),
       n_clusters = length(cluster_counts),
-      cluster_names = as.list(paste0("Cluster ", names(cluster_counts))),
-      cluster_sizes = as.list(as.integer(cluster_counts)),
+      cluster_names = as.list(bounded_public_labels(paste0("Cluster ", names(cluster_summary)))),
+      cluster_sizes = as.list(as.integer(cluster_summary)),
+      cluster_summary_count = length(cluster_summary),
+      cluster_summary_truncated = length(cluster_counts) > length(cluster_summary),
       algorithm = algo_name,
       resolution = resolution,
-      dims_used = dims
+      dims_used = dims,
+      k_param = k_param,
+      n_start = n_start
     ),
     script_text = script,
     operation = "cluster",
@@ -2022,6 +3159,8 @@ function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
       algorithm = algorithm, 
       algorithm_name = algo_name, 
       seed = used_seed,
+      k_param = k_param,
+      n_start = n_start,
       n_clusters = length(cluster_counts)
     )
   )
@@ -2034,21 +3173,40 @@ function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "") {
 #* Run UMAP dimensionality reduction
 #* @get /umap
 function(res, dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, seed = "") {
-  dims <- as.integer(dims)
-  n_components <- as.integer(n_components)
-  n_neighbors <- as.integer(n_neighbors)
-  min_dist <- as.numeric(min_dist)
-
   # Null-check BEFORE accessing any slots on global_obj
   if (is.null(global_obj)) return(list(error = "No object loaded. Please reload and rerun the pipeline."))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "UMAP"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+
+  parsed <- tryCatch({
+    parsed_components <- public_bounded_integer(n_components, "n_components", 2, 3)
+    if (!(parsed_components %in% c(2L, 3L))) stop("n_components must be 2 or 3.")
+    list(
+      dims = public_bounded_integer(dims, "dims", 1, MAX_REDUCTION_DIMS),
+      n_components = parsed_components,
+      n_neighbors = public_bounded_integer(n_neighbors, "n_neighbors", 2, 100),
+      min_dist = public_bounded_number(min_dist, "min_dist", 0, 1),
+      seed = public_optional_seed(seed)
+    )
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
+  dims <- parsed$dims
+  n_components <- parsed$n_components
+  n_neighbors <- parsed$n_neighbors
+  min_dist <- parsed$min_dist
 
   n_neighbors <- min(n_neighbors, ncol(global_obj) - 1, na.rm = TRUE)
   if (n_neighbors < 2) stop("Insufficient cells for UMAP.")
 
-  if (is.null(seed) || seed == "" || is.na(as.integer(seed))) {
+  if (is.null(parsed$seed)) {
     used_seed <- sample.int(100000, 1)
   } else {
-    used_seed <- as.integer(seed)
+    used_seed <- parsed$seed
   }
 
   # Auto-detect best reduction: use harmony if available, otherwise pca
@@ -2067,6 +3225,7 @@ function(res, dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, see
       cat("[WARN] Requested", dims, "dims but only", available_dims, "available. Clamping.\n")
       dims <- available_dims
     }
+    if (dims < 1) return(list(error = "No reduction dimensions are available. Please re-run PCA."))
 
     script <- paste0(
       "# Set seed for reproducibility\n",
@@ -2082,11 +3241,20 @@ function(res, dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, see
                            n.neighbors = n_neighbors, min.dist = min_dist, seed.use = used_seed)
 
     emb <- Embeddings(global_obj, "umap")
-    clusts <- Idents(global_obj)
+    clusts <- Idents(global_obj)[rownames(emb)]
+    all_cluster_levels <- public_identity_levels(clusts)
+    returned_cluster_levels <- head(all_cluster_levels, MAX_PUBLIC_CLUSTERS)
+    eligible_idx <- which(as.character(clusts) %in% returned_cluster_levels)
+    sample_relative <- bounded_group_sample_indices(
+      as.character(clusts)[eligible_idx], MAX_PUBLIC_CELL_VALUES
+    )
+    sample_idx <- eligible_idx[sample_relative]
+    sampled_clusters <- as.character(clusts)[sample_idx]
 
-    trace_data <- lapply(levels(clusts), function(cl) {
-      idx <- which(clusts == cl)
+    trace_data <- lapply(returned_cluster_levels, function(cl) {
+      idx <- sample_idx[sampled_clusters == cl]
       name_val <- if (grepl("^[0-9]+$", as.character(cl))) paste("Cluster", cl) else as.character(cl)
+      name_val <- bounded_public_labels(name_val)
       el <- list(
         name = name_val,
         x = as.numeric(emb[idx, 1]),
@@ -2104,6 +3272,12 @@ function(res, dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, see
         n_components = n_components,
         n_neighbors = n_neighbors,
         min_dist = min_dist,
+        n_cells = nrow(emb),
+        n_points = length(sample_idx),
+        sampled = length(sample_idx) < nrow(emb),
+        n_clusters = length(all_cluster_levels),
+        returned_clusters = length(returned_cluster_levels),
+        clusters_truncated = length(returned_cluster_levels) < length(all_cluster_levels),
         trace_data = trace_data
       ),
       script_text = script,
@@ -2170,70 +3344,135 @@ function(res) {
   } else {
     genes <- rownames(global_obj)
   }
-  list(genes = genes, count = length(genes))
+  total_genes <- length(genes)
+  returned_genes <- bounded_public_gene_names(genes)
+  list(
+    genes = returned_genes,
+    count = total_genes,
+    returned_count = length(returned_genes),
+    truncated = total_genes > length(returned_genes)
+  )
 }
 
 #* Get expression data for a specific gene
 #* @get /gene-expression
 function(res, gene) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
+  parsed_gene <- tryCatch(public_gene_identifier(gene), error = identity)
+  if (inherits(parsed_gene, "error")) return(public_validation_response(res, parsed_gene))
+  gene <- parsed_gene
   if (!(gene %in% rownames(global_obj))) return(list(error = "Gene not found in dataset"))
   
-  # Fetch expression
-  expr_data <- FetchData(global_obj, vars = gene)
-  expr_data$ident <- Idents(global_obj)
-  umap_coords <- tryCatch(Embeddings(global_obj, "umap"), error = function(e) NULL)
+  total_cells <- ncol(global_obj)
+  sample_idx <- bounded_sample_indices(total_cells, MAX_PUBLIC_CELL_VALUES)
+  sample_cells <- colnames(global_obj)[sample_idx]
+  expr_data <- FetchData(global_obj, vars = gene, cells = sample_cells)
+  expr_data$ident <- Idents(global_obj)[rownames(expr_data)]
+  umap_coords <- tryCatch(
+    Embeddings(global_obj, "umap")[rownames(expr_data), , drop = FALSE],
+    error = function(e) NULL
+  )
   
-  res <- list(
+  result <- list(
     gene = gene,
     expression = as.numeric(expr_data[[gene]]),
-    clusters = as.character(expr_data$ident)
+    clusters = bounded_public_labels(expr_data$ident),
+    n_cells = total_cells,
+    n_values = nrow(expr_data),
+    sampled = total_cells > nrow(expr_data)
   )
   
   if (!is.null(umap_coords)) {
-    res$u1 <- as.numeric(umap_coords[,1])
-    res$u2 <- as.numeric(umap_coords[,2])
+    result$u1 <- as.numeric(umap_coords[, 1])
+    result$u2 <- as.numeric(umap_coords[, 2])
   }
   
-  res
+  result
 }
 
 #* Feature values for a gene overlaid on UMAP
 #* @get /feature-values
 function(res, gene) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
+  parsed_gene <- tryCatch(public_gene_identifier(gene), error = identity)
+  if (inherits(parsed_gene, "error")) return(public_validation_response(res, parsed_gene))
+  gene <- parsed_gene
   if (!(gene %in% rownames(global_obj))) return(list(error = paste("Gene not found:", gene)))
   umap_coords <- tryCatch(Embeddings(global_obj, "umap"), error = function(e) NULL)
   if (is.null(umap_coords)) return(list(error = "UMAP not computed yet. Run the UMAP step first."))
-  expr <- as.numeric(FetchData(global_obj, vars = gene)[[gene]])
+  total_cells <- ncol(global_obj)
+  sample_idx <- bounded_sample_indices(total_cells, MAX_PUBLIC_CELL_VALUES)
+  sample_cells <- colnames(global_obj)[sample_idx]
+  expr_data <- FetchData(global_obj, vars = gene, cells = sample_cells)
+  umap_coords <- umap_coords[rownames(expr_data), , drop = FALSE]
+  expr <- as.numeric(expr_data[[gene]])
   list(
     gene = gene,
     expression = expr,
     u1 = as.numeric(umap_coords[, 1]),
-    u2 = as.numeric(umap_coords[, 2])
+    u2 = as.numeric(umap_coords[, 2]),
+    n_cells = total_cells,
+    n_values = nrow(expr_data),
+    sampled = total_cells > nrow(expr_data)
   )
 }
 
 #* Top marker gene heatmap data (avg expression per cluster)
 #* @get /heatmap
 function(res, top_n = 5) {
-  top_n <- as.integer(top_n)
   if (is.null(global_obj)) return(list(error = "No object loaded"))
-  if (length(levels(Idents(global_obj))) < 2) return(list(error = "Clustering required"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Heatmap"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+  parsed_top_n <- tryCatch(
+    public_bounded_integer(top_n, "top_n", 1, 20),
+    error = identity
+  )
+  if (inherits(parsed_top_n, "error")) return(public_validation_response(res, parsed_top_n))
+  top_n <- parsed_top_n
+  identity_values <- Idents(global_obj)
+  all_clusters <- public_identity_levels(identity_values)
+  if (length(all_clusters) < 2) return(list(error = "Clustering required"))
   tryCatch({
-    suppressMessages({ library(dplyr) })
-    markers <- FindAllMarkers(global_obj, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25, verbose = FALSE)
+    returned_clusters <- head(all_clusters, MAX_PUBLIC_CLUSTERS)
+    identity_labels <- as.character(identity_values)
+    eligible_idx <- which(!is.na(identity_labels) & identity_labels %in% returned_clusters)
+    sample_relative <- bounded_group_sample_indices(
+      identity_labels[eligible_idx], MAX_HEATMAP_CELLS
+    )
+    analysis_idx <- eligible_idx[sample_relative]
+    analysis_cells <- colnames(global_obj)[analysis_idx]
+    analysis_obj <- if (length(analysis_cells) < ncol(global_obj)) {
+      subset(global_obj, cells = analysis_cells)
+    } else {
+      global_obj
+    }
+
+    markers <- FindAllMarkers(analysis_obj, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25, verbose = FALSE)
     if (is.null(markers) || nrow(markers) == 0) return(list(error = "No marker genes found."))
-    top_genes <- as.data.frame(markers) %>%
-      group_by(cluster) %>%
-      top_n(n = top_n, wt = avg_log2FC) %>%
-      pull(gene) %>% unique()
-    avg_mat <- AverageExpression(global_obj, features = top_genes, assays = "RNA")$RNA
+    top_genes <- bounded_marker_features(as.data.frame(markers), top_n)
+    if (length(top_genes) == 0) return(list(error = "No finite marker genes found."))
+    avg_mat <- AverageExpression(analysis_obj, features = top_genes, assays = "RNA")$RNA
+    returned_cluster_names <- head(colnames(avg_mat), MAX_PUBLIC_CLUSTERS)
+    avg_mat <- avg_mat[, returned_cluster_names, drop = FALSE]
     z_list <- lapply(seq_len(nrow(avg_mat)), function(i) as.numeric(avg_mat[i, ]))
     list(
       genes    = rownames(avg_mat),
-      clusters = colnames(avg_mat),
-      z        = z_list
+      clusters = bounded_public_labels(colnames(avg_mat)),
+      z        = z_list,
+      top_n = top_n,
+      n_genes = nrow(avg_mat),
+      feature_limit = MAX_HEATMAP_GENES,
+      n_cells = ncol(global_obj),
+      analysis_cells = length(analysis_cells),
+      sampled = length(analysis_cells) < ncol(global_obj),
+      n_clusters = length(all_clusters),
+      returned_clusters = ncol(avg_mat),
+      clusters_truncated = length(all_clusters) > ncol(avg_mat)
     )
   }, error = function(e) list(error = paste("Heatmap failed:", e$message)))
 }
@@ -2242,26 +3481,53 @@ function(res, top_n = 5) {
 #* @get /dot-plot
 function(res, genes = "") {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
-  if (length(levels(Idents(global_obj))) < 2) return(list(error = "Clustering required"))
-  gene_vec <- trimws(strsplit(genes, ",")[[1]])
-  gene_vec <- gene_vec[gene_vec != ""]
-  if (length(gene_vec) == 0) return(list(error = "No genes provided"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Dot plot"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
+  gene_vec <- tryCatch(public_csv_gene_list(genes), error = identity)
+  if (inherits(gene_vec, "error")) return(public_validation_response(res, gene_vec))
   missing <- gene_vec[!gene_vec %in% rownames(global_obj)]
   if (length(missing) > 0) return(list(error = paste("Genes not found:", paste(missing, collapse = ", "))))
+  identity_values <- Idents(global_obj)
+  all_clusters <- public_identity_levels(identity_values)
+  if (length(all_clusters) < 2) return(list(error = "Clustering required"))
   tryCatch({
-    clusters <- levels(Idents(global_obj))
+    clusters <- head(all_clusters, MAX_PUBLIC_CLUSTERS)
+    identity_labels <- as.character(identity_values)
+    eligible_idx <- which(!is.na(identity_labels) & identity_labels %in% clusters)
+    sample_relative <- bounded_group_sample_indices(
+      identity_labels[eligible_idx], MAX_PUBLIC_CELL_VALUES
+    )
+    analysis_idx <- eligible_idx[sample_relative]
+    analysis_cells <- colnames(global_obj)[analysis_idx]
+    expression_data <- FetchData(global_obj, vars = gene_vec, cells = analysis_cells)
+    idents <- as.character(identity_values[rownames(expression_data)])
     avg_list <- vector("list", length(gene_vec))
     pct_list <- vector("list", length(gene_vec))
     for (gi in seq_along(gene_vec)) {
       g <- gene_vec[gi]
-      expr <- as.numeric(FetchData(global_obj, vars = g)[[g]])
-      idents <- as.character(Idents(global_obj))
+      expr <- as.numeric(expression_data[[g]])
       avg_row <- sapply(clusters, function(cl) mean(expr[idents == cl]))
       pct_row <- sapply(clusters, function(cl) mean(expr[idents == cl] > 0))
       avg_list[[gi]] <- as.numeric(avg_row)
       pct_list[[gi]] <- as.numeric(pct_row)
     }
-    list(genes = gene_vec, clusters = clusters, avg_expr = avg_list, pct_expr = pct_list)
+    list(
+      genes = gene_vec,
+      clusters = bounded_public_labels(clusters),
+      avg_expr = avg_list,
+      pct_expr = pct_list,
+      n_cells = ncol(global_obj),
+      analysis_cells = nrow(expression_data),
+      sampled = nrow(expression_data) < ncol(global_obj),
+      n_clusters = length(all_clusters),
+      returned_clusters = length(clusters),
+      clusters_truncated = length(all_clusters) > length(clusters)
+    )
   }, error = function(e) list(error = paste("Dot plot failed:", e$message)))
 }
 
@@ -2567,7 +3833,6 @@ function(res, database = "GO_BP", pval_cutoff = 0.05, logfc_threshold = 0.25, to
 #* @parser json
 function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
-  
   body <- req$body
   group_by <- body$group_by
   database <- body$database # "human" or "mouse"
@@ -2759,7 +4024,7 @@ get_pub_palette <- function(name, n) {
 build_pub_plot <- function(params) {
   plot_type      <- params$plot_type %||% "UMAP"
   group_by       <- params$group_by  %||% "seurat_clusters"
-  features       <- params$features  # character vector or NULL
+  features       <- bounded_plot_features(params$features)
   title_str      <- params$title     %||% ""
   subtitle_str   <- params$subtitle  %||% ""
   x_label        <- params$x_label   %||% NULL
@@ -2773,10 +4038,12 @@ build_pub_plot <- function(params) {
   font_size      <- as.numeric(params$font_size %||% 12)
   palette_name   <- params$color_palette %||% "Set2"
   split_by       <- if (!is.null(params$split_by) && nchar(params$split_by) > 0) params$split_by else NULL
-  ncol_val       <- if (!is.null(params$ncol)) as.integer(params$ncol) else NULL
+  ncol_val       <- if (!is.null(params$ncol)) {
+    as.integer(bounded_plot_number(params$ncol, 1, 1, 6))
+  } else NULL
   dot_scale_val  <- as.numeric(params$dot_scale %||% 6)
   log_scale_val  <- isTRUE(params$log_scale)
-  top_n_val      <- as.integer(params$top_n %||% 5)
+  top_n_val      <- as.integer(bounded_plot_number(params$top_n %||% 5, 5, 1, 10))
 
   n_groups <- tryCatch(length(levels(Idents(global_obj))), error = function(e) 8)
   palette_colors <- get_pub_palette(palette_name, max(n_groups, 8))
@@ -2824,13 +4091,7 @@ build_pub_plot <- function(params) {
 
   } else if (plot_type == "Heatmap") {
     if (is.null(features) || length(features) == 0) {
-      # Auto: top marker genes
-      suppressMessages({ library(dplyr) })
-      markers <- FindAllMarkers(global_obj, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25, verbose = FALSE)
-      if (!is.null(markers) && nrow(markers) > 0) {
-        top_genes <- as.data.frame(markers) %>% group_by(cluster) %>% top_n(n = top_n_val, wt = avg_log2FC) %>% pull(gene) %>% unique()
-        features <- top_genes
-      }
+      stop("Explicit features are required for Heatmap preview/export; marker discovery runs as a durable DEG job.")
     }
     valid_features <- intersect(features, rownames(global_obj))
     if (length(valid_features) == 0) stop("None of the requested features found in dataset")
@@ -2905,15 +4166,18 @@ function(res, req) {
       res$status <- 400
       return(list(error = unsupported_export_format_message()))
     }
-    width    <- as.numeric(body$width  %||% 8)
-    height   <- as.numeric(body$height %||% 6)
-    dpi_val  <- as.integer(body$dpi   %||% 300)
-    dpi_val  <- min(max(dpi_val, 72), 600)  # clamp to sensible range
+    width    <- bounded_plot_number(body$width %||% 8, 8, 1, 12)
+    height   <- bounded_plot_number(body$height %||% 6, 6, 1, 12)
+    dpi_val  <- as.integer(bounded_plot_number(body$dpi %||% 300, 300, 72, 300))
+    if (!plot_pixel_budget_ok(width, height, dpi_val)) {
+      res$status <- 400
+      return(list(error = "Requested figure dimensions exceed the render budget."))
+    }
 
     # Coerce features from JSON array to character vector
     features_raw <- body$features
     if (!is.null(features_raw) && length(features_raw) > 0) {
-      body$features <- as.character(unlist(features_raw))
+      body$features <- bounded_plot_features(features_raw)
     }
 
     # ── Collision-resistant, user/object-scoped export destination ──────────
@@ -2977,15 +4241,14 @@ function(res, req) {
     make_provenance(
       result = list(
         message      = paste("Successfully exported", plot_type, "to", file_name),
-        file_path    = file_path,
         file_name    = file_name,
         thumbnail_b64 = thumbnail_b64
       ),
       script_text = paste0(
         "# Export: ", plot_type, "\n",
         "p <- build_publication_plot(params)\n",
-        if (format == "pdf") paste0("pdf('", file_path, "', width=", width, ", height=", height, ")\n")
-        else paste0("png('", file_path, "', width=", width, ", height=", height, ", res=", dpi_val, ", units='in')\n"),
+        if (format == "pdf") paste0("pdf('server-managed-export', width=", width, ", height=", height, ")\n")
+        else paste0("png('server-managed-export', width=", width, ", height=", height, ", res=", dpi_val, ", units='in')\n"),
         "print(p)\ndev.off()\n"
       ),
       operation  = "export",
@@ -3002,15 +4265,28 @@ function(res, req) {
 #* @parser json
 function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Plot preview"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
 
   body <- req$body
+  if (!is.list(body)) {
+    res$status <- 400
+    return(list(error = "Plot preview parameters are required."))
+  }
 
   # Coerce features
   features_raw <- body$features
   if (!is.null(features_raw) && length(features_raw) > 0) {
-    body$features <- as.character(unlist(features_raw))
+    body$features <- bounded_plot_features(features_raw)
   }
 
+  tmp_file <- NULL
+  plot_device <- NULL
   tryCatch({
     if (!requireNamespace("base64enc", quietly = TRUE)) {
       stop("Package 'base64enc' must be installed for preview rendering.")
@@ -3020,18 +4296,22 @@ function(res, req) {
 
     tmp_file <- tempfile(fileext = ".jpg")
     jpeg(tmp_file, width = 6, height = 4.5, units = "in", res = 150, quality = 85)
+    plot_device <- dev.cur()
     print(p)
-    dev.off()
+    dev.off(which = plot_device)
+    plot_device <- NULL
 
     raw_bytes <- readBin(tmp_file, "raw", file.info(tmp_file)$size)
     b64 <- base64enc::base64encode(raw_bytes)
-    unlink(tmp_file)
-
     list(result = list(base64 = paste0("data:image/jpeg;base64,", b64)))
 
   }, error = function(e) {
-    if (dev.cur() > 1) dev.off()
     list(error = paste("Preview failed:", e$message))
+  }, finally = {
+    if (!is.null(plot_device) && plot_device %in% dev.list()) {
+      try(dev.off(which = plot_device), silent = TRUE)
+    }
+    if (!is.null(tmp_file) && file.exists(tmp_file)) unlink(tmp_file)
   })
 }
 
@@ -3039,22 +4319,57 @@ function(res, req) {
 #* @parser json
 function(res, req) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Base64 plot render"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
 
-  body       <- req$body
-  plot_type  <- body$plot_type
-  features   <- body$features
-  group_by   <- body$group_by
-  width      <- as.numeric(if (!is.null(body$width))  body$width  else 6)
-  height     <- as.numeric(if (!is.null(body$height)) body$height else 5)
-  res        <- as.numeric(if (!is.null(body$res))    body$res    else 150)
+  body <- req$body
+  parsed <- tryCatch({
+    if (!is.list(body)) stop("Plot render parameters are required.")
+    list(
+      plot_type = public_choice(
+        public_scalar_text(body$plot_type, "plot_type"),
+        "plot_type",
+        c("UMAP", "FeaturePlot", "Violin")
+      ),
+      features = bounded_plot_features(body$features),
+      group_by = if (is.null(body$group_by) || identical(body$group_by, "")) {
+        NULL
+      } else {
+        public_metadata_column(global_obj, body$group_by, "group_by")
+      },
+      width = bounded_plot_number(body$width, 6, 1, 12),
+      height = bounded_plot_number(body$height, 5, 1, 12),
+      resolution = bounded_plot_number(body$res, 150, 72, 300)
+    )
+  }, error = identity)
+  if (inherits(parsed, "error")) return(public_validation_response(res, parsed))
+  plot_type <- parsed$plot_type
+  features <- parsed$features
+  group_by <- parsed$group_by
+  width <- parsed$width
+  height <- parsed$height
+  resolution <- parsed$resolution
 
+  if (!plot_pixel_budget_ok(width, height, resolution)) {
+    res$status <- 400
+    return(list(error = "Requested plot dimensions exceed the render budget."))
+  }
+
+  tmp_file <- NULL
+  plot_device <- NULL
   tryCatch({
     if (!requireNamespace("base64enc", quietly = TRUE)) {
       stop("Package 'base64enc' must be installed to use base64 rendering.")
     }
 
     tmp_file <- tempfile(fileext = ".png")
-    png(tmp_file, width = width, height = height, units = "in", res = res)
+    png(tmp_file, width = width, height = height, units = "in", res = resolution)
+    plot_device <- dev.cur()
 
     p <- NULL
     if (plot_type == "UMAP") {
@@ -3075,22 +4390,24 @@ function(res, req) {
         stop("Feature not found.")
       }
     } else {
-      dev.off()
       stop(paste("Unsupported plot type for base64:", plot_type))
     }
 
     print(p)
-    dev.off()
+    dev.off(which = plot_device)
+    plot_device <- NULL
 
     raw_bytes <- readBin(tmp_file, "raw", file.info(tmp_file)$size)
     b64 <- base64enc::base64encode(raw_bytes)
-    unlink(tmp_file)
-
     list(result = list(base64 = paste0("data:image/png;base64,", b64)))
 
   }, error = function(e) {
-    if (dev.cur() > 1) dev.off()
     list(error = paste("Base64 Render failed:", e$message))
+  }, finally = {
+    if (!is.null(plot_device) && plot_device %in% dev.list()) {
+      try(dev.off(which = plot_device), silent = TRUE)
+    }
+    if (!is.null(tmp_file) && file.exists(tmp_file)) unlink(tmp_file)
   })
 }
 
@@ -3098,6 +4415,13 @@ function(res, req) {
 #* @get /validate
 function(res) {
   if (is.null(global_obj)) return(list(error = "No object loaded"))
+  admission <- tryCatch(
+    public_compute_admission(global_obj, "Validation"),
+    error = identity
+  )
+  if (inherits(admission, "error")) {
+    return(public_compute_admission_response(res, admission))
+  }
   
   tryCatch({
     # Compute percent.mt if not already present

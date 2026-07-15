@@ -40,7 +40,9 @@ pr <- plumber::plumb(api_file)
 
 # Allow port override via env var (used by integration tests to avoid conflicts)
 plumber_port <- as.integer(Sys.getenv("PLUMBER_PORT", unset = "8000"))
-cat("Plumber API running on http://127.0.0.1:", plumber_port, "\n", sep = "")
+plumber_host <- Sys.getenv("PLUMBER_HOST", unset = "127.0.0.1")
+if (!(plumber_host %in% c("127.0.0.1", "0.0.0.0"))) stop("Invalid PLUMBER_HOST")
+cat("Plumber API running on configured private interface, port ", plumber_port, "\n", sep = "")
 pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE))
 
 # Centralized Global Error Handler
@@ -55,4 +57,4 @@ pr$setErrorHandler(function(req, res, err) {
   res$status <- 500
   return(list(error = paste("Backend Exception:", err$message)))
 })
-pr$run(host = "127.0.0.1", port = plumber_port)
+pr$run(host = plumber_host, port = plumber_port)

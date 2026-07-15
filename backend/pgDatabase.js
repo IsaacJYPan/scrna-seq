@@ -37,6 +37,13 @@ const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
 
 let pool = null;
 
+// The supported Branch 5 topology admits one live heavy job at a time. The
+// session-scoped worker lock prevents two healthy standalone workers from
+// starting together, while this distinct transaction-scoped gate fences the
+// claim itself if that session lock is lost between a topology check and the
+// database mutation.
+const WORKER_CLAIM_GATE_LOCK = [0x5343524e, 501];
+
 // ── Job state machine ───────────────────────────────────────────────────────
 const JOB_STATUSES = new Set([
   'created', 'queued', 'running', 'waiting_for_user', 'completed', 'failed', 'canceled'
@@ -83,6 +90,35 @@ const ALLOWED_JOB_TYPES = new Set([
   'checkpoint.fork.v1',
   'deg.find_markers.v1'
 ]);
+const RETRYABLE_DURABLE_JOB_TYPES = new Set([
+  'pbmc.pipeline.v1',
+  'seurat.pipeline.v1',
+  'checkpoint.load.v1',
+  'checkpoint.fork.v1',
+  'deg.find_markers.v1',
+]);
+
+// An HTTP timeout does not prove the R operation stopped. Keep the original
+// claim during a short bounded observation window, then grant exactly one
+// recovery-only claim. These internal markers distinguish that lifecycle from
+// an ordinary expired lease, which may otherwise rerun the handler.
+const R_TIMEOUT_INDETERMINATE = 'R_TIMEOUT_INDETERMINATE';
+const R_TIMEOUT_RECOVERY_PENDING = 'R_TIMEOUT_RECOVERY_PENDING';
+const R_DISPATCH_STARTED = 'R_DISPATCH_STARTED';
+const R_RETRY_RECOVERY_PENDING = 'R_RETRY_RECOVERY_PENDING';
+const COMMITTED_OUTPUT_RECOVERY_PENDING = 'COMMITTED_OUTPUT_RECOVERY_PENDING';
+const R_TIMEOUT_RECOVERY_MAX_GRACE_SECONDS = 300;
+const RECOVERY_ONLY_PENDING_CODES = Object.freeze([
+  R_TIMEOUT_RECOVERY_PENDING,
+  R_RETRY_RECOVERY_PENDING,
+  COMMITTED_OUTPUT_RECOVERY_PENDING,
+]);
+
+function maxAttemptsForJobType(jobType, projectId) {
+  // Retry cleanup and output convergence are defined only for project-scoped
+  // durable storage. Legacy projectless/vault jobs remain one-shot.
+  return projectId && RETRYABLE_DURABLE_JOB_TYPES.has(jobType) ? 2 : 1;
+}
 const ALLOWED_DATASET_FILE_TYPES = new Set([
   'tenx_zip', 'tenx_h5', 'seurat_rds', 'h5seurat', 'h5ad',
   'count_matrix_csv', 'count_matrix_tsv', 'metadata_csv', 'metadata_tsv'
@@ -349,7 +385,86 @@ async function query(text, params = []) {
 
 async function initSchema() {
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf8');
-  await query(sql);
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    // Express and the standalone worker may start together on a fresh database.
+    // PostgreSQL's IF NOT EXISTS DDL is not catalog-race-safe across sessions, so
+    // serialize the idempotent schema bootstrap with one transaction-scoped lock.
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [0x5343524e, 5]);
+    await client.query(sql);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function checkHealth() {
+  await query('SELECT 1');
+  return true;
+}
+
+async function acquireStandaloneWorkerLock() {
+  const p = await connect();
+  const client = await p.connect();
+  let released = false;
+  let lost = false;
+  const onClientError = () => { lost = true; };
+  client.on('error', onClientError);
+  try {
+    const result = await client.query(
+      'SELECT pg_try_advisory_lock($1, $2) AS acquired',
+      [0x5343524e, 500]
+    );
+    if (!result.rows[0] || result.rows[0].acquired !== true) {
+      throw codedError(
+        'WORKER_TOPOLOGY_LOCKED',
+        'Another standalone worker already owns the supported single-worker topology.'
+      );
+    }
+    const active = await client.query(
+      "SELECT 1 FROM jobs WHERE status = 'running' AND lease_expires_at > now() LIMIT 1"
+    );
+    if (active.rows[0]) {
+      await client.query('SELECT pg_advisory_unlock($1, $2)', [0x5343524e, 500]);
+      throw codedError(
+        'WORKER_ACTIVE_CLAIM_EXISTS',
+        'A prior standalone worker still has an active claim; wait for drain or lease expiry.'
+      );
+    }
+  } catch (error) {
+    client.off('error', onClientError);
+    client.release();
+    throw error;
+  }
+  return Object.freeze({
+    async check() {
+      if (released || lost) {
+        throw codedError('WORKER_TOPOLOGY_LOCK_LOST', 'The standalone worker topology lock was lost.');
+      }
+      try {
+        await client.query('SELECT 1');
+      } catch {
+        lost = true;
+        throw codedError('WORKER_TOPOLOGY_LOCK_LOST', 'The standalone worker topology lock was lost.');
+      }
+      return true;
+    },
+    async release() {
+      if (released) return;
+      released = true;
+      try {
+        if (!lost) await client.query('SELECT pg_advisory_unlock($1, $2)', [0x5343524e, 500]);
+      } finally {
+        client.off('error', onClientError);
+        client.release();
+      }
+    },
+  });
 }
 
 // TEST-ONLY: drop the app tables so a contract run starts from a clean schema.
@@ -1780,8 +1895,9 @@ async function createJob(ownerUserId, input = {}) {
   const id = genId('job');
   const { rows } = await query(
     `INSERT INTO jobs
-       (id, owner_user_id, project_id, analysis_object_id, dataset_id, job_type, status, parameters_json)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (id, owner_user_id, project_id, analysis_object_id, dataset_id, job_type,
+        status, parameters_json, max_attempts)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
     [
       id, owner,
@@ -1790,7 +1906,8 @@ async function createJob(ownerUserId, input = {}) {
       datasetId,
       jobType,
       INITIAL_JOB_STATUS,
-      JSON.stringify(parameters)
+      JSON.stringify(parameters),
+      maxAttemptsForJobType(jobType, input.projectId)
     ]
   );
   return rowToJob(rows[0]);
@@ -1968,15 +2085,38 @@ async function createProjectJob(userId, projectId, input = {}) {
     throw codedError('INVALID_JOB_TYPE',
       `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
   }
-  if (jobType === 'checkpoint.fork.v1') {
-    if (input.resultAnalysisObjectId !== undefined) {
-      throw codedError('INVALID_PARAMETERS',
-        'checkpoint.fork.v1 resultAnalysisObjectId is server-managed and must not be provided.');
-    }
-    if (input.datasetId !== undefined) {
-      throw codedError('INVALID_PARAMETERS',
-        'checkpoint.fork.v1 datasetId is derived from the source checkpoint and must not be provided.');
-    }
+  const serverManagedResultTypes = new Set([
+    'pbmc.pipeline.v1',
+    'seurat.pipeline.v1',
+    'deg.find_markers.v1',
+    'checkpoint.load.v1',
+    'checkpoint.fork.v1',
+  ]);
+  const noDatasetBindingTypes = new Set([
+    'pbmc.pipeline.v1',
+    'deg.find_markers.v1',
+    'checkpoint.load.v1',
+    'checkpoint.fork.v1',
+  ]);
+  const requiresAnalysisObjectTypes = new Set([
+    'pbmc.pipeline.v1',
+    'seurat.pipeline.v1',
+    'deg.find_markers.v1',
+    'checkpoint.load.v1',
+    'checkpoint.fork.v1',
+  ]);
+  if (serverManagedResultTypes.has(jobType)
+      && input.resultAnalysisObjectId !== undefined) {
+    throw codedError('INVALID_PARAMETERS',
+      `${jobType} resultAnalysisObjectId is server-managed and must not be provided.`);
+  }
+  if (noDatasetBindingTypes.has(jobType) && input.datasetId !== undefined) {
+    throw codedError('INVALID_PARAMETERS',
+      `${jobType} datasetId is not accepted; inputs are derived from the source analysis object.`);
+  }
+  if (requiresAnalysisObjectTypes.has(jobType)
+      && (input.analysisObjectId === undefined || input.analysisObjectId === null)) {
+    throw codedError('INVALID_PARAMETERS', `${jobType} requires a source analysisObjectId.`);
   }
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
@@ -2035,11 +2175,11 @@ async function createProjectJob(userId, projectId, input = {}) {
   const { rows } = await query(
     `INSERT INTO jobs
        (id, owner_user_id, project_id, analysis_object_id, result_analysis_object_id,
-        dataset_id, job_type, status, parameters_json)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        dataset_id, job_type, status, parameters_json, max_attempts)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [id, Number(owner), pid, analysisObjectId, resultAnalysisObjectId, datasetId,
-      jobType, INITIAL_JOB_STATUS, JSON.stringify(parameters)]
+      jobType, INITIAL_JOB_STATUS, JSON.stringify(parameters), maxAttemptsForJobType(jobType, pid)]
   );
   return rowToJob(rows[0]);
 }
@@ -2071,29 +2211,76 @@ async function getProjectJob(userId, projectId, jobId) {
 }
 
 async function cancelProjectJob(userId, projectId, jobId) {
-  const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
   const pid = String(projectId);
-  const job = await getProjectJobRow(jobId, pid);
-  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (membership.role === 'analyst' && job.ownerUserId !== membership.userId) {
-    throw codedError('FORBIDDEN', 'Analysts can only cancel their own jobs.');
+  const actorUserId = Number(userId);
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    // Claim selection already uses job -> project lock order. Keep that order
+    // here to avoid a cancellation/claim deadlock, then re-read the actor role
+    // under the project lock before mutating the job.
+    const locked = await client.query(
+      'SELECT * FROM jobs WHERE id = $1 AND project_id = $2 FOR UPDATE',
+      [String(jobId), pid]
+    );
+    const row = locked.rows[0];
+    if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+    const project = await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [pid]);
+    if (!project.rows[0]) throw codedError('NOT_FOUND', 'Project not found.');
+    const membershipResult = await client.query(
+      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [pid, actorUserId]
+    );
+    const role = membershipResult.rows[0]?.role;
+    if (!role) throw codedError('NOT_FOUND', 'Project not found.');
+    if (!PROJECT_JOB_WRITE_ROLES.includes(role)) {
+      throw codedError('FORBIDDEN', 'You do not have permission to perform this action.');
+    }
+    const membership = { userId: actorUserId, role };
+    const job = rowToJob(row);
+    if (membership.role === 'analyst' && job.ownerUserId !== membership.userId) {
+      throw codedError('FORBIDDEN', 'Analysts can only cancel their own jobs.');
+    }
+    if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
+    }
+
+    // Output publication takes this same row lock before committing. Under READ
+    // COMMITTED, this query gets a fresh snapshot after any blocked publisher
+    // commits, so cancellation cannot hide an already-published durable output.
+    const output = await client.query(
+      'SELECT 1 FROM job_artifacts WHERE job_id = $1 LIMIT 1',
+      [String(jobId)]
+    );
+    if (row.result_analysis_object_id !== null || output.rows[0]) {
+      throw codedError('JOB_NOT_CANCELABLE', 'Job can no longer be canceled.');
+    }
+
+    const cancelLog = normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' });
+    const canceled = await client.query(
+      `UPDATE jobs SET
+         status = 'canceled',
+         logs_json = (logs_json::jsonb || $1::jsonb)::text,
+         updated_at = now(),
+         canceled_at = now(),
+         claim_token = NULL,
+         lease_expires_at = NULL
+       WHERE id = $2 AND project_id = $3 AND status IN ('queued', 'running')
+       RETURNING *`,
+      [JSON.stringify([cancelLog]), String(jobId), pid]
+    );
+    if (!canceled.rows[0]) {
+      throw codedError('JOB_NOT_CANCELABLE', 'Job can no longer be canceled.');
+    }
+    await client.query('COMMIT');
+    return rowToJob(canceled.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  if (TERMINAL_JOB_STATUSES.has(job.status)) {
-    throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
-  }
-  const logs = [...job.logs, normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' })];
-  await query(
-    `UPDATE jobs SET
-       status = 'canceled',
-       logs_json = $1,
-       updated_at = now(),
-       canceled_at = now(),
-       claim_token = NULL,
-       lease_expires_at = NULL
-     WHERE id = $2 AND project_id = $3`,
-    [JSON.stringify(logs), String(jobId), pid]
-  );
-  return getProjectJobRow(jobId, pid);
 }
 
 /**
@@ -2186,25 +2373,52 @@ async function appendJobLogForUser(ownerUserId, jobId, entry) {
 
 async function cancelJobForUser(ownerUserId, jobId) {
   const owner = Number(ownerUserId);
-  const job = await getJobForUser(jobId, owner);
-  if (!job) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (TERMINAL_JOB_STATUSES.has(job.status)) {
-    throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const locked = await client.query(
+      'SELECT * FROM jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE',
+      [String(jobId), owner]
+    );
+    const row = locked.rows[0];
+    if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+    const job = rowToJob(row);
+    if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      throw codedError('JOB_NOT_CANCELABLE', `Job is already ${job.status}.`);
+    }
+    const output = await client.query(
+      'SELECT 1 FROM job_artifacts WHERE job_id = $1 LIMIT 1',
+      [String(jobId)]
+    );
+    if (row.result_analysis_object_id !== null || output.rows[0]) {
+      throw codedError('JOB_NOT_CANCELABLE', 'Job can no longer be canceled.');
+    }
+
+    const cancelLog = normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' });
+    const canceled = await client.query(
+      `UPDATE jobs SET
+         status = 'canceled',
+         logs_json = (logs_json::jsonb || $1::jsonb)::text,
+         updated_at = now(),
+         canceled_at = now(),
+         claim_token = NULL,
+         lease_expires_at = NULL
+       WHERE id = $2 AND owner_user_id = $3 AND status IN ('queued', 'running')
+       RETURNING *`,
+      [JSON.stringify([cancelLog]), String(jobId), owner]
+    );
+    if (!canceled.rows[0]) {
+      throw codedError('JOB_NOT_CANCELABLE', 'Job can no longer be canceled.');
+    }
+    await client.query('COMMIT');
+    return rowToJob(canceled.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  const logs = [...job.logs, normalizeJobLogEntry({ level: 'info', message: 'Job canceled.' })];
-  const { rows } = await query(
-    `UPDATE jobs SET
-       status = 'canceled',
-       logs_json = $1,
-       updated_at = now(),
-       canceled_at = now(),
-       claim_token = NULL,
-       lease_expires_at = NULL
-     WHERE id = $2 AND owner_user_id = $3
-     RETURNING *`,
-    [JSON.stringify(logs), String(jobId), owner]
-  );
-  return rowToJob(rows[0]);
 }
 
 async function cancelPrivateJobForUser(ownerUserId, jobId) {
@@ -2464,7 +2678,7 @@ async function getJobArtifactRowById(id) {
   return rowToJobArtifact(rows[0]);
 }
 
-async function resolveArtifactRefs(jobRow, input = {}) {
+async function resolveArtifactRefs(jobRow, input = {}, executor = query) {
   const pid = jobRow.project_id || null;
   const owner = Number(jobRow.owner_user_id);
   const out = {
@@ -2475,11 +2689,16 @@ async function resolveArtifactRefs(jobRow, input = {}) {
     figureId: null
   };
 
+  async function exists(sql, params) {
+    const result = await executor(sql, params);
+    return !!result.rows[0];
+  }
+
   async function resolveAo(id, code, label) {
     if (typeof id !== 'string') throw codedError(code, `${label} not found.`);
     const ok = pid
-      ? !!(await getProjectAnalysisObjectRow(id, pid))
-      : !!(await getAnalysisObjectForUser(id, owner));
+      ? await exists('SELECT 1 FROM analysis_objects WHERE id = $1 AND project_id = $2', [id, pid])
+      : await exists('SELECT 1 FROM analysis_objects WHERE id = $1 AND owner_user_id = $2', [id, owner]);
     if (!ok) throw codedError(code, `${label} not found.`);
     return id;
   }
@@ -2491,19 +2710,22 @@ async function resolveArtifactRefs(jobRow, input = {}) {
     out.resultAnalysisObjectId = await resolveAo(input.resultAnalysisObjectId, 'RESULT_OBJECT_NOT_FOUND', 'Result analysis object');
   }
   if (input.datasetId !== undefined && input.datasetId !== null) {
-    if (!pid || typeof input.datasetId !== 'string' || !(await getDatasetRow(input.datasetId, pid))) {
+    if (!pid || typeof input.datasetId !== 'string'
+        || !(await exists('SELECT 1 FROM datasets WHERE id = $1 AND project_id = $2', [input.datasetId, pid]))) {
       throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
     }
     out.datasetId = input.datasetId;
   }
   if (input.provenanceId !== undefined && input.provenanceId !== null) {
-    if (!pid || typeof input.provenanceId !== 'string' || !(await getProjectProvenanceRow(input.provenanceId, pid))) {
+    if (!pid || typeof input.provenanceId !== 'string'
+        || !(await exists('SELECT 1 FROM provenance WHERE id = $1 AND project_id = $2', [input.provenanceId, pid]))) {
       throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
     }
     out.provenanceId = input.provenanceId;
   }
   if (input.figureId !== undefined && input.figureId !== null) {
-    if (!pid || typeof input.figureId !== 'string' || !(await getProjectFigureRow(input.figureId, pid))) {
+    if (!pid || typeof input.figureId !== 'string'
+        || !(await exists('SELECT 1 FROM figure_collection WHERE id = $1 AND project_id = $2', [input.figureId, pid]))) {
       throw codedError('FIGURE_NOT_FOUND', 'Figure not found.');
     }
     out.figureId = input.figureId;
@@ -2556,7 +2778,7 @@ async function insertJobArtifactRow(client, {
   );
 }
 
-async function insertJobArtifact(jobRow, input = {}) {
+async function prepareMetadataArtifact(jobRow, input = {}, executor = query) {
   const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : 'other_metadata';
   if (!isValidArtifactType(artifactType)) {
     throw codedError('INVALID_ARTIFACT_TYPE',
@@ -2574,50 +2796,57 @@ async function insertJobArtifact(jobRow, input = {}) {
   }
   const metadata = input.metadata === undefined ? {} : input.metadata;
   assertArtifactMetadata(metadata);
-  const refs = await resolveArtifactRefs(jobRow, input);
-  const id = generateJobArtifactId();
-  const p = await connect();
-  const client = await p.connect();
-  try {
-    await insertJobArtifactRow(client, {
-      id,
-      jobRow,
-      refs,
-      artifactType,
-      name: input.name != null ? String(input.name) : null,
-      description: input.description != null ? String(input.description) : null,
-      mimeType: input.mimeType != null ? String(input.mimeType) : null,
-      storageKind,
-      status,
-      metadata
-    });
-  } finally {
-    client.release();
+  const refs = await resolveArtifactRefs(jobRow, input, executor);
+  return {
+    id: generateJobArtifactId(),
+    jobRow,
+    refs,
+    artifactType,
+    name: input.name != null ? String(input.name) : null,
+    description: input.description != null ? String(input.description) : null,
+    mimeType: input.mimeType != null ? String(input.mimeType) : null,
+    storageKind,
+    status,
+    metadata,
+  };
+}
+
+async function lockWorkerClaimRow(client, jobId, workerId, claimToken, now) {
+  const locked = await client.query('SELECT * FROM jobs WHERE id = $1 FOR UPDATE', [String(jobId)]);
+  const row = locked.rows[0];
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, workerId, claimToken, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
   }
-  return getJobArtifactRowById(id);
+  return row;
 }
 
 async function createJobArtifactByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
   const wid = requireWorkerId(workerId);
   const token = requireClaimToken(claimToken);
   const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  const p = await connect();
+  const client = await p.connect();
+  let prepared;
+  try {
+    await client.query('BEGIN');
+    const row = await lockWorkerClaimRow(client, jobId, wid, token, now);
+    prepared = await prepareMetadataArtifact(row, input, client.query.bind(client));
+    await insertJobArtifactRow(client, prepared);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  return insertJobArtifact(row, input);
+  return getJobArtifactRowById(prepared.id);
 }
 
 async function createCheckpointArtifactForJobByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
   const wid = requireWorkerId(workerId);
   const token = requireClaimToken(claimToken);
   const now = normalizeWorkerNow(opts);
-  const row = await getJobRowById(jobId);
-  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
-  if (!workerHoldsClaim(row, wid, token, now)) {
-    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
-  }
   const artifactType = typeof input.artifactType === 'string' ? input.artifactType.trim() : 'checkpoint';
   if (!isValidArtifactType(artifactType)) {
     throw codedError('INVALID_ARTIFACT_TYPE',
@@ -2631,7 +2860,6 @@ async function createCheckpointArtifactForJobByWorker(jobId, workerId, claimToke
   if (!isSafeInternalStorageKey(input.internalStorageKey)) {
     throw codedError('INVALID_STORAGE_KEY', 'internalStorageKey must be a safe, relative, server-allocated key.');
   }
-  assertProjectArtifactStorageKey(row, input.internalStorageKey, 'checkpoints');
   const checksum = normalizeChecksumSha256(input.checksumSha256);
   if (checksum === undefined) throw codedError('INVALID_CHECKSUM', 'checksumSha256 must be a 64-char hex string.');
   const sizeBytes = normalizeArtifactSizeBytes(input.sizeBytes);
@@ -2642,11 +2870,14 @@ async function createCheckpointArtifactForJobByWorker(jobId, workerId, claimToke
   }
   const metadata = input.metadata === undefined ? {} : input.metadata;
   assertArtifactMetadata(metadata);
-  const refs = await resolveArtifactRefs(row, input);
   const id = generateJobArtifactId();
   const p = await connect();
   const client = await p.connect();
   try {
+    await client.query('BEGIN');
+    const row = await lockWorkerClaimRow(client, jobId, wid, token, now);
+    assertProjectArtifactStorageKey(row, input.internalStorageKey, 'checkpoints');
+    const refs = await resolveArtifactRefs(row, input, client.query.bind(client));
     await insertJobArtifactRow(client, {
       id,
       jobRow: row,
@@ -2662,6 +2893,10 @@ async function createCheckpointArtifactForJobByWorker(jobId, workerId, claimToke
       status,
       metadata
     });
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
   } finally {
     client.release();
   }
@@ -3214,27 +3449,61 @@ async function claimNextJob(workerId, opts = {}) {
   const wid = requireWorkerId(workerId);
   const now = normalizeWorkerNow(opts);
   const leaseSeconds = normalizeLeaseSeconds(opts.leaseSeconds);
+  let allowedJobTypes = null;
+  if (opts.allowedJobTypes !== undefined && opts.allowedJobTypes !== null) {
+    if (!Array.isArray(opts.allowedJobTypes)) {
+      throw codedError('INVALID_WORKER_CAPABILITIES', 'allowedJobTypes must be an array.');
+    }
+    allowedJobTypes = [...new Set(opts.allowedJobTypes.map((value) => String(value)))];
+    if (allowedJobTypes.some((jobType) => !ALLOWED_JOB_TYPES.has(jobType))) {
+      throw codedError('INVALID_WORKER_CAPABILITIES', 'allowedJobTypes contains an invalid job type.');
+    }
+  }
   const claimToken = generateClaimToken();
   const p = await connect();
   const client = await p.connect();
   try {
     await client.query('BEGIN');
 
+    await client.query(
+      'SELECT pg_advisory_xact_lock($1, $2)',
+      WORKER_CLAIM_GATE_LOCK
+    );
+    const activeClaim = await client.query(
+      `SELECT 1 FROM jobs
+        WHERE status = 'running'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > $1
+        LIMIT 1`,
+      [now]
+    );
+    if (activeClaim.rows[0]) {
+      await client.query('COMMIT');
+      return null;
+    }
+
     // Membership/role changes are authoritative at claim time. Ineligible
     // project jobs, plus legacy projectless jobs that reference project-scoped
     // inputs, are canceled before any handler or R contact; completed and
     // already-running scientific history is preserved.
     const revoked = await client.query(
-      `SELECT j.id, j.logs_json, (j.project_id IS NULL) AS invalid_project_scope
+      `SELECT j.id, j.job_type, j.attempts, j.logs_json,
+              (j.project_id IS NULL) AS invalid_project_scope,
+              (j.result_analysis_object_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = j.id)
+                OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = j.id)
+              ) AS has_committed_output
          FROM jobs j
         WHERE j.status = 'queued'
           AND (
-            (j.project_id IS NOT NULL AND NOT EXISTS (
-              SELECT 1 FROM project_members pm
-               WHERE pm.project_id = j.project_id
-                 AND pm.user_id = j.owner_user_id
-                 AND pm.role = ANY($1::text[])
-            ))
+            (j.project_id IS NOT NULL
+              AND NOT (COALESCE(j.last_worker_error::jsonb ->> 'code', '') = ANY($2::text[]))
+              AND NOT EXISTS (
+                SELECT 1 FROM project_members pm
+                 WHERE pm.project_id = j.project_id
+                   AND pm.user_id = j.owner_user_id
+                   AND pm.role = ANY($1::text[])
+              ))
             OR
             (j.project_id IS NULL AND (
               EXISTS (
@@ -3260,7 +3529,7 @@ async function claimNextJob(workerId, opts = {}) {
         ORDER BY j.created_at ASC, j.id ASC
         LIMIT 100
         FOR UPDATE OF j SKIP LOCKED`,
-      [PROJECT_JOB_WRITE_ROLES]
+      [PROJECT_JOB_WRITE_ROLES, RECOVERY_ONLY_PENDING_CODES]
     );
     const accessError = normalizeJobError({
       code: 'PROJECT_ACCESS_REVOKED',
@@ -3276,6 +3545,38 @@ async function claimNextJob(workerId, opts = {}) {
         ...parseJson(row.logs_json, []),
         normalizeJobLogEntry({ level: 'warn', message: cancellationError.message }),
       ];
+      if (row.has_committed_output) {
+        // Never label durable scientific history as canceled. A reviewed
+        // project-scoped job type is left queued for the recovery-only claim
+        // below; invalid/unknown shapes fail closed without another handler.
+        if (!row.invalid_project_scope && RETRYABLE_DURABLE_JOB_TYPES.has(row.job_type)) continue;
+        await client.query(
+          `UPDATE jobs SET status = 'failed', logs_json = $1, error_json = $2,
+             completed_at = $3, updated_at = $3, worker_id = NULL,
+             claim_token = NULL, lease_expires_at = NULL
+           WHERE id = $4 AND status = 'queued'`,
+          [JSON.stringify(logs), JSON.stringify(cancellationError), now, row.id]
+        );
+        continue;
+      }
+      if (!row.invalid_project_scope
+          && Number(row.attempts) > 0
+          && RETRYABLE_DURABLE_JOB_TYPES.has(row.job_type)) {
+        // A prior authorized attempt may have atomically written its private
+        // signed R receipt even when no DB output transaction is visible yet.
+        // Preserve one receipt-only claim after access revocation; the worker is
+        // explicitly forbidden from dispatching R under this marker.
+        const recoveryError = normalizeJobError({
+          code: R_RETRY_RECOVERY_PENDING,
+          message: 'Creator access changed after a prior attempt; queued for recovery-only inspection.',
+        });
+        await client.query(
+          `UPDATE jobs SET logs_json = $1, last_worker_error = $2, updated_at = $3
+            WHERE id = $4 AND status = 'queued'`,
+          [JSON.stringify(logs), JSON.stringify(recoveryError), now, row.id]
+        );
+        continue;
+      }
       await client.query(
         `UPDATE jobs SET status = 'canceled', logs_json = $1, error_json = $2,
            canceled_at = $3, updated_at = $3, worker_id = NULL,
@@ -3286,8 +3587,16 @@ async function claimNextJob(workerId, opts = {}) {
     }
 
     const found = await client.query(
-      `SELECT j.id, j.project_id, j.owner_user_id FROM jobs j
+      `SELECT j.id, j.project_id, j.owner_user_id,
+              (COALESCE(j.last_worker_error::jsonb ->> 'code', '') = ANY($4::text[]))
+                AS recovery_only_pending,
+              (j.result_analysis_object_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = j.id)
+                OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = j.id)
+              ) AS has_committed_output
+         FROM jobs j
         WHERE j.status = 'queued' AND j.attempts < j.max_attempts
+          AND ($2::text[] IS NULL OR j.job_type = ANY($2::text[]))
           AND (
             (j.project_id IS NULL
               AND NOT EXISTS (
@@ -3314,11 +3623,27 @@ async function claimNextJob(workerId, opts = {}) {
                  AND pm.user_id = j.owner_user_id
                  AND pm.role = ANY($1::text[])
             )
+            OR (
+              j.project_id IS NOT NULL
+              AND j.job_type = ANY($3::text[])
+              AND (j.result_analysis_object_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = j.id)
+                OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = j.id))
+            )
+            OR (
+              j.project_id IS NOT NULL
+              AND COALESCE(j.last_worker_error::jsonb ->> 'code', '') = ANY($4::text[])
+            )
           )
         ORDER BY j.priority DESC, j.created_at ASC, j.id ASC
         LIMIT 1
         FOR UPDATE OF j SKIP LOCKED`,
-      [PROJECT_JOB_WRITE_ROLES]
+      [
+        PROJECT_JOB_WRITE_ROLES,
+        allowedJobTypes,
+        [...RETRYABLE_DURABLE_JOB_TYPES],
+        RECOVERY_ONLY_PENDING_CODES,
+      ]
     );
     if (!found.rows[0]) {
       await client.query('COMMIT');
@@ -3326,7 +3651,8 @@ async function claimNextJob(workerId, opts = {}) {
     }
     const selected = found.rows[0];
     const id = selected.id;
-    if (selected.project_id) {
+    if (selected.project_id && !selected.has_committed_output
+        && !selected.recovery_only_pending) {
       // Serialize the final eligibility check with membership mutations. If a
       // removal/demotion committed while this job was being selected, cancel it
       // under the same job lock instead of starting a handler with stale access.
@@ -3388,10 +3714,48 @@ async function heartbeatJob(jobId, workerId, claimToken, opts = {}) {
     `UPDATE jobs SET heartbeat_at = $1, lease_expires_at = $2, updated_at = $1
       WHERE id = $3 AND worker_id = $4 AND claim_token = $5
         AND status = 'running' AND lease_expires_at > $1
+        AND COALESCE(last_worker_error::jsonb ->> 'code', '') <> $6
       RETURNING *`,
-    [now, addSeconds(now, leaseSeconds), String(jobId), wid, token]
+    [now, addSeconds(now, leaseSeconds), String(jobId), wid, token, R_TIMEOUT_INDETERMINATE]
   );
   if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return rowToWorkerJob(rows[0]);
+}
+
+/**
+ * Persist the point of no safe retry immediately before a receipt-backed R
+ * request is dispatched. A worker-process crash closes its HTTP socket but does
+ * not stop synchronous R execution, so an expired lease carrying this marker is
+ * observed and recovered without ever issuing the handler a second time.
+ */
+async function markRDispatchStartedByWorker(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const marker = JSON.stringify(normalizeJobError({
+    code: R_DISPATCH_STARTED,
+    message: 'A receipt-backed R operation was dispatched; retries require recovery-only handling.',
+  }));
+  if (!(await getJobRowById(jobId))) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  const { rows } = await query(
+    `UPDATE jobs SET last_worker_error = $1, updated_at = $2
+      WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+        AND status = 'running' AND lease_expires_at > $2
+        AND job_type = ANY($6::text[])
+      RETURNING *`,
+    [
+      marker,
+      now,
+      String(jobId),
+      wid,
+      token,
+      [...RETRYABLE_DURABLE_JOB_TYPES],
+    ]
+  );
+  if (!rows[0]) throw codedError(
+    'CLAIM_LOST',
+    'This worker no longer holds a valid receipt-backed claim on the job.'
+  );
   return rowToWorkerJob(rows[0]);
 }
 
@@ -3433,6 +3797,166 @@ async function completeJobByWorker(jobId, workerId, claimToken, opts = {}) {
   return rowToWorkerJob(rows[0]);
 }
 
+/**
+ * Recover the narrow crash window where a handler's atomic output transaction
+ * committed but the process died before the generic terminal job update. Only
+ * exact, reviewed output shapes are resumable; partial/ambiguous output fails
+ * closed without another R call.
+ */
+async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+
+  const recoverySpecs = {
+    'pbmc.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
+    'seurat.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
+    'checkpoint.fork.v1': {
+      artifacts: ['checkpoint_fork'], result: true, edges: 1, runtimeBoundArtifact: 'checkpoint_fork',
+    },
+    'checkpoint.load.v1': {
+      artifacts: ['checkpoint_load'], result: false, edges: 0, runtimeBoundArtifact: 'checkpoint_load',
+    },
+    'deg.find_markers.v1': { artifacts: ['deg_markers', 'deg_summary'], result: false, edges: 0 },
+  };
+  const spec = recoverySpecs[row.job_type];
+  if (!spec) return { resumed: false, committedOutput: false };
+
+  const artifacts = await query(
+    `SELECT artifact_type, storage_kind, storage_uri, checksum_sha256, size_bytes, metadata_json
+       FROM job_artifacts WHERE job_id = $1 ORDER BY created_at ASC, id ASC`,
+    [String(jobId)]
+  );
+  const counts = new Map();
+  for (const artifact of artifacts.rows) {
+    counts.set(artifact.artifact_type, (counts.get(artifact.artifact_type) || 0) + 1);
+  }
+  const edgeCountResult = await query(
+    'SELECT COUNT(*)::integer AS count FROM analysis_object_edges WHERE job_id = $1',
+    [String(jobId)]
+  );
+  const edgeCount = Number(edgeCountResult.rows[0].count);
+  const totalArtifacts = artifacts.rows.length;
+  const hasCommittedOutput = totalArtifacts > 0 || edgeCount > 0 || !!row.result_analysis_object_id;
+  if (!hasCommittedOutput) return { resumed: false, committedOutput: false };
+
+  const artifactsComplete = totalArtifacts === spec.artifacts.length
+    && spec.artifacts.every((artifactType) => counts.get(artifactType) === 1);
+  const resultComplete = spec.result ? !!row.result_analysis_object_id : !row.result_analysis_object_id;
+  const edgesComplete = edgeCount === spec.edges;
+  async function failRecovery(errorCode, message, logMessage) {
+    await failJobByWorker(
+      jobId,
+      wid,
+      token,
+      {
+        code: errorCode,
+        message,
+      },
+      {
+        ...(opts.now === undefined ? {} : { now: opts.now }),
+        log: { level: 'error', message: logMessage },
+      }
+    );
+    return { resumed: false, committedOutput: true, failed: true, errorCode };
+  }
+
+  if (!artifactsComplete || !resultComplete || !edgesComplete) {
+    return failRecovery(
+      'INCOMPLETE_COMMITTED_OUTPUT',
+      'A prior worker left an incomplete durable output; the job was stopped safely.',
+      'Incomplete prior output detected; refusing to rerun R.'
+    );
+  }
+
+  const localArtifacts = artifacts.rows.filter((artifact) => artifact.storage_kind === 'local_internal');
+  if (localArtifacts.length > 0) {
+    if (typeof opts.inspectStorageObject !== 'function') {
+      return failRecovery(
+        'COMMITTED_OUTPUT_INVALID',
+        'A prior worker output could not be verified; the job was stopped safely.',
+        'Prior output storage could not be verified; refusing recovery.'
+      );
+    }
+    try {
+      for (const artifact of localArtifacts) {
+        const kind = artifact.artifact_type === 'checkpoint'
+          ? 'checkpoints'
+          : (artifact.artifact_type === 'deg_markers' ? 'artifacts' : null);
+        if (!kind || !row.project_id || !storage.isProjectStorageKey(artifact.storage_uri, {
+          projectId: row.project_id,
+          kind,
+        })) {
+          throw codedError('INVALID_STORAGE_KEY', 'Committed output storage is outside the job scope.');
+        }
+        const checksumSha256 = normalizeChecksumSha256(artifact.checksum_sha256);
+        const sizeBytes = normalizeArtifactSizeBytes(artifact.size_bytes);
+        if (!checksumSha256 || sizeBytes === null || sizeBytes === undefined) {
+          throw codedError('INVALID_STORAGE_METADATA', 'Committed output integrity metadata is invalid.');
+        }
+        await opts.inspectStorageObject(artifact.storage_uri, { checksumSha256, sizeBytes });
+      }
+    } catch {
+      return failRecovery(
+        'COMMITTED_OUTPUT_INVALID',
+        'A prior worker output failed integrity verification; the job was stopped safely.',
+        'Prior output failed storage integrity verification; refusing recovery.'
+      );
+    }
+  }
+
+  if (spec.runtimeBoundArtifact) {
+    const runtimeArtifact = artifacts.rows.find(
+      (artifact) => artifact.artifact_type === spec.runtimeBoundArtifact
+    );
+    const metadata = runtimeArtifact ? parseJson(runtimeArtifact.metadata_json, {}) : {};
+    const committedHash = metadata && metadata.loaded && metadata.loaded.runtimeInstanceHash;
+    const currentHash = opts.rRuntimeInstanceHash;
+    if (!/^[0-9a-f]{64}$/.test(String(committedHash || ''))
+        || committedHash !== currentHash) {
+      return failRecovery(
+        'LIVE_R_STATE_LOST',
+        'The R runtime restarted after a live-state operation; rerun the operation explicitly.',
+        'R runtime identity changed after committed live-state output; refusing false recovery.'
+      );
+    }
+  }
+
+  const recoveryLog = normalizeJobLogEntry({
+    level: 'info',
+    message: 'Recovered committed output after a prior worker lease expired.',
+  });
+  // Hashing a large checkpoint above can take longer than the lease. Never use
+  // the timestamp captured before that I/O for the guarded terminal update: an
+  // expired claim must not be able to complete merely because its old timestamp
+  // still predates lease_expires_at. Production uses the database clock at the
+  // statement boundary; tests may continue to inject an explicit deterministic
+  // timestamp through opts.now.
+  const terminalNow = opts.now === undefined ? null : normalizeWorkerNow(opts);
+  const { rows } = await query(
+    `UPDATE jobs SET
+       status = 'completed',
+       logs_json = (logs_json::jsonb || $1::jsonb)::text,
+       completed_at = COALESCE($2::timestamptz, CURRENT_TIMESTAMP),
+       heartbeat_at = COALESCE($2::timestamptz, CURRENT_TIMESTAMP),
+       updated_at = COALESCE($2::timestamptz, CURRENT_TIMESTAMP),
+       claim_token = NULL,
+       lease_expires_at = NULL
+     WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+       AND status = 'running'
+       AND lease_expires_at > COALESCE($2::timestamptz, CURRENT_TIMESTAMP)
+     RETURNING *`,
+    [JSON.stringify([recoveryLog]), terminalNow, String(jobId), wid, token]
+  );
+  if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return { resumed: true, committedOutput: true, job: rowToWorkerJob(rows[0]) };
+}
+
 async function failJobByWorker(jobId, workerId, claimToken, error, opts = {}) {
   const wid = requireWorkerId(workerId);
   const token = requireClaimToken(claimToken);
@@ -3461,6 +3985,64 @@ async function failJobByWorker(jobId, workerId, claimToken, error, opts = {}) {
        AND status = 'running' AND lease_expires_at > $3
      RETURNING *`,
     [errJson, JSON.stringify(logs), now, String(jobId), wid, token]
+  );
+  if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  return rowToWorkerJob(rows[0]);
+}
+
+/**
+ * Record an indeterminate R bridge outcome without terminally failing or releasing
+ * the job. The R request may still be executing after a local timeout or transport
+ * disconnect, so immediately re-queueing would permit overlapping R execution. The
+ * claim remains running for a bounded grace period and is converted by
+ * reapExpiredJobs into one recovery-only claim.
+ */
+async function deferIndeterminateRTimeoutByWorker(jobId, workerId, claimToken, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const requestedGraceSeconds = normalizeLeaseSeconds(opts.recoveryDelaySeconds);
+  const recoveryDelaySeconds = Math.min(
+    requestedGraceSeconds,
+    R_TIMEOUT_RECOVERY_MAX_GRACE_SECONDS
+  );
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+
+  const timeoutState = normalizeJobError({
+    code: R_TIMEOUT_INDETERMINATE,
+    message: 'The local R execution outcome is unknown; waiting for bounded output recovery.',
+  });
+  const logs = [
+    ...parseJson(row.logs_json, []),
+    normalizeJobLogEntry({
+      level: 'warn',
+      message: 'R execution became indeterminate after a local timeout or disconnect; waiting before exact-output recovery.',
+    }),
+  ];
+  const { rows } = await query(
+    `UPDATE jobs SET
+       error_json = NULL,
+       last_worker_error = $1,
+       logs_json = $2,
+       heartbeat_at = $3,
+       lease_expires_at = $4,
+       updated_at = $3
+     WHERE id = $5 AND worker_id = $6 AND claim_token = $7
+       AND status = 'running' AND lease_expires_at > $3
+     RETURNING *`,
+    [
+      JSON.stringify(timeoutState),
+      JSON.stringify(logs),
+      now,
+      addSeconds(now, recoveryDelaySeconds),
+      String(jobId),
+      wid,
+      token,
+    ]
   );
   if (!rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
   return rowToWorkerJob(rows[0]);
@@ -3516,34 +4098,143 @@ async function appendJobLogByWorker(jobId, workerId, claimToken, entry, opts = {
 
 async function reapExpiredJobs(opts = {}) {
   const now = normalizeWorkerNow(opts);
-  const { rows } = await query(
-    `SELECT id, attempts, max_attempts FROM jobs
+  const candidates = await query(
+    `SELECT id FROM jobs
       WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $1`,
     [now]
   );
   const requeued = [];
   const failed = [];
-  for (const row of rows) {
-    if (Number(row.attempts) < Number(row.max_attempts)) {
-      const lastErr = JSON.stringify(normalizeJobError({ code: 'LEASE_EXPIRED', message: 'Worker lease expired; job re-queued for another claim.' }));
-      const res = await query(
-        `UPDATE jobs SET status = 'queued', worker_id = NULL, claim_token = NULL,
-           locked_at = NULL, lease_expires_at = NULL, heartbeat_at = $1,
-           last_worker_error = $2, updated_at = $1
-         WHERE id = $3 AND status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $1`,
-        [now, lastErr, row.id]
+  for (const candidate of candidates.rows) {
+    const p = await connect();
+    const client = await p.connect();
+    try {
+      await client.query('BEGIN');
+      // Atomic output publishers take this same row lock. After waiting for a
+      // publisher, READ COMMITTED gives the output query below a fresh snapshot.
+      const locked = await client.query('SELECT * FROM jobs WHERE id = $1 FOR UPDATE', [candidate.id]);
+      const row = locked.rows[0];
+      if (!row || row.status !== 'running' || !row.lease_expires_at
+          || new Date(row.lease_expires_at).getTime() > now.getTime()) {
+        await client.query('COMMIT');
+        continue;
+      }
+      const output = await client.query(
+        `SELECT
+           EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = $1)
+           OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = $1)
+           AS present`,
+        [row.id]
       );
-      if (res.rowCount === 1) requeued.push(row.id);
-    } else {
-      const errJson = JSON.stringify(normalizeJobError({ code: 'LEASE_EXPIRED', message: 'Worker lease expired and the claim budget is exhausted; job failed.' }));
-      const res = await query(
-        `UPDATE jobs SET status = 'failed', error_json = $1, last_worker_error = $1,
-           completed_at = $2, heartbeat_at = $2, claim_token = NULL,
-           lease_expires_at = NULL, updated_at = $2
-         WHERE id = $3 AND status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $2`,
-        [errJson, now, row.id]
-      );
-      if (res.rowCount === 1) failed.push(row.id);
+      const hasCommittedOutput = row.result_analysis_object_id !== null || output.rows[0]?.present === true;
+      const attempts = Number(row.attempts);
+      const maxAttempts = Number(row.max_attempts);
+      const previousError = parseJson(row.last_worker_error, {});
+      const rDispatchStarted = previousError.code === R_DISPATCH_STARTED;
+      const indeterminateRTimeout = previousError.code === R_TIMEOUT_INDETERMINATE;
+      const recoveryOnlyClaim = RECOVERY_ONLY_PENDING_CODES.includes(previousError.code);
+      if (rDispatchStarted) {
+        // A hard worker crash can sever Node's upstream socket while the separate
+        // R process continues synchronously. Revoke the dead claim and spend one
+        // bounded observation window before granting receipt-only recovery. A
+        // crash between this marker and actual dispatch may therefore fail, but
+        // can never duplicate scientific execution.
+        const recoveryError = JSON.stringify(normalizeJobError({
+          code: R_TIMEOUT_INDETERMINATE,
+          message: 'The worker exited after R dispatch; waiting for bounded completion recovery.',
+        }));
+        await client.query(
+          `UPDATE jobs SET worker_id = NULL, claim_token = NULL, locked_at = NULL,
+             lease_expires_at = $1, heartbeat_at = $2,
+             last_worker_error = $3, updated_at = $2
+           WHERE id = $4`,
+          [addSeconds(now, R_TIMEOUT_RECOVERY_MAX_GRACE_SECONDS), now, recoveryError, row.id]
+        );
+      } else if (indeterminateRTimeout) {
+        // The grace window ended. Grant exactly one claim that may validate and
+        // finalize an exact committed output, but must never invoke the handler/R.
+        // Refund only the claim consumed by this bounded recovery handoff.
+        const recoveryError = JSON.stringify(normalizeJobError({
+          code: R_TIMEOUT_RECOVERY_PENDING,
+          message: 'R recovery grace period ended; queued for one recovery-only claim.',
+        }));
+        await client.query(
+          `UPDATE jobs SET status = 'queued', attempts = GREATEST(attempts - 1, 0),
+             worker_id = NULL, claim_token = NULL, locked_at = NULL,
+             lease_expires_at = NULL, heartbeat_at = $1,
+             last_worker_error = $2, updated_at = $1
+           WHERE id = $3`,
+          [now, recoveryError, row.id]
+        );
+        requeued.push(row.id);
+      } else if (recoveryOnlyClaim) {
+        // A recovery-only worker also died or stalled. We cannot prove the
+        // separate synchronous R process stopped, so revoke the dead claim and
+        // return to observation instead of failing, cleaning, or ever falling
+        // through to another scientific dispatch. Operators may explicitly
+        // cancel a permanently stuck job.
+        const recoveryError = JSON.stringify(normalizeJobError({
+          code: R_TIMEOUT_INDETERMINATE,
+          message: 'Recovery is still observing an indeterminate R execution.',
+        }));
+        await client.query(
+          `UPDATE jobs SET worker_id = NULL, claim_token = NULL, locked_at = NULL,
+             lease_expires_at = $1, heartbeat_at = $2,
+             last_worker_error = $3, updated_at = $2
+           WHERE id = $4`,
+          [addSeconds(now, R_TIMEOUT_RECOVERY_MAX_GRACE_SECONDS), now, recoveryError, row.id]
+        );
+      } else if (attempts < maxAttempts) {
+        const lastErr = JSON.stringify(normalizeJobError({
+          code: 'LEASE_EXPIRED', message: 'Worker lease expired; job re-queued for another claim.',
+        }));
+        await client.query(
+          `UPDATE jobs SET status = 'queued', worker_id = NULL, claim_token = NULL,
+             locked_at = NULL, lease_expires_at = NULL, heartbeat_at = $1,
+             last_worker_error = $2, updated_at = $1
+           WHERE id = $3`,
+          [now, lastErr, row.id]
+        );
+        requeued.push(row.id);
+      } else {
+        if (hasCommittedOutput && RETRYABLE_DURABLE_JOB_TYPES.has(row.job_type)) {
+          // Preserve the execution-attempt ceiling while granting exactly one
+          // recovery-only claim. claimNextJob increments attempts back to the
+          // final value, and resumeCommittedJobByWorker runs before any handler.
+          const recoveryError = JSON.stringify(normalizeJobError({
+            code: COMMITTED_OUTPUT_RECOVERY_PENDING,
+            message: 'Final output committed before lease expiry; queued for recovery-only finalization.',
+          }));
+          await client.query(
+            `UPDATE jobs SET status = 'queued', attempts = GREATEST(attempts - 1, 0),
+               worker_id = NULL, claim_token = NULL, locked_at = NULL,
+               lease_expires_at = NULL, heartbeat_at = $1,
+               last_worker_error = $2, updated_at = $1
+             WHERE id = $3`,
+            [now, recoveryError, row.id]
+          );
+          requeued.push(row.id);
+        } else {
+          const errJson = JSON.stringify(normalizeJobError({
+            code: 'LEASE_EXPIRED',
+            message: 'Worker lease expired and the claim budget is exhausted; job failed.',
+          }));
+          await client.query(
+            `UPDATE jobs SET status = 'failed', error_json = $1, last_worker_error = $1,
+               completed_at = $2, heartbeat_at = $2, claim_token = NULL,
+               lease_expires_at = NULL, updated_at = $2
+             WHERE id = $3`,
+            [errJson, now, row.id]
+          );
+          failed.push(row.id);
+        }
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
   }
   return { requeued, failed };
@@ -4000,7 +4691,8 @@ async function completeDegFindMarkersResultByWorker(jobId, workerId, claimToken,
     const claimRow = await client.query(
       `SELECT 1 FROM jobs
        WHERE id = $1 AND worker_id = $2 AND claim_token = $3
-         AND status = 'running' AND lease_expires_at > $4`,
+         AND status = 'running' AND lease_expires_at > $4
+       FOR UPDATE`,
       [String(row.id), wid, token, now]
     );
     if (!claimRow.rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
@@ -4281,6 +4973,8 @@ module.exports = {
   connect,
   query,
   initSchema,
+  checkHealth,
+  acquireStandaloneWorkerLock,
   resetSchemaForTests,
   close,
   // constants / state machine
@@ -4290,6 +4984,7 @@ module.exports = {
   PROJECT_ROLES,
   ALLOWED_OBJECT_TYPES,
   ALLOWED_JOB_TYPES,
+  RETRYABLE_DURABLE_JOB_TYPES,
   ALLOWED_DATASET_FILE_TYPES,
   ALLOWED_ARTIFACT_TYPES,
   validateJobTransition,
@@ -4415,8 +5110,11 @@ module.exports = {
   getWorkerJob,
   claimNextJob,
   heartbeatJob,
+  markRDispatchStartedByWorker,
   completeJobByWorker,
+  resumeCommittedJobByWorker,
   failJobByWorker,
+  deferIndeterminateRTimeoutByWorker,
   releaseJob,
   appendJobLogByWorker,
   reapExpiredJobs,
@@ -4427,6 +5125,11 @@ module.exports = {
   getForkableCheckpointForJobByWorker,
   rowToJob,
   toPublicJob,
+  R_TIMEOUT_INDETERMINATE,
+  R_TIMEOUT_RECOVERY_PENDING,
+  R_DISPATCH_STARTED,
+  R_RETRY_RECOVERY_PENDING,
+  COMMITTED_OUTPUT_RECOVERY_PENDING,
   // project provenance / figures
   createProjectProvenance,
   listProjectProvenance,

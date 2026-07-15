@@ -52,6 +52,22 @@ function generateWorkerId() {
 
 // Error code recorded on a job whose type has no registered handler.
 const UNSUPPORTED_JOB_TYPE = 'UNSUPPORTED_JOB_TYPE';
+const R_TIMEOUT_INDETERMINATE = 'R_TIMEOUT_INDETERMINATE';
+const R_TIMEOUT_RECOVERY_PENDING = 'R_TIMEOUT_RECOVERY_PENDING';
+const R_RETRY_RECOVERY_PENDING = 'R_RETRY_RECOVERY_PENDING';
+const COMMITTED_OUTPUT_RECOVERY_PENDING = 'COMMITTED_OUTPUT_RECOVERY_PENDING';
+const R_COMPLETION_PUBLICATION_INDETERMINATE = 'R_COMPLETION_PUBLICATION_INDETERMINATE';
+const R_TIMEOUT_RECOVERY_GRACE_SECONDS = 300;
+const COMPLETION_RECEIPT_JOB_TYPES = new Set([
+  'pbmc.pipeline.v1',
+  'seurat.pipeline.v1',
+  'deg.find_markers.v1',
+  'checkpoint.load.v1',
+  'checkpoint.fork.v1',
+]);
+const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
+  ANALYSIS_OBJECT_NOT_FOUND: 'Analysis object not found.',
+});
 
 /** Coded handler error carrying a stable, SAFE message. Handlers throw these for
  *  pre-R validation failures; the message is durable (failHandlerError records it),
@@ -59,16 +75,137 @@ const UNSUPPORTED_JOB_TYPE = 'UNSUPPORTED_JOB_TYPE';
 function codedHandlerError(code, message) {
   const err = new Error(message);
   err.code = code;
+  Object.defineProperty(err, 'publicSafeHandlerError', {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
   return err;
 }
 
-async function discardUnrecordedProjectOutput(ctx, key) {
+function safeDiagnosticCode(error) {
+  if (!error || typeof error.code !== 'string') return 'UNCLASSIFIED';
+  return error.code.replace(/[^A-Z0-9_:-]/gi, '').slice(0, 80) || 'UNCLASSIFIED';
+}
+
+function isIndeterminateRExecutionFailure(error) {
+  // Once a receipt-backed R request has been marked for dispatch, no response-side
+  // failure proves that synchronous R work stopped. This includes oversized or
+  // malformed responses and non-200 statuses, not only timeouts/disconnects.
+  return !!error && (error.rSideEffectsPossible === true
+    || error.code === 'R_TIMEOUT'
+    || error.code === 'R_UNREACHABLE'
+    || error.code === R_COMPLETION_PUBLICATION_INDETERMINATE);
+}
+
+function publicationIndeterminateError(error) {
+  if (error && (error.code === 'CLAIM_LOST' || error.code === 'JOB_NOT_FOUND')) return error;
+  return codedHandlerError(
+    R_COMPLETION_PUBLICATION_INDETERMINATE,
+    'Completion publication outcome is indeterminate.'
+  );
+}
+
+async function discardUnrecordedProjectOutput(ctx, key, cause = null) {
+  // A local HTTP timeout or disconnect does not prove R stopped. Removing the server-owned
+  // destination here can race an R process that is still publishing its output.
+  // Preserve it for the bounded recovery-only pass instead.
+  if (isIndeterminateRExecutionFailure(cause)) return;
   if (!storage.isProjectStorageKey(key) || typeof ctx.removeDurableObject !== 'function') return;
   try {
     await ctx.removeDurableObject(key);
   } catch {
     // Best effort only. Preserve the original handler error.
   }
+}
+
+async function removeRetryOrphanOutput(ctx, key) {
+  if (ctx.recoveringCompletionReceipt
+      || !ctx.job || Number(ctx.job.attempts || 0) <= 1) return;
+  if (!storage.isProjectStorageKey(key) || typeof ctx.removeDurableObject !== 'function') {
+    throw codedHandlerError('RETRY_CLEANUP_FAILED', 'A prior job attempt could not be prepared safely.');
+  }
+  try {
+    await ctx.removeDurableObject(key);
+  } catch {
+    throw codedHandlerError('RETRY_CLEANUP_FAILED', 'A prior job attempt could not be prepared safely.');
+  }
+}
+
+function deriveCheckpointForkResultObjectId(jobId) {
+  if (typeof jobId !== 'string' || jobId === '') {
+    throw codedHandlerError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  return `ao_${crypto.createHash('sha256')
+    .update('checkpoint-fork-result-v1:')
+    .update(jobId)
+    .digest('hex')}`;
+}
+
+function deterministicCompletionOutputKey(job) {
+  if (!job || !COMPLETION_RECEIPT_JOB_TYPES.has(job.jobType)) return null;
+  if (job.jobType === 'pbmc.pipeline.v1') {
+    return allocateCheckpointStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'seurat.pipeline.v1') {
+    return allocateSeuratCheckpointStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'deg.find_markers.v1') {
+    return allocateDegResultStorageKey(job.projectId, job.id);
+  }
+  return null;
+}
+
+async function completionReceiptExpectation(ctx) {
+  const job = ctx.job;
+  const outputStorageKey = deterministicCompletionOutputKey(job);
+  if (outputStorageKey) return { outputStorageKey };
+  if (job.jobType === 'checkpoint.load.v1') {
+    const checkpoint = await ctx.getLoadableCheckpoint();
+    if (!checkpoint || checkpoint.analysisObjectId !== job.analysisObjectId
+        || checkpoint.projectId !== job.projectId
+        || typeof checkpoint.checkpointArtifactId !== 'string') {
+      throw codedHandlerError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return {
+      sourceCheckpointArtifactId: checkpoint.checkpointArtifactId,
+      targetAnalysisObjectId: job.analysisObjectId,
+    };
+  }
+  if (job.jobType === 'checkpoint.fork.v1') {
+    const checkpoint = await ctx.getForkableCheckpoint();
+    if (!checkpoint || checkpoint.analysisObjectId !== job.analysisObjectId
+        || checkpoint.projectId !== job.projectId
+        || typeof checkpoint.checkpointArtifactId !== 'string') {
+      throw codedHandlerError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return {
+      sourceCheckpointArtifactId: checkpoint.checkpointArtifactId,
+      targetAnalysisObjectId: deriveCheckpointForkResultObjectId(job.id),
+    };
+  }
+  return null;
+}
+
+async function bestEffortRemoveCompletionReceipt(storageProvider, job) {
+  if (!job || !COMPLETION_RECEIPT_JOB_TYPES.has(job.jobType)) return;
+  try {
+    await storageProvider.remove(storage.completionReceiptKey(job.projectId, job.id));
+  } catch {
+    // Receipt deletion is housekeeping after a guarded DB transition. Never
+    // overwrite the authoritative outcome with a cleanup error.
+  }
+}
+
+async function bestEffortRemoveRecoveryObjects(storageProvider, job, { output = true } = {}) {
+  if (output) {
+    const outputKey = deterministicCompletionOutputKey(job);
+    if (outputKey) {
+      try { await storageProvider.remove(outputKey); } catch { /* best effort */ }
+    }
+  }
+  await bestEffortRemoveCompletionReceipt(storageProvider, job);
 }
 
 // Documented safe defaults for worker runtime config. These MUST match the values
@@ -79,6 +216,7 @@ async function discardUnrecordedProjectOutput(ctx, key) {
 // in the runRBridgeOperation ctx seam keeps longer runs alive, and this default is the
 // safety floor for the pre-handler window. Override with JOB_WORKER_LEASE_SECONDS.
 const JOB_WORKER_DEFAULTS = Object.freeze({ pollIntervalMs: 1000, leaseSeconds: 120 });
+const JOB_WORKER_MIN_LEASE_SECONDS = 10;
 
 /**
  * Parse a value that must be a positive integer (poll ms / lease seconds). Returns
@@ -103,8 +241,8 @@ function parsePositiveIntOrNull(raw) {
  *     other value ("TRUE", "1", "yes", blank, unset, …) means disabled.
  *   - JOB_WORKER_POLL_MS must be a positive integer; otherwise fall back to the
  *     documented default and warn (only if the var was present but invalid).
- *   - JOB_WORKER_LEASE_SECONDS must be a positive integer; otherwise fall back to the
- *     documented default and warn (only if present but invalid).
+ *   - JOB_WORKER_LEASE_SECONDS must be an integer of at least 10 seconds; otherwise
+ *     fall back to the documented default and warn (only if present but invalid).
  * Warnings name the variable and the default used — never the raw value — so no
  * secret or operator-supplied content is echoed. Returns
  * { enabled, pollIntervalMs, leaseSeconds }.
@@ -127,9 +265,9 @@ function parseJobWorkerConfig(env = {}, opts = {}) {
 
   const leaseRaw = env.JOB_WORKER_LEASE_SECONDS;
   let leaseSeconds = parsePositiveIntOrNull(leaseRaw);
-  if (leaseSeconds === null) {
+  if (leaseSeconds === null || leaseSeconds < JOB_WORKER_MIN_LEASE_SECONDS) {
     if (leaseRaw !== undefined) {
-      warn(`[worker] JOB_WORKER_LEASE_SECONDS is not a positive integer; using default ${defaults.leaseSeconds}s.`);
+      warn(`[worker] JOB_WORKER_LEASE_SECONDS must be an integer of at least ${JOB_WORKER_MIN_LEASE_SECONDS}; using default ${defaults.leaseSeconds}s.`);
     }
     leaseSeconds = defaults.leaseSeconds;
   }
@@ -400,6 +538,7 @@ async function pbmcPipelineHandler(ctx) {
   // 5. Server-allocate the internal checkpoint storage key (no client input; relative,
   //    traversal-free; the R backend confines it to project storage). Never logged/exposed.
   const checkpointStorageKey = allocateCheckpointStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, checkpointStorageKey);
 
   await ctx.log({ level: 'info', message: 'pbmc.pipeline.v1 handler: parameters valid; invoking allowlisted PBMC pipeline on a copy of the input object (parent unchanged).' });
 
@@ -419,7 +558,7 @@ async function pbmcPipelineHandler(ctx) {
       callR: ctx.callR,
     });
   } catch (err) {
-    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, err);
     throw err;
   }
 
@@ -477,8 +616,7 @@ async function pbmcPipelineHandler(ctx) {
     },
     });
   } catch (err) {
-    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
-    throw err;
+    throw publicationIndeterminateError(err);
   }
 
   const resultObject = completion.resultObject;
@@ -538,6 +676,7 @@ async function seuratPipelineHandler(ctx) {
 
   const { params, defaultsApplied } = validateSeuratPipelineParams(job.parameters);
   const checkpointStorageKey = allocateSeuratCheckpointStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, checkpointStorageKey);
 
   let descriptor;
   try {
@@ -563,7 +702,7 @@ async function seuratPipelineHandler(ctx) {
       level: 'error',
       message: `seurat.pipeline.v1 handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
     });
-    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, err);
     throw err;
   }
 
@@ -629,8 +768,7 @@ async function seuratPipelineHandler(ctx) {
     },
     });
   } catch (err) {
-    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
-    throw err;
+    throw publicationIndeterminateError(err);
   }
 
   const resultObject = completion.resultObject;
@@ -731,6 +869,7 @@ async function checkpointLoadHandler(ctx) {
     actor: { userId: job.ownerUserId, projectId: job.projectId || null },
     objectContext: { objectId, stateKey },
     checkpoint: {
+      checkpointArtifactId: checkpoint.checkpointArtifactId,
       internalStorageKey: checkpoint.internalStorageKey,
       checksumSha256: checkpoint.checksumSha256,
       sizeBytes: checkpoint.sizeBytes,
@@ -751,19 +890,24 @@ async function checkpointLoadHandler(ctx) {
   // 7. Record ONE metadata-only checkpoint_load summary artifact. The internal storage
   //    key/path and the R state key are NEVER placed in metadata; checksum/size are the
   //    already-public integrity descriptors of the source checkpoint artifact.
-  const artifact = await ctx.createArtifact({
-    artifactType: descriptor.artifactType, // 'checkpoint_load'
-    name: descriptor.name,
-    description: descriptor.description,
-    storageKind: descriptor.storageKind, // 'metadata_only'
-    metadata: {
-      ...descriptor.metadata,
-      sourceAnalysisObjectId: objectId,
-      checkpointArtifactId: checkpoint.checkpointArtifactId,
-      checksumSha256: checkpoint.checksumSha256,
-      sizeBytes: checkpoint.sizeBytes,
-    },
-  });
+  let artifact;
+  try {
+    artifact = await ctx.createArtifact({
+      artifactType: descriptor.artifactType, // 'checkpoint_load'
+      name: descriptor.name,
+      description: descriptor.description,
+      storageKind: descriptor.storageKind, // 'metadata_only'
+      metadata: {
+        ...descriptor.metadata,
+        sourceAnalysisObjectId: objectId,
+        checkpointArtifactId: checkpoint.checkpointArtifactId,
+        checksumSha256: checkpoint.checksumSha256,
+        sizeBytes: checkpoint.sizeBytes,
+      },
+    });
+  } catch (error) {
+    throw publicationIndeterminateError(error);
+  }
 
   await ctx.log({ level: 'info', message: `checkpoint.load.v1 handler: recorded metadata-only artifact ${artifact.id} (live-state reattach; no new analysis object or lineage edge).` });
 
@@ -787,7 +931,6 @@ async function checkpointForkHandler(ctx) {
     throw codedHandlerError('PROJECT_CONTEXT_REQUIRED', 'Checkpoint fork requires a project and source object.');
   }
   if (typeof ctx.getForkableCheckpoint !== 'function'
-      || typeof ctx.allocateAnalysisObjectId !== 'function'
       || typeof ctx.deriveRObjectStateKey !== 'function'
       || typeof ctx.completeCheckpointFork !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Checkpoint fork is not configured.');
@@ -798,7 +941,7 @@ async function checkpointForkHandler(ctx) {
       || checkpoint.projectId !== job.projectId) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
-  const resultObjectId = ctx.allocateAnalysisObjectId();
+  const resultObjectId = deriveCheckpointForkResultObjectId(job.id);
   const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, resultObjectId);
   if (!stateKey) throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Checkpoint fork is not configured.');
 
@@ -808,6 +951,7 @@ async function checkpointForkHandler(ctx) {
     actor: { userId: job.ownerUserId, projectId: job.projectId },
     objectContext: { objectId: resultObjectId, stateKey },
     checkpoint: {
+      checkpointArtifactId: checkpoint.checkpointArtifactId,
       internalStorageKey: checkpoint.internalStorageKey,
       checksumSha256: checkpoint.checksumSha256,
       sizeBytes: checkpoint.sizeBytes,
@@ -820,11 +964,16 @@ async function checkpointForkHandler(ctx) {
     throw codedHandlerError('CHECKPOINT_LOAD_FAILED', 'Checkpoint did not load into the new private live session.');
   }
 
-  const completed = await ctx.completeCheckpointFork({
-    resultAnalysisObjectId: resultObjectId,
-    checkpointArtifactId: checkpoint.checkpointArtifactId,
-    loaded: descriptor.loaded,
-  });
+  let completed;
+  try {
+    completed = await ctx.completeCheckpointFork({
+      resultAnalysisObjectId: resultObjectId,
+      checkpointArtifactId: checkpoint.checkpointArtifactId,
+      loaded: descriptor.loaded,
+    });
+  } catch (error) {
+    throw publicationIndeterminateError(error);
+  }
   await ctx.log({
     level: 'info',
     message: `checkpoint.fork.v1 handler: created owned result object ${completed.resultObject.id} with source lineage.`,
@@ -908,6 +1057,7 @@ async function degFindMarkersHandler(ctx) {
   // 5. Server-allocate the internal result storage key (no client input; relative,
   //    traversal-free; the R backend confines it to project storage). Never logged/exposed.
   const resultStorageKey = allocateDegResultStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, resultStorageKey);
 
   await ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: parameters valid; running allowlisted DEG over the existing live object (no new object/edge, object not mutated).' });
 
@@ -927,7 +1077,7 @@ async function degFindMarkersHandler(ctx) {
       callR: ctx.callR,
     });
   } catch (err) {
-    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey, err);
     throw err;
   }
 
@@ -980,8 +1130,7 @@ async function degFindMarkersHandler(ctx) {
     },
     });
   } catch (err) {
-    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
-    throw err;
+    throw publicationIndeterminateError(err);
   }
 
   const markersArtifact = completion.markersArtifact;
@@ -1054,6 +1203,8 @@ function createJobWorker(options = {}) {
     pollIntervalMs = 1000,
     leaseSeconds = JOB_WORKER_DEFAULTS.leaseSeconds,
     handlers = DEFAULT_HANDLERS,
+    allowedJobTypes,
+    claimGate,
     rBridge = rWorkerBridge,
     callR,
     rBridgeConfig = {},
@@ -1123,6 +1274,54 @@ function createJobWorker(options = {}) {
     throw err;
   }
 
+  // Renew from immediately after the initial heartbeat until the claimed
+  // lifecycle reaches a guarded terminal/deferred transition. This includes
+  // committed-output inspection and hashing, handler validation, R I/O, durable
+  // publication, and the final status update.
+  function startClaimRenewal(jobId, claimToken) {
+    const renewEveryMs = Math.max(5000, Math.floor((leaseSeconds * 1000) / 2));
+    let stopped = false;
+    let renewalInFlight = null;
+    let renewTimer = null;
+
+    const stopTimer = () => {
+      stopped = true;
+      if (renewTimer) {
+        clearInterval(renewTimer);
+        renewTimer = null;
+      }
+    };
+    const handleRenewalError = (error) => {
+      if (error && (error.code === 'CLAIM_LOST' || error.code === 'JOB_NOT_FOUND')) {
+        stopTimer();
+        return;
+      }
+      log.warn(`[worker ${workerId}] lease renewal temporarily failed for ${jobId}.`);
+    };
+    const renew = () => {
+      if (stopped || renewalInFlight) return;
+      let tracked;
+      try {
+        tracked = Promise.resolve(
+          db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs()))
+        ).catch(handleRenewalError).finally(() => {
+          if (renewalInFlight === tracked) renewalInFlight = null;
+        });
+        renewalInFlight = tracked;
+      } catch (error) {
+        handleRenewalError(error);
+      }
+    };
+
+    renewTimer = setInterval(renew, renewEveryMs);
+    if (typeof renewTimer.unref === 'function') renewTimer.unref();
+    return async () => {
+      stopTimer();
+      const pending = renewalInFlight;
+      if (pending) await pending;
+    };
+  }
+
   /**
    * One drain tick: reap expired leases, claim one eligible job, run its handler
    * (or fail it as unsupported), and complete/fail it through the contract. Returns
@@ -1131,21 +1330,40 @@ function createJobWorker(options = {}) {
    */
   async function runOnce() {
     const nowTs = resolveNowTs();
+    let claimAdmission = null;
 
     // 1. Recover expired leases FIRST so a crashed worker's job becomes claimable.
     let reaped = { requeued: [], failed: [] };
     try {
       reaped = await db.reapExpiredJobs(withNow({}, nowTs));
     } catch (err) {
-      log.error(`[worker ${workerId}] reap failed: ${err && err.code ? err.code : err.message}`);
+      log.error(`[worker ${workerId}] reap failed: ${safeDiagnosticCode(err)}`);
+    }
+
+    // Pause without claiming when a standalone runtime reports that its private R
+    // service, shared storage, or memory admission gate is unavailable. Reaping is
+    // intentionally still performed so crashed claims can recover while paused.
+    if (typeof claimGate === 'function') {
+      try {
+        claimAdmission = await claimGate();
+        if (!claimAdmission || claimAdmission.ready !== true) {
+          return {
+            status: 'paused',
+            reason: claimAdmission && claimAdmission.reason ? claimAdmission.reason : 'NOT_READY',
+            reaped,
+          };
+        }
+      } catch {
+        return { status: 'paused', reason: 'NOT_READY', reaped };
+      }
     }
 
     // 2. Claim one eligible queued job (single-winner; null if none available).
     let job;
     try {
-      job = await db.claimNextJob(workerId, withNow({ leaseSeconds }, nowTs));
+      job = await db.claimNextJob(workerId, withNow({ leaseSeconds, allowedJobTypes }, nowTs));
     } catch (err) {
-      log.error(`[worker ${workerId}] claim failed: ${err && err.code ? err.code : err.message}`);
+      log.error(`[worker ${workerId}] claim failed: ${safeDiagnosticCode(err)}`);
       return { status: 'error', phase: 'claim', reaped };
     }
     if (!job) return { status: 'idle', reaped };
@@ -1153,11 +1371,6 @@ function createJobWorker(options = {}) {
     const { id: jobId, jobType, claimToken } = job;
     await safeWorkerLog(jobId, claimToken, { level: 'info', message: `Claimed by worker (type=${jobType}).` }, nowTs);
     log.info(`[worker ${workerId}] claimed ${jobId} (${jobType})`);
-
-    const handler = handlers[jobType];
-    if (typeof handler !== 'function') {
-      return failUnsupported(jobId, jobType, claimToken, nowTs, reaped);
-    }
 
     // Heartbeat once up front so the lease covers the handler's run. If the claim is
     // already gone (canceled/reaped between claim and now), bail without resurrecting.
@@ -1167,9 +1380,306 @@ function createJobWorker(options = {}) {
       return asClaimLoss(err, 'pre-handler-heartbeat', jobId, jobType, reaped);
     }
 
+    const stopClaimRenewal = startClaimRenewal(jobId, claimToken);
+    try {
+      const handler = handlers[jobType];
+      if (typeof handler !== 'function') {
+        return failUnsupported(jobId, jobType, claimToken, nowTs, reaped);
+      }
+
+      let receiptBackedRCompleted = false;
+      const makeClaimContext = (overrides = {}) => ({
+        job,
+        workerId,
+        heartbeat: () => db.heartbeatJob(
+          jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())
+        ),
+        log: (entry) => safeWorkerLog(jobId, claimToken, entry, resolveNowTs()),
+        createArtifact: (input) => db.createJobArtifactByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        createCheckpointArtifact: (input) => db.createCheckpointArtifactForJobByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        createCheckpoint: (input) => db.createCheckpointForJobByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        completePbmcPipelineResult: (input) => db.completePbmcPipelineResultByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        completeSeuratPipelineResult: (input) => db.completeSeuratPipelineResultByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        removeDurableObject: (key) => storageProvider.remove(key),
+        runRBridgeOperation: async (bridgeArgs) => {
+          const descriptor = await rBridge.runRBridgeOperation({
+            ...bridgeArgs,
+            markRDispatchStarted: typeof db.markRDispatchStartedByWorker === 'function'
+              ? () => db.markRDispatchStartedByWorker(
+                jobId, workerId, claimToken, withNow({}, resolveNowTs())
+              )
+              : undefined,
+          });
+          if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)) receiptBackedRCompleted = true;
+          return descriptor;
+        },
+        callR: resolvedCallR,
+        getOwnedAnalysisObject: () => db.getOwnedAnalysisObjectForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        getSeuratPipelineInputs: () => db.getSeuratPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        deriveRObjectStateKey: typeof deriveRObjectStateKey === 'function'
+          ? deriveRObjectStateKey : undefined,
+        getLoadableCheckpoint: () => db.getLoadableCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        getForkableCheckpoint: () => db.getForkableCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
+        logger: log,
+        recoveringCompletionReceipt: false,
+        ...overrides,
+      });
+      let ctx = makeClaimContext();
+      let adoptedCompletionReceipt = null;
+
+      async function cleanupRecoveryEvidenceAfterClaimLoss() {
+        // CLAIM_LOST can mean cancellation OR lease expiry/reaping. Deleting on an
+        // ambiguous lease loss destroys the only recovery evidence, so consult the
+        // authoritative row. Only explicit cancellation makes full cleanup safe;
+        // completed output keeps its file but no longer needs the receipt. Missing,
+        // running, queued, failed, or unreadable state preserves all evidence.
+        let authoritativeJob = null;
+        if (typeof db.getWorkerJob === 'function') {
+          try { authoritativeJob = await db.getWorkerJob(jobId); } catch { /* preserve */ }
+        }
+        if (authoritativeJob && authoritativeJob.status === 'canceled') {
+          await bestEffortRemoveRecoveryObjects(storageProvider, job);
+        } else if (authoritativeJob && authoritativeJob.status === 'completed') {
+          await bestEffortRemoveCompletionReceipt(storageProvider, job);
+        }
+      }
+
+    // If a previous process committed this job's exact atomic output set and then
+    // died before the terminal status update, finalize that existing output instead
+    // of invoking R again. The DB helper fails closed on partial/ambiguous output.
+    if (typeof db.resumeCommittedJobByWorker === 'function') {
+      let recovery;
+      try {
+        recovery = await db.resumeCommittedJobByWorker(
+          jobId,
+          workerId,
+          claimToken,
+          withNow({
+            rRuntimeInstanceHash: claimAdmission && claimAdmission.rRuntimeInstanceHash,
+            inspectStorageObject: (key, expected) => storageProvider.inspect(key, expected),
+          }, resolveNowTs())
+        );
+      } catch (err) {
+        if (err && (err.code === 'CLAIM_LOST' || err.code === 'JOB_NOT_FOUND')) {
+          await cleanupRecoveryEvidenceAfterClaimLoss();
+        }
+        return asClaimLoss(err, 'recover-committed-output', jobId, jobType, reaped);
+      }
+      if (recovery && recovery.resumed) {
+        await bestEffortRemoveCompletionReceipt(storageProvider, job);
+        log.info(`[worker ${workerId}] recovered committed output for ${jobId} (${jobType})`);
+        return { status: 'completed', jobId, jobType, recovered: true, reaped };
+      }
+      if (recovery && recovery.failed) {
+        const recoveryCode = recovery.errorCode || 'INCOMPLETE_COMMITTED_OUTPUT';
+        return {
+          status: 'failed',
+          jobId,
+          jobType,
+          error: { code: recoveryCode },
+          reaped,
+        };
+      }
+    }
+
+    // R writes a private, signed receipt only after its deterministic file output
+    // or private live-state mutation succeeds. Probe it before any retry handler is
+    // invoked. A present-but-invalid receipt is terminal: falling through to R would
+    // risk duplicating an operation whose outcome is already ambiguous.
+    if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)
+        && typeof storageProvider.readCompletionReceipt === 'function') {
+      let envelope = null;
+      let receiptFailure = null;
+      try {
+        envelope = await storageProvider.readCompletionReceipt(
+          storage.completionReceiptKey(job.projectId, job.id)
+        );
+      } catch (error) {
+        if (!error || error.code !== 'STORAGE_OBJECT_MISSING') receiptFailure = error;
+      }
+
+      if (envelope && !receiptFailure) {
+        try {
+          if (typeof resolvedCallR.verifyCompletionReceipt !== 'function'
+              || typeof rBridge.descriptorFromCompletionReceipt !== 'function'
+              || typeof rBridge.buildCompletionReceiptBinding !== 'function') {
+            throw codedHandlerError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+          }
+          const receipt = resolvedCallR.verifyCompletionReceipt(envelope);
+          const expected = await completionReceiptExpectation(ctx);
+          const descriptor = rBridge.descriptorFromCompletionReceipt(job, receipt, expected);
+
+          if (expected.outputStorageKey) {
+            if (typeof storageProvider.inspect !== 'function') {
+              throw codedHandlerError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+            }
+            const integrity = descriptor.checkpoint || descriptor.result;
+            await storageProvider.inspect(expected.outputStorageKey, {
+              checksumSha256: integrity && integrity.checksumSha256,
+              sizeBytes: integrity && integrity.sizeBytes,
+            });
+          } else {
+            const admittedRuntimeHash = claimAdmission && claimAdmission.rRuntimeInstanceHash;
+            if (!admittedRuntimeHash || !descriptor.loaded
+                || descriptor.loaded.runtimeInstanceHash !== admittedRuntimeHash) {
+              const runtimeError = codedHandlerError(
+                'LIVE_R_STATE_LOST',
+                'The private R runtime changed before completion could be recovered.'
+              );
+              throw runtimeError;
+            }
+          }
+
+          const bindingMatches = (bridgeArgs) => {
+            const actual = rBridge.buildCompletionReceiptBinding(
+              bridgeArgs.job, bridgeArgs.operation, bridgeArgs
+            );
+            return actual && Object.entries(actual).every(
+              ([key, value]) => receipt[key] === value
+            );
+          };
+          adoptedCompletionReceipt = { descriptor, receipt };
+          ctx = makeClaimContext({
+            recoveringCompletionReceipt: true,
+            runRBridgeOperation: async (bridgeArgs) => {
+              if (!bindingMatches(bridgeArgs)) {
+                throw codedHandlerError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+              }
+              return descriptor;
+            },
+          });
+        } catch (error) {
+          receiptFailure = error;
+        }
+      }
+
+      if (receiptFailure) {
+        const receiptErrorCode = receiptFailure.code === 'LIVE_R_STATE_LOST'
+          ? 'LIVE_R_STATE_LOST' : 'R_COMPLETION_RECEIPT_INVALID';
+        const error = {
+          code: receiptErrorCode,
+          message: receiptErrorCode === 'LIVE_R_STATE_LOST'
+            ? 'The private R runtime changed before completion could be recovered.'
+            : 'Completion receipt validation failed.',
+        };
+        try {
+          await db.failJobByWorker(
+            jobId,
+            workerId,
+            claimToken,
+            error,
+            withNow({
+              log: {
+                level: 'error',
+                message: receiptErrorCode === 'LIVE_R_STATE_LOST'
+                  ? 'Completion receipt referred to private live state from a prior R runtime.'
+                  : 'Completion receipt failed strict integrity or job binding validation; refusing to rerun R.',
+              },
+            }, resolveNowTs())
+          );
+        } catch (claimError) {
+          return asClaimLoss(claimError, 'fail-invalid-completion-receipt', jobId, jobType, reaped);
+        }
+        return { status: 'failed', jobId, jobType, error, receiptInvalid: true, reaped };
+      }
+    }
+
+    // Reaping or revoked-membership admission marks a single claim as
+    // recovery-only. If exact committed output was not finalized above, stop
+    // safely without invoking the handler or contacting R a second time.
+    const recoveryOnlyMarker = job.lastWorkerError && [
+      R_TIMEOUT_RECOVERY_PENDING,
+      R_RETRY_RECOVERY_PENDING,
+      COMMITTED_OUTPUT_RECOVERY_PENDING,
+    ].includes(job.lastWorkerError.code);
+    if (!adoptedCompletionReceipt && recoveryOnlyMarker) {
+      const hasSingletonRExecutionBarrier = claimAdmission
+        && claimAdmission.ready === true
+        && typeof claimAdmission.rRuntimeInstanceHash === 'string'
+        && claimAdmission.rRuntimeInstanceHash !== '';
+      if (hasSingletonRExecutionBarrier) {
+        // Supported production topology uses one synchronous Plumber process. Its
+        // authenticated readiness response cannot complete while an earlier handler
+        // is still running, and a changed runtime identity means the old process is
+        // gone. This is the only proof that makes terminal cleanup safe.
+        const error = {
+          code: 'R_COMPLETION_RECEIPT_MISSING',
+          message: 'R execution stopped without a recoverable completion receipt.',
+        };
+        try {
+          await db.failJobByWorker(
+            jobId,
+            workerId,
+            claimToken,
+            error,
+            withNow({
+              log: {
+                level: 'error',
+                message: 'The singleton R execution barrier completed without an exact output receipt; the job was stopped safely.',
+              },
+            }, resolveNowTs())
+          );
+        } catch (err) {
+          return asClaimLoss(err, 'fail-missing-receipt-after-r-barrier', jobId, jobType, reaped);
+        }
+        await bestEffortRemoveRecoveryObjects(storageProvider, job);
+        return { status: 'failed', jobId, jobType, error, recoveryOnly: true, reaped };
+      }
+
+      // Absence is not failure: the original synchronous R request may still be
+      // executing after Node timed out or crashed. Return to another bounded,
+      // receipt-only observation window forever (or until an operator intervenes),
+      // preserving both deterministic paths and never dispatching R again.
+      await stopClaimRenewal();
+      try {
+        await db.deferIndeterminateRTimeoutByWorker(
+          jobId,
+          workerId,
+          claimToken,
+          withNow({ recoveryDelaySeconds: R_TIMEOUT_RECOVERY_GRACE_SECONDS }, resolveNowTs())
+        );
+      } catch (err) {
+        return asClaimLoss(err, 'defer-unrecovered-r-observation', jobId, jobType, reaped);
+      }
+      return {
+        status: 'indeterminate',
+        jobId,
+        jobType,
+        error: { code: R_TIMEOUT_INDETERMINATE },
+        recoveryOnly: true,
+        recoveryAfterSeconds: R_TIMEOUT_RECOVERY_GRACE_SECONDS,
+        reaped,
+      };
+    }
+
     await safeWorkerLog(jobId, claimToken, { level: 'info', message: 'Handler started.' }, nowTs);
 
-    const ctx = {
+    if (!adoptedCompletionReceipt) ctx = {
       job,
       workerId,
       heartbeat: () => db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())),
@@ -1209,25 +1719,19 @@ function createJobWorker(options = {}) {
       // retries run concurrent heavy R (memory-driven 500s) until max_attempts fails
       // the job. Cancellation stays cooperative: a heartbeat that loses the claim is
       // swallowed here and surfaces at the guarded completion after R returns.
+      // The surrounding claimed-lifecycle timer also covers recovery hashing and
+      // durable publication before/after this bridge call.
       runRBridgeOperation: async (bridgeArgs) => {
-        const renewEveryMs = Math.max(5000, Math.floor((leaseSeconds * 1000) / 2));
-        const renewTimer = setInterval(() => {
-          try {
-            void Promise.resolve(db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs()))).catch(() => {
-              clearInterval(renewTimer);
-            });
-          } catch {
-            // Claim lost (canceled/reaped) — stop renewing; the guarded completion
-            // will refuse to resurrect the job. Do not throw from the timer.
-            clearInterval(renewTimer);
-          }
-        }, renewEveryMs);
-        if (typeof renewTimer.unref === 'function') renewTimer.unref();
-        try {
-          return await rBridge.runRBridgeOperation(bridgeArgs);
-        } finally {
-          clearInterval(renewTimer);
-        }
+        const descriptor = await rBridge.runRBridgeOperation({
+          ...bridgeArgs,
+          markRDispatchStarted: typeof db.markRDispatchStartedByWorker === 'function'
+            ? () => db.markRDispatchStartedByWorker(
+              jobId, workerId, claimToken, withNow({}, resolveNowTs())
+            )
+            : undefined,
+        });
+        if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)) receiptBackedRCompleted = true;
+        return descriptor;
       },
       callR: resolvedCallR,
       // Claim-authorized resource resolvers derive every id from the trusted job
@@ -1262,8 +1766,83 @@ function createJobWorker(options = {}) {
     try {
       outcome = await handler(ctx);
     } catch (handlerErr) {
-      return failHandlerError(jobId, jobType, claimToken, handlerErr, resolveNowTs(), reaped);
+      let effectiveHandlerErr = handlerErr;
+      if (effectiveHandlerErr
+          && effectiveHandlerErr.code === R_COMPLETION_PUBLICATION_INDETERMINATE
+          && adoptedCompletionReceipt) {
+        let publicationRecovery = null;
+        if (typeof db.resumeCommittedJobByWorker === 'function') {
+          try {
+            publicationRecovery = await db.resumeCommittedJobByWorker(
+              jobId,
+              workerId,
+              claimToken,
+              withNow({
+                rRuntimeInstanceHash: claimAdmission && claimAdmission.rRuntimeInstanceHash,
+                inspectStorageObject: (key, expected) => storageProvider.inspect(key, expected),
+              }, resolveNowTs())
+            );
+          } catch (error) {
+            if (error && (error.code === 'CLAIM_LOST' || error.code === 'JOB_NOT_FOUND')) {
+              effectiveHandlerErr = error;
+              publicationRecovery = { claimLost: true };
+            } else {
+              throw error;
+            }
+          }
+        }
+        if (publicationRecovery && publicationRecovery.resumed) {
+          await bestEffortRemoveCompletionReceipt(storageProvider, job);
+          return {
+            status: 'completed',
+            jobId,
+            jobType,
+            recovered: true,
+            publicationRecovered: true,
+            reaped,
+          };
+        }
+        if (publicationRecovery && publicationRecovery.failed) {
+          await bestEffortRemoveRecoveryObjects(storageProvider, job);
+          return {
+            status: 'failed',
+            jobId,
+            jobType,
+            error: { code: publicationRecovery.errorCode || 'INCOMPLETE_COMMITTED_OUTPUT' },
+            reaped,
+          };
+        }
+        if (!publicationRecovery || !publicationRecovery.claimLost) {
+          // One receipt-only publication retry has now returned an error and an
+          // exact DB re-read found no committed output. Bound the ambiguity here.
+          effectiveHandlerErr = codedHandlerError(
+            'R_COMPLETION_PUBLICATION_FAILED',
+            'Completion publication could not be recovered.'
+          );
+        }
+      }
+      const claimLostAfterReceiptBackedSuccess = effectiveHandlerErr
+        && (effectiveHandlerErr.code === 'CLAIM_LOST'
+          || effectiveHandlerErr.code === 'JOB_NOT_FOUND')
+        && (adoptedCompletionReceipt || receiptBackedRCompleted);
+      if (isIndeterminateRExecutionFailure(effectiveHandlerErr)) {
+        // Fence the recovery grace against a timer heartbeat already in flight.
+        await stopClaimRenewal();
+      } else if (claimLostAfterReceiptBackedSuccess) {
+        await cleanupRecoveryEvidenceAfterClaimLoss();
+      } else if (adoptedCompletionReceipt || receiptBackedRCompleted) {
+        await bestEffortRemoveRecoveryObjects(storageProvider, job);
+      } else {
+        await bestEffortRemoveCompletionReceipt(storageProvider, job);
+      }
+      return failHandlerError(
+        jobId, jobType, claimToken, effectiveHandlerErr, resolveNowTs(), reaped
+      );
     }
+
+    // Handler publication is claim-guarded and authoritative. A crash before the
+    // generic terminal update still converges through committed-output recovery.
+    await bestEffortRemoveCompletionReceipt(storageProvider, job);
 
     // 3. Success → complete through the contract (guarded UPDATE; will not resurrect
     //    a job canceled mid-run — that surfaces as CLAIM_LOST).
@@ -1279,6 +1858,9 @@ function createJobWorker(options = {}) {
     }
     log.info(`[worker ${workerId}] completed ${jobId} (${jobType})`);
     return { status: 'completed', jobId, jobType, result: outcome && outcome.result, reaped };
+    } finally {
+      await stopClaimRenewal();
+    }
   }
 
   async function failUnsupported(jobId, jobType, claimToken, nowTs, reaped) {
@@ -1304,10 +1886,37 @@ function createJobWorker(options = {}) {
       log.warn(`[worker ${workerId}] claim lost during handler for ${jobId}; not resurrecting.`);
       return { status: 'claim_lost', jobId, jobType, phase: 'handler', reaped };
     }
+    if (isIndeterminateRExecutionFailure(handlerErr)) {
+      log.warn(`[worker ${workerId}] R execution outcome is indeterminate for ${jobId}; retaining the claim for bounded recovery.`);
+      try {
+        await db.deferIndeterminateRTimeoutByWorker(
+          jobId,
+          workerId,
+          claimToken,
+          withNow({ recoveryDelaySeconds: R_TIMEOUT_RECOVERY_GRACE_SECONDS }, nowTs)
+        );
+      } catch (err) {
+        return asClaimLoss(err, 'defer-r-timeout', jobId, jobType, reaped);
+      }
+      return {
+        status: 'indeterminate',
+        jobId,
+        jobType,
+        error: { code: R_TIMEOUT_INDETERMINATE },
+        recoveryAfterSeconds: R_TIMEOUT_RECOVERY_GRACE_SECONDS,
+        reaped,
+      };
+    }
     // Record a sanitized message only — never a stack/path. Handlers are responsible
     // for not embedding secrets in their error messages.
-    const message = handlerErr && handlerErr.message ? String(handlerErr.message) : 'Handler error.';
-    log.error(`[worker ${workerId}] handler error for ${jobId}: ${message}`);
+    const domainMessage = handlerErr && typeof handlerErr.code === 'string'
+      ? SAFE_HANDLER_DOMAIN_MESSAGES[handlerErr.code]
+      : null;
+    const message = domainMessage || (handlerErr && handlerErr.publicSafeHandlerError === true
+      ? String(handlerErr.message || 'Handler failed.').slice(0, 240)
+      : 'Handler failed.');
+    const diagnosticCode = safeDiagnosticCode(handlerErr);
+    log.error(`[worker ${workerId}] handler error for ${jobId}: ${diagnosticCode}`);
     const opts = withNow({ log: { level: 'error', message: 'Handler failed.' } }, nowTs);
     try {
       await db.failJobByWorker(jobId, workerId, claimToken, { code: 'HANDLER_ERROR', message }, opts);
@@ -1325,7 +1934,7 @@ function createJobWorker(options = {}) {
     timer = null;
     if (!running) return;
     tickInFlight = runOnce()
-      .catch((err) => log.error(`[worker ${workerId}] tick error: ${err && err.message ? err.message : err}`))
+      .catch((err) => log.error(`[worker ${workerId}] tick error: ${safeDiagnosticCode(err)}`))
       .finally(() => { tickInFlight = null; });
     await tickInFlight;
     if (running) timer = setTimeout(tick, pollIntervalMs);
@@ -1366,6 +1975,7 @@ module.exports = {
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,
+  JOB_WORKER_MIN_LEASE_SECONDS,
   parseJobWorkerConfig,
   parsePositiveIntOrNull,
 };

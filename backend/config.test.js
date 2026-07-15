@@ -11,11 +11,18 @@ const SAVED = {};
 const KEYS = [
   'NODE_ENV', 'DATABASE_BACKEND', 'DATABASE_URL', 'PGHOST', 'PGDATABASE',
   'SESSION_SECRET', 'SESSION_TTL_SECONDS', 'COOKIE_SECURE', 'COOKIE_SAMESITE',
-  'FRONTEND_ORIGIN', 'FRONTEND_URL', 'R_BACKEND_URL', 'PLUMBER_PORT',
-  'STORAGE_ROOT', 'VAULT_ROOT', 'MAX_UPLOAD_BYTES', 'MAX_UPLOAD_FILES'
+  'FRONTEND_ORIGIN', 'FRONTEND_URL', 'R_RUNTIME_MODE', 'R_BACKEND_URL',
+  'R_BACKEND_ALLOWED_HOSTS', 'R_API_TOKEN', 'PLUMBER_PORT',
+  'STORAGE_ROOT', 'VAULT_ROOT', 'MAX_UPLOAD_BYTES', 'MAX_UPLOAD_FILES',
+  'R_PROXY_TIMEOUT_MS', 'R_PROXY_MAX_RESPONSE_BYTES',
+  'R_PROXY_RATE_LIMIT_WINDOW_MS', 'R_PROXY_RATE_LIMIT_MAX',
+  'R_PROXY_MAX_CONCURRENT'
 ];
 
-beforeEach(() => { KEYS.forEach((k) => { SAVED[k] = process.env[k]; delete process.env[k]; }); });
+beforeEach(() => {
+  KEYS.forEach((k) => { SAVED[k] = process.env[k]; delete process.env[k]; });
+  process.env.R_API_TOKEN = 'r'.repeat(32);
+});
 afterEach(() => { KEYS.forEach((k) => { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }); });
 
 describe('database backend selection', () => {
@@ -88,6 +95,14 @@ describe('production validation gate', () => {
     expect(errors.join(' ')).toMatch(/FRONTEND_ORIGIN/);
     expect(errors.join(' ')).toMatch(/Secure/);
   });
+  it('requires a dedicated strong R service token in production', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.SESSION_SECRET = 'a-strong-secret';
+    process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
+    process.env.FRONTEND_ORIGIN = 'https://app.example.com';
+    delete process.env.R_API_TOKEN;
+    expect(config.validateProductionConfig().join(' ')).toMatch(/R_API_TOKEN/);
+  });
   it('is satisfied when production vars are all present and safe', () => {
     process.env.NODE_ENV = 'production';
     process.env.SESSION_SECRET = 'a-strong-secret';
@@ -134,6 +149,24 @@ describe('production validation gate', () => {
     expect(errors.join(' ')).toMatch(/MAX_UPLOAD_BYTES/);
     expect(errors.join(' ')).toMatch(/MAX_UPLOAD_FILES/);
   });
+  it('uses bounded R proxy defaults and rejects malformed production overrides', () => {
+    expect(config.rProxyTimeoutMs()).toBe(120000);
+    expect(config.rProxyMaxResponseBytes()).toBe(8 * 1024 * 1024);
+    expect(config.rProxyRateLimitWindowMs()).toBe(60000);
+    expect(config.rProxyRateLimitMax()).toBe(60);
+    expect(config.rProxyMaxConcurrent()).toBe(1);
+
+    process.env.NODE_ENV = 'production';
+    process.env.SESSION_SECRET = 'a-strong-secret';
+    process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
+    process.env.FRONTEND_ORIGIN = 'https://app.example.com';
+    process.env.R_PROXY_TIMEOUT_MS = 'never';
+    process.env.R_PROXY_MAX_RESPONSE_BYTES = '0';
+    process.env.R_PROXY_MAX_CONCURRENT = '2';
+    expect(config.validateProductionConfig().join(' ')).toMatch(/R_PROXY_TIMEOUT_MS/);
+    expect(config.validateProductionConfig().join(' ')).toMatch(/R_PROXY_MAX_RESPONSE_BYTES/);
+    expect(config.validateProductionConfig().join(' ')).toMatch(/R_PROXY_MAX_CONCURRENT/);
+  });
   it('rejects overlapping storage and vault roots in production', () => {
     process.env.NODE_ENV = 'production';
     process.env.SESSION_SECRET = 'a-strong-secret';
@@ -154,6 +187,7 @@ describe('summary() secret hygiene', () => {
     const serialized = JSON.stringify(s);
     expect(s.hasSessionSecret).toBe(true);
     expect(s.hasDatabaseUrl).toBe(true);
+    expect(s.hasRApiToken).toBe(true);
     expect(serialized).not.toContain('top-secret-value');
     expect(serialized).not.toContain('password');
   });

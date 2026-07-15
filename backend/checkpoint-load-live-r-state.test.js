@@ -82,6 +82,7 @@ function pipelineBody() {
 function loadBody(overrides = {}) {
   return {
     loaded: true,
+    runtime_instance_id: 'checkpoint-load-runtime-instance-0001',
     checksum_verified: true,
     class: 'Seurat',
     n_cells: 2700, n_features: 13714,
@@ -314,7 +315,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — direct R-proxy access is bl
     ]) {
       expect(isInternalOnlyRProxyPath(p), p).toBe(true);
     }
-    for (const ok of ['/object/inspect', '/health', '/object/checkpoint-load-extra', '/checkpoint-load', '']) {
+    for (const ok of ['/health', '/object/checkpoint-load-extra', '/checkpoint-load', '']) {
       expect(isInternalOnlyRProxyPath(ok), ok).toBe(false);
     }
     // The pbmc block remains intact.
@@ -356,9 +357,9 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — direct R-proxy access is bl
 
   it('does NOT over-block: a non-internal /api/r path still enforces X-Object-ID ownership before R', async () => {
     const { token } = await createUserWithToken({ email: 'owner3@example.com' });
-    const bad = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
+    const bad = await api(server, '/api/r/health', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
     expect(bad.status).toBe(400);
-    const unknown = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
+    const unknown = await api(server, '/api/r/health', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
     expect(unknown.status).toBe(404);
   });
 
@@ -420,6 +421,7 @@ describe.skipIf(!CONFIGURED)('r.checkpoint.load.v1 — bridge allowlist & input 
     expect(descriptor.artifactType).toBe('checkpoint_load');
     expect(descriptor.storageKind).toBe('metadata_only');
     expect(descriptor.loaded.loaded).toBe(true);
+    expect(descriptor.loaded.runtimeInstanceHash).toMatch(/^[0-9a-f]{64}$/);
     expect(descriptor.metadata.live_state_mutation).toBe(true);
     expect(descriptor.metadata.scientific_output).toBe(false);
   });
@@ -556,14 +558,14 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — failure / cancel / claim-lo
   beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
 
-  it('an R load failure (non-200) fails the job and records NO checkpoint_load artifact', async () => {
+  it('an R load failure (non-200) remains indeterminate with NO checkpoint_load artifact', async () => {
     const { alice, proj, resultObjectId } = await seedLoadableCheckpoint();
     const ljob = await seedLoadJob(alice.id, proj.id, resultObjectId);
     const res = await drain(pipelineThenLoadCaller([], { status: 500, body: { error: 'boom' } }), T0);
-    expect(res.status).toBe('failed');
+    expect(res.status).toBe('indeterminate');
     const arts = await getJobArtifactsByJobId(ljob.id);
     expect(arts.filter((a) => a.artifactType === 'checkpoint_load')).toHaveLength(0);
-    expect((await getProjectJob(alice.id, proj.id, ljob.id)).status).toBe('failed');
+    expect((await getProjectJob(alice.id, proj.id, ljob.id)).status).toBe('running');
   });
 
   it('an R "loaded:false" response fails the job and records NO checkpoint_load artifact', async () => {

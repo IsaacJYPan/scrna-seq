@@ -85,8 +85,9 @@ jobs:
         # The FULL backend suite (backend/*.test.js) against the real Postgres
         # service: per-user isolation, auth (cookie/bearer/rate-limit/credentials),
         # org/project RBAC, datasets, analysis-objects, the durable job-worker
-        # claim/lease/heartbeat contract, artifacts/checkpoints, lineage DAG, the
-        # R-proxy ownership/policy/diagnostics gates, and the mocked-R pipeline
+        # claim/lease/heartbeat contract, standalone worker process/runtime,
+        # crash-output recovery, artifacts/checkpoints, lineage DAG, the R-proxy
+        # ownership/policy/diagnostics gates, and the mocked-R pipeline
         # worker handlers (pbmc/seurat/deg/checkpoint-load/checkpoint-fork/
         # object-inspect/bridge).
         # Every DB-backed suite resets the schema via resetSchemaForTests(), so no
@@ -94,6 +95,19 @@ jobs:
         # validators, serializers, config) run unconditionally; DB/HTTP suites skip
         # only when DATABASE_URL is unset (never in CI).
         run: npm run test:backend
+
+      - name: Run Standalone Worker Process and Recovery Tests
+        # Explicitly named audit gate: real child processes + Postgres claim/lease
+        # recovery, dependency/readiness policy, bounded R calls, and crash-window
+        # output convergence. These also run in the full backend suite above.
+        run: >-
+          npx vitest run
+          backend/standalone-worker-runtime.test.js
+          backend/standalone-worker-process.test.js
+          backend/job-output-recovery.test.js
+          backend/job-recovery-lease-fence.test.js
+          backend/r-worker-caller-bounds.test.js
+          --environment node --fileParallelism=false
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R check for owner-scoped DB-backed R object state.
@@ -106,6 +120,8 @@ jobs:
         run: node scripts/download_sample_data.js
 
       - name: Run Seurat Pipeline End-to-End Smoke Test
+        # Real R + standalone worker, observed lease renewals, competing claimant,
+        # checkpoint output, and one terminal completion.
         run: npm run test:seurat-pipeline
 
       - name: Run Checkpoint-Load Reattach Smoke Test
@@ -113,6 +129,9 @@ jobs:
 
       - name: Run Durable Storage Path Tests
         run: npm run test:r-storage
+
+      - name: Run Public R Endpoint Bound Tests
+        run: npm run test:r-public-bounds
 
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
