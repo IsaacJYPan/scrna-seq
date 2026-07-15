@@ -40,17 +40,18 @@ At a glance:
   (`ao_*`), live R object state, QC/Normalize/PCA/Cluster/UMAP/plots, DEG through
   durable `deg.find_markers.v1` jobs and bounded summary artifacts, the narrow
   10x HDF5 `seurat.pipeline.v1` Pipeline Manager flow with result checkpoint
-  reattach, declarative pipeline manifests for registered modules,
+  reattach, project member/role management, private collaborator checkpoint
+  forks with durable source lineage, declarative pipeline manifests for registered modules,
   provenance/figures/cache.
-- **Backend implemented with partial read-only UI visibility:** durable jobs,
+- **Backend implemented with selected UI actions and read-only metadata:** durable jobs,
   artifacts/checkpoints, and lineage exist in the backend, and the React UI now
-  includes a read-only Jobs & Artifacts / durable history surface for safe
-  metadata visibility. DEG job launch is wired in the DEG tab, and the Pipeline
+  includes a Jobs & Artifacts / durable history surface for safe metadata plus
+  controlled checkpoint forks. DEG job launch is wired in the DEG tab, and the Pipeline
   Manager Seurat panel can launch the supported 10x HDF5 pipeline plus checkpoint
   reattach. Artifact downloads, general job launch/cancel/retry, and lineage
   mutation are still not UI-wired.
-- **Backend-only (implemented + tested, no UI yet):** project members/RBAC
-  endpoints, general dataset management, the opt-in worker loop controls, and
+- **Backend-only (implemented + tested, no UI yet):** general dataset management,
+  the opt-in worker loop controls, and
   the PBMC pipeline / runtime-check / object-inspect worker workflows. The DEG
   marker worker and narrow Seurat pipeline worker are UI-wired for selected
   launch/status/safe summary metadata only.
@@ -63,7 +64,8 @@ At a glance:
 - **Durable local storage:** new dataset, checkpoint, and DEG files use
   server-owned project keys under `STORAGE_ROOT`. Existing private-vault records
   remain readable. Project writers can fork a member's durable checkpoint into a
-  new object that they own, without sharing live R state.
+  new object that they own from Jobs & Artifacts, without sharing live R state;
+  the fork records its source object, checkpoint, job, and lineage edge.
 - **Not implemented (product):** pathway enrichment, CellChat, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
   object storage, server-side session revocation, shared project live R state.

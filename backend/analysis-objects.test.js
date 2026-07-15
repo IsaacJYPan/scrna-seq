@@ -10,12 +10,12 @@ const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 
 const CONFIGURED = config.hasPostgresConnection();
 
-// Create a project owned by `userId` plus a dataset in it, returning the dataset.
-// Used to exercise datasetId verification on analysis-object creation.
+// Create a project owned by `userId` plus a dataset in it.
 async function makeDataset(userId, fileType = 'seurat_rds') {
   const org = await createOrganizationForUser(userId, { name: 'Org' });
-  const proj = await createProjectForUser(userId, { organizationId: org.id, name: 'Proj' });
-  return createDatasetForProject(userId, proj.id, { fileType });
+  const project = await createProjectForUser(userId, { organizationId: org.id, name: 'Proj' });
+  const dataset = await createDatasetForProject(userId, project.id, { fileType });
+  return { dataset, project };
 }
 
 let server;
@@ -245,8 +245,8 @@ describe.skipIf(!CONFIGURED)('analysis-objects API', () => {
   });
 
   // ── datasetId is now verified against the durable datasets model ───────────
-  // datasetId remains optional/nullable, but if supplied it must reference a real
-  // dataset whose project the caller can write to (owner/admin/analyst).
+  // Durable datasets are always project-scoped. The legacy owner route remains
+  // private-scope-only so a removed project member cannot bypass project RBAC.
   it('accepts a null/absent datasetId (still optional)', async () => {
     const { alice } = await users();
     const res = await api(server, '/api/analysis-objects', {
@@ -256,15 +256,21 @@ describe.skipIf(!CONFIGURED)('analysis-objects API', () => {
     expect(res.data.datasetId).toBeNull();
   });
 
-  it('accepts a real, accessible datasetId and records it', async () => {
+  it('rejects a project dataset on the private route and accepts it on the project route', async () => {
     const { alice } = await users();
-    const ds = await makeDataset(alice.user.id);
-    const res = await api(server, '/api/analysis-objects', {
+    const { dataset, project } = await makeDataset(alice.user.id);
+    const privateResult = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
-      body: { objectType: 'seurat', datasetId: ds.id }
+      body: { objectType: 'seurat', datasetId: dataset.id }
     });
-    expect(res.status).toBe(201);
-    expect(res.data.datasetId).toBe(ds.id);
+    expect(privateResult.status).toBe(404);
+
+    const projectResult = await api(server, `/api/projects/${project.id}/analysis-objects`, {
+      method: 'POST', token: alice.token,
+      body: { objectType: 'seurat', datasetId: dataset.id }
+    });
+    expect(projectResult.status).toBe(201);
+    expect(projectResult.data.datasetId).toBe(dataset.id);
   });
 
   it('rejects a malformed datasetId with 400', async () => {
@@ -288,7 +294,7 @@ describe.skipIf(!CONFIGURED)('analysis-objects API', () => {
 
   it('rejects a datasetId from another user\'s project with 404 (no leak)', async () => {
     const { alice, bob } = await users();
-    const bobDs = await makeDataset(bob.user.id);
+    const { dataset: bobDs } = await makeDataset(bob.user.id);
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token,
       body: { objectType: 'seurat', datasetId: bobDs.id }
@@ -296,14 +302,17 @@ describe.skipIf(!CONFIGURED)('analysis-objects API', () => {
     expect(res.status).toBe(404);
   });
 
-  it('keeps datasetId-filtered listing owner-scoped', async () => {
+  it('never exposes project objects through legacy owner-scoped reads', async () => {
     const { alice } = await users();
-    const ds = await makeDataset(alice.user.id);
-    await api(server, '/api/analysis-objects', {
-      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: ds.id }
+    const { dataset, project } = await makeDataset(alice.user.id);
+    const created = await api(server, `/api/projects/${project.id}/analysis-objects`, {
+      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: dataset.id }
     });
-    const byDataset = await api(server, `/api/analysis-objects?datasetId=${ds.id}`, { token: alice.token });
-    expect(byDataset.data).toHaveLength(1);
-    expect(byDataset.data[0].ownerUserId).toBe(alice.user.id);
+    expect(created.status).toBe(201);
+
+    const byDataset = await api(server, `/api/analysis-objects?datasetId=${dataset.id}`, { token: alice.token });
+    expect(byDataset.status).toBe(200);
+    expect(byDataset.data).toEqual([]);
+    expect((await api(server, `/api/analysis-objects/${created.data.id}`, { token: alice.token })).status).toBe(404);
   });
 });

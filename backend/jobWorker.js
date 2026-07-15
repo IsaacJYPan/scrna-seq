@@ -253,8 +253,8 @@ async function rRuntimeCheckHandler(ctx) {
  * CENTRAL OWNERSHIP BOUNDARY (project membership ≠ live R access):
  *   The object id comes from the TRUSTED job row (job.analysisObjectId), never from
  *   client passthrough. Before ANY R contact, the handler verifies the JOB CREATOR
- *   (job.ownerUserId) OWNS that analysis object via the same owner-verified check the
- *   /api/r/* proxy uses (verifyAnalysisObjectOwner). A project co-member (even an
+ *   (job.ownerUserId) OWNS that analysis object via a claim-authorized resolver that
+ *   enforces the same ownership rule as the /api/r/* proxy. A project co-member (even an
  *   admin) who created a job against another member's object therefore FAILS here —
  *   owning the project metadata never grants live R object access. The R state key
  *   (X-Object-ID) is SERVER-DERIVED from the owner + object id (deriveRObjectStateKey,
@@ -281,14 +281,15 @@ async function rObjectInspectHandler(ctx) {
     throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Inspection job is missing its analysis object.');
   }
 
-  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may inspect. This
-  //    is the same owner-verified check the /api/r/* proxy uses, so project membership
-  //    alone can never reach another user's live object. Uses a 404-style message so
-  //    we never reveal another user's object exists.
-  if (typeof ctx.verifyAnalysisObjectOwner !== 'function') {
+  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may inspect.
+  //    The worker-only resolver binds the lookup to this job's valid claim and exact
+  //    project scope without re-reading membership after claim. Uses a 404-style
+  //    message so we never reveal another user's object exists.
+  if (typeof ctx.getOwnedAnalysisObject !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
@@ -343,7 +344,7 @@ async function rObjectInspectHandler(ctx) {
  *
  * SAME OWNERSHIP BOUNDARY as r.object.inspect (project membership ≠ live R access):
  *   the input object id comes from the TRUSTED job row; the job creator must OWN that
- *   live object (verifyAnalysisObjectOwner) BEFORE any R contact, and the R state key
+ *   live object through a claim-authorized, owner/project-bound resolver BEFORE R contact, and the R state key
  *   (X-Object-ID) is SERVER-DERIVED (deriveRObjectStateKey). A co-member/admin who
  *   created a job against another user's object FAILS here.
  *
@@ -374,12 +375,13 @@ async function pbmcPipelineHandler(ctx) {
   }
 
   // 2. CENTRAL GATE: only the live-R object owner (the job creator) may run the
-  //    pipeline. Same owner-verified check the /api/r/* proxy uses; 404-style message
-  //    so another user's object existence is never revealed.
-  if (typeof ctx.verifyAnalysisObjectOwner !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
+  //    pipeline. The worker-only resolver also binds the lookup to this job's valid
+  //    claim and exact project scope; 404-style message avoids existence disclosure.
+  if (typeof ctx.getOwnedAnalysisObject !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
@@ -514,19 +516,22 @@ async function seuratPipelineHandler(ctx) {
   if (typeof objectId !== 'string' || objectId === '') {
     throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Seurat pipeline job is missing its raw dataset analysis object.');
   }
-  if (typeof ctx.getDatasetForProject !== 'function' || typeof ctx.getProjectAnalysisObject !== 'function') {
+  if (typeof ctx.getSeuratPipelineInputs !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
 
-  const dataset = await ctx.getDatasetForProject(job.ownerUserId, job.projectId, datasetId);
-  if (!dataset) throw codedHandlerError('DATASET_NOT_FOUND', 'Dataset not found.');
+  const resolvedInputs = await ctx.getSeuratPipelineInputs();
+  const dataset = resolvedInputs && resolvedInputs.dataset;
+  const inputObject = resolvedInputs && resolvedInputs.inputObject;
+  if (!dataset || dataset.id !== datasetId) throw codedHandlerError('DATASET_NOT_FOUND', 'Dataset not found.');
   try {
     assertSupportedSeuratPipelineDataset(dataset);
   } catch (err) {
     throw codedHandlerError(err.code || 'DATASET_NOT_READY', err.message || 'Dataset is not ready for analysis.');
   }
-  const inputObject = await ctx.getProjectAnalysisObject(job.ownerUserId, job.projectId, objectId);
-  if (!inputObject) throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  if (!inputObject || inputObject.id !== objectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
   if (inputObject.datasetId !== datasetId) {
     throw codedHandlerError('INVALID_PARAMETERS', 'Seurat pipeline input object must reference the same dataset as the job.');
   }
@@ -656,13 +661,13 @@ async function seuratPipelineHandler(ctx) {
  * and NO checkpoint artifact (it only reattaches an existing one).
  *
  * SAME OWNERSHIP BOUNDARY as r.object.inspect / pbmc.pipeline.v1 (project membership ≠
- * live R access), enforced TWICE before any R contact:
- *   - the object id comes from the TRUSTED job row; the job creator must OWN the live
- *     object (verifyAnalysisObjectOwner), and the X-Object-ID is SERVER-derived
+ * live R access), enforced before any R contact:
+ *   - the object id comes from the TRUSTED job row; a claim-authorized resolver verifies
+ *     the job creator owns the object in the exact job scope, and the X-Object-ID is SERVER-derived
  *     (deriveRObjectStateKey); a co-member/admin/viewer who created a job against another
  *     user's object FAILS here.
- *   - getLoadableCheckpoint re-verifies ownership + project scope + checkpoint storage
- *     metadata and returns the SERVER-selected internal storage key (never client input).
+ *   - getLoadableCheckpoint verifies checkpoint storage metadata and returns the
+ *     SERVER-selected internal storage key (never client input).
  *
  * Order (the metadata artifact is recorded only AFTER R reports a successful load):
  *   1. heartbeat; require + own the object; derive its canonical state key (all before R)
@@ -688,17 +693,13 @@ async function checkpointLoadHandler(ctx) {
     throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Checkpoint load job is missing its analysis object.');
   }
 
-  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may load. Same
-  //    owner-verified check the /api/r/* proxy uses; 404-style message so another
-  //    user's object existence is never revealed. Also require the server-injected
-  //    deriver + loadable-checkpoint resolver.
-  if (typeof ctx.verifyAnalysisObjectOwner !== 'function'
-    || typeof ctx.deriveRObjectStateKey !== 'function'
+  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may load. The
+  //    claim-authorized checkpoint resolver verifies owner, exact project scope,
+  //    artifact integrity, and this worker's live claim. Also require the server-
+  //    injected state-key deriver.
+  if (typeof ctx.deriveRObjectStateKey !== 'function'
     || typeof ctx.getLoadableCheckpoint !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
-  }
-  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
-    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
   // 3. Derive the canonical object state key (X-Object-ID) SERVER-SIDE from the verified
@@ -714,7 +715,11 @@ async function checkpointLoadHandler(ctx) {
   //    INVALID_*) that fail the job terminally WITHOUT contacting R. The internal storage
   //    key it returns is SECRET — it is passed only to the server-controlled bridge and
   //    is never logged or placed in artifact metadata.
-  const checkpoint = await ctx.getLoadableCheckpoint(job.projectId || null, objectId, job.ownerUserId);
+  const checkpoint = await ctx.getLoadableCheckpoint();
+  if (!checkpoint || checkpoint.analysisObjectId !== objectId
+      || (checkpoint.projectId || null) !== (job.projectId || null)) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
 
   await ctx.log({ level: 'info', message: 'checkpoint.load.v1 handler: checkpoint resolved; loading into the owner\'s private live R session (no new object/edge).' });
 
@@ -788,11 +793,11 @@ async function checkpointForkHandler(ctx) {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Checkpoint fork is not configured.');
   }
 
-  const checkpoint = await ctx.getForkableCheckpoint(
-    job.ownerUserId,
-    job.projectId,
-    sourceObjectId
-  );
+  const checkpoint = await ctx.getForkableCheckpoint();
+  if (!checkpoint || checkpoint.analysisObjectId !== sourceObjectId
+      || checkpoint.projectId !== job.projectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
   const resultObjectId = ctx.allocateAnalysisObjectId();
   const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, resultObjectId);
   if (!stateKey) throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Checkpoint fork is not configured.');
@@ -846,7 +851,8 @@ async function checkpointForkHandler(ctx) {
  *
  * SAME OWNERSHIP BOUNDARY as r.object.inspect / pbmc.pipeline.v1 / checkpoint.load.v1
  * (project membership ≠ live R access): the input object id comes from the TRUSTED job row;
- * the job creator must OWN that live object (verifyAnalysisObjectOwner) BEFORE any R contact,
+ * a claim-authorized resolver verifies the job creator OWNS that live object in the
+ * exact job scope BEFORE any R contact,
  * and the X-Object-ID is SERVER-derived (deriveRObjectStateKey). A co-member/admin/viewer who
  * created a job against another user's object FAILS here.
  *
@@ -876,13 +882,14 @@ async function degFindMarkersHandler(ctx) {
     throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'DEG job is missing its input analysis object.');
   }
 
-  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may run DEG. Same
-  //    owner-verified check the /api/r/* proxy uses; 404-style message so another user's
-  //    object existence is never revealed. Also require the server-injected deriver.
-  if (typeof ctx.verifyAnalysisObjectOwner !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
+  // 2. CENTRAL GATE: only the live-R object owner (the job creator) may run DEG.
+  //    The worker-only resolver binds ownership and exact scope to this valid claim;
+  //    a 404-style message avoids another user's object existence disclosure.
+  if (typeof ctx.getOwnedAnalysisObject !== 'function' || typeof ctx.deriveRObjectStateKey !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (!(await ctx.verifyAnalysisObjectOwner(job.ownerUserId, objectId))) {
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
@@ -1024,7 +1031,7 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - db                 coordination helpers (defaults to ./pgDatabase); injectable for tests
  *   - workerId           this worker's id (defaults to a fresh generated id)
  *   - pollIntervalMs     delay between idle ticks in start() (default 1000)
- *   - leaseSeconds       claim lease length passed to claim/heartbeat (default 30)
+ *   - leaseSeconds       claim lease length passed to claim/heartbeat (default 120)
  *   - handlers           job_type → async handler registry (default DEFAULT_HANDLERS)
  *   - rBridge            R-bridge module seam (default ./rWorkerBridge); injectable for tests
  *   - callR              R caller used by the bridge; injectable for tests. Defaults to a
@@ -1223,26 +1230,31 @@ function createJobWorker(options = {}) {
         }
       },
       callR: resolvedCallR,
-      // Owner-verified gate + server-derived state-key deriver for r.object.inspect.
-      // verifyAnalysisObjectOwner is the SAME owner check the /api/r/* proxy uses, so
-      // project membership alone never reaches another user's live R object. The
-      // deriver is injected (server's canonical deriveRStateKey); the client never
-      // controls the X-Object-ID.
-      verifyAnalysisObjectOwner: (ownerUserId, objectId) => db.verifyAnalysisObjectOwner(ownerUserId, objectId),
+      // Claim-authorized resource resolvers derive every id from the trusted job
+      // row and validate this worker's live lease/token. They deliberately do not
+      // re-read project membership after claim: claim-time eligibility is the
+      // authorization boundary for an already-running job. Object ownership and
+      // exact project/dataset/checkpoint scope remain mandatory.
+      getOwnedAnalysisObject: () =>
+        db.getOwnedAnalysisObjectForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+      getSeuratPipelineInputs: () =>
+        db.getSeuratPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
       deriveRObjectStateKey: typeof deriveRObjectStateKey === 'function' ? deriveRObjectStateKey : undefined,
-      // Server-selected loadable-checkpoint resolver for checkpoint.load.v1 ONLY. It
-      // re-verifies object ownership + project scope + checkpoint storage metadata and
-      // returns the SERVER-controlled internal storage key (never client input). The
-      // worker keeps that key private (it is not logged or placed in artifact metadata).
-      getLoadableCheckpoint: (projectId, objectId, ownerUserId) =>
-        db.getLoadableCheckpointForAnalysisObject(projectId, objectId, ownerUserId),
-      getForkableCheckpoint: (ownerUserId, projectId, objectId) =>
-        db.getForkableCheckpointForAnalysisObject(ownerUserId, projectId, objectId),
+      // Server-selected checkpoint resolvers keep internal storage keys private
+      // while binding selection to this job's valid claim and trusted source id.
+      getLoadableCheckpoint: () =>
+        db.getLoadableCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+      getForkableCheckpoint: () =>
+        db.getForkableCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
       allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
-      getDatasetForProject: (ownerUserId, projectId, datasetId) =>
-        db.getDatasetForProject(ownerUserId, projectId, datasetId),
-      getProjectAnalysisObject: (ownerUserId, projectId, objectId) =>
-        db.getProjectAnalysisObject(ownerUserId, projectId, objectId),
       logger: log,
     };
 
