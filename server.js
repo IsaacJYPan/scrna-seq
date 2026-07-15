@@ -585,10 +585,11 @@ function isValidArtifactIdFormat(value) {
 
 // Middleware: verify any client-supplied X-Object-ID against the DB before it
 // reaches R. Sanitizing the string (deriveRStateKey) is not enough on its own:
-// the id must be a real persisted analysis_objects.id owned by req.user. On
-// success the verified canonical id is stashed on req.verifiedObjectId, and the
-// proxy derives the R state key from it. With no X-Object-ID, the request falls
-// through to the legacy user-scoped key.
+// the id must be a real persisted analysis_objects.id owned by req.user and be
+// usable through its authoritative scope. On success the verified canonical id
+// is stashed on req.verifiedObjectId, and the proxy derives the R state key from
+// it. With no X-Object-ID, the request falls through to the legacy user-scoped
+// key.
 async function verifyRObjectOwnership(req, res, next) {
   const rawObjectId = req.headers['x-object-id'];
 
@@ -602,9 +603,37 @@ async function verifyRObjectOwnership(req, res, next) {
   }
 
   // Mandatory DB ownership check — rejected before the request can reach R.
-  if (!(await db.verifyAnalysisObjectOwner(req.user.id, objectId))) {
+  const object = await db.getAnalysisObjectForUser(objectId, req.user.id);
+  if (!object) {
     // 404 (not 403) so we never reveal that another user's object exists.
     return res.status(404).json({ error: 'Analysis object not found.' });
+  }
+
+  // Scientific authorship remains immutable, but a project-associated live
+  // object is usable only while its owner is still a project writer. This is a
+  // public-proxy check only: worker-internal ownership checks intentionally do
+  // not revalidate here, so an already-valid running claim may finish.
+  if (object.projectId) {
+    try {
+      await db.requireProjectRole(req.user.id, object.projectId, ['owner', 'admin', 'analyst']);
+    } catch (error) {
+      if (error.code === 'NOT_FOUND') {
+        return res.status(404).json({ error: 'Analysis object not found.' });
+      }
+      if (error.code === 'FORBIDDEN') {
+        return res.status(403).json({ error: 'You do not have permission to use this project analysis object.' });
+      }
+      throw error;
+    }
+  } else {
+    // A projectless row is not necessarily private: legacy descendants can
+    // inherit a project lineage, and legacy rows can reference a project
+    // dataset. Apply the same private-scope resolution used by the compatibility
+    // metadata routes so these rows cannot become an R-proxy bypass.
+    const privateObject = await db.getPrivateAnalysisObjectForUser(objectId, req.user.id);
+    if (!privateObject) {
+      return res.status(404).json({ error: 'Analysis object not found.' });
+    }
   }
 
   req.verifiedObjectId = objectId;
@@ -931,6 +960,10 @@ function rejectAnalysisObjectStorageFields(body, res) {
 app.post('/api/analysis-objects', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
 
+  // Compatibility surface for genuinely private, projectless objects only.
+  // Project data must use /api/projects/:projectId/analysis-objects so creator
+  // identity can never bypass current project membership.
+
   // Object ids are server-issued. Reject any client attempt to choose one.
   if (body.id !== undefined) {
     return res.status(400).json({ error: 'Object id is server-assigned and must not be provided.' });
@@ -946,7 +979,7 @@ app.post('/api/analysis-objects', async (req, res) => {
   // Validate linked-resource ownership before creating anything. 404 (not 403)
   // so we never reveal that another user's resource exists.
   if (body.parentObjectId !== undefined && body.parentObjectId !== null) {
-    if (typeof body.parentObjectId !== 'string' || !(await db.getAnalysisObjectForUser(body.parentObjectId, req.user.id))) {
+    if (typeof body.parentObjectId !== 'string' || !(await db.getPrivateAnalysisObjectForUser(body.parentObjectId, req.user.id))) {
       return res.status(404).json({ error: 'Parent analysis object not found.' });
     }
   }
@@ -955,17 +988,16 @@ app.post('/api/analysis-objects', async (req, res) => {
       return res.status(404).json({ error: 'Provenance record not found.' });
     }
   }
-  // datasetId is now verified against the durable datasets model: if supplied it
-  // must be a real dataset whose project the caller can write to (owner/admin/
-  // analyst). A malformed id is rejected here (400); resolution + role enforcement
-  // happen in the DB layer (404 unknown/inaccessible, 403 viewer), mapped below.
+  // Durable datasets are project-scoped and therefore unavailable here. Keep a
+  // distinct 400 for malformed ids; any well-formed id is resolved as 404 by the
+  // private-scope DB helper.
   if (body.datasetId !== undefined && body.datasetId !== null) {
     if (!isValidDatasetIdFormat(body.datasetId)) {
       return res.status(400).json({ error: 'Malformed dataset ID.' });
     }
   }
   try {
-    const created = await db.createAnalysisObjectForUser(req.user.id, {
+    const created = await db.createPrivateAnalysisObjectForUser(req.user.id, {
       datasetId: body.datasetId,
       parentObjectId: body.parentObjectId,
       objectType: body.objectType,
@@ -992,20 +1024,19 @@ app.get('/api/analysis-objects', async (req, res) => {
     lineageRootId: typeof req.query.lineageRootId === 'string' ? req.query.lineageRootId : undefined,
     objectType: typeof req.query.objectType === 'string' ? req.query.objectType : undefined
   };
-  res.json((await db.listAnalysisObjectsForUser(req.user.id, filters)).map(db.toPublicAnalysisObject));
+  res.json((await db.listPrivateAnalysisObjectsForUser(req.user.id, filters)).map(db.toPublicAnalysisObject));
 });
 
 app.get('/api/analysis-objects/:id', async (req, res) => {
-  const obj = await db.getAnalysisObjectForUser(req.params.id, req.user.id);
+  const obj = await db.getPrivateAnalysisObjectForUser(req.params.id, req.user.id);
   if (!obj) return res.status(404).json({ error: 'Analysis object not found.' });
   res.json(db.toPublicAnalysisObject(obj));
 });
 
 // ── Jobs API ────────────────────────────────────────────────────────────
-// Durable, ownership-scoped records for long-running analysis work. Job ids
-// and status are server-managed; clients may never choose an id, assert
-// ownership, or set a status. This is the foundation for backgrounding R work;
-// the opt-in worker drains only registered, allowlisted handlers.
+// Legacy compatibility API for private, projectless jobs. Project jobs use the
+// project RBAC routes. Job ids/status are server-managed, and the worker drains
+// only registered, allowlisted handlers.
 app.use('/api/jobs', express.json());
 app.use('/api/jobs', requireAuth);
 
@@ -1026,8 +1057,8 @@ app.post('/api/jobs', async (req, res) => {
   if (body.status !== undefined) {
     return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
   }
-  // A supplied datasetId must be well-formed (else 400); resolution + role
-  // enforcement happen in the DB layer (404 unknown/inaccessible, 403 viewer).
+  // Durable datasets are project-scoped and therefore unavailable here. Keep a
+  // distinct 400 for malformed ids; well-formed ids resolve as 404 below.
   if (body.datasetId !== undefined && body.datasetId !== null) {
     if (!isValidDatasetIdFormat(body.datasetId)) {
       return res.status(400).json({ error: 'Malformed dataset ID.' });
@@ -1035,7 +1066,7 @@ app.post('/api/jobs', async (req, res) => {
   }
 
   try {
-    const created = await db.createJobForUser(req.user.id, {
+    const created = await db.createPrivateJobForUser(req.user.id, {
       analysisObjectId: body.analysisObjectId,
       datasetId: body.datasetId,
       jobType: body.jobType,
@@ -1060,24 +1091,24 @@ app.get('/api/jobs', async (req, res) => {
     analysisObjectId: typeof req.query.analysisObjectId === 'string' ? req.query.analysisObjectId : undefined,
     resultAnalysisObjectId: typeof req.query.resultAnalysisObjectId === 'string' ? req.query.resultAnalysisObjectId : undefined
   };
-  res.json((await db.listJobsForUser(req.user.id, filters)).map(db.toPublicJob));
+  res.json((await db.listPrivateJobsForUser(req.user.id, filters)).map(db.toPublicJob));
 });
 
 app.get('/api/jobs/:id', async (req, res) => {
-  const job = await db.getJobForUser(req.params.id, req.user.id);
+  const job = await db.getPrivateJobForUser(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
   res.json(db.toPublicJob(job));
 });
 
 app.get('/api/jobs/:id/logs', async (req, res) => {
-  const job = await db.getJobForUser(req.params.id, req.user.id);
+  const job = await db.getPrivateJobForUser(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
   res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
 });
 
 app.post('/api/jobs/:id/cancel', async (req, res) => {
   try {
-    const job = await db.cancelJobForUser(req.user.id, req.params.id);
+    const job = await db.cancelPrivateJobForUser(req.user.id, req.params.id);
     res.json(db.toPublicJob(job));
   } catch (e) {
     if (e.code === 'JOB_NOT_FOUND') return res.status(404).json({ error: e.message });
@@ -1229,10 +1260,11 @@ app.post('/api/projects/:id/members', async (req, res) => {
     return res.status(400).json({ error: 'A member email is required.' });
   }
   try {
-    // owner/admin may manage members; the acting role is passed through so the
-    // DB layer can enforce that only an owner grants the owner role.
-    const actor = await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
-    const member = await db.addProjectMemberByEmail(req.params.id, body.email, body.role, actor.role);
+    // The DB layer re-reads this authenticated user's role while holding the
+    // project mutation lock, so a concurrent demotion cannot leave stale authority.
+    const member = await db.addProjectMemberByEmail(
+      req.params.id, body.email, body.role, { userId: req.user.id }
+    );
     res.status(201).json(member);
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
@@ -1241,14 +1273,21 @@ app.post('/api/projects/:id/members', async (req, res) => {
 
 app.patch('/api/projects/:id/members/:userId', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const targetUserId = Number(req.params.userId);
+  if (!Number.isInteger(targetUserId) || targetUserId <= 0) {
+    return res.status(400).json({ error: 'Malformed member user ID.' });
+  }
+  if (rejectServerControlledFields(req, res, {
+    rejectRole: false,
+    extra: ['userId', 'user_id', 'projectId', 'project_id', 'email', 'id'],
+  })) return;
   if (typeof body.role !== 'string') {
     return res.status(400).json({ error: 'A role is required.' });
   }
   try {
-    // owner/admin may manage members; the acting role is passed through so the
-    // DB layer can enforce that only an owner grants or demotes the owner role.
-    const actor = await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
-    const updated = await db.updateProjectMemberRole(req.params.id, Number(req.params.userId), body.role, actor.role);
+    const updated = await db.updateProjectMemberRole(
+      req.params.id, targetUserId, body.role, { userId: req.user.id }
+    );
     res.json(updated);
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
@@ -1256,11 +1295,14 @@ app.patch('/api/projects/:id/members/:userId', async (req, res) => {
 });
 
 app.delete('/api/projects/:id/members/:userId', async (req, res) => {
+  const targetUserId = Number(req.params.userId);
+  if (!Number.isInteger(targetUserId) || targetUserId <= 0) {
+    return res.status(400).json({ error: 'Malformed member user ID.' });
+  }
   try {
-    // owner/admin may manage members; the acting role is passed through so the
-    // DB layer can enforce that only an owner removes an owner.
-    const actor = await db.requireProjectRole(req.user.id, req.params.id, ['owner', 'admin']);
-    await db.removeProjectMember(req.params.id, Number(req.params.userId), actor.role);
+    await db.removeProjectMember(
+      req.params.id, targetUserId, { userId: req.user.id }
+    );
     res.json({ success: true });
   } catch (e) {
     sendOrgProjectError(res, e, 'Projects');
@@ -1796,6 +1838,18 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   if (body.datasetId !== undefined && body.datasetId !== null &&
       !isValidDatasetIdFormat(body.datasetId)) {
     return res.status(400).json({ error: 'Malformed dataset ID.' });
+  }
+
+  // A checkpoint fork allocates its result object and derives its dataset from
+  // the server-selected source checkpoint. Accepting either client field would
+  // let a queued job advertise forged output metadata before the worker runs.
+  if (body.jobType === 'checkpoint.fork.v1') {
+    if (body.resultAnalysisObjectId !== undefined) {
+      return res.status(400).json({ error: 'checkpoint.fork.v1 result analysis object is server-managed and must not be provided.' });
+    }
+    if (body.datasetId !== undefined) {
+      return res.status(400).json({ error: 'checkpoint.fork.v1 dataset is derived from the source checkpoint and must not be provided.' });
+    }
   }
 
   // Durable dataset-backed Seurat pipeline has a strict server-side parameter

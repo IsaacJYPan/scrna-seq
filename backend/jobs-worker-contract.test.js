@@ -3,14 +3,15 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const {
-  createUser, createAnalysisObjectForUser,
+  createUser, createAnalysisObjectForUser, createProjectAnalysisObject,
   createJobForUser, getJobForUser, listJobsForUser, updateJobStatusForUser,
   cancelJobForUser, verifyJobOwner, verifyAnalysisObjectOwner, validateJobTransition,
   // worker coordination contract under test
   claimNextJob, heartbeatJob, completeJobByWorker, failJobByWorker, releaseJob,
   reapExpiredJobs, setJobScheduling, getWorkerJob, generateClaimToken,
   // project setup for the project-cancel interaction
-  createOrganizationForUser, createProjectForUser, createProjectJob, cancelProjectJob, getProjectJob
+  createOrganizationForUser, createProjectForUser, createProjectJob, cancelProjectJob, getProjectJob,
+  addProjectMemberByEmail, updateProjectMemberRole, removeProjectMember
 } = dbmod;
 
 const CONFIGURED = config.hasPostgresConnection();
@@ -80,6 +81,76 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
 
   it('returns null when there is no claimable job', async () => {
     expect(await claimNextJob('w1', { now: T0 })).toBeNull();
+  });
+
+  it('cancels queued project jobs after creator demotion/removal and claims the next eligible job', async () => {
+    const carol = await createUser('carol@example.com', 'password123', 'Carol');
+    const org = await createOrganizationForUser(alice.id, { name: 'Lab' });
+    const project = await createProjectForUser(alice.id, { organizationId: org.id, name: 'Study' });
+    await addProjectMemberByEmail(project.id, bob.email, 'analyst', 'owner');
+    await addProjectMemberByEmail(project.id, carol.email, 'analyst', 'owner');
+    const demotedJob = await createProjectJob(bob.id, project.id, { jobType: 'generic' });
+    const removedJob = await createProjectJob(carol.id, project.id, { jobType: 'generic' });
+    const ownerJob = await createProjectJob(alice.id, project.id, { jobType: 'generic' });
+
+    await updateProjectMemberRole(project.id, bob.id, 'viewer', { userId: alice.id });
+    await removeProjectMember(project.id, carol.id, { userId: alice.id });
+
+    const claimed = await claimNextJob('worker-access', { now: T0, leaseSeconds: 30 });
+    expect(claimed.id).toBe(ownerJob.id);
+    await expect(getProjectJob(alice.id, project.id, demotedJob.id)).resolves.toMatchObject({
+      status: 'canceled',
+      error: expect.objectContaining({ code: 'PROJECT_ACCESS_REVOKED' }),
+    });
+    await expect(getProjectJob(alice.id, project.id, removedJob.id)).resolves.toMatchObject({
+      status: 'canceled',
+      error: expect.objectContaining({ code: 'PROJECT_ACCESS_REVOKED' }),
+    });
+  });
+
+  it('cancels a legacy projectless job that references a project object before claim', async () => {
+    const org = await createOrganizationForUser(alice.id, { name: 'Lab' });
+    const project = await createProjectForUser(alice.id, { organizationId: org.id, name: 'Study' });
+    const projectObject = await createProjectAnalysisObject(alice.id, project.id, {
+      objectType: 'seurat',
+      displayName: 'Project object',
+    });
+    // Seed the shape an older compatibility route could create: projectless
+    // descendants whose lineage root is still the project object.
+    const legacyChild = await createAnalysisObjectForUser(alice.id, {
+      objectType: 'seurat',
+      parentObjectId: projectObject.id,
+    });
+    const legacyGrandchild = await createAnalysisObjectForUser(alice.id, {
+      objectType: 'seurat',
+      parentObjectId: legacyChild.id,
+    });
+    const invalid = await createJobForUser(alice.id, {
+      jobType: 'r.object.inspect',
+      analysisObjectId: legacyGrandchild.id,
+    });
+    const eligible = await createJobForUser(alice.id, { jobType: 'generic' });
+
+    const claimed = await claimNextJob('worker-scope', { now: T0, leaseSeconds: 30 });
+    expect(claimed.id).toBe(eligible.id);
+    expect(await getWorkerJob(invalid.id)).toMatchObject({
+      status: 'canceled',
+      error: expect.objectContaining({ code: 'INVALID_PROJECT_SCOPE' }),
+    });
+  });
+
+  it('preserves an already-running claim after member removal', async () => {
+    const org = await createOrganizationForUser(alice.id, { name: 'Lab' });
+    const project = await createProjectForUser(alice.id, { organizationId: org.id, name: 'Study' });
+    await addProjectMemberByEmail(project.id, bob.email, 'analyst', 'owner');
+    const job = await createProjectJob(bob.id, project.id, { jobType: 'generic' });
+    const claimed = await claimNextJob('worker-running', { now: T0, leaseSeconds: 30 });
+    expect(claimed.id).toBe(job.id);
+
+    await removeProjectMember(project.id, bob.id, { userId: alice.id });
+    await completeJobByWorker(job.id, 'worker-running', claimed.claimToken, { now: T0_PLUS_10 });
+
+    await expect(getProjectJob(alice.id, project.id, job.id)).resolves.toMatchObject({ status: 'completed' });
   });
 
   it('is a single winner: two workers cannot both claim the same job', async () => {

@@ -8,6 +8,7 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const DEG_FIND_MARKERS_JOB_TYPE = 'deg.find_markers.v1';
 const SEURAT_PIPELINE_JOB_TYPE = 'seurat.pipeline.v1';
+const CHECKPOINT_FORK_JOB_TYPE = 'checkpoint.fork.v1';
 const DEG_FIND_MARKERS_PARAM_KEYS = new Set([
   'groupBy',
   'assay',
@@ -68,6 +69,14 @@ export function buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, par
     ...(datasetId ? { datasetId } : {}),
     ...(analysisObjectId ? { analysisObjectId } : {}),
     parameters: safeParams,
+  };
+}
+
+export function buildCheckpointForkJobPayload(analysisObjectId) {
+  return {
+    jobType: CHECKPOINT_FORK_JOB_TYPE,
+    analysisObjectId,
+    parameters: {},
   };
 }
 
@@ -204,7 +213,9 @@ async function req(endpoint, options = {}) {
   const res = await fetch(apiUrl(endpoint), options);
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    const error = new Error(text || res.statusText);
+    error.status = res.status;
+    throw error;
   }
   return res.json();
 }
@@ -450,6 +461,11 @@ export const electronAPI = {
     req(`/api/projects/${projectId}/jobs`, {
       method: 'POST',
       body: JSON.stringify(buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params })),
+    }),
+  createCheckpointForkJob: async (projectId, analysisObjectId) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildCheckpointForkJobPayload(analysisObjectId)),
     }),
 
   // Project-scoped provenance & figure metadata (project metadata/history; ids/
