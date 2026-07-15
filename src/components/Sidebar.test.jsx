@@ -88,6 +88,8 @@ describe('Sidebar component', () => {
     );
 
     expect(screen.getByRole('button', { name: /Pipeline Manager, User scoped/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Collaborators, Project RBAC/i })).not.toBeDisabled();
+    expect(screen.queryByText(/Demo only/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Default Seurat scRNA-seq Pipeline/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Markers \/ DEG/i })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: /Jobs & Artifacts/i })).not.toBeDisabled();

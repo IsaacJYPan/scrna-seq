@@ -384,42 +384,53 @@ describe.skipIf(!CONFIGURED)('datasets API — file upload', () => {
 describe.skipIf(!CONFIGURED)('datasets — datasetId verification on analysis objects & jobs', () => {
   // Helper: create a dataset in a project the given user can write to.
   async function datasetFor(ownerUserId) {
-    const proj = await seedProject(ownerUserId);
-    return createDatasetForProject(ownerUserId, proj.id, { fileType: 'seurat_rds' });
+    const project = await seedProject(ownerUserId);
+    const dataset = await createDatasetForProject(ownerUserId, project.id, { fileType: 'seurat_rds' });
+    return { project, dataset };
   }
 
-  it('analysis object creation succeeds with a valid accessible datasetId', async () => {
+  it('dataset-backed analysis object creation requires the project route', async () => {
     const { alice } = await users();
-    const ds = await datasetFor(alice.user.id);
-    const res = await api(server, '/api/analysis-objects', {
-      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: ds.id }
+    const { project, dataset } = await datasetFor(alice.user.id);
+    const legacy = await api(server, '/api/analysis-objects', {
+      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: dataset.id }
     });
-    expect(res.status).toBe(201);
-    expect(res.data.datasetId).toBe(ds.id);
+    expect(legacy.status).toBe(404);
+
+    const scoped = await api(server, `/api/projects/${project.id}/analysis-objects`, {
+      method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: dataset.id }
+    });
+    expect(scoped.status).toBe(201);
+    expect(scoped.data.datasetId).toBe(dataset.id);
   });
 
   it('analysis object creation fails (404) with an inaccessible datasetId', async () => {
     const { alice, bob } = await users();
-    const bobDs = await datasetFor(bob.user.id);
+    const { dataset: bobDs } = await datasetFor(bob.user.id);
     const res = await api(server, '/api/analysis-objects', {
       method: 'POST', token: alice.token, body: { objectType: 'seurat', datasetId: bobDs.id }
     });
     expect(res.status).toBe(404);
   });
 
-  it('job creation succeeds with a valid accessible datasetId', async () => {
+  it('dataset-backed job creation requires the project route', async () => {
     const { alice } = await users();
-    const ds = await datasetFor(alice.user.id);
-    const res = await api(server, '/api/jobs', {
-      method: 'POST', token: alice.token, body: { jobType: 'normalize', datasetId: ds.id }
+    const { project, dataset } = await datasetFor(alice.user.id);
+    const legacy = await api(server, '/api/jobs', {
+      method: 'POST', token: alice.token, body: { jobType: 'normalize', datasetId: dataset.id }
     });
-    expect(res.status).toBe(201);
-    expect(res.data.datasetId).toBe(ds.id);
+    expect(legacy.status).toBe(404);
+
+    const scoped = await api(server, `/api/projects/${project.id}/jobs`, {
+      method: 'POST', token: alice.token, body: { jobType: 'normalize', datasetId: dataset.id }
+    });
+    expect(scoped.status).toBe(201);
+    expect(scoped.data.datasetId).toBe(dataset.id);
   });
 
   it('job creation fails (404) with an inaccessible datasetId', async () => {
     const { alice, bob } = await users();
-    const bobDs = await datasetFor(bob.user.id);
+    const { dataset: bobDs } = await datasetFor(bob.user.id);
     const res = await api(server, '/api/jobs', {
       method: 'POST', token: alice.token, body: { jobType: 'normalize', datasetId: bobDs.id }
     });
@@ -432,12 +443,12 @@ describe.skipIf(!CONFIGURED)('datasets — datasetId verification on analysis ob
     await addMember(proj.id, 'bob@example.com', 'viewer');
     const ds = await createDatasetForProject(alice.user.id, proj.id, { fileType: 'seurat_rds' });
 
-    const ao = await api(server, '/api/analysis-objects', {
+    const ao = await api(server, `/api/projects/${proj.id}/analysis-objects`, {
       method: 'POST', token: bob.token, body: { objectType: 'seurat', datasetId: ds.id }
     });
     expect(ao.status).toBe(403);
 
-    const job = await api(server, '/api/jobs', {
+    const job = await api(server, `/api/projects/${proj.id}/jobs`, {
       method: 'POST', token: bob.token, body: { jobType: 'normalize', datasetId: ds.id }
     });
     expect(job.status).toBe(403);

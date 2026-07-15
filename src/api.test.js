@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { electronAPI, apiUrl, buildDegFindMarkersJobPayload, buildSeuratPipelineJobPayload } from './api';
+import {
+  electronAPI,
+  apiUrl,
+  buildCheckpointForkJobPayload,
+  buildDegFindMarkersJobPayload,
+  buildSeuratPipelineJobPayload,
+} from './api';
 
 describe('apiUrl (VITE_API_BASE_URL resolution)', () => {
   afterEach(() => {
@@ -135,6 +141,16 @@ describe('buildSeuratPipelineJobPayload', () => {
   });
 });
 
+describe('buildCheckpointForkJobPayload', () => {
+  it('pins the allowlisted fork job shape without client-controlled checkpoint fields', () => {
+    expect(buildCheckpointForkJobPayload('ao_source123')).toEqual({
+      jobType: 'checkpoint.fork.v1',
+      analysisObjectId: 'ao_source123',
+      parameters: {},
+    });
+  });
+});
+
 describe('API Client (electronAPI)', () => {
   const originalFetch = global.fetch;
 
@@ -212,6 +228,20 @@ describe('API Client (electronAPI)', () => {
 
     await electronAPI.getFigures();
     expect(global.fetch).toHaveBeenCalledWith('/api/db/figures', expect.any(Object));
+  });
+
+  it('preserves HTTP status on project API errors for access reconciliation', async () => {
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+      text: async () => JSON.stringify({ error: 'Project job not found.' }),
+    });
+
+    await expect(electronAPI.getProjectJob('proj_1', 'job_1')).rejects.toMatchObject({
+      status: 404,
+      message: JSON.stringify({ error: 'Project job not found.' }),
+    });
   });
 
   it('clears auth and session localStorage so a reload remains logged out', async () => {
@@ -397,6 +427,27 @@ describe('API Client (electronAPI)', () => {
         minCells: 3,
         minFeatures: 200,
       },
+    });
+  });
+
+  it('creates checkpoint forks through the fixed project job API wrapper', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_fork123', jobType: 'checkpoint.fork.v1', status: 'queued' }),
+    });
+
+    const result = await electronAPI.createCheckpointForkJob('proj_1', 'ao_source123');
+
+    expect(result.id).toBe('job_fork123');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'checkpoint.fork.v1',
+      analysisObjectId: 'ao_source123',
+      parameters: {},
     });
   });
 });

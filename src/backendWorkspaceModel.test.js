@@ -119,6 +119,21 @@ describe('backend workspace model', () => {
     ]);
   });
 
+  it('does not trust durable project metadata as proof of private live R attachment', async () => {
+    const api = {
+      listProjectAnalysisObjects: vi.fn(async () => [{
+        id: 'ao_shared',
+        projectId: 'proj_1',
+        objectType: 'seurat',
+        metadata: { liveState: 'attached' },
+      }]),
+    };
+
+    const state = await loadProjectAnalysisObjectState(api, makeStorage(), user, 'proj_1');
+
+    expect(state.objects[0]).toMatchObject({ id: 'ao_shared', liveState: 'unknown' });
+  });
+
   it('stores selected project/object IDs as preferences without full project or object records', () => {
     const storage = makeStorage();
 

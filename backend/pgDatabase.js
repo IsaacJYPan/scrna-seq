@@ -953,47 +953,166 @@ async function countProjectOwners(projectId) {
   return Number(rows[0]?.n || 0);
 }
 
-async function addProjectMemberByEmail(projectId, email, role, actorRole) {
+async function lockProjectAndResolveMemberActor(client, projectId, actor) {
+  const pid = String(projectId);
+  const project = await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [pid]);
+  if (!project.rows[0]) throw codedError('NOT_FOUND', 'Project not found.');
+
+  if (actor && typeof actor === 'object') {
+    const actorUserId = Number(actor.userId);
+    if (!Number.isInteger(actorUserId) || actorUserId <= 0) {
+      throw codedError('NOT_FOUND', 'Project not found.');
+    }
+    const membership = await client.query(
+      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [pid, actorUserId]
+    );
+    if (!membership.rows[0]) throw codedError('NOT_FOUND', 'Project not found.');
+    if (!['owner', 'admin'].includes(membership.rows[0].role)) {
+      throw codedError('FORBIDDEN', 'You do not have permission to perform this action.');
+    }
+    return membership.rows[0].role;
+  }
+
+  // Compatibility for trusted helper callers/tests. HTTP routes always pass the
+  // authenticated user id above so the acting role is re-read under the lock.
+  if (!['owner', 'admin'].includes(actor)) {
+    throw codedError('FORBIDDEN', 'You do not have permission to perform this action.');
+  }
+  return actor;
+}
+
+async function addProjectMemberByEmail(projectId, email, role, actor) {
   if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
-  if (role === 'owner' && actorRole !== 'owner') throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
   if (typeof email !== 'string' || !email.trim()) throw codedError('INVALID_EMAIL', 'A member email is required.');
-  const user = await getUserByEmail(email);
-  if (!user) throw codedError('USER_NOT_FOUND', 'No user found with that email.');
-  if (await getProjectMember(projectId, user.id)) throw codedError('ALREADY_MEMBER', 'User is already a member of this project.');
-  await query('INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3)', [String(projectId), user.id, role]);
-  return { userId: user.id, email: user.email, displayName: user.displayName, role };
+  const pid = String(projectId);
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const actorRole = await lockProjectAndResolveMemberActor(client, pid, actor);
+    if (role === 'owner' && actorRole !== 'owner') {
+      throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
+    }
+    const found = await client.query(
+      'SELECT id, email, display_name FROM users WHERE email = $1',
+      [String(email).trim().toLowerCase()]
+    );
+    const user = found.rows[0];
+    if (!user) throw codedError('USER_NOT_FOUND', 'No user found with that email.');
+    const existing = await client.query(
+      'SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [pid, Number(user.id)]
+    );
+    if (existing.rows[0]) throw codedError('ALREADY_MEMBER', 'User is already a member of this project.');
+    await client.query(
+      'INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, $3)',
+      [pid, Number(user.id), role]
+    );
+    await client.query('COMMIT');
+    return {
+      userId: Number(user.id),
+      email: user.email,
+      displayName: user.display_name,
+      role,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
-async function updateProjectMemberRole(projectId, targetUserId, role, actorRole) {
+async function updateProjectMemberRole(projectId, targetUserId, role, actor) {
   if (!isValidRole(role)) throw codedError('INVALID_ROLE', 'Invalid role.');
-  const member = await getProjectMember(projectId, targetUserId);
-  if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
-  if (role === 'owner' && member.role !== 'owner' && actorRole !== 'owner') {
-    throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
+  const pid = String(projectId);
+  const target = Number(targetUserId);
+  if (!Number.isInteger(target) || target <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid member user id is required.');
   }
-  if (member.role === 'owner' && role !== 'owner' && actorRole !== 'owner') {
-    throw codedError('FORBIDDEN', 'Only an owner can demote an owner.');
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const actorRole = await lockProjectAndResolveMemberActor(client, pid, actor);
+    const found = await client.query(
+      'SELECT project_id, user_id, role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [pid, target]
+    );
+    const member = found.rows[0];
+    if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
+    if (role === 'owner' && member.role !== 'owner' && actorRole !== 'owner') {
+      throw codedError('FORBIDDEN', 'Only an owner can grant the owner role.');
+    }
+    if (member.role === 'owner' && role !== 'owner' && actorRole !== 'owner') {
+      throw codedError('FORBIDDEN', 'Only an owner can demote an owner.');
+    }
+    if (member.role === 'owner' && role !== 'owner') {
+      const owners = await client.query(
+        "SELECT COUNT(*)::int AS n FROM project_members WHERE project_id = $1 AND role = 'owner'",
+        [pid]
+      );
+      if (Number(owners.rows[0]?.n || 0) <= 1) {
+        throw codedError('LAST_OWNER', 'Cannot demote the last owner of the project.');
+      }
+    }
+    const updated = await client.query(
+      'UPDATE project_members SET role = $1, updated_at = now() WHERE project_id = $2 AND user_id = $3 RETURNING project_id, user_id, role',
+      [role, pid, target]
+    );
+    await client.query('COMMIT');
+    return {
+      projectId: updated.rows[0].project_id,
+      userId: Number(updated.rows[0].user_id),
+      role: updated.rows[0].role,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-  if (member.role === 'owner' && role !== 'owner' && (await countProjectOwners(projectId)) <= 1) {
-    throw codedError('LAST_OWNER', 'Cannot demote the last owner of the project.');
-  }
-  await query('UPDATE project_members SET role = $1, updated_at = now() WHERE project_id = $2 AND user_id = $3', [
-    role, String(projectId), Number(targetUserId)
-  ]);
-  return getProjectMember(projectId, targetUserId);
 }
 
-async function removeProjectMember(projectId, targetUserId, actorRole) {
-  const member = await getProjectMember(projectId, targetUserId);
-  if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
-  if (member.role === 'owner' && actorRole !== 'owner') {
-    throw codedError('FORBIDDEN', 'Only an owner can remove an owner.');
+async function removeProjectMember(projectId, targetUserId, actor) {
+  const pid = String(projectId);
+  const target = Number(targetUserId);
+  if (!Number.isInteger(target) || target <= 0) {
+    throw codedError('INVALID_OWNER', 'A valid member user id is required.');
   }
-  if (member.role === 'owner' && (await countProjectOwners(projectId)) <= 1) {
-    throw codedError('LAST_OWNER', 'Cannot remove the last owner of the project.');
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const actorRole = await lockProjectAndResolveMemberActor(client, pid, actor);
+    const found = await client.query(
+      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [pid, target]
+    );
+    const member = found.rows[0];
+    if (!member) throw codedError('MEMBER_NOT_FOUND', 'Project member not found.');
+    if (member.role === 'owner' && actorRole !== 'owner') {
+      throw codedError('FORBIDDEN', 'Only an owner can remove an owner.');
+    }
+    if (member.role === 'owner') {
+      const owners = await client.query(
+        "SELECT COUNT(*)::int AS n FROM project_members WHERE project_id = $1 AND role = 'owner'",
+        [pid]
+      );
+      if (Number(owners.rows[0]?.n || 0) <= 1) {
+        throw codedError('LAST_OWNER', 'Cannot remove the last owner of the project.');
+      }
+    }
+    await client.query('DELETE FROM project_members WHERE project_id = $1 AND user_id = $2', [pid, target]);
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-  await query('DELETE FROM project_members WHERE project_id = $1 AND user_id = $2', [String(projectId), Number(targetUserId)]);
-  return true;
 }
 
 function rowToPipelineDefinition(row) {
@@ -1417,6 +1536,88 @@ async function listAnalysisObjectsForUser(ownerUserId, filters = {}) {
 
 const createAnalysisObjectForUser = createAnalysisObject;
 
+// Legacy owner-scoped HTTP routes are private-scope compatibility surfaces.
+// Project-associated rows must stay behind the project RBAC routes; otherwise a
+// removed creator could keep reading or deriving work from project data merely
+// because owner_user_id still records scientific authorship.
+async function getPrivateAnalysisObjectForUser(id, ownerUserId) {
+  const { rows } = await query(
+    `SELECT ao.* FROM analysis_objects ao
+      WHERE ao.id = $1 AND ao.owner_user_id = $2 AND ao.project_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM analysis_objects parent
+           WHERE parent.id = ao.parent_object_id AND parent.project_id IS NOT NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1
+            FROM analysis_objects root
+            LEFT JOIN datasets root_dataset ON root_dataset.id = root.dataset_id
+           WHERE root.id = ao.lineage_root_id
+             AND (root.project_id IS NOT NULL OR root_dataset.project_id IS NOT NULL)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM datasets d
+           WHERE d.id = ao.dataset_id AND d.project_id IS NOT NULL
+        )`,
+    [String(id), Number(ownerUserId)]
+  );
+  return rowToAnalysisObject(rows[0]);
+}
+
+async function listPrivateAnalysisObjectsForUser(ownerUserId, filters = {}) {
+  const { clauses, params } = filterClauses(filters, {
+    datasetId: 'ao.dataset_id',
+    parentObjectId: 'ao.parent_object_id',
+    lineageRootId: 'ao.lineage_root_id',
+    objectType: 'ao.object_type'
+  });
+  const allParams = [Number(ownerUserId), ...params];
+  const where = [
+    'ao.owner_user_id = $1',
+    'ao.project_id IS NULL',
+    `NOT EXISTS (
+      SELECT 1 FROM analysis_objects parent
+       WHERE parent.id = ao.parent_object_id AND parent.project_id IS NOT NULL
+    )`,
+    `NOT EXISTS (
+      SELECT 1
+        FROM analysis_objects root
+        LEFT JOIN datasets root_dataset ON root_dataset.id = root.dataset_id
+       WHERE root.id = ao.lineage_root_id
+         AND (root.project_id IS NOT NULL OR root_dataset.project_id IS NOT NULL)
+    )`,
+    `NOT EXISTS (
+      SELECT 1 FROM datasets d
+       WHERE d.id = ao.dataset_id AND d.project_id IS NOT NULL
+    )`,
+    ...clauses.map((c, i) => c.replace(`$${i + 1}`, `$${i + 2}`))
+  ];
+  const { rows } = await query(
+    `SELECT ao.* FROM analysis_objects ao WHERE ${where.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
+    allParams
+  );
+  return rows.map(rowToAnalysisObject);
+}
+
+async function createPrivateAnalysisObjectForUser(ownerUserId, input = {}) {
+  if (input.projectId !== undefined && input.projectId !== null) {
+    throw codedError('PARENT_NOT_FOUND', 'Project-scoped analysis objects require a project route.');
+  }
+  // Every durable dataset is project-scoped. A dataset-backed object must carry
+  // that same project id and therefore cannot be created through this legacy
+  // private route.
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+  }
+  if (input.parentObjectId !== undefined && input.parentObjectId !== null) {
+    const parent = typeof input.parentObjectId === 'string'
+      ? await getPrivateAnalysisObjectForUser(input.parentObjectId, ownerUserId)
+      : null;
+    if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+  }
+  return createAnalysisObject(ownerUserId, { ...input, projectId: null, datasetId: null });
+}
+
 async function verifyAnalysisObjectOwner(ownerUserId, objectId) {
   return !!(await getAnalysisObjectForUser(objectId, ownerUserId));
 }
@@ -1665,6 +1866,90 @@ async function listJobsForUser(ownerUserId, filters = {}) {
   return rows.map(rowToJob);
 }
 
+async function getPrivateJobForUser(id, ownerUserId) {
+  const { rows } = await query(
+    `SELECT j.* FROM jobs j
+      WHERE j.id = $1 AND j.owner_user_id = $2 AND j.project_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+            FROM analysis_objects ao
+            LEFT JOIN analysis_objects parent ON parent.id = ao.parent_object_id
+            LEFT JOIN analysis_objects root ON root.id = ao.lineage_root_id
+            LEFT JOIN datasets source_dataset ON source_dataset.id = ao.dataset_id
+            LEFT JOIN datasets root_dataset ON root_dataset.id = root.dataset_id
+           WHERE ao.id IN (j.analysis_object_id, j.result_analysis_object_id)
+             AND (ao.project_id IS NOT NULL
+               OR parent.project_id IS NOT NULL
+               OR root.project_id IS NOT NULL
+               OR source_dataset.project_id IS NOT NULL
+               OR root_dataset.project_id IS NOT NULL)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM datasets d
+           WHERE d.id = j.dataset_id AND d.project_id IS NOT NULL
+        )`,
+    [String(id), Number(ownerUserId)]
+  );
+  return rowToJob(rows[0]);
+}
+
+async function listPrivateJobsForUser(ownerUserId, filters = {}) {
+  const clauses = [
+    'j.owner_user_id = $1',
+    'j.project_id IS NULL',
+    `NOT EXISTS (
+      SELECT 1
+        FROM analysis_objects ao
+        LEFT JOIN analysis_objects parent ON parent.id = ao.parent_object_id
+        LEFT JOIN analysis_objects root ON root.id = ao.lineage_root_id
+        LEFT JOIN datasets source_dataset ON source_dataset.id = ao.dataset_id
+        LEFT JOIN datasets root_dataset ON root_dataset.id = root.dataset_id
+       WHERE ao.id IN (j.analysis_object_id, j.result_analysis_object_id)
+         AND (ao.project_id IS NOT NULL
+           OR parent.project_id IS NOT NULL
+           OR root.project_id IS NOT NULL
+           OR source_dataset.project_id IS NOT NULL
+           OR root_dataset.project_id IS NOT NULL)
+    )`,
+    `NOT EXISTS (
+      SELECT 1 FROM datasets d
+       WHERE d.id = j.dataset_id AND d.project_id IS NOT NULL
+    )`
+  ];
+  const params = [Number(ownerUserId)];
+  const allowed = {
+    status: 'j.status',
+    jobType: 'j.job_type',
+    analysisObjectId: 'j.analysis_object_id',
+    resultAnalysisObjectId: 'j.result_analysis_object_id',
+    datasetId: 'j.dataset_id'
+  };
+  for (const [field, column] of Object.entries(allowed)) {
+    if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
+  }
+  const { rows } = await query(
+    `SELECT j.* FROM jobs j WHERE ${clauses.join(' AND ')} ORDER BY j.created_at DESC, j.id DESC`,
+    params
+  );
+  return rows.map(rowToJob);
+}
+
+async function createPrivateJobForUser(ownerUserId, input = {}) {
+  if (input.projectId !== undefined && input.projectId !== null) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Project-scoped jobs require a project route.');
+  }
+  if (input.datasetId !== undefined && input.datasetId !== null) {
+    throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+  }
+  if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
+    const object = typeof input.analysisObjectId === 'string'
+      ? await getPrivateAnalysisObjectForUser(input.analysisObjectId, ownerUserId)
+      : null;
+    if (!object) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  return createJob(ownerUserId, { ...input, projectId: null, datasetId: null });
+}
+
 async function getProjectJobRow(jobId, projectId) {
   if (typeof jobId !== 'string' || jobId === '') return null;
   const { rows } = await query(
@@ -1682,6 +1967,16 @@ async function createProjectJob(userId, projectId, input = {}) {
   if (!ALLOWED_JOB_TYPES.has(jobType)) {
     throw codedError('INVALID_JOB_TYPE',
       `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
+  }
+  if (jobType === 'checkpoint.fork.v1') {
+    if (input.resultAnalysisObjectId !== undefined) {
+      throw codedError('INVALID_PARAMETERS',
+        'checkpoint.fork.v1 resultAnalysisObjectId is server-managed and must not be provided.');
+    }
+    if (input.datasetId !== undefined) {
+      throw codedError('INVALID_PARAMETERS',
+        'checkpoint.fork.v1 datasetId is derived from the source checkpoint and must not be provided.');
+    }
   }
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
@@ -1910,6 +2205,13 @@ async function cancelJobForUser(ownerUserId, jobId) {
     [JSON.stringify(logs), String(jobId), owner]
   );
   return rowToJob(rows[0]);
+}
+
+async function cancelPrivateJobForUser(ownerUserId, jobId) {
+  if (!(await getPrivateJobForUser(jobId, ownerUserId))) {
+    throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  }
+  return cancelJobForUser(ownerUserId, jobId);
 }
 
 // ── Job artifacts (metadata-first; result-checkpoint immutability) ───────────
@@ -2809,6 +3111,105 @@ function workerHoldsClaim(row, workerId, claimToken, now) {
     && lease.getTime() > now.getTime();
 }
 
+const CLAIMED_OWNED_OBJECT_JOB_TYPES = new Set([
+  'r.object.inspect',
+  'pbmc.pipeline.v1',
+  'checkpoint.load.v1',
+  'deg.find_markers.v1',
+]);
+
+async function requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts = {}, expectedJobType = null) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (expectedJobType && row.job_type !== expectedJobType) {
+    throw codedError('INVALID_JOB_TYPE', `A claimed ${expectedJobType} job is required.`);
+  }
+  return row;
+}
+
+async function resolveOwnedAnalysisObjectForClaimedJob(row) {
+  if (!row.analysis_object_id) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const object = row.project_id
+    ? await getProjectAnalysisObjectRow(row.analysis_object_id, row.project_id)
+    : await getPrivateAnalysisObjectForUser(row.analysis_object_id, Number(row.owner_user_id));
+  if (!object || object.ownerUserId !== Number(row.owner_user_id)) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  return object;
+}
+
+// Worker-only resolvers authorize against the live job claim, not the creator's
+// current project membership. Membership is authoritative up to claim time; once
+// a project job is running, these helpers preserve its exact job/project/resource
+// binding so a validly claimed handler may finish after a later demotion/removal.
+// Every helper derives resource ids from the trusted job row and rechecks the
+// worker id, claim token, running status, and unexpired lease on each call.
+async function getOwnedAnalysisObjectForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts);
+  if (!CLAIMED_OWNED_OBJECT_JOB_TYPES.has(row.job_type)) {
+    throw codedError('INVALID_JOB_TYPE', 'A claimed live-object job is required.');
+  }
+  return resolveOwnedAnalysisObjectForClaimedJob(row);
+}
+
+async function getSeuratPipelineInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'seurat.pipeline.v1'
+  );
+  if (!row.project_id || !row.dataset_id || !row.analysis_object_id) {
+    throw codedError('INVALID_JOB_CONTEXT', 'Seurat pipeline job inputs are incomplete.');
+  }
+  const [dataset, inputObject] = await Promise.all([
+    getDatasetRow(row.dataset_id, row.project_id),
+    getProjectAnalysisObjectRow(row.analysis_object_id, row.project_id),
+  ]);
+  if (!dataset) throw codedError('DATASET_NOT_FOUND', 'Dataset not found.');
+  if (!inputObject) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  if (inputObject.datasetId !== dataset.id) {
+    throw codedError('INVALID_PARAMETERS', 'Seurat pipeline input object must reference the same dataset as the job.');
+  }
+  return { dataset, inputObject };
+}
+
+async function getLoadableCheckpointForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'checkpoint.load.v1'
+  );
+  const object = await resolveOwnedAnalysisObjectForClaimedJob(row);
+  const checkpoint = await resolveCheckpointArtifact(object.id, object.projectId || null);
+  return {
+    analysisObjectId: object.id,
+    projectId: object.projectId || null,
+    ...checkpoint,
+  };
+}
+
+async function getForkableCheckpointForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'checkpoint.fork.v1'
+  );
+  if (!row.project_id || !row.analysis_object_id) {
+    throw codedError('INVALID_JOB_CONTEXT', 'Checkpoint fork job inputs are incomplete.');
+  }
+  const sourceObject = await getProjectAnalysisObjectRow(row.analysis_object_id, row.project_id);
+  if (!sourceObject) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  const checkpoint = await resolveCheckpointArtifact(sourceObject.id, row.project_id);
+  return {
+    sourceAnalysisObject: sourceObject,
+    analysisObjectId: sourceObject.id,
+    projectId: row.project_id,
+    ...checkpoint,
+  };
+}
+
 async function claimNextJob(workerId, opts = {}) {
   const wid = requireWorkerId(workerId);
   const now = normalizeWorkerNow(opts);
@@ -2818,18 +3219,140 @@ async function claimNextJob(workerId, opts = {}) {
   const client = await p.connect();
   try {
     await client.query('BEGIN');
+
+    // Membership/role changes are authoritative at claim time. Ineligible
+    // project jobs, plus legacy projectless jobs that reference project-scoped
+    // inputs, are canceled before any handler or R contact; completed and
+    // already-running scientific history is preserved.
+    const revoked = await client.query(
+      `SELECT j.id, j.logs_json, (j.project_id IS NULL) AS invalid_project_scope
+         FROM jobs j
+        WHERE j.status = 'queued'
+          AND (
+            (j.project_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM project_members pm
+               WHERE pm.project_id = j.project_id
+                 AND pm.user_id = j.owner_user_id
+                 AND pm.role = ANY($1::text[])
+            ))
+            OR
+            (j.project_id IS NULL AND (
+              EXISTS (
+                SELECT 1
+                  FROM analysis_objects ao
+                  LEFT JOIN analysis_objects parent ON parent.id = ao.parent_object_id
+                  LEFT JOIN analysis_objects root ON root.id = ao.lineage_root_id
+                  LEFT JOIN datasets source_dataset ON source_dataset.id = ao.dataset_id
+                  LEFT JOIN datasets root_dataset ON root_dataset.id = root.dataset_id
+                 WHERE ao.id IN (j.analysis_object_id, j.result_analysis_object_id)
+                   AND (ao.project_id IS NOT NULL
+                     OR parent.project_id IS NOT NULL
+                     OR root.project_id IS NOT NULL
+                     OR source_dataset.project_id IS NOT NULL
+                     OR root_dataset.project_id IS NOT NULL)
+              )
+              OR EXISTS (
+                SELECT 1 FROM datasets d
+                 WHERE d.id = j.dataset_id AND d.project_id IS NOT NULL
+              )
+            ))
+          )
+        ORDER BY j.created_at ASC, j.id ASC
+        LIMIT 100
+        FOR UPDATE OF j SKIP LOCKED`,
+      [PROJECT_JOB_WRITE_ROLES]
+    );
+    const accessError = normalizeJobError({
+      code: 'PROJECT_ACCESS_REVOKED',
+      message: 'Job canceled because its creator no longer has permission to run project jobs.',
+    });
+    const scopeError = normalizeJobError({
+      code: 'INVALID_PROJECT_SCOPE',
+      message: 'Job canceled because a project-associated input was submitted without project scope.',
+    });
+    for (const row of revoked.rows) {
+      const cancellationError = row.invalid_project_scope ? scopeError : accessError;
+      const logs = [
+        ...parseJson(row.logs_json, []),
+        normalizeJobLogEntry({ level: 'warn', message: cancellationError.message }),
+      ];
+      await client.query(
+        `UPDATE jobs SET status = 'canceled', logs_json = $1, error_json = $2,
+           canceled_at = $3, updated_at = $3, worker_id = NULL,
+           claim_token = NULL, lease_expires_at = NULL
+         WHERE id = $4 AND status = 'queued'`,
+        [JSON.stringify(logs), JSON.stringify(cancellationError), now, row.id]
+      );
+    }
+
     const found = await client.query(
-      `SELECT id FROM jobs
-        WHERE status = 'queued' AND attempts < max_attempts
-        ORDER BY priority DESC, created_at ASC, id ASC
+      `SELECT j.id, j.project_id, j.owner_user_id FROM jobs j
+        WHERE j.status = 'queued' AND j.attempts < j.max_attempts
+          AND (
+            (j.project_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM analysis_objects ao
+                  LEFT JOIN analysis_objects parent ON parent.id = ao.parent_object_id
+                  LEFT JOIN analysis_objects root ON root.id = ao.lineage_root_id
+                  LEFT JOIN datasets source_dataset ON source_dataset.id = ao.dataset_id
+                  LEFT JOIN datasets root_dataset ON root_dataset.id = root.dataset_id
+                 WHERE ao.id IN (j.analysis_object_id, j.result_analysis_object_id)
+                   AND (ao.project_id IS NOT NULL
+                     OR parent.project_id IS NOT NULL
+                     OR root.project_id IS NOT NULL
+                     OR source_dataset.project_id IS NOT NULL
+                     OR root_dataset.project_id IS NOT NULL)
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM datasets d
+                 WHERE d.id = j.dataset_id AND d.project_id IS NOT NULL
+              )
+            ) OR EXISTS (
+              SELECT 1 FROM project_members pm
+               WHERE pm.project_id = j.project_id
+                 AND pm.user_id = j.owner_user_id
+                 AND pm.role = ANY($1::text[])
+            )
+          )
+        ORDER BY j.priority DESC, j.created_at ASC, j.id ASC
         LIMIT 1
-        FOR UPDATE SKIP LOCKED`
+        FOR UPDATE OF j SKIP LOCKED`,
+      [PROJECT_JOB_WRITE_ROLES]
     );
     if (!found.rows[0]) {
       await client.query('COMMIT');
       return null;
     }
-    const id = found.rows[0].id;
+    const selected = found.rows[0];
+    const id = selected.id;
+    if (selected.project_id) {
+      // Serialize the final eligibility check with membership mutations. If a
+      // removal/demotion committed while this job was being selected, cancel it
+      // under the same job lock instead of starting a handler with stale access.
+      await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [selected.project_id]);
+      const eligible = await client.query(
+        `SELECT 1 FROM project_members
+          WHERE project_id = $1 AND user_id = $2 AND role = ANY($3::text[])`,
+        [selected.project_id, Number(selected.owner_user_id), PROJECT_JOB_WRITE_ROLES]
+      );
+      if (!eligible.rows[0]) {
+        const row = await client.query('SELECT logs_json FROM jobs WHERE id = $1', [id]);
+        const logs = [
+          ...parseJson(row.rows[0]?.logs_json, []),
+          normalizeJobLogEntry({ level: 'warn', message: accessError.message }),
+        ];
+        await client.query(
+          `UPDATE jobs SET status = 'canceled', logs_json = $1, error_json = $2,
+             canceled_at = $3, updated_at = $3, worker_id = NULL,
+             claim_token = NULL, lease_expires_at = NULL
+           WHERE id = $4 AND status = 'queued'`,
+          [JSON.stringify(logs), JSON.stringify(accessError), now, id]
+        );
+        await client.query('COMMIT');
+        return null;
+      }
+    }
     const updated = await client.query(
       `UPDATE jobs SET
          status = 'running',
@@ -3643,7 +4166,6 @@ async function completeCheckpointForkByWorker(jobId, workerId, claimToken, input
     sourceAnalysisObjectId: sourceObject.id,
     sourceCheckpointArtifactId: checkpoint.checkpointArtifactId,
     scientific_output: true,
-    liveState: 'attached',
   };
   const artifactId = generateJobArtifactId();
   const p = await connect();
@@ -3860,9 +4382,12 @@ module.exports = {
   // analysis objects
   createAnalysisObject,
   createAnalysisObjectForUser,
+  createPrivateAnalysisObjectForUser,
   verifyAnalysisObjectOwner,
   getAnalysisObjectForUser,
+  getPrivateAnalysisObjectForUser,
   listAnalysisObjectsForUser,
+  listPrivateAnalysisObjectsForUser,
   createProjectAnalysisObject,
   listProjectAnalysisObjects,
   getProjectAnalysisObject,
@@ -3872,10 +4397,14 @@ module.exports = {
   // jobs
   createJob,
   createJobForUser,
+  createPrivateJobForUser,
   verifyJobOwner,
   cancelJobForUser,
+  cancelPrivateJobForUser,
   getJobForUser,
+  getPrivateJobForUser,
   listJobsForUser,
+  listPrivateJobsForUser,
   createProjectJob,
   listProjectJobs,
   getProjectJob,
@@ -3892,6 +4421,10 @@ module.exports = {
   appendJobLogByWorker,
   reapExpiredJobs,
   setJobScheduling,
+  getOwnedAnalysisObjectForJobByWorker,
+  getSeuratPipelineInputsForJobByWorker,
+  getLoadableCheckpointForJobByWorker,
+  getForkableCheckpointForJobByWorker,
   rowToJob,
   toPublicJob,
   // project provenance / figures
