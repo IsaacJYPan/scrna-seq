@@ -160,6 +160,10 @@ function buildRChildEnv(env = process.env, options = {}) {
     if (/^[1-9][0-9]{0,5}$/.test(delay) && Number(delay) <= 600000) {
       child.R_TEST_SEURAT_DELAY_MS = delay;
     }
+    const degDelay = trimmed(env.R_TEST_DEG_DELAY_MS);
+    if (/^[1-9][0-9]{0,5}$/.test(degDelay) && Number(degDelay) <= 600000) {
+      child.R_TEST_DEG_DELAY_MS = degDelay;
+    }
   }
   if (env.ALLOW_TRUSTED_RDS_LOAD === 'true') child.ALLOW_TRUSTED_RDS_LOAD = 'true';
   return child;

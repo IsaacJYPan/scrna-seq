@@ -124,6 +124,16 @@ jobs:
         # checkpoint output, and one terminal completion.
         run: npm run test:seurat-pipeline
 
+      - name: Run DEG Worker Pipeline Lease-Renewal Smoke Test
+        # Real R + standalone worker for deg.find_markers.v1 specifically: a real,
+        # delayed FindAllMarkers call over a small synthetic clustered checkpoint,
+        # observed lease renewals, a rejected competing claimant, and completion with
+        # the expected deg_markers/deg_summary artifacts. The DEG-mocked worker suite
+        # (part of Run Backend Tests) proves the contract; this proves the same real-R
+        # lease-renewal property that Run Seurat Pipeline End-to-End Smoke Test proves
+        # for seurat.pipeline.v1.
+        run: npm run test:deg-worker-pipeline
+
       - name: Run Checkpoint-Load Reattach Smoke Test
         run: npm run test:checkpoint-load
 

@@ -138,6 +138,23 @@ describe('owned R child environment isolation', () => {
     }, options)).not.toHaveProperty('R_TEST_SEURAT_DELAY_MS');
   });
 
+  it('passes the controlled DEG delay only with non-production test diagnostics', () => {
+    const options = {
+      token: 'r-token', port: 8123, storageRoot: process.cwd(), analysisRoot: process.cwd(),
+    };
+    expect(buildRChildEnv({
+      NODE_ENV: 'test', ENABLE_R_TEST_DIAGNOSTICS: 'true', R_TEST_DEG_DELAY_MS: '16000',
+    }, options)).toMatchObject({
+      ENABLE_R_TEST_DIAGNOSTICS: 'true', R_TEST_DEG_DELAY_MS: '16000',
+    });
+    expect(buildRChildEnv({
+      NODE_ENV: 'production', ENABLE_R_TEST_DIAGNOSTICS: 'true', R_TEST_DEG_DELAY_MS: '16000',
+    }, options)).not.toHaveProperty('R_TEST_DEG_DELAY_MS');
+    expect(buildRChildEnv({
+      NODE_ENV: 'test', ENABLE_R_TEST_DIAGNOSTICS: 'true', R_TEST_DEG_DELAY_MS: '999999',
+    }, options)).not.toHaveProperty('R_TEST_DEG_DELAY_MS');
+  });
+
   it('passes only validated live-session cache limits to an owned R child', () => {
     const options = {
       token: 'r-token', port: 8123, storageRoot: process.cwd(), analysisRoot: process.cwd(),
