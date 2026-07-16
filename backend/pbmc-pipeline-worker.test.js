@@ -639,7 +639,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — worker success', () => {
 
     // Internally the key IS persisted (as storage_uri) so it is retrievable + stripped.
     const internal = (await getJobArtifactsByJobId(job.id)).find(a => a.artifactType === 'checkpoint');
-    expect(internal.storageUri).toMatch(new RegExp(`^projects/${proj.id}/checkpoints/job_[0-9a-f]+/[0-9a-f]+\\.rds$`));
+    expect(internal.storageUri).toMatch(new RegExp(`^projects/${proj.id}/checkpoints/job_[0-9a-f]+/checkpoint\\.rds$`));
     expect(toPublicJobArtifact(internal)).not.toHaveProperty('storageUri');
   });
 });
@@ -658,11 +658,11 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
     expect(await listProjectArtifacts(alice.id, proj.id, { jobId: job.id })).toHaveLength(0);
   }
 
-  it('an R failure (non-200) creates NO successful result object / edge / artifact', async () => {
+  it('an R failure (non-200) remains indeterminate and creates NO successful output', async () => {
     const { job, alice, proj, obj } = await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'boom /vault/x.rds' } });
     const res = await drainPipeline(failCaller);
-    expect(res.status).toBe('failed');
+    expect(res.status).toBe('indeterminate');
     await expectNoSuccessRecords(job, alice, proj);
     expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
   });
@@ -678,11 +678,11 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
     expect(await listProjectAnalysisObjectChildren(alice.id, proj.id, obj.id)).toHaveLength(0);
   });
 
-  it('a missing checksum (no integrity) also fails with no result object', async () => {
+  it('a missing checksum remains indeterminate with no result object', async () => {
     const { job, alice, proj } = await seedPipelineJob({});
     const noChecksum = recordingPipelineCaller([], pipelineBody({ checkpoint: { saved: true, checksum_sha256: null, size_bytes: 10 } }));
     const res = await drainPipeline(noChecksum);
-    expect(res.status).toBe('failed');
+    expect(res.status).toBe('indeterminate');
     await expectNoSuccessRecords(job, alice, proj);
   });
 
@@ -731,7 +731,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
     const { job, alice, proj } = await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'R Error: cannot open /vault/u/secret.rds at line 7' } });
     const res = await drainPipeline(failCaller);
-    expect(res.status).toBe('failed');
+    expect(res.status).toBe('indeterminate');
     const blob = JSON.stringify(res.error || {});
     for (const f of ['/vault', 'secret.rds', 'line 7']) {
       expect(blob, f).not.toContain(f);
@@ -748,7 +748,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
 
   it('allocates a server-controlled, relative, traversal-free internal key from the job id only', async () => {
     const key = allocateCheckpointStorageKey('proj_abc123', 'job_deadbeef');
-    expect(key).toMatch(/^projects\/proj_abc123\/checkpoints\/job_deadbeef\/[0-9a-f]{24}\.rds$/);
+    expect(key).toBe('projects/proj_abc123/checkpoints/job_deadbeef/checkpoint.rds');
     expect(isSafeInternalStorageKey(key)).toBe(true);
     // A bad / client-shaped job id is refused.
     for (const bad of ['', 'evil', '../etc', 'job_x/../y']) {
@@ -777,7 +777,10 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
   it('createCheckpointArtifactForJobByWorker rejects client paths / traversal / bad checksum (defense in depth)', async () => {
     const alice = await createUser('alice@example.com', 'password123', 'Alice');
     const proj = await seedProject(alice.id);
-    const j = await createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1' });
+    const source = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
+    const j = await createProjectJob(alice.id, proj.id, {
+      jobType: 'pbmc.pipeline.v1', analysisObjectId: source.id,
+    });
     const claimed = await claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
     const base = { artifactType: 'checkpoint', checksumSha256: 'a'.repeat(64), sizeBytes: 10 };
     const validKey = `projects/${proj.id}/checkpoints/${claimed.id}/result.rds`;
@@ -795,7 +798,10 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — checkpoint storage', () => {
   it('the generic createJobArtifactByWorker STILL ignores client storage fields (unchanged guard)', async () => {
     const alice = await createUser('alice@example.com', 'password123', 'Alice');
     const proj = await seedProject(alice.id);
-    await createProjectJob(alice.id, proj.id, { jobType: 'pbmc.pipeline.v1' });
+    const source = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat' });
+    await createProjectJob(alice.id, proj.id, {
+      jobType: 'pbmc.pipeline.v1', analysisObjectId: source.id,
+    });
     const claimed = await claimNextJob('worker_t', { leaseSeconds: 30, now: T0 });
     const art = await createJobArtifactByWorker(claimed.id, 'worker_t', claimed.claimToken, {
       artifactType: 'pipeline_summary',
@@ -826,7 +832,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — R-side request contract', () 
     expect(calls[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, obj.id));
     // Server-allocated checkpoint key (never client-provided), tied to the job id.
     expect(calls[0].body.storage_key)
-      .toMatch(new RegExp(`^projects/${proj.id}/checkpoints/job_[0-9a-f]+/[0-9a-f]+\\.rds$`));
+      .toMatch(new RegExp(`^projects/${proj.id}/checkpoints/job_[0-9a-f]+/checkpoint\\.rds$`));
     // Resolved params (incl. the caller's pcaDims) are the body's only param fields.
     expect(calls[0].body.params.pcaDims).toBe(25);
     expect(Object.keys(calls[0].body.params).sort()).toEqual(PBMC_PIPELINE_PARAM_NAMES.slice().sort());
@@ -865,7 +871,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — direct R-proxy access is bloc
     ]) {
       expect(isInternalOnlyRProxyPath(p), p).toBe(true);
     }
-    for (const ok of ['/object/inspect', '/health', '/normalize', '/object/pbmc-pipeline-extra', '/pbmc-pipeline', '']) {
+    for (const ok of ['/health', '/normalize', '/object/pbmc-pipeline-extra', '/pbmc-pipeline', '']) {
       expect(isInternalOnlyRProxyPath(ok), ok).toBe(false);
     }
   });
@@ -908,10 +914,10 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — direct R-proxy access is bloc
   it('does NOT over-block: a non-internal /api/r path still enforces X-Object-ID ownership before R', async () => {
     const { token } = await createUserWithToken({ email: 'owner3@example.com' });
     // Malformed object id → 400 (verifyRObjectOwnership), still before any R contact.
-    const bad = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
+    const bad = await api(server, '/api/r/health', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
     expect(bad.status).toBe(400);
     // Well-formed but not-owned/unknown → 404 (no existence leak), before R.
-    const unknown = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
+    const unknown = await api(server, '/api/r/health', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
     expect(unknown.status).toBe(404);
   });
 

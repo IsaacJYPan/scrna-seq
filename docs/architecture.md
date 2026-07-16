@@ -11,13 +11,17 @@ update the table below in the same change.
 
 ```text
 Browser (React/Vite)
-  -> Express API (auth, authorization, DB, uploads, R proxy)
-  -> R Plumber/Seurat backend (compute only, localhost/private)
+  -> Express API (auth, authorization, DB, uploads, R proxy) --+
+                                                               +-> private R Plumber/Seurat service
+Standalone job worker -> Postgres queue + shared storage ------+
 ```
 
 Express is the authentication and authorization boundary. The R backend trusts
 only server-injected headers such as `X-API-Token` and server-derived
 `X-Object-ID`; it must not be exposed directly to users or the public network.
+The supported v1 topology has exactly one standalone worker slot and one private
+R service shared with the web proxy. This keeps current live-R state semantics
+intact; it is not support for parallel heavy-R replicas.
 
 ## Implemented vs UI-wired
 
@@ -37,19 +41,19 @@ Status legend:
 
 | Subsystem | Status | Notes |
 | --- | --- | --- |
-| Auth / logout | UI-wired (cookie foundation) | HttpOnly session cookie is the source of auth truth (login/signup set it; `GET /api/auth/session` restores it; `POST /api/auth/logout` clears it). The localStorage bearer token is deprecated legacy/dev compatibility, still accepted in a transition mode. CSRF for cookie-auth mutations is a SameSite=Lax cookie + an allowed-origin check. Server-side session **revocation/versioning** is still future work (stateless HMAC token). |
+| Auth / logout | UI-wired (cookie foundation) | HttpOnly session cookie is the source of auth truth (login/signup set it; `GET /api/auth/session` restores it; `POST /api/auth/logout` clears it). The localStorage bearer token is deprecated legacy/dev compatibility, still accepted in a transition mode. CSRF for cookie-auth mutations is a SameSite=Lax cookie + an allowed-origin check; `/api/r` applies that check to every cookie-authenticated method because legacy GET operations can mutate R state. Server-side session **revocation/versioning** is still future work (stateless HMAC token). |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
 | Project members / RBAC | UI-wired | Collaborators lists project members for every role and lets owners/admins add existing users, change permitted roles, and remove permitted members. Owner-only owner changes, last-owner protection, non-member 404s, insufficient-role 403s, and server-controlled identities remain backend enforced. This is immediate account membership, not an invitation-token/delivery workflow. |
 | Project-scoped datasets | UI-wired (narrow Seurat path) | The Pipeline Manager Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. New uploads use server-owned project storage keys plus SHA-256 checksums, and public responses omit internal storage. |
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. |
 | Pipeline Manager / pipeline manifests | UI-wired (declarative registry) | A Pipeline Manager tab lets each user select an active pipeline within a project, upload declarative pipeline manifests, and populate pipeline-generated sidebar tabs from registered modules. Upload is currently allowed to project owners/admins/analysts, not a separate platform-developer role. Uploaded manifests may choose from registered modules/templates only; arbitrary code, endpoints, icons, storage keys, and paths are rejected. Parameter/result template declarations are validated and displayed, but there is not yet a fully generic template-driven execution/result renderer. |
-| QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the authenticated live-R proxy (`/api/r/*`). |
+| QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the private-live-R compatibility proxy. Production uses an exact method/path allowlist, one global slot, rate/deadline/body/response limits, bounded route parameters/results, QC sampling, plot budgets, an explicit outbound-header allowlist, JSON-only upstream responses, and response path/runtime-field sanitization. |
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
 | Durable Seurat pipeline worker (`seurat.pipeline.v1`) | UI-wired (10x HDF5 only) | Pipeline Manager can upload/select one `tenx_h5` dataset, create/reuse a raw dataset analysis object, launch a durable Seurat preprocessing job, show logs/status/safe summary metadata, and hand the result to checkpoint load or DEG. See "Seurat pipeline path" below. |
 | Durable jobs | UI-wired (metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1`; Pipeline Manager can create `seurat.pipeline.v1` and result `checkpoint.load.v1`; Jobs & Artifacts can create `checkpoint.fork.v1` when an object has exactly one available, local, loadable checkpoint. General job launch, cancel, and retry flows are not generally UI-wired. |
-| Job worker loop | backend-only (opt-in, in-process) | Off unless `ENABLE_JOB_WORKER="true"`; drains only registered, allowlisted handlers. The local `npm run dev` script explicitly preloads this env var so UI-wired durable workflows run end-to-end; use `npm run dev:no-worker` for UI/API/R only. The queue supports multiple claimers through Postgres leases and `FOR UPDATE SKIP LOCKED`, but there is no standalone worker entrypoint or supported multi-worker deployment topology yet. Each loop handles one claimed job at a time. |
+| Standalone job worker | backend-wired (one-slot topology) | `worker.js` is the queue consumer; Express no longer starts an in-process worker. `npm run dev` supervises Vite, Express, one local R service, and one standalone worker; `npm run dev:no-worker` omits the worker. Claims use Postgres leases and `FOR UPDATE SKIP LOCKED`; a Postgres advisory singleton plus `JOB_WORKER_CONCURRENCY=1` enforce the supported one-process topology using the same private R service as Express. Process tests prove second-entrypoint refusal and lease recovery, not parallel heavy-R execution. Private `/livez` and `/readyz` endpoints expose process/readiness state. |
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
 | Checkpoint artifacts | UI-wired (metadata + reattach/fork actions) | Immutable result checkpoint metadata per successful job can be listed. Pipeline Manager can request owner-only reattach through `checkpoint.load.v1`; project writers can request a private collaborator fork through `checkpoint.fork.v1`; there is still no download route. |
 | Checkpoint load worker (`checkpoint.load.v1`) | UI-wired (Seurat result action) | Owner-only reattach of a server-selected checkpoint into live R. UI coverage is limited to the Seurat pipeline result panel; it is not a general checkpoint browser/launcher. |
@@ -79,9 +83,9 @@ durable worker path as its primary workflow:
   `deg.find_markers.v1` job, polls project job status/logs, and renders only
   sanitized `deg_summary` artifact metadata. Full raw marker tables are stored as
   internal `deg_markers` artifacts and are not downloadable.
-- **Legacy/dev path:** `/api/r/deg` remains reachable behind the authenticated
-  live-R proxy for temporary legacy/development compatibility. It is not the main
-  DEG UI workflow and should not be treated as the durable product path.
+- **Legacy/dev path:** `/api/r/deg` remains reachable only outside production
+  for temporary legacy/development compatibility. Production blocks it before
+  R contact. It is not the main DEG UI workflow.
 
 Neither path is removed. The UI migration does not add public downloads,
 generated reports/scripts, pathway enrichment, CellChat, or shared live R state.
@@ -112,13 +116,14 @@ The first supported end-to-end local/dev pipeline is intentionally narrow:
   paths, R state keys, matrices, embeddings, cell rows, or gene tables.
 - **Worker boundary:** Express blocks `/api/r/object/seurat-pipeline` from the
   public R proxy before R contact. The endpoint is reachable only through the
-  allowlisted in-process worker bridge, which reconstructs the body from trusted
-  DB rows and server-allocated checkpoint keys.
+  allowlisted trusted worker bridge, which reconstructs the body from trusted DB
+  rows and server-allocated checkpoint keys. Worker R responses have an explicit
+  byte ceiling and total wall-clock deadline.
 - **Module boundary:** The default Seurat workflow is represented as a
   declarative pipeline manifest whose tabs map to registered frontend module
   templates and allowlisted job types. Most Seurat preprocessing steps still run
-  through the full `seurat.pipeline.v1` worker path; standalone durable workers
-  for every module step are future work. Uploaded manifests cannot introduce
+  through the full `seurat.pipeline.v1` worker path; separately queued module
+  steps are future work. Uploaded manifests cannot introduce
   arbitrary code execution or unregistered backend endpoints.
 
 This is local/dev pipeline evidence, not hosted-service production readiness.
@@ -130,29 +135,122 @@ members.
 
 Pathway enrichment, CellChat, and cell annotation are **not
 production-integrated** and are **not exposed as supported UI workflows** (the
-UI shows placeholders). However, some **legacy authenticated R endpoints may
-still be reachable behind the R proxy** for development/legacy use — for example
+UI shows placeholders). Some legacy authenticated endpoints remain reachable
+only outside production for development compatibility, for example
 `/api/r/cellchat`, `/api/r/cellchat-infer`, `/api/r/enrichment`,
-`/api/r/annotate-clusters`, and `/api/r/deg`. These are owner-scoped (they still
-require auth and a server-verified `X-Object-ID`) but are **not** the durable
-product workflow and should not be treated as a supported feature surface.
+`/api/r/annotate-clusters`, and `/api/r/deg`. Production is fail-closed with an
+exact method/path allowlist and blocks those routes before R contact.
+
+The legacy synchronous vault loaders (`/load-local-10x`, `/load-multi-10x`, and
+`/load-h5ad`) are also blocked in production because their aggregate dimensions
+and conversion memory are unknown until after expensive file work begins. Use the
+project-scoped dataset upload plus `seurat.pipeline.v1` durable job for the
+currently supported 10X HDF5 path. The legacy loaders remain available only for
+explicit local/development compatibility.
+
+The legacy `/csv-columns`, `/add-metadata`, and `/subset` live-state routes are
+likewise blocked in production. The CSV routes can inspect or attach an unbounded
+user file directly to a live Seurat object; subset duplicates live state and can write a client-selected vault file
+outside the durable artifact contract. They remain local/development compatibility
+only until queued replacements own bounded inputs, outputs, and storage accounting.
+Synchronous `/integrate` is also production-blocked. Even with object and dense-value
+ceilings, CCA anchor search grows across batch pairs and a proxy timeout cannot stop
+work already running in the singleton R service. Integration needs a durable,
+resource-isolated job path before production exposure.
 
 By contrast, the internal worker-only R endpoints
 (`/api/r/object/pbmc-pipeline`, `/api/r/object/checkpoint-load`,
-`/api/r/object/deg-find-markers`, `/api/r/object/seurat-pipeline`) are
+`/api/r/object/deg-find-markers`, `/api/r/object/seurat-pipeline`, and
+`/api/r/object/inspect`, plus `/internal/worker-readiness`) are
 **blocked** from the public proxy before any R contact (404, no existence leak);
-they run only through the in-process worker bridge. The current policy is pinned
+they run only through the trusted standalone-worker bridge/readiness client. The current policy is pinned
 by `backend/r-proxy-policy.test.js`.
 
 ## RDS loading is a trusted-input boundary
 
-The R backend has a legacy `.rds` object loader (`/api/r/load-rds`), but it is
-fail-closed by default at the Express boundary and again in R. **RDS
+The R backend has legacy `.rds` load/restore endpoints, but they are fail-closed
+by default at Express and again in R. **RDS
 deserialization can execute arbitrary R code.** Set `ALLOW_TRUSTED_RDS_LOAD=true`
-only for trusted local/dev inputs; the route remains owner-scoped and
+only for trusted local/dev inputs; production ignores the override and always
+blocks both public routes. Outside production the route remains owner-scoped and
 path-validated (confined to the per-user vault), but it is not safe for
 untrusted uploads until stronger sandbox/container isolation exists. Worker
 checkpoint loading is a separate internal path for server-created checkpoints.
+
+## Standalone worker topology
+
+Branch 5 separates durable queue consumption from the web process without
+claiming that the existing live-R architecture can scale horizontally:
+
+- `server.js` serves the API and either owns one loopback R child for local use
+  or connects to a separately managed private R service. It never starts a job
+  worker.
+- `worker.js` is a separate trusted process with direct Postgres access, the
+  shared local-filesystem provider, and the same private R URL/token as Express.
+  Its supported concurrency is exactly one in-flight job.
+- A session-level Postgres advisory lock refuses a second standalone entrypoint.
+  An active unexpired claim prevents replacement startup; loss of the lock after
+  startup is fatal and triggers a controlled nonzero drain/exit. Every claim
+  transaction also takes a distinct advisory gate and refuses to claim while
+  any unexpired running job exists. This closes the interval between a lost
+  session lock and process shutdown, so the supported topology still admits at
+  most one live job.
+- `npm run dev` supervises Vite, Express, the local owned R child, and the
+  standalone worker with one ephemeral shared R token. `npm run dev:no-worker`
+  starts the UI/API/R stack only. A deployed standalone worker requires
+  `R_RUNTIME_MODE=external` and an explicit `R_API_TOKEN` of at least 32
+  characters.
+- The private R URL must be loopback, a private IP literal, or an exact hostname
+  in `R_BACKEND_ALLOWED_HOSTS`. URL credentials, query strings, fragments, and
+  path prefixes are rejected. The R token is an internal service credential,
+  not browser authentication, and must never be exposed publicly.
+- A web-owned R child receives a narrow environment allowlist. Database/session
+  credentials, cloud credentials, and unrelated process secrets are not copied
+  into the scientific runtime.
+- Worker readiness requires Postgres, authenticated R, enough admitted free
+  memory, and a fresh nonce-backed storage challenge visible through R. Express, the worker,
+  and R must use the same persistent `STORAGE_ROOT`; cross-host local disks are
+  unsupported. `/livez` only reports process life, while `/readyz` also goes
+  non-ready before drain and whenever dependency admission fails.
+- The memory threshold is claim admission, not a hard per-job limit. Real
+  deployments still need container/VM CPU, RAM, disk, and network controls.
+- On shutdown the worker stops accepting claims, remains alive to heartbeat and
+  drain the active tick, then closes health and database resources. The default
+  630-second drain budget exceeds the current 600-second maximum R call;
+  orchestrator termination grace must exceed the worker drain budget.
+- Cancellation is cooperative for the shared R process. A canceled running job
+  cannot publish durable output through its invalidated claim, but the underlying
+  R call may continue until it returns. Deterministic file output is removed when
+  cancellation authoritatively wins; canceled checkpoint load/fork state remains
+  owner-private and ephemeral until bounded LRU eviction or R restart. Immediate
+  compute termination requires a future isolated per-job runtime.
+- PBMC, Seurat, checkpoint load/fork, and DEG jobs receive at most two execution
+  attempts, but a claim-guarded dispatch marker prevents a crashed worker from
+  issuing the same side-effecting R request twice. R atomically writes a private,
+  HMAC-signed, job/project/type/input/output-bound completion receipt after its
+  deterministic file or live-state mutation. A later recovery-only claim adopts
+  that exact receipt or exact committed DB output without another R call. The
+  authenticated readiness gate against the supported singleton synchronous R
+  process is the execution barrier before missing-receipt cleanup; without that
+  proof recovery remains in no-R observation. Recovery is allowed after creator
+  removal/demotion because it cannot invoke a handler. Partial or integrity-
+  mismatched output fails closed, and an ambiguous DB acknowledgement is resolved
+  by re-reading the exact committed output before cleanup.
+- The private R session cache authenticates before key lookup, accepts only the
+  canonical server-derived user/object key shape, retains no empty keys, and
+  deterministically evicts least-recently-used entries to enforce global/per-user
+  count and estimated-object-byte budgets. Eviction never grants shared project
+  live state; users reattach their own durable checkpoints as needed.
+- An optional registered job-type capability filter is applied atomically during
+  claim. This prepares for reviewed worker pools, but running multiple heavy-R
+  workers is not supported while jobs depend on one process-local R state store.
+
+The standalone worker remains a trusted first-party deployment component: it has
+application database credentials and the internal R capability. It is not a
+safe outbound BYOC agent and it does not execute uploaded/customer R code.
+Arbitrary R, package installation, per-job containers or microVMs, hard resource
+enforcement, multi-host autoscaling, and a narrow remote execution broker remain
+explicitly deferred.
 
 ## Database backend
 
@@ -184,8 +282,9 @@ The app runtime is Postgres-only.
 
 - Browser auth is now an **HttpOnly session cookie** (source of truth); the
   localStorage bearer token is deprecated legacy/dev compatibility accepted in a
-  transition mode. CSRF for cookie-authenticated state-changing requests is
-  SameSite=Lax + an allowed-origin check (`FRONTEND_ORIGIN`). Server-side session
+  transition mode. CSRF for ordinary cookie-authenticated state-changing requests is
+  SameSite=Lax + an allowed-origin check (`FRONTEND_ORIGIN`); every cookie-authenticated
+  `/api/r` method requires that check because some legacy GET endpoints mutate state. Server-side session
   revocation/versioning is not yet implemented (the token is a stateless HMAC);
   project role/membership is still re-checked on every project-scoped request.
   SameSite=Lax is intended for same-site/local deployments (API and frontend on
@@ -225,22 +324,29 @@ The app runtime is Postgres-only.
   only genuinely private, projectless resources. Project resources and legacy
   descendants that trace to project data stay behind project RBAC routes, so
   immutable creator metadata cannot become a post-removal access bypass.
-- The worker is opt-in and allowlisted. Registered handlers include PBMC
-  pipeline, dataset-backed Seurat pipeline, checkpoint load, checkpoint fork,
-  DEG marker finding, runtime check, and object inspection. The DEG marker workflow is UI-wired for
-  job launch/status/safe summary metadata; the Seurat pipeline UI is wired only
-  for `tenx_h5` input plus result checkpoint reattach. PBMC pipeline, runtime
-  check, and object inspect worker launches remain backend-only.
+  Receipt-backed PBMC/Seurat/checkpoint/DEG job types are rejected synchronously
+  on `/api/jobs`; they require project-scoped durable storage and must use the
+  project jobs API.
+- The standalone worker is opt-in and allowlisted. Registered handlers include
+  PBMC pipeline, dataset-backed Seurat pipeline, checkpoint load, checkpoint
+  fork, DEG marker finding, runtime check, and object inspection. The DEG marker
+  workflow is UI-wired for job launch/status/safe summary metadata; the Seurat
+  pipeline UI is wired only for `tenx_h5` input plus result checkpoint reattach.
+  PBMC pipeline, runtime check, and object inspect worker launches remain
+  backend-only. Express never consumes the queue.
 - Project authorization is checked when a job is created and revalidated under a
   project lock immediately before worker claim. Queued jobs owned by a removed
   member or a member demoted below analyst are canceled with a sanitized
   `PROJECT_ACCESS_REVOKED` error before handler/R contact. A job that was already
   running keeps its valid claim and may finish; its durable output/history remains
-  project-scoped, while a removed member can no longer read the project.
+  project-scoped, while a removed member can no longer read the project. If that
+  worker published an exact atomic output and crashed before terminal status,
+  the next worker may only finalize that committed output; it cannot rerun R.
 - There is no public artifact download surface, object storage, generated report
   export, arbitrary R execution, or shared project live R state.
 - New local files survive application restarts when `STORAGE_ROOT` is persistent
-  and shared correctly with the R process. Legacy records also require `VAULT_ROOT`.
+  and shared correctly with Express, the worker, and R. Legacy records also
+  require `VAULT_ROOT`.
   Metadata can outlive a missing file, and there is no startup reconciliation yet.
 - R 4.5.x is the intended local development target; the Dockerfile pins R 4.5.3
   with Bioconductor 3.22. Report if R 4.6.x is detected.
@@ -251,7 +357,8 @@ The app runtime is Postgres-only.
   against Postgres: config boundaries, the real `pgDatabase` contract, per-user
   isolation, auth (cookie/bearer/rate-limit/credentials), org/project RBAC,
   datasets, analysis objects, the durable job-worker claim/lease/heartbeat
-  contract, artifacts/checkpoints, the lineage DAG, the R-proxy
+  contract, standalone runtime/process behavior, crash-output recovery,
+  artifacts/checkpoints, the lineage DAG, the R-proxy
   ownership/policy/diagnostics gates, and the mocked-R pipeline worker handlers.
   Every DB-backed suite resets the schema per test via `resetSchemaForTests()`
   and skips cleanly without `DATABASE_URL`; pure suites always run. (The SQLite-era
@@ -265,6 +372,12 @@ The app runtime is Postgres-only.
   launching, artifact downloads, and lineage mutation are still not UI-wired. A
   passing backend suite means the API/DB contract holds - **not** that every
   backend feature is surfaced in the UI.
+- `backend/standalone-worker-process.test.js` launches real child processes
+  against real Postgres. It proves a second standalone entrypoint is refused,
+  one supported process drains jobs sequentially, a crashed claim is recovered
+  after lease expiry, and the stale claim capability remains invalid. Runtime tests separately pin readiness,
+  one-slot admission, drain behavior, token/URL validation, R child secret
+  exclusion, response limits/deadlines, and exact-output crash recovery.
 - `npm run test:visual` is a **mocked** frontend visual smoke test: it renders
   the built UI with backend and R responses mocked in the browser. It checks
   rendering/layout and obvious UI regressions only, and is **not** integration
@@ -276,22 +389,39 @@ The app runtime is Postgres-only.
   change the project/object UI flow. It proves the UI *model* wiring (what the
   app requests and how it renders responses); it does **not** prove real
   backend, auth, ownership, or tenant isolation.
-- The R-worker suites (`*-worker.test.js`, part of `test:backend`) **mock the R
+- The handler-focused R-worker suites (`*-worker.test.js`, part of
+  `test:backend`) **mock the R
   caller** with instant, unboxed responses, so they prove handler/bridge wiring
   but **not** real R timing, serialization, or compute. Real end-to-end completion
   of the durable Seurat pipeline against a live R backend — including worker-lease
   renewal during the long R call — is covered by `npm run test:seurat-pipeline`.
-  The worker renews its claim lease from a timer while an R bridge call is in
-  flight, so long compute jobs do not lose their lease mid-run; the default
-  `JOB_WORKER_LEASE_SECONDS` is 120.
+  That check launches the standalone worker entrypoint, uses a deliberately
+  short lease, observes at least two real heartbeat renewals during the R call,
+  and proves a competing claimant cannot reap or steal the job after the
+  original lease deadline. The default `JOB_WORKER_LEASE_SECONDS` remains 120
+  for normal operation.
+- `npm run test:deg-worker-pipeline` is the same real-R lease-renewal proof,
+  scoped to `deg.find_markers.v1` specifically. The lease-renewal timer
+  (`startClaimRenewal` in `backend/jobWorker.js`) is shared code across every
+  R-facing handler, but the Seurat check above only exercises it through
+  `seurat.pipeline.v1`. This check seeds a small synthetic clustered checkpoint
+  directly at the DB layer (no R call for that step), reattaches it for real via
+  `checkpoint.load.v1`, then runs `deg.find_markers.v1` for real with a short
+  lease against an R-side diagnostic delay (`R_TEST_DEG_DELAY_MS`, gated the
+  same way as `R_TEST_SEURAT_DELAY_MS`) on `POST /object/deg-find-markers`. It
+  asserts at least two real heartbeat renewals, a rejected competing claimant,
+  and correct `deg_markers`/`deg_summary` artifacts with no storage path/key
+  leak. It needs only Seurat + dplyr (no HDF5 sample data), so it stays fast.
 - The R/workflow checks (`test:seurat-pipeline`, `test:r-state-proxy`,
   `test:pbmc-parent`, `test:checkpoint-load`, `test:deg-markers`) exercise the
   hardened live paths and require a real R/Seurat backend (`test:seurat-pipeline`
   also needs `hdf5r` for 10x HDF5); they skip cleanly when R/Seurat is absent.
   `test:r-storage` separately checks project-key validation, atomic RDS writes,
-  and link-escape blocking at the R storage boundary.
+  and link-escape blocking at the R storage boundary. `test:r-public-bounds`
+  checks plot dimensions, feature caps, and deterministic bounded QC sampling.
   CI installs `hdf5r` and runs `test:seurat-pipeline` so the UI-wired Seurat
-  pipeline has a real R/worker regression gate in pull requests.
+  pipeline has a real R/standalone-worker/lease-renewal regression gate in pull
+  requests.
 - CI runs on `pull_request` and `workflow_dispatch` only. The security-critical
   suites are additionally named explicitly in the workflow so their regression
   coverage is auditable.

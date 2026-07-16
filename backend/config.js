@@ -24,6 +24,7 @@
 'use strict';
 
 const path = require('path');
+const rRuntime = require('./rRuntime');
 
 function trimmed(raw) {
   return raw === undefined || raw === null ? '' : String(raw).trim();
@@ -166,6 +167,16 @@ function rBackendUrl() {
   return `http://127.0.0.1:${plumberPort()}`;
 }
 
+function rRuntimeMode() {
+  const explicit = trimmed(process.env.R_RUNTIME_MODE).toLowerCase();
+  if (explicit) return explicit;
+  return trimmed(process.env.R_BACKEND_URL) ? 'external' : 'owned';
+}
+
+function hasRApiToken() {
+  return trimmed(process.env.R_API_TOKEN).length >= 32;
+}
+
 // ── Storage roots + upload limits (server-only; never exposed to clients) ────
 function resolveRoot(envValue, fallbackSegments) {
   const raw = trimmed(envValue);
@@ -188,6 +199,29 @@ function maxUploadBytes() {
 
 function maxUploadFiles() {
   return positiveIntFromEnv(process.env.MAX_UPLOAD_FILES, 10000);
+}
+
+// The authenticated legacy R proxy is intentionally bounded. Heavy durable
+// workflows use the job queue; these limits keep the compatibility/live-state
+// path from becoming an unbounded memory or connection sink.
+function rProxyTimeoutMs() {
+  return positiveIntFromEnv(process.env.R_PROXY_TIMEOUT_MS, 120000);
+}
+
+function rProxyMaxResponseBytes() {
+  return positiveIntFromEnv(process.env.R_PROXY_MAX_RESPONSE_BYTES, 8 * 1024 * 1024);
+}
+
+function rProxyRateLimitWindowMs() {
+  return positiveIntFromEnv(process.env.R_PROXY_RATE_LIMIT_WINDOW_MS, 60 * 1000);
+}
+
+function rProxyRateLimitMax() {
+  return positiveIntFromEnv(process.env.R_PROXY_RATE_LIMIT_MAX, 60);
+}
+
+function rProxyMaxConcurrent() {
+  return positiveIntFromEnv(process.env.R_PROXY_MAX_CONCURRENT, 1);
 }
 
 function pathContains(parent, child) {
@@ -216,7 +250,9 @@ function summary() {
     cookieSecure: cookieSecure(),
     cookieSameSite: cookieSameSite(),
     allowedOrigins: allowedOrigins(),
-    supportedRTarget: supportedRTarget()
+    supportedRTarget: supportedRTarget(),
+    rRuntimeMode: rRuntimeMode(),
+    hasRApiToken: hasRApiToken()
   };
 }
 
@@ -240,6 +276,14 @@ function validateProductionConfig() {
   if (!trimmed(process.env.FRONTEND_ORIGIN) && !trimmed(process.env.FRONTEND_URL)) {
     errors.push('FRONTEND_ORIGIN must be set in production so CORS/CSRF are not left at the dev default.');
   }
+  if (!hasRApiToken()) {
+    errors.push('R_API_TOKEN must be set to at least 32 characters in production.');
+  }
+  try {
+    rRuntime.resolveRRuntimeConfig(process.env, { role: 'web' });
+  } catch (error) {
+    errors.push(error && error.message ? error.message : 'R runtime configuration is invalid.');
+  }
   if (!cookieSecure()) {
     errors.push('Session cookies must be Secure in production (do not set COOKIE_SECURE=false).');
   }
@@ -260,6 +304,24 @@ function validateProductionConfig() {
   }
   if (!isValidPositiveIntOverride(process.env.MAX_UPLOAD_FILES)) {
     errors.push('MAX_UPLOAD_FILES must be a positive integer when set.');
+  }
+  for (const name of [
+    'R_PROXY_TIMEOUT_MS', 'R_PROXY_MAX_RESPONSE_BYTES',
+    'R_PROXY_RATE_LIMIT_WINDOW_MS', 'R_PROXY_RATE_LIMIT_MAX',
+    'R_PROXY_MAX_CONCURRENT'
+  ]) {
+    if (!isValidPositiveIntOverride(process.env[name])) {
+      errors.push(`${name} must be a positive integer when set.`);
+    }
+  }
+  if (rProxyMaxConcurrent() > 1) {
+    errors.push('R_PROXY_MAX_CONCURRENT must be 1 for the supported single-R production topology.');
+  }
+  if (rProxyTimeoutMs() > 120000) {
+    errors.push('R_PROXY_TIMEOUT_MS must not exceed 120000 in production.');
+  }
+  if (rProxyMaxResponseBytes() > 8 * 1024 * 1024) {
+    errors.push('R_PROXY_MAX_RESPONSE_BYTES must not exceed 8388608 in production.');
   }
   const durableRoot = storageRoot();
   const privateRoot = vaultRoot();
@@ -293,10 +355,17 @@ module.exports = {
   isAllowedOrigin,
   plumberPort,
   rBackendUrl,
+  rRuntimeMode,
+  hasRApiToken,
   storageRoot,
   vaultRoot,
   maxUploadBytes,
   maxUploadFiles,
+  rProxyTimeoutMs,
+  rProxyMaxResponseBytes,
+  rProxyRateLimitWindowMs,
+  rProxyRateLimitMax,
+  rProxyMaxConcurrent,
   supportedRTarget,
   summary,
   validateProductionConfig

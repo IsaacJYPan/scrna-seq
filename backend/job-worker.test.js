@@ -117,8 +117,36 @@ describe.skipIf(!CONFIGURED)('job worker — lifecycle (claim / heartbeat / comp
     expect(after.status).toBe('failed');
     expect(after.error).toBeTruthy();
     expect(after.error.code).toBe('HANDLER_ERROR');
-    expect(after.error.message).toMatch(/handler exploded/);
+    expect(after.error.message).toBe('Handler failed.');
     expect(after.logs.some((l) => /handler failed/i.test(l.message))).toBe(true);
+  });
+
+  it('never persists or logs raw details from an unknown handler failure', async () => {
+    const job = await newGenericJob();
+    const leaked = 'postgres://db.internal:5432/tenant secret=/vault/private/key constraint=users_email_key';
+    const boom = async () => {
+      throw Object.assign(new Error(leaked), { code: 'DB_FAILURE' });
+    };
+    const errors = [];
+    const w = createJobWorker({
+      db: dbmod,
+      now: () => T0,
+      logger: { info: () => {}, warn: () => {}, error: (message) => errors.push(message) },
+      handlers: { generic: boom },
+    });
+
+    const res = await w.runOnce();
+    const after = await getJobForUser(job.id, alice.id);
+    expect(res).toMatchObject({
+      status: 'failed',
+      error: { code: 'HANDLER_ERROR', message: 'Handler failed.' },
+    });
+    expect(after.error).toEqual({ code: 'HANDLER_ERROR', message: 'Handler failed.' });
+    const visible = JSON.stringify({ res, after, errors });
+    for (const forbidden of ['db.internal', '/vault/private/key', 'users_email_key', 'secret=']) {
+      expect(visible).not.toContain(forbidden);
+    }
+    expect(errors.some((message) => message.includes('DB_FAILURE'))).toBe(true);
   });
 
   it('does not expose claim_token through owner-facing job reads', async () => {
@@ -355,6 +383,45 @@ describe.skipIf(!CONFIGURED)('job worker — start/stop lifecycle (fake timers, 
     await w.stop(); // no throw
     expect(w.isRunning()).toBe(false);
   });
+
+  it('never overlaps two claims inside one worker process while a handler is pending', async () => {
+    vi.useFakeTimers();
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    let claims = 0;
+    const stub = {
+      reapExpiredJobs: async () => ({ requeued: [], failed: [] }),
+      claimNextJob: async () => {
+        claims += 1;
+        return claims === 1 ? {
+          id: 'job_first', jobType: 'generic', ownerUserId: alice.id,
+          claimToken: 'wct_first', projectId: null, status: 'running',
+        } : {
+          id: 'job_second', jobType: 'generic', ownerUserId: alice.id,
+          claimToken: 'wct_second', projectId: null, status: 'running',
+        };
+      },
+      appendJobLogByWorker: async () => ({}),
+      heartbeatJob: async () => ({ status: 'running' }),
+      completeJobByWorker: async () => ({ status: 'completed' }),
+      failJobByWorker: async () => ({ status: 'failed' }),
+    };
+    const w = createJobWorker({
+      db: stub,
+      pollIntervalMs: 10,
+      handlers: { generic: async () => { await pending; return { result: { ok: true } }; } },
+      logger: silentLogger(),
+    });
+    w.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(claims).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(claims).toBe(1);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await w.stop();
+    expect(claims).toBe(1);
+  });
 });
 
 describe.skipIf(!CONFIGURED)('job worker — startup config (disabled by default)', () => {
@@ -430,7 +497,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
       rBridge: fakeBridge,
       callR: () => {},
       handlers,
-      leaseSeconds: 30, // renewal interval = max(5000, leaseSeconds*1000/2) = 15000ms
+      leaseSeconds: 10, // exact accepted floor; renewal must fire at 5000ms
       now: () => T0,
       logger: silentLogger(),
     });
@@ -440,13 +507,172 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     await vi.advanceTimersByTimeAsync(0);
     const beforeRenewals = spy._calls.heartbeat; // 1 pre-handler heartbeat
     // Two renewal windows fire while the call is still pending.
-    await vi.advanceTimersByTimeAsync(15000);
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(5000);
     expect(spy._calls.heartbeat).toBeGreaterThanOrEqual(beforeRenewals + 2);
 
     releaseBridge();
     const res = await runPromise;
     expect(res.status).toBe('completed');
+  });
+
+  it('keeps renewing while committed-output storage validation is pending', async () => {
+    vi.useFakeTimers();
+    const claimed = {
+      id: 'job_recovery_lease', jobType: 'generic', ownerUserId: alice.id,
+      claimToken: 'wct_recovery_lease', projectId: null, analysisObjectId: null,
+      status: 'running',
+    };
+    let heartbeatCalls = 0;
+    let handlerCalls = 0;
+    let inspectionStarted = false;
+    let releaseInspection;
+    const inspectionPending = new Promise((resolve) => {
+      releaseInspection = () => resolve({ ok: true });
+    });
+    const stubDb = {
+      reapExpiredJobs: async () => ({ requeued: [], failed: [] }),
+      claimNextJob: async () => claimed,
+      appendJobLogByWorker: async () => ({}),
+      heartbeatJob: async () => { heartbeatCalls += 1; return { status: 'running' }; },
+      resumeCommittedJobByWorker: async (_id, _wid, _token, opts) => {
+        await opts.inspectStorageObject('projects/proj_x/checkpoints/job_x/checkpoint.rds', {});
+        return { resumed: true, committedOutput: true };
+      },
+      completeJobByWorker: async () => ({ status: 'completed' }),
+      failJobByWorker: async () => ({ status: 'failed' }),
+    };
+    const worker = createJobWorker({
+      db: stubDb,
+      handlers: { generic: async () => { handlerCalls += 1; return {}; } },
+      storageProvider: {
+        inspect: () => {
+          inspectionStarted = true;
+          return inspectionPending;
+        },
+        remove: () => true,
+      },
+      leaseSeconds: 10,
+      now: () => T0,
+      logger: silentLogger(),
+    });
+
+    const run = worker.runOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inspectionStarted).toBe(true);
+    const beforeRenewals = heartbeatCalls;
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(heartbeatCalls).toBeGreaterThanOrEqual(beforeRenewals + 2);
+
+    releaseInspection();
+    await expect(run).resolves.toMatchObject({ status: 'completed', recovered: true });
+    expect(handlerCalls).toBe(0);
+  });
+
+  it('keeps renewing after a transient heartbeat failure and stops only on claim loss', async () => {
+    vi.useFakeTimers();
+    const claimed = {
+      id: 'job_transient_lease', jobType: 'generic', ownerUserId: alice.id,
+      claimToken: 'wct_transient', projectId: null, analysisObjectId: null, status: 'running',
+    };
+    let heartbeatCalls = 0;
+    const stubDb = {
+      reapExpiredJobs: async () => ({ requeued: [], failed: [] }),
+      claimNextJob: async () => claimed,
+      appendJobLogByWorker: async () => ({}),
+      heartbeatJob: async () => {
+        heartbeatCalls += 1;
+        if (heartbeatCalls === 2) throw Object.assign(new Error('temporary database outage'), { code: 'ECONNRESET' });
+        return { status: 'running' };
+      },
+      completeJobByWorker: async () => ({ status: 'completed' }),
+      failJobByWorker: async () => ({ status: 'failed' }),
+    };
+    let releaseBridge;
+    const bridgePending = new Promise((resolve) => { releaseBridge = () => resolve({ ok: true }); });
+    const w = createJobWorker({
+      db: stubDb,
+      rBridge: { runRBridgeOperation: () => bridgePending },
+      callR: () => {},
+      handlers: {
+        generic: async (ctx) => {
+          await ctx.runRBridgeOperation({ operation: 'r.runtime.check' });
+          return { result: { ok: true } };
+        },
+      },
+      leaseSeconds: 30,
+      logger: silentLogger(),
+    });
+    const run = w.runOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(15000); // transient failure
+    await vi.advanceTimersByTimeAsync(15000); // successful later renewal
+    expect(heartbeatCalls).toBeGreaterThanOrEqual(3); // pre-handler + two timer attempts
+    releaseBridge();
+    await expect(run).resolves.toMatchObject({ status: 'completed' });
+  });
+
+  it('stops and awaits an in-flight renewal before writing the indeterminate grace lease', async () => {
+    vi.useFakeTimers();
+    const claimed = {
+      id: 'job_timeout_lease_fence', jobType: 'generic', ownerUserId: alice.id,
+      claimToken: 'wct_timeout_lease_fence', projectId: null,
+      analysisObjectId: null, status: 'running',
+    };
+    const events = [];
+    let heartbeatCalls = 0;
+    let resolveRenewal;
+    const renewalPending = new Promise((resolve) => { resolveRenewal = resolve; });
+    const stubDb = {
+      reapExpiredJobs: async () => ({ requeued: [], failed: [] }),
+      claimNextJob: async () => claimed,
+      appendJobLogByWorker: async () => ({}),
+      heartbeatJob: async () => {
+        heartbeatCalls += 1;
+        if (heartbeatCalls === 2) {
+          events.push('renewal-started');
+          await renewalPending;
+          events.push('renewal-finished');
+        }
+        return { status: 'running' };
+      },
+      deferIndeterminateRTimeoutByWorker: async () => {
+        events.push('deferred');
+        return { status: 'running' };
+      },
+      failJobByWorker: async () => ({ status: 'failed' }),
+      completeJobByWorker: async () => ({ status: 'completed' }),
+    };
+    let rejectBridge;
+    const bridgePending = new Promise((_resolve, reject) => {
+      rejectBridge = () => reject(Object.assign(new Error('timeout'), { code: 'R_TIMEOUT' }));
+    });
+    const worker = createJobWorker({
+      db: stubDb,
+      rBridge: { runRBridgeOperation: () => bridgePending },
+      callR: () => {},
+      handlers: {
+        generic: async (ctx) => {
+          await ctx.runRBridgeOperation({ operation: 'r.runtime.check' });
+          return {};
+        },
+      },
+      leaseSeconds: 10,
+      logger: silentLogger(),
+    });
+
+    const run = worker.runOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(events).toEqual(['renewal-started']);
+    rejectBridge();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(['renewal-started']);
+
+    resolveRenewal();
+    await expect(run).resolves.toMatchObject({ status: 'indeterminate' });
+    expect(events).toEqual(['renewal-started', 'renewal-finished', 'deferred']);
   });
 });
 

@@ -51,6 +51,7 @@ function seuratResponse() {
 function checkpointLoadResponse() {
   return {
     loaded: true,
+    runtime_instance_id: 'running-claim-rbac-runtime-instance-0001',
     checksum_verified: true,
     class: 'Seurat',
     n_cells: 100,
