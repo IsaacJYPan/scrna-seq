@@ -1487,6 +1487,72 @@ app.use('/api/organizations', requireAuth);
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 
+// Publishing a trusted pipeline manifest is a platform capability, not a
+// project role. Authenticate before parsing the bounded body so cookie CSRF
+// enforcement runs before any mutation work. Manifests are declarative only;
+// this endpoint never accepts module code, R code, filesystem paths, or URLs.
+const PIPELINE_REGISTRY_BODY_LIMIT = 70 * 1024;
+const parsePipelineRegistryJson = express.json({
+  limit: PIPELINE_REGISTRY_BODY_LIMIT,
+  inflate: false,
+  type: ['application/json', 'application/*+json'],
+});
+
+function parseBoundedPipelineRegistryJson(req, res, next) {
+  if (String(req.method || '').toUpperCase() !== 'POST') return next();
+  return parsePipelineRegistryJson(req, res, (error) => {
+    if (!error) {
+      if (req.body === undefined) {
+        return res.status(400).json({ error: 'A JSON manifest body is required.' });
+      }
+      return next();
+    }
+    if (error.type === 'entity.too.large' || error.status === 413) {
+      return res.status(413).json({ error: 'Pipeline manifest request exceeded the size limit.' });
+    }
+    if (error.type === 'encoding.unsupported' || error.status === 415) {
+      return res.status(415).json({ error: 'Compressed pipeline manifest bodies are not accepted.' });
+    }
+    return res.status(400).json({ error: 'Pipeline manifest request body must be valid JSON.' });
+  });
+}
+
+function sendPipelineRegistryError(res, error) {
+  switch (error.code) {
+    case 'FORBIDDEN':
+      return res.status(403).json({ error: error.message });
+    case 'PIPELINE_MANIFEST_EXISTS':
+    case 'PIPELINE_REGISTRY_FULL':
+      return res.status(409).json({ error: error.message });
+    case 'INVALID_PIPELINE_DEFINITION':
+    case 'INVALID_PIPELINE_MANIFEST':
+      return res.status(400).json({ error: error.message });
+    default:
+      console.error('[PipelineRegistry]', error);
+      return res.status(500).json({ error: 'Internal error.' });
+  }
+}
+
+app.use('/api/pipeline-registry', requireAuth);
+app.use('/api/pipeline-registry', parseBoundedPipelineRegistryJson);
+
+app.get('/api/pipeline-registry/capabilities', async (req, res) => {
+  try {
+    res.json(await db.getPipelineRegistryCapabilities(req.user.id));
+  } catch (error) {
+    sendPipelineRegistryError(res, error);
+  }
+});
+
+app.post('/api/pipeline-registry/definitions', async (req, res) => {
+  try {
+    const created = await db.createPipelineRegistryDefinition(req.user.id, req.body);
+    res.status(201).json(created);
+  } catch (error) {
+    sendPipelineRegistryError(res, error);
+  }
+});
+
 // Body fields that name the row creator/owner. Ownership always derives from the
 // session, so any client-supplied value here is rejected outright.
 const REJECTED_CREATOR_FIELDS = ['createdByUserId', 'created_by_user_id'];
@@ -1994,23 +2060,6 @@ function rejectProjectResourceFields(req, res, { extra = [] } = {}) {
 app.get('/api/projects/:projectId/pipeline-definitions', async (req, res) => {
   try {
     res.json(await db.listProjectPipelineDefinitions(req.user.id, req.params.projectId));
-  } catch (e) {
-    sendProjectResourceError(res, e, 'ProjectPipelines');
-  }
-});
-
-app.post('/api/projects/:projectId/pipeline-definitions', async (req, res) => {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-  if (body.id !== undefined || body.projectId !== undefined || body.project_id !== undefined
-      || body.ownerUserId !== undefined || body.owner_user_id !== undefined) {
-    return res.status(400).json({ error: 'Pipeline definition identity and ownership are server-controlled.' });
-  }
-  try {
-    const created = await db.createProjectPipelineDefinition(req.user.id, req.params.projectId, {
-      manifest: body.manifest,
-      visibility: body.visibility,
-    });
-    res.status(201).json(db.toPublicJob(created));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectPipelines');
   }

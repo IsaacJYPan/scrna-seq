@@ -28,6 +28,17 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
+-- Platform capabilities are assigned out of band by a trusted operator. They
+-- are intentionally separate from organization/project roles and have no
+-- user-facing mutation endpoint.
+CREATE TABLE IF NOT EXISTS platform_capabilities (
+  user_id      BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  capability   TEXT NOT NULL,
+  granted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, capability)
+);
+CREATE INDEX IF NOT EXISTS idx_platform_capability_name ON platform_capabilities(capability);
+
 -- ── Provenance (owner-scoped, optionally project-associated; append-only) ────
 CREATE TABLE IF NOT EXISTS provenance (
   id                        TEXT PRIMARY KEY,
@@ -154,7 +165,9 @@ CREATE INDEX IF NOT EXISTS idx_datasets_validation_status ON datasets(validation
 CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
 CREATE INDEX IF NOT EXISTS idx_datasets_sha256 ON datasets(sha256);
 
--- Pipeline definitions and user-project active selection. Manifests are
+-- Pipeline definitions and user-project active selection. Trusted platform
+-- definitions use project_id NULL + visibility 'platform'; older project/user
+-- rows remain stored but are quarantined from selection. Manifests are
 -- declarative module/tab definitions only; code, paths, endpoints, and R state
 -- stay outside the manifest contract. Selection is scoped by BOTH project and
 -- user so collaborators do not overwrite each other's active workflow.
@@ -163,14 +176,20 @@ CREATE TABLE IF NOT EXISTS pipeline_definitions (
   project_id    TEXT REFERENCES projects(id),
   owner_user_id BIGINT NOT NULL REFERENCES users(id),
   visibility    TEXT NOT NULL DEFAULT 'user',
+  manifest_id   TEXT,
   name          TEXT NOT NULL,
   manifest_json TEXT NOT NULL,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Additive upgrade for databases created before the trusted platform registry.
+ALTER TABLE pipeline_definitions ADD COLUMN IF NOT EXISTS manifest_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_pipeline_def_project ON pipeline_definitions(project_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_def_owner ON pipeline_definitions(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_def_visibility ON pipeline_definitions(visibility);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_platform_manifest_id
+  ON pipeline_definitions(manifest_id)
+  WHERE project_id IS NULL AND visibility = 'platform' AND manifest_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS project_pipeline_selections (
   project_id  TEXT NOT NULL REFERENCES projects(id),
