@@ -93,6 +93,21 @@ describe.skipIf(!CONFIGURED)('jobs API', () => {
     expect(res.data.error).toMatch(/jobType/i);
   });
 
+  it('rejects receipt-backed scientific jobs on the legacy projectless route', async () => {
+    const { alice } = await users();
+    for (const jobType of [
+      'pbmc.pipeline.v1',
+      'seurat.pipeline.v1',
+      'checkpoint.load.v1',
+      'checkpoint.fork.v1',
+      'deg.find_markers.v1',
+    ]) {
+      const res = await createJob(alice.token, { jobType });
+      expect(res.status, jobType).toBe(400);
+      expect(res.data.error).toMatch(/project-scoped jobs API/i);
+    }
+  });
+
   it('rejects invalid parameters (array, null, scalar)', async () => {
     const { alice } = await users();
     for (const parameters of [[], null, 'string', 42]) {

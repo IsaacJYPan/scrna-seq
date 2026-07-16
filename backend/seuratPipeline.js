@@ -4,7 +4,6 @@
 // (`tenx_h5`) only. Dataset identity/storage is resolved from trusted DB rows by
 // the worker; clients never provide paths or storage keys.
 
-const crypto = require('crypto');
 const { isProjectStorageKey, projectStorageFileKey } = require('./storage');
 
 function codedError(code, message) {
@@ -101,11 +100,10 @@ function allocateSeuratCheckpointStorageKey(projectId, jobId) {
   if (typeof jobId !== 'string' || !/^job_[0-9a-f]+$/.test(jobId)) {
     throw codedError('INVALID_JOB_ID', 'A server-generated job id is required to allocate a checkpoint key.');
   }
-  const token = crypto.randomBytes(12).toString('hex');
   if (projectId) {
-    return projectStorageFileKey(String(projectId), 'checkpoints', jobId, `${token}.rds`);
+    return projectStorageFileKey(String(projectId), 'checkpoints', jobId, 'checkpoint.rds');
   }
-  return `vault/checkpoints/${jobId}/${token}.rds`;
+  return `vault/checkpoints/${jobId}/checkpoint.rds`;
 }
 
 function assertSupportedSeuratPipelineDataset(dataset) {

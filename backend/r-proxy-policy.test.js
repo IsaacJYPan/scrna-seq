@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import http from 'http';
 
 // Pins the CURRENT R-proxy path policy so future changes are deliberate and
 // visible in review. Two classes of `/api/r/*` paths:
@@ -25,7 +26,12 @@ const { startServer, createUserWithToken, api, serverModule } = require('./_http
 
 const CONFIGURED = config.hasPostgresConnection();
 
-const { isInternalOnlyRProxyPath, R_PROXY_INTERNAL_ONLY_PATHS } = serverModule;
+const {
+  isInternalOnlyRProxyPath,
+  R_PROXY_INTERNAL_ONLY_PATHS,
+  isAllowedProductionRProxyRequest,
+  R_PROXY_PRODUCTION_ALLOWLIST,
+} = serverModule;
 
 // Worker-only endpoints that must be blocked from the public /api/r/* proxy.
 const INTERNAL_ONLY = [
@@ -33,6 +39,8 @@ const INTERNAL_ONLY = [
   '/object/checkpoint-load',
   '/object/deg-find-markers',
   '/object/seurat-pipeline',
+  '/object/inspect',
+  '/internal/worker-readiness',
 ];
 
 // Legacy live-R analytical endpoints that are currently reachable (owner-scoped)
@@ -47,10 +55,38 @@ const LEGACY_REACHABLE = [
 
 let server;
 let prevTrustedRdsLoad;
+let prevNodeEnv;
+
+function rawRRequest({ method, path, token, headers = {}, chunks = [] }) {
+  return new Promise((resolve, reject) => {
+    const address = server.address();
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: address.port,
+      method,
+      path,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...headers,
+      },
+    }, (res) => {
+      const body = [];
+      res.on('data', (chunk) => body.push(chunk));
+      res.on('end', () => {
+        const raw = Buffer.concat(body).toString('utf8');
+        resolve({ status: res.statusCode, data: raw ? JSON.parse(raw) : null });
+      });
+    });
+    req.on('error', reject);
+    for (const chunk of chunks) req.write(chunk);
+    req.end();
+  });
+}
 
 beforeAll(async () => {
   if (!CONFIGURED) return;
   prevTrustedRdsLoad = process.env.ALLOW_TRUSTED_RDS_LOAD;
+  prevNodeEnv = process.env.NODE_ENV;
   server = await startServer();
 });
 
@@ -60,12 +96,34 @@ afterAll(async () => {
   await db.close();
   if (prevTrustedRdsLoad === undefined) delete process.env.ALLOW_TRUSTED_RDS_LOAD;
   else process.env.ALLOW_TRUSTED_RDS_LOAD = prevTrustedRdsLoad;
+  if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = prevNodeEnv;
 });
 
 beforeEach(async () => {
   if (!CONFIGURED) return;
+  process.env.NODE_ENV = prevNodeEnv || 'test';
   await db.resetSchemaForTests();
   delete process.env.ALLOW_TRUSTED_RDS_LOAD;
+});
+
+describe('production R proxy exact allowlist', () => {
+  it('contains only reviewed method/path pairs and rejects unknown or wrong-method variants', () => {
+    expect(R_PROXY_PRODUCTION_ALLOWLIST.GET.has('/normalize')).toBe(true);
+    expect(R_PROXY_PRODUCTION_ALLOWLIST.POST.has('/export-preview')).toBe(true);
+    expect(isAllowedProductionRProxyRequest('GET', '/normalize', { NODE_ENV: 'production' })).toBe(true);
+    expect(isAllowedProductionRProxyRequest('POST', '/normalize', { NODE_ENV: 'production' })).toBe(false);
+    expect(isAllowedProductionRProxyRequest('GET', '/Normalize', { NODE_ENV: 'production' })).toBe(false);
+    expect(isAllowedProductionRProxyRequest('GET', '/unknown', { NODE_ENV: 'production' })).toBe(false);
+    expect(isAllowedProductionRProxyRequest('GET', '%252Fnormalize', { NODE_ENV: 'production' })).toBe(false);
+    for (const [method, path] of [
+      ['GET', '/load-local-10x'], ['GET', '/load-h5ad'], ['POST', '/load-multi-10x'],
+      ['GET', '/csv-columns'], ['GET', '/add-metadata'], ['POST', '/subset'],
+      ['GET', '/integrate'],
+    ]) {
+      expect(isAllowedProductionRProxyRequest(method, path, { NODE_ENV: 'production' })).toBe(false);
+    }
+  });
 });
 
 describe('isInternalOnlyRProxyPath classifier (source of truth for the block)', () => {
@@ -122,6 +180,87 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
     }
   });
 
+  it('blocks legacy heavy routes, unknown paths, and wrong methods in production', async () => {
+    process.env.NODE_ENV = 'production';
+    const { token } = await createUserWithToken({ email: 'production-policy@example.com' });
+    for (const [method, path] of [
+      ['GET', '/deg'], ['POST', '/cellchat'], ['GET', '/unknown-route'],
+      ['POST', '/normalize'], ['GET', '/Normalize'],
+      ['GET', '/load-local-10x'], ['GET', '/load-h5ad'], ['POST', '/load-multi-10x'],
+      ['GET', '/csv-columns'], ['GET', '/add-metadata'], ['POST', '/subset'],
+      ['GET', '/integrate'],
+    ]) {
+      const res = await api(server, `/api/r${path}`, { method, token });
+      expect(res.status).toBe(404);
+      expect(res.data).toEqual({ error: 'Not found' });
+    }
+  });
+
+  it('rejects body-bearing GET, non-JSON POST, malformed JSON, and oversized chunked JSON before R contact', async () => {
+    const { token } = await createUserWithToken({ email: 'r-request-shape@example.com' });
+    const getWithBody = await rawRRequest({
+      method: 'GET', path: '/api/r/health', token,
+      headers: { 'Content-Length': '1' }, chunks: ['x'],
+    });
+    expect(getWithBody.status).toBe(400);
+
+    const textPost = await rawRRequest({
+      method: 'POST', path: '/api/r/qc', token,
+      headers: { 'Content-Type': 'text/plain' }, chunks: ['{}'],
+    });
+    expect(textPost.status).toBe(415);
+
+    const malformed = await rawRRequest({
+      method: 'POST', path: '/api/r/qc', token,
+      headers: { 'Content-Type': 'application/json' }, chunks: ['{"broken":'],
+    });
+    expect(malformed.status).toBe(400);
+    expect(malformed.data).toEqual({ error: 'R request body must be valid JSON.' });
+
+    const oversized = await rawRRequest({
+      method: 'POST', path: '/api/r/qc', token,
+      headers: { 'Content-Type': 'application/json' },
+      chunks: ['{"value":"', 'a'.repeat(256 * 1024 + 1), '"}'],
+    });
+    expect(oversized.status).toBe(413);
+    expect(oversized.data).toEqual({ error: 'R request body exceeded the configured size limit.' });
+  });
+
+  it('never enables public RDS deserialization in production', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.ALLOW_TRUSTED_RDS_LOAD = 'true';
+    const { token } = await createUserWithToken({ email: 'production-rds@example.com' });
+    for (const path of ['/load-rds', '/restore-session']) {
+      const res = await api(server, `/api/r${path}`, {
+        method: 'POST', token, body: { path: 'vault/ignored.rds' },
+      });
+      expect(res.status).toBe(404);
+      expect(res.data).toEqual({ error: 'Not found' });
+    }
+  });
+
+  it('requires an allowed origin for every cookie-authenticated R method', async () => {
+    const { token } = await createUserWithToken({ email: 'r-csrf@example.com' });
+    const cookie = `${config.SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`;
+    const missing = await api(server, '/api/r/object/inspect', {
+      method: 'GET', headers: { Cookie: cookie },
+    });
+    expect(missing.status).toBe(403);
+    expect(missing.data.error).toMatch(/CSRF/i);
+
+    const crossSite = await api(server, '/api/r/object/inspect', {
+      method: 'GET', headers: { Cookie: cookie, Origin: 'https://evil.example' },
+    });
+    expect(crossSite.status).toBe(403);
+
+    const allowed = await api(server, '/api/r/object/inspect', {
+      method: 'GET', headers: { Cookie: cookie, Origin: config.allowedOrigins()[0] },
+    });
+    expect(allowed.status).toBe(404);
+    const bearer = await api(server, '/api/r/object/inspect', { method: 'GET', token });
+    expect(bearer.status).toBe(404);
+  });
+
   it('blocks public RDS loading by default before any R contact', async () => {
     const { user, token } = await createUserWithToken({ email: 'owner@example.com' });
     const res = await api(server, '/api/r/load-rds', {
@@ -133,12 +272,34 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
     expect(res.data.error).toMatch(/RDS loading is disabled/i);
   });
 
+  it('blocks legacy session restore by the same default RDS trust gate', async () => {
+    const { user, token } = await createUserWithToken({ email: 'restore-owner@example.com' });
+    const res = await api(server, '/api/r/restore-session', {
+      method: 'POST',
+      token,
+      body: { path: `vault/${serverModule.sanitizeVaultSegment(user.email)}/uploaded.rds` },
+    });
+    expect(res.status).toBe(403);
+    expect(res.data.error).toMatch(/RDS loading is disabled/i);
+  });
+
   it('does not reveal path-validation details when RDS loading is disabled', async () => {
     const { token } = await createUserWithToken({ email: 'owner@example.com' });
     const res = await api(server, '/api/r/load-rds', {
       method: 'POST',
       token,
       body: { path: '../outside.rds' }
+    });
+    expect(res.status).toBe(403);
+    expect(res.data.error).toMatch(/RDS loading is disabled/i);
+  });
+
+  it('does not reveal restore path details while the RDS trust gate is closed', async () => {
+    const { token } = await createUserWithToken({ email: 'restore-owner@example.com' });
+    const res = await api(server, '/api/r/restore-session', {
+      method: 'POST',
+      token,
+      body: { path: '../outside.rds' },
     });
     expect(res.status).toBe(403);
     expect(res.data.error).toMatch(/RDS loading is disabled/i);

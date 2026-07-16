@@ -42,7 +42,10 @@
 // stateKey }); `input` / job parameters can never choose the object, state key,
 // method, or path.
 
+const crypto = require('crypto');
 const http = require('http');
+const https = require('https');
+const storage = require('./storage');
 const { PBMC_PIPELINE_PARAM_NAMES } = require('./pbmcPipeline');
 const { DEG_FIND_MARKERS_PARAM_NAMES } = require('./degFindMarkers');
 const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
@@ -51,6 +54,26 @@ const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
 function codedError(code, message) {
   const err = new Error(message);
   err.code = code;
+  return err;
+}
+
+/**
+ * Receipt-backed R calls cross a point after which every response-side failure is
+ * ambiguous: R may already have committed its output and receipt before Node sees
+ * a disconnect, oversized/malformed response, or non-200 status. Keep that fact
+ * non-enumerable so callers can choose bounded recovery without exposing internal
+ * execution state in serialized errors.
+ */
+function markRSideEffectsPossible(error) {
+  const err = error instanceof Error
+    ? error
+    : codedError('R_BRIDGE_ERROR', 'R bridge operation failed.');
+  Object.defineProperty(err, 'rSideEffectsPossible', {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
   return err;
 }
 
@@ -66,6 +89,15 @@ const DEFAULT_R_BRIDGE_TIMEOUT_MS = 10000;
 // Hard ceiling for any single bridge call (incl. the longer pipeline op), so even a
 // caller-supplied timeout can never make a worker tick unbounded.
 const MAX_R_BRIDGE_TIMEOUT_MS = 600000;
+const COMPLETION_RECEIPT_SIGNED_MAX_BYTES = 96 * 1024;
+const COMPLETION_RECEIPT_ALGORITHM = 'hmac-sha256';
+const COMPLETION_JOB_TO_R_OPERATION = Object.freeze({
+  'pbmc.pipeline.v1': 'r.pbmc.pipeline.v1',
+  'seurat.pipeline.v1': 'r.seurat.pipeline.v1',
+  'deg.find_markers.v1': 'r.deg.find_markers.v1',
+  'checkpoint.load.v1': 'r.checkpoint.load.v1',
+  'checkpoint.fork.v1': 'r.checkpoint.load.v1',
+});
 
 // ── Operation allowlist ──────────────────────────────────────────────────────
 // The ONLY operations the bridge will run. Each entry fully describes the
@@ -406,6 +438,11 @@ function sanitizeLoadSummary(body) {
   out.checksumVerified = b.checksum_verified === true;
   if (!out.loaded) return out;
 
+  const runtimeInstanceId = sanitizeRuntimeField(b.runtime_instance_id);
+  if (runtimeInstanceId) {
+    out.runtimeInstanceHash = crypto.createHash('sha256').update(runtimeInstanceId).digest('hex');
+  }
+
   const cls = sanitizeRuntimeField(b.class);
   if (cls) out.class = cls;
 
@@ -491,7 +528,9 @@ function sanitizeDegSummary(body) {
   // overall row cap). group/gene are name-safe strings; the rest are bounded numbers.
   if (Array.isArray(s.top_markers)) {
     const rows = [];
-    const MAX_TOP_ROWS = 2000;
+    // Must match R completion_receipt_safe_value() so normal publication and
+    // receipt recovery persist the exact same bounded scientific summary.
+    const MAX_TOP_ROWS = 256;
     for (const r of s.top_markers) {
       if (!r || typeof r !== 'object') continue;
       const group = sanitizeRuntimeField(r.group);
@@ -539,6 +578,352 @@ function sanitizeDegResultInfo(body) {
   };
 }
 
+const COMPLETION_RECEIPT_BINDING_KEYS = Object.freeze([
+  'version',
+  'job_id',
+  'job_type',
+  'r_operation',
+  'project_id',
+  'receipt_storage_key',
+  'source_analysis_object_id',
+  'source_dataset_id',
+  'source_checkpoint_artifact_id',
+  'target_analysis_object_id',
+  'output_storage_key',
+]);
+const COMPLETION_RECEIPT_KEYS = Object.freeze([
+  ...COMPLETION_RECEIPT_BINDING_KEYS,
+  'payload',
+]);
+// Printable domain separation is intentionally shared byte-for-byte with R.
+// Avoid an embedded NUL because R character values cannot safely represent it.
+const COMPLETION_RECEIPT_HMAC_DOMAIN = 'BENCHONE_R_COMPLETION_RECEIPT_V1:';
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function assertExactObjectKeys(value, keys, code = 'R_COMPLETION_RECEIPT_INVALID') {
+  if (!isPlainObject(value)) throw codedError(code, 'Completion receipt is invalid.');
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length
+      || actual.some((key, index) => key !== expected[index])) {
+    throw codedError(code, 'Completion receipt is invalid.');
+  }
+}
+
+function assertAllowedObjectKeys(value, allowed, required = []) {
+  if (!isPlainObject(value)) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  const allowedSet = new Set(allowed);
+  if (Object.keys(value).some((key) => !allowedSet.has(key))
+      || required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+}
+
+function createCompletionReceiptEnvelope(receipt, secret) {
+  if (!isPlainObject(receipt) || typeof secret !== 'string' || secret.length === 0) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  const signedReceipt = JSON.stringify(receipt);
+  if (Buffer.byteLength(signedReceipt, 'utf8') > COMPLETION_RECEIPT_SIGNED_MAX_BYTES) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  const signature = crypto.createHmac('sha256', secret)
+    .update(COMPLETION_RECEIPT_HMAC_DOMAIN, 'utf8')
+    .update(signedReceipt, 'utf8')
+    .digest('hex');
+  return {
+    algorithm: COMPLETION_RECEIPT_ALGORITHM,
+    signed_receipt: signedReceipt,
+    signature,
+  };
+}
+
+function verifyCompletionReceiptEnvelope(envelope, secret) {
+  assertExactObjectKeys(
+    envelope,
+    ['algorithm', 'signed_receipt', 'signature'],
+    'R_COMPLETION_RECEIPT_INVALID'
+  );
+  if (envelope.algorithm !== COMPLETION_RECEIPT_ALGORITHM
+      || typeof envelope.signed_receipt !== 'string'
+      || Buffer.byteLength(envelope.signed_receipt, 'utf8') === 0
+      || Buffer.byteLength(envelope.signed_receipt, 'utf8') > COMPLETION_RECEIPT_SIGNED_MAX_BYTES
+      || typeof envelope.signature !== 'string'
+      || !/^[0-9a-f]{64}$/.test(envelope.signature)
+      || typeof secret !== 'string' || secret.length === 0) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  const supplied = Buffer.from(envelope.signature, 'hex');
+  const expected = crypto.createHmac('sha256', secret)
+    .update(COMPLETION_RECEIPT_HMAC_DOMAIN, 'utf8')
+    .update(envelope.signed_receipt, 'utf8')
+    .digest();
+  if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  let receipt;
+  try {
+    receipt = JSON.parse(envelope.signed_receipt);
+  } catch {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  if (!isPlainObject(receipt)) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  return receipt;
+}
+
+function buildCompletionReceiptBinding(job, operation, args = {}) {
+  const jobType = job && job.jobType;
+  const expectedOperation = COMPLETION_JOB_TO_R_OPERATION[jobType];
+  if (!expectedOperation) return null;
+  if (operation !== expectedOperation
+      || typeof job.id !== 'string' || job.id === ''
+      || typeof job.projectId !== 'string' || job.projectId === '') {
+    throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
+  }
+
+  let outputStorageKey = null;
+  let outputKind = null;
+  let sourceCheckpointArtifactId = null;
+  let targetAnalysisObjectId = null;
+  if (jobType === 'pbmc.pipeline.v1') {
+    outputStorageKey = args.pipeline && args.pipeline.checkpointStorageKey;
+    outputKind = 'checkpoints';
+  } else if (jobType === 'seurat.pipeline.v1') {
+    outputStorageKey = args.seuratPipeline && args.seuratPipeline.checkpointStorageKey;
+    outputKind = 'checkpoints';
+  } else if (jobType === 'deg.find_markers.v1') {
+    outputStorageKey = args.deg && args.deg.resultStorageKey;
+    outputKind = 'artifacts';
+  } else {
+    sourceCheckpointArtifactId = args.checkpoint && args.checkpoint.checkpointArtifactId;
+    targetAnalysisObjectId = args.objectContext && args.objectContext.objectId;
+  }
+  if (outputKind && !storage.isProjectStorageKey(outputStorageKey, {
+    projectId: job.projectId,
+    kind: outputKind,
+  })) {
+    throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
+  }
+  if ((jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1')
+      && (typeof sourceCheckpointArtifactId !== 'string' || sourceCheckpointArtifactId === ''
+        || typeof targetAnalysisObjectId !== 'string' || targetAnalysisObjectId === '')) {
+    throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
+  }
+
+  return {
+    version: storage.COMPLETION_RECEIPT_VERSION,
+    job_id: job.id,
+    job_type: jobType,
+    r_operation: operation,
+    project_id: job.projectId,
+    receipt_storage_key: storage.completionReceiptKey(job.projectId, job.id),
+    source_analysis_object_id: job.analysisObjectId || null,
+    source_dataset_id: job.datasetId || null,
+    source_checkpoint_artifact_id: sourceCheckpointArtifactId,
+    target_analysis_object_id: targetAnalysisObjectId,
+    output_storage_key: outputStorageKey,
+  };
+}
+
+function validateBoundedReceiptValue(value, depth = 0, state = { nodes: 0 }) {
+  state.nodes += 1;
+  if (depth > 7 || state.nodes > 6000) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  if (value === null || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return;
+  }
+  if (typeof value === 'string') {
+    if (Buffer.byteLength(value, 'utf8') > 160 || !/^[A-Za-z0-9 ._:+-]*$/.test(value)) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 256) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    for (const item of value) validateBoundedReceiptValue(item, depth + 1, state);
+    return;
+  }
+  if (!isPlainObject(value) || Object.keys(value).length > 64) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(key)) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    validateBoundedReceiptValue(child, depth + 1, state);
+  }
+}
+
+function validateReceiptPayloadSchema(jobType, payload) {
+  validateBoundedReceiptValue(payload);
+  if (jobType === 'pbmc.pipeline.v1' || jobType === 'seurat.pipeline.v1') {
+    const topKeys = jobType === 'seurat.pipeline.v1'
+      ? ['ok', 'summary', 'checkpoint', 'versions', 'warnings']
+      : ['ok', 'summary', 'checkpoint', 'versions'];
+    assertExactObjectKeys(payload, topKeys);
+    if (payload.ok !== true) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    assertAllowedObjectKeys(payload.summary, [
+      'n_cells', 'n_features', 'pre_filter_cells', 'post_filter_cells',
+      'percent_mt_available', 'n_variable_features', 'n_pcs', 'n_clusters',
+      'cluster_sizes', 'reductions', 'normalization_method', 'resolution', 'used_seed',
+    ], ['n_cells', 'n_features']);
+    assertExactObjectKeys(payload.checkpoint, ['saved', 'checksum_sha256', 'size_bytes']);
+    assertExactObjectKeys(payload.versions, ['seurat_version', 'r_version']);
+    if (jobType === 'seurat.pipeline.v1' && !Array.isArray(payload.warnings)) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return;
+  }
+  if (jobType === 'deg.find_markers.v1') {
+    assertExactObjectKeys(payload, ['ok', 'summary', 'result', 'versions']);
+    if (payload.ok !== true) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    assertExactObjectKeys(payload.summary, [
+      'group_by', 'test_use', 'assay', 'n_groups', 'groups',
+      'n_markers_total', 'markers_per_group', 'top_markers',
+    ]);
+    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
+    assertExactObjectKeys(payload.versions, ['seurat_version', 'r_version']);
+    if (!Array.isArray(payload.summary.groups)
+        || !Array.isArray(payload.summary.markers_per_group)
+        || !Array.isArray(payload.summary.top_markers)) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    for (const row of payload.summary.markers_per_group) assertExactObjectKeys(row, ['group', 'n']);
+    for (const row of payload.summary.top_markers) {
+      assertExactObjectKeys(row, ['group', 'gene', 'avg_log2FC', 'pct_1', 'pct_2', 'p_val_adj', 'rank']);
+    }
+    return;
+  }
+  assertExactObjectKeys(payload, [
+    'loaded', 'runtime_instance_id', 'checksum_verified', 'class', 'n_cells',
+    'n_features', 'assays', 'reductions', 'n_meta_fields', 'meta_fields',
+    'seurat_version', 'r_version',
+  ]);
+  if (payload.loaded !== true || payload.checksum_verified !== true) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  if (!Array.isArray(payload.assays) || !Array.isArray(payload.reductions)
+      || !Array.isArray(payload.meta_fields)
+      || typeof payload.runtime_instance_id !== 'string'
+      || payload.runtime_instance_id.length === 0) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+}
+
+function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
+  assertExactObjectKeys(receipt, COMPLETION_RECEIPT_KEYS);
+  const jobType = job && job.jobType;
+  const rOperation = COMPLETION_JOB_TO_R_OPERATION[jobType];
+  const receiptKey = storage.completionReceiptKey(job.projectId, job.id);
+  const parsedReceiptKey = storage.parseProjectStorageKey(receipt.receipt_storage_key);
+  const commonMatches = receipt.version === storage.COMPLETION_RECEIPT_VERSION
+    && receipt.job_id === job.id
+    && receipt.job_type === jobType
+    && receipt.r_operation === rOperation
+    && receipt.project_id === job.projectId
+    && receipt.receipt_storage_key === receiptKey
+    && parsedReceiptKey && parsedReceiptKey.projectId === job.projectId
+    && parsedReceiptKey.kind === 'artifacts' && parsedReceiptKey.resourceId === job.id
+    && receipt.source_analysis_object_id === (job.analysisObjectId || null)
+    && receipt.source_dataset_id === (job.datasetId || null)
+    && receipt.source_checkpoint_artifact_id === (expected.sourceCheckpointArtifactId || null)
+    && receipt.target_analysis_object_id === (expected.targetAnalysisObjectId || null)
+    && receipt.output_storage_key === (expected.outputStorageKey || null);
+  if (!commonMatches) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  validateReceiptPayloadSchema(jobType, receipt.payload);
+  const body = receipt.payload;
+  const spec = R_BRIDGE_OPERATIONS[rOperation];
+  if (jobType === 'pbmc.pipeline.v1' || jobType === 'seurat.pipeline.v1') {
+    const summary = sanitizePipelineSummary(body);
+    const checkpoint = sanitizeCheckpointInfo(body);
+    if (!checkpoint.saved || !checkpoint.checksumSha256 || checkpoint.sizeBytes === null) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return {
+      operation: rOperation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      resultObjectType: 'seurat',
+      summary,
+      checkpoint,
+      metadata: {
+        operation: rOperation,
+        kind: 'pipeline',
+        scientific_output: true,
+        ranAt: new Date().toISOString(),
+        ...(job.analysisObjectId ? { objectId: job.analysisObjectId } : {}),
+        summary,
+        ...(jobType === 'seurat.pipeline.v1'
+          ? { warnings: sanitizeNameList(body.warnings, 32, 160) } : {}),
+      },
+    };
+  }
+  if (jobType === 'deg.find_markers.v1') {
+    const summary = sanitizeDegSummary(body);
+    const result = sanitizeDegResultInfo(body);
+    if (!result.saved || !result.checksumSha256 || result.sizeBytes === null
+        || result.nRows === null) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return {
+      operation: rOperation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: job.analysisObjectId,
+      summary,
+      result,
+      metadata: {
+        operation: rOperation,
+        kind: 'deg_summary',
+        scientific_output: true,
+        downloadable: false,
+        ranAt: new Date().toISOString(),
+        objectId: job.analysisObjectId,
+        summary,
+      },
+    };
+  }
+  const loaded = sanitizeLoadSummary(body);
+  if (!loaded.loaded || !loaded.checksumVerified || !loaded.runtimeInstanceHash) {
+    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+  }
+  return {
+    operation: rOperation,
+    artifactType: spec.artifactType,
+    storageKind: 'metadata_only',
+    name: spec.artifactName,
+    description: spec.artifactDescription,
+    objectId: expected.targetAnalysisObjectId,
+    loaded,
+    metadata: {
+      operation: rOperation,
+      kind: 'checkpoint_load',
+      scientific_output: false,
+      live_state_mutation: true,
+      loadedAt: new Date().toISOString(),
+      objectId: expected.targetAnalysisObjectId,
+      loaded,
+    },
+  };
+}
+
 /**
  * Map any thrown bridge/caller error to a SAFE { code, message } pair. Known coded
  * errors get a stable, generic message; anything else collapses to a single generic
@@ -556,6 +941,8 @@ function sanitizeRBridgeError(err) {
     R_DEG_PARAMS_REQUIRED: 'Server-validated DEG parameters and result key are required.',
     R_CHECKPOINT_REQUIRED: 'A server-selected checkpoint is required for a checkpoint load.',
     R_TIMEOUT: 'R runtime did not respond before the timeout.',
+    R_RESPONSE_TOO_LARGE: 'R runtime response exceeded its safe limit.',
+    R_RESPONSE_INVALID: 'R runtime returned an invalid response.',
     R_UNREACHABLE: 'R runtime is unreachable.',
     R_RUNTIME_CHECK_FAILED: 'R runtime check failed.',
     R_OBJECT_INSPECT_FAILED: 'R object inspection failed.',
@@ -581,13 +968,29 @@ function sanitizeRBridgeError(err) {
 // state). Every low-level failure (ECONNREFUSED, socket/host details, timeouts) is
 // sanitized into a coded error with NO host/URL/stack, so nothing internal leaks.
 function createDefaultRCaller(config = {}) {
-  const host = '127.0.0.1';
-  const port = Number(config.port) || Number(process.env.PLUMBER_PORT) || 8000;
+  let endpoint = null;
+  try {
+    endpoint = new URL(
+      config.baseUrl || process.env.R_BACKEND_URL
+      || `http://127.0.0.1:${Number(config.port) || Number(process.env.PLUMBER_PORT) || 8000}`
+    );
+    if (!['http:', 'https:'].includes(endpoint.protocol)
+        || endpoint.username || endpoint.password || endpoint.search || endpoint.hash
+        || (endpoint.pathname && endpoint.pathname !== '/')) {
+      endpoint = null;
+    }
+  } catch {
+    endpoint = null;
+  }
   const token = config.token || process.env.API_TOKEN || '';
+  const maxResponseBytes = Number.isInteger(Number(config.maxResponseBytes))
+    && Number(config.maxResponseBytes) > 0
+    ? Math.min(Number(config.maxResponseBytes), 4 * 1024 * 1024)
+    : 1024 * 1024;
 
-  return function callR({ method, path, timeoutMs, objectStateKey, body }) {
+  const callR = function callR({ method, path, timeoutMs, objectStateKey, body }) {
     return new Promise((resolve, reject) => {
-      if (!token) {
+      if (!token || !endpoint) {
         reject(codedError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.'));
         return;
       }
@@ -597,8 +1000,21 @@ function createDefaultRCaller(config = {}) {
         return;
       }
       let settled = false;
-      const finishOk = (v) => { if (!settled) { settled = true; resolve(v); } };
-      const finishErr = (e) => { if (!settled) { settled = true; reject(e); } };
+      let deadline = null;
+      const finishOk = (v) => {
+        if (!settled) {
+          settled = true;
+          if (deadline) clearTimeout(deadline);
+          resolve(v);
+        }
+      };
+      const finishErr = (e) => {
+        if (!settled) {
+          settled = true;
+          if (deadline) clearTimeout(deadline);
+          reject(e);
+        }
+      };
 
       const headers = { 'X-API-Token': token, Accept: 'application/json' };
       // Server-derived object state key only (never client-controlled). Absent for
@@ -619,12 +1035,30 @@ function createDefaultRCaller(config = {}) {
 
       let req;
       try {
-        req = http.request(
-          { host, port, method, path, headers },
+        const transport = endpoint.protocol === 'https:' ? https : http;
+        req = transport.request(
+          {
+            protocol: endpoint.protocol,
+            hostname: endpoint.hostname,
+            port: endpoint.port || (endpoint.protocol === 'https:' ? 443 : 80),
+            method,
+            path,
+            headers,
+          },
           (res) => {
             const chunks = [];
-            res.on('data', (c) => chunks.push(c));
+            let responseBytes = 0;
+            res.on('data', (c) => {
+              responseBytes += c.length;
+              if (responseBytes > maxResponseBytes) {
+                req.destroy();
+                finishErr(codedError('R_RESPONSE_TOO_LARGE', 'R runtime response exceeded its safe limit.'));
+                return;
+              }
+              chunks.push(c);
+            });
             res.on('end', () => {
+              if (settled) return;
               const raw = Buffer.concat(chunks).toString('utf8');
               let resBody = null;
               try { resBody = raw ? JSON.parse(raw) : null; } catch { resBody = null; }
@@ -638,16 +1072,28 @@ function createDefaultRCaller(config = {}) {
         return;
       }
 
-      req.setTimeout(Number(timeoutMs) || DEFAULT_R_BRIDGE_TIMEOUT_MS, () => {
+      // Total wall-clock deadline, not merely an idle-socket timeout. A peer that
+      // slowly streams bytes therefore cannot keep a heavy-job claim alive forever.
+      deadline = setTimeout(() => {
         req.destroy();
         finishErr(codedError('R_TIMEOUT', 'R runtime did not respond before the timeout.'));
-      });
+      }, Number(timeoutMs) || DEFAULT_R_BRIDGE_TIMEOUT_MS);
+      if (typeof deadline.unref === 'function') deadline.unref();
       // Collapse every transport-level error to a generic, host/URL-free code.
       req.on('error', () => finishErr(codedError('R_UNREACHABLE', 'R runtime is unreachable.')));
       if (payload) req.write(payload);
       req.end();
     });
   };
+  // Keep the shared secret closed over by the caller. Recovery receives only a
+  // verifier capability; the API token is never copied into worker state or logs.
+  Object.defineProperty(callR, 'verifyCompletionReceipt', {
+    value: (envelope) => verifyCompletionReceiptEnvelope(envelope, token),
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return callR;
 }
 
 // ── The bridge ───────────────────────────────────────────────────────────────
@@ -820,12 +1266,38 @@ async function runRBridgeOperation(args = {}) {
     };
   }
 
+  // Every real output/live-state worker operation carries one deterministic,
+  // server-derived receipt binding. R writes this receipt only after its atomic
+  // output or live-state mutation succeeds. Raw job parameters are never read
+  // for any binding field.
+  const completionReceipt = buildCompletionReceiptBinding(job, operation, args);
+  if (completionReceipt) {
+    if (!request.body || typeof request.body !== 'object') {
+      throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
+    }
+    request.body.completion_receipt = completionReceipt;
+  }
+
   if (logger && typeof logger.info === 'function') {
     // NB: never log the state key (an R state key); only the safe method/path.
     logger.info(`[r-bridge] running allowlisted operation '${operation}' (${spec.method} ${spec.path}).`);
   }
 
-  // 3. Call R, mapping any failure to a sanitized, coded error.
+  // 3. Persist the no-safe-retry boundary immediately before the actual HTTP
+  // dispatch. A process crash after this point must become receipt-only recovery,
+  // never a second scientific execution. The callback is claim-guarded by the DB.
+  if (completionReceipt) {
+    if (typeof args.markRDispatchStarted !== 'function') {
+      throw codedError(
+        'R_DISPATCH_MARKER_REQUIRED',
+        'Receipt-backed R dispatch could not be marked safely.'
+      );
+    }
+    await args.markRDispatchStarted();
+  }
+
+  // Call R, mapping any failure to a sanitized, coded error. Once the durable
+  // marker has been written, every caller/response failure is side-effect-possible.
   let response;
   try {
     response = await callR(request);
@@ -836,7 +1308,8 @@ async function runRBridgeOperation(args = {}) {
     if (logger && typeof logger.warn === 'function') {
       logger.warn(`[r-bridge] operation '${operation}' (${spec.method} ${spec.path}) call failed: ${safe.code}.`);
     }
-    throw codedError(safe.code, safe.message);
+    const bridgeError = codedError(safe.code, safe.message);
+    throw completionReceipt ? markRSideEffectsPossible(bridgeError) : bridgeError;
   }
 
   if (!response || response.status !== 200) {
@@ -858,11 +1331,17 @@ async function runRBridgeOperation(args = {}) {
     const err = codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
     err.rStatus = rStatus;
     err.rCode = rCode;
-    throw err;
+    throw completionReceipt ? markRSideEffectsPossible(err) : err;
   }
 
   // 4. Build SAFE, metadata-only artifact metadata. Only a small, sanitized allowlist
   //    of fields is kept; everything else from the R response is dropped.
+  if (completionReceipt && !isPlainObject(response.body)) {
+    throw markRSideEffectsPossible(codedError(
+      'R_RESPONSE_INVALID',
+      'R runtime returned an invalid response.'
+    ));
+  }
   const body = response.body && typeof response.body === 'object' ? response.body : {};
 
   if (operation === 'r.pbmc.pipeline.v1') {
@@ -871,6 +1350,12 @@ async function runRBridgeOperation(args = {}) {
     // success + integrity (checksum/size) — never the storage path/key.
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
+    if (checkpoint.saved === true && !checkpoint.checksumSha256) {
+      throw markRSideEffectsPossible(codedError(
+        'R_RESPONSE_INVALID',
+        'R runtime returned an invalid response.'
+      ));
+    }
     return {
       operation,
       artifactType: spec.artifactType, // 'pipeline_summary'
@@ -899,6 +1384,13 @@ async function runRBridgeOperation(args = {}) {
     // only load success + verification + a bounded object summary — never the storage
     // path/key (the worker already holds it internally and keeps it private).
     const loaded = sanitizeLoadSummary(body);
+    if (loaded.loaded === true && (loaded.checksumVerified !== true
+        || !loaded.runtimeInstanceHash)) {
+      throw markRSideEffectsPossible(codedError(
+        'R_RESPONSE_INVALID',
+        'R runtime returned an invalid response.'
+      ));
+    }
     return {
       operation,
       artifactType: spec.artifactType, // 'checkpoint_load'
@@ -928,6 +1420,12 @@ async function runRBridgeOperation(args = {}) {
     // marker summary. Resolved params are added by the worker (which holds the validated set).
     const summary = sanitizeDegSummary(body);
     const result = sanitizeDegResultInfo(body);
+    if (result.saved === true && !result.checksumSha256) {
+      throw markRSideEffectsPossible(codedError(
+        'R_RESPONSE_INVALID',
+        'R runtime returned an invalid response.'
+      ));
+    }
     return {
       operation,
       artifactType: spec.artifactType, // 'deg_summary'
@@ -952,6 +1450,12 @@ async function runRBridgeOperation(args = {}) {
   if (operation === 'r.seurat.pipeline.v1') {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
+    if (checkpoint.saved === true && !checkpoint.checksumSha256) {
+      throw markRSideEffectsPossible(codedError(
+        'R_RESPONSE_INVALID',
+        'R runtime returned an invalid response.'
+      ));
+    }
     return {
       operation,
       artifactType: spec.artifactType,
@@ -1036,6 +1540,10 @@ module.exports = {
   sanitizeStatNumber,
   sanitizeDegSummary,
   sanitizeDegResultInfo,
+  createCompletionReceiptEnvelope,
+  verifyCompletionReceiptEnvelope,
+  buildCompletionReceiptBinding,
+  descriptorFromCompletionReceipt,
   sanitizeRBridgeError,
   createDefaultRCaller,
   runRBridgeOperation,

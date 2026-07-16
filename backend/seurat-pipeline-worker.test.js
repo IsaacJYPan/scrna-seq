@@ -149,6 +149,7 @@ describe.skipIf(!CONFIGURED)('seurat.pipeline.v1 bridge and worker outputs', () 
   it('bridge builds a fixed R request from server-side dataset/checkpoint keys only', async () => {
     const { job, dataset } = await seedUploadedTenxH5Job({ pcaDims: 20 });
     const calls = [];
+    let dispatchMarkers = 0;
     const descriptor = await runRBridgeOperation({
       job,
       operation: 'r.seurat.pipeline.v1',
@@ -156,16 +157,33 @@ describe.skipIf(!CONFIGURED)('seurat.pipeline.v1 bridge and worker outputs', () 
         params: validateSeuratPipelineParams(job.parameters).params,
         datasetStorageKey: dataset.internalStorageKey,
         datasetFileType: dataset.fileType,
-        checkpointStorageKey: 'vault/checkpoints/job_aaaaaaaaaaaaaaaaaaaaaaaa/abc.rds',
+        checkpointStorageKey: `projects/${job.projectId}/checkpoints/${job.id}/checkpoint.rds`,
       },
       input: { path: '../../escape', code: 'system("x")' },
       callR: recordingCaller(calls),
+      markRDispatchStarted: async () => { dispatchMarkers += 1; },
       logger: silentLogger(),
     });
+    expect(dispatchMarkers).toBe(1);
     expect(calls[0].method).toBe('POST');
     expect(calls[0].path).toBe('/object/seurat-pipeline');
     expect(calls[0].body.dataset_storage_key).toBe(dataset.internalStorageKey);
-    expect(calls[0].body.storage_key).toMatch(/^vault\/checkpoints\/job_/);
+    expect(calls[0].body.storage_key).toBe(
+      `projects/${job.projectId}/checkpoints/${job.id}/checkpoint.rds`
+    );
+    expect(calls[0].body.completion_receipt).toEqual({
+      version: 1,
+      job_id: job.id,
+      job_type: 'seurat.pipeline.v1',
+      r_operation: 'r.seurat.pipeline.v1',
+      project_id: job.projectId,
+      receipt_storage_key: `projects/${job.projectId}/artifacts/${job.id}/completion-receipt.json`,
+      source_analysis_object_id: job.analysisObjectId,
+      source_dataset_id: job.datasetId,
+      source_checkpoint_artifact_id: null,
+      target_analysis_object_id: null,
+      output_storage_key: `projects/${job.projectId}/checkpoints/${job.id}/checkpoint.rds`,
+    });
     expect(calls[0].body).not.toHaveProperty('path');
     expect(calls[0].body).not.toHaveProperty('code');
     expect(descriptor.checkpoint.saved).toBe(true);
@@ -196,10 +214,10 @@ describe.skipIf(!CONFIGURED)('seurat.pipeline.v1 bridge and worker outputs', () 
     expect(JSON.stringify(publicArtifacts)).not.toContain('storageUri');
   });
 
-  it('worker failure before durable checkpoint creates no successful outputs and logs safe R diagnostics', async () => {
+  it('ambiguous worker response creates no successful outputs and logs safe R diagnostics', async () => {
     const { alice, proj, job } = await seedUploadedTenxH5Job({});
     const res = await drain(async () => ({ status: 500, body: { error: 'raw path /vault/x', code: 'missing_hdf5r' } }));
-    expect(res.status).toBe('failed');
+    expect(res.status).toBe('indeterminate');
     const failed = await getProjectJob(alice.id, proj.id, job.id);
     expect(failed.resultAnalysisObjectId).toBeFalsy();
     expect(JSON.stringify(failed.logs)).toContain('status=500');

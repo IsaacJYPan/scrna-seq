@@ -14,11 +14,10 @@
 //     of a fixed enum string set. No parameter is ever interpolated into R code, used
 //     as a file path, or used to choose an R function — the R endpoint consumes these
 //     as typed Seurat arguments only.
-//   - The checkpoint storage key is built from SERVER-controlled ids only (the job id
-//     + server-generated random hex); no client input contributes to it, and it is a
-//     relative, traversal-free path the R backend further confines to its vault.
+//   - The checkpoint storage key is built from the SERVER-controlled job id only;
+//     no client input contributes to it. Its stable per-job filename lets a retry
+//     remove a crashed attempt's unrecorded file safely before calling R again.
 
-const crypto = require('crypto');
 const { projectStorageFileKey } = require('./storage');
 
 /** Coded error so callers (route/handler) can branch + map to 400 / failed-job. */
@@ -127,10 +126,10 @@ function validatePbmcPipelineParams(input) {
 }
 
 // ── Internal checkpoint storage key allocation ───────────────────────────────
-// The server allocates the internal vault key for a job's checkpoint RDS. It is a
-// RELATIVE, traversal-free path built ONLY from the (server-generated) job id and a
-// fresh random hex token — no client input. The R backend additionally confines it to
-// its vault via validate_path(), so it can never escape even if this changed.
+// The server allocates the internal key for a job's checkpoint RDS. It is a
+// relative, traversal-free path built only from the server-generated job id. The
+// stable filename makes retry cleanup deterministic; the R backend independently
+// confines it to internal storage.
 const _JOB_ID_RE = /^job_[0-9a-f]+$/;
 
 function allocateCheckpointStorageKey(projectId, jobId) {
@@ -142,11 +141,10 @@ function allocateCheckpointStorageKey(projectId, jobId) {
     // Defense-in-depth: only ever build a key from a well-formed server job id.
     throw codedError('INVALID_JOB_ID', 'A server-generated job id is required to allocate a checkpoint key.');
   }
-  const token = crypto.randomBytes(12).toString('hex');
   if (projectId) {
-    return projectStorageFileKey(String(projectId), 'checkpoints', jobId, `${token}.rds`);
+    return projectStorageFileKey(String(projectId), 'checkpoints', jobId, 'checkpoint.rds');
   }
-  return `vault/checkpoints/${jobId}/${token}.rds`;
+  return `vault/checkpoints/${jobId}/checkpoint.rds`;
 }
 
 module.exports = {

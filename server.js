@@ -10,17 +10,24 @@ const crypto = require('crypto');
 const db = require('./backend/pgDatabase');
 const config = require('./backend/config');
 const storage = require('./backend/storage');
+const rRuntime = require('./backend/rRuntime');
+const {
+  sanitizeObjectIdSegment,
+  deriveRObjectStateKey,
+  deriveRStateKey,
+} = require('./backend/rStateKeys');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const PLUMBER_PORT = process.env.PLUMBER_PORT || 8000;
+const R_RUNTIME_CONFIG = rRuntime.resolveRRuntimeConfig(process.env, { role: 'web' });
+const PLUMBER_PORT = R_RUNTIME_CONFIG.port;
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS || 12 * 60 * 60);
 const SUPPORTED_R_TARGET = 'R 4.5.x';
 
 // Plumber auth token
-const API_TOKEN = crypto.randomBytes(32).toString('hex');
+const API_TOKEN = R_RUNTIME_CONFIG.token;
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 if (!process.env.SESSION_SECRET && process.env.NODE_ENV === 'production') {
   throw new Error('SESSION_SECRET must be set in production.');
@@ -280,32 +287,11 @@ function sanitizeVaultSegment(value) {
 // caller's OWN namespace — it can never reach another user's state.
 // When no object id is supplied, the key is exactly `user-${id}`, preserving
 // the previous behavior.
-function sanitizeObjectIdSegment(value) {
-  const cleaned = String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
-  return cleaned.replace(/^[._-]+/, '');
-}
-
 // Canonical, server-only derivation from a numeric owner user id + optional object
 // id. This is the single source of truth for the R state key format; deriveRStateKey
 // (the session-facing wrapper) delegates here, and the worker's read-only object
 // inspection bridge is injected with this exact function so it derives the SAME key
 // the /api/r/* proxy would — the client never controls the `user-${id}` prefix.
-function deriveRObjectStateKey(ownerUserId, clientObjectId) {
-  if (ownerUserId === undefined || ownerUserId === null || ownerUserId === '') {
-    throw new Error('An owner user id is required to derive an R state key.');
-  }
-  const base = `user-${ownerUserId}`;
-  const objectSegment = sanitizeObjectIdSegment(clientObjectId);
-  return objectSegment ? `${base}:obj-${objectSegment}` : base;
-}
-
-function deriveRStateKey(user, clientObjectId) {
-  if (!user || (user.id === undefined || user.id === null)) {
-    throw new Error('Authenticated user is required to derive an R state key.');
-  }
-  return deriveRObjectStateKey(user.id, clientObjectId);
-}
-
 // Normalize a proxy sub-path (the part after the /api/r mount) before deciding
 // whether it targets a test-only diagnostic endpoint. A raw
 // `req.path.startsWith('/__test')` check is bypassable with double slashes
@@ -313,7 +299,7 @@ function deriveRStateKey(user, clientObjectId) {
 // past the gate and reach the proxy/R. This decodes once, folds backslashes to
 // forward slashes, and collapses repeated slashes so every spelling of the
 // diagnostic prefix is recognized.
-function isDiagnosticRProxyPath(rawPath) {
+function normalizeRProxyPath(rawPath) {
   let p = String(rawPath || '');
   try {
     p = decodeURIComponent(p);
@@ -322,6 +308,23 @@ function isDiagnosticRProxyPath(rawPath) {
   }
   p = p.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
   if (!p.startsWith('/')) p = `/${p}`;
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+  return p;
+}
+
+// Several legacy Plumber GET endpoints mutate the caller's private live R
+// object. For this proxy, cookie-authenticated GET therefore is not considered
+// CSRF-safe; every proxied method needs an allowed same-site Origin/Referer.
+function enforceRProxyCsrfForCookieAuth(req, res, next) {
+  if (req.authVia !== 'cookie') return next();
+  const origin = req.headers.origin
+    || (req.headers.referer ? originOf(req.headers.referer) : '');
+  if (config.isAllowedOrigin(origin) || isSameOriginRequest(req, origin)) return next();
+  return res.status(403).json({ error: 'CSRF origin check failed.' });
+}
+
+function isDiagnosticRProxyPath(rawPath) {
+  const p = normalizeRProxyPath(rawPath);
   return p === '/__test' || p.startsWith('/__test/');
 }
 
@@ -330,8 +333,10 @@ function isProductionDiagnosticRProxyPath(reqPath) {
 }
 
 function trustedRdsLoadEnabled(env = process.env) {
-  return env.ALLOW_TRUSTED_RDS_LOAD === 'true';
+  return env.NODE_ENV !== 'production' && env.ALLOW_TRUSTED_RDS_LOAD === 'true';
 }
+
+const RDS_DESERIALIZATION_PROXY_PATHS = new Set(['/load-rds', '/restore-session']);
 
 // ── Internal-only R endpoints (never reachable through the public proxy) ──────
 // Some R endpoints are driven EXCLUSIVELY by the in-process worker bridge, which calls
@@ -363,20 +368,52 @@ function trustedRdsLoadEnabled(env = process.env) {
 // checkpoint. It is worker-only for the same durable job/artifact/lineage reasons.
 const R_PROXY_INTERNAL_ONLY_PATHS = new Set([
   '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers',
-  '/object/seurat-pipeline'
+  '/object/seurat-pipeline', '/object/inspect', '/internal/worker-readiness'
 ]);
 
 function isInternalOnlyRProxyPath(rawPath) {
-  let p = String(rawPath || '');
-  try {
-    p = decodeURIComponent(p);
-  } catch {
-    // Malformed percent-encoding: fall back to the raw value rather than throw.
-  }
-  p = p.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
-  if (!p.startsWith('/')) p = `/${p}`;
-  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1); // ignore a single trailing slash
-  return R_PROXY_INTERNAL_ONLY_PATHS.has(p);
+  return R_PROXY_INTERNAL_ONLY_PATHS.has(normalizeRProxyPath(rawPath));
+}
+
+const R_PROXY_PRODUCTION_BLOCKED_PATHS = new Set([
+  '/deg', '/cellchat', '/cellchat-infer', '/enrichment', '/annotate-clusters',
+  '/load-rds', '/save-session', '/check-session', '/restore-session', '/delete-session',
+  '/export-figure',
+  // These legacy loaders read/convert user vault contents synchronously before
+  // the object dimensions are known. Keep them available for explicit local/dev
+  // use, but do not expose them in production until they are durable jobs with
+  // aggregate input and memory admission limits.
+  '/load-local-10x', '/load-h5ad', '/load-multi-10x',
+  // These legacy live-state transformations bypass the durable job/artifact
+  // contract. Metadata import can read and attach an unbounded CSV, while subset
+  // can duplicate a large Seurat object and write an unmanaged client-selected
+  // vault file. Retain them for explicit local development only until reviewed
+  // queued equivalents own their input/output and resource limits.
+  '/csv-columns', '/add-metadata', '/subset', '/integrate',
+]);
+
+const R_PROXY_PRODUCTION_ALLOWLIST = Object.freeze({
+  GET: new Set([
+    '/health', '/session-id', '/qc-distributions', '/load-data',
+    '/object-info', '/pipeline-state', '/meta-values',
+    '/normalize', '/pca', '/cluster', '/umap',
+    '/genes', '/gene-expression', '/feature-values', '/heatmap', '/dot-plot', '/validate',
+  ]),
+  POST: new Set([
+    '/add-meta-mapping', '/qc',
+    '/export-preview', '/render-plot-base64',
+  ]),
+});
+
+function isProductionBlockedRProxyPath(rawPath, env = process.env) {
+  return env.NODE_ENV === 'production' &&
+    R_PROXY_PRODUCTION_BLOCKED_PATHS.has(normalizeRProxyPath(rawPath));
+}
+
+function isAllowedProductionRProxyRequest(method, rawPath, env = process.env) {
+  if (env.NODE_ENV !== 'production') return true;
+  const allowed = R_PROXY_PRODUCTION_ALLOWLIST[String(method || '').toUpperCase()];
+  return !!allowed && allowed.has(normalizeRProxyPath(rawPath));
 }
 
 function getUserVaultDir(user) {
@@ -494,7 +531,8 @@ function validateRProxyPaths(req, res, next) {
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : {};
-    if (req.path === '/load-rds' && !trustedRdsLoadEnabled()) {
+    const normalizedProxyPath = normalizeRProxyPath(req.path);
+    if (RDS_DESERIALIZATION_PROXY_PATHS.has(normalizedProxyPath) && !trustedRdsLoadEnabled()) {
       return res.status(403).json({
         error: 'RDS loading is disabled. Set ALLOW_TRUSTED_RDS_LOAD=true only for trusted local/dev inputs.'
       });
@@ -512,7 +550,7 @@ function validateRProxyPaths(req, res, next) {
 
     for (const value of values) resolveVaultPath(value, req.user);
 
-    if (req.path === '/load-rds') {
+    if (RDS_DESERIALIZATION_PROXY_PATHS.has(normalizedProxyPath)) {
       const safePath = resolveVaultPath(body.path, req.user);
       if (path.extname(safePath).toLowerCase() !== '.rds') {
         return res.status(400).json({ error: 'Only RDS files in the application vault can be loaded.' });
@@ -716,6 +754,315 @@ function createRateLimiter() {
 // share (or exhaust) one another's budget.
 const loginRateLimiter = createRateLimiter();
 const signupRateLimiter = createRateLimiter();
+
+// A downstream browser disconnect does not prove that a synchronous R handler
+// stopped. Keep the admission lease attached to the request until the upstream
+// response actually settles, or until the full R deadline has elapsed. Without
+// this fence an aborting client could immediately open another expensive request
+// while the first one was still consuming the single shared R process.
+const R_PROXY_ADMISSION_STATE = Symbol('rProxyAdmissionState');
+
+function markRProxyAdmissionIndeterminate(req) {
+  const state = req && req[R_PROXY_ADMISSION_STATE];
+  if (state) state.markIndeterminate();
+}
+
+function markRProxyAdmissionSettled(req) {
+  const state = req && req[R_PROXY_ADMISSION_STATE];
+  if (state) state.markSettled();
+}
+
+function markRProxyUpstreamConnected(req) {
+  const state = req && req[R_PROXY_ADMISSION_STATE];
+  if (state) state.markConnected();
+}
+
+function markRProxyUpstreamError(req) {
+  const state = req && req[R_PROXY_ADMISSION_STATE];
+  if (state) state.markProxyError();
+}
+
+function createRProxyAdmission() {
+  const hits = new Map();
+  const activeByUser = new Map();
+  let activeTotal = 0;
+
+  function middleware(req, res, next) {
+    const userKey = String(req.user?.id || 'unknown');
+    const now = Date.now();
+    const windowMs = config.rProxyRateLimitWindowMs();
+    const maxRequests = config.rProxyRateLimitMax();
+    let entry = hits.get(userKey);
+    if (!entry || now >= entry.resetAt) {
+      entry = { count: 0, resetAt: now + windowMs };
+      hits.set(userKey, entry);
+    }
+    entry.count += 1;
+    if (entry.count > maxRequests) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((entry.resetAt - now) / 1000))));
+      return res.status(429).json({ error: 'R request rate limit exceeded. Please retry later.' });
+    }
+
+    const maxConcurrent = config.rProxyMaxConcurrent();
+    const userActive = activeByUser.get(userKey) || 0;
+    // One in-flight request per user prevents a single browser from filling the
+    // entire shared R service. The global cap defaults to one because the v1 R
+    // runtime is one private process; BYOC deployments may raise it only when
+    // their R service topology actually has matching capacity.
+    if (userActive >= 1 || activeTotal >= maxConcurrent) {
+      res.setHeader('Retry-After', '1');
+      return res.status(429).json({ error: 'R service is busy. Please retry shortly.' });
+    }
+
+    let released = false;
+    let indeterminate = false;
+    let upstreamConnected = false;
+    let conservativeReleaseTimer = null;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (conservativeReleaseTimer) {
+        clearTimeout(conservativeReleaseTimer);
+        conservativeReleaseTimer = null;
+      }
+      delete req[R_PROXY_ADMISSION_STATE];
+      activeTotal = Math.max(0, activeTotal - 1);
+      const remaining = Math.max(0, (activeByUser.get(userKey) || 1) - 1);
+      if (remaining === 0) activeByUser.delete(userKey);
+      else activeByUser.set(userKey, remaining);
+    };
+    const scheduleConservativeRelease = () => {
+      if (released || conservativeReleaseTimer) return;
+      indeterminate = true;
+      conservativeReleaseTimer = setTimeout(release, config.rProxyTimeoutMs());
+      if (typeof conservativeReleaseTimer.unref === 'function') {
+        conservativeReleaseTimer.unref();
+      }
+    };
+    activeTotal += 1;
+    activeByUser.set(userKey, userActive + 1);
+    req[R_PROXY_ADMISSION_STATE] = Object.freeze({
+      markIndeterminate: scheduleConservativeRelease,
+      markConnected: () => { upstreamConnected = true; },
+      // DNS/connection-refused failures before a TCP connection cannot have
+      // started an R handler. Once connected, a reset is indeterminate.
+      markProxyError: () => {
+        if (upstreamConnected) scheduleConservativeRelease();
+        else release();
+      },
+      // An upstream `end` proves the synchronous R request returned. Capacity is
+      // safe to release even when the browser disappeared before receiving it.
+      markSettled: release,
+    });
+    res.once('finish', () => {
+      if (indeterminate) scheduleConservativeRelease();
+      else release();
+    });
+    res.once('close', () => {
+      if (res.writableFinished && !indeterminate) release();
+      else scheduleConservativeRelease();
+    });
+    try {
+      return next();
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
+  middleware.reset = () => {
+    hits.clear();
+    activeByUser.clear();
+    activeTotal = 0;
+  };
+  return middleware;
+}
+
+function sendRProxyFailure(res, status, message) {
+  if (res.headersSent || res.writableEnded) return;
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(JSON.stringify({ error: message }));
+}
+
+const R_PROXY_MAX_REQUEST_BYTES = 256 * 1024;
+
+function isJsonMediaType(value) {
+  const mediaType = String(value || '').split(';', 1)[0].trim().toLowerCase();
+  return mediaType === 'application/json'
+    || /^application\/[a-z0-9!#$&^_.+-]+\+json$/.test(mediaType);
+}
+
+function enforceRProxyRequestShape(req, res, next) {
+  const method = String(req.method || '').toUpperCase();
+  const headers = req.headers || {};
+  const rawLength = headers['content-length'];
+  const hasTransferEncoding = headers['transfer-encoding'] !== undefined;
+  let declaredLength = 0;
+  if (rawLength !== undefined) {
+    if (!/^[0-9]+$/.test(String(rawLength).trim())) {
+      return res.status(400).json({ error: 'Invalid R request body length.' });
+    }
+    declaredLength = Number(rawLength);
+    if (!Number.isSafeInteger(declaredLength)) {
+      return res.status(400).json({ error: 'Invalid R request body length.' });
+    }
+  }
+
+  if (method === 'GET') {
+    if (declaredLength > 0 || hasTransferEncoding) {
+      return res.status(400).json({ error: 'GET R requests must not include a body.' });
+    }
+    return next();
+  }
+  if (method !== 'POST') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const contentEncoding = String(headers['content-encoding'] || 'identity').trim().toLowerCase();
+  if (contentEncoding !== 'identity') {
+    return res.status(415).json({ error: 'Compressed R request bodies are not accepted.' });
+  }
+  if (!isJsonMediaType(headers['content-type'])) {
+    return res.status(415).json({ error: 'R POST requests require a JSON body.' });
+  }
+  if (declaredLength > R_PROXY_MAX_REQUEST_BYTES) {
+    return res.status(413).json({ error: 'R request body exceeded the configured size limit.' });
+  }
+  return next();
+}
+
+const parseRProxyJsonBody = express.json({
+  limit: R_PROXY_MAX_REQUEST_BYTES,
+  type: ['application/json', 'application/*+json'],
+});
+
+function parseBoundedRProxyJson(req, res, next) {
+  if (String(req.method || '').toUpperCase() !== 'POST') return next();
+  return parseRProxyJsonBody(req, res, (error) => {
+    if (!error) {
+      if (req.body === undefined) {
+        return res.status(400).json({ error: 'R POST requests require a JSON body.' });
+      }
+      return next();
+    }
+    if (error.type === 'entity.too.large' || error.status === 413) {
+      return res.status(413).json({ error: 'R request body exceeded the configured size limit.' });
+    }
+    return res.status(400).json({ error: 'R request body must be valid JSON.' });
+  });
+}
+
+function writeRProxyRequest(proxyReq, req) {
+  // http-proxy starts with a copy of every browser header. Remove that inherited
+  // set completely so cookies, bearer tokens, forwarding headers, and arbitrary
+  // X-* values cannot cross the Express/R trust boundary.
+  for (const name of proxyReq.getHeaderNames()) proxyReq.removeHeader(name);
+  proxyReq.setHeader('Host', new URL(R_RUNTIME_CONFIG.baseUrl).host);
+  proxyReq.setHeader('Accept', 'application/json');
+  proxyReq.setHeader('X-API-Token', API_TOKEN);
+  proxyReq.setHeader('X-Object-ID', deriveRStateKey(req.user, req.verifiedObjectId));
+
+  if (String(req.method || '').toUpperCase() === 'POST') {
+    const bodyData = JSON.stringify(req.body);
+    proxyReq.setHeader('Content-Type', 'application/json');
+    proxyReq.setHeader('Content-Length', String(Buffer.byteLength(bodyData)));
+    proxyReq.write(bodyData);
+  }
+}
+
+const R_PROXY_PRIVATE_RESPONSE_KEYS = new Set([
+  'r_home', 'file_path', 'path', 'paths', 'csv_path', 'storage_uri',
+  'storage_key', 'dataset_storage_key', 'token', 'api_token',
+]);
+
+function redactAbsolutePaths(value) {
+  return String(value)
+    .replace(/[A-Za-z]:[\\/][^\s'"`]+/g, '[redacted-path]')
+    .replace(/(^|[\s'"`])\/(?:[^\s'"`/]+\/)+[^\s'"`]+/g, '$1[redacted-path]');
+}
+
+function sanitizeRProxyJson(value) {
+  if (Array.isArray(value)) return value.map((item) => sanitizeRProxyJson(item));
+  if (value && typeof value === 'object') {
+    const safe = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      if (R_PROXY_PRIVATE_RESPONSE_KEYS.has(childKey.toLowerCase())) continue;
+      safe[childKey] = sanitizeRProxyJson(childValue);
+    }
+    return safe;
+  }
+  if (typeof value === 'string') return redactAbsolutePaths(value);
+  return value;
+}
+
+function handleBoundedRProxyResponse(proxyRes, req, res) {
+  const maxBytes = config.rProxyMaxResponseBytes();
+  const declaredBytes = Number(proxyRes.headers && proxyRes.headers['content-length']);
+  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+    markRProxyAdmissionIndeterminate(req);
+    proxyRes.destroy();
+    sendRProxyFailure(res, 502, 'R response exceeded the configured size limit.');
+    return;
+  }
+  const chunks = [];
+  let received = 0;
+  let finished = false;
+
+  proxyRes.on('data', (chunk) => {
+    if (finished) return;
+    received += chunk.length;
+    if (received > maxBytes) {
+      finished = true;
+      markRProxyAdmissionIndeterminate(req);
+      proxyRes.destroy();
+      sendRProxyFailure(res, 502, 'R response exceeded the configured size limit.');
+      return;
+    }
+    chunks.push(chunk);
+  });
+  proxyRes.on('end', () => {
+    if (finished) return;
+    finished = true;
+    markRProxyAdmissionSettled(req);
+    const upstreamStatus = proxyRes.statusCode || 502;
+    if (upstreamStatus < 200 || upstreamStatus >= 300) {
+      sendRProxyFailure(res, upstreamStatus, 'R request failed.');
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks, received).toString('utf8'));
+    } catch {
+      sendRProxyFailure(res, 502, 'R service returned an invalid response.');
+      return;
+    }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.error !== undefined) {
+      sendRProxyFailure(res, 502, 'R request failed.');
+      return;
+    }
+    const outgoing = Buffer.from(JSON.stringify(sanitizeRProxyJson(parsed)));
+    res.statusCode = upstreamStatus;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Length', String(outgoing.length));
+    res.end(outgoing);
+  });
+  proxyRes.on('error', () => {
+    if (finished) return;
+    finished = true;
+    markRProxyAdmissionIndeterminate(req);
+    sendRProxyFailure(res, 502, 'R service response failed.');
+  });
+  proxyRes.on('aborted', () => {
+    if (finished) return;
+    finished = true;
+    markRProxyAdmissionIndeterminate(req);
+    sendRProxyFailure(res, 502, 'R service response failed.');
+  });
+}
+
+const rProxyAdmission = createRProxyAdmission();
 
 // ── R proxy path-field validation allowlist ─────────────────────────────────
 // Single source of truth for which request fields validateRProxyPaths treats as
@@ -1042,6 +1389,15 @@ app.use('/api/jobs', requireAuth);
 
 app.post('/api/jobs', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+  // Receipt-backed scientific jobs require project-scoped durable storage and
+  // recovery authorization. Do not accept them through this legacy projectless
+  // compatibility route only to fail later in the worker.
+  if (db.RETRYABLE_DURABLE_JOB_TYPES.has(body.jobType)) {
+    return res.status(400).json({
+      error: 'This durable scientific job type requires the project-scoped jobs API.',
+    });
+  }
 
   // Job ids are server-issued. Reject any client attempt to choose one.
   if (body.id !== undefined) {
@@ -1840,16 +2196,33 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
     return res.status(400).json({ error: 'Malformed dataset ID.' });
   }
 
-  // A checkpoint fork allocates its result object and derives its dataset from
-  // the server-selected source checkpoint. Accepting either client field would
-  // let a queued job advertise forged output metadata before the worker runs.
-  if (body.jobType === 'checkpoint.fork.v1') {
-    if (body.resultAnalysisObjectId !== undefined) {
-      return res.status(400).json({ error: 'checkpoint.fork.v1 result analysis object is server-managed and must not be provided.' });
-    }
-    if (body.datasetId !== undefined) {
-      return res.status(400).json({ error: 'checkpoint.fork.v1 dataset is derived from the source checkpoint and must not be provided.' });
-    }
+  // Receipt-backed handlers bind their exact source and output shape before R
+  // contact. Reject incompatible client references synchronously so they cannot
+  // manufacture partial-output/recovery states after dispatch.
+  const serverManagedResultTypes = [
+    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1',
+    'checkpoint.load.v1', 'checkpoint.fork.v1',
+  ];
+  const noDatasetBindingTypes = [
+    'pbmc.pipeline.v1', 'deg.find_markers.v1',
+    'checkpoint.load.v1', 'checkpoint.fork.v1',
+  ];
+  if (serverManagedResultTypes.includes(body.jobType)
+      && body.resultAnalysisObjectId !== undefined) {
+    return res.status(400).json({
+      error: `${body.jobType} result analysis object is server-managed and must not be provided.`,
+    });
+  }
+  if (noDatasetBindingTypes.includes(body.jobType) && body.datasetId !== undefined) {
+    return res.status(400).json({
+      error: `${body.jobType} dataset is derived from its source analysis object and must not be provided.`,
+    });
+  }
+  if (serverManagedResultTypes.includes(body.jobType)
+      && (body.analysisObjectId === undefined || body.analysisObjectId === null)) {
+    return res.status(400).json({
+      error: `${body.jobType} requires a source analysisObjectId.`,
+    });
   }
 
   // Durable dataset-backed Seurat pipeline has a strict server-side parameter
@@ -1861,14 +2234,8 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
     } catch (e) {
       return res.status(400).json({ error: e.message || 'Invalid seurat.pipeline.v1 parameters.' });
     }
-    if (body.resultAnalysisObjectId !== undefined && body.resultAnalysisObjectId !== null) {
-      return res.status(400).json({ error: 'Result analysis object is server-managed and must not be provided.' });
-    }
     if (body.datasetId === undefined || body.datasetId === null) {
       return res.status(400).json({ error: 'seurat.pipeline.v1 requires datasetId.' });
-    }
-    if (body.analysisObjectId === undefined || body.analysisObjectId === null) {
-      return res.status(400).json({ error: 'seurat.pipeline.v1 requires analysisObjectId for the raw dataset object.' });
     }
   }
 
@@ -2157,8 +2524,13 @@ app.get('/api/projects/:projectId/jobs/:jobId/artifacts', async (req, res) => {
 // ── R Plumber Proxy ─────────────────────────────────────────────────────
 // Forward all /api/r/* requests to localhost:8000/*
 app.use('/api/r', requireAuth);
-app.use('/api/r', express.json({ limit: '10mb', type: ['application/json', 'application/*+json'] }));
-
+app.use('/api/r', enforceRProxyCsrfForCookieAuth);
+app.use('/api/r', (req, res, next) => {
+  if (String(req.originalUrl || '').length > 8192) {
+    return res.status(414).json({ error: 'R request URL is too long.' });
+  }
+  next();
+});
 // Gate test-only diagnostic endpoints. They must return 404 in production (or
 // whenever diagnostics are disabled) BEFORE the request can reach the proxy/R.
 app.use('/api/r', (req, res, next) => {
@@ -2182,8 +2554,18 @@ app.use('/api/r', (req, res, next) => {
   if (isInternalOnlyRProxyPath(req.path)) {
     return res.status(404).json({ error: 'Not found' });
   }
+  if (isProductionBlockedRProxyPath(req.path)
+      || !isAllowedProductionRProxyRequest(req.method, req.path)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
   next();
 });
+
+// Only reviewed public paths reach body parsing. This preserves the no-leak 404
+// for internal/unknown paths while still enforcing a streaming cap for every
+// body that can actually be proxied to R.
+app.use('/api/r', enforceRProxyRequestShape);
+app.use('/api/r', parseBoundedRProxyJson);
 
 app.use('/api/r', validateRProxyPaths);
 // Verify any client-supplied X-Object-ID against the DB BEFORE proxying to R,
@@ -2200,31 +2582,32 @@ app.get('/api/r/__test/state-key', (req, res) => {
   });
 });
 
+app.use('/api/r', rProxyAdmission);
 app.use('/api/r', createProxyMiddleware({
-  target: `http://127.0.0.1:${PLUMBER_PORT}`,
+  target: R_RUNTIME_CONFIG.baseUrl,
   changeOrigin: true,
+  selfHandleResponse: true,
+  proxyTimeout: config.rProxyTimeoutMs(),
+  timeout: config.rProxyTimeoutMs() + 5000,
   pathRewrite: {
     '^/api/r': '', // remove /api/r base
   },
   on: {
-    proxyReq: (proxyReq, req, res) => {
-      // Inject required headers for Plumber
-      proxyReq.setHeader('X-API-Token', API_TOKEN);
-
-      // Forward only the server-derived R state key. The user prefix is
-      // server-controlled (from the verified session); the optional object
-      // segment comes from req.verifiedObjectId, which verifyRObjectOwnership
-      // has already confirmed is a DB-backed object owned by this user. A raw,
-      // unverified client X-Object-ID never reaches R. See deriveRStateKey().
-      proxyReq.setHeader('X-Object-ID', deriveRStateKey(req.user, req.verifiedObjectId));
-
-      if (req.body && Object.keys(req.body).length > 0) {
-        const bodyData = JSON.stringify(req.body);
-        proxyReq.setHeader('Content-Type', 'application/json');
-        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
-        proxyReq.write(bodyData);
-      }
-    }
+    proxyReq: (proxyReq, req) => {
+      const observeSocket = (socket) => {
+        if (!socket || socket.destroyed) return;
+        if (socket.connecting) socket.once('connect', () => markRProxyUpstreamConnected(req));
+        else markRProxyUpstreamConnected(req);
+      };
+      if (proxyReq.socket) observeSocket(proxyReq.socket);
+      else proxyReq.once('socket', observeSocket);
+      writeRProxyRequest(proxyReq, req);
+    },
+    proxyRes: handleBoundedRProxyResponse,
+    error: (error, req, res) => {
+      markRProxyUpstreamError(req);
+      sendRProxyFailure(res, 502, 'R service is unavailable or exceeded its deadline.');
+    },
   }
 }));
 
@@ -2273,7 +2656,7 @@ async function probeRHealth(timeoutMs = 750) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`http://127.0.0.1:${PLUMBER_PORT}/health`, {
+    const res = await fetch(`${R_RUNTIME_CONFIG.baseUrl}/health`, {
       headers: { 'X-API-Token': API_TOKEN, Accept: 'application/json' },
       signal: controller.signal
     });
@@ -2345,7 +2728,12 @@ function startPlumber(options = {}) {
   
   const rProcess = spawnFn(rscript, [plumberScript], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, API_TOKEN, PLUMBER_PORT: String(PLUMBER_PORT) }
+    env: rRuntime.buildRChildEnv(process.env, {
+      token: API_TOKEN,
+      port: PLUMBER_PORT,
+      storageRoot: config.storageRoot(),
+      analysisRoot: __dirname,
+    })
   });
 
   rProcess.ready = ready;
@@ -2393,6 +2781,17 @@ function startPlumber(options = {}) {
   // awaiting readiness. Callers that gate worker startup still await rProcess.ready.
   ready.catch(() => {});
   return rProcess;
+}
+
+function startWebRBackend(options = {}) {
+  const logger = options.logger || console;
+  if (R_RUNTIME_CONFIG.mode === 'external') {
+    if (typeof logger.info === 'function') {
+      logger.info('[R] Using configured private external R runtime; the web process will not spawn R.');
+    }
+    return null;
+  }
+  return (options.startPlumber || startPlumber)({ logger });
 }
 
 async function startRBackendAndJobWorkerIfEnabled(env = process.env, deps = {}) {
@@ -2587,8 +2986,8 @@ if (require.main === module) {
   initAppDatabase().then(() => {
     httpServer = app.listen(PORT, () => {
       console.log(`Node.js Web Server running on http://localhost:${PORT}`);
-      console.log(`Starting local R Plumber backend...`);
-      startRBackendAndJobWorkerIfEnabled();
+      if (R_RUNTIME_CONFIG.mode === 'owned') console.log('Starting local R Plumber backend...');
+      startWebRBackend();
     });
   }).catch((err) => {
     console.error('[DB] Refusing to start; Postgres initialization failed:', err && err.message ? err.message : err);
@@ -2614,6 +3013,9 @@ if (require.main === module) {
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, onShutdownSignal);
   }
+  process.on('message', (message) => {
+    if (message && message.type === 'benchone:shutdown') onShutdownSignal();
+  });
 }
 
 module.exports = {
@@ -2627,9 +3029,21 @@ module.exports = {
   sanitizeObjectIdSegment,
   isProductionDiagnosticRProxyPath,
   isDiagnosticRProxyPath,
+  normalizeRProxyPath,
   trustedRdsLoadEnabled,
+  RDS_DESERIALIZATION_PROXY_PATHS,
   isInternalOnlyRProxyPath,
   R_PROXY_INTERNAL_ONLY_PATHS,
+  isProductionBlockedRProxyPath,
+  R_PROXY_PRODUCTION_BLOCKED_PATHS,
+  isAllowedProductionRProxyRequest,
+  R_PROXY_PRODUCTION_ALLOWLIST,
+  createRProxyAdmission,
+  enforceRProxyRequestShape,
+  parseBoundedRProxyJson,
+  writeRProxyRequest,
+  handleBoundedRProxyResponse,
+  sanitizeRProxyJson,
   // Exposed for tests + R proxy ownership verification
   issueSession,
   verifySession,
@@ -2652,6 +3066,7 @@ module.exports = {
   buildRuntimeDiagnostics,
   // Exposed for tests: opt-in job worker startup/shutdown wiring
   startPlumber,
+  startWebRBackend,
   startRBackendAndJobWorkerIfEnabled,
   waitForOwnedRHealth,
   startJobWorkerIfEnabled,

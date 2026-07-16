@@ -38,7 +38,7 @@ const {
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getProjectJob,
-  claimNextJob, cancelProjectJob,
+  claimNextJob, reapExpiredJobs, cancelProjectJob,
   getJobArtifactsByJobId,
   listProjectAnalysisObjectChildren,
   completeDegFindMarkersResultByWorker,
@@ -68,6 +68,7 @@ const { deriveRObjectStateKey, isInternalOnlyRProxyPath, R_PROXY_INTERNAL_ONLY_P
 
 // Deterministic UTC instants in SQLite's 'YYYY-MM-DD HH:MM:SS' format.
 const T0 = '2030-01-01 00:00:00';
+const LATER = '2030-01-01 01:00:00';
 
 function silentLogger() { return { info() {}, warn() {}, error() {} }; }
 
@@ -302,7 +303,7 @@ describe.skipIf(!CONFIGURED)('validateDegFindMarkersParams — fixed allowlist',
 describe.skipIf(!CONFIGURED)('allocateDegResultStorageKey — server-controlled internal key', () => {
   it('builds a safe relative key from a well-formed job id only', async () => {
     const key = allocateDegResultStorageKey('proj_abc123', 'job_abc123');
-    expect(key).toMatch(/^projects\/proj_abc123\/artifacts\/job_abc123\/[0-9a-f]{24}\.csv$/);
+    expect(key).toBe('projects/proj_abc123/artifacts/job_abc123/markers.csv');
     expect(dbmod.isSafeInternalStorageKey(key)).toBe(true);
   });
   it('refuses anything but a server-generated job id (no client input contributes)', async () => {
@@ -310,9 +311,9 @@ describe.skipIf(!CONFIGURED)('allocateDegResultStorageKey — server-controlled 
       expect(() => allocateDegResultStorageKey(bad)).toThrowError(/server-generated job id/);
     }
   });
-  it('is unique per call', async () => {
+  it('is stable per job so retry cleanup targets the prior attempt', async () => {
     expect(allocateDegResultStorageKey('proj_abc123', 'job_abc123'))
-      .not.toBe(allocateDegResultStorageKey('proj_abc123', 'job_abc123'));
+      .toBe(allocateDegResultStorageKey('proj_abc123', 'job_abc123'));
   });
 });
 
@@ -371,7 +372,7 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — direct R-proxy access is b
     ]) {
       expect(isInternalOnlyRProxyPath(p), p).toBe(true);
     }
-    for (const ok of ['/object/inspect', '/health', '/object/deg-find-markers-extra', '/deg-find-markers', '/deg', '']) {
+    for (const ok of ['/health', '/object/deg-find-markers-extra', '/deg-find-markers', '/deg', '']) {
       expect(isInternalOnlyRProxyPath(ok), ok).toBe(false);
     }
     // The pbmc + checkpoint-load blocks remain intact.
@@ -414,9 +415,9 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — direct R-proxy access is b
 
   it('does NOT over-block: a non-internal /api/r path still enforces X-Object-ID ownership before R', async () => {
     const { token } = await createUserWithToken({ email: 'owner3@example.com' });
-    const bad = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
+    const bad = await api(server, '/api/r/health', { method: 'GET', token, headers: { 'X-Object-ID': 'no spaces!' } });
     expect(bad.status).toBe(400);
-    const unknown = await api(server, '/api/r/object/inspect', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
+    const unknown = await api(server, '/api/r/health', { method: 'GET', token, headers: { 'X-Object-ID': 'ao_doesnotexist' } });
     expect(unknown.status).toBe(404);
   });
 
@@ -567,7 +568,7 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker success', () => {
     expect(degReqs).toHaveLength(1);
     expect(degReqs[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, obj.id));
     expect(degReqs[0].body.storage_key)
-      .toMatch(new RegExp(`^projects/${proj.id}/artifacts/job_[0-9a-f]+/[0-9a-f]{24}\\.csv$`));
+      .toMatch(new RegExp(`^projects/${proj.id}/artifacts/job_[0-9a-f]+/markers\\.csv$`));
 
     const { markers, summary, all } = await degArtifacts(job.id);
     expect(all).toHaveLength(2);
@@ -634,6 +635,29 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker success', () => {
     expect(logs).not.toContain(deriveRObjectStateKey(alice.id, obj.id));
   });
 
+  it('removes the deterministic unrecorded output key before a retry contacts R', async () => {
+    const { alice, proj, obj } = await seedDegInput();
+    const job = await seedDegJob(alice.id, proj.id, obj.id);
+    await claimNextJob('worker-crashed-before-output-record', { leaseSeconds: 1, now: T0 });
+    const reaped = await reapExpiredJobs({ now: LATER });
+    expect(reaped.requeued).toContain(job.id);
+
+    const removed = [];
+    const calls = [];
+    const res = await drain(degCaller(calls), LATER, {
+      storageProvider: {
+        remove: async (key) => { removed.push(key); return true; },
+        inspect: () => ({ checksumSha256: 'a'.repeat(64), sizeBytes: 123 }),
+      },
+    });
+    expect(res.status).toBe('completed');
+    expect(removed).toEqual([
+      `projects/${proj.id}/artifacts/${job.id}/markers.csv`,
+      `projects/${proj.id}/artifacts/${job.id}/completion-receipt.json`,
+    ]);
+    expect(calls.some((call) => call.path === '/object/deg-find-markers')).toBe(true);
+  });
+
   it('a duplicate completion cannot duplicate the success artifacts (DEG_RESULT_EXISTS)', async () => {
     const { alice, proj, obj } = await seedDegInput();
     const job = await seedDegJob(alice.id, proj.id, obj.id);
@@ -663,13 +687,13 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker failure / cancel', 
   beforeEach(async () => { await dbmod.resetSchemaForTests(); });
 
 
-  it('an R failure (non-200) fails the job and records NO DEG artifact', async () => {
+  it('an R failure (non-200) remains indeterminate and records NO DEG artifact', async () => {
     const { alice, proj, obj } = await seedDegInput();
     const job = await seedDegJob(alice.id, proj.id, obj.id);
     const res = await drain(degCaller([], { status: 500, body: { error: 'boom' } }), T0);
-    expect(res.status).toBe('failed');
+    expect(res.status).toBe('indeterminate');
     expect((await degArtifacts(job.id)).all).toHaveLength(0);
-    expect((await getProjectJob(alice.id, proj.id, job.id)).status).toBe('failed');
+    expect((await getProjectJob(alice.id, proj.id, job.id)).status).toBe('running');
   });
 
   it('an R result with saved:false fails the job and records NO DEG artifact', async () => {
@@ -681,12 +705,12 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker failure / cancel', 
     expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
-  it('a missing checksum (write produced no integrity) fails the job and records NO DEG artifact', async () => {
+  it('a missing checksum remains indeterminate and records NO DEG artifact', async () => {
     const { alice, proj, obj } = await seedDegInput();
     const job = await seedDegJob(alice.id, proj.id, obj.id);
     const body = degBody({ result: { saved: true, checksum_sha256: 'not-hex', size_bytes: 1, n_rows: 1 } });
     const res = await drain(degCaller([], { status: 200, body }), T0);
-    expect(res.status).toBe('failed');
+    expect(res.status).toBe('indeterminate');
     expect((await degArtifacts(job.id)).all).toHaveLength(0);
   });
 
@@ -845,7 +869,7 @@ describe.skipIf(!CONFIGURED)('sanitizeDegSummary — bounded, metadata-only, saf
     const huge = [];
     for (let i = 0; i < 5000; i++) huge.push({ group: '0', gene: `G${i}`, avg_log2FC: 1, pct_1: 0.5, pct_2: 0.1, p_val_adj: 0.01, rank: i });
     const out = sanitizeDegSummary({ summary: { top_markers: huge } });
-    expect(out.topMarkers.length).toBeLessThanOrEqual(2000);
+    expect(out.topMarkers.length).toBeLessThanOrEqual(256);
   });
 
   it('drops NaN/Infinity/oversized numeric stats', async () => {

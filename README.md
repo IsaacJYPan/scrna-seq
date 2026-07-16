@@ -20,13 +20,19 @@ storage paths/keys in responses.
 
 ```text
 Browser (React/Vite)
-  -> Express API (auth, authorization, DB, uploads, R proxy)
-  -> R Plumber/Seurat backend (compute only, localhost/private)
+  -> Express API (auth, authorization, DB, uploads, R proxy) --+
+                                                               +-> private R Plumber/Seurat service
+Standalone job worker -> Postgres queue + shared storage ------+
 ```
 
 Express is the authentication and authorization boundary. The R backend trusts
 only server-injected headers such as `X-API-Token` and server-derived
 `X-Object-ID`; it must not be exposed directly to users or the public network.
+The supported v1 execution topology is deliberately limited to one standalone
+worker process, one in-flight job, and the same private R service used by the web
+proxy. This preserves private live-R object continuity while moving durable work
+out of the web process. Multiple heavy R workers are not yet a supported scaling
+topology.
 
 ## Architecture Status
 
@@ -51,7 +57,7 @@ At a glance:
   reattach. Artifact downloads, general job launch/cancel/retry, and lineage
   mutation are still not UI-wired.
 - **Backend-only (implemented + tested, no UI yet):** general dataset management,
-  the opt-in worker loop controls, and
+  standalone worker operations/health controls, and
   the PBMC pipeline / runtime-check / object-inspect worker workflows. The DEG
   marker worker and narrow Seurat pipeline worker are UI-wired for selected
   launch/status/safe summary metadata only.
@@ -60,7 +66,9 @@ At a glance:
   restores; `/api/auth/logout` clears; cookie auth is preferred while the
   localStorage bearer remains a deprecated fallback), an expanded Postgres data
   runtime data layer + schema proven by real-Postgres contract/runtime tests,
-  server-owned storage-key hardening, and centralized config validation.
+  server-owned storage-key hardening, centralized config validation, and a
+  standalone Postgres-lease queue consumer with crash recovery and graceful
+  drain behavior.
 - **Durable local storage:** new dataset, checkpoint, and DEG files use
   server-owned project keys under `STORAGE_ROOT`. Existing private-vault records
   remain readable. Project writers can fork a member's durable checkpoint into a
@@ -83,13 +91,63 @@ npm install
 npm run dev
 ```
 
-This starts Vite plus the Express server, which starts local R Plumber in the
-current development setup. A local R installation with the required Seurat
-packages is expected. The local/dev R target is the R 4.5.x family; the Docker
-image pins R 4.5.3 with Bioconductor 3.22.
+This starts Vite, Express, one local R Plumber service, and one standalone job
+worker. The development supervisor gives Express and the worker one ephemeral R
+service token so both reach the same private live-R process. Use
+`npm run dev:no-worker` when only Vite, Express, and local R are needed.
+
+A local R installation with the required Seurat packages is expected. The
+local/dev R target is the R 4.5.x family; the Docker image pins R 4.5.3 with
+Bioconductor 3.22.
+
+For a separately managed R service, configure `R_RUNTIME_MODE=external`, a
+private `R_BACKEND_URL`, and the same dedicated 32-or-more-character
+`R_API_TOKEN` on Express, the standalone worker, and R (as `API_TOKEN`). Then
+run the processes separately:
+
+```bash
+npm run start
+npm run worker
+```
+
+The worker also requires the same Postgres database and the same persistent
+`STORAGE_ROOT` mount as Express and R. Its private `/livez` and `/readyz`
+endpoints default to `127.0.0.1:3101`. Readiness requires Postgres,
+authenticated R, a shared-storage proof, and the configured free-memory
+admission threshold before any claim is taken.
+
+`JOB_WORKER_CONCURRENCY` is fixed at `1` in this topology. The memory threshold
+pauses new claims but is not a hard RAM limit; deployments still need real
+container/VM resource limits. Cancellation is cooperative for shared-R calls:
+it blocks durable output publication, but it does not claim to terminate compute
+already running inside R. See `.env.example` for lease, capability, health, and
+drain settings.
+
+Private live-R objects are bounded independently of job admission. R accepts only
+authenticated server-derived state keys, retains no empty keys, and applies
+deterministic least-recently-used eviction against global/per-user session-count
+and estimated object-byte budgets. Evicted objects must be reattached from their
+durable checkpoint; collaborators never share another user's live R object.
+
+Production `/api/r` is an exact reviewed method/path allowlist, not an open
+Plumber catch-all. Cookie-authenticated R requests require an allowed
+Origin/Referer even for GET because legacy GET operations can mutate private
+live R state. The compatibility proxy has one global admission slot plus
+rate/deadline/request/response limits, accepts only bodyless GET or bounded JSON
+POST requests, strips all browser headers before injecting only the private R
+token/state key, requires JSON success responses, replaces every upstream error
+  with a stable public body, strips private path/runtime fields, and blocks legacy
+  heavy, RDS, persistent-export, synchronous vault-loading, unbounded metadata-import,
+  and unmanaged live-subset routes in production.
+Uploaded 10X/H5 work should use the reviewed project dataset + durable Seurat job
+path; the legacy live-session loaders, CSV inspection/mutation, and vault-writing subset
+flow remain local/development compatibility only until they have bounded durable jobs.
+Synchronous batch integration is also development-only: CCA anchor search scales
+across batch pairs and cannot be safely interrupted when the shared R service times out.
 
 RDS imports are disabled by default because RDS deserialization can execute R
-code. Set `ALLOW_TRUSTED_RDS_LOAD=true` only for trusted local/dev `.rds` files.
+code. Set `ALLOW_TRUSTED_RDS_LOAD=true` only for trusted local/dev `.rds` files;
+production always blocks public load and restore regardless of that setting.
 The Docker image skips optional legacy packages such as CellChat and SeuratDisk
 unless built with `--build-arg INSTALL_OPTIONAL_R_PACKAGES=true`.
 
@@ -125,15 +183,20 @@ and upload-limit requirements.
 Existing local SQLite data is not migrated; a fresh Postgres database starts empty.
 
 Postgres metadata and scientific files are durable when both Postgres and
-`STORAGE_ROOT` are persisted and shared with the R process. Existing private-vault
-records also require `VAULT_ROOT` while they remain in use. There is no startup file
-reconciliation, object storage, or byte-download API yet.
+`STORAGE_ROOT` are persisted and shared with Express, the worker, and R. Existing
+private-vault records also require `VAULT_ROOT` while they remain in use. Heavy
+jobs have bounded retry support: exact already-committed outputs can be resumed
+after a worker crash without another R call, including output committed on the
+final execution attempt or before creator removal. Partial or ambiguous output
+sets fail closed, and a canceled job cannot retain published output. There
+is no startup file reconciliation, object storage, or byte-download API yet.
 
 R/workflow checks for the hardened, live paths (require a real R/Seurat backend;
 they skip cleanly when Seurat is unavailable):
 
 ```bash
 npm run test:r-storage
+npm run test:r-public-bounds
 npm run test:r-state-proxy
 npm run test:seurat-pipeline
 npm run test:pbmc-parent

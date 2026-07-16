@@ -17,15 +17,14 @@
 //     endpoint consumes these as typed Seurat arguments only. The two string params
 //     (`groupBy`, `assay`, `testUse`) are restricted to short, fixed enum allowlists,
 //     so nothing string-like (which could carry code/path) ever flows to R.
-//   - The result storage key is built from SERVER-controlled ids only (the job id +
-//     server-generated random hex); no client input contributes to it, and it is a
-//     relative, traversal-free path the R backend further confines to its vault.
+//   - The result storage key is built from the SERVER-controlled job id only; no
+//     client input contributes to it. Its stable per-job filename lets a retry
+//     remove a crashed attempt's unrecorded file safely before calling R again.
 //
 // SCOPE: DEG is an OUTPUT-producing analysis over an EXISTING live object. It creates
 // NO new analysis object and NO lineage edge. Pathway enrichment and CellChat are
 // intentionally NOT integrated here.
 
-const crypto = require('crypto');
 const { projectStorageFileKey } = require('./storage');
 
 /** Coded error so callers (route/handler) can branch + map to 400 / failed-job. */
@@ -146,10 +145,10 @@ function validateDegFindMarkersParams(input) {
 }
 
 // ── Internal result storage key allocation ───────────────────────────────────
-// The server allocates the internal vault key for a job's full DEG marker table. It is
-// a RELATIVE, traversal-free path built ONLY from the (server-generated) job id and a
-// fresh random hex token — no client input. The R backend additionally confines it to
-// its vault via validate_path(). The full table is stored as `local_internal` only;
+// The server allocates the internal key for a job's full DEG marker table. It is a
+// relative, traversal-free path built only from the server-generated job id. The
+// stable filename makes retry cleanup deterministic; R independently confines it
+// to internal storage. The full table is stored as `local_internal` only;
 // there is NO public download route in this branch.
 const _JOB_ID_RE = /^job_[0-9a-f]+$/;
 
@@ -162,11 +161,10 @@ function allocateDegResultStorageKey(projectId, jobId) {
     // Defense-in-depth: only ever build a key from a well-formed server job id.
     throw codedError('INVALID_JOB_ID', 'A server-generated job id is required to allocate a DEG result key.');
   }
-  const token = crypto.randomBytes(12).toString('hex');
   if (projectId) {
-    return projectStorageFileKey(String(projectId), 'artifacts', jobId, `${token}.csv`);
+    return projectStorageFileKey(String(projectId), 'artifacts', jobId, 'markers.csv');
   }
-  return `vault/deg/${jobId}/${token}.csv`;
+  return `vault/deg/${jobId}/markers.csv`;
 }
 
 module.exports = {

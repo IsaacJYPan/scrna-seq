@@ -428,34 +428,54 @@ describe.skipIf(!CONFIGURED)('project analysis resources — references stay wit
     expect((await createJob(projA.id, alice.token, { jobType: 'normalize', resultAnalysisObjectId: aoB.data.id })).status).toBe(404);
   });
 
-  it('checkpoint forks reject client-controlled result and dataset fields at HTTP and DB boundaries', async () => {
+  it('receipt-backed jobs reject incompatible references at HTTP and DB boundaries', async () => {
     const { alice } = await users();
     const proj = await seedProject(alice.user.id);
     const source = await createAO(proj.id, alice.token);
     const forgedResult = await createAO(proj.id, alice.token);
     const dataset = await createDatasetForProject(alice.user.id, proj.id, { fileType: 'seurat_rds' });
 
-    for (const body of [
-      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, resultAnalysisObjectId: forgedResult.data.id },
-      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, datasetId: dataset.id },
-      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, resultAnalysisObjectId: null },
-      { jobType: 'checkpoint.fork.v1', analysisObjectId: source.data.id, datasetId: null },
-    ]) {
+    const receiptTypes = [
+      'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1',
+      'checkpoint.load.v1', 'checkpoint.fork.v1',
+    ];
+    const noDatasetTypes = [
+      'pbmc.pipeline.v1', 'deg.find_markers.v1',
+      'checkpoint.load.v1', 'checkpoint.fork.v1',
+    ];
+    const invalidBodies = [
+      ...receiptTypes.flatMap((jobType) => [
+        { jobType, analysisObjectId: source.data.id, resultAnalysisObjectId: forgedResult.data.id },
+        { jobType, analysisObjectId: source.data.id, resultAnalysisObjectId: null },
+        { jobType },
+      ]),
+      ...noDatasetTypes.flatMap((jobType) => [
+        { jobType, analysisObjectId: source.data.id, datasetId: dataset.id },
+        { jobType, analysisObjectId: source.data.id, datasetId: null },
+      ]),
+    ];
+    for (const body of invalidBodies) {
       const response = await createJob(proj.id, alice.token, body);
       expect(response.status).toBe(400);
-      expect(response.data.error).toMatch(/server-managed|derived from the source checkpoint/i);
+      expect(response.data.error).toMatch(/server-managed|derived from|requires a source/i);
     }
 
-    await expect(db.createProjectJob(alice.user.id, proj.id, {
-      jobType: 'checkpoint.fork.v1',
-      analysisObjectId: source.data.id,
-      resultAnalysisObjectId: forgedResult.data.id,
-    })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
-    await expect(db.createProjectJob(alice.user.id, proj.id, {
-      jobType: 'checkpoint.fork.v1',
-      analysisObjectId: source.data.id,
-      datasetId: dataset.id,
-    })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
+    for (const jobType of receiptTypes) {
+      await expect(db.createProjectJob(alice.user.id, proj.id, {
+        jobType,
+        analysisObjectId: source.data.id,
+        resultAnalysisObjectId: forgedResult.data.id,
+      })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
+      await expect(db.createProjectJob(alice.user.id, proj.id, { jobType }))
+        .rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
+    }
+    for (const jobType of noDatasetTypes) {
+      await expect(db.createProjectJob(alice.user.id, proj.id, {
+        jobType,
+        analysisObjectId: source.data.id,
+        datasetId: dataset.id,
+      })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
+    }
   });
 
   it('cross-project object/job reads return 404', async () => {

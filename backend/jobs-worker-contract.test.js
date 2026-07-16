@@ -7,8 +7,10 @@ const {
   createJobForUser, getJobForUser, listJobsForUser, updateJobStatusForUser,
   cancelJobForUser, verifyJobOwner, verifyAnalysisObjectOwner, validateJobTransition,
   // worker coordination contract under test
-  claimNextJob, heartbeatJob, completeJobByWorker, failJobByWorker, releaseJob,
+  claimNextJob, heartbeatJob, completeJobByWorker, failJobByWorker,
+  deferIndeterminateRTimeoutByWorker, markRDispatchStartedByWorker, releaseJob,
   reapExpiredJobs, setJobScheduling, getWorkerJob, generateClaimToken,
+  createJobArtifactByWorker, getJobArtifactsByJobId,
   // project setup for the project-cancel interaction
   createOrganizationForUser, createProjectForUser, createProjectJob, cancelProjectJob, getProjectJob,
   addProjectMemberByEmail, updateProjectMemberRole, removeProjectMember
@@ -24,6 +26,25 @@ const T0_PLUS_10 = '2030-01-01 00:00:10';
 const T0_PLUS_20 = '2030-01-01 00:00:20';
 const LATER = '2030-01-01 01:00:00'; // well past any 30s lease taken at T0
 const MUCH_LATER = '2030-01-01 02:00:00';
+
+async function waitForBlockedPgQuery(client, queryFragment, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await client.query(
+      `SELECT 1 FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND pid <> pg_backend_pid()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND position($1 in lower(query)) > 0
+        LIMIT 1`,
+      [String(queryFragment).toLowerCase()]
+    );
+    if (result.rows[0]) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for blocked PostgreSQL query: ${queryFragment}`);
+}
 
 // NOTE: the SQLite-era "schema migration" describe (idempotent additive upgrade of
 // a legacy .sqlite jobs table via better-sqlite3 + PRAGMA table_info) was removed
@@ -162,6 +183,60 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
     expect(b).toBeNull(); // the job is already running with a live lease
   });
 
+  it('is a single winner under genuinely concurrent claim attempts', async () => {
+    const job = await newJob(alice, 'generic');
+    const results = await Promise.all([
+      claimNextJob('worker-concurrent-A', { now: T0, leaseSeconds: 30 }),
+      claimNextJob('worker-concurrent-B', { now: T0, leaseSeconds: 30 }),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.find(Boolean).id).toBe(job.id);
+    expect((await getWorkerJob(job.id)).attempts).toBe(1);
+  });
+
+  it('admits only one live claim when workers race for different queued jobs', async () => {
+    const first = await newJob(alice, 'generic');
+    const second = await newJob(alice, 'generic');
+    const claims = await Promise.all([
+      claimNextJob('worker-gate-A', { now: T0, leaseSeconds: 30 }),
+      claimNextJob('worker-gate-B', { now: T0, leaseSeconds: 30 }),
+    ]);
+    const liveClaims = claims.filter(Boolean);
+    expect(liveClaims).toHaveLength(1);
+    expect([first.id, second.id]).toContain(liveClaims[0].id);
+
+    expect(await claimNextJob('worker-gate-C', {
+      now: T0_PLUS_10,
+      leaseSeconds: 30,
+    })).toBeNull();
+
+    const live = liveClaims[0];
+    await completeJobByWorker(live.id, live.workerId, live.claimToken, { now: T0_PLUS_10 });
+    const next = await claimNextJob('worker-gate-C', {
+      now: T0_PLUS_20,
+      leaseSeconds: 30,
+    });
+    expect([first.id, second.id]).toContain(next.id);
+    expect(next.id).not.toBe(live.id);
+  });
+
+  it('applies a capability filter atomically without consuming an incompatible job', async () => {
+    const incompatible = await newJob(alice, 'pca');
+    await setJobScheduling(incompatible.id, { createdAt: '2029-12-31 23:59:58' });
+    const compatible = await newJob(alice, 'generic');
+    const claimed = await claimNextJob('worker-generic-only', {
+      now: T0,
+      leaseSeconds: 30,
+      allowedJobTypes: ['generic'],
+    });
+    expect(claimed.id).toBe(compatible.id);
+    expect((await getWorkerJob(incompatible.id)).status).toBe('queued');
+    expect((await getWorkerJob(incompatible.id)).attempts).toBe(0);
+    expect(await claimNextJob('worker-none', { now: T0, allowedJobTypes: [] })).toBeNull();
+    await expect(claimNextJob('worker-invalid', { now: T0, allowedJobTypes: ['evil.dynamic.r'] }))
+      .rejects.toMatchObject({ code: 'INVALID_WORKER_CAPABILITIES' });
+  });
+
   it('a running job with an unexpired lease cannot be claimed by another worker', async () => {
     await newJob();
     const a = await claimNextJob('worker-A', { now: T0, leaseSeconds: 30 });
@@ -178,10 +253,13 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
     // Raise j3's priority so it jumps the queue despite being newest.
     await setJobScheduling(j3.id, { priority: 10 });
 
-    expect((await claimNextJob('w', { now: T0, leaseSeconds: 1 })).id).toBe(j3.id); // priority wins
-    // Re-claim is blocked by the live lease, so claim the next two by created_at.
-    expect((await claimNextJob('w', { now: T0, leaseSeconds: 1 })).id).toBe(j1.id); // oldest of the rest
-    expect((await claimNextJob('w', { now: T0, leaseSeconds: 1 })).id).toBe(j2.id);
+    const c3 = await claimNextJob('w', { now: T0, leaseSeconds: 30 });
+    expect(c3.id).toBe(j3.id); // priority wins
+    await completeJobByWorker(c3.id, 'w', c3.claimToken, { now: T0_PLUS_10 });
+    const c1 = await claimNextJob('w', { now: T0_PLUS_10, leaseSeconds: 30 });
+    expect(c1.id).toBe(j1.id); // oldest of the rest
+    await completeJobByWorker(c1.id, 'w', c1.claimToken, { now: T0_PLUS_20 });
+    expect((await claimNextJob('w', { now: T0_PLUS_20, leaseSeconds: 30 })).id).toBe(j2.id);
   });
 
   it('does not claim terminal jobs (completed / failed / canceled)', async () => {
@@ -332,6 +410,271 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
     expect(code).toBe('JOB_NOT_FOUND');
   });
 
+  it('defers an indeterminate R timeout under the live claim for a bounded grace period', async () => {
+    await newJob(alice, 'generic');
+    const claim = await claimNextJob('worker-timeout', { now: T0, leaseSeconds: 30 });
+
+    await expect(deferIndeterminateRTimeoutByWorker(
+      claim.id, 'worker-intruder', claim.claimToken,
+      { now: T0_PLUS_10, recoveryDelaySeconds: 30 }
+    )).rejects.toThrow(/no longer holds/i);
+
+    const deferred = await deferIndeterminateRTimeoutByWorker(
+      claim.id, 'worker-timeout', claim.claimToken,
+      { now: T0_PLUS_10, recoveryDelaySeconds: 30 }
+    );
+    expect(deferred).toMatchObject({
+      status: 'running',
+      workerId: 'worker-timeout',
+      claimToken: claim.claimToken,
+      leaseExpiresAt: '2030-01-01 00:00:40',
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_TIMEOUT_INDETERMINATE }),
+    });
+    expect(deferred.error).toBeNull();
+  });
+
+  it('turns a crashed side-effecting R dispatch into observation then recovery-only claim', async () => {
+    const organization = await createOrganizationForUser(alice.id, { name: 'Dispatch recovery org' });
+    const project = await createProjectForUser(alice.id, {
+      organizationId: organization.id,
+      name: 'Dispatch recovery project',
+    });
+    const source = await createProjectAnalysisObject(alice.id, project.id, {
+      objectType: 'seurat', displayName: 'Dispatch source',
+    });
+    const job = await createProjectJob(alice.id, project.id, {
+      jobType: 'pbmc.pipeline.v1', analysisObjectId: source.id,
+    });
+    const claim = await claimNextJob('worker-r-dispatch-crash', {
+      now: T0,
+      leaseSeconds: 30,
+      allowedJobTypes: ['pbmc.pipeline.v1'],
+    });
+
+    await expect(markRDispatchStartedByWorker(
+      job.id,
+      'worker-intruder',
+      claim.claimToken,
+      { now: T0_PLUS_10 }
+    )).rejects.toMatchObject({ code: 'CLAIM_LOST' });
+    const marked = await markRDispatchStartedByWorker(
+      job.id,
+      'worker-r-dispatch-crash',
+      claim.claimToken,
+      { now: T0_PLUS_10 }
+    );
+    expect(marked.lastWorkerError).toMatchObject({ code: dbmod.R_DISPATCH_STARTED });
+
+    // The process disappears here. Lease reaping must revoke that claim and
+    // observe the separate R process for the full bounded grace, not queue a
+    // second scientific execution immediately.
+    const firstReap = await reapExpiredJobs({ now: LATER });
+    expect(firstReap.requeued).not.toContain(job.id);
+    expect(firstReap.failed).not.toContain(job.id);
+    expect(await getWorkerJob(job.id)).toMatchObject({
+      status: 'running',
+      workerId: null,
+      claimToken: null,
+      leaseExpiresAt: '2030-01-01 01:05:00',
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_TIMEOUT_INDETERMINATE }),
+    });
+    await expect(heartbeatJob(
+      job.id,
+      'worker-r-dispatch-crash',
+      claim.claimToken,
+      { now: LATER, leaseSeconds: 30 }
+    )).rejects.toMatchObject({ code: 'CLAIM_LOST' });
+    await expect(claimNextJob('worker-must-not-rerun', {
+      now: LATER,
+      leaseSeconds: 30,
+      allowedJobTypes: ['pbmc.pipeline.v1'],
+    })).resolves.toBeNull();
+
+    const afterObservation = '2030-01-01 01:05:00';
+    expect((await reapExpiredJobs({ now: afterObservation })).requeued).toContain(job.id);
+    const recovery = await claimNextJob('worker-receipt-only', {
+      now: afterObservation,
+      leaseSeconds: 30,
+      allowedJobTypes: ['pbmc.pipeline.v1'],
+    });
+    expect(recovery).toMatchObject({
+      id: job.id,
+      attempts: 1,
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_TIMEOUT_RECOVERY_PENDING }),
+    });
+  });
+
+  it('fences stale heartbeats after an indeterminate R outcome without blocking the recovery claimant', async () => {
+    const job = await newJob(alice, 'generic');
+    await setJobScheduling(job.id, { maxAttempts: 3 });
+    const original = await claimNextJob('worker-timeout-fenced', {
+      now: T0, leaseSeconds: 30,
+    });
+    await deferIndeterminateRTimeoutByWorker(
+      job.id,
+      'worker-timeout-fenced',
+      original.claimToken,
+      { now: T0_PLUS_10, recoveryDelaySeconds: 10 }
+    );
+
+    // A heartbeat already in flight when defer began must not shorten or extend
+    // the fenced grace lease after the outcome became indeterminate.
+    await expect(heartbeatJob(
+      job.id,
+      'worker-timeout-fenced',
+      original.claimToken,
+      { now: T0_PLUS_10, leaseSeconds: 30 }
+    )).rejects.toMatchObject({ code: 'CLAIM_LOST' });
+    expect((await getWorkerJob(job.id)).leaseExpiresAt).toBe(T0_PLUS_20);
+
+    await reapExpiredJobs({ now: T0_PLUS_20 });
+    const recovery = await claimNextJob('worker-timeout-recovery-fenced', {
+      now: T0_PLUS_20, leaseSeconds: 30,
+    });
+    expect(recovery.lastWorkerError.code).toBe(dbmod.R_TIMEOUT_RECOVERY_PENDING);
+
+    // The new claim has a different token and must be able to renew while it
+    // verifies a potentially large receipt/output.
+    await expect(heartbeatJob(
+      job.id,
+      'worker-timeout-recovery-fenced',
+      recovery.claimToken,
+      { now: T0_PLUS_20, leaseSeconds: 30 }
+    )).resolves.toMatchObject({ leaseExpiresAt: '2030-01-01 00:00:50' });
+  });
+
+  it('preserves recovery-only authorization when a validly running creator is later removed', async () => {
+    const organization = await createOrganizationForUser(alice.id, { name: 'Recovery authorization org' });
+    const project = await createProjectForUser(alice.id, {
+      organizationId: organization.id,
+      name: 'Recovery authorization project',
+    });
+    await addProjectMemberByEmail(project.id, bob.email, 'analyst', { userId: alice.id });
+    const job = await createProjectJob(bob.id, project.id, { jobType: 'generic' });
+    const original = await claimNextJob('worker-authorized-before-demotion', {
+      now: T0, leaseSeconds: 30,
+    });
+    expect(original.id).toBe(job.id);
+    await deferIndeterminateRTimeoutByWorker(
+      job.id,
+      'worker-authorized-before-demotion',
+      original.claimToken,
+      { now: T0_PLUS_10, recoveryDelaySeconds: 10 }
+    );
+
+    await removeProjectMember(project.id, bob.id, { userId: alice.id });
+    expect((await reapExpiredJobs({ now: T0_PLUS_20 })).requeued).toContain(job.id);
+
+    // This claim may only run the worker's recovery-only receipt path. It must not
+    // be canceled by the ordinary queued-job role sweep because the original R
+      // execution was authorized while the creator still had analyst access.
+    const recovery = await claimNextJob('worker-after-creator-removal', {
+      now: T0_PLUS_20, leaseSeconds: 30,
+    });
+    expect(recovery).toMatchObject({
+      id: job.id,
+      status: 'running',
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_TIMEOUT_RECOVERY_PENDING }),
+    });
+    await expect(getProjectJob(alice.id, project.id, job.id)).resolves.toMatchObject({
+      status: 'running',
+    });
+    await expect(getProjectJob(bob.id, project.id, job.id))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('converts a pre-marker retry to receipt-only recovery after creator demotion', async () => {
+    const organization = await createOrganizationForUser(alice.id, { name: 'Legacy retry recovery org' });
+    const project = await createProjectForUser(alice.id, {
+      organizationId: organization.id,
+      name: 'Legacy retry recovery project',
+    });
+    await addProjectMemberByEmail(project.id, bob.email, 'analyst', { userId: alice.id });
+    const source = await createProjectAnalysisObject(bob.id, project.id, {
+      objectType: 'seurat', displayName: 'Pre-marker source',
+    });
+    const job = await createProjectJob(bob.id, project.id, {
+      jobType: 'pbmc.pipeline.v1', analysisObjectId: source.id,
+    });
+    await claimNextJob('worker-pre-marker-crash', {
+      now: T0,
+      leaseSeconds: 30,
+      allowedJobTypes: ['pbmc.pipeline.v1'],
+    });
+
+    // Model a job created by an older worker that crashed before dispatch
+    // markers existed. It has consumed an authorized attempt but has no DB rows;
+    // a private signed receipt may still arrive from the separate R process.
+    expect((await reapExpiredJobs({ now: LATER })).requeued).toContain(job.id);
+    await updateProjectMemberRole(project.id, bob.id, 'viewer', { userId: alice.id });
+
+    const recovery = await claimNextJob('worker-pre-marker-recovery', {
+      now: LATER,
+      leaseSeconds: 30,
+      allowedJobTypes: ['pbmc.pipeline.v1'],
+    });
+    expect(recovery).toMatchObject({
+      id: job.id,
+      status: 'running',
+      attempts: 2,
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_RETRY_RECOVERY_PENDING }),
+    });
+    await expect(getProjectJob(alice.id, project.id, job.id)).resolves.toMatchObject({
+      status: 'running',
+    });
+    await expect(getProjectJob(bob.id, project.id, job.id)).resolves.toMatchObject({
+      status: 'running',
+    });
+  });
+
+  it('repeats no-R observation after a timeout without ever falling through to normal retries', async () => {
+    const job = await newJob(alice, 'generic');
+    await setJobScheduling(job.id, { maxAttempts: 3 });
+    const claim = await claimNextJob('worker-timeout-first', { now: T0, leaseSeconds: 30 });
+    await deferIndeterminateRTimeoutByWorker(
+      job.id, 'worker-timeout-first', claim.claimToken,
+      { now: T0_PLUS_10, recoveryDelaySeconds: 10 }
+    );
+
+    expect((await reapExpiredJobs({ now: T0_PLUS_20 })).requeued).toContain(job.id);
+    const pending = await getWorkerJob(job.id);
+    expect(pending).toMatchObject({
+      status: 'queued',
+      attempts: 0,
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_TIMEOUT_RECOVERY_PENDING }),
+    });
+
+    const recoveryClaim = await claimNextJob('worker-timeout-recovery', {
+      now: T0_PLUS_20, leaseSeconds: 30,
+    });
+    expect(recoveryClaim).toMatchObject({
+      id: job.id,
+      attempts: 1,
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_TIMEOUT_RECOVERY_PENDING }),
+    });
+
+    const expiredRecovery = await reapExpiredJobs({ now: LATER });
+    expect(expiredRecovery.failed).not.toContain(job.id);
+    expect(expiredRecovery.requeued).not.toContain(job.id);
+    expect(await getWorkerJob(job.id)).toMatchObject({
+      status: 'running',
+      workerId: null,
+      claimToken: null,
+      leaseExpiresAt: '2030-01-01 01:05:00',
+      lastWorkerError: expect.objectContaining({ code: dbmod.R_TIMEOUT_INDETERMINATE }),
+    });
+
+    // A crashed recovery observer cannot prove the separate R process stopped.
+    // After another bounded observation window it receives another no-R claim,
+    // preserving eventual adoption of a late signed receipt.
+    expect((await reapExpiredJobs({ now: '2030-01-01 01:05:00' })).requeued)
+      .toContain(job.id);
+    const nextObserver = await claimNextJob('worker-timeout-recovery-again', {
+      now: '2030-01-01 01:05:00', leaseSeconds: 30,
+    });
+    expect(nextObserver.lastWorkerError.code).toBe(dbmod.R_TIMEOUT_RECOVERY_PENDING);
+  });
+
   // ── Complete / fail / release ownership ──────────────────────────────────────
   it('only the owning worker can complete, fail, or release a job', async () => {
     await newJob();
@@ -475,6 +818,99 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — cancel makes worker behav
     await expect(heartbeatJob(created.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
     await expect(completeJobByWorker(created.id, 'w1', c.claimToken, { now: T0_PLUS_10 })).rejects.toThrow(/no longer holds/i);
     expect((await getProjectJob(alice.id, proj.id, created.id)).status).toBe('canceled');
+  });
+
+  it('cancel versus complete has exactly one terminal winner and never overwrites completion', async () => {
+    const created = await createJobForUser(alice.id, { jobType: 'generic' });
+    const claimed = await claimNextJob('worker-race', { now: T0, leaseSeconds: 30 });
+    const settled = await Promise.allSettled([
+      cancelJobForUser(alice.id, created.id),
+      completeJobByWorker(created.id, 'worker-race', claimed.claimToken, { now: T0_PLUS_10 }),
+    ]);
+    expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(settled.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const after = await getJobForUser(created.id, alice.id);
+    expect(['completed', 'canceled']).toContain(after.status);
+    if (after.status === 'completed') {
+      await expect(cancelJobForUser(alice.id, created.id)).rejects.toMatchObject({ code: 'JOB_NOT_CANCELABLE' });
+      expect((await getJobForUser(created.id, alice.id)).status).toBe('completed');
+    } else {
+      await expect(completeJobByWorker(created.id, 'worker-race', claimed.claimToken, { now: T0_PLUS_20 }))
+        .rejects.toMatchObject({ code: 'CLAIM_LOST' });
+    }
+  });
+
+  it('publication that owns the job lock forces later cancellation to observe its output', async () => {
+    const created = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    const claimed = await claimNextJob('worker-output-race', { now: T0, leaseSeconds: 30 });
+    const pool = await dbmod.connect();
+    const barrier = await pool.connect();
+    const observer = await pool.connect();
+    try {
+      await barrier.query('BEGIN');
+      await barrier.query('LOCK TABLE job_artifacts IN ACCESS EXCLUSIVE MODE');
+      const publication = createJobArtifactByWorker(
+        created.id,
+        'worker-output-race',
+        claimed.claimToken,
+        { artifactType: 'r_runtime_check', storageKind: 'metadata_only', metadata: { ok: true } },
+        { now: T0_PLUS_10 }
+      );
+      await waitForBlockedPgQuery(observer, 'insert into job_artifacts');
+      const cancellation = cancelJobForUser(alice.id, created.id)
+        .then((value) => ({ value }), (error) => ({ error }));
+      await waitForBlockedPgQuery(observer, 'select * from jobs where id');
+      await barrier.query('COMMIT');
+
+      await expect(publication).resolves.toMatchObject({ jobId: created.id });
+      const cancelOutcome = await cancellation;
+      expect(cancelOutcome.error).toMatchObject({ code: 'JOB_NOT_CANCELABLE' });
+      expect((await getJobArtifactsByJobId(created.id))).toHaveLength(1);
+      expect((await getJobForUser(created.id, alice.id)).status).toBe('running');
+      await expect(cancelJobForUser(alice.id, created.id))
+        .rejects.toMatchObject({ code: 'JOB_NOT_CANCELABLE' });
+      await completeJobByWorker(
+        created.id, 'worker-output-race', claimed.claimToken, { now: T0_PLUS_20 }
+      );
+      expect((await getJobForUser(created.id, alice.id)).status).toBe('completed');
+    } finally {
+      await barrier.query('ROLLBACK').catch(() => {});
+      barrier.release();
+      observer.release();
+    }
+  });
+
+  it('cancellation that owns the job lock makes a later publisher roll back', async () => {
+    const created = await createJobForUser(alice.id, { jobType: 'r.runtime.check' });
+    const claimed = await claimNextJob('worker-cancel-wins', { now: T0, leaseSeconds: 30 });
+    const pool = await dbmod.connect();
+    const barrier = await pool.connect();
+    const observer = await pool.connect();
+    try {
+      await barrier.query('BEGIN');
+      await barrier.query('LOCK TABLE job_artifacts IN ACCESS EXCLUSIVE MODE');
+      const cancellation = cancelJobForUser(alice.id, created.id);
+      await waitForBlockedPgQuery(observer, 'select 1 from job_artifacts');
+      const publication = createJobArtifactByWorker(
+        created.id,
+        'worker-cancel-wins',
+        claimed.claimToken,
+        { artifactType: 'r_runtime_check', storageKind: 'metadata_only', metadata: { ok: true } },
+        { now: T0_PLUS_10 }
+      ).then((value) => ({ value }), (error) => ({ error }));
+      await waitForBlockedPgQuery(observer, 'select * from jobs where id');
+      await barrier.query('COMMIT');
+
+      await expect(cancellation).resolves.toMatchObject({ status: 'canceled' });
+      const publishOutcome = await publication;
+      expect(publishOutcome.error).toMatchObject({ code: 'CLAIM_LOST' });
+      expect((await getJobArtifactsByJobId(created.id))).toHaveLength(0);
+      expect((await getJobForUser(created.id, alice.id)).status).toBe('canceled');
+    } finally {
+      await barrier.query('ROLLBACK').catch(() => {});
+      barrier.release();
+      observer.release();
+    }
   });
 });
 
