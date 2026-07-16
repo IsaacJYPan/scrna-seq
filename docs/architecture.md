@@ -400,6 +400,18 @@ The app runtime is Postgres-only.
   and proves a competing claimant cannot reap or steal the job after the
   original lease deadline. The default `JOB_WORKER_LEASE_SECONDS` remains 120
   for normal operation.
+- `npm run test:deg-worker-pipeline` is the same real-R lease-renewal proof,
+  scoped to `deg.find_markers.v1` specifically. The lease-renewal timer
+  (`startClaimRenewal` in `backend/jobWorker.js`) is shared code across every
+  R-facing handler, but the Seurat check above only exercises it through
+  `seurat.pipeline.v1`. This check seeds a small synthetic clustered checkpoint
+  directly at the DB layer (no R call for that step), reattaches it for real via
+  `checkpoint.load.v1`, then runs `deg.find_markers.v1` for real with a short
+  lease against an R-side diagnostic delay (`R_TEST_DEG_DELAY_MS`, gated the
+  same way as `R_TEST_SEURAT_DELAY_MS`) on `POST /object/deg-find-markers`. It
+  asserts at least two real heartbeat renewals, a rejected competing claimant,
+  and correct `deg_markers`/`deg_summary` artifacts with no storage path/key
+  leak. It needs only Seurat + dplyr (no HDF5 sample data), so it stays fast.
 - The R/workflow checks (`test:seurat-pipeline`, `test:r-state-proxy`,
   `test:pbmc-parent`, `test:checkpoint-load`, `test:deg-markers`) exercise the
   hardened live paths and require a real R/Seurat backend (`test:seurat-pipeline`

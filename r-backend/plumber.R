@@ -2038,6 +2038,20 @@ function(req, res) {
   }
   p <- body$params
 
+  # Deterministic lease-renewal coverage for the real-R CI smoke (mirrors the
+  # r.seurat.pipeline.v1 diagnostic hook above). This delay is carried through the narrow
+  # child environment only when diagnostics are explicitly enabled outside production;
+  # ordinary requests cannot set it.
+  diagnostics_enabled <- identical(Sys.getenv("ENABLE_R_TEST_DIAGNOSTICS"), "true") &&
+    !identical(Sys.getenv("NODE_ENV"), "production")
+  if (diagnostics_enabled) {
+    test_delay_ms <- suppressWarnings(as.integer(Sys.getenv("R_TEST_DEG_DELAY_MS", unset = "0")))
+    if (length(test_delay_ms) == 1 && !is.na(test_delay_ms)
+        && test_delay_ms > 0 && test_delay_ms <= 600000) {
+      Sys.sleep(test_delay_ms / 1000)
+    }
+  }
+
   storage_key <- body$storage_key
   if (is.null(storage_key) || !is.character(storage_key) || length(storage_key) != 1 || nchar(storage_key) == 0) {
     res$status <- 400
