@@ -144,8 +144,8 @@ function MetadataTab({ info }) {
   );
 }
 
-function AddMetadataTab({ onMetaAdded, info, callApi }) {
-  const [mode, setMode] = useState('csv'); // 'csv' or 'map'
+function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEnabled = false }) {
+  const [mode, setMode] = useState(legacyLiveMutationToolsEnabled ? 'csv' : 'map');
   
   // ── CSV Mode State ──
   const [csvPath, setCsvPath] = useState(null);
@@ -243,14 +243,16 @@ function AddMetadataTab({ onMetaAdded, info, callApi }) {
     <div className="space-y-5">
       {/* Mode Selector */}
       <div className="flex bg-slate-800/60 p-1 rounded-xl">
-        <button
-          onClick={() => { setMode('csv'); setResult(null); setError(null); }}
-          className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all ${
-            mode === 'csv' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
-          }`}
-        >
-          Import CSV
-        </button>
+        {legacyLiveMutationToolsEnabled && (
+          <button
+            onClick={() => { setMode('csv'); setResult(null); setError(null); }}
+            className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all ${
+              mode === 'csv' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
+            }`}
+          >
+            Import CSV
+          </button>
+        )}
         <button
           onClick={() => { setMode('map'); setResult(null); setError(null); }}
           className={`flex-1 py-1.5 text-xs font-bold uppercase tracking-widest rounded-lg transition-all ${
@@ -260,6 +262,13 @@ function AddMetadataTab({ onMetaAdded, info, callApi }) {
           Map from Column
         </button>
       </div>
+
+      {!legacyLiveMutationToolsEnabled && (
+        <div className="flex items-start gap-2 text-amber-300 text-xs bg-amber-900/20 border border-amber-700/40 rounded-lg p-3">
+          <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+          CSV metadata import and live subsetting are local-development tools. Production keeps only bounded in-object value mapping here.
+        </div>
+      )}
 
       {mode === 'csv' && (
         <>
@@ -630,11 +639,22 @@ const TABS = [
   { id: 'subset',    label: 'Subset',       icon: <Scissors size={13} /> },
 ];
 
-export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, parentSessionPath, workspaceObjects = [], callApi }) {
+export default function Inspect({
+  obj,
+  globalTab,
+  onSubsetCreated,
+  onMetaAdded,
+  parentSessionPath,
+  workspaceObjects = [],
+  callApi,
+  deploymentPolicy = {},
+}) {
   const [activeTab, setActiveTab] = useState('overview');
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const legacyLiveMutationToolsEnabled = deploymentPolicy.legacyLiveMutationToolsEnabled === true;
+  const visibleTabs = TABS.filter((tab) => legacyLiveMutationToolsEnabled || tab.id !== 'subset');
 
   const fetchInfo = () => {
     setLoading(true);
@@ -698,7 +718,7 @@ export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, 
 
         {/* Tabs */}
         <div className="flex border-b border-slate-800 px-6">
-          {TABS.map(tab => (
+          {visibleTabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
@@ -734,8 +754,8 @@ export default function Inspect({ obj, globalTab, onSubsetCreated, onMetaAdded, 
               <>
                 {activeTab === 'overview'  && <OverviewTab info={info} />}
                 {activeTab === 'metadata'  && <MetadataTab info={info} />}
-                {activeTab === 'add-meta' && <AddMetadataTab info={info} onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} callApi={callApi} />}
-                {activeTab === 'subset' && <SubsetTab info={info} obj={obj} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} workspaceObjects={workspaceObjects} callApi={callApi} />}
+                {activeTab === 'add-meta' && <AddMetadataTab info={info} onMetaAdded={() => { onMetaAdded?.(); fetchInfo(); }} callApi={callApi} legacyLiveMutationToolsEnabled={legacyLiveMutationToolsEnabled} />}
+                {activeTab === 'subset' && legacyLiveMutationToolsEnabled && <SubsetTab info={info} obj={obj} onSubsetCreated={onSubsetCreated} parentSessionPath={parentSessionPath} workspaceObjects={workspaceObjects} callApi={callApi} />}
               </>
             )}
           </div>

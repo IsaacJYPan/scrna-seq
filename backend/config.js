@@ -26,8 +26,38 @@
 const path = require('path');
 const rRuntime = require('./rRuntime');
 
+const ALLOWED_NODE_ENVS = new Set(['development', 'test', 'production']);
+const MIN_SESSION_SECRET_LENGTH = 32;
+const SESSION_EPOCH_PATTERN = /^[0-9a-f]{32}$/;
+const DEVELOPMENT_SESSION_EPOCH = '00000000000000000000000000000000';
+const SESSION_TTL_MIN_SECONDS = 5 * 60;
+const SESSION_TTL_MAX_SECONDS = 24 * 60 * 60;
+const LEGACY_SESSION_COOKIE_NAME = 'benchone_session';
+const PRODUCTION_SESSION_COOKIE_NAME = '__Host-benchone_session';
+const ALLOWED_DATABASE_URL_QUERY_KEYS = new Set(['sslmode', 'sslrootcert', 'sslcert', 'sslkey']);
+const ALLOWED_POSTGRES_SSL_MODES = new Set(['disable', 'prefer', 'require', 'verify-ca', 'verify-full', 'no-verify']);
+
 function trimmed(raw) {
   return raw === undefined || raw === null ? '' : String(raw).trim();
+}
+
+function looksLikeGeneratedHex(value, length) {
+  if (typeof value !== 'string' || value.length !== length || !/^[0-9a-f]+$/.test(value)) return false;
+  if (new Set(value).size < 8) return false;
+  if (/(.)\1{7}/.test(value)) return false;
+  if (value.includes('0123456789abcdef') || value.includes('fedcba9876543210')) return false;
+  for (let period = 1; period <= Math.floor(value.length / 2); period += 1) {
+    if (value.length % period === 0 && value === value.slice(0, period).repeat(value.length / period)) return false;
+  }
+  return true;
+}
+
+function isStrongSecretValue(raw, minimumLength = 32) {
+  const value = trimmed(raw);
+  // Production examples use `openssl rand -hex 32`. Requiring that exact
+  // encoding is auditable and rejects varied-looking phrases/sequences without
+  // pretending that character variety proves entropy.
+  return minimumLength <= 64 && looksLikeGeneratedHex(value, 64);
 }
 
 /**
@@ -57,6 +87,11 @@ function isProduction() {
   return nodeEnv() === 'production';
 }
 
+function isLoopbackHost(value) {
+  const host = trimmed(value).toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
 // ── Database backend selection ──────────────────────────────────────────────
 // The app runtime is Postgres-only. DATABASE_BACKEND is accepted for readable
 // summaries, but any value resolves to Postgres; SQLite is no longer a runtime
@@ -71,6 +106,44 @@ function databaseUrl() {
   return trimmed(process.env.DATABASE_URL);
 }
 
+function inspectDatabaseUrl() {
+  const raw = databaseUrl();
+  if (!raw) return { parsed: null, sslMode: '', errors: [] };
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { parsed: null, sslMode: '', errors: ['DATABASE_URL must be a valid Postgres URL.'] };
+  }
+  const errors = [];
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)
+      || !parsed.hostname || !parsed.username
+      || !parsed.pathname || parsed.pathname === '/') {
+    errors.push('DATABASE_URL must include a Postgres host, user, and database name.');
+  }
+  const seen = new Set();
+  let sslMode = '';
+  for (const [rawName, value] of parsed.searchParams) {
+    const name = rawName.toLowerCase();
+    if (rawName !== name || seen.has(name)) {
+      errors.push('DATABASE_URL query options must use unique lowercase names.');
+      continue;
+    }
+    seen.add(name);
+    if (!ALLOWED_DATABASE_URL_QUERY_KEYS.has(name)) {
+      errors.push(`DATABASE_URL option ${name} is not supported.`);
+      continue;
+    }
+    if (name === 'sslmode') {
+      sslMode = trimmed(value).toLowerCase();
+      if (!ALLOWED_POSTGRES_SSL_MODES.has(sslMode)) {
+        errors.push('DATABASE_URL sslmode is invalid.');
+      }
+    }
+  }
+  return { parsed, sslMode, errors };
+}
+
 /**
  * Build a node-postgres client/pool config from DATABASE_URL if present, else
  * from explicit PG* vars (PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE), which the
@@ -78,10 +151,19 @@ function databaseUrl() {
  * providers) — never for a plain localhost dev/CI database.
  */
 function postgresConfig() {
-  const cfg = {};
+  const cfg = {
+    application_name: 'scrna-seq-workbench',
+    max: postgresPoolMax(),
+    connectionTimeoutMillis: postgresConnectTimeoutMs(),
+    idleTimeoutMillis: postgresIdleTimeoutMs(),
+  };
   const url = databaseUrl();
   if (url) {
-    cfg.connectionString = url;
+    const inspected = inspectDatabaseUrl();
+    if (!inspected.parsed || inspected.errors.length > 0) {
+      throw new Error('DATABASE_URL is invalid or contains unsupported connection options.');
+    }
+    cfg.connectionString = inspected.parsed.toString();
   } else {
     if (trimmed(process.env.PGHOST)) cfg.host = trimmed(process.env.PGHOST);
     if (trimmed(process.env.PGPORT)) cfg.port = positiveIntFromEnv(process.env.PGPORT, 5432);
@@ -89,10 +171,42 @@ function postgresConfig() {
     if (process.env.PGPASSWORD !== undefined) cfg.password = String(process.env.PGPASSWORD);
     if (trimmed(process.env.PGDATABASE)) cfg.database = trimmed(process.env.PGDATABASE);
   }
-  if (trimmed(process.env.PGSSLMODE).toLowerCase() === 'require') {
+  const sslMode = postgresSslMode();
+  if (sslMode === 'require') {
+    // Development compatibility only. Production validation rejects this mode
+    // because encryption without certificate authentication is vulnerable to a
+    // database MITM.
     cfg.ssl = { rejectUnauthorized: false };
+  } else if (sslMode === 'verify-ca' || sslMode === 'verify-full') {
+    cfg.ssl = { rejectUnauthorized: true };
   }
   return cfg;
+}
+
+function postgresSslMode() {
+  const explicit = trimmed(process.env.PGSSLMODE).toLowerCase();
+  const fromUrl = inspectDatabaseUrl().sslMode;
+  return fromUrl || explicit;
+}
+
+function postgresHost() {
+  const url = databaseUrl();
+  if (url) {
+    try { return new URL(url).hostname; } catch { return ''; }
+  }
+  return trimmed(process.env.PGHOST);
+}
+
+function postgresPoolMax() {
+  return positiveIntFromEnv(process.env.PG_POOL_MAX, 10);
+}
+
+function postgresConnectTimeoutMs() {
+  return positiveIntFromEnv(process.env.PG_CONNECT_TIMEOUT_MS, 5000);
+}
+
+function postgresIdleTimeoutMs() {
+  return positiveIntFromEnv(process.env.PG_IDLE_TIMEOUT_MS, 30000);
 }
 
 /** True when enough Postgres connection info exists to attempt a connection. */
@@ -101,10 +215,36 @@ function hasPostgresConnection() {
 }
 
 // ── Session / cookie auth ───────────────────────────────────────────────────
-const SESSION_COOKIE_NAME = 'benchone_session';
+const SESSION_COOKIE_NAME = LEGACY_SESSION_COOKIE_NAME;
+
+function sessionCookieName() {
+  return isProduction() ? PRODUCTION_SESSION_COOKIE_NAME : LEGACY_SESSION_COOKIE_NAME;
+}
 
 function sessionTtlSeconds() {
   return positiveIntFromEnv(process.env.SESSION_TTL_SECONDS, 12 * 60 * 60);
+}
+
+function sessionEpoch() {
+  return trimmed(process.env.SESSION_EPOCH) || DEVELOPMENT_SESSION_EPOCH;
+}
+
+function isValidSessionEpoch(value = sessionEpoch()) {
+  const epoch = String(value || '');
+  if (epoch === DEVELOPMENT_SESSION_EPOCH) return !isProduction();
+  return SESSION_EPOCH_PATTERN.test(epoch) && looksLikeGeneratedHex(epoch, 32);
+}
+
+function hasStrongSessionSecret() {
+  return isStrongSecretValue(process.env.SESSION_SECRET, MIN_SESSION_SECRET_LENGTH);
+}
+
+// Network-facing production registration is deliberately unavailable in the
+// supported topology. Accounts are provisioned through the operator-only CLI,
+// preventing anonymous account creation from becoming a storage/compute abuse
+// primitive. Development and test retain the convenient signup flow.
+function registrationEnabled() {
+  return !isProduction();
 }
 
 // HttpOnly session cookies are Secure by default in production and non-Secure by
@@ -146,14 +286,72 @@ function allowedOrigins() {
   const raw = trimmed(process.env.FRONTEND_ORIGIN) || trimmed(process.env.FRONTEND_URL) || 'http://localhost:5173';
   return raw
     .split(',')
-    .map((s) => s.trim().replace(/\/+$/, ''))
+    .map((s) => normalizeOrigin(s))
     .filter(Boolean);
+}
+
+function normalizeOrigin(value) {
+  const raw = trimmed(value).replace(/\/+$/, '');
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (!['http:', 'https:'].includes(parsed.protocol)
+        || parsed.username || parsed.password
+        || (parsed.pathname && parsed.pathname !== '/')
+        || parsed.search || parsed.hash) return raw;
+    return parsed.origin;
+  } catch {
+    return raw;
+  }
+}
+
+function isValidBrowserOrigin(value) {
+  const normalized = normalizeOrigin(value);
+  if (!normalized) return false;
+  try {
+    const parsed = new URL(normalized);
+    return ['http:', 'https:'].includes(parsed.protocol)
+      && !parsed.username && !parsed.password
+      && (parsed.pathname === '/' || parsed.pathname === '')
+      && !parsed.search && !parsed.hash
+      && parsed.origin === normalized;
+  } catch {
+    return false;
+  }
 }
 
 function isAllowedOrigin(origin) {
   if (!origin) return false;
-  const normalized = String(origin).trim().replace(/\/+$/, '');
+  const normalized = normalizeOrigin(origin);
+  if (!isValidBrowserOrigin(normalized)) return false;
   return allowedOrigins().includes(normalized);
+}
+
+// â”€â”€ Web listener / ingress contract â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function webPort() {
+  return positiveIntFromEnv(process.env.PORT, 3000);
+}
+
+function webHost() {
+  return trimmed(process.env.WEB_HOST) || '127.0.0.1';
+}
+
+function trustProxyHops() {
+  const raw = trimmed(process.env.TRUST_PROXY_HOPS);
+  if (!raw) return 0;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 1 && value <= 3 ? value : 0;
+}
+
+function webShutdownTimeoutMs() {
+  return positiveIntFromEnv(process.env.WEB_SHUTDOWN_TIMEOUT_MS, 150000);
+}
+
+function webDrainDelayMs() {
+  const raw = trimmed(process.env.WEB_DRAIN_DELAY_MS);
+  if (!raw) return 1000;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : 1000;
 }
 
 // ── Internal R backend (server-only; never exposed to the client) ───────────
@@ -174,7 +372,7 @@ function rRuntimeMode() {
 }
 
 function hasRApiToken() {
-  return trimmed(process.env.R_API_TOKEN).length >= 32;
+  return isStrongSecretValue(process.env.R_API_TOKEN, 32);
 }
 
 // ── Storage roots + upload limits (server-only; never exposed to clients) ────
@@ -246,10 +444,17 @@ function summary() {
     databaseBackend: databaseBackend(),
     hasDatabaseUrl: !!databaseUrl(),
     hasSessionSecret: !!trimmed(process.env.SESSION_SECRET),
+    hasStrongSessionSecret: hasStrongSessionSecret(),
+    hasSessionEpoch: !!trimmed(process.env.SESSION_EPOCH),
+    registrationMode: registrationEnabled() ? 'open-development' : 'operator-only',
     sessionTtlSeconds: sessionTtlSeconds(),
+    sessionCookieName: sessionCookieName(),
     cookieSecure: cookieSecure(),
     cookieSameSite: cookieSameSite(),
     allowedOrigins: allowedOrigins(),
+    webHost: webHost(),
+    webPort: webPort(),
+    trustProxyHops: trustProxyHops(),
     supportedRTarget: supportedRTarget(),
     rRuntimeMode: rRuntimeMode(),
     hasRApiToken: hasRApiToken()
@@ -263,40 +468,76 @@ function summary() {
  * Returns an array of human-readable error strings (empty === OK). Never echoes
  * secret values — only names the missing/invalid variable.
  */
-function validateProductionConfig() {
+function validateProductionConfig(options = {}) {
+  const role = options.role || 'web';
   const errors = validateCookieConfig();
+  if (!ALLOWED_NODE_ENVS.has(nodeEnv())) {
+    errors.push('NODE_ENV must be development, test, or production.');
+  }
+  const rawPoolMax = trimmed(process.env.PG_POOL_MAX);
+  if (rawPoolMax && (!isValidPositiveIntOverride(rawPoolMax)
+      || Number(rawPoolMax) < 2 || Number(rawPoolMax) > 20)) {
+    errors.push('PG_POOL_MAX must be between 2 and 20 because topology locks reserve one connection.');
+  }
+  const rawSessionEpoch = trimmed(process.env.SESSION_EPOCH);
+  if (rawSessionEpoch && !isValidSessionEpoch(rawSessionEpoch)) {
+    errors.push('SESSION_EPOCH must be exactly 32 lowercase hexadecimal characters.');
+  }
   if (!isProduction()) return errors;
 
-  if (!trimmed(process.env.SESSION_SECRET)) {
-    errors.push('SESSION_SECRET must be set in production.');
+  if (role !== 'web' && role !== 'worker') {
+    errors.push('Runtime role must be web or worker.');
+  }
+  if (role === 'web' && !hasStrongSessionSecret()) {
+    errors.push('SESSION_SECRET must be generated as exactly 64 lowercase hexadecimal characters in production (for example, openssl rand -hex 32).');
+  }
+  if (role === 'web' && (!rawSessionEpoch || !isValidSessionEpoch(rawSessionEpoch))) {
+    errors.push('SESSION_EPOCH must be a freshly generated 32-character lowercase hexadecimal deployment identifier in production.');
   }
   if (!hasPostgresConnection()) {
     errors.push('DATABASE_URL (or PGHOST/PGDATABASE) must be set for the Postgres backend.');
   }
-  if (!trimmed(process.env.FRONTEND_ORIGIN) && !trimmed(process.env.FRONTEND_URL)) {
+  if (role === 'web' && !trimmed(process.env.FRONTEND_ORIGIN) && !trimmed(process.env.FRONTEND_URL)) {
     errors.push('FRONTEND_ORIGIN must be set in production so CORS/CSRF are not left at the dev default.');
   }
   if (!hasRApiToken()) {
-    errors.push('R_API_TOKEN must be set to at least 32 characters in production.');
+    errors.push('R_API_TOKEN must be independently generated as exactly 64 lowercase hexadecimal characters in production.');
   }
   try {
-    rRuntime.resolveRRuntimeConfig(process.env, { role: 'web' });
+    rRuntime.resolveRRuntimeConfig(process.env, { role });
   } catch (error) {
     errors.push(error && error.message ? error.message : 'R runtime configuration is invalid.');
   }
-  if (!cookieSecure()) {
+  if (rRuntimeMode() !== 'external' || !trimmed(process.env.R_BACKEND_URL)) {
+    errors.push('Production web and worker processes require R_RUNTIME_MODE=external with an explicit R_BACKEND_URL.');
+  }
+  if (role === 'web' && !cookieSecure()) {
     errors.push('Session cookies must be Secure in production (do not set COOKIE_SECURE=false).');
   }
-  if (cookieSameSite() === 'None') {
-    const insecureOrigins = allowedOrigins().filter((origin) => {
-      try {
-        return new URL(origin).protocol !== 'https:';
-      } catch {
-        return true;
-      }
-    });
-    if (insecureOrigins.length > 0) {
-      errors.push('COOKIE_SAMESITE=None is for cross-site cookie deployments and requires every FRONTEND_ORIGIN to use https:// in production.');
+  if (role === 'web') {
+    const origins = allowedOrigins();
+    if (origins.length === 0 || origins.some((origin) => !isValidBrowserOrigin(origin))) {
+      errors.push('FRONTEND_ORIGIN must contain only valid absolute HTTP(S) origins without paths, credentials, queries, or fragments.');
+    }
+    if (origins.some((origin) => {
+      try { return new URL(origin).protocol !== 'https:'; } catch { return true; }
+    })) {
+      errors.push('Every FRONTEND_ORIGIN must use https:// in production.');
+    }
+    if (!isValidPositiveIntOverride(process.env.SESSION_TTL_SECONDS)
+        || sessionTtlSeconds() < SESSION_TTL_MIN_SECONDS
+        || sessionTtlSeconds() > SESSION_TTL_MAX_SECONDS) {
+      errors.push(`SESSION_TTL_SECONDS must be an integer between ${SESSION_TTL_MIN_SECONDS} and ${SESSION_TTL_MAX_SECONDS} in production.`);
+    }
+    const rawPort = trimmed(process.env.PORT);
+    if (rawPort && (!isValidPositiveIntOverride(rawPort) || webPort() > 65535)) {
+      errors.push('PORT must be an integer between 1 and 65535.');
+    }
+    if (!['127.0.0.1', '::1', '0.0.0.0'].includes(webHost())) {
+      errors.push('WEB_HOST must be 127.0.0.1, ::1, or 0.0.0.0.');
+    }
+    if (!trimmed(process.env.TRUST_PROXY_HOPS) || trustProxyHops() === 0) {
+      errors.push('TRUST_PROXY_HOPS must be an integer between 1 and 3 for the production TLS ingress.');
     }
   }
   if (!isValidPositiveIntOverride(process.env.MAX_UPLOAD_BYTES)) {
@@ -323,6 +564,41 @@ function validateProductionConfig() {
   if (rProxyMaxResponseBytes() > 8 * 1024 * 1024) {
     errors.push('R_PROXY_MAX_RESPONSE_BYTES must not exceed 8388608 in production.');
   }
+  for (const [name, min, max] of [
+    ['PG_CONNECT_TIMEOUT_MS', 100, 30000],
+    ['PG_IDLE_TIMEOUT_MS', 1000, 300000],
+  ]) {
+    if (!isValidPositiveIntOverride(process.env[name])) {
+      errors.push(`${name} must be a positive integer when set.`);
+      continue;
+    }
+    const value = name === 'PG_CONNECT_TIMEOUT_MS' ? postgresConnectTimeoutMs()
+        : postgresIdleTimeoutMs();
+    if (value < min || value > max) errors.push(`${name} must be between ${min} and ${max} in production.`);
+  }
+  const dbHost = postgresHost();
+  const sslMode = postgresSslMode();
+  const databaseInspection = inspectDatabaseUrl();
+  errors.push(...databaseInspection.errors);
+  const explicitSslMode = trimmed(process.env.PGSSLMODE).toLowerCase();
+  if (explicitSslMode && !ALLOWED_POSTGRES_SSL_MODES.has(explicitSslMode)) {
+    errors.push('PGSSLMODE is invalid.');
+  }
+  if (explicitSslMode && databaseInspection.sslMode && explicitSslMode !== databaseInspection.sslMode) {
+    errors.push('PGSSLMODE and DATABASE_URL sslmode must not conflict.');
+  }
+  if (dbHost && !isLoopbackHost(dbHost) && sslMode !== 'verify-full') {
+    errors.push('Non-loopback Postgres requires sslmode=verify-full so the database certificate and hostname are authenticated.');
+  }
+  if (sslMode && !['disable', 'verify-full'].includes(sslMode)) {
+    errors.push('Production Postgres sslmode must be disable for loopback or verify-full for authenticated TLS.');
+  }
+  if (!trimmed(process.env.STORAGE_ROOT) || !path.isAbsolute(trimmed(process.env.STORAGE_ROOT))) {
+    errors.push('STORAGE_ROOT must be an explicit absolute persistent path in production.');
+  }
+  if (!trimmed(process.env.VAULT_ROOT) || !path.isAbsolute(trimmed(process.env.VAULT_ROOT))) {
+    errors.push('VAULT_ROOT must be an explicit absolute persistent path in production.');
+  }
   const durableRoot = storageRoot();
   const privateRoot = vaultRoot();
   if (isFilesystemRoot(durableRoot)) {
@@ -346,13 +622,32 @@ module.exports = {
   databaseUrl,
   postgresConfig,
   hasPostgresConnection,
+  postgresSslMode,
+  postgresHost,
+  postgresPoolMax,
+  postgresConnectTimeoutMs,
+  postgresIdleTimeoutMs,
   SESSION_COOKIE_NAME,
+  LEGACY_SESSION_COOKIE_NAME,
+  PRODUCTION_SESSION_COOKIE_NAME,
+  sessionCookieName,
   sessionTtlSeconds,
+  sessionEpoch,
+  isValidSessionEpoch,
+  hasStrongSessionSecret,
+  registrationEnabled,
   cookieSecure,
   cookieSameSite,
   validateCookieConfig,
   allowedOrigins,
+  normalizeOrigin,
+  isValidBrowserOrigin,
   isAllowedOrigin,
+  webPort,
+  webHost,
+  trustProxyHops,
+  webShutdownTimeoutMs,
+  webDrainDelayMs,
   plumberPort,
   rBackendUrl,
   rRuntimeMode,

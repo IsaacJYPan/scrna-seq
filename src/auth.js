@@ -10,6 +10,9 @@ function localStorageAuth() {
   const saveUsers = (users) => localStorage.setItem(USERS_KEY, JSON.stringify(users));
 
   return {
+    async registrationPolicy() {
+      return { registrationEnabled: true };
+    },
     async signup(email, password, displayName) {
       const users = getUsers();
       const normalizedEmail = email.trim().toLowerCase();
@@ -47,6 +50,12 @@ async function hashMock(str) {
 const fallbackAuth = localStorageAuth();
 
 const auth = {
+  async registrationPolicy() {
+    if (typeof window !== 'undefined' && window.electronAPI?.registrationPolicy) {
+      return window.electronAPI.registrationPolicy();
+    }
+    return fallbackAuth.registrationPolicy();
+  },
   async signup(email, password, displayName) {
     if (typeof window !== 'undefined' && window.electronAPI?.signup) {
       return window.electronAPI.signup(email, password, displayName);

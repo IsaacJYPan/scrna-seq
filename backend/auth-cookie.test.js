@@ -1,28 +1,35 @@
 /**
  * HttpOnly cookie session foundation (real Express, evidence label: backend
- * contract). Proves the cookie auth migration path:
+ * contract). Proves the cookie-only auth contract:
  *   - signup/login set an HttpOnly, SameSite, Max-Age session cookie,
  *   - GET /api/auth/session restores auth state from the cookie alone,
  *   - a protected route accepts cookie auth,
  *   - CSRF: a cookie-authenticated mutation is rejected without an allowed
- *     Origin and accepted with one; a bearer mutation is exempt (not a CSRF
- *     vector),
- *   - logout clears the cookie,
- *   - the legacy bearer path still authenticates (transition compatibility).
+ *     Origin and accepted with one,
+ *   - logout revokes every cookie for the account and clears the browser cookie,
+ *   - bearer credentials are rejected.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 const config = require('./config');
 const { startServer, serverModule } = require('./_http-test-utils');
 const db = require('./pgDatabase');
 
 const CONFIGURED = config.hasPostgresConnection();
 const { issueSession } = serverModule;
-const COOKIE_NAME = 'benchone_session';
+const COOKIE_NAME = config.sessionCookieName();
 const ALLOWED_ORIGIN = 'http://localhost:5173'; // config default when FRONTEND_* unset
 
 let server;
 let baseUrl;
+
+describe('session claim bounds', () => {
+  it('rejects user ids that cannot round-trip safely and versions outside Postgres BIGINT', () => {
+    expect(() => issueSession({ id: '9007199254740992', sessionVersion: '1' })).toThrow(/valid internal user/i);
+    expect(() => issueSession({ id: 1, sessionVersion: '9223372036854775808' })).toThrow(/valid internal user/i);
+    expect(() => issueSession({ id: 1, sessionVersion: '01' })).toThrow(/valid internal user/i);
+  });
+});
 
 function uniqueEmail(tag) {
   return `cookie-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
@@ -66,6 +73,15 @@ afterAll(async () => {
   await db.close();
 });
 
+beforeEach(() => {
+  serverModule.loginRateLimiter.reset();
+  serverModule.signupRateLimiter.reset();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe.skipIf(!CONFIGURED)('cookie session issuance', () => {
   it('sets an HttpOnly SameSite session cookie on signup', async () => {
     const email = uniqueEmail('signup');
@@ -79,8 +95,9 @@ describe.skipIf(!CONFIGURED)('cookie session issuance', () => {
     expect(cookie).toMatch(/HttpOnly/i);
     expect(cookie).toMatch(/SameSite=Lax/i);
     expect(cookie).toMatch(/Max-Age=\d+/i);
-    // Transition: the token is still returned in JSON for legacy bearer clients.
-    expect(typeof data.token).toBe('string');
+    expect(data.token).toBeUndefined();
+    expect(data.user.sessionVersion).toBeUndefined();
+    expect(res.headers.get('cache-control')).toBe('no-store');
   });
 
   it('sets a session cookie on login', async () => {
@@ -110,7 +127,7 @@ describe.skipIf(!CONFIGURED)('cookie session restore + protected access', () => 
     });
     expect(status).toBe(200);
     expect(data.user.email).toBe(email);
-    expect(data.authVia).toBe('cookie');
+    expect(data.authVia).toBeUndefined();
   });
 
   it('accepts cookie auth on a protected route', async () => {
@@ -119,6 +136,25 @@ describe.skipIf(!CONFIGURED)('cookie session restore + protected access', () => 
       headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}` }
     });
     expect(status).toBe(200);
+  });
+
+  it('invalidates every existing cookie when the deployment session epoch changes', async () => {
+    const previous = process.env.SESSION_EPOCH;
+    try {
+      process.env.SESSION_EPOCH = '4f8c2a6e1d9b3075c4e8a2f6d1b93570';
+      const { cookie } = await loginCookie('epoch-rotation');
+      expect((await http('/api/auth/session', {
+        headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}` }
+      })).status).toBe(200);
+
+      process.env.SESSION_EPOCH = 'a7d31c8e5f209b64d2a84f1c7e3059b6';
+      expect((await http('/api/auth/session', {
+        headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}` }
+      })).status).toBe(401);
+    } finally {
+      if (previous === undefined) delete process.env.SESSION_EPOCH;
+      else process.env.SESSION_EPOCH = previous;
+    }
   });
 
   it('rejects an unauthenticated protected request', async () => {
@@ -178,7 +214,7 @@ describe.skipIf(!CONFIGURED)('CSRF protection for cookie-authenticated mutations
     expect(status).toBe(201);
   });
 
-  it('exempts bearer-auth mutations from the CSRF origin check', async () => {
+  it('rejects a valid signed token when it is presented only as a bearer credential', async () => {
     const email = uniqueEmail('bearer-csrf');
     const user = await db.createUser(email, 'password123', 'B');
     const token = issueSession(user);
@@ -187,12 +223,12 @@ describe.skipIf(!CONFIGURED)('CSRF protection for cookie-authenticated mutations
       headers: { Authorization: `Bearer ${token}` }, // no Origin header
       body: { name: 'Bearer Org' }
     });
-    expect(status).toBe(201);
+    expect(status).toBe(401);
   });
 });
 
-describe.skipIf(!CONFIGURED)('logout + legacy bearer compatibility', () => {
-  it('prefers a valid cookie over a different valid legacy bearer token', async () => {
+describe.skipIf(!CONFIGURED)('logout + removed bearer transport', () => {
+  it('uses a valid cookie and ignores a different valid bearer token', async () => {
     const cookieEmail = uniqueEmail('cookie-wins');
     await http('/api/auth/signup', { method: 'POST', body: { email: cookieEmail, password: 'password123', displayName: 'Cookie' } });
     const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email: cookieEmail, password: 'password123' } });
@@ -209,7 +245,7 @@ describe.skipIf(!CONFIGURED)('logout + legacy bearer compatibility', () => {
     });
 
     expect(status).toBe(200);
-    expect(data.authVia).toBe('cookie');
+    expect(data.authVia).toBeUndefined();
     expect(data.user.email).toBe(cookieEmail);
   });
 
@@ -228,6 +264,46 @@ describe.skipIf(!CONFIGURED)('logout + legacy bearer compatibility', () => {
     expect(cleared).toMatch(/Max-Age=0/i);
   });
 
+  it('preserves the retry credential on a revocation failure, then revokes it on retry', async () => {
+    const email = uniqueEmail('logout-retry');
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
+    const cookie = getSessionCookie((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: 'password123' }
+    })).res);
+    vi.spyOn(db, 'revokeUserSessions').mockRejectedValueOnce(new Error('/private/database'));
+
+    const failed = await http('/api/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}`, Origin: ALLOWED_ORIGIN }
+    });
+    expect(failed.status).toBe(503);
+    expect(getSessionCookie(failed.res)).toBe('');
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}` }
+    })).status).toBe(200);
+
+    const retried = await http('/api/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}`, Origin: ALLOWED_ORIGIN }
+    });
+    expect(retried.status).toBe(200);
+    expect(retried.data.allSessionsRevoked).toBe(true);
+    expect(getSessionCookie(retried.res)).toMatch(/Max-Age=0/i);
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(cookie)}` }
+    })).status).toBe(401);
+  });
+
+  it('does not falsely report revoke-all for an invalid cookie', async () => {
+    const result = await http('/api/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=invalid`, Origin: ALLOWED_ORIGIN }
+    });
+    expect(result.status).toBe(200);
+    expect(result.data).toMatchObject({ success: true, allSessionsRevoked: false });
+    expect(getSessionCookie(result.res)).toMatch(/Max-Age=0/i);
+  });
+
   it('clears the session cookie on same-origin logout even when FRONTEND_ORIGIN points at the dev server', async () => {
     const email = uniqueEmail('logout-same-origin');
     await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
@@ -244,15 +320,61 @@ describe.skipIf(!CONFIGURED)('logout + legacy bearer compatibility', () => {
     expect(cleared).toMatch(/Max-Age=0/i);
   });
 
-  it('still authenticates via the legacy bearer token', async () => {
+  it('does not authenticate via the removed bearer transport', async () => {
     const email = uniqueEmail('bearer');
     const user = await db.createUser(email, 'password123', 'B');
     const token = issueSession(user);
     const { status, data } = await http('/api/auth/session', {
       headers: { Authorization: `Bearer ${token}` }
     });
-    expect(status).toBe(200);
-    expect(data.user.email).toBe(email);
-    expect(data.authVia).toBe('bearer');
+    expect(status).toBe(401);
+    expect(data.error).toMatch(/authentication required/i);
+  });
+
+  it('revokes every cookie issued for the account immediately', async () => {
+    const email = uniqueEmail('revoke-all');
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
+    const first = getSessionCookie((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: 'password123' }
+    })).res);
+    const second = getSessionCookie((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: 'password123' }
+    })).res);
+
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}` }
+    })).status).toBe(200);
+    expect((await http('/api/auth/logout', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}`, Origin: ALLOWED_ORIGIN }
+    })).status).toBe(200);
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}` }
+    })).status).toBe(401);
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(second)}` }
+    })).status).toBe(401);
+
+    const fresh = getSessionCookie((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: 'password123' }
+    })).res);
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(fresh)}` }
+    })).status).toBe(200);
+  });
+
+  it('rejects malformed and duplicate session cookies without throwing', async () => {
+    const malformed = await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=%not-valid` }
+    });
+    expect(malformed.status).toBe(401);
+
+    const email = uniqueEmail('duplicate');
+    const user = await db.createUser(email, 'password123', 'D');
+    const token = issueSession(user);
+    const duplicate = await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${encodeURIComponent(token)}; ${COOKIE_NAME}=${encodeURIComponent(token)}` }
+    });
+    expect(duplicate.status).toBe(401);
   });
 });

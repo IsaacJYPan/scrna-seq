@@ -125,8 +125,33 @@ const TabContent = ({ id, activeTab, children }) => (
   </div>
 );
 
+const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
+  registrationEnabled: false,
+  legacyLocalImportsEnabled: false,
+  legacyLiveMutationToolsEnabled: false,
+  serverFigureExportEnabled: false,
+});
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
+  const [deploymentPolicy, setDeploymentPolicy] = useState(CLOSED_DEPLOYMENT_POLICY);
+
+  useEffect(() => {
+    let active = true;
+    if (!window.electronAPI?.registrationPolicy) return undefined;
+    window.electronAPI.registrationPolicy().then((policy) => {
+      if (!active) return;
+      setDeploymentPolicy({
+        registrationEnabled: policy?.registrationEnabled === true,
+        legacyLocalImportsEnabled: policy?.legacyLocalImportsEnabled === true,
+        legacyLiveMutationToolsEnabled: policy?.legacyLiveMutationToolsEnabled === true,
+        serverFigureExportEnabled: policy?.serverFigureExportEnabled === true,
+      });
+    }).catch(() => {
+      if (active) setDeploymentPolicy(CLOSED_DEPLOYMENT_POLICY);
+    });
+    return () => { active = false; };
+  }, []);
 
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
   useEffect(() => {
@@ -159,14 +184,15 @@ export default function App() {
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
 
   const [user, setUser] = useState(null);
+  const [loggedOutNotice, setLoggedOutNotice] = useState('');
   const isLoggedIn = !!user;
 
   // Restore auth state from the HttpOnly session cookie (source of truth) on
-  // mount, rather than trusting the localStorage bearer token. The cookie is not
+  // mount, rather than trusting cached local user metadata. The cookie is not
   // readable by JS, so we ask the backend who we are. This reconciles the fast
   // synchronous bootstrap (cached user) with the real server session: if the
   // cookie session is valid we adopt/refresh the user; if it is gone we stay
-  // logged out so a reload cannot trust a stale localStorage bearer/user cache.
+  // logged out so a reload cannot trust stale local user metadata.
   useEffect(() => {
     let cancelled = false;
     if (!window.electronAPI?.restoreSession) return undefined;
@@ -672,28 +698,30 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    try {
-      await window.electronAPI?.logout?.();
-    } finally {
-      setUser(null);
-      setActiveTab('workspace');
-      setProvenanceRecords([]);
-      setDrawerProvId(null);
-      setDrawerChain(null);
-      setRSessionId(null);
-      setSessionCheckDone(false);
-      setApiStatus('Checking backend');
-      setWorkspaces([
-        createEmptyWorkspace({ collaborators: ['me@lab.edu'] }),
-      ]);
-      setBackendModelStatus({
-        projectsLoading: false,
-        objectsLoading: false,
-        error: null,
-        projectCacheCleared: false,
-        objectCacheCleared: false,
-      });
+    const result = await window.electronAPI?.logout?.();
+    if (result?.error) {
+      setApiStatus(result.error);
+      return;
     }
+    setLoggedOutNotice(result?.warning || '');
+    setUser(null);
+    setActiveTab('workspace');
+    setProvenanceRecords([]);
+    setDrawerProvId(null);
+    setDrawerChain(null);
+    setRSessionId(null);
+    setSessionCheckDone(false);
+    setApiStatus('Checking backend');
+    setWorkspaces([
+      createEmptyWorkspace({ collaborators: ['me@lab.edu'] }),
+    ]);
+    setBackendModelStatus({
+      projectsLoading: false,
+      objectsLoading: false,
+      error: null,
+      projectCacheCleared: false,
+      objectCacheCleared: false,
+    });
   };
 
   // ── Workspace Persistence ───────────────────────────────────────
@@ -930,7 +958,17 @@ export default function App() {
   }, [currentProvId, provenanceRecords, datasetInfo?.liveState, resetPipelineState]);
   // ────────────────────────────────────────────────────────────────
 
-  if (!isLoggedIn) return <Login onLogin={(u) => setUser(u || null)} theme={theme} setTheme={setTheme} />;
+  if (!isLoggedIn) return (
+    <Login
+      onLogin={(u) => {
+        setLoggedOutNotice('');
+        setUser(u || null);
+      }}
+      notice={loggedOutNotice}
+      theme={theme}
+      setTheme={setTheme}
+    />
+  );
 
   const handleDataVersionChange = (fn) => {
     updateActiveWorkspace({ dataVersion: (typeof fn === 'function' ? fn(currentWs.dataVersion) : fn) });
@@ -969,6 +1007,7 @@ export default function App() {
       userEmail: user?.email ?? null,
       userId: user?.id ?? null,
       objectId: datasetInfo?.id ?? null,
+      deploymentPolicy,
     };
 
     return (
@@ -1046,6 +1085,7 @@ export default function App() {
         theme={theme}
         setTheme={setTheme}
         figuresCount={figuresCount}
+        deploymentPolicy={deploymentPolicy}
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
         {renderContent()}

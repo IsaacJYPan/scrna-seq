@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import http from 'http';
 
 // Pins the CURRENT R-proxy path policy so future changes are deliberate and
@@ -25,6 +25,7 @@ const db = require('./pgDatabase');
 const { startServer, createUserWithToken, api, serverModule } = require('./_http-test-utils');
 
 const CONFIGURED = config.hasPostgresConnection();
+const TEST_SESSION_EPOCH = '4f8c2a6e1d9b3075c4e8a2f6d1b93570';
 
 const {
   isInternalOnlyRProxyPath,
@@ -56,6 +57,7 @@ const LEGACY_REACHABLE = [
 let server;
 let prevTrustedRdsLoad;
 let prevNodeEnv;
+let prevSessionEpoch;
 
 function rawRRequest({ method, path, token, headers = {}, chunks = [] }) {
   return new Promise((resolve, reject) => {
@@ -66,7 +68,10 @@ function rawRRequest({ method, path, token, headers = {}, chunks = [] }) {
       method,
       path,
       headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(token ? {
+          Cookie: `${config.sessionCookieName()}=${encodeURIComponent(token)}`,
+          Origin: 'http://localhost:5173',
+        } : {}),
         ...headers,
       },
     }, (res) => {
@@ -87,6 +92,8 @@ beforeAll(async () => {
   if (!CONFIGURED) return;
   prevTrustedRdsLoad = process.env.ALLOW_TRUSTED_RDS_LOAD;
   prevNodeEnv = process.env.NODE_ENV;
+  prevSessionEpoch = process.env.SESSION_EPOCH;
+  process.env.SESSION_EPOCH = TEST_SESSION_EPOCH;
   server = await startServer();
 });
 
@@ -98,13 +105,22 @@ afterAll(async () => {
   else process.env.ALLOW_TRUSTED_RDS_LOAD = prevTrustedRdsLoad;
   if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = prevNodeEnv;
+  if (prevSessionEpoch === undefined) delete process.env.SESSION_EPOCH;
+  else process.env.SESSION_EPOCH = prevSessionEpoch;
 });
 
 beforeEach(async () => {
   if (!CONFIGURED) return;
   process.env.NODE_ENV = prevNodeEnv || 'test';
+  process.env.SESSION_EPOCH = TEST_SESSION_EPOCH;
   await db.resetSchemaForTests();
   delete process.env.ALLOW_TRUSTED_RDS_LOAD;
+});
+
+afterEach(() => {
+  // Production HTTP-policy cases model the supported TLS reverse proxy. Restore
+  // the ordinary test setting so forwarded headers cannot affect later cases.
+  serverModule.app.set('trust proxy', 0);
 });
 
 describe('production R proxy exact allowlist', () => {
@@ -182,6 +198,7 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
 
   it('blocks legacy heavy routes, unknown paths, and wrong methods in production', async () => {
     process.env.NODE_ENV = 'production';
+    serverModule.app.set('trust proxy', 1);
     const { token } = await createUserWithToken({ email: 'production-policy@example.com' });
     for (const [method, path] of [
       ['GET', '/deg'], ['POST', '/cellchat'], ['GET', '/unknown-route'],
@@ -190,7 +207,11 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
       ['GET', '/csv-columns'], ['GET', '/add-metadata'], ['POST', '/subset'],
       ['GET', '/integrate'],
     ]) {
-      const res = await api(server, `/api/r${path}`, { method, token });
+      const res = await api(server, `/api/r${path}`, {
+        method,
+        token,
+        headers: { 'X-Forwarded-Proto': 'https' },
+      });
       expect(res.status).toBe(404);
       expect(res.data).toEqual({ error: 'Not found' });
     }
@@ -228,11 +249,15 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
 
   it('never enables public RDS deserialization in production', async () => {
     process.env.NODE_ENV = 'production';
+    serverModule.app.set('trust proxy', 1);
     process.env.ALLOW_TRUSTED_RDS_LOAD = 'true';
     const { token } = await createUserWithToken({ email: 'production-rds@example.com' });
     for (const path of ['/load-rds', '/restore-session']) {
       const res = await api(server, `/api/r${path}`, {
-        method: 'POST', token, body: { path: 'vault/ignored.rds' },
+        method: 'POST',
+        token,
+        headers: { 'X-Forwarded-Proto': 'https' },
+        body: { path: 'vault/ignored.rds' },
       });
       expect(res.status).toBe(404);
       expect(res.data).toEqual({ error: 'Not found' });
@@ -241,7 +266,7 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
 
   it('requires an allowed origin for every cookie-authenticated R method', async () => {
     const { token } = await createUserWithToken({ email: 'r-csrf@example.com' });
-    const cookie = `${config.SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`;
+    const cookie = `${config.sessionCookieName()}=${encodeURIComponent(token)}`;
     const missing = await api(server, '/api/r/object/inspect', {
       method: 'GET', headers: { Cookie: cookie },
     });
@@ -253,12 +278,22 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
     });
     expect(crossSite.status).toBe(403);
 
+    const badHeader = await api(server, '/api/r/object/inspect', {
+      method: 'GET', headers: { Cookie: cookie, 'X-BenchOne-CSRF': '0' },
+    });
+    expect(badHeader.status).toBe(403);
+
+    const firstPartyHeader = await api(server, '/api/r/object/inspect', {
+      method: 'GET', headers: { Cookie: cookie, 'X-BenchOne-CSRF': '1' },
+    });
+    expect(firstPartyHeader.status).toBe(404);
+
     const allowed = await api(server, '/api/r/object/inspect', {
       method: 'GET', headers: { Cookie: cookie, Origin: config.allowedOrigins()[0] },
     });
     expect(allowed.status).toBe(404);
-    const bearer = await api(server, '/api/r/object/inspect', { method: 'GET', token });
-    expect(bearer.status).toBe(404);
+    const cookieHelper = await api(server, '/api/r/object/inspect', { method: 'GET', token });
+    expect(cookieHelper.status).toBe(404);
   });
 
   it('blocks public RDS loading by default before any R contact', async () => {

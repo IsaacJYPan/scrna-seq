@@ -4,7 +4,7 @@ import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 
 // Removed API constant
-export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme }) {
+export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme, deploymentPolicy }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [dotData, setDotData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -265,6 +265,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         baseParams={{ features: genes, groupBy: 'seurat_clusters' }}
         userEmail={userEmail || ''}
         objectId={objectId || ''}
+        deploymentPolicy={deploymentPolicy}
       />
     </div>
   );

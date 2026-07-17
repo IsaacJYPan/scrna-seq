@@ -15,7 +15,7 @@ fs.mkdirSync(REPORT_DIR, { recursive: true });
 
 const state = {
   user: { id: 101, email: 'db-flow@example.com', displayName: 'DB Flow Tester' },
-  token: 'mock-db-flow-token',
+  authenticated: false,
   org: null,
   projects: [],
   objectsByProject: new Map(),
@@ -99,7 +99,21 @@ async function installRoutes(page) {
     }
 
     if (pathname === '/api/auth/signup' && request.method() === 'POST') {
-      return fulfill(route, 200, { token: state.token, user: state.user });
+      state.authenticated = true;
+      return fulfill(route, 201, { success: true, user: state.user });
+    }
+    if (pathname === '/api/auth/session' && request.method() === 'GET') {
+      return state.authenticated
+        ? fulfill(route, 200, { user: state.user })
+        : fulfill(route, 401, { error: 'Authentication required' });
+    }
+    if (pathname === '/api/auth/policy' && request.method() === 'GET') {
+      return fulfill(route, 200, {
+        registrationEnabled: true,
+        legacyLocalImportsEnabled: true,
+        legacyLiveMutationToolsEnabled: true,
+        serverFigureExportEnabled: true,
+      });
     }
     if (pathname === '/api/db/figures' && request.method() === 'GET') {
       return fulfill(route, 200, []);
@@ -212,6 +226,23 @@ async function installRoutes(page) {
       });
     }
 
+    if (pathname === '/api/r/pipeline-state') {
+      const objectId = request.headers()['x-object-id'];
+      state.verifiedObjectHeaders.push({ endpoint: 'pipeline-state', objectId });
+      if (objectId !== 'ao_mockdemo') return fulfill(route, 404, { error: 'Analysis object not found.' });
+      return fulfill(route, 200, {
+        exists: true,
+        has_qc: false,
+        has_normalized: false,
+        has_integrated: false,
+        has_pca: false,
+        has_clusters: false,
+        has_umap: false,
+        n_clusters: 0,
+        pca_dims: 0,
+      });
+    }
+
     if (pathname === '/api/r/object-info') {
       return fulfill(route, 200, { n_cells: 2700, n_features: 13714, assays: ['RNA'], meta_cols: [] });
     }
@@ -297,8 +328,10 @@ async function main() {
 
     const loadHeader = state.verifiedObjectHeaders.find(item => item.endpoint === 'load-data');
     const qcHeader = state.verifiedObjectHeaders.find(item => item.endpoint === 'qc-distributions');
+    const pipelineHeader = state.verifiedObjectHeaders.find(item => item.endpoint === 'pipeline-state');
     if (loadHeader?.objectId !== 'ao_mockdemo') fail('PBMC load did not use the DB analysis object id');
     if (qcHeader?.objectId !== 'ao_mockdemo') fail('QC distributions did not use the DB analysis object id');
+    if (pipelineHeader?.objectId !== 'ao_mockdemo') fail('Pipeline-state probe did not use the DB analysis object id');
     assertNoLeaks();
 
     await page.close();

@@ -10,7 +10,16 @@ import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 // Removed API constant
 // ── Load Object Modal ──────────────────────────────────────────────
 
-function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId, onCreateAnalysisObjectForLoad }) {
+function LoadModal({
+  onClose,
+  onLoaded,
+  loadingId,
+  setLoadingId,
+  activeProjectId,
+  onCreateAnalysisObjectForLoad,
+  legacyLocalImportsEnabled = false,
+  onOpenPipelineManager,
+}) {
   const [showFilters, setShowFilters] = useState(false);
   const [minCells, setMinCells] = useState(3);
   const [minFeatures, setMinFeatures] = useState(200);
@@ -240,7 +249,17 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
       action: loadDemo,
     },
     {
+      id: 'pipeline-manager',
+      icon: <Archive size={22} className="text-blue-400" />,
+      title: 'Durable 10X H5 Pipeline',
+      desc: 'Upload a 10X filtered feature-barcode .h5 dataset and run the queued, checkpointed Seurat pipeline.',
+      tag: 'Production',
+      tagColor: 'text-blue-400 bg-blue-500/10 border-blue-500/20',
+      action: onOpenPipelineManager,
+    },
+    {
       id: '10x',
+      legacy: true,
       icon: <FolderOpen size={22} className="text-emerald-400" />,
       title: 'Local 10X Directory',
       desc: 'Select a folder containing barcodes.tsv, features.tsv (or genes.tsv), and matrix.mtx.',
@@ -250,6 +269,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
     },
     {
       id: 'multi10x',
+      legacy: true,
       icon: <FolderTree size={22} className="text-cyan-400" />,
       title: 'Multiple 10X Directories',
       desc: 'Load several Cell Ranger output folders and merge them into one object. Sample names become a metadata column.',
@@ -259,6 +279,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
     },
     {
       id: 'scan-root',
+      legacy: true,
       icon: <Search size={22} className="text-violet-400" />,
       title: 'Scan Root Folder for Samples',
       desc: 'Select a parent folder and automatically discover all nested 10X data directories. Perfect for standard Cell Ranger project layouts.',
@@ -268,6 +289,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
     },
     {
       id: 'rds',
+      legacy: true,
       icon: <HardDrive size={22} className="text-violet-400" />,
       title: 'Seurat RDS Object',
       desc: 'Load a trusted local Seurat object saved as .rds. Disabled unless ALLOW_TRUSTED_RDS_LOAD=true.',
@@ -277,6 +299,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
     },
     {
       id: 'h5',
+      legacy: true,
       icon: <Database size={22} className="text-amber-400" />,
       title: 'H5AD / H5Seurat',
       desc: 'AnnData or H5Seurat format. Requires the SeuratDisk R package to be installed.',
@@ -517,7 +540,7 @@ function LoadModal({ onClose, onLoaded, loadingId, setLoadingId, activeProjectId
 
           {/* Option cards */}
           <div className="p-7 pt-4 space-y-3">
-            {options.map(opt => {
+            {options.filter(opt => legacyLocalImportsEnabled || !opt.legacy).map(opt => {
               const active = loadingId === opt.id;
               return (
                 <button
@@ -720,7 +743,7 @@ function WorkbenchOverview({
     nextAction = 'Select a DB-backed analysis object from the project list below before opening live-R workflow tabs.';
     actionLabel = 'Select Object';
   } else if (hasProject && !hasObject) {
-    nextAction = 'Load a PBMC demo or trusted local object into this backend project.';
+    nextAction = 'Load the PBMC demo or use the durable Pipeline Manager upload for this backend project.';
     actionLabel = 'Load Object';
     action = () => setShowLoadModal(true);
   } else if (hasProject && hasObject && !liveAttached) {
@@ -1384,6 +1407,7 @@ export default function Workspace({
   pipelineState,
   sessionReady,
   rSessionId,
+  deploymentPolicy = {},
 }) {
   const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
   const [showLoadModal, setShowLoadModal] = useState(false);
@@ -1726,7 +1750,7 @@ export default function Workspace({
                   <Database size={40} className="text-slate-400 mb-4 opacity-50" />
                   <h4 className="text-text font-bold mb-2">No analysis objects in this project</h4>
                   <p className="text-sm text-textMuted mb-6">
-                    Load the PBMC demo or import data to create a DB-backed analysis object.
+                    Use the durable Pipeline Manager upload or the PBMC demo to create a DB-backed analysis object.
                   </p>
                   <button
                     onClick={() => setShowLoadModal(true)}
@@ -1928,6 +1952,11 @@ export default function Workspace({
           setLoadingId={setLoadingId}
           activeProjectId={activeProjectId}
           onCreateAnalysisObjectForLoad={onCreateAnalysisObjectForLoad}
+          legacyLocalImportsEnabled={deploymentPolicy.legacyLocalImportsEnabled === true}
+          onOpenPipelineManager={() => {
+            setShowLoadModal(false);
+            setActiveTab?.('pipeline-manager');
+          }}
         />
       )}
     </div>

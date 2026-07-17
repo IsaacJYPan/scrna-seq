@@ -180,7 +180,10 @@ describe('API Client (electronAPI)', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/r/test-endpoint'),
-      expect.any(Object)
+      expect.objectContaining({
+        credentials: 'include',
+        headers: expect.objectContaining({ 'X-BenchOne-CSRF': '1' }),
+      })
     );
   });
 
@@ -254,6 +257,12 @@ describe('API Client (electronAPI)', () => {
 
     expect(electronAPI.getCurrentUser()).toEqual({ email: 'user@example.com' });
 
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, allSessionsRevoked: true }),
+    });
+
     await electronAPI.logout();
 
     expect(localStorage.getItem('benchone_auth_token')).toBeNull();
@@ -288,7 +297,33 @@ describe('API Client (electronAPI)', () => {
     expect(electronAPI.getCurrentUser()).toEqual(sessionUser);
   });
 
-  it('sends the legacy bearer during restore for compatibility while cookies remain preferred by the backend', async () => {
+  it('loads the public registration policy without sending a bearer', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({
+        registrationEnabled: false,
+        legacyLocalImportsEnabled: false,
+        legacyLiveMutationToolsEnabled: false,
+        serverFigureExportEnabled: false,
+      }),
+    });
+
+    await expect(electronAPI.registrationPolicy()).resolves.toEqual({
+      registrationEnabled: false,
+      legacyLocalImportsEnabled: false,
+      legacyLiveMutationToolsEnabled: false,
+      serverFigureExportEnabled: false,
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/auth/policy',
+      expect.objectContaining({ method: 'GET' })
+    );
+    expect(global.fetch.mock.calls[0][1].headers).not.toHaveProperty('Authorization');
+  });
+
+  it('purges a legacy bearer during restore and never sends it', async () => {
     localStorage.setItem('benchone_auth_token', 'legacy-token');
     const sessionUser = { id: 8, email: 'cookie@example.com', displayName: 'Cookie' };
     global.fetch.mockResolvedValue({
@@ -305,9 +340,10 @@ describe('API Client (electronAPI)', () => {
       '/api/auth/session',
       expect.objectContaining({
         credentials: 'include',
-        headers: expect.objectContaining({ Authorization: 'Bearer legacy-token' })
+        headers: expect.not.objectContaining({ Authorization: expect.anything() })
       })
     );
+    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
   });
 
   it('clears stale auth keys when the server rejects restore (401)', async () => {
@@ -337,8 +373,56 @@ describe('API Client (electronAPI)', () => {
     const result = await electronAPI.restoreSession();
 
     expect(result).toBeNull();
-    expect(localStorage.getItem('benchone_auth_token')).toBe('stale-token');
+    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
     expect(electronAPI.getCurrentUser()).toEqual({ email: 'offline@example.com' });
+  });
+
+  it('does not persist a bearer returned by an older login response', async () => {
+    const user = { id: 9, email: 'cookie-only@example.com', displayName: 'Cookie Only' };
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ user, token: 'must-not-be-stored' }),
+    });
+
+    expect(await electronAPI.login(user.email, 'correct horse battery staple')).toEqual(user);
+    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
+    const [, options] = global.fetch.mock.calls[0];
+    expect(options.credentials).toBe('include');
+    expect(options.headers).not.toHaveProperty('Authorization');
+  });
+
+  it('keeps cached user state when logout revocation fails', async () => {
+    const user = { id: 10, email: 'retry@example.com', displayName: 'Retry' };
+    localStorage.setItem('benchone_auth_user', JSON.stringify(user));
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: 'Session revocation is temporarily unavailable.' }),
+    });
+
+    await expect(electronAPI.logout()).resolves.toEqual({
+      error: 'Session revocation is temporarily unavailable.',
+    });
+    expect(electronAPI.getCurrentUser()).toEqual(user);
+  });
+
+  it('clears stale local auth when the current cookie already expired', async () => {
+    const user = { id: 11, email: 'missing-cookie@example.com', displayName: 'Missing Cookie' };
+    localStorage.setItem('benchone_auth_user', JSON.stringify(user));
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, allSessionsRevoked: false }),
+    });
+
+    await expect(electronAPI.logout()).resolves.toEqual({
+      success: true,
+      allSessionsRevoked: false,
+      warning: 'The current session had already expired; other sessions could not be revoked.',
+    });
+    expect(electronAPI.getCurrentUser()).toBeNull();
   });
 
   it('reads runtime diagnostics from the backend instead of hardcoded R strings', async () => {

@@ -25,6 +25,7 @@ describe('FigureSavePanel component', () => {
         onClose={() => {}} 
         plotType="UMAP" 
         baseParams={{}} 
+        deploymentPolicy={{ serverFigureExportEnabled: true }}
       />
     );
 
@@ -44,6 +45,7 @@ describe('FigureSavePanel component', () => {
         baseParams={{}} 
         userEmail="test@example.com"
         onSaved={onSavedMock}
+        deploymentPolicy={{ serverFigureExportEnabled: true }}
       />
     );
 
@@ -57,5 +59,28 @@ describe('FigureSavePanel component', () => {
     await waitFor(() => {
       expect(global.window.electronAPI.saveFigure).toHaveBeenCalled();
     });
+  });
+
+  it('keeps previews available but disables server-file export in production', async () => {
+    render(
+      <FigureSavePanel
+        isOpen={true}
+        onClose={() => {}}
+        plotType="UMAP"
+        baseParams={{}}
+        deploymentPolicy={{ serverFigureExportEnabled: false }}
+      />
+    );
+
+    const saveButton = screen.getByRole('button', { name: /save to figure gallery/i });
+    expect(saveButton).toBeDisabled();
+    expect(screen.getByText(/Production previews are not persisted/i)).toBeInTheDocument();
+    await waitFor(() => expect(global.window.electronAPI.apiRequest).toHaveBeenCalledWith(
+      '/export-preview', expect.any(Object)
+    ));
+    expect(global.window.electronAPI.apiRequest).not.toHaveBeenCalledWith(
+      '/export-figure', expect.any(Object)
+    );
+    expect(global.window.electronAPI.saveFigure).not.toHaveBeenCalled();
   });
 });

@@ -73,7 +73,9 @@ export default function FigureSavePanel({
   userEmail = '',
   objectId = '',
   onSaved,          // callback(figureRecord)
+  deploymentPolicy = {},
 }) {
+  const serverFigureExportEnabled = deploymentPolicy.serverFigureExportEnabled === true;
   // ── Label params ────────────────────────────────────────────────
   const [title, setTitle] = useState('');
   const [subtitle, setSubtitle] = useState('');
@@ -177,6 +179,7 @@ export default function FigureSavePanel({
   }, [isOpen]);
 
   const handleSave = async () => {
+    if (!serverFigureExportEnabled) return;
     setSaving(true);
     setSaveError(null);
     setSaveSuccess(null);
@@ -471,7 +474,7 @@ export default function FigureSavePanel({
               )}
               <button
                 onClick={handleSave}
-                disabled={saving || previewLoading || !previewB64 || Boolean(previewError)}
+                disabled={!serverFigureExportEnabled || saving || previewLoading || !previewB64 || Boolean(previewError)}
                 className="w-full btn btn-primary h-12 flex items-center justify-center gap-2 text-sm font-bold"
               >
                 {saving
@@ -480,7 +483,9 @@ export default function FigureSavePanel({
                 }
               </button>
               <p className="text-[10px] text-slate-500 text-center">
-                Saves figure metadata and preview to the gallery; no public download route is created
+                {serverFigureExportEnabled
+                  ? 'Saves figure metadata and preview to the gallery; no public download route is created'
+                  : 'Server-side file export is a local-development tool. Production previews are not persisted.'}
               </p>
             </div>
           </div>

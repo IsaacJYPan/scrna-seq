@@ -62,7 +62,7 @@ describe.skipIf(!CONFIGURED)('runtime diagnostics route', () => {
 
     try {
       const res = await fetch(url('/api/runtime/diagnostics'), {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Cookie: `${config.sessionCookieName()}=${encodeURIComponent(token)}` }
       });
       const body = await res.json();
 

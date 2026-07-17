@@ -123,22 +123,6 @@ function isInsideRoot(root, candidate) {
   return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function hashFileSync(filePath) {
-  const hash = crypto.createHash('sha256');
-  const fd = fs.openSync(filePath, 'r');
-  const buffer = Buffer.allocUnsafe(1024 * 1024);
-  try {
-    let bytesRead;
-    do {
-      bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
-    } while (bytesRead > 0);
-  } finally {
-    fs.closeSync(fd);
-  }
-  return hash.digest('hex');
-}
-
 // Recovery can inspect multi-gigabyte checkpoints while a worker claim is live.
 // Hashing those files with readSync blocks the Node event loop, which also blocks
 // the worker's lease-renewal timer. Stream the file instead so heartbeat timers and
@@ -283,8 +267,8 @@ function createLocalStorageProvider(options = {}) {
     }
   }
 
-  function putFileFromPath(sourcePath, key) {
-    const sourceStat = assertOrdinaryPathEntry(sourcePath);
+  async function putFileFromPath(sourcePath, key) {
+    assertOrdinaryPathEntry(sourcePath);
     const destination = prepareWrite(key);
     if (fs.existsSync(destination)) {
       throw storageError('STORAGE_OBJECT_EXISTS', 'Durable storage object already exists.');
@@ -292,20 +276,32 @@ function createLocalStorageProvider(options = {}) {
 
     const partial = `${destination}.partial-${crypto.randomBytes(8).toString('hex')}`;
     try {
-      fs.copyFileSync(sourcePath, partial, fs.constants.COPYFILE_EXCL);
-      const fd = fs.openSync(partial, 'r+');
-      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      const checksumSha256 = hashFileSync(partial);
-      fs.linkSync(partial, destination);
-      fs.unlinkSync(partial);
-      fs.unlinkSync(sourcePath);
+      await fs.promises.copyFile(sourcePath, partial, fs.constants.COPYFILE_EXCL);
+      const noFollow = Number.isInteger(fs.constants.O_NOFOLLOW) ? fs.constants.O_NOFOLLOW : 0;
+      const handle = await fs.promises.open(partial, fs.constants.O_RDWR | noFollow);
+      let checksumSha256;
+      let sizeBytes;
+      try {
+        const partialStat = await handle.stat();
+        if (!partialStat.isFile()) {
+          throw storageError('UNSAFE_STORAGE_PATH', 'Durable storage object is not a regular file.');
+        }
+        sizeBytes = partialStat.size;
+        await handle.sync();
+        checksumSha256 = await hashFileHandle(handle);
+      } finally {
+        await handle.close();
+      }
+      await fs.promises.link(partial, destination);
+      await fs.promises.unlink(partial);
+      await fs.promises.unlink(sourcePath);
       return {
         key,
         checksumSha256,
-        sizeBytes: sourceStat.size,
+        sizeBytes,
       };
     } catch (error) {
-      try { if (fs.existsSync(partial)) fs.unlinkSync(partial); } catch { /* best effort */ }
+      try { await fs.promises.unlink(partial); } catch { /* best effort */ }
       throw error;
     }
   }
