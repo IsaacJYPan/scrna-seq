@@ -13,14 +13,8 @@ const { spawnSync } = require('child_process');
 const root = path.resolve(__dirname, '..');
 const composeFile = path.join(root, 'deploy', 'compose.single-host.yml');
 const smokeOverride = path.join(root, 'deploy', 'compose.test-smoke.yml');
-const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'benchone-compose-drill-'));
-const backupRoot = path.join(tempRoot, 'backups');
-const sourceEnv = path.join(tempRoot, 'source.env');
-const targetEnv = path.join(tempRoot, 'target.env');
-const suffix = `${process.pid}${crypto.randomBytes(4).toString('hex')}`.toLowerCase();
-const sourceProject = `b7ops${suffix}src`;
-const targetProject = `b7ops${suffix}dst`;
 const secrets = [];
+const CONTAINER_BACKUP_DIRECTORY = '/app/backups/source-backup';
 
 function randomSecret() {
   const value = crypto.randomBytes(32).toString('hex');
@@ -83,8 +77,8 @@ function unusedPort() {
   });
 }
 
-function writeEnvironment(file, port, credentials) {
-  const portableBackupRoot = backupRoot.replace(/\\/g, '/');
+function writeEnvironment(file, port, credentials, backupDirectory) {
+  const portableBackupRoot = backupDirectory.replace(/\\/g, '/');
   fs.writeFileSync(file, [
     'FRONTEND_ORIGIN=https://compose-smoke.example.test',
     `WEB_PORT=${port}`,
@@ -156,6 +150,15 @@ function down(project, envFile) {
   }
 }
 
+function cleanupContainerOwnedBackup(composeFn, project, envFile) {
+  return composeFn(project, envFile, [
+    '--profile', 'operations',
+    'run', '-T', '--rm', '--no-deps',
+    '--entrypoint', '/bin/rm',
+    'operations', '-rf', '--', CONTAINER_BACKUP_DIRECTORY,
+  ]);
+}
+
 function printDiagnostics(project, envFile) {
   for (const args of [
     ['ps', '--all'],
@@ -170,6 +173,16 @@ function printDiagnostics(project, envFile) {
 }
 
 async function main() {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'benchone-compose-drill-'));
+  const backupRoot = path.join(tempRoot, 'backups');
+  const sourceEnv = path.join(tempRoot, 'source.env');
+  const targetEnv = path.join(tempRoot, 'target.env');
+  const suffix = `${process.pid}${crypto.randomBytes(4).toString('hex')}`.toLowerCase();
+  const sourceProject = `b7ops${suffix}src`;
+  const targetProject = `b7ops${suffix}dst`;
+  let sourceStarted = false;
+  let failure = null;
+
   fs.mkdirSync(backupRoot, { mode: 0o777 });
   try { fs.chmodSync(backupRoot, 0o777); } catch { /* Docker Desktop bind semantics */ }
   const credentials = {
@@ -179,14 +192,15 @@ async function main() {
   };
   const sourcePort = await unusedPort();
   const targetPort = await unusedPort();
-  writeEnvironment(sourceEnv, sourcePort, { ...credentials, sessionEpoch: randomSessionEpoch() });
-  writeEnvironment(targetEnv, targetPort, { ...credentials, sessionEpoch: randomSessionEpoch() });
+  writeEnvironment(sourceEnv, sourcePort, { ...credentials, sessionEpoch: randomSessionEpoch() }, backupRoot);
+  writeEnvironment(targetEnv, targetPort, { ...credentials, sessionEpoch: randomSessionEpoch() }, backupRoot);
 
   try {
     compose(sourceProject, sourceEnv, [
       'up', '-d', '--no-build', '--wait', '--wait-timeout', '120',
       'namespace-anchor', 'postgres', 'r', 'web', 'worker',
     ]);
+    sourceStarted = true;
     assertPublishedPort(sourceProject, sourceEnv, sourcePort);
     const sourceReady = await waitForReady(sourcePort);
     assert.equal(sourceReady.status, 'ready');
@@ -256,16 +270,42 @@ async function main() {
       "process.stdout.write(require('fs').readFileSync(require('path').join(process.env.STORAGE_ROOT,'compose-sentinel.txt'),'utf8'))",
     ]);
     assert.equal(sentinel, 'compose-restore-v1');
-    console.log('[compose-operations-drill] passed: actual non-root Compose boot, operator account/capability audit, healthy Postgres/web/worker, offline backup, read-only-input restore, exact verification, and restored restart');
   } catch (error) {
     printDiagnostics(sourceProject, sourceEnv);
     printDiagnostics(targetProject, targetEnv);
-    throw error;
+    failure = error;
   } finally {
+    const cleanupFailures = [];
+    if (sourceStarted) {
+      try {
+        // The hardened operations container creates the backup as APP_UID. On
+        // Linux that UID is intentionally different from the CI runner, so the
+        // same non-root container must remove its bind-mounted files before the
+        // host process removes the remaining temporary directory.
+        cleanupContainerOwnedBackup(compose, sourceProject, sourceEnv);
+      } catch (error) {
+        cleanupFailures.push(`container backup cleanup failed: ${redact(error.message)}`);
+      }
+    }
     down(targetProject, targetEnv);
     down(sourceProject, sourceEnv);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    } catch (error) {
+      cleanupFailures.push(`host temporary cleanup failed: ${redact(error.message)}`);
+    }
+    if (cleanupFailures.length > 0) {
+      const cleanupError = new Error(cleanupFailures.join('; '));
+      if (failure) {
+        console.error(`[compose-operations-drill] cleanup warning: ${cleanupError.message}`);
+      } else {
+        failure = cleanupError;
+      }
+    }
   }
+
+  if (failure) throw failure;
+  console.log('[compose-operations-drill] passed: actual non-root Compose boot, operator account/capability audit, healthy Postgres/web/worker, offline backup, read-only-input restore, exact verification, restored restart');
 }
 
 if (require.main === module) {
@@ -275,4 +315,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main };
+module.exports = { cleanupContainerOwnedBackup, main };
