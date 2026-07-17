@@ -327,6 +327,16 @@ async function main() {
       console.log(`[NETWORK FAIL] ${req.method()} ${url} → ${err}`);
     }
   });
+  // Playwright does not emit requestfailed for completed HTTP error responses.
+  // Capture those separately so a browser-console "Failed to load resource"
+  // message identifies the method, URL, and status that caused it.
+  page.on('response', response => {
+    if (response.status() < 400) return;
+    const request = response.request();
+    const failure = `${request.method()} ${response.url()} → HTTP ${response.status()}`;
+    networkFailures.push(failure);
+    console.log(`[HTTP FAIL] ${failure}`);
+  });
 
   // ── Route Mocking for E2E Tests ───────────────────────────────────────────
   const corsHeaders = { 'Access-Control-Allow-Origin': '*' };
@@ -388,6 +398,18 @@ async function main() {
     });
   });
 
+  // Platform registry publication is a server-managed capability. This
+  // frontend-only suite uses an ordinary project owner, not a platform
+  // developer, so fail closed without contacting the absent Express server.
+  await page.route('**/api/pipeline-registry/capabilities*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ canPublishPipelineManifests: false })
+    });
+  });
+
   // ── DB-backed project / analysis-object model (mocked; no backend in CI) ─────
   // The app loads the backend project model on startup and during the PBMC demo
   // load. This suite runs frontend-only, so these are mocked exactly like the R and
@@ -397,6 +419,59 @@ async function main() {
   const visualProject = {
     id: 'proj_visual_mock', organizationId: visualOrg.id, name: 'Visual Test Project',
     description: '', role: 'owner', createdAt: '2026-01-01 00:00:00', updatedAt: '2026-01-01 00:00:00'
+  };
+  const visualDefaultPipelineId = 'default-seurat-scrna-v1';
+  const visualPipelineTab = (id, label, moduleKey, optional = false) => ({
+    id, label, moduleKey, optional, parameterSchema: [], resultArtifactTypes: [], resultViews: []
+  });
+  const visualDefaultPipelineManifest = {
+    schemaVersion: 1,
+    id: visualDefaultPipelineId,
+    name: 'Default Seurat scRNA-seq Pipeline',
+    description: 'Dataset-backed Seurat preprocessing, exploration, DEG, and project history using registered modules.',
+    modality: 'scrna',
+    tabs: [
+      visualPipelineTab('inspect', 'Inspect', 'inspectObject'),
+      visualPipelineTab('qc', 'Quality Control', 'seuratQc'),
+      visualPipelineTab('normalize', 'Normalize', 'seuratNormalize'),
+      visualPipelineTab('integrate', 'Integration', 'seuratIntegration', true),
+      visualPipelineTab('pca', 'PCA', 'seuratPca'),
+      visualPipelineTab('cluster', 'Cluster', 'seuratCluster'),
+      visualPipelineTab('umap', 'UMAP', 'seuratUmap'),
+      visualPipelineTab('featureplot', 'Feature Plot', 'featurePlot'),
+      visualPipelineTab('geneviewer', 'Gene Expression', 'geneExpression'),
+      visualPipelineTab('heatmap', 'Heatmap', 'heatmap'),
+      visualPipelineTab('dotplot', 'Dot Plot', 'dotPlot'),
+      visualPipelineTab('deg', 'Markers / DEG', 'differentialExpression'),
+      visualPipelineTab('history', 'Jobs & Artifacts', 'projectHistory')
+    ]
+  };
+  const visualDefaultPipelineDefinition = {
+    id: visualDefaultPipelineId,
+    manifestId: visualDefaultPipelineId,
+    projectId: visualProject.id,
+    visibility: 'builtin',
+    name: visualDefaultPipelineManifest.name,
+    manifest: visualDefaultPipelineManifest,
+    createdAt: null,
+    updatedAt: null
+  };
+  const visualPipelineDefinition = {
+    id: 'pipe_abcdef1234',
+    manifestId: 'visual-inspection-view',
+    projectId: null,
+    visibility: 'platform',
+    name: 'Visual Inspection View',
+    manifest: {
+      schemaVersion: 1,
+      id: 'visual-inspection-view',
+      name: 'Visual Inspection View',
+      description: 'A trusted declarative manifest used by the browser test.',
+      modality: 'scrna',
+      tabs: [visualPipelineTab('inspect', 'Inspect', 'inspectObject')]
+    },
+    createdAt: '2026-01-01 00:00:00',
+    updatedAt: '2026-01-01 00:00:00'
   };
   const visualAnalysisObject = (overrides = {}) => ({
     id: 'ao_visualmock0001', ownerUserId: 1, projectId: visualProject.id,
@@ -429,7 +504,21 @@ async function main() {
     const path = new URL(request.url()).pathname;
     let status = 200;
     let body;
-    if (/\/analysis-objects\/[^/]+\/lineage$/.test(path)) {
+    if (path.endsWith('/pipeline-definitions')) {
+      body = [
+        visualDefaultPipelineDefinition,
+        visualPipelineDefinition
+      ];
+    } else if (path.endsWith('/pipeline-selection')) {
+      body = {
+        projectId: visualProject.id,
+        userId: 1,
+        pipelineId: visualDefaultPipelineId,
+        definition: visualDefaultPipelineDefinition,
+        selectionUnavailable: false,
+        updatedAt: null
+      };
+    } else if (/\/analysis-objects\/[^/]+\/lineage$/.test(path)) {
       body = {
         projectId: visualProject.id,
         objectId: 'ao_visualmock0001',
@@ -817,6 +906,7 @@ async function main() {
 
   // ── Test 5: Per-Tab Rendering ──────────────────────────────────────────────
   const allTabs = [
+    { id: 'pipeline-manager', label: 'Pipeline Manager',     requiresData: false },
     { id: 'inspect',      label: 'Inspect',                  requiresData: true  },
     { id: 'qc',           label: 'Quality Control',           requiresData: true  },
     { id: 'normalize',    label: 'Normalize',                 requiresData: true  },
@@ -878,6 +968,15 @@ async function main() {
       assert(`${tab.label}: no React ErrorBoundary crash`, !crashed);
 
       if (!crashed) {
+        if (tab.id === 'pipeline-manager') {
+          const trustedDefinition = page.getByText('Visual Inspection View', { exact: true });
+          const trustedDefinitionCount = await trustedDefinition.count();
+          assert('Pipeline Manager: trusted registry definition visible after navigation',
+            trustedDefinitionCount === 1 && await trustedDefinition.isVisible());
+          assert('Pipeline Manager: non-developer publication controls hidden',
+            await page.getByRole('heading', { name: 'Publish Trusted Pipeline Manifest', exact: true }).count() === 0);
+        }
+
         // 2. Screenshot regression
         await checkSnapshot(page, `tab_${tab.id}`);
 
