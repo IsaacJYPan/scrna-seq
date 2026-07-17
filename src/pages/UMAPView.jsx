@@ -7,7 +7,7 @@ import FigureSavePanel from '../components/FigureSavePanel';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
-export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme }) {
+export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme, deploymentPolicy }) {
 
   const [savePanelOpen, setSavePanelOpen] = useState(false);
 
@@ -476,6 +476,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         baseParams={{ features: [], groupBy: 'seurat_clusters' }}
         userEmail={userEmail || ''}
         objectId={objectId || ''}
+        deploymentPolicy={deploymentPolicy}
       />
     </div>
   );

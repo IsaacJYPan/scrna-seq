@@ -28,7 +28,10 @@ function url(path) {
 
 async function http(method, path, { token, body } = {}) {
   const headers = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (token) {
+    headers.Cookie = `${config.sessionCookieName()}=${encodeURIComponent(token)}`;
+    headers.Origin = 'http://localhost:5173';
+  }
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const res = await fetch(url(path), {
     method,
@@ -38,7 +41,7 @@ async function http(method, path, { token, body } = {}) {
   const text = await res.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { json = text; }
-  return { status: res.status, body: json };
+  return { status: res.status, body: json, res };
 }
 
 async function signup(email) {
@@ -46,7 +49,10 @@ async function signup(email) {
     body: { email, password: 'password123', displayName: email.split('@')[0] }
   });
   if (res.status !== 201) throw new Error(`signup failed: ${JSON.stringify(res.body)}`);
-  return res.body.token;
+  const cookie = (res.res.headers.getSetCookie?.() || [])
+    .find((value) => value.startsWith(`${config.sessionCookieName()}=`));
+  if (!cookie) throw new Error('signup did not set a session cookie');
+  return decodeURIComponent(cookie.split(';')[0].slice(cookie.indexOf('=') + 1));
 }
 
 function provenanceEnvelope(id) {
@@ -159,6 +165,16 @@ describe.skipIf(!CONFIGURED)('HTTP authorization: two-user route isolation', () 
     expect(del.body).toEqual({ success: true });
   });
 
+  it('rejects oversized legacy provenance ids without exposing Postgres diagnostics', async () => {
+    const res = await http('POST', '/api/db/provenance', {
+      token: tokenA,
+      body: provenanceEnvelope('x'.repeat(3000)),
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'Invalid provenance record.' });
+    expect(JSON.stringify(res.body)).not.toMatch(/btree|index row|postgres|value too long/i);
+  });
+
   it('cannot read another user’s cache by direct key', async () => {
     // Alice creates a cache entry tied to her own provenance.
     const keyRes = await http('POST', '/api/db/cache-key', {
@@ -202,12 +218,12 @@ describe.skipIf(!CONFIGURED)('HTTP authorization: two-user route isolation', () 
     const del = await http('DELETE', '/api/db/figures/fig-http', { token: tokenB });
     expect(del.body).toEqual({ success: false });
 
-    // Bob cannot overwrite it (saveFigure throws -> 500).
+    // Bob cannot overwrite it; the conflict is hidden as not found.
     const overwrite = await http('POST', '/api/db/figures', {
       token: tokenB,
       body: { id: 'fig-http', plotType: 'FeaturePlot', title: 'Bob', params: {}, filePath: 'vault/b/fig.png' }
     });
-    expect(overwrite.status).toBe(500);
+    expect(overwrite.status).toBe(404);
 
     // Alice still owns it and can list it.
     const figs = await http('GET', '/api/db/figures', { token: tokenA });

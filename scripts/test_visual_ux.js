@@ -381,6 +381,19 @@ async function main() {
   // localStorage so the app stays logged in. logout is a best-effort POST that is
   // never triggered here, but is mocked too for completeness.
   const visualAuthUser = { id: 'visual-user', email: 'researcher@lab.edu', displayName: 'Visual Tester' };
+  await page.route('**/api/auth/policy*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        registrationEnabled: true,
+        legacyLocalImportsEnabled: true,
+        legacyLiveMutationToolsEnabled: true,
+        serverFigureExportEnabled: true,
+      })
+    });
+  });
   await page.route('**/api/auth/session*', async route => {
     await route.fulfill({
       status: 200,

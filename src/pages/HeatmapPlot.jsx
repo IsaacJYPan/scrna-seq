@@ -4,7 +4,7 @@ import { Grid3x3, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 
 // Removed API constant
-export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme }) {
+export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme, deploymentPolicy }) {
   const [heatmapData, setHeatmapData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -143,6 +143,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
         baseParams={{ features: [], groupBy: 'seurat_clusters', top_n: topN }}
         userEmail={userEmail || ''}
         objectId={objectId || ''}
+        deploymentPolicy={deploymentPolicy}
       />
     </div>
   );

@@ -12,8 +12,8 @@
  *   npm run init:postgres
  *
  * This does NOT migrate existing SQLite dev data.
- * A fresh Postgres database starts empty and users/projects are re-created
- * through the normal signup/create flows.
+ * A fresh Postgres database starts empty. Development may use signup;
+ * production accounts use the operator-only account-admin flow.
  */
 
 'use strict';

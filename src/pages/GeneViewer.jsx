@@ -64,7 +64,7 @@ function formatFeaturePlot(data) {
   }];
 }
 
-export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, theme }) {
+export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, theme, deploymentPolicy }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeGene, setActiveGene] = useState(null);
@@ -305,6 +305,7 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, 
         baseParams={{ features: activeGene ? [activeGene] : [], groupBy: 'seurat_clusters' }}
         userEmail={userEmail || ''}
         objectId={objectId || ''}
+        deploymentPolicy={deploymentPolicy}
       />
     </div>
   );

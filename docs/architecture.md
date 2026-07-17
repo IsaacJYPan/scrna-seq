@@ -41,7 +41,7 @@ Status legend:
 
 | Subsystem | Status | Notes |
 | --- | --- | --- |
-| Auth / logout | UI-wired (cookie foundation) | HttpOnly session cookie is the source of auth truth (login/signup set it; `GET /api/auth/session` restores it; `POST /api/auth/logout` clears it). The localStorage bearer token is deprecated legacy/dev compatibility, still accepted in a transition mode. CSRF for cookie-auth mutations is a SameSite=Lax cookie + an allowed-origin check; `/api/r` applies that check to every cookie-authenticated method because legacy GET operations can mutate R state. Server-side session **revocation/versioning** is still future work (stateless HMAC token). |
+| Auth / logout | UI-wired (cookie-only + versioned revocation) | A signed HttpOnly session cookie is the only authentication transport; bearer headers are ignored and pre-upgrade localStorage credentials are purged. Session claims contain only a bounded user ID, database-backed session version, deployment epoch, and times. Every authenticated request re-reads the user/session version. Logout atomically increments it and revokes all of that user's cookies; failure is 503 rather than false success. An already-expired cookie is cleared locally so the login screen remains reachable without claiming other sessions were revoked. Production registration is operator-only; stdin-only account and platform-capability mutations record audit events, and password reset revokes sessions. SameSite plus allowed-origin checks protect mutations, and the browser sends an explicit first-party CSRF header on every `/api/r` request because legacy GET operations can mutate R state. |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
 | Project members / RBAC | UI-wired | Collaborators lists project members for every role and lets owners/admins add existing users, change permitted roles, and remove permitted members. Owner-only owner changes, last-owner protection, non-member 404s, insufficient-role 403s, and server-controlled identities remain backend enforced. This is immediate account membership, not an invitation-token/delivery workflow. |
 | Project-scoped datasets | UI-wired (narrow Seurat path) | The Pipeline Manager Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. New uploads use server-owned project storage keys plus SHA-256 checksums, and public responses omit internal storage. |
@@ -60,7 +60,7 @@ Status legend:
 | Checkpoint fork worker (`checkpoint.fork.v1`) | UI-wired (controlled checkpoint action) | When a project object has exactly one available `local_internal` checkpoint, a project writer may load that server-selected checkpoint into a new analysis object and private live R key owned by the writer. Ambiguous or unloadable checkpoint sets are rejected. The immutable source object/checkpoint remain unchanged; the child object and lineage edge record the source object, exact checkpoint artifact, fork job, and creating member. It never attaches the source owner's live state. |
 | Job artifacts (metadata) | UI-wired (read-only metadata) | Read-only, path/storage-key stripped from responses; no download route. Jobs & Artifacts renders sanitized metadata only. |
 | Analysis-object lineage DAG | UI-wired (read-only summary) | Edge model + parents/children/lineage read routes are surfaced as a bounded summary in Jobs & Artifacts. Mutations remain server/worker-driven. |
-| Provenance / figures / cache | UI-wired | Older `/api/db/*` routes still back the live gallery/cache path. Jobs & Artifacts also shows project-scoped provenance and figure metadata read-only. |
+| Provenance / figures / cache | UI-wired with production limits | Older `/api/db/*` routes still back the live gallery/cache path. Jobs & Artifacts also shows project-scoped provenance and figure metadata read-only. Production keeps bounded figure preview but disables legacy server-file gallery save because its R export path is outside the durable artifact contract. |
 | Runtime check / object inspect workers | backend-only | Read-only, metadata-only bridge operations. |
 | Default visual theme | UI-wired | The React shell is light-first by default with the existing dark toggle retained. |
 | Pathway enrichment | not implemented (product) | No durable workflow. A legacy authenticated R endpoint may still exist (see below). |
@@ -70,9 +70,11 @@ Status legend:
 | Reports / generated R scripts | not implemented | No supported report or script-export surface. Legacy live-R provenance script preview is copy-only and not a complete reproducibility export. |
 | Artifact downloads | not implemented | No public download route; responses never expose storage paths/keys. |
 | Object storage | not implemented | Local filesystem provider only; no external object storage. |
-| Secure cookie sessions | backend-wired (transitional) | HttpOnly + SameSite + Secure-in-production session cookie is set on login/signup and accepted on every route; frontend restores via `/api/auth/session`. localStorage bearer is deprecated fallback. Session revocation/versioning not yet implemented. |
+| Secure cookie sessions | backend-wired | Production uses a host-only `__Host-` HttpOnly + Secure + SameSite cookie. The frontend restores only through `/api/auth/session`; public auth JSON never contains a token/session version. Logout is revoke-all through `users.session_version`; secret or deployment-epoch rotation invalidates all sessions, and malformed/duplicate cookies fail closed. Globally bounded asynchronous PBKDF2 work prevents authentication from blocking the event loop. |
 | Postgres database runtime | backend-wired | `backend/pgDatabase.js` + `backend/pg/schema.sql` are the app metadata runtime for users, projects/members, datasets, analysis objects, project jobs/logs/artifacts, provenance, figures/cache, and lineage. See "Database backend" below. |
 | Shared project live R state | not implemented | Collaboration is via durable metadata, never a shared live R session. |
+| Single-host deployment | backend-wired (supported conservative topology) | `deploy/compose.single-host.yml` packages one web, one worker, one private R, Postgres, and on-demand operations in a shared private namespace with loopback-only ingress, non-root/read-only containers, resource limits, health checks, and drain ordering. Postgres advisory locks refuse unsupported second web/worker instances. It is not HA or a multi-host topology. |
+| Backup / restore | backend-wired (offline operations) | A controlled operations image creates a custom Postgres dump plus exact SHA-256/size inventories of `STORAGE_ROOT` and `VAULT_ROOT`. Restore requires an empty DB, new/empty roots, and a new deployment epoch; it stages files, restores in one DB transaction, cancels/de-claims restored queued/running jobs, and re-inventories before success. CI runs a real pg_dump/pg_restore/reference/security-delta/table-fingerprint drill. See `docs/deployment.md`. |
 
 ## Trusted declarative pipeline registry
 
@@ -172,8 +174,8 @@ The first supported end-to-end local/dev pipeline is intentionally narrow:
   introduce arbitrary code, packages, worker handlers, or backend endpoints.
 
 This is local/dev pipeline evidence, not hosted-service production readiness.
-There is no object storage, no public download route, no server-side session
-revocation, no general dataset manager, and no live R state shared across project
+There is no object storage, no public download route, no general dataset
+manager, and no live R state shared across project
 members.
 
 ## Hidden/disabled features vs reachable R endpoints
@@ -202,6 +204,14 @@ Synchronous `/integrate` is also production-blocked. Even with object and dense-
 ceilings, CCA anchor search grows across batch pairs and a proxy timeout cannot stop
 work already running in the singleton R service. Integration needs a durable,
 resource-isolated job path before production exposure.
+
+The public non-secret deployment policy keeps the React shell aligned with these
+boundaries and fails closed if the policy cannot be loaded. Production's
+Load/Attach modal retains the bounded PBMC demo and links to Pipeline Manager,
+but hides local-directory/RDS/H5AD loaders. Inspect hides CSV import and live
+subset while retaining bounded in-object value mapping; the sidebar disables
+synchronous Integration; figure panels retain preview but disable legacy
+server-file save.
 
 By contrast, the internal worker-only R endpoints
 (`/api/r/object/pbmc-pipeline`, `/api/r/object/checkpoint-load`,
@@ -243,7 +253,7 @@ claiming that the existing live-R architecture can scale horizontally:
 - `npm run dev` supervises Vite, Express, the local owned R child, and the
   standalone worker with one ephemeral shared R token. `npm run dev:no-worker`
   starts the UI/API/R stack only. A deployed standalone worker requires
-  `R_RUNTIME_MODE=external` and an explicit `R_API_TOKEN` of at least 32
+  `R_RUNTIME_MODE=external` and an explicit production `R_API_TOKEN` encoded as 64 lowercase hexadecimal
   characters.
 - The private R URL must be loopback, a private IP literal, or an exact hostname
   in `R_BACKEND_ALLOWED_HOSTS`. URL credentials, query strings, fragments, and
@@ -326,22 +336,23 @@ The app runtime is Postgres-only.
 
 ## State & storage boundaries
 
-- Browser auth is now an **HttpOnly session cookie** (source of truth); the
-  localStorage bearer token is deprecated legacy/dev compatibility accepted in a
-  transition mode. CSRF for ordinary cookie-authenticated state-changing requests is
-  SameSite=Lax + an allowed-origin check (`FRONTEND_ORIGIN`); every cookie-authenticated
-  `/api/r` method requires that check because some legacy GET endpoints mutate state. Server-side session
-  revocation/versioning is not yet implemented (the token is a stateless HMAC);
-  project role/membership is still re-checked on every project-scoped request.
+- Browser auth is an **HttpOnly session cookie** and bearer transport has been
+  removed. The frontend purges old bearer values and starts from
+  `/api/auth/session`; JavaScript never receives the signed session. The token's
+  database-backed version is checked on every request, and logout increments the
+  version to revoke all outstanding sessions for that account. Project role and
+  membership are still re-checked on every project-scoped request. CSRF for
+  ordinary mutations is SameSite=Lax plus an allowed-origin check
+  (`FRONTEND_ORIGIN`). The browser also sends `X-BenchOne-CSRF: 1` on every
+  `/api/r` request because some legacy GET endpoints mutate state; cross-origin
+  scripts cannot send that custom header without a successful CORS preflight.
   SameSite=Lax is intended for same-site/local deployments (API and frontend on
   the same origin). For cross-origin hosted deployments — API and frontend on
   different origins — cookie auth requires an explicit `COOKIE_SAMESITE=None` +
   `COOKIE_SECURE=true` configuration, a correct `FRONTEND_ORIGIN` allowlist, and
   HTTPS; config validation refuses `SameSite=None` without Secure cookies and,
-  in production, refuses non-HTTPS frontend origins for cross-site cookies. The
-  frontend no longer treats cached localStorage bearer/user data as login truth;
-  it starts from `/api/auth/session`, while still sending the legacy bearer as a
-  transition fallback.
+  in production, refuses non-HTTPS frontend origins for cross-site cookies.
+  Same-origin deployment is the supported Compose default.
 - `backend/storage.js` is the active local-filesystem provider for new durable
   datasets, checkpoints, and DEG tables. It uses server-owned keys shaped as
   `projects/<projectId>/<kind>/<id>/<file>` under `STORAGE_ROOT`. Writes are
@@ -401,7 +412,7 @@ The app runtime is Postgres-only.
 
 - `npm run test:backend` runs the FULL backend suite (`backend/*.test.js`)
   against Postgres: config boundaries, the real `pgDatabase` contract, per-user
-  isolation, auth (cookie/bearer/rate-limit/credentials), org/project RBAC,
+  isolation, cookie-only versioned auth/rate-limit/credentials, org/project RBAC,
   the trusted pipeline-registry capability/legacy-quarantine contract, datasets,
   analysis objects, the durable job-worker claim/lease/heartbeat contract,
   standalone runtime/process behavior, crash-output recovery,
@@ -436,6 +447,25 @@ The app runtime is Postgres-only.
   change the project/object UI flow. It proves the UI *model* wiring (what the
   app requests and how it renders responses); it does **not** prove real
   backend, auth, ownership, or tenant isolation.
+- `npm run test:deployment:browser` is the real frontend deployment flow. It
+  drives Chromium without route interception through the built React bundle,
+  actual Express, real Postgres, and a private deterministic R service. It
+  covers signup/login/logout, durable project reload, Collaborators add/role/
+  remove confirmation and read-only views, cookie-only restoration/revocation,
+  and audits page errors, unexpected console errors, request failures, and 5xx
+  responses. It runs in CI.
+- `npm run test:deployment:smoke` starts the actual production server process
+  and checks pre-side-effect config refusal, trusted-TLS ingress, security
+  headers, health/degraded readiness, CSRF, singleton web admission, revoke-all,
+  secret-safe logs, graceful drain, and advisory-lock release.
+- `npm run test:backup-restore:real` exercises real `pg_dump`/`pg_restore` into
+  isolated source/target databases and roots, then verifies exact bytes, modern
+  durable references, and every public-table fingerprint. Unit adversarial tests
+  cover links, traversal, overlap, malformed manifests, changed bytes, nonempty
+  targets, and command/credential boundaries.
+- `npm run test:deployment:compose` renders Compose JSON and asserts the private
+  namespace, loopback-only ingress, one-replica topology, non-root/read-only
+  services, resource bounds, operations isolation, and shutdown ordering.
 - The handler-focused R-worker suites (`*-worker.test.js`, part of
   `test:backend`) **mock the R
   caller** with instant, unboxed responses, so they prove handler/bridge wiring
@@ -468,7 +498,10 @@ The app runtime is Postgres-only.
   checks plot dimensions, feature caps, and deterministic bounded QC sampling.
   CI installs `hdf5r` and runs `test:seurat-pipeline` so the UI-wired Seurat
   pipeline has a real R/standalone-worker/lease-renewal regression gate in pull
-  requests.
+  requests. A separate required CI job also builds the exact production
+  `r-backend/Dockerfile`, verifies every required R package, boots it under the
+  unprivileged read-only container boundary, proves authenticated `/health`, and
+  rejects an unauthenticated health request.
 - CI runs on `pull_request` and `workflow_dispatch` only. The security-critical
   suites are additionally named explicitly in the workflow so their regression
   coverage is auditable.

@@ -29,14 +29,16 @@ async function main() {
     throw error;
   }
 
+  let mutation = null;
   if (action === 'grant' || action === 'revoke') {
-    await db.setPipelineRegistryPublisherByEmail(email, action === 'grant');
+    mutation = await db.setPipelineRegistryPublisherByEmail(email, action === 'grant');
   }
   const capabilities = await db.getPipelineRegistryCapabilities(user.id);
   console.log(
-    '[platform-developer] %s pipeline_registry.publish=%s',
+    '[platform-developer] %s pipeline_registry.publish=%s%s',
     user.email,
-    capabilities.canPublishPipelineManifests ? 'granted' : 'revoked'
+    capabilities.canPublishPipelineManifests ? 'granted' : 'revoked',
+    mutation ? ` audit_event=${mutation.auditEventId}` : ''
   );
 }
 

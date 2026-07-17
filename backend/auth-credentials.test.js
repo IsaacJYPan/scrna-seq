@@ -11,7 +11,7 @@
  * oracle; that's defense-in-depth and intentionally not asserted via timing
  * here (timing assertions are brittle).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 
 const config = require('./config');
 const db = require('./pgDatabase');
@@ -97,6 +97,21 @@ describe.skipIf(!CONFIGURED)('login route (HTTP)', () => {
     });
     const ok = await login('user@example.com', 'password123');
     expect(ok.status).toBe(200);
-    expect(ok.data.token).toBeTruthy();
+    expect(ok.data.token).toBeUndefined();
+    expect(ok.data.user.email).toBe('user@example.com');
+  });
+
+  it('returns a sanitized retryable 503 when global password work is full', async () => {
+    const busy = Object.assign(new Error('private capacity detail'), { code: 'AUTH_HASH_BUSY' });
+    const verify = vi.spyOn(db, 'verifyUser').mockRejectedValueOnce(busy);
+    try {
+      const result = await login('user@example.com', 'password123');
+      expect(result.status).toBe(503);
+      expect(result.res.headers.get('retry-after')).toBe('1');
+      expect(result.data).toEqual({ error: 'Authentication is temporarily busy. Please try again.' });
+      expect(JSON.stringify(result.data)).not.toContain('private capacity detail');
+    } finally {
+      verify.mockRestore();
+    }
   });
 });

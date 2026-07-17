@@ -16,7 +16,7 @@ const DARK_COLORSCALE = [
 // Light mode: standard Blues scale (white → dark blue) — common in scRNA-seq publications
 const LIGHT_COLORSCALE = 'Blues';
 
-export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi }) {
+export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, deploymentPolicy }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [gene, setGene] = useState('');
   const [geneInput, setGeneInput] = useState('');
@@ -237,6 +237,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
         baseParams={{ features: gene ? [gene] : [], groupBy: 'seurat_clusters' }}
         userEmail={userEmail || ''}
         objectId={objectId || ''}
+        deploymentPolicy={deploymentPolicy}
       />
     </div>
   );

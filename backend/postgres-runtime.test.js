@@ -29,8 +29,11 @@ describe.skipIf(!CONFIGURED)('Postgres runtime API', () => {
     });
     expect(signup.status).toBe(201);
     expect(signup.data.user.email).toBe(email);
-    expect(signup.data.token).toMatch(/\./);
-    token = signup.data.token;
+    expect(signup.data.token).toBeUndefined();
+    const setCookie = (signup.res.headers.getSetCookie?.() || [])
+      .find((value) => value.startsWith(`${config.sessionCookieName()}=`));
+    expect(setCookie).toBeTruthy();
+    token = decodeURIComponent(setCookie.split(';')[0].slice(setCookie.indexOf('=') + 1));
     user = signup.data.user;
 
     const session = await api(server, '/api/auth/session', { token });

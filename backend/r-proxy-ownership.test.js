@@ -5,15 +5,19 @@ const db = require('./pgDatabase');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 
 const CONFIGURED = config.hasPostgresConnection();
+const TEST_SESSION_EPOCH = '4f8c2a6e1d9b3075c4e8a2f6d1b93570';
 
 let server;
 let prevDiag;
 let prevNodeEnv;
+let prevSessionEpoch;
 
 beforeAll(async () => {
   if (!CONFIGURED) return;
   prevDiag = process.env.ENABLE_R_TEST_DIAGNOSTICS;
   prevNodeEnv = process.env.NODE_ENV;
+  prevSessionEpoch = process.env.SESSION_EPOCH;
+  process.env.SESSION_EPOCH = TEST_SESSION_EPOCH;
   process.env.ENABLE_R_TEST_DIAGNOSTICS = 'true';
   delete process.env.NODE_ENV; // ensure not 'production'
   server = await startServer();
@@ -27,10 +31,13 @@ afterAll(async () => {
   else process.env.ENABLE_R_TEST_DIAGNOSTICS = prevDiag;
   if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = prevNodeEnv;
+  if (prevSessionEpoch === undefined) delete process.env.SESSION_EPOCH;
+  else process.env.SESSION_EPOCH = prevSessionEpoch;
 });
 
 beforeEach(async () => {
   if (!CONFIGURED) return;
+  process.env.SESSION_EPOCH = TEST_SESSION_EPOCH;
   await db.resetSchemaForTests();
 });
 

@@ -109,6 +109,52 @@ describe.skipIf(!CONFIGURED)('security data isolation', () => {
     expect(await getFiguresByUser('alice@example.com')).toHaveLength(0);
   });
 
+  it('keeps ownership intact when different users race on the same legacy ids', async () => {
+    const provenanceResults = await Promise.allSettled([
+      saveProvenance({ userEmail: 'alice@example.com', provenance: provenance('prov-race') }),
+      saveProvenance({ userEmail: 'bob@example.com', provenance: provenance('prov-race') }),
+    ]);
+    expect(provenanceResults.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(provenanceResults.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const provenanceOwners = await Promise.all([
+      getProvenance('prov-race', 'alice@example.com'),
+      getProvenance('prov-race', 'bob@example.com'),
+    ]);
+    expect(provenanceOwners.filter(Boolean)).toHaveLength(1);
+
+    await saveProvenance({ userEmail: 'alice@example.com', provenance: provenance('prov-cache-a') });
+    await saveProvenance({ userEmail: 'bob@example.com', provenance: provenance('prov-cache-b') });
+    const cacheResults = await Promise.allSettled([
+      setCachedResult('shared-race-key', 'prov-cache-a', { owner: 'alice' }, 'alice@example.com'),
+      setCachedResult('shared-race-key', 'prov-cache-b', { owner: 'bob' }, 'bob@example.com'),
+    ]);
+    expect(cacheResults.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(cacheResults.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const cacheOwners = await Promise.all([
+      getCachedResult('shared-race-key', 'alice@example.com'),
+      getCachedResult('shared-race-key', 'bob@example.com'),
+    ]);
+    expect(cacheOwners.filter(Boolean)).toHaveLength(1);
+
+    const figureResults = await Promise.allSettled([
+      saveFigure({
+        id: 'fig-race', userEmail: 'alice@example.com', plotType: 'UMAP', params: {},
+        filePath: 'vault/alice/figure.png', fileFormat: 'png', thumbnailB64: ''
+      }),
+      saveFigure({
+        id: 'fig-race', userEmail: 'bob@example.com', plotType: 'UMAP', params: {},
+        filePath: 'vault/bob/figure.png', fileFormat: 'png', thumbnailB64: ''
+      }),
+    ]);
+    expect(figureResults.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(figureResults.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const figureOwners = await Promise.all([
+      getFiguresByUser('alice@example.com'),
+      getFiguresByUser('bob@example.com'),
+    ]);
+    expect(figureOwners.flat()).toHaveLength(1);
+  });
+
   // ── Finding 6: owner-optional DB helper footguns ──────────────────────────
   // A user-owned helper called without an owner used to silently match every
   // row (e.g. getAllProvenance() returning all users' provenance). These now
@@ -170,6 +216,17 @@ describe.skipIf(!CONFIGURED)('security data isolation', () => {
       id: 'fig-ok-abs', userEmail: 'alice@example.com', plotType: 'UMAP', params: {},
       filePath: '/srv/app/exports/user-1/UMAP_20260101_000000_efgh.png', fileFormat: 'png', thumbnailB64: ''
     })).resolves.not.toThrow();
-    expect(await getFiguresByUser('alice@example.com')).toHaveLength(2);
+    await expect(saveFigure({
+      id: 'fig-ok-win', userEmail: 'alice@example.com', plotType: 'UMAP', params: {},
+      filePath: 'C:\\private\\vault\\UMAP_windows.png', fileFormat: 'png', thumbnailB64: ''
+    })).resolves.not.toThrow();
+    const figures = await getFiguresByUser('alice@example.com');
+    expect(figures).toHaveLength(3);
+    expect(figures.map((figure) => figure.filePath)).toEqual(expect.arrayContaining([
+      'UMAP_20260101_000000_abcd.png',
+      'UMAP_20260101_000000_efgh.png',
+      'UMAP_windows.png',
+    ]));
+    expect(figures.every((figure) => !/[\\/]/.test(figure.filePath))).toBe(true);
   });
 });

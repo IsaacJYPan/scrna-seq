@@ -72,7 +72,22 @@ describe('local durable storage provider', () => {
     const key = storage.projectStorageFileKey('proj_abc', 'datasets', 'ds_def', 'matrix.h5');
     const provider = storage.createLocalStorageProvider({ root });
 
-    const stored = provider.putFileFromPath(source, key);
+    const copySync = vi.spyOn(fs, 'copyFileSync').mockImplementation(() => {
+      throw new Error('dataset finalization must not copy synchronously');
+    });
+    const fsyncSync = vi.spyOn(fs, 'fsyncSync').mockImplementation(() => {
+      throw new Error('dataset finalization must not fsync synchronously');
+    });
+    const hashReadSync = vi.spyOn(fs, 'readSync').mockImplementation(() => {
+      throw new Error('dataset finalization must not hash synchronously');
+    });
+    const stored = await provider.putFileFromPath(source, key);
+    expect(copySync).not.toHaveBeenCalled();
+    expect(fsyncSync).not.toHaveBeenCalled();
+    expect(hashReadSync).not.toHaveBeenCalled();
+    copySync.mockRestore();
+    fsyncSync.mockRestore();
+    hashReadSync.mockRestore();
 
     expect(fs.existsSync(source)).toBe(false);
     expect(fs.readFileSync(provider.resolveKey(key))).toEqual(bytes);
@@ -99,7 +114,7 @@ describe('local durable storage provider', () => {
     const key = storage.projectStorageFileKey('proj_abc', 'artifacts', 'job_def', 'result.csv');
     const source = path.join(staging, 'result.csv');
     fs.writeFileSync(source, 'a,b\n1,2\n');
-    const stored = provider.putFileFromPath(source, key);
+    const stored = await provider.putFileFromPath(source, key);
 
     expect(() => provider.prepareWrite('vault/private/file.rds')).toThrow(/project-scoped/);
     expect(() => provider.remove('vault/private/file.rds')).toThrow(/project-scoped/);
@@ -112,7 +127,7 @@ describe('local durable storage provider', () => {
 
     const duplicate = path.join(staging, 'duplicate.csv');
     fs.writeFileSync(duplicate, 'different');
-    expect(() => provider.putFileFromPath(duplicate, key)).toThrow(/already exists/);
+    await expect(provider.putFileFromPath(duplicate, key)).rejects.toThrow(/already exists/);
     expect(fs.existsSync(duplicate)).toBe(true);
   });
 

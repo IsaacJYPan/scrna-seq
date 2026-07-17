@@ -9,6 +9,7 @@ describe('auth.js login/signup flow', () => {
     // Mock the electronAPI
     global.window = {
       electronAPI: {
+        registrationPolicy: vi.fn(async () => ({ registrationEnabled: false })),
         signup: vi.fn(async (email, password, organization) => {
           if (email === 'duplicate@example.com') {
             return { error: 'Email already in use' };
@@ -38,6 +39,11 @@ describe('auth.js login/signup flow', () => {
     expect(result.error).toBeUndefined();
     expect(result.id).toBeDefined();
     expect(result.email).toBe('new@example.com');
+  });
+
+  it('forwards the server registration policy', async () => {
+    await expect(auth.registrationPolicy()).resolves.toEqual({ registrationEnabled: false });
+    expect(window.electronAPI.registrationPolicy).toHaveBeenCalledTimes(1);
   });
 
   it('should return an error for duplicate email on signup', async () => {
