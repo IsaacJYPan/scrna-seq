@@ -20,22 +20,46 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     patch \
     && rm -rf /var/lib/apt/lists/*
 
-# Install remotes to install specific package versions if needed
-RUN Rscript -e "install.packages('remotes', repos='https://cloud.r-project.org/')"
+# RcppEigen emits thousands of harmless GCC attribute warnings on the hosted
+# Linux runner. Keep useful compiler errors visible while suppressing that one
+# warning class for build-time source compilation only.
+RUN install -d -m 0755 /root/.R \
+    && printf '%s\n' \
+      'CXXFLAGS += -Wno-ignored-attributes' \
+      'CXX11FLAGS += -Wno-ignored-attributes' \
+      'CXX14FLAGS += -Wno-ignored-attributes' \
+      'CXX17FLAGS += -Wno-ignored-attributes' \
+      'CXX20FLAGS += -Wno-ignored-attributes' \
+      > /root/.R/Makevars
+
+COPY --chmod=0755 install-r-packages.sh /usr/local/bin/install-r-packages
+
+# Install remotes to install specific package versions if needed.
+RUN install-r-packages remotes \
+    -e "install.packages('remotes', repos='https://cloud.r-project.org/')"
+
+# Compile the heaviest Seurat prerequisite in its own cacheable, single-core
+# layer. The installer emits one heartbeat per minute, suppresses successful
+# compiler noise, and exposes a bounded diagnostic tail on failure.
+RUN install-r-packages RcppEigen \
+    -e "install.packages('RcppEigen', repos='https://cloud.r-project.org/')"
 
 # Install CRAN dependencies. hdf5r is REQUIRED for Read10X_h5 (the tenx_h5 Seurat
 # pipeline input): it is only a Seurat *Suggests*, so it must be installed explicitly
 # or the seurat.pipeline.v1 endpoint fails. libhdf5-dev (above) provides its system lib.
-RUN Rscript -e "install.packages(c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc'), repos='https://cloud.r-project.org/')"
+RUN install-r-packages seurat-cran-dependencies \
+    -e "install.packages(c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc'), repos='https://cloud.r-project.org/')"
 
 # Install Bioconductor dependencies pinned to the R 4.5-compatible release.
-RUN Rscript -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics'), ask=FALSE)"
+RUN install-r-packages bioconductor-dependencies \
+    -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics'), ask=FALSE)"
 
 # BiocManager may update Matrix after SeuratObject was first compiled as a
 # Seurat dependency. Rebuild SeuratObject against the final Matrix ABI so the
 # production image does not start with a potentially incompatible native-code
 # warning.
-RUN Rscript -e "install.packages('SeuratObject', repos='https://cloud.r-project.org/'); stopifnot(requireNamespace('SeuratObject', quietly=TRUE))"
+RUN install-r-packages seurat-object-abi-rebuild \
+    -e "install.packages('SeuratObject', repos='https://cloud.r-project.org/'); stopifnot(requireNamespace('SeuratObject', quietly=TRUE))"
 
 # install.packages() reports individual source-package failures as warnings and
 # can otherwise leave a successfully built but unusable image. Fail the image
@@ -47,9 +71,9 @@ RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r'
 # keep them out of the default image unless a trusted local build explicitly asks.
 ARG INSTALL_OPTIONAL_R_PACKAGES=false
 RUN if [ "$INSTALL_OPTIONAL_R_PACKAGES" = "true" ]; then \
-      Rscript -e "install.packages('NMF', repos='https://cloud.r-project.org/')" && \
-      Rscript -e "remotes::install_github('sqjin/CellChat')" && \
-      Rscript -e "remotes::install_github('mojaveazure/seurat-disk')"; \
+      install-r-packages optional-nmf -e "install.packages('NMF', repos='https://cloud.r-project.org/')" && \
+      install-r-packages optional-cellchat -e "remotes::install_github('sqjin/CellChat')" && \
+      install-r-packages optional-seurat-disk -e "remotes::install_github('mojaveazure/seurat-disk')"; \
     else \
       echo "Skipping optional legacy R packages (CellChat, SeuratDisk). Set INSTALL_OPTIONAL_R_PACKAGES=true to include them."; \
     fi
@@ -61,7 +85,8 @@ RUN if [ "$INSTALL_OPTIONAL_R_PACKAGES" = "true" ]; then \
 WORKDIR /app
 COPY . /app/
 
-RUN groupadd --gid "${APP_GID}" appuser \
+RUN rm -f /usr/local/bin/install-r-packages /root/.R/Makevars /app/install-r-packages.sh \
+    && groupadd --gid "${APP_GID}" appuser \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home \
       --shell /usr/sbin/nologin appuser \
     && install -d -o "${APP_UID}" -g "${APP_GID}" -m 0750 \

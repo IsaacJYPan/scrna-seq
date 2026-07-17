@@ -1,5 +1,6 @@
 **
 !Dockerfile
+!install-r-packages.sh
 !plumber.R
 !run.R
 !sample_data.csv
