@@ -72,7 +72,8 @@ describe.skipIf(!CONFIGURED)('auth rate limiting', () => {
 
     const l = await login('normal@example.com');
     expect(l.status).toBe(200);
-    expect(l.data.token).toBeTruthy();
+    expect(l.data.token).toBeUndefined();
+    expect(l.data.user.email).toBe('normal@example.com');
   });
 
   it('returns 429 once rapid signup attempts exceed the limit', async () => {
@@ -122,12 +123,15 @@ describe.skipIf(!CONFIGURED)('auth rate limiting', () => {
 // `DISABLE_RATE_LIMIT === 'true'` check with no NODE_ENV gate.
 describe.skipIf(!CONFIGURED)('rate-limit disable behavior across environments', () => {
   let prevNodeEnv;
+  let prevSessionEpoch;
 
   beforeEach(() => {
     prevNodeEnv = process.env.NODE_ENV;
+    prevSessionEpoch = process.env.SESSION_EPOCH;
   });
   afterEach(() => {
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevSessionEpoch === undefined) delete process.env.SESSION_EPOCH; else process.env.SESSION_EPOCH = prevSessionEpoch;
     delete process.env.DISABLE_RATE_LIMIT;
     serverModule.signupRateLimiter.reset();
     serverModule.loginRateLimiter.reset();
@@ -135,14 +139,17 @@ describe.skipIf(!CONFIGURED)('rate-limit disable behavior across environments', 
 
   it('ignores DISABLE_RATE_LIMIT in production (still rate-limits)', async () => {
     process.env.NODE_ENV = 'production';
+    process.env.SESSION_EPOCH = '4f8c2a6e1d9b3075c4e8a2f6d1b93570';
     process.env.DISABLE_RATE_LIMIT = 'true';
     expect(serverModule.rateLimitDisabled()).toBe(false);
+    expect((await signup('production-signup@example.com')).status).toBe(403);
 
+    await db.createUser('prod-victim@example.com', 'password123', 'Prod Victim');
     const statuses = [];
-    for (let i = 0; i < MAX; i++) statuses.push((await signup(`prod${i}@example.com`)).status);
-    const overflow = await signup('prod-overflow@example.com');
+    for (let i = 0; i < MAX; i++) statuses.push((await login('prod-victim@example.com', 'wrong-password')).status);
+    const overflow = await login('prod-victim@example.com', 'wrong-password');
 
-    expect(statuses.slice(0, MAX).every(s => s === 201)).toBe(true);
+    expect(statuses.slice(0, MAX).every(s => s === 401)).toBe(true);
     expect(overflow.status).toBe(429); // production never honors the disable flag
   });
 
@@ -202,5 +209,45 @@ describe('malformed rate-limit env falls closed to defaults', () => {
     delete process.env.AUTH_RATE_LIMIT_WINDOW_MS;
     expect(serverModule.authRateLimitMax()).toBe(DEFAULT_MAX);
     expect(serverModule.authRateLimitWindowMs()).toBe(DEFAULT_WINDOW);
+  });
+});
+
+describe('auth rate-limit key storage', () => {
+  it('caps one-off client keys and fails closed for a new address', () => {
+    const previousDisabled = process.env.DISABLE_RATE_LIMIT;
+    const previousMax = process.env.AUTH_RATE_LIMIT_MAX;
+    const previousWindow = process.env.AUTH_RATE_LIMIT_WINDOW_MS;
+    delete process.env.DISABLE_RATE_LIMIT;
+    process.env.AUTH_RATE_LIMIT_MAX = '100';
+    process.env.AUTH_RATE_LIMIT_WINDOW_MS = '3600000';
+    try {
+      const limiter = serverModule.createRateLimiter();
+      const response = () => {
+        const state = { statusCode: null, body: null, headers: {} };
+        return {
+          state,
+          setHeader: (name, value) => { state.headers[name] = value; },
+          status: (code) => ({ json: (body) => { state.statusCode = code; state.body = body; } }),
+        };
+      };
+      for (let i = 0; i < serverModule.MAX_AUTH_RATE_LIMIT_KEYS; i += 1) {
+        const res = response();
+        let passed = false;
+        limiter({ ip: `198.51.${Math.floor(i / 256)}.${i % 256}` }, res, () => { passed = true; });
+        expect(passed).toBe(true);
+      }
+      expect(limiter.keyCount()).toBe(serverModule.MAX_AUTH_RATE_LIMIT_KEYS);
+
+      const overflow = response();
+      let passed = false;
+      limiter({ ip: '203.0.113.250' }, overflow, () => { passed = true; });
+      expect(passed).toBe(false);
+      expect(overflow.state.statusCode).toBe(429);
+      expect(limiter.keyCount()).toBe(serverModule.MAX_AUTH_RATE_LIMIT_KEYS);
+    } finally {
+      if (previousDisabled === undefined) delete process.env.DISABLE_RATE_LIMIT; else process.env.DISABLE_RATE_LIMIT = previousDisabled;
+      if (previousMax === undefined) delete process.env.AUTH_RATE_LIMIT_MAX; else process.env.AUTH_RATE_LIMIT_MAX = previousMax;
+      if (previousWindow === undefined) delete process.env.AUTH_RATE_LIMIT_WINDOW_MS; else process.env.AUTH_RATE_LIMIT_WINDOW_MS = previousWindow;
+    }
   });
 });

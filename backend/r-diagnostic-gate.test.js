@@ -18,6 +18,7 @@ const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const serverModule = require('../server.js');
 
 const CONFIGURED = config.hasPostgresConnection();
+const TEST_SESSION_EPOCH = '4f8c2a6e1d9b3075c4e8a2f6d1b93570';
 
 const { isDiagnosticRProxyPath, isProductionDiagnosticRProxyPath } = serverModule.default || serverModule;
 
@@ -60,11 +61,14 @@ describe.skipIf(!CONFIGURED)('R diagnostic gate (HTTP) returns 404 for all varia
   let server;
   let prevDiag;
   let prevNodeEnv;
+  let prevSessionEpoch;
   let token;
 
   beforeAll(async () => {
     prevDiag = process.env.ENABLE_R_TEST_DIAGNOSTICS;
     prevNodeEnv = process.env.NODE_ENV;
+    prevSessionEpoch = process.env.SESSION_EPOCH;
+    process.env.SESSION_EPOCH = TEST_SESSION_EPOCH;
     server = await startServer();
   });
 
@@ -73,9 +77,11 @@ describe.skipIf(!CONFIGURED)('R diagnostic gate (HTTP) returns 404 for all varia
     await db.close();
     if (prevDiag === undefined) delete process.env.ENABLE_R_TEST_DIAGNOSTICS; else process.env.ENABLE_R_TEST_DIAGNOSTICS = prevDiag;
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevSessionEpoch === undefined) delete process.env.SESSION_EPOCH; else process.env.SESSION_EPOCH = prevSessionEpoch;
   });
 
   beforeEach(async () => {
+    process.env.SESSION_EPOCH = TEST_SESSION_EPOCH;
     await db.resetSchemaForTests();
     token = (await createUserWithToken({ email: 'diag@example.com', displayName: 'Diag' })).token;
   });
@@ -86,6 +92,7 @@ describe.skipIf(!CONFIGURED)('R diagnostic gate (HTTP) returns 404 for all varia
   afterEach(() => {
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
     if (prevDiag === undefined) delete process.env.ENABLE_R_TEST_DIAGNOSTICS; else process.env.ENABLE_R_TEST_DIAGNOSTICS = prevDiag;
+    process.env.SESSION_EPOCH = TEST_SESSION_EPOCH;
   });
 
   const variants = [

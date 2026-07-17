@@ -2,12 +2,19 @@
 'use strict';
 
 const { createStandaloneWorkerRuntime } = require('./backend/workerRuntime');
+const config = require('./backend/config');
 
 async function main(options = {}) {
   const argv = options.argv || process.argv.slice(2);
   const logger = options.logger || console;
   const exit = options.exit || ((code) => process.exit(code));
   let fatalExitIssued = false;
+  const configErrors = config.validateProductionConfig({ role: 'worker' });
+  if (configErrors.length > 0) {
+    throw Object.assign(new Error('Worker runtime configuration is invalid.'), {
+      code: 'INVALID_RUNTIME_CONFIG',
+    });
+  }
   const runtimeOptions = { ...(options.runtimeOptions || {}) };
   if (typeof runtimeOptions.onFatal !== 'function') {
     runtimeOptions.onFatal = (code) => {

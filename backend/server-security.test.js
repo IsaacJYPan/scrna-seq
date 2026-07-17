@@ -8,8 +8,38 @@ const {
   sanitizeVaultSegment,
   deriveRStateKey,
   isProductionDiagnosticRProxyPath,
-  trustedRdsLoadEnabled
+  trustedRdsLoadEnabled,
+  requireLegacyVaultUploadsEnabled
 } = serverModule;
+
+describe('production legacy upload policy', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+  });
+
+  it('rejects private-vault upload parsing in production', () => {
+    process.env.NODE_ENV = 'production';
+    let nextCalled = false;
+    const state = { status: null, body: null };
+    const res = {
+      status(code) { state.status = code; return this; },
+      json(body) { state.body = body; return this; },
+    };
+    requireLegacyVaultUploadsEnabled({}, res, () => { nextCalled = true; });
+    expect(nextCalled).toBe(false);
+    expect(state.status).toBe(403);
+    expect(state.body).toEqual({ error: 'Legacy private-vault uploads are disabled in production.' });
+  });
+
+  it('retains local development compatibility', () => {
+    process.env.NODE_ENV = 'development';
+    let nextCalled = false;
+    requireLegacyVaultUploadsEnabled({}, {}, () => { nextCalled = true; });
+    expect(nextCalled).toBe(true);
+  });
+});
 
 describe('server vault path authorization', () => {
   it('allows a user to access paths inside their own vault folder', () => {

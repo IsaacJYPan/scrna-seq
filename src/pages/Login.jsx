@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Shield, Lock, Mail, User, Microscope, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
 import auth from '../auth';
 
-export default function Login({ onLogin, theme = 'light', setTheme }) {
+export default function Login({ onLogin, notice = '', theme = 'light', setTheme }) {
   const [mode, setMode] = useState('login'); // 'login' | 'signup'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -11,6 +11,25 @@ export default function Login({ onLogin, theme = 'light', setTheme }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [registrationEnabled, setRegistrationEnabled] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    auth.registrationPolicy()
+      .then((policy) => {
+        if (!active) return;
+        const enabled = policy?.registrationEnabled === true;
+        setRegistrationEnabled(enabled);
+        if (!enabled) setMode('login');
+      })
+      .catch(() => {
+        if (active) {
+          setRegistrationEnabled(false);
+          setMode('login');
+        }
+      });
+    return () => { active = false; };
+  }, []);
 
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   const passwordStrong = password.length >= 8;
@@ -94,26 +113,41 @@ export default function Login({ onLogin, theme = 'light', setTheme }) {
             <Microscope size={30} className="text-primary" />
           </div>
           <h1 className="text-2xl font-bold text-text tracking-tight">BenchOne</h1>
-          <p className="text-textMuted text-sm mt-1.5">Local Development Research Workbench</p>
+          <p className="text-textMuted text-sm mt-1.5">Reproducible Single-Cell Analysis Workbench</p>
         </div>
 
         {/* Card */}
         <div className="bg-surface border border-border rounded-2xl shadow-xl shadow-slate-900/5 p-6 sm:p-7">
           {/* Mode Toggle — segmented control */}
-          <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-background border border-border rounded-xl">
+          <div className={`${registrationEnabled ? 'grid grid-cols-2' : ''} gap-1 p-1 mb-6 bg-background border border-border rounded-xl`}>
             <button
               onClick={() => { setMode('login'); setError(''); setSuccess(''); }}
               className={`${tabBase} ${mode === 'login' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
             >
               Log In
             </button>
-            <button
-              onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
-              className={`${tabBase} ${mode === 'signup' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
-            >
-              Sign Up
-            </button>
+            {registrationEnabled && (
+              <button
+                onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
+                className={`${tabBase} ${mode === 'signup' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
+              >
+                Sign Up
+              </button>
+            )}
           </div>
+
+          {!registrationEnabled && (
+            <p className="mb-5 text-center text-xs text-textMuted">
+              Accounts are provisioned by your deployment administrator.
+            </p>
+          )}
+
+          {notice && (
+            <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+              <AlertTriangle size={15} className="flex-shrink-0" />
+              {notice}
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'signup' && (

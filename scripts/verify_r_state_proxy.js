@@ -18,6 +18,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const config = require('../backend/config');
 
 const WORKSPACE = path.resolve(__dirname, '..');
 const PORT = Number(process.env.TEST_PORT || 18121);
@@ -65,7 +66,10 @@ function request(method, requestPath, { token, objectId, body } = {}) {
     const headers = {
       'Content-Type': 'application/json',
       ...(bodyText ? { 'Content-Length': Buffer.byteLength(bodyText) } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(token ? {
+        Cookie: `${config.sessionCookieName()}=${encodeURIComponent(token)}`,
+        Origin: BASE_URL,
+      } : {}),
       ...(objectId ? { 'X-Object-ID': objectId } : {}),
     };
 
@@ -83,7 +87,7 @@ function request(method, requestPath, { token, objectId, body } = {}) {
         try {
           parsed = data ? JSON.parse(data) : null;
         } catch (_) {}
-        resolve({ status: res.statusCode, body: parsed });
+        resolve({ status: res.statusCode, body: parsed, headers: res.headers });
       });
     });
 
@@ -170,7 +174,9 @@ async function signup(email) {
     if (response.status === 201) return response;
     return false;
   }, 60000);
-  return { token: res.body.token, userId: res.body.user.id };
+  const setCookie = Array.isArray(res.headers['set-cookie']) ? res.headers['set-cookie'][0] : res.headers['set-cookie'];
+  const encoded = String(setCookie || '').split(';')[0].split('=').slice(1).join('=');
+  return { token: decodeURIComponent(encoded), userId: res.body.user.id };
 }
 
 async function createAnalysisObject(token) {

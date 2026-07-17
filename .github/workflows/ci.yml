@@ -44,14 +44,45 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install Node dependencies
-        run: npm ci || npm install
+        run: npm ci
+
+      - name: Audit Node dependency security
+        run: npm audit --audit-level=high
+
+      - name: Install PostgreSQL client tools
+        # The real backup/restore drill uses pg_dump and pg_restore against the
+        # isolated CI service database.
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Lint
         run: npm run lint
+
+      - name: Validate supported deployment topology
+        # Renders Compose and pins the single-host security invariants: private
+        # shared namespace, loopback-only ingress, non-root/read-only services,
+        # resource bounds, one replica, and safe shutdown ordering.
+        run: npm run test:deployment:compose
+
+      - name: Validate and build deployable Node images
+        run: |
+          docker build --check --target runtime .
+          docker build --check -f r-backend/Dockerfile r-backend
+          docker build --target runtime -t scrna-seq-workbench:ci .
+          docker build --target operations -t scrna-seq-operations:ci .
+
+      - name: Boot Compose and run containerized backup/restore drill
+        # Uses the real hardened Node/Postgres/operations images and namespace.
+        # A tiny authenticated R health stub replaces only the expensive R image.
+        # Proves non-root service startup, web/worker health, mounted-volume
+        # layout, offline backup, read-only-input restore, verification, and
+        # restart from the restored candidate.
+        run: npm run test:deployment:compose-runtime
 
       - name: Setup R
         uses: r-lib/actions/setup-r@v2
@@ -83,7 +114,8 @@ jobs:
 
       - name: Run Backend Tests
         # The FULL backend suite (backend/*.test.js) against the real Postgres
-        # service: per-user isolation, auth (cookie/bearer/rate-limit/credentials),
+        # service: per-user isolation, cookie-only versioned auth, rate limits,
+        # credentials, fail-fast config, health/drain, offline backup validation,
         # org/project RBAC, datasets, analysis-objects, the durable job-worker
         # claim/lease/heartbeat contract, standalone worker process/runtime,
         # crash-output recovery, artifacts/checkpoints, lineage DAG, the R-proxy
@@ -95,6 +127,19 @@ jobs:
         # validators, serializers, config) run unconditionally; DB/HTTP suites skip
         # only when DATABASE_URL is unset (never in CI).
         run: npm run test:backend
+
+      - name: Run real backup and restore drill
+        # Creates an isolated source DB, writes durable dataset/artifact bytes,
+        # runs real pg_dump + pg_restore into a new DB/roots, verifies hashes,
+        # references, and every public table fingerprint, then removes both DBs.
+        run: npm run test:backup-restore:real
+
+      - name: Run production process smoke test
+        # Boots the actual production server with Postgres and a private fake R
+        # service. Exercises fail-fast config, health/readiness degradation,
+        # secure cookie + headers, CSRF, single-web locking, session revocation,
+        # graceful drain, and stable public error boundaries.
+        run: npm run test:deployment:smoke
 
       - name: Run Standalone Worker Process and Recovery Tests
         # Explicitly named audit gate: real child processes + Postgres claim/lease
@@ -150,5 +195,74 @@ jobs:
         # Mocked frontend visual smoke test; it checks UI rendering/layout.
         run: npm run test:visual
 
+      - name: Run real Chromium deployment flow
+        # No request interception: browser -> built React app -> actual Express
+        # -> Postgres/private fake R. Covers signup/login/logout, durable project
+        # reload, collaborators RBAC UI, cookies, console, 5xx, and network audit.
+        run: npm run test:deployment:browser
+
       - name: Build Application
         run: npm run build
+
+  r-image-smoke:
+    name: Build and boot production R image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build exact R runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: r-backend
+          file: r-backend/Dockerfile
+          load: true
+          tags: scrna-seq-r:ci
+          cache-from: type=gha,scope=production-r-image
+          cache-to: type=gha,mode=max,scope=production-r-image
+
+      - name: Verify required R packages
+        run: >-
+          docker run --rm --read-only --user 10001:10001
+          --cap-drop ALL --security-opt no-new-privileges
+          --tmpfs /tmp:rw,noexec,nosuid,nodev
+          --entrypoint Rscript scrna-seq-r:ci -e
+          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE)))"
+
+      - name: Boot R image and audit authenticated health
+        shell: bash
+        run: |
+          token="$(openssl rand -hex 32)"
+          container="$(docker run -d --read-only --user 10001:10001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 1024 --memory 4g --cpus 2 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev \
+            -e API_TOKEN="$token" -e PLUMBER_HOST=127.0.0.1 \
+            scrna-seq-r:ci)"
+          cleanup() {
+            docker logs "$container" || true
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          ready=false
+          for _ in $(seq 1 90); do
+            if docker exec "$container" Rscript -e \
+              'con <- url("http://127.0.0.1:8000/health", open="rb", headers=c("X-API-Token"=Sys.getenv("API_TOKEN"))); payload <- jsonlite::fromJSON(con); close(con); stopifnot(identical(payload[["status"]], "ok"))' \
+              >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = true
+          if docker exec "$container" Rscript -e \
+            'con <- url("http://127.0.0.1:8000/health", open="rb"); readLines(con)' \
+            >/dev/null 2>&1; then
+            echo "Unauthenticated R health unexpectedly succeeded" >&2
+            exit 1
+          fi

@@ -24,9 +24,26 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   salt          TEXT NOT NULL,
   display_name  TEXT NOT NULL,
+  session_version BIGINT NOT NULL DEFAULT 1,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS session_version BIGINT NOT NULL DEFAULT 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- Append-only operator actions that do not have an authenticated browser actor.
+-- Account and platform-capability CLIs write here in the same transaction as
+-- their mutation. There is intentionally no public mutation or read endpoint.
+CREATE TABLE IF NOT EXISTS operator_audit_events (
+  id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  event_type     TEXT NOT NULL,
+  target_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  target_email   TEXT NOT NULL,
+  metadata_json  TEXT NOT NULL DEFAULT '{}',
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_operator_audit_created ON operator_audit_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_operator_audit_target ON operator_audit_events(target_user_id);
 
 -- Platform capabilities are assigned out of band by a trusted operator. They
 -- are intentionally separate from organization/project roles and have no

@@ -8,6 +8,7 @@
 
 const serverModule = require('../server.js');
 const db = require('./pgDatabase');
+const config = require('./config');
 
 const { app, issueSession } = serverModule;
 
@@ -33,19 +34,37 @@ async function createUserWithToken({ email, password = 'password123', displayNam
 
 async function api(server, path, { method = 'GET', token, headers = {}, body } = {}) {
   const h = { ...headers };
-  if (token) h.Authorization = `Bearer ${token}`;
+  if (token) {
+    h.Cookie = `${config.sessionCookieName()}=${encodeURIComponent(token)}`;
+    if (!h.Origin && !h.origin) h.Origin = 'http://localhost:5173';
+  }
   if (body !== undefined && h['Content-Type'] === undefined) h['Content-Type'] = 'application/json';
+  const production = config.isProduction();
+  const priorTrustProxy = app.get('trust proxy');
+  if (production) {
+    // A few policy tests deliberately switch NODE_ENV after the shared app was
+    // imported. Reproduce the trusted one-hop TLS ingress for that request so
+    // the intended route gate, not the plaintext-production gate, is asserted.
+    app.set('trust proxy', 1);
+    if (!h['X-Forwarded-Proto'] && !h['x-forwarded-proto']) h['X-Forwarded-Proto'] = 'https';
+    if (!h['X-Forwarded-For'] && !h['x-forwarded-for']) h['X-Forwarded-For'] = '127.0.0.1';
+  }
 
-  const res = await fetch(`${baseUrl(server)}${path}`, {
-    method,
-    headers: h,
-    body: body !== undefined ? JSON.stringify(body) : undefined
-  });
+  let res;
+  try {
+    res = await fetch(`${baseUrl(server)}${path}`, {
+      method,
+      headers: h,
+      body: body !== undefined ? JSON.stringify(body) : undefined
+    });
+  } finally {
+    if (production) app.set('trust proxy', priorTrustProxy);
+  }
 
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  return { status: res.status, data };
+  return { status: res.status, data, res };
 }
 
 module.exports = { startServer, createUserWithToken, api, db, serverModule };

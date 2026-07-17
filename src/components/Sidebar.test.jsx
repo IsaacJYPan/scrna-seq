@@ -95,6 +95,19 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /Jobs & Artifacts/i })).not.toBeDisabled();
   });
 
+  it('disables the legacy live integration action under the production policy', () => {
+    render(
+      <Sidebar
+        activeTab="workspace"
+        {...baseProps}
+        selectedObjects={[{ id: 'ao_abc123' }]}
+        deploymentPolicy={{ legacyLiveMutationToolsEnabled: false }}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: /Integration, Local development only/i })).toBeDisabled();
+  });
+
   it('does not require icons for pipeline-generated tabs', () => {
     const { container } = render(
       <Sidebar
