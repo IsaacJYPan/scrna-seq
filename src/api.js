@@ -393,8 +393,9 @@ export const electronAPI = {
   getDataset: async (projectId, datasetId) => req(`/api/projects/${projectId}/datasets/${datasetId}`),
   updateDataset: async (projectId, datasetId, payload) => req(`/api/projects/${projectId}/datasets/${datasetId}`, { method: 'PATCH', body: JSON.stringify(payload || {}) }),
   listProjectPipelineDefinitions: async (projectId) => req(`/api/projects/${projectId}/pipeline-definitions`),
-  createProjectPipelineDefinition: async (projectId, payload) =>
-    req(`/api/projects/${projectId}/pipeline-definitions`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  getPipelineRegistryCapabilities: async () => req('/api/pipeline-registry/capabilities'),
+  publishPipelineRegistryDefinition: async (manifest) =>
+    req('/api/pipeline-registry/definitions', { method: 'POST', body: JSON.stringify({ manifest }) }),
   getProjectPipelineSelection: async (projectId) => req(`/api/projects/${projectId}/pipeline-selection`),
   setProjectPipelineSelection: async (projectId, pipelineId) =>
     req(`/api/projects/${projectId}/pipeline-selection`, { method: 'PUT', body: JSON.stringify({ pipelineId }) }),

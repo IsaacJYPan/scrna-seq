@@ -148,10 +148,11 @@ const WORKER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const DEFAULT_LEASE_SECONDS = 120;
 const MAX_NAME_LENGTH = 200;
 const MAX_DESCRIPTION_LENGTH = 2000;
-const PIPELINE_DEFINITION_WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const PIPELINE_DEFINITION_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const PIPELINE_SELECTION_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
-const PIPELINE_VISIBILITIES = new Set(['user', 'project']);
+const PIPELINE_REGISTRY_PUBLISH_CAPABILITY = 'pipeline_registry.publish';
+const PLATFORM_PIPELINE_VISIBILITY = 'platform';
+const PLATFORM_PIPELINE_REGISTRY_LIMIT = 200;
 const PROVENANCE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const PROVENANCE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const FIGURE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
@@ -478,7 +479,8 @@ async function resetSchemaForTests() {
       project_pipeline_selections, pipeline_definitions,
       analysis_object_edges, job_artifacts, jobs, analysis_objects,
       datasets, project_members, projects, organization_members,
-      organizations, figure_collection, results_cache, provenance, users
+      organizations, figure_collection, results_cache, provenance,
+      platform_capabilities, users
     CASCADE;
   `);
   await initSchema();
@@ -735,6 +737,50 @@ async function verifyUser(email, password) {
 }
 
 // ── Organizations / projects / membership ───────────────────────────────────
+async function hasPipelineRegistryPublishCapability(userId) {
+  const uid = Number(userId);
+  if (!Number.isInteger(uid) || uid <= 0) return false;
+  const { rows } = await query(
+    `SELECT 1 FROM platform_capabilities
+      WHERE user_id = $1 AND capability = $2`,
+    [uid, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+  );
+  return Boolean(rows[0]);
+}
+
+async function getPipelineRegistryCapabilities(userId) {
+  return {
+    canPublishPipelineManifests: await hasPipelineRegistryPublishCapability(userId),
+  };
+}
+
+async function setPipelineRegistryPublisherByEmail(email, enabled) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) throw codedError('INVALID_USER', 'A user email is required.');
+  if (typeof enabled !== 'boolean') throw codedError('INVALID_CAPABILITY', 'Capability state must be boolean.');
+  const { rows } = await query('SELECT id, email FROM users WHERE email = $1', [normalizedEmail]);
+  if (!rows[0]) throw codedError('USER_NOT_FOUND', 'User not found.');
+  const userId = Number(rows[0].id);
+  if (enabled) {
+    await query(
+      `INSERT INTO platform_capabilities (user_id, capability)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id, capability) DO NOTHING`,
+      [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+    );
+  } else {
+    await query(
+      'DELETE FROM platform_capabilities WHERE user_id = $1 AND capability = $2',
+      [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+    );
+  }
+  return {
+    userId,
+    email: rows[0].email,
+    canPublishPipelineManifests: enabled,
+  };
+}
+
 async function createOrganization(name, ownerUserId) {
   const owner = Number(ownerUserId);
   if (!Number.isInteger(owner) || owner <= 0) {
@@ -1230,15 +1276,31 @@ async function removeProjectMember(projectId, targetUserId, actor) {
   }
 }
 
-function rowToPipelineDefinition(row) {
-  if (!row) return null;
+function validatedPlatformPipelineDefinition(row) {
+  if (!row || !isValidPipelineDefinitionId(row.id)
+      || row.project_id !== null || row.visibility !== PLATFORM_PIPELINE_VISIBILITY
+      || typeof row.manifest_id !== 'string' || row.manifest_id === '') return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(row.manifest_json);
+  } catch {
+    return null;
+  }
+  let manifest;
+  try {
+    manifest = validatePipelineManifest(parsed);
+  } catch {
+    return null;
+  }
+  if (manifest.id !== row.manifest_id || manifest.name !== row.name) return null;
   return {
     id: row.id,
-    projectId: row.project_id,
+    projectId: null,
     ownerUserId: Number(row.owner_user_id),
-    visibility: row.visibility,
+    visibility: PLATFORM_PIPELINE_VISIBILITY,
+    manifestId: row.manifest_id,
     name: row.name,
-    manifest: parseJson(row.manifest_json, {}),
+    manifest,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1250,6 +1312,7 @@ function toPublicPipelineDefinition(definition) {
     id: definition.id,
     projectId: definition.projectId,
     visibility: definition.visibility,
+    manifestId: definition.manifestId,
     name: definition.name,
     manifest: definition.manifest,
     createdAt: definition.createdAt,
@@ -1260,6 +1323,7 @@ function toPublicPipelineDefinition(definition) {
 function defaultPipelineDefinitionPublic(projectId) {
   return {
     id: DEFAULT_PIPELINE_ID,
+    manifestId: DEFAULT_PIPELINE_ID,
     projectId: projectId || null,
     visibility: 'builtin',
     name: 'Default Seurat scRNA-seq Pipeline',
@@ -1268,54 +1332,96 @@ function defaultPipelineDefinitionPublic(projectId) {
   };
 }
 
-async function getAccessiblePipelineDefinitionRow(userId, projectId, pipelineId) {
+async function getAccessiblePipelineDefinition(pipelineId) {
   if (isBuiltInPipelineId(pipelineId)) return { builtin: true };
   if (!isValidPipelineDefinitionId(pipelineId)) return null;
   const { rows } = await query(
     `SELECT * FROM pipeline_definitions
       WHERE id = $1
-        AND project_id = $2
-        AND (owner_user_id = $3 OR visibility = 'project')`,
-    [String(pipelineId), String(projectId), Number(userId)]
+        AND project_id IS NULL
+        AND visibility = $2
+        AND manifest_id IS NOT NULL`,
+    [String(pipelineId), PLATFORM_PIPELINE_VISIBILITY]
   );
-  return rows[0] || null;
+  return validatedPlatformPipelineDefinition(rows[0]);
 }
 
 async function listProjectPipelineDefinitions(userId, projectId) {
   await requireProjectRole(userId, projectId, PIPELINE_DEFINITION_READ_ROLES);
   const { rows } = await query(
     `SELECT * FROM pipeline_definitions
-      WHERE project_id = $1
-        AND (owner_user_id = $2 OR visibility = 'project')
-      ORDER BY updated_at DESC, id DESC`,
-    [String(projectId), Number(userId)]
+      WHERE project_id IS NULL
+        AND visibility = $1
+        AND manifest_id IS NOT NULL
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2`,
+    [PLATFORM_PIPELINE_VISIBILITY, PLATFORM_PIPELINE_REGISTRY_LIMIT]
   );
+  const trusted = rows.map(validatedPlatformPipelineDefinition).filter(Boolean);
   return [
     defaultPipelineDefinitionPublic(projectId),
-    ...rows.map(row => toPublicPipelineDefinition(rowToPipelineDefinition(row))),
+    ...trusted.map(toPublicPipelineDefinition),
   ];
 }
 
-async function createProjectPipelineDefinition(userId, projectId, input = {}) {
-  await requireProjectRole(userId, projectId, PIPELINE_DEFINITION_WRITE_ROLES);
-  if (input.id !== undefined || input.projectId !== undefined || input.project_id !== undefined
-      || input.ownerUserId !== undefined || input.owner_user_id !== undefined) {
-    throw codedError('INVALID_PIPELINE_DEFINITION', 'Pipeline definition identity and ownership are server-controlled.');
+async function createPipelineRegistryDefinition(userId, input = {}) {
+  const uid = Number(userId);
+  if (!Number.isInteger(uid) || uid <= 0) {
+    throw codedError('FORBIDDEN', 'Platform pipeline publication is not permitted.');
   }
-  const visibility = input.visibility === undefined ? 'user' : String(input.visibility);
-  if (!PIPELINE_VISIBILITIES.has(visibility)) {
-    throw codedError('INVALID_PIPELINE_DEFINITION', 'Pipeline visibility must be user or project.');
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+      || Object.keys(input).some((field) => field !== 'manifest')) {
+    throw codedError('INVALID_PIPELINE_DEFINITION', 'Only a declarative manifest may be published.');
   }
-  const manifest = validatePipelineManifest(input.manifest);
-  const id = generatePipelineDefinitionId();
-  const { rows } = await query(
-    `INSERT INTO pipeline_definitions
-       (id, project_id, owner_user_id, visibility, name, manifest_json)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING *`,
-    [id, String(projectId), Number(userId), visibility, manifest.name, JSON.stringify(manifest)]
-  );
-  return toPublicPipelineDefinition(rowToPipelineDefinition(rows[0]));
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [0x5343524e, 6]);
+    const capability = await client.query(
+      `SELECT 1 FROM platform_capabilities
+        WHERE user_id = $1 AND capability = $2
+        FOR SHARE`,
+      [uid, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+    );
+    if (!capability.rows[0]) {
+      throw codedError('FORBIDDEN', 'Platform pipeline publication is not permitted.');
+    }
+    const count = await client.query(
+      `SELECT count(*)::integer AS count FROM pipeline_definitions
+        WHERE project_id IS NULL AND visibility = $1`,
+      [PLATFORM_PIPELINE_VISIBILITY]
+    );
+    if (Number(count.rows[0]?.count || 0) >= PLATFORM_PIPELINE_REGISTRY_LIMIT) {
+      throw codedError('PIPELINE_REGISTRY_FULL', 'The trusted pipeline registry has reached its configured limit.');
+    }
+    const manifest = validatePipelineManifest(input.manifest);
+    const id = generatePipelineDefinitionId();
+    const inserted = await client.query(
+      `INSERT INTO pipeline_definitions
+         (id, project_id, owner_user_id, visibility, manifest_id, name, manifest_json)
+       VALUES ($1, NULL, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [
+        id,
+        uid,
+        PLATFORM_PIPELINE_VISIBILITY,
+        manifest.id,
+        manifest.name,
+        JSON.stringify(manifest),
+      ]
+    );
+    await client.query('COMMIT');
+    return toPublicPipelineDefinition(validatedPlatformPipelineDefinition(inserted.rows[0]));
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err && err.code === '23505') {
+      throw codedError('PIPELINE_MANIFEST_EXISTS', 'A trusted pipeline with this manifest id already exists.');
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 async function getProjectPipelineSelection(userId, projectId) {
@@ -1325,16 +1431,17 @@ async function getProjectPipelineSelection(userId, projectId) {
     [String(projectId), Number(userId)]
   );
   const requestedId = rows[0]?.pipeline_id || DEFAULT_PIPELINE_ID;
-  const accessible = await getAccessiblePipelineDefinitionRow(userId, projectId, requestedId);
+  const accessible = await getAccessiblePipelineDefinition(requestedId);
   const pipelineId = accessible ? requestedId : DEFAULT_PIPELINE_ID;
   const definition = isBuiltInPipelineId(pipelineId)
     ? defaultPipelineDefinitionPublic(projectId)
-    : toPublicPipelineDefinition(rowToPipelineDefinition(accessible));
+    : toPublicPipelineDefinition(accessible);
   return {
     projectId: String(projectId),
     userId: Number(userId),
     pipelineId,
     definition,
+    selectionUnavailable: requestedId !== pipelineId,
     updatedAt: rows[0]?.updated_at || null,
   };
 }
@@ -1344,7 +1451,7 @@ async function setProjectPipelineSelection(userId, projectId, pipelineId) {
   if (typeof pipelineId !== 'string' || pipelineId === '') {
     throw codedError('INVALID_PIPELINE_SELECTION', 'pipelineId is required.');
   }
-  const accessible = await getAccessiblePipelineDefinitionRow(userId, projectId, pipelineId);
+  const accessible = await getAccessiblePipelineDefinition(pipelineId);
   if (!accessible) throw codedError('PIPELINE_NOT_FOUND', 'Pipeline definition not found.');
   await query(
     `INSERT INTO project_pipeline_selections (project_id, user_id, pipeline_id, updated_at)
@@ -5019,6 +5126,9 @@ module.exports = {
   createUser,
   getUserByEmail,
   verifyUser,
+  hasPipelineRegistryPublishCapability,
+  getPipelineRegistryCapabilities,
+  setPipelineRegistryPublisherByEmail,
   // owner-scoped provenance / cache / figures
   saveProvenance,
   getProvenance,
@@ -5059,9 +5169,10 @@ module.exports = {
   updateProjectMemberRole,
   removeProjectMember,
   // pipeline definitions
+  PIPELINE_REGISTRY_PUBLISH_CAPABILITY,
   toPublicPipelineDefinition,
   listProjectPipelineDefinitions,
-  createProjectPipelineDefinition,
+  createPipelineRegistryDefinition,
   getProjectPipelineSelection,
   setProjectPipelineSelection,
   // datasets

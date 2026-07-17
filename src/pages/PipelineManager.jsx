@@ -1,11 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Code2, Layers, Loader2, RefreshCw, Upload } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle, CheckCircle2, Code2, Layers, Loader2, RefreshCw, ShieldCheck, Upload,
+} from 'lucide-react';
+import PipelineTemplatePreview from '../components/PipelineTemplatePreview';
 import { SeuratPipelinePanel } from './Workspace';
 import {
   DEFAULT_PIPELINE_ID,
   PARAMETER_TEMPLATE_TYPES,
+  PIPELINE_CONTRACT,
   RESULT_VIEW_TEMPLATES,
   getDefaultPipelineManifest,
+  resolvePipelineManifest,
   validatePipelineManifest,
 } from '../pipelines/pipelineRegistry';
 
@@ -40,14 +45,67 @@ function selectedObjectForProject(currentWs, activeProjectId, datasetInfo) {
     || (datasetInfo?.projectId === activeProjectId ? datasetInfo : null);
 }
 
+function builtInDefinition(projectId) {
+  const manifest = getDefaultPipelineManifest();
+  return {
+    id: DEFAULT_PIPELINE_ID,
+    manifestId: DEFAULT_PIPELINE_ID,
+    projectId: projectId || null,
+    visibility: 'builtin',
+    builtin: true,
+    name: manifest.name,
+    manifest,
+  };
+}
+
+function normalizeDefinition(definition, projectId) {
+  if (!definition || typeof definition !== 'object' || typeof definition.id !== 'string') return null;
+  if (definition.id === DEFAULT_PIPELINE_ID) return builtInDefinition(projectId);
+  if (definition.visibility !== 'platform' || definition.projectId !== null) return null;
+  try {
+    const manifest = validatePipelineManifest(definition.manifest);
+    if (definition.manifestId !== manifest.id || definition.name !== manifest.name) return null;
+    return { ...definition, manifest };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeDefinitionList(rawDefinitions, projectId) {
+  const source = Array.isArray(rawDefinitions) ? rawDefinitions : [];
+  const definitions = source.map(definition => normalizeDefinition(definition, projectId)).filter(Boolean);
+  const unique = [];
+  const ids = new Set();
+  for (const definition of definitions) {
+    if (!ids.has(definition.id)) {
+      ids.add(definition.id);
+      unique.push(definition);
+    }
+  }
+  if (!ids.has(DEFAULT_PIPELINE_ID)) unique.unshift(builtInDefinition(projectId));
+  return { definitions: unique, rejectedCount: source.length - definitions.length };
+}
+
+function normalizeSelection(rawSelection, definitions, projectId) {
+  const requestedId = typeof rawSelection?.pipelineId === 'string' ? rawSelection.pipelineId : DEFAULT_PIPELINE_ID;
+  const definition = definitions.find(item => item.id === requestedId) || builtInDefinition(projectId);
+  return {
+    projectId,
+    pipelineId: definition.id,
+    definition,
+    selectionUnavailable: rawSelection?.selectionUnavailable === true || definition.id !== requestedId,
+    updatedAt: rawSelection?.updatedAt || null,
+  };
+}
+
 function PipelineModuleList({ manifest }) {
   const tabs = Array.isArray(manifest?.tabs) ? manifest.tabs : [];
   return (
     <div className="rounded-lg border border-border bg-surface/50">
       <div className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto] gap-3 border-b border-border px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-textMuted">
         <span>Tab</span>
-        <span>Module</span>
-        <span>Status</span>
+        <span>Registered module</span>
+        <span>Mode</span>
       </div>
       <div className="divide-y divide-border/50">
         {tabs.map(tab => (
@@ -60,8 +118,8 @@ function PipelineModuleList({ manifest }) {
               <div className="truncate font-mono text-xs text-textMuted">{tab.moduleKey}</div>
               {tab.jobType && <div className="mt-1 truncate font-mono text-[11px] text-textMuted">{tab.jobType}</div>}
             </div>
-            <StatusBadge tone={tab.executableNow ? 'green' : tab.jobType ? 'amber' : 'blue'}>
-              {tab.executableNow ? 'worker' : tab.jobType ? 'planned worker' : 'view'}
+            <StatusBadge tone={tab.executable ? 'green' : 'blue'}>
+              {tab.executable ? 'worker job' : 'application UI'}
             </StatusBadge>
           </div>
         ))}
@@ -86,97 +144,231 @@ export default function PipelineManager({
   const [definitions, setDefinitions] = useState([]);
   const [selection, setSelection] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [selectingId, setSelectingId] = useState(null);
   const [error, setError] = useState(null);
+  const [registryWarning, setRegistryWarning] = useState(null);
+  const [capabilities, setCapabilities] = useState({ loaded: false, canPublishPipelineManifests: false });
+  const [capabilityError, setCapabilityError] = useState(null);
   const [uploadText, setUploadText] = useState('');
-  const [uploadVisibility, setUploadVisibility] = useState('user');
   const [uploadError, setUploadError] = useState(null);
+  const [uploadSuccess, setUploadSuccess] = useState(null);
   const [uploading, setUploading] = useState(false);
 
-  const manifest = useMemo(() => activePipeline || selection?.definition?.manifest || getDefaultPipelineManifest(), [activePipeline, selection]);
-  const selectedPipelineId = selection?.pipelineId || manifest?.id || DEFAULT_PIPELINE_ID;
+  const mountedRef = useRef(true);
+  const projectRef = useRef(activeProjectId);
+  const definitionsRef = useRef(definitions);
+  const selectionChangedRef = useRef(onPipelineSelectionChanged);
+  const pipelineOperationSequenceRef = useRef(0);
+  const capabilitySequenceRef = useRef(0);
+  const publishSequenceRef = useRef(0);
+  projectRef.current = activeProjectId;
+  definitionsRef.current = definitions;
+  selectionChangedRef.current = onPipelineSelectionChanged;
 
-  const loadPipelines = useCallback(async () => {
-    if (!activeProjectId) {
-      setDefinitions([]);
-      setSelection(null);
-      setError(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pipelineOperationSequenceRef.current += 1;
+      capabilitySequenceRef.current += 1;
+      publishSequenceRef.current += 1;
+    };
+  }, []);
+
+  const manifest = useMemo(() => {
+    const candidate = selection?.projectId === activeProjectId
+      ? selection.definition?.manifest
+      : (!activeProjectId ? activePipeline : null);
+    try {
+      return resolvePipelineManifest(candidate || getDefaultPipelineManifest());
+    } catch {
+      return resolvePipelineManifest(getDefaultPipelineManifest());
+    }
+  }, [activePipeline, activeProjectId, selection]);
+  const selectedPipelineId = selection?.projectId === activeProjectId
+    ? selection.pipelineId
+    : DEFAULT_PIPELINE_ID;
+
+  const loadCapabilities = useCallback(async () => {
+    const sequence = ++capabilitySequenceRef.current;
+    const api = window.electronAPI || {};
+    if (!api.getPipelineRegistryCapabilities) {
+      if (mountedRef.current && sequence === capabilitySequenceRef.current) {
+        setCapabilities({ loaded: true, canPublishPipelineManifests: false });
+        setCapabilityError('Pipeline registry capability API is unavailable.');
+      }
       return;
+    }
+    setCapabilityError(null);
+    try {
+      const result = await api.getPipelineRegistryCapabilities();
+      if (!mountedRef.current || sequence !== capabilitySequenceRef.current) return;
+      setCapabilities({
+        loaded: true,
+        canPublishPipelineManifests: result?.canPublishPipelineManifests === true,
+      });
+    } catch (requestError) {
+      if (!mountedRef.current || sequence !== capabilitySequenceRef.current) return;
+      setCapabilities({ loaded: true, canPublishPipelineManifests: false });
+      setCapabilityError(parseApiError(requestError));
+    }
+  }, []);
+
+  const loadPipelines = useCallback(async (projectId = projectRef.current) => {
+    const sequence = ++pipelineOperationSequenceRef.current;
+    setSelectingId(null);
+    if (!projectId) {
+      if (mountedRef.current) {
+        setDefinitions([]);
+        setSelection(null);
+        setLoading(false);
+        setError(null);
+        setRegistryWarning(null);
+      }
+      return null;
     }
     const api = window.electronAPI || {};
     if (!api.listProjectPipelineDefinitions || !api.getProjectPipelineSelection) {
-      setError('Pipeline APIs are unavailable in this frontend runtime.');
-      return;
+      if (mountedRef.current && projectId === projectRef.current) {
+        setLoading(false);
+        setError('Pipeline APIs are unavailable in this frontend runtime.');
+      }
+      return null;
     }
     setLoading(true);
     setError(null);
+    setRegistryWarning(null);
     try {
-      const [defs, selected] = await Promise.all([
-        api.listProjectPipelineDefinitions(activeProjectId),
-        api.getProjectPipelineSelection(activeProjectId),
+      const [rawDefinitions, rawSelection] = await Promise.all([
+        api.listProjectPipelineDefinitions(projectId),
+        api.getProjectPipelineSelection(projectId),
       ]);
-      const nextDefs = Array.isArray(defs) ? defs : [];
-      setDefinitions(nextDefs);
-      setSelection(selected || null);
-      if (selected?.definition?.manifest) onPipelineSelectionChanged?.(selected.definition.manifest);
-    } catch (err) {
-      setError(parseApiError(err));
+      if (!mountedRef.current || sequence !== pipelineOperationSequenceRef.current || projectId !== projectRef.current) return null;
+      const normalized = normalizeDefinitionList(rawDefinitions, projectId);
+      const nextSelection = normalizeSelection(rawSelection, normalized.definitions, projectId);
+      setDefinitions(normalized.definitions);
+      setSelection(nextSelection);
+      definitionsRef.current = normalized.definitions;
+      selectionChangedRef.current?.(nextSelection.definition.manifest);
+      if (normalized.rejectedCount > 0) {
+        setRegistryWarning('One or more invalid registry entries were ignored by the browser.');
+      } else if (nextSelection.selectionUnavailable) {
+        setRegistryWarning('Your previous pipeline is no longer available. The built-in pipeline is active instead.');
+      }
+      return { definitions: normalized.definitions, selection: nextSelection };
+    } catch (requestError) {
+      if (!mountedRef.current || sequence !== pipelineOperationSequenceRef.current || projectId !== projectRef.current) return null;
+      setError(parseApiError(requestError));
+      return null;
     } finally {
-      setLoading(false);
+      if (mountedRef.current && sequence === pipelineOperationSequenceRef.current && projectId === projectRef.current) {
+        setLoading(false);
+      }
     }
-  }, [activeProjectId, onPipelineSelectionChanged]);
+  }, []);
 
   useEffect(() => {
-    loadPipelines();
-  }, [loadPipelines]);
+    setDefinitions([]);
+    setSelection(null);
+    setSelectingId(null);
+    setError(null);
+    setRegistryWarning(null);
+    selectionChangedRef.current?.(getDefaultPipelineManifest());
+    loadPipelines(activeProjectId);
+  }, [activeProjectId, loadPipelines]);
+
+  useEffect(() => {
+    loadCapabilities();
+  }, [loadCapabilities]);
+
+  const refreshAll = () => {
+    loadCapabilities();
+    loadPipelines(projectRef.current);
+  };
 
   const selectPipeline = async (pipelineId) => {
-    if (!activeProjectId || !pipelineId) return;
+    const projectId = projectRef.current;
+    if (!projectId || !pipelineId) return;
     const api = window.electronAPI || {};
     if (!api.setProjectPipelineSelection) {
       setError('Pipeline selection API is unavailable in this frontend runtime.');
       return;
     }
-    setLoading(true);
+    const sequence = ++pipelineOperationSequenceRef.current;
+    setLoading(false);
+    setSelectingId(pipelineId);
     setError(null);
     try {
-      const selected = await api.setProjectPipelineSelection(activeProjectId, pipelineId);
-      setSelection(selected);
-      if (selected?.definition?.manifest) onPipelineSelectionChanged?.(selected.definition.manifest);
-    } catch (err) {
-      setError(parseApiError(err));
+      const rawSelection = await api.setProjectPipelineSelection(projectId, pipelineId);
+      if (!mountedRef.current || sequence !== pipelineOperationSequenceRef.current || projectId !== projectRef.current) return;
+      const nextSelection = normalizeSelection(rawSelection, definitionsRef.current, projectId);
+      if (nextSelection.pipelineId !== pipelineId) {
+        throw new Error('The selected registry entry is no longer available.');
+      }
+      setSelection(nextSelection);
+      setRegistryWarning(nextSelection.selectionUnavailable
+        ? 'Your requested pipeline is no longer available. The built-in pipeline is active instead.'
+        : null);
+      selectionChangedRef.current?.(nextSelection.definition.manifest);
+    } catch (requestError) {
+      if (mountedRef.current && sequence === pipelineOperationSequenceRef.current && projectId === projectRef.current) {
+        setError(parseApiError(requestError));
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current && sequence === pipelineOperationSequenceRef.current && projectId === projectRef.current) {
+        setSelectingId(null);
+      }
     }
   };
 
-  const uploadManifest = async () => {
-    if (!activeProjectId) return;
+  const loadManifestFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
     setUploadError(null);
+    setUploadSuccess(null);
+    if (file.size > PIPELINE_CONTRACT.limits.maxManifestBytes) {
+      setUploadError(`Manifest files may not exceed ${PIPELINE_CONTRACT.limits.maxManifestBytes} bytes.`);
+      return;
+    }
+    try {
+      setUploadText(await file.text());
+    } catch {
+      setUploadError('The selected manifest file could not be read.');
+    }
+  };
+
+  const publishManifest = async () => {
+    setUploadError(null);
+    setUploadSuccess(null);
     let parsed;
     try {
       parsed = validatePipelineManifest(JSON.parse(uploadText));
-    } catch (err) {
-      setUploadError(err.message || 'Pipeline manifest is not valid JSON.');
+    } catch (validationError) {
+      setUploadError(validationError.message || 'Pipeline manifest is not valid JSON.');
       return;
     }
     const api = window.electronAPI || {};
-    if (!api.createProjectPipelineDefinition) {
-      setUploadError('Pipeline definition API is unavailable in this frontend runtime.');
+    if (!capabilities.canPublishPipelineManifests || !api.publishPipelineRegistryDefinition) {
+      setUploadError('Trusted pipeline publication is not available for this account.');
       return;
     }
+    const sequence = ++publishSequenceRef.current;
     setUploading(true);
     try {
-      const created = await api.createProjectPipelineDefinition(activeProjectId, {
-        manifest: parsed,
-        visibility: uploadVisibility,
-      });
+      const created = await api.publishPipelineRegistryDefinition(parsed);
+      if (!mountedRef.current || sequence !== publishSequenceRef.current) return;
+      const normalized = normalizeDefinition(created, projectRef.current);
+      if (!normalized) throw new Error('The registry returned an invalid pipeline definition.');
       setUploadText('');
-      await loadPipelines();
-      if (created?.id) await selectPipeline(created.id);
-    } catch (err) {
-      setUploadError(parseApiError(err));
+      setUploadSuccess(`Published “${normalized.name}” to the trusted registry.`);
+      if (projectRef.current) await loadPipelines(projectRef.current);
+    } catch (requestError) {
+      if (!mountedRef.current || sequence !== publishSequenceRef.current) return;
+      setUploadError(parseApiError(requestError));
+      await loadCapabilities();
     } finally {
-      setUploading(false);
+      if (mountedRef.current && sequence === publishSequenceRef.current) setUploading(false);
     }
   };
 
@@ -190,15 +382,15 @@ export default function PipelineManager({
               Pipeline Manager
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-textMuted">
-              Active pipeline selection is scoped to you inside this project. Shared project jobs and artifacts remain durable project history.
+              Choose from code-shipped analysis modules assembled by trusted declarative manifests. Each collaborator keeps a private live R object; durable project jobs and artifacts remain shared according to project role.
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
               <StatusBadge tone="green">user-project selection</StatusBadge>
-              <StatusBadge tone="blue">module registry</StatusBadge>
-              <StatusBadge tone="amber">declarative uploads only</StatusBadge>
+              <StatusBadge tone="blue">trusted registry</StatusBadge>
+              <StatusBadge tone="amber">no uploaded code</StatusBadge>
             </div>
           </div>
-          <button onClick={loadPipelines} disabled={loading || !activeProjectId} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+          <button onClick={refreshAll} disabled={loading || Boolean(selectingId) || uploading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Refresh
           </button>
@@ -207,7 +399,7 @@ export default function PipelineManager({
         {!activeProjectId ? (
           <div className="rounded-lg border border-dashed border-border p-6 text-center">
             <p className="font-bold text-text">Select a backend project</p>
-            <p className="mt-2 text-sm text-textMuted">Pipeline definitions and selections are scoped to a project and user.</p>
+            <p className="mt-2 text-sm text-textMuted">A project is required to choose and use a trusted pipeline. Platform developers can still publish manifests below.</p>
           </div>
         ) : (
           <>
@@ -227,100 +419,69 @@ export default function PipelineManager({
             </section>
 
             {error && (
-              <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">
+              <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger" role="alert">
                 <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Pipeline unavailable</div>
                 <p className="mt-1 text-sm">{error}</p>
+                <button type="button" onClick={() => loadPipelines(activeProjectId)} className="mt-3 text-sm font-bold underline">Retry</button>
+              </div>
+            )}
+            {registryWarning && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200" role="status">
+                <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Registry fallback</div>
+                <p className="mt-1">{registryWarning}</p>
               </div>
             )}
 
             <section className="space-y-4">
               <div>
                 <h3 className="text-lg font-bold text-text">Available Pipelines</h3>
-                <p className="mt-1 text-sm text-textMuted">Choose your active pipeline for this project. This does not change other users' active pipeline.</p>
+                <p className="mt-1 text-sm text-textMuted">Choose your active pipeline for this project. This does not change another collaborator’s selection or grant access to their live R state.</p>
               </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {definitions.map(definition => {
-                  const isActive = selectedPipelineId === definition.id || (selectedPipelineId === DEFAULT_PIPELINE_ID && definition.id === DEFAULT_PIPELINE_ID);
-                  return (
-                    <button
-                      key={definition.id}
-                      type="button"
-                      onClick={() => selectPipeline(definition.id)}
-                      className={`rounded-lg border p-4 text-left transition ${
-                        isActive ? 'border-primary bg-primary/10' : 'border-border bg-surface/60 hover:border-primary/40'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate font-bold text-text">{definition.name || definition.manifest?.name}</div>
-                          <div className="mt-1 font-mono text-xs text-textMuted">{definition.id}</div>
+              {loading && definitions.length === 0 ? (
+                <div className="rounded border border-border p-5 text-sm text-textMuted" role="status">
+                  <Loader2 size={16} className="mr-2 inline animate-spin" /> Loading trusted pipelines…
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {definitions.map(definition => {
+                    const isActive = selectedPipelineId === definition.id;
+                    const isSelecting = selectingId === definition.id;
+                    return (
+                      <button
+                        key={definition.id}
+                        type="button"
+                        onClick={() => selectPipeline(definition.id)}
+                        disabled={loading || Boolean(selectingId) || uploading}
+                        className={`rounded-lg border p-4 text-left transition disabled:cursor-wait disabled:opacity-75 ${
+                          isActive ? 'border-primary bg-primary/10' : 'border-border bg-surface/60 hover:border-primary/40'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate font-bold text-text">{definition.name}</div>
+                            <div className="mt-1 font-mono text-xs text-textMuted">{definition.manifestId}</div>
+                          </div>
+                          {isSelecting ? <Loader2 size={18} className="animate-spin text-primary" />
+                            : isActive ? <CheckCircle2 size={18} className="text-success" />
+                              : <StatusBadge tone={definition.builtin ? 'slate' : 'blue'}>{definition.visibility}</StatusBadge>}
                         </div>
-                        {isActive ? <CheckCircle2 size={18} className="text-success" /> : <StatusBadge>{definition.visibility || 'user'}</StatusBadge>}
-                      </div>
-                      <p className="mt-3 line-clamp-2 text-xs text-textMuted">{definition.manifest?.description || 'Registered pipeline manifest.'}</p>
-                    </button>
-                  );
-                })}
-              </div>
+                        <p className="mt-3 line-clamp-2 text-xs text-textMuted">{definition.manifest.description || 'Registered pipeline manifest.'}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </section>
 
             <section className="space-y-4">
               <div>
                 <h3 className="text-lg font-bold text-text">Active Pipeline Modules</h3>
-                <p className="mt-1 text-sm text-textMuted">Pipeline-generated sidebar tabs are derived from these registered modules and labels.</p>
+                <p className="mt-1 text-sm text-textMuted">Routes, components, job types, and execution privileges come from the application’s allowlisted registry—not from the manifest.</p>
               </div>
               <PipelineModuleList manifest={manifest} />
             </section>
 
-            <section className="rounded-lg border border-border bg-surface/60 p-5">
-              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                    <Upload size={18} className="text-primary" />
-                    Upload Pipeline Manifest
-                  </h3>
-                  <p className="mt-1 max-w-3xl text-sm text-textMuted">
-                    Uploads are validated against the module registry. Code, endpoints, paths, icons, and storage/state keys are rejected.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <select
-                    value={uploadVisibility}
-                    onChange={event => setUploadVisibility(event.target.value)}
-                    className="rounded border border-border bg-background px-2 py-1 text-sm text-text"
-                  >
-                    <option value="user">Only me</option>
-                    <option value="project">Project visible</option>
-                  </select>
-                  <button onClick={uploadManifest} disabled={uploading || !uploadText.trim()} className="btn btn-primary inline-flex items-center gap-2 text-sm">
-                    {uploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
-                    Upload
-                  </button>
-                </div>
-              </div>
-              <textarea
-                value={uploadText}
-                onChange={event => setUploadText(event.target.value)}
-                rows={8}
-                className="w-full rounded border border-border bg-background p-3 font-mono text-xs text-text focus:border-primary focus:outline-none"
-                placeholder='{"schemaVersion":1,"id":"custom-seurat-view","name":"Custom Seurat View","tabs":[{"id":"inspect","label":"Inspect","moduleKey":"inspectObject"}]}'
-              />
-              {uploadError && (
-                <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-                  {uploadError}
-                </div>
-              )}
-              <div className="mt-4 grid grid-cols-1 gap-3 text-xs text-textMuted md:grid-cols-2">
-                <div className="rounded border border-border bg-background/60 p-3">
-                  <div className="mb-2 flex items-center gap-2 font-bold text-text"><Code2 size={14} /> Parameter Templates</div>
-                  {PARAMETER_TEMPLATE_TYPES.join(', ')}
-                </div>
-                <div className="rounded border border-border bg-background/60 p-3">
-                  <div className="mb-2 flex items-center gap-2 font-bold text-text"><Code2 size={14} /> Result View Templates</div>
-                  {RESULT_VIEW_TEMPLATES.join(', ')}
-                </div>
-              </div>
-            </section>
+            <PipelineTemplatePreview manifest={manifest} />
 
             {manifest.id === DEFAULT_PIPELINE_ID && (
               <SeuratPipelinePanel
@@ -333,6 +494,70 @@ export default function PipelineManager({
               />
             )}
           </>
+        )}
+
+        {capabilities.canPublishPipelineManifests ? (
+          <section className="rounded-lg border border-primary/30 bg-surface/60 p-5">
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="flex items-center gap-2 text-lg font-bold text-text">
+                  <ShieldCheck size={18} className="text-primary" />
+                  Publish Trusted Pipeline Manifest
+                </h3>
+                <p className="mt-1 max-w-3xl text-sm text-textMuted">
+                  Platform developer access is managed outside the browser. Publication is global and accepts only allowlisted modules, parameter templates, and result views—never R code, endpoints, paths, packages, URLs, or storage keys.
+                </p>
+              </div>
+              <button onClick={publishManifest} disabled={uploading || loading || Boolean(selectingId) || !uploadText.trim()} className="btn btn-primary inline-flex items-center gap-2 text-sm">
+                {uploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
+                Publish
+              </button>
+            </div>
+            <label className="mb-2 block text-xs font-bold text-text" htmlFor="pipeline-manifest-file">Load JSON manifest file</label>
+            <input
+              id="pipeline-manifest-file"
+              type="file"
+              accept=".json,application/json"
+              onChange={loadManifestFile}
+              className="mb-3 block w-full text-sm text-textMuted file:mr-3 file:rounded file:border file:border-border file:bg-background file:px-3 file:py-1.5 file:text-text"
+            />
+            <label className="mb-2 block text-xs font-bold text-text" htmlFor="pipeline-manifest-json">Manifest JSON</label>
+            <textarea
+              id="pipeline-manifest-json"
+              value={uploadText}
+              onChange={event => { setUploadText(event.target.value); setUploadError(null); setUploadSuccess(null); }}
+              rows={9}
+              className="w-full rounded border border-border bg-background p-3 font-mono text-xs text-text focus:border-primary focus:outline-none"
+              placeholder='{"schemaVersion":1,"id":"trusted-inspection-view","name":"Trusted Inspection View","tabs":[{"id":"inspect","label":"Inspect","moduleKey":"inspectObject"}]}'
+            />
+            {uploadError && <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">{uploadError}</div>}
+            {uploadSuccess && <div className="mt-3 rounded border border-success/30 bg-success/10 px-3 py-2 text-sm text-success" role="status">{uploadSuccess}</div>}
+            <div className="mt-4 grid grid-cols-1 gap-3 text-xs text-textMuted md:grid-cols-2">
+              <div className="rounded border border-border bg-background/60 p-3">
+                <div className="mb-2 flex items-center gap-2 font-bold text-text"><Code2 size={14} /> Parameter templates</div>
+                {PARAMETER_TEMPLATE_TYPES.join(', ')}
+              </div>
+              <div className="rounded border border-border bg-background/60 p-3">
+                <div className="mb-2 flex items-center gap-2 font-bold text-text"><Code2 size={14} /> Result-view templates</div>
+                {RESULT_VIEW_TEMPLATES.join(', ')}
+              </div>
+            </div>
+          </section>
+        ) : (
+          <section className="rounded-lg border border-border bg-surface/40 p-4 text-sm text-textMuted">
+            <div className="flex items-center gap-2 font-bold text-text"><ShieldCheck size={17} className="text-primary" /> Trusted registry</div>
+            <p className="mt-1">
+              {capabilities.loaded
+                ? 'You can select approved manifests, but only an out-of-band platform developer can publish new ones.'
+                : 'Checking trusted registry access…'}
+            </p>
+            {capabilityError && <p className="mt-2 text-xs text-danger">Publisher status unavailable: {capabilityError}</p>}
+            {uploadError && (
+              <p className="mt-2 text-xs text-danger" role="alert">
+                Publication failed: {uploadError}
+              </p>
+            )}
+          </section>
         )}
       </div>
     </div>
