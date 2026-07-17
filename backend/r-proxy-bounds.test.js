@@ -123,6 +123,21 @@ describe('bounded authenticated R proxy policy', () => {
     expect(next).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps bounded read-only runtime probes out of the heavy concurrency slot', () => {
+    process.env.R_PROXY_MAX_CONCURRENT = '1';
+    process.env.R_PROXY_RATE_LIMIT_MAX = '10';
+    const admission = createRProxyAdmission();
+    const next = vi.fn();
+
+    admission({ method: 'GET', path: '/health', user: { id: 1 } }, fakeResponse(), next);
+    admission({ method: 'GET', path: '/session-id', user: { id: 1 } }, fakeResponse(), next);
+    const heavy = fakeResponse();
+    admission({ method: 'GET', path: '/normalize', user: { id: 1 } }, heavy, next);
+
+    expect(next).toHaveBeenCalledTimes(3);
+    expect(heavy.statusCode).toBe(200);
+  });
+
   it('rate-limits by authenticated user without echoing request data', () => {
     process.env.R_PROXY_MAX_CONCURRENT = '1';
     process.env.R_PROXY_RATE_LIMIT_MAX = '1';

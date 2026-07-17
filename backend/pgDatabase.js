@@ -376,6 +376,12 @@ async function connect() {
   // Lazy require so importing this file does not attempt a database connection.
   const { Pool } = require('pg');
   pool = new Pool(config.postgresConfig());
+  pool.on('error', (error) => {
+    const code = error && typeof error.code === 'string'
+      ? error.code.replace(/[^A-Z0-9_]/gi, '').slice(0, 64)
+      : 'POOL_ERROR';
+    console.error(`[DB] idle pool connection failed (${code || 'POOL_ERROR'}).`);
+  });
   return pool;
 }
 
@@ -404,9 +410,70 @@ async function initSchema() {
   }
 }
 
-async function checkHealth() {
-  await query('SELECT 1');
+async function checkHealth(options = {}) {
+  const timeoutMs = Number.isInteger(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
+    ? Number(options.timeoutMs)
+    : 1000;
+  await query({ text: 'SELECT 1', query_timeout: timeoutMs });
   return true;
+}
+
+async function acquireWebTopologyLock() {
+  const p = await connect();
+  const client = await p.connect();
+  let released = false;
+  let lost = false;
+  const onClientError = () => { lost = true; };
+  client.on('error', onClientError);
+  try {
+    const result = await client.query(
+      'SELECT pg_try_advisory_lock($1, $2) AS acquired',
+      [0x5343524e, 700]
+    );
+    if (!result.rows[0] || result.rows[0].acquired !== true) {
+      throw codedError(
+        'WEB_TOPOLOGY_LOCKED',
+        'Another web process already owns the supported single-web topology.'
+      );
+    }
+  } catch (error) {
+    client.off('error', onClientError);
+    client.release();
+    throw error;
+  }
+  return Object.freeze({
+    isHeld() {
+      return !released && !lost;
+    },
+    async check() {
+      if (released || lost) {
+        throw codedError('WEB_TOPOLOGY_LOCK_LOST', 'The web topology lock was lost.');
+      }
+      try {
+        await client.query({ text: 'SELECT 1', query_timeout: 1000 });
+      } catch {
+        // A bounded probe timeout is not evidence that the reserved session or
+        // advisory lock disappeared. The client's error event marks confirmed
+        // connection loss; other failures are transient and the watchdog
+        // requires consecutive failures before taking the process down.
+        if (lost || released) {
+          throw codedError('WEB_TOPOLOGY_LOCK_LOST', 'The web topology lock was lost.');
+        }
+        throw codedError('WEB_TOPOLOGY_LOCK_CHECK_FAILED', 'The web topology lock could not be verified.');
+      }
+      return true;
+    },
+    async release() {
+      if (released) return;
+      released = true;
+      try {
+        if (!lost) await client.query('SELECT pg_advisory_unlock($1, $2)', [0x5343524e, 700]);
+      } finally {
+        client.off('error', onClientError);
+        client.release();
+      }
+    },
+  });
 }
 
 async function acquireStandaloneWorkerLock() {
@@ -480,7 +547,7 @@ async function resetSchemaForTests() {
       analysis_object_edges, job_artifacts, jobs, analysis_objects,
       datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
-      platform_capabilities, users
+      platform_capabilities, operator_audit_events, users
     CASCADE;
   `);
   await initSchema();
@@ -498,12 +565,15 @@ async function close() {
 async function saveProvenance(envelope) {
   const prov = envelope.provenance || {};
   const owner = requireOwnerEmail(envelope.userEmail || prov.userEmail);
-  const id = String(prov.id || '');
+  if (typeof prov.id !== 'string' || prov.id.length < 1 || prov.id.length > 200 || prov.id.includes('\0')) {
+    throw codedError('INVALID_PROVENANCE', 'Provenance id must contain 1-200 safe characters.');
+  }
+  const id = prov.id;
   const existing = await query('SELECT user_email FROM provenance WHERE id = $1', [id]);
   if (existing.rows[0] && normalizeEmail(existing.rows[0].user_email) !== owner) {
     throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
   }
-  await query(
+  const saved = await query(
     `INSERT INTO provenance
        (id, user_email, timestamp, language, language_version, packages, script,
         parameters, parent_ids, operation)
@@ -517,7 +587,9 @@ async function saveProvenance(envelope) {
        script = EXCLUDED.script,
        parameters = EXCLUDED.parameters,
        parent_ids = EXCLUDED.parent_ids,
-       operation = EXCLUDED.operation`,
+       operation = EXCLUDED.operation
+     WHERE provenance.user_email = EXCLUDED.user_email
+     RETURNING id`,
     [
       id,
       owner,
@@ -531,6 +603,9 @@ async function saveProvenance(envelope) {
       String(prov.operation || 'unknown')
     ]
   );
+  if (saved.rowCount === 0) {
+    throw codedError('PROVENANCE_NOT_FOUND', 'Provenance record not found.');
+  }
   return id;
 }
 
@@ -608,16 +683,21 @@ async function setCachedResult(cacheKey, provenanceId, resultData, userEmail) {
   const owner = requireOwnerEmail(userEmail);
   const prov = await query('SELECT id FROM provenance WHERE id = $1 AND user_email = $2', [String(provenanceId), owner]);
   if (!prov.rows[0]) throw new Error('Cannot cache result for provenance owned by another user.');
-  await query(
+  const saved = await query(
     `INSERT INTO results_cache (cache_key, user_email, provenance_id, result_data)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (cache_key) DO UPDATE SET
        user_email = EXCLUDED.user_email,
        provenance_id = EXCLUDED.provenance_id,
        result_data = EXCLUDED.result_data,
-       created_at = now()`,
+       created_at = now()
+     WHERE results_cache.user_email = EXCLUDED.user_email
+     RETURNING cache_key`,
     [String(cacheKey), owner, String(provenanceId), JSON.stringify(resultData)]
   );
+  if (saved.rowCount === 0) {
+    throw codedError('CACHE_NOT_FOUND', 'Cache record not found.');
+  }
 }
 
 async function clearCache(userEmail) {
@@ -638,9 +718,9 @@ async function saveFigure(record) {
   const safeFilePath = assertSafeFigureFilePath(record.filePath);
   const existing = await query('SELECT user_email FROM figure_collection WHERE id = $1', [String(record.id)]);
   if (existing.rows[0] && normalizeEmail(existing.rows[0].user_email) !== userEmail) {
-    throw new Error('Cannot replace a figure owned by another user.');
+    throw codedError('FIGURE_NOT_FOUND', 'Cannot replace a figure owned by another user.');
   }
-  await query(
+  const saved = await query(
     `INSERT INTO figure_collection
        (id, user_email, object_id, plot_type, title, params_json, file_path,
         file_format, thumbnail_b64)
@@ -653,7 +733,9 @@ async function saveFigure(record) {
        params_json = EXCLUDED.params_json,
        file_path = EXCLUDED.file_path,
        file_format = EXCLUDED.file_format,
-       thumbnail_b64 = EXCLUDED.thumbnail_b64`,
+       thumbnail_b64 = EXCLUDED.thumbnail_b64
+     WHERE figure_collection.user_email = EXCLUDED.user_email
+     RETURNING id`,
     [
       String(record.id),
       userEmail,
@@ -666,6 +748,9 @@ async function saveFigure(record) {
       record.thumbnailB64 || ''
     ]
   );
+  if (saved.rowCount === 0) {
+    throw codedError('FIGURE_NOT_FOUND', 'Cannot replace a figure owned by another user.');
+  }
   return record.id;
 }
 
@@ -682,7 +767,11 @@ async function getFiguresByUser(email) {
     plotType: r.plot_type,
     title: r.title,
     params: parseJson(r.params_json, {}),
-    filePath: r.file_path,
+    // Legacy gallery compatibility keeps the display basename but never sends
+    // an internal absolute/relative storage path to the browser.
+    // Records can survive a restore from either POSIX or Windows hosts. Split
+    // both separator styles so platform mismatch cannot expose a stored path.
+    filePath: r.file_path ? String(r.file_path).split(/[\\/]+/).pop() : '',
     fileFormat: r.file_format,
     thumbnailB64: r.thumbnail_b64,
     createdAt: r.created_at
@@ -698,23 +787,118 @@ async function deleteFigure(id, userEmail) {
 async function createUser(email, password, displayName) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   const salt = passwords.newSalt();
-  const passwordHash = passwords.hashPassword(password, salt);
+  const passwordHash = await passwords.hashPassword(password, salt);
   try {
     const { rows } = await query(
       `INSERT INTO users (email, password_hash, salt, display_name)
        VALUES ($1, $2, $3, $4)
-       RETURNING id, email, display_name, created_at`,
+       RETURNING id, email, display_name, session_version, created_at`,
       [normalizedEmail, passwordHash, salt, String(displayName || '').trim()]
     );
     const u = rows[0];
     // node-postgres returns BIGINT as a string to avoid precision loss; user ids
     // are small and the app treats them as numbers.
-    return { id: Number(u.id), email: u.email, displayName: u.display_name, createdAt: u.created_at };
+    return {
+      id: Number(u.id),
+      email: u.email,
+      displayName: u.display_name,
+      sessionVersion: String(u.session_version),
+      createdAt: u.created_at,
+    };
   } catch (err) {
     if (err && err.code === '23505') {
       return { error: 'An account with this email already exists.' };
     }
     throw err;
+  }
+}
+
+async function provisionUserByOperator(email, password, displayName) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const salt = passwords.newSalt();
+  const passwordHash = await passwords.hashPassword(password, salt);
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO users (email, password_hash, salt, display_name)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, email, display_name, session_version, created_at`,
+      [normalizedEmail, passwordHash, salt, String(displayName || '').trim()]
+    );
+    const user = rows[0];
+    const audit = await client.query(
+      `INSERT INTO operator_audit_events
+         (event_type, target_user_id, target_email, metadata_json)
+       VALUES ('account.provisioned', $1, $2, $3)
+       RETURNING id, created_at`,
+      [user.id, user.email, JSON.stringify({ source: 'operator_cli' })]
+    );
+    await client.query('COMMIT');
+    return {
+      id: Number(user.id),
+      email: user.email,
+      displayName: user.display_name,
+      sessionVersion: String(user.session_version),
+      createdAt: user.created_at,
+      auditEventId: String(audit.rows[0].id),
+      auditCreatedAt: audit.rows[0].created_at,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error?.code === '23505') {
+      return { error: 'An account with this email already exists.' };
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resetUserPasswordByOperator(email, password) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const salt = passwords.newSalt();
+  const passwordHash = await passwords.hashPassword(password, salt);
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `UPDATE users
+          SET password_hash = $2,
+              salt = $3,
+              session_version = session_version + 1
+        WHERE email = $1
+        RETURNING id, email, display_name, session_version, created_at`,
+      [normalizedEmail, passwordHash, salt]
+    );
+    if (!rows[0]) {
+      throw codedError('USER_NOT_FOUND', 'No account exists for that email.');
+    }
+    const user = rows[0];
+    const audit = await client.query(
+      `INSERT INTO operator_audit_events
+         (event_type, target_user_id, target_email, metadata_json)
+       VALUES ('account.password_reset', $1, $2, $3)
+       RETURNING id, created_at`,
+      [user.id, user.email, JSON.stringify({ source: 'operator_cli', sessionsRevoked: true })]
+    );
+    await client.query('COMMIT');
+    return {
+      id: Number(user.id),
+      email: user.email,
+      displayName: user.display_name,
+      sessionVersion: String(user.session_version),
+      createdAt: user.created_at,
+      auditEventId: String(audit.rows[0].id),
+      auditCreatedAt: audit.rows[0].created_at,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -731,9 +915,81 @@ async function verifyUser(email, password) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   const { rows } = await query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
   const user = rows[0];
-  const ok = passwords.verifyPassword(password, user ? user.password_hash : null);
+  const ok = await passwords.verifyPassword(password, user ? user.password_hash : null);
   if (!user || !ok) return { error: passwords.GENERIC_CREDENTIAL_ERROR };
-  return { id: Number(user.id), email: user.email, displayName: user.display_name, createdAt: user.created_at };
+  return {
+    id: Number(user.id),
+    email: user.email,
+    displayName: user.display_name,
+    sessionVersion: String(user.session_version),
+    createdAt: user.created_at,
+  };
+}
+
+const MAX_POSTGRES_BIGINT = 9223372036854775807n;
+
+function isCanonicalPositiveIntegerString(value, maximum) {
+  const text = String(value ?? '');
+  if (!/^[1-9][0-9]{0,18}$/.test(text)) return false;
+  try { return BigInt(text) <= maximum; } catch { return false; }
+}
+
+function isSafeUserId(value) {
+  return isCanonicalPositiveIntegerString(value, BigInt(Number.MAX_SAFE_INTEGER));
+}
+
+function isSessionVersion(value) {
+  return isCanonicalPositiveIntegerString(value, MAX_POSTGRES_BIGINT);
+}
+
+async function getUserForSession(userId, sessionVersion) {
+  const uid = Number(userId);
+  const version = String(sessionVersion || '');
+  if (!isSafeUserId(userId) || !Number.isSafeInteger(uid) || !isSessionVersion(version)) return null;
+  const { rows } = await query(
+    `SELECT id, email, display_name, created_at
+       FROM users
+      WHERE id = $1 AND session_version = $2`,
+    [uid, version]
+  );
+  if (!rows[0]) return null;
+  return {
+    id: Number(rows[0].id),
+    email: rows[0].email,
+    displayName: rows[0].display_name,
+    createdAt: rows[0].created_at,
+  };
+}
+
+async function getUserSessionVersion(userId) {
+  const uid = Number(userId);
+  if (!isSafeUserId(userId) || !Number.isSafeInteger(uid)) return null;
+  const { rows } = await query('SELECT session_version FROM users WHERE id = $1', [uid]);
+  return rows[0] ? String(rows[0].session_version) : null;
+}
+
+async function revokeUserSessions(userId, expectedVersion) {
+  const uid = Number(userId);
+  const version = String(expectedVersion || '');
+  if (!isSafeUserId(userId) || !Number.isSafeInteger(uid) || !isSessionVersion(version)) {
+    throw codedError('INVALID_SESSION', 'A valid session generation is required.');
+  }
+  const { rows } = await query(
+    `UPDATE users
+        SET session_version = session_version + 1
+      WHERE id = $1 AND session_version = $2
+        AND session_version < 9223372036854775807
+      RETURNING session_version`,
+    [uid, version]
+  );
+  if (rows[0]) return String(rows[0].session_version);
+  const current = await getUserSessionVersion(uid);
+  if (current === version) {
+    throw codedError('SESSION_VERSION_EXHAUSTED', 'The session generation cannot be revoked safely.');
+  }
+  // A concurrent logout already advanced the generation, or the user was
+  // deleted. In both cases this exact credential is no longer usable.
+  return null;
 }
 
 // ── Organizations / projects / membership ───────────────────────────────────
@@ -758,27 +1014,54 @@ async function setPipelineRegistryPublisherByEmail(email, enabled) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) throw codedError('INVALID_USER', 'A user email is required.');
   if (typeof enabled !== 'boolean') throw codedError('INVALID_CAPABILITY', 'Capability state must be boolean.');
-  const { rows } = await query('SELECT id, email FROM users WHERE email = $1', [normalizedEmail]);
-  if (!rows[0]) throw codedError('USER_NOT_FOUND', 'User not found.');
-  const userId = Number(rows[0].id);
-  if (enabled) {
-    await query(
-      `INSERT INTO platform_capabilities (user_id, capability)
-       VALUES ($1, $2)
-       ON CONFLICT (user_id, capability) DO NOTHING`,
-      [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT id, email FROM users WHERE email = $1 FOR UPDATE',
+      [normalizedEmail]
     );
-  } else {
-    await query(
-      'DELETE FROM platform_capabilities WHERE user_id = $1 AND capability = $2',
-      [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+    if (!rows[0]) throw codedError('USER_NOT_FOUND', 'User not found.');
+    const userId = Number(rows[0].id);
+    if (enabled) {
+      await client.query(
+        `INSERT INTO platform_capabilities (user_id, capability)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id, capability) DO NOTHING`,
+        [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+      );
+    } else {
+      await client.query(
+        'DELETE FROM platform_capabilities WHERE user_id = $1 AND capability = $2',
+        [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+      );
+    }
+    const audit = await client.query(
+      `INSERT INTO operator_audit_events
+         (event_type, target_user_id, target_email, metadata_json)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [
+        enabled ? 'platform_capability_granted' : 'platform_capability_revoked',
+        userId,
+        rows[0].email,
+        JSON.stringify({ capability: PIPELINE_REGISTRY_PUBLISH_CAPABILITY }),
+      ]
     );
+    await client.query('COMMIT');
+    return {
+      userId,
+      email: rows[0].email,
+      canPublishPipelineManifests: enabled,
+      auditEventId: String(audit.rows[0].id),
+    };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
+    throw error;
+  } finally {
+    client.release();
   }
-  return {
-    userId,
-    email: rows[0].email,
-    canPublishPipelineManifests: enabled,
-  };
 }
 
 async function createOrganization(name, ownerUserId) {
@@ -5081,6 +5364,7 @@ module.exports = {
   query,
   initSchema,
   checkHealth,
+  acquireWebTopologyLock,
   acquireStandaloneWorkerLock,
   resetSchemaForTests,
   close,
@@ -5124,8 +5408,13 @@ module.exports = {
   generateAnalysisObjectEdgeId,
   // users
   createUser,
+  provisionUserByOperator,
+  resetUserPasswordByOperator,
   getUserByEmail,
   verifyUser,
+  getUserForSession,
+  getUserSessionVersion,
+  revokeUserSessions,
   hasPipelineRegistryPublishCapability,
   getPipelineRegistryCapabilities,
   setPipelineRegistryPublisherByEmail,

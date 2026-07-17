@@ -1,6 +1,7 @@
 # scRNA-seq Workbench
 
-A local/development-oriented single-cell RNA-seq analysis workbench:
+A single-cell RNA-seq analysis workbench with a conservative single-host
+deployment topology:
 
 - React/Vite browser app.
 - Express API server for auth, project/object/job metadata, uploads, and R proxying.
@@ -8,13 +9,15 @@ A local/development-oriented single-cell RNA-seq analysis workbench:
   (`backend/pgDatabase.js` + `backend/pg/schema.sql`).
 - R Plumber/Seurat backend for computation.
 
-This repository is not a production-complete multi-tenant service. Treat it as a
-local or trusted-environment workbench while the production boundaries are still
-being hardened. Infrastructure is moving toward a hosted-service-ready shape:
-Postgres, HttpOnly cookie sessions over localStorage bearer tokens,
-and centralized environment/config validation (`backend/config.js`). Data is
-sensitive by default — no public downloads, no shared live R state, and no raw
-storage paths/keys in responses.
+The repository now includes a supported deployment candidate for one Linux host:
+fail-fast production configuration, cookie-only versioned sessions, health and
+graceful drain, non-root/read-only Compose services, a private R/Postgres network
+namespace, resource limits, and verified offline backup/restore. This is not a
+high-availability, hostile-user multi-tenant, or hostile-code-compute platform.
+Data is sensitive by default: project-scoped production APIs expose no public
+downloads, shared live R state, or raw storage paths/keys. Production account
+creation is operator-only and legacy vault uploads are disabled. Read
+[docs/deployment.md](docs/deployment.md) before exposing it.
 
 ## Runtime Shape
 
@@ -61,14 +64,14 @@ At a glance:
   the PBMC pipeline / runtime-check / object-inspect worker workflows. The DEG
   marker worker and narrow Seurat pipeline worker are UI-wired for selected
   launch/status/safe summary metadata only.
-- **Infrastructure foundation (backend-wired, hosted-service direction):**
-  HttpOnly cookie sessions (login/signup set the cookie; `/api/auth/session`
-  restores; `/api/auth/logout` clears; cookie auth is preferred while the
-  localStorage bearer remains a deprecated fallback), an expanded Postgres data
-  runtime data layer + schema proven by real-Postgres contract/runtime tests,
-  server-owned storage-key hardening, centralized config validation, and a
-  standalone Postgres-lease queue consumer with crash recovery and graceful
-  drain behavior.
+- **Infrastructure foundation (supported single-host shape):** cookie-only
+  HttpOnly sessions with database-backed revoke-all versioning and a deployment
+  epoch, operator-audited account provisioning/password reset, an expanded
+  Postgres runtime data layer, server-owned storage keys, fail-fast production
+  config, liveness/readiness and graceful drain, a singleton web topology fence,
+  a standalone Postgres-lease queue consumer, hardened container packaging, and
+  offline manifest-verified backup/restore that invalidates pre-restore sessions
+  and cancels restored active jobs.
 - **Durable local storage:** new dataset, checkpoint, and DEG files use
   server-owned project keys under `STORAGE_ROOT`. Existing private-vault records
   remain readable. Project writers can fork a member's durable checkpoint into a
@@ -76,13 +79,15 @@ At a glance:
   the fork records its source object, checkpoint, job, and lineage edge.
 - **Not implemented (product):** pathway enrichment, CellChat, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
-  object storage, server-side session revocation, shared project live R state.
+  object storage, shared project live R state, high availability, and parallel R
+  worker scaling.
 
 See **[docs/architecture.md](docs/architecture.md)** for the full
 implemented-vs-UI-wired table, the DEG dual-path detail, the
 hidden-feature-vs-reachable-endpoint policy, the RDS trusted-input boundary, and
-the testing/CI notes. Keep that table honest when a subsystem moves between
-backend-only and UI-wired.
+the testing/CI notes. [docs/deployment.md](docs/deployment.md) defines the exact
+operating, security, backup, restore, and recovery boundaries. Keep both honest
+when behavior changes.
 
 ## Trusted Pipeline Registry
 
@@ -166,9 +171,10 @@ and estimated object-byte budgets. Evicted objects must be reattached from their
 durable checkpoint; collaborators never share another user's live R object.
 
 Production `/api/r` is an exact reviewed method/path allowlist, not an open
-Plumber catch-all. Cookie-authenticated R requests require an allowed
-Origin/Referer even for GET because legacy GET operations can mutate private
-live R state. The compatibility proxy has one global admission slot plus
+Plumber catch-all. Every browser R request carries the explicit
+`X-BenchOne-CSRF: 1` first-party header; the server also accepts a reviewed
+Origin/Referer fallback. This applies even to GET because legacy GET operations
+can mutate private live R state. The compatibility proxy has one global admission slot plus
 rate/deadline/request/response limits, accepts only bodyless GET or bounded JSON
 POST requests, strips all browser headers before injecting only the private R
 token/state key, requires JSON success responses, replaces every upstream error
@@ -180,6 +186,9 @@ path; the legacy live-session loaders, CSV inspection/mutation, and vault-writin
 flow remain local/development compatibility only until they have bounded durable jobs.
 Synchronous batch integration is also development-only: CCA anchor search scales
 across batch pairs and cannot be safely interrupted when the shared R service times out.
+The frontend consumes a fail-closed deployment policy: production hides those
+local loaders and live mutations, routes 10X H5 upload to Pipeline Manager, and
+keeps figure preview while disabling the legacy server-file save action.
 
 RDS imports are disabled by default because RDS deserialization can execute R
 code. Set `ALLOW_TRUSTED_RDS_LOAD=true` only for trusted local/dev `.rds` files;
@@ -242,7 +251,11 @@ npm run test:deg-markers
 
 The visual tests (`npm run test:visual`, `npm run test:visual:db-flow`) are
 **mocked** frontend smoke tests — they check rendering/layout, not real
-backend/R/tenant behavior, and are not integration or security evidence. See
+backend/R/tenant behavior, and are not integration or security evidence.
+`npm run test:deployment:browser` instead drives real Chromium through the built
+frontend, actual Express server, real Postgres, and a private deterministic R
+test service while auditing console errors, 5xx responses, network failures,
+cookie behavior, project durability, and Collaborators RBAC. See
 [docs/architecture.md](docs/architecture.md#testing--ci-notes) for what each does
 and does not prove (and which runs in CI).
 

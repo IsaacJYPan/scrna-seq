@@ -5,23 +5,47 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import path from 'path';
 const config = require('./config');
+const { Client } = require('pg');
+
+const VALID_R_API_TOKEN = '9f2c1a7e4b8d6035c7e91f2a4d6b8c0e13579bdf2468ace05731d9fb62e4a8c5';
+const VALID_SESSION_SECRET = 'a3f91c7e5b2d8046f8a1c3e597b2d4f6081a3c5e7f9b2d4a6c8e0f13579bdf24';
+const VALID_SESSION_EPOCH = '4f8c2a6e1d9b3075c4e8a2f6d1b93570';
 
 const SAVED = {};
 const KEYS = [
   'NODE_ENV', 'DATABASE_BACKEND', 'DATABASE_URL', 'PGHOST', 'PGDATABASE',
-  'SESSION_SECRET', 'SESSION_TTL_SECONDS', 'COOKIE_SECURE', 'COOKIE_SAMESITE',
+  'SESSION_SECRET', 'SESSION_EPOCH', 'SESSION_TTL_SECONDS', 'COOKIE_SECURE', 'COOKIE_SAMESITE',
   'FRONTEND_ORIGIN', 'FRONTEND_URL', 'R_RUNTIME_MODE', 'R_BACKEND_URL',
   'R_BACKEND_ALLOWED_HOSTS', 'R_API_TOKEN', 'PLUMBER_PORT',
   'STORAGE_ROOT', 'VAULT_ROOT', 'MAX_UPLOAD_BYTES', 'MAX_UPLOAD_FILES',
   'R_PROXY_TIMEOUT_MS', 'R_PROXY_MAX_RESPONSE_BYTES',
   'R_PROXY_RATE_LIMIT_WINDOW_MS', 'R_PROXY_RATE_LIMIT_MAX',
-  'R_PROXY_MAX_CONCURRENT'
+  'R_PROXY_MAX_CONCURRENT', 'PGSSLMODE', 'PG_POOL_MAX',
+  'PG_CONNECT_TIMEOUT_MS', 'PG_IDLE_TIMEOUT_MS', 'PORT', 'WEB_HOST',
+  'TRUST_PROXY_HOPS', 'WEB_SHUTDOWN_TIMEOUT_MS', 'WEB_DRAIN_DELAY_MS'
 ];
+
+function setValidProduction(overrides = {}) {
+  Object.assign(process.env, {
+    NODE_ENV: 'production',
+    SESSION_SECRET: VALID_SESSION_SECRET,
+    SESSION_EPOCH: VALID_SESSION_EPOCH,
+    DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+    FRONTEND_ORIGIN: 'https://app.example.com',
+    R_RUNTIME_MODE: 'external',
+    R_BACKEND_URL: 'http://127.0.0.1:8000',
+    TRUST_PROXY_HOPS: '1',
+    STORAGE_ROOT: path.resolve('deployment-storage'),
+    VAULT_ROOT: path.resolve('deployment-vault'),
+    ...overrides,
+  });
+}
 
 beforeEach(() => {
   KEYS.forEach((k) => { SAVED[k] = process.env[k]; delete process.env[k]; });
-  process.env.R_API_TOKEN = 'r'.repeat(32);
+  process.env.R_API_TOKEN = VALID_R_API_TOKEN;
 });
 afterEach(() => { KEYS.forEach((k) => { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }); });
 
@@ -52,6 +76,15 @@ describe('database backend selection', () => {
 });
 
 describe('cookie + origin boundaries', () => {
+  it('keeps production registration operator-only', () => {
+    process.env.NODE_ENV = 'development';
+    expect(config.registrationEnabled()).toBe(true);
+    process.env.NODE_ENV = 'test';
+    expect(config.registrationEnabled()).toBe(true);
+    process.env.NODE_ENV = 'production';
+    expect(config.registrationEnabled()).toBe(false);
+    expect(config.summary().registrationMode).toBe('operator-only');
+  });
   it('defaults cookies to non-secure in dev and secure in production', () => {
     expect(config.cookieSecure()).toBe(false);
     process.env.NODE_ENV = 'production';
@@ -103,11 +136,43 @@ describe('production validation gate', () => {
     delete process.env.R_API_TOKEN;
     expect(config.validateProductionConfig().join(' ')).toMatch(/R_API_TOKEN/);
   });
+  it('rejects long but predictable repeated session and R secrets', () => {
+    setValidProduction({
+      SESSION_SECRET: '0123456789abcdef'.repeat(2),
+      R_API_TOKEN: 'abcdef0123456789'.repeat(2),
+    });
+    const errors = config.validateProductionConfig().join(' ');
+    expect(errors).toMatch(/SESSION_SECRET/);
+    expect(errors).toMatch(/R_API_TOKEN/);
+  });
+  it('rejects varied-looking sequences and uppercase encodings as generated secrets', () => {
+    setValidProduction({
+      SESSION_SECRET: 'abcdefghijklmnopqrstuvwxyz012345',
+      R_API_TOKEN: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
+    });
+    const errors = config.validateProductionConfig().join(' ');
+    expect(errors).toMatch(/SESSION_SECRET/);
+    expect(errors).toMatch(/R_API_TOKEN/);
+  });
+  it('rejects uniform or periodic hex values and the development epoch sentinel', () => {
+    setValidProduction({
+      SESSION_SECRET: '0'.repeat(64),
+      R_API_TOKEN: '0123456789abcdef'.repeat(4),
+      SESSION_EPOCH: '0'.repeat(32),
+    });
+    const errors = config.validateProductionConfig().join(' ');
+    expect(errors).toMatch(/SESSION_SECRET/);
+    expect(errors).toMatch(/R_API_TOKEN/);
+    expect(errors).toMatch(/SESSION_EPOCH/);
+  });
+  it('requires a canonical deployment session epoch in production', () => {
+    setValidProduction({ SESSION_EPOCH: '' });
+    expect(config.validateProductionConfig().join(' ')).toMatch(/SESSION_EPOCH/);
+    process.env.SESSION_EPOCH = 'ABCDEF0123456789ABCDEF0123456789';
+    expect(config.validateProductionConfig().join(' ')).toMatch(/lowercase hexadecimal/);
+  });
   it('is satisfied when production vars are all present and safe', () => {
-    process.env.NODE_ENV = 'production';
-    process.env.SESSION_SECRET = 'a-strong-secret';
-    process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
-    process.env.FRONTEND_ORIGIN = 'https://app.example.com';
+    setValidProduction();
     expect(config.validateProductionConfig()).toEqual([]);
   });
   it('rejects SameSite=None without Secure cookies (cross-origin misconfiguration)', () => {
@@ -121,11 +186,7 @@ describe('production validation gate', () => {
     expect(errors.join(' ')).toMatch(/COOKIE_SAMESITE=None/);
   });
   it('allows SameSite=None when Secure cookies are enabled', () => {
-    process.env.NODE_ENV = 'production';
-    process.env.SESSION_SECRET = 'a-strong-secret';
-    process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
-    process.env.FRONTEND_ORIGIN = 'https://app.example.com';
-    process.env.COOKIE_SAMESITE = 'none';
+    setValidProduction({ COOKIE_SAMESITE: 'none' });
     expect(config.validateProductionConfig()).toEqual([]);
   });
   it('rejects SameSite=None with non-HTTPS frontend origins in production', () => {
@@ -176,6 +237,90 @@ describe('production validation gate', () => {
     process.env.VAULT_ROOT = './data/vault';
     const errors = config.validateProductionConfig();
     expect(errors.join(' ')).toMatch(/STORAGE_ROOT and VAULT_ROOT/);
+  });
+
+  it('rejects weak secrets, unsafe TTLs, malformed ports, and missing proxy trust', () => {
+    setValidProduction({
+      SESSION_SECRET: 'change-me',
+      SESSION_TTL_SECONDS: '86401',
+      PORT: '70000',
+      TRUST_PROXY_HOPS: '',
+    });
+    const errors = config.validateProductionConfig().join(' ');
+    expect(errors).toMatch(/SESSION_SECRET/);
+    expect(errors).toMatch(/SESSION_TTL_SECONDS/);
+    expect(errors).toMatch(/PORT/);
+    expect(errors).toMatch(/TRUST_PROXY_HOPS/);
+  });
+
+  it('requires valid HTTPS browser origins and explicit persistent roots', () => {
+    setValidProduction({
+      FRONTEND_ORIGIN: 'https://app.example.com/path',
+      STORAGE_ROOT: 'relative-data',
+      VAULT_ROOT: 'relative-vault',
+    });
+    const errors = config.validateProductionConfig().join(' ');
+    expect(errors).toMatch(/FRONTEND_ORIGIN/);
+    expect(errors).toMatch(/STORAGE_ROOT/);
+    expect(errors).toMatch(/VAULT_ROOT/);
+  });
+
+  it('requires an external shared R service for production roles', () => {
+    setValidProduction({ R_RUNTIME_MODE: 'owned', R_BACKEND_URL: '' });
+    expect(config.validateProductionConfig().join(' ')).toMatch(/R_RUNTIME_MODE=external/);
+  });
+
+  it('rejects unauthenticated TLS modes for a non-loopback Postgres host', () => {
+    setValidProduction({
+      DATABASE_URL: 'postgres://u:p@db.example.com:5432/db',
+      PGSSLMODE: 'require',
+    });
+    const errors = config.validateProductionConfig().join(' ');
+    expect(errors).toMatch(/Non-loopback Postgres/);
+    expect(errors).toMatch(/Production Postgres sslmode/);
+    process.env.PGSSLMODE = 'verify-full';
+    expect(config.validateProductionConfig()).toEqual([]);
+  });
+
+  it('rejects conflicting, duplicate, and redirecting DATABASE_URL query options', () => {
+    setValidProduction({
+      DATABASE_URL: 'postgres://u:p@db.example.com:5432/db?sslmode=no-verify',
+      PGSSLMODE: 'verify-full',
+    });
+    expect(config.validateProductionConfig().join(' ')).toMatch(/must not conflict/);
+
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/db?sslmode=verify-full&host=attacker.example';
+    delete process.env.PGSSLMODE;
+    expect(config.validateProductionConfig().join(' ')).toMatch(/option host is not supported/);
+    expect(() => config.postgresConfig()).toThrow(/unsupported connection options/);
+
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/db?sslmode=verify-full&sslmode=no-verify';
+    expect(config.validateProductionConfig().join(' ')).toMatch(/unique lowercase names/);
+  });
+
+  it('uses one authoritative verify-full mode for remote Postgres', () => {
+    setValidProduction({
+      DATABASE_URL: 'postgres://u:p@db.example.com:5432/db?sslmode=verify-full',
+      PGSSLMODE: '',
+    });
+    expect(config.validateProductionConfig()).toEqual([]);
+    const client = new Client(config.postgresConfig());
+    expect(client.connectionParameters.ssl).not.toBe(false);
+    expect(client.connectionParameters.ssl?.rejectUnauthorized).not.toBe(false);
+  });
+
+  it('rejects a one-connection pool because the topology lock reserves one client', () => {
+    process.env.PG_POOL_MAX = '1';
+    expect(config.validateProductionConfig().join(' ')).toMatch(/between 2 and 20/);
+    setValidProduction({ PG_POOL_MAX: '1' });
+    expect(config.validateProductionConfig().join(' ')).toMatch(/topology locks reserve one/);
+  });
+
+  it('validates the worker role without requiring browser/session settings', () => {
+    setValidProduction();
+    delete process.env.SESSION_SECRET;
+    delete process.env.FRONTEND_ORIGIN;
+    expect(config.validateProductionConfig({ role: 'worker' })).toEqual([]);
   });
 });
 

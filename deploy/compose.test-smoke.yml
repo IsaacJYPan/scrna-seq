@@ -1,0 +1,43 @@
+# CI/local deployment smoke override. It replaces only the R image/entrypoint
+# with a tiny authenticated health stub so the real Compose topology, Node
+# images, Postgres service, worker, and operations flow can be booted without
+# rebuilding the large scientific R image. This file is not a deployment input.
+services:
+  r:
+    entrypoint: ["node"]
+    command:
+      - -e
+      - >-
+        const http=require('http');const fs=require('fs');const path=require('path');
+        http.createServer((req,res)=>{
+        res.setHeader('Content-Type','application/json');
+        if(req.headers['x-api-token']!==process.env.API_TOKEN){
+        res.statusCode=401;res.end(JSON.stringify({error:'unauthorized'}));return;}
+        if(req.url==='/internal/worker-readiness'){
+        const nonce=String(req.headers['x-storage-probe-nonce']||'').toLowerCase();
+        let shared=false;
+        if(/^[0-9a-f]{32}$/.test(nonce)){try{
+        const probe=path.join(process.env.STORAGE_ROOT,'.benchone-worker-storage-probe-'+nonce);
+        const stat=fs.lstatSync(probe);
+        shared=stat.isFile()&&!stat.isSymbolicLink()&&
+        fs.readFileSync(probe,'utf8')==='benchone-shared-storage-v1\n';
+        }catch{shared=false;}}
+        if(!shared)res.statusCode=503;
+        res.end(JSON.stringify({status:shared?'ok':'not_ready',storage_shared:shared,
+        runtime_session_id:shared?'compose-smoke-r-0001':null}));return;}
+        res.end(JSON.stringify({status:'ok',r_version:'compose-smoke'}));
+        }).listen(8000,'127.0.0.1');
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8000/health',
+          {headers:{'X-API-Token':process.env.API_TOKEN}})
+          .then(response => process.exit(response.ok ? 0 : 1))
+          .catch(() => process.exit(1))
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 2s

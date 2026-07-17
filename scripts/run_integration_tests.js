@@ -40,6 +40,7 @@ const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
 const TEST_EMAIL   = `integration-${Date.now()}@example.com`;
 const TEST_PASSWORD = 'IntegrationTest123!';
 let authToken = null;
+const SESSION_COOKIE_NAME = 'benchone_session';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -88,7 +89,8 @@ async function req(method, path, body = null, unauth = false) {
       ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {})
     };
     if (authToken && !unauth) {
-      headers.Authorization = `Bearer ${authToken}`;
+      headers.Cookie = `${SESSION_COOKIE_NAME}=${encodeURIComponent(authToken)}`;
+      headers.Origin = BASE_URL;
     }
     
     // Unauth test: omit Client ID
@@ -114,9 +116,9 @@ async function req(method, path, body = null, unauth = false) {
       res.on('end', () => {
         clearTimeout(timeout);
         try {
-          resolve({ status: res.statusCode, body: JSON.parse(data) });
+          resolve({ status: res.statusCode, body: JSON.parse(data), headers: res.headers });
         } catch (e) {
-          resolve({ status: res.statusCode, body: data });
+          resolve({ status: res.statusCode, body: data, headers: res.headers });
         }
       });
     });
@@ -140,8 +142,9 @@ async function ensureAuth() {
     displayName: 'Integration Test'
   }, true);
 
-  if (signup.status === 201 && signup.body && signup.body.token) {
-    authToken = signup.body.token;
+  if (signup.status === 201 && signup.headers && signup.headers['set-cookie']) {
+    const setCookie = Array.isArray(signup.headers['set-cookie']) ? signup.headers['set-cookie'][0] : signup.headers['set-cookie'];
+    authToken = decodeURIComponent(String(setCookie).split(';')[0].split('=').slice(1).join('='));
     return true;
   }
 
@@ -150,8 +153,9 @@ async function ensureAuth() {
     password: TEST_PASSWORD
   }, true);
 
-  if (login.status === 200 && login.body && login.body.token) {
-    authToken = login.body.token;
+  if (login.status === 200 && login.headers && login.headers['set-cookie']) {
+    const setCookie = Array.isArray(login.headers['set-cookie']) ? login.headers['set-cookie'][0] : login.headers['set-cookie'];
+    authToken = decodeURIComponent(String(setCookie).split(';')[0].split('=').slice(1).join('='));
     return true;
   }
 
@@ -397,13 +401,14 @@ async function main() {
     assert('/pca has gene_loadings', typeof res.gene_loadings === 'object');
     info(`PCA: ${res.npcs} PCs, PC1 stdev=${res.stdevs && res.stdevs[0].toFixed(4)}`);
     
-    // Test PCA clamping
-    info('Testing PCA boundary clamping (npcs=1000)...');
+    // Public inputs above the reviewed reduction bound are rejected before
+    // expensive computation. Dataset-size clamping still applies within the
+    // accepted range.
+    info('Testing PCA public bound rejection (npcs=1000)...');
     const rClamp = await req('GET', '/pca?npcs=1000');
-    assertOk('/pca (clamped) returns 200', rClamp);
-    const resClamp = (rClamp.body || {}).result || {};
-    assert('/pca clamped npcs is < 1000', typeof resClamp.npcs === 'number' && resClamp.npcs < 1000);
-    info(`PCA Clamped gracefully to ${resClamp.npcs} PCs`);
+    assert('/pca rejects npcs above the public bound', rClamp.status === 400,
+      `HTTP ${rClamp.status}`);
+    assert('/pca bound error is sanitized', rClamp.body?.error === 'R request failed.');
   } catch (e) { fail('/pca request', e.message); }
 
   // ── 10. Clustering ───────────────────────────────────────────────────────────
@@ -541,7 +546,8 @@ async function main() {
       if (exists) info(`Exported: ${res.file_name} (${fs.statSync(res.file_path).size} bytes)`);
     }
     
-    // Test export-figure error handling
+    // Invalid features produce an upstream error. Express converts that body to
+    // a stable generic 502 so raw R/Seurat diagnostics cannot reach a browser.
     info('Testing export-figure with invalid features...');
     const rInvalid = await req('POST', '/export-figure', {
       plot_type: 'DotPlot',
@@ -551,8 +557,11 @@ async function main() {
       features: ['INVALID_GENE_123', 'ANOTHER_INVALID_GENE'],
       group_by: 'seurat_clusters',
     });
-    assert('/export-figure returns gracefully with invalid features', rInvalid.status === 200 && rInvalid.body && rInvalid.body.error);
-    info('export-figure gracefully handled invalid features');
+    assert('/export-figure rejects invalid features', rInvalid.status === 502,
+      `HTTP ${rInvalid.status}`);
+    assert('/export-figure invalid-feature error is sanitized',
+      rInvalid.body?.error === 'R request failed.');
+    info('export-figure rejected invalid features without exposing R diagnostics');
   } catch (e) { fail('/export-figure DotPlot SVG request', e.message); }
 
   // ── 17. CellChat Inference ───────────────────────────────────────────────────

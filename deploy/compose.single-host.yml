@@ -1,0 +1,346 @@
+# Supported conservative single-host topology.
+#
+# The namespace-anchor container owns one private network namespace. Postgres, R,
+# web, and worker join that exact namespace, so internal services can stay on
+# 127.0.0.1 while remaining reachable by the trusted Node processes. Only the web
+# port is published, and it is fixed to host loopback for a same-host TLS reverse
+# proxy. R, worker health, and Postgres are never published.
+
+x-app-image: &app-image
+  image: ${APP_IMAGE:-scrna-seq-workbench:single-host}
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    args:
+      APP_UID: ${APP_UID:-10001}
+      APP_GID: ${APP_GID:-10001}
+
+x-operations-image: &operations-image
+  image: ${OPS_IMAGE:-scrna-seq-operations:single-host}
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    target: operations
+    args:
+      APP_UID: ${APP_UID:-10001}
+      APP_GID: ${APP_GID:-10001}
+
+x-db-client-environment: &db-client-environment
+  # PostgreSQL shares the private namespace as well. Keeping its client address
+  # on loopback avoids weakening the production certificate-authentication rule
+  # for non-loopback database connections.
+  PGHOST: 127.0.0.1
+  PGPORT: "5432"
+  PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER}
+  PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+  PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB}
+
+x-private-runtime: &private-runtime
+  network_mode: service:namespace-anchor
+  user: "${APP_UID:-10001}:${APP_GID:-10001}"
+  read_only: true
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,mode=1770,uid=${APP_UID:-10001},gid=${APP_GID:-10001}
+  restart: unless-stopped
+
+services:
+  namespace-anchor:
+    image: ${NAMESPACE_IMAGE:-alpine:3.21}
+    user: "65534:65534"
+    command: ["sleep", "infinity"]
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # Terminate TLS in a same-host reverse proxy and forward to this loopback
+      # listener. Do not change the host binding to 0.0.0.0.
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    networks:
+      - private-backend
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 64
+    deploy:
+      replicas: 1
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    user: postgres
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777
+      # The official image's first-start SQL client deliberately ignores
+      # PGHOST, so its conventional socket directory must be writable too.
+      # Sticky world-write is confined to this container-private tmpfs.
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,mode=1777
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    network_mode: service:namespace-anchor
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    shm_size: ${POSTGRES_SHM_SIZE:-1g}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-4g}
+    cpus: ${POSTGRES_CPU_LIMIT:-2}
+    pids_limit: 512
+    restart: unless-stopped
+    stop_grace_period: 60s
+    deploy:
+      replicas: 1
+
+  r:
+    image: ${R_IMAGE:-scrna-seq-r:single-host}
+    build:
+      context: ../r-backend
+      dockerfile: Dockerfile
+      args:
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
+    <<: *private-runtime
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
+      PLUMBER_HOST: 127.0.0.1
+      PLUMBER_PORT: "8000"
+      ANALYSIS_ROOT: /app
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+      R_MAX_ACTIVE_SESSIONS: ${R_MAX_ACTIVE_SESSIONS:-8}
+      R_MAX_ACTIVE_SESSIONS_PER_USER: ${R_MAX_ACTIVE_SESSIONS_PER_USER:-4}
+      R_MAX_ACTIVE_SESSION_BYTES: ${R_MAX_ACTIVE_SESSION_BYTES:-4294967296}
+      R_MAX_ACTIVE_SESSION_BYTES_PER_USER: ${R_MAX_ACTIVE_SESSION_BYTES_PER_USER:-2147483648}
+      R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION: ${R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION:-1073741824}
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - Rscript
+        - -e
+        - >-
+          con <- url("http://127.0.0.1:8000/health", open="rb",
+          headers=c("X-API-Token"=Sys.getenv("API_TOKEN")));
+          response <- jsonlite::fromJSON(con); close(con);
+          stopifnot(identical(response[["status"]], "ok"))
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    mem_limit: ${R_MEMORY_LIMIT:-16g}
+    cpus: ${R_CPU_LIMIT:-4}
+    pids_limit: 1024
+    stop_grace_period: 660s
+    deploy:
+      replicas: 1
+
+  web:
+    <<: [*app-image, *private-runtime]
+    command: ["node", "server.js"]
+    environment:
+      <<: *db-client-environment
+      NODE_ENV: production
+      HOME: /tmp
+      WEB_HOST: 0.0.0.0
+      PORT: "3000"
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:?Set FRONTEND_ORIGIN to the public HTTPS origin}
+      COOKIE_SECURE: "true"
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-Lax}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET to 64 lowercase hexadecimal characters}
+      SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+      R_RUNTIME_MODE: external
+      R_BACKEND_URL: http://127.0.0.1:8000
+      R_API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
+      ENABLE_JOB_WORKER: "false"
+      R_PROXY_MAX_CONCURRENT: "1"
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000/readyz')
+          .then(response => process.exit(response.ok ? 0 : 1))
+          .catch(() => process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    mem_limit: ${WEB_MEMORY_LIMIT:-2g}
+    cpus: ${WEB_CPU_LIMIT:-2}
+    pids_limit: 256
+    # The server's default graceful-shutdown budget is 150 seconds.
+    stop_grace_period: 165s
+    deploy:
+      replicas: 1
+
+  worker:
+    <<: [*app-image, *private-runtime]
+    command: ["node", "worker.js"]
+    environment:
+      <<: *db-client-environment
+      NODE_ENV: production
+      HOME: /tmp
+      SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+      R_RUNTIME_MODE: external
+      R_BACKEND_URL: http://127.0.0.1:8000
+      R_API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
+      ENABLE_JOB_WORKER: "true"
+      JOB_WORKER_CONCURRENCY: "1"
+      JOB_WORKER_HEALTH_HOST: 127.0.0.1
+      JOB_WORKER_HEALTH_PORT: "3101"
+      JOB_WORKER_DRAIN_TIMEOUT_MS: "630000"
+      JOB_WORKER_MIN_FREE_MEMORY_MB: ${JOB_WORKER_MIN_FREE_MEMORY_MB:-1024}
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      r:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3101/readyz')
+          .then(response => process.exit(response.ok ? 0 : 1))
+          .catch(() => process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${WORKER_CPU_LIMIT:-2}
+    pids_limit: 256
+    # Must exceed the worker's 630-second drain budget. Compose stops dependents
+    # before R, so a running R call can finish while the worker drains.
+    stop_grace_period: 650s
+    deploy:
+      replicas: 1
+
+  # On-demand only: web, worker, and R must be stopped before backup or restore.
+  # The host backup directory should be on separate durable media and writable
+  # only by the configured APP_UID. See docs/deployment.md for exact commands.
+  operations:
+    <<: [*operations-image, *private-runtime]
+    profiles:
+      - operations
+    command: ["scripts/backup-runtime.js", "--help"]
+    environment:
+      <<: *db-client-environment
+      NODE_ENV: production
+      HOME: /tmp
+      SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+      - type: bind
+        source: ${BACKUP_HOST_PATH:?Set BACKUP_HOST_PATH to an absolute operator-owned backup directory}
+        target: /app/backups
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: ${OPS_MEMORY_LIMIT:-2g}
+    cpus: ${OPS_CPU_LIMIT:-2}
+    pids_limit: 256
+    deploy:
+      replicas: 1
+
+  # Restore and verification receive the backup package through a read-only bind.
+  # They may write only to the new named-volume parents and the isolated target DB.
+  restore-operations:
+    <<: [*operations-image, *private-runtime]
+    profiles:
+      - operations
+    command: ["scripts/restore-runtime.js", "--help"]
+    environment:
+      <<: *db-client-environment
+      NODE_ENV: production
+      HOME: /tmp
+      SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+      - type: bind
+        source: ${BACKUP_HOST_PATH:?Set BACKUP_HOST_PATH to an absolute operator-owned backup directory}
+        target: /app/backups
+        read_only: true
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: ${OPS_MEMORY_LIMIT:-2g}
+    cpus: ${OPS_CPU_LIMIT:-2}
+    pids_limit: 256
+    deploy:
+      replicas: 1
+
+networks:
+  private-backend:
+    # Docker's internal bridge mode suppresses published host ingress on
+    # supported runtimes. Keep the bridge project-scoped/non-external; every
+    # listener except Express is independently bound to shared loopback.
+    external: false
+
+volumes:
+  postgres-data:
+  durable-storage:
+  legacy-vault:

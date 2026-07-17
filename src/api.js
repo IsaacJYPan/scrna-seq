@@ -82,20 +82,17 @@ export function buildCheckpointForkJobPayload(analysisObjectId) {
 
 const CLIENT_ID = localStorage.getItem('client_id') || Math.random().toString(36).substr(2, 9);
 localStorage.setItem('client_id', CLIENT_ID);
-// DEPRECATED (transition): the HttpOnly session cookie set by the backend is now
-// the source of auth truth. The localStorage bearer token is legacy/dev
-// compatibility only — it is still sent as a fallback Authorization header and
-// still cached here, but the backend prefers the cookie and the app restores auth
-// state via restoreSession() (GET /api/auth/session), which reads the cookie the
-// browser cannot expose to JavaScript. See docs/architecture.md → auth.
+// The HttpOnly session cookie set by the backend is the only authentication
+// credential. This key remains exported solely so migration cleanup and tests
+// can remove bearer credentials left by pre-cookie releases.
 export const AUTH_TOKEN_KEY = 'benchone_auth_token';
 export const AUTH_USER_KEY = 'benchone_auth_user';
 const AUTH_SESSION_KEY_PREFIXES = ['benchone_auth_', 'benchone_session'];
 const SESSION_STORAGE_KEYS = ['client_id'];
 
-function getAuthToken() {
-  return localStorage.getItem(AUTH_TOKEN_KEY);
-}
+// Purge bearer credentials left by pre-cookie-only releases. The key remains
+// exported for migration tests but is never used for authentication.
+localStorage.removeItem(AUTH_TOKEN_KEY);
 
 function getCurrentUser() {
   try {
@@ -106,10 +103,9 @@ function getCurrentUser() {
 }
 
 function persistAuthResponse(data) {
-  if (!data?.token || !data?.user) return data;
-  localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+  if (!data?.user) return data;
   localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
-  return { ...data.user, token: data.token };
+  return data.user;
 }
 
 export function clearAuthSessionStorage() {
@@ -121,11 +117,6 @@ export function clearAuthSessionStorage() {
     }
   }
   keysToRemove.forEach(key => localStorage.removeItem(key));
-}
-
-function attachAuthHeader(headers) {
-  const token = getAuthToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
 }
 
 function pickFiles({ accept = '', directory = false, multiple = false } = {}) {
@@ -152,7 +143,6 @@ async function uploadSingleFile(file) {
   const form = new FormData();
   form.append('file', file, file.name);
   const headers = {};
-  attachAuthHeader(headers);
 
   const res = await fetch(apiUrl('/api/upload'), { method: 'POST', headers, body: form, credentials: 'include' });
   const data = await res.json().catch(() => ({}));
@@ -167,7 +157,6 @@ async function uploadDirectory(files) {
     form.append('relativePaths', file.webkitRelativePath || file.name);
   });
   const headers = {};
-  attachAuthHeader(headers);
 
   const res = await fetch(apiUrl('/api/upload-directory'), { method: 'POST', headers, body: form, credentials: 'include' });
   const data = await res.json().catch(() => ({}));
@@ -206,9 +195,7 @@ async function req(endpoint, options = {}) {
   options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
   options.headers['X-Client-ID'] = CLIENT_ID;
   // Send the HttpOnly session cookie (source of auth truth) even cross-origin.
-  // The bearer header is still attached as legacy/dev fallback.
   options.credentials = options.credentials || 'include';
-  attachAuthHeader(options.headers);
 
   const res = await fetch(apiUrl(endpoint), options);
   if (!res.ok) {
@@ -246,8 +233,8 @@ export const electronAPI = {
     try {
       options.headers = options.headers || {};
       options.headers['X-Client-ID'] = CLIENT_ID;
+      options.headers['X-BenchOne-CSRF'] = '1';
       options.credentials = options.credentials || 'include';
-      attachAuthHeader(options.headers);
 
       const res = await fetch(apiUrl(`/api/r${endpoint}`), options);
       const contentType = res.headers.get('content-type');
@@ -270,6 +257,15 @@ export const electronAPI = {
   },
 
   // Auth / DB calls
+  registrationPolicy: async () => {
+    try {
+      return await req('/api/auth/policy', { method: 'GET' });
+    } catch {
+      // Fail closed in the UI. Login remains available even if the policy probe
+      // is temporarily unavailable.
+      return { registrationEnabled: false };
+    }
+  },
   signup: async (email, password, displayName) => {
     try {
       const data = await req('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email, password, displayName }) });
@@ -288,16 +284,13 @@ export const electronAPI = {
   },
   getCurrentUser,
   // Restore auth state from the HttpOnly session cookie (source of truth). The
-  // cookie is not readable by JS, so the app asks the backend who it is. The
-  // legacy bearer header is still attached for transitional compatibility, but
-  // localStorage is not treated as proof of an authenticated browser session.
+  // cookie is not readable by JS, so the app asks the backend who it is.
   restoreSession: async () => {
+    // Purge credentials that an older release may have written after this
+    // module was loaded. They are never sent or accepted as authentication.
+    localStorage.removeItem(AUTH_TOKEN_KEY);
     try {
-      // Attach the legacy bearer header too, so an existing bearer-only session
-      // (from before the cookie migration) is still recognized and not forcibly
-      // logged out on first load after deploy.
       const headers = { 'X-Client-ID': CLIENT_ID };
-      attachAuthHeader(headers);
       const res = await fetch(apiUrl('/api/auth/session'), {
         method: 'GET',
         headers,
@@ -320,19 +313,35 @@ export const electronAPI = {
     }
   },
   logout: async () => {
-    // Best-effort server-side cookie clear. Swallow any error (and tolerate a
-    // fetch mock that returns undefined) so logout always proceeds to clear
-    // local state.
+    // Keep local state until the server confirms that every session issued for
+    // this user has been revoked. A failed request is visible and retryable.
     try {
-      await fetch(apiUrl('/api/auth/logout'), {
+      const res = await fetch(apiUrl('/api/auth/logout'), {
         method: 'POST',
         headers: { 'X-Client-ID': CLIENT_ID },
         credentials: 'include'
       });
+      if (!res || !res.ok) {
+        const data = await res?.json?.().catch(() => ({}));
+        return { error: data?.error || 'Session revocation failed. Please retry.' };
+      }
+      const data = await res.json().catch(() => ({}));
+      if (data?.allSessionsRevoked !== true) {
+        // The server clears an invalid/expired cookie on this successful path.
+        // There is no authenticated session left to preserve, so make the login
+        // screen reachable while accurately warning about the revoke-all result.
+        clearAuthSessionStorage();
+        return {
+          success: true,
+          allSessionsRevoked: false,
+          warning: 'The current session had already expired; other sessions could not be revoked.',
+        };
+      }
+      clearAuthSessionStorage();
+      return { success: true };
     } catch {
-      // ignore — local state is cleared regardless
+      return { error: 'Session revocation failed. Please check your connection and retry.' };
     }
-    clearAuthSessionStorage();
   },
   
   // Figures
@@ -407,7 +416,6 @@ export const electronAPI = {
     if (fileType) form.append('fileType', fileType);
     if (metadata && Object.keys(metadata).length > 0) form.append('metadata', JSON.stringify(metadata));
     const headers = {};
-    attachAuthHeader(headers);
     const res = await fetch(apiUrl(`/api/projects/${projectId}/datasets`), { method: 'POST', headers, body: form, credentials: 'include' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || res.statusText);

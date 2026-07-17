@@ -21,6 +21,7 @@ export default function Sidebar({
   theme = 'dark',
   setTheme,
   figuresCount = 0,
+  deploymentPolicy = {},
 }) {
   const [isCollapsed, setIsCollapsed] = useState(() => (
     typeof window !== 'undefined' ? window.innerWidth < 900 : false
@@ -229,13 +230,22 @@ export default function Sidebar({
           {pipelineSections.map(section => (
             <div key={section.id} className="space-y-[2px]">
               <SectionLabel>{section.label}</SectionLabel>
-              {section.items.map(item => (
-                <NavButton
-                  key={item.id}
-                  item={item}
-                  disabled={(item.requiresObject && !hasData) || (item.requiresProject && !hasProject)}
-                />
-              ))}
+              {section.items.map(item => {
+                const blockedLegacyMutation = deploymentPolicy.legacyLiveMutationToolsEnabled !== true
+                  && item.id === 'integrate';
+                const visibleItem = blockedLegacyMutation
+                  ? { ...item, status: 'Local development only' }
+                  : item;
+                return (
+                  <NavButton
+                    key={item.id}
+                    item={visibleItem}
+                    disabled={blockedLegacyMutation
+                      || (item.requiresObject && !hasData)
+                      || (item.requiresProject && !hasProject)}
+                  />
+                );
+              })}
             </div>
           ))}
         </div>

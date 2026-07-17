@@ -332,7 +332,10 @@ describe.skipIf(!CONFIGURED)('datasets API — file upload', () => {
     if (fileType) form.append('fileType', fileType);
     const res = await fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/datasets`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Cookie: `${config.sessionCookieName()}=${encodeURIComponent(token)}`,
+        Origin: 'http://localhost:5173',
+      },
       body: form
     });
     const data = await res.json().catch(() => ({}));
@@ -374,9 +377,20 @@ describe.skipIf(!CONFIGURED)('datasets API — file upload', () => {
     const proj = await seedProject(alice.user.id);
     await addMember(proj.id, 'bob@example.com', 'viewer');
     const res = await uploadFile(proj.id, bob.token, {
-      content: 'x', filename: 'counts.csv', fileType: 'count_matrix_csv'
+      // Unsupported extension proves authorization runs before Multer's file
+      // parser/filter. A late role check would return 400 after consuming input.
+      content: 'x', filename: 'must-not-be-staged.exe', fileType: 'count_matrix_csv'
     });
     expect(res.status).toBe(403);
+  });
+
+  it('rejects a nonmember before multipart parsing without revealing the project', async () => {
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    const res = await uploadFile(proj.id, bob.token, {
+      content: 'x', filename: 'must-not-be-staged.exe', fileType: 'count_matrix_csv'
+    });
+    expect(res.status).toBe(404);
   });
 });
 

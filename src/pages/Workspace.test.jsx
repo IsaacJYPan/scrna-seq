@@ -206,4 +206,29 @@ describe('Workspace backend-backed project/object UI', () => {
     });
   });
 
+  it('routes production imports to the durable Pipeline Manager and hides blocked local loaders', () => {
+    const { props } = renderWorkspace({
+      currentWs: {
+        ...baseWorkspace,
+        projects: [{ id: 'proj_1', name: 'PBMC Project', role: 'owner', isBackendProject: true }],
+        selectedProjectId: 'proj_1',
+      },
+      deploymentPolicy: {
+        legacyLocalImportsEnabled: false,
+        legacyLiveMutationToolsEnabled: false,
+      },
+    });
+
+    fireEvent.click(screen.getAllByRole('button', { name: /Load Object/i })[0]);
+    expect(screen.getByRole('button', { name: /PBMC 3k Demo Dataset/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Durable 10X H5 Pipeline/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Local 10X Directory/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Multiple 10X Directories/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Seurat RDS Object/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /H5AD \/ H5Seurat/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Durable 10X H5 Pipeline/i }));
+    expect(props.setActiveTab).toHaveBeenCalledWith('pipeline-manager');
+  });
+
 });

@@ -11,6 +11,9 @@ const db = require('./backend/pgDatabase');
 const config = require('./backend/config');
 const storage = require('./backend/storage');
 const rRuntime = require('./backend/rRuntime');
+const { createWebHealthController } = require('./backend/webHealth');
+const { shutdownWebRuntime } = require('./backend/webShutdown');
+const { startTopologyLockWatchdog } = require('./backend/webTopologyWatchdog');
 const {
   sanitizeObjectIdSegment,
   deriveRObjectStateKey,
@@ -19,11 +22,25 @@ const {
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
 
+// Validate the executable web role before resolving R configuration, creating
+// directories, opening Postgres, or binding a socket. Importing the module in
+// tests remains side-effect-free with respect to the production startup gate.
+if (require.main === module) {
+  const startupConfigErrors = config.validateProductionConfig({ role: 'web' });
+  if (startupConfigErrors.length > 0) {
+    console.error('[Config] Refusing to start - invalid runtime configuration:');
+    for (const error of startupConfigErrors) console.error(`  - ${error}`);
+    process.exit(1);
+  }
+}
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.disable('x-powered-by');
+app.set('trust proxy', config.trustProxyHops() || false);
+const PORT = config.webPort();
+const WEB_HOST = config.webHost();
 const R_RUNTIME_CONFIG = rRuntime.resolveRRuntimeConfig(process.env, { role: 'web' });
 const PLUMBER_PORT = R_RUNTIME_CONFIG.port;
-const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS || 12 * 60 * 60);
 const SUPPORTED_R_TARGET = 'R 4.5.x';
 
 // Plumber auth token
@@ -46,6 +63,14 @@ for (const dir of [UPLOAD_DIR, VAULT_DIR]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 const durableStorage = storage.createLocalStorageProvider({ root: DB_DIR });
+let webTopologyLock = null;
+const webHealth = createWebHealthController({
+  db,
+  storageRoot: DB_DIR,
+  vaultRoot: VAULT_DIR,
+  probeR: () => probeRHealth(500),
+  getTopologyLock: () => webTopologyLock,
+});
 
 let appDatabaseReady = null;
 function initAppDatabase() {
@@ -69,22 +94,46 @@ function signPayload(payload) {
   return crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
 }
 
+const MAX_POSTGRES_BIGINT = 9223372036854775807n;
+
+function isCanonicalPositiveIntegerString(value, maximum) {
+  const text = String(value ?? '');
+  if (!/^[1-9][0-9]{0,18}$/.test(text)) return false;
+  try { return BigInt(text) <= maximum; } catch { return false; }
+}
+
+function isSafeUserIdString(value) {
+  return isCanonicalPositiveIntegerString(value, BigInt(Number.MAX_SAFE_INTEGER));
+}
+
+function isSessionVersionString(value) {
+  return isCanonicalPositiveIntegerString(value, MAX_POSTGRES_BIGINT);
+}
+
 function issueSession(user) {
+  const sessionVersion = String(user && user.sessionVersion || '');
+  const sessionEpoch = config.sessionEpoch();
+  if (!user || !isSafeUserIdString(user.id) || !isSessionVersionString(sessionVersion)
+      || !config.isValidSessionEpoch(sessionEpoch)) {
+    throw new Error('A valid internal user session generation is required.');
+  }
   const now = Math.floor(Date.now() / 1000);
   const payload = base64UrlJson({
+    v: 2,
     sub: String(user.id),
-    email: user.email,
-    displayName: user.displayName,
+    sv: sessionVersion,
+    se: sessionEpoch,
     iat: now,
-    exp: now + SESSION_TTL_SECONDS
+    exp: now + config.sessionTtlSeconds()
   });
   return `${payload}.${signPayload(payload)}`;
 }
 
-async function verifySession(token) {
-  if (!token || typeof token !== 'string') return null;
-  const [payload, signature] = token.split('.');
-  if (!payload || !signature) return null;
+async function verifySessionDetails(token) {
+  if (!token || typeof token !== 'string' || token.length > 4096) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const [payload, signature] = parts;
 
   const expected = signPayload(payload);
   const expectedBuffer = Buffer.from(expected);
@@ -103,25 +152,29 @@ async function verifySession(token) {
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (!parsed.email || !parsed.sub || !parsed.exp || parsed.exp < now) return null;
+  if (!parsed || Object.getPrototypeOf(parsed) !== Object.prototype
+      || parsed.v !== 2
+      || typeof parsed.sub !== 'string' || !isSafeUserIdString(parsed.sub)
+      || typeof parsed.sv !== 'string' || !isSessionVersionString(parsed.sv)
+      || typeof parsed.se !== 'string' || !config.isValidSessionEpoch(parsed.se)
+      || parsed.se !== config.sessionEpoch()
+      || !Number.isSafeInteger(parsed.iat) || !Number.isSafeInteger(parsed.exp)
+      || parsed.iat > now + 60 || parsed.exp <= now || parsed.exp <= parsed.iat) return null;
 
-  const user = await db.getUserByEmail(parsed.email);
-  if (!user || String(user.id) !== String(parsed.sub)) return null;
-  return user;
+  const user = await db.getUserForSession(parsed.sub, parsed.sv);
+  if (!user || String(user.id) !== parsed.sub) return null;
+  return { user, sessionVersion: parsed.sv };
 }
 
-function getBearerToken(req) {
-  const match = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : null;
+async function verifySession(token) {
+  const details = await verifySessionDetails(token);
+  return details ? details.user : null;
 }
 
 // ── HttpOnly cookie session (hosted-service auth foundation) ─────────────────
-// Browser auth is migrating from localStorage bearer tokens toward an HttpOnly,
-// SameSite, Secure-in-production session cookie. The token payload is the SAME
-// stateless HMAC session used by the bearer path (issueSession/verifySession),
-// so this is a transport change, not a new trust model. During the transition
-// BOTH are accepted (cookie is preferred); the bearer path is legacy/dev
-// compatibility and is documented as deprecated (docs/architecture.md).
+// Browser auth is cookie-only. The signed token carries a server-checked per-user
+// session generation, so logout revokes every previously issued session for that
+// account immediately. Tokens are never returned to JavaScript.
 
 // Minimal, dependency-free cookie reader. Express 5 does not parse cookies by
 // default and we deliberately avoid adding a parser dependency for one cookie.
@@ -134,20 +187,33 @@ function parseCookies(req) {
     if (eq === -1) continue;
     const name = part.slice(0, eq).trim();
     if (!name) continue;
-    out[name] = decodeURIComponent(part.slice(eq + 1).trim());
+    let value;
+    try { value = decodeURIComponent(part.slice(eq + 1).trim()); } catch { value = null; }
+    // Duplicate session-cookie names are ambiguous (cookie tossing). Preserve a
+    // null marker rather than choosing attacker-controlled ordering.
+    if (Object.prototype.hasOwnProperty.call(out, name)) out[name] = null;
+    else out[name] = value;
   }
   return out;
 }
 
 function getCookieToken(req) {
-  return parseCookies(req)[config.SESSION_COOKIE_NAME] || null;
+  const value = parseCookies(req)[config.sessionCookieName()];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function hasSessionCookie(req) {
+  const header = req.headers.cookie;
+  if (!header || typeof header !== 'string') return false;
+  const expected = config.sessionCookieName();
+  return header.split(';').some((part) => part.slice(0, Math.max(0, part.indexOf('='))).trim() === expected);
 }
 
 // Serialize the session Set-Cookie. HttpOnly (never readable by JS, the whole
 // point of the migration), SameSite (CSRF first line of defense), Secure in
 // production, Path=/, and Max-Age tied to the session TTL.
-function buildSessionCookie(token, { clear = false } = {}) {
-  const parts = [`${config.SESSION_COOKIE_NAME}=${clear ? '' : encodeURIComponent(token)}`];
+function buildSessionCookie(token, { clear = false, name = config.sessionCookieName() } = {}) {
+  const parts = [`${name}=${clear ? '' : encodeURIComponent(token)}`];
   parts.push('Path=/');
   parts.push('HttpOnly');
   parts.push(`SameSite=${config.cookieSameSite()}`);
@@ -158,27 +224,32 @@ function buildSessionCookie(token, { clear = false } = {}) {
 
 function setSessionCookie(res, token) {
   res.append('Set-Cookie', buildSessionCookie(token));
+  if (config.sessionCookieName() !== config.LEGACY_SESSION_COOKIE_NAME) {
+    res.append('Set-Cookie', buildSessionCookie('', {
+      clear: true,
+      name: config.LEGACY_SESSION_COOKIE_NAME,
+    }));
+  }
 }
 
 function clearSessionCookie(res) {
   res.append('Set-Cookie', buildSessionCookie('', { clear: true }));
+  if (config.sessionCookieName() !== config.LEGACY_SESSION_COOKIE_NAME) {
+    res.append('Set-Cookie', buildSessionCookie('', {
+      clear: true,
+      name: config.LEGACY_SESSION_COOKIE_NAME,
+    }));
+  }
 }
 
-// Resolve the authenticated user from the cookie first, then the legacy bearer
-// header. `req.authVia` records which transport won so the CSRF check can apply
-// only to cookie-authenticated (browser-auto-sent) mutations.
+// Resolve only the HttpOnly cookie. Authorization bearer headers are ignored.
 async function resolveSessionUser(req) {
   const cookieToken = getCookieToken(req);
   if (cookieToken) {
-    const user = await verifySession(cookieToken);
-    if (user) return { user, via: 'cookie' };
+    const details = await verifySessionDetails(cookieToken);
+    if (details) return { ...details, via: 'cookie' };
   }
-  const bearer = getBearerToken(req);
-  if (bearer) {
-    const user = await verifySession(bearer);
-    if (user) return { user, via: 'bearer' };
-  }
-  return { user: null, via: null };
+  return { user: null, sessionVersion: null, via: null };
 }
 
 // CSRF defense for cookie-authenticated state-changing requests. A cookie is
@@ -186,8 +257,6 @@ async function resolveSessionUser(req) {
 // request authenticated via cookie must also carry an Origin/Referer that is in
 // the allowed-origins allowlist. SameSite=Lax already blocks most cross-site
 // cookie sends; this origin check is the explicit, testable second layer.
-// Bearer-authenticated requests are exempt: a bearer token is never auto-sent by
-// a browser, so it is not a CSRF vector.
 const CSRF_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 function enforceCsrfForCookieAuth(req, res) {
@@ -201,20 +270,20 @@ function enforceCsrfForCookieAuth(req, res) {
   // serves the built SPA itself (npm start, default :3000) the request is same-origin,
   // so accept it even if the FRONTEND_ORIGIN allowlist only lists the dev origin
   // (:5173). Cross-origin requests still require an explicit allowlist entry.
-  if (isSameOriginRequest(req, origin)) return true;
+  if (!config.isProduction() && isSameOriginRequest(req, origin)) return true;
   res.status(403).json({ error: 'CSRF origin check failed.' });
   return false;
 }
 
-// True when the request's Origin host:port equals the Host the browser connected to
-// (the definition of same-origin for CSRF purposes). Requires a real Origin; a missing
-// Origin is treated as cross-origin (fails closed).
+// Development/test fallback for an Express-served SPA. Scheme is part of an
+// origin, so same host over HTTP and HTTPS are not interchangeable. Production
+// uses only the explicit HTTPS FRONTEND_ORIGIN allowlist.
 function isSameOriginRequest(req, origin) {
   if (!origin) return false;
   const host = req.headers.host;
   if (!host) return false;
   try {
-    return new URL(origin).host === host;
+    return new URL(origin).origin === `${req.protocol}://${host}`;
   } catch {
     return false;
   }
@@ -249,9 +318,10 @@ function validateSignupBody(body) {
   const password = typeof body.password === 'string' ? body.password : '';
   const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'A valid email is required.' };
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'A valid email is required.' };
   if (password.length < 8) return { error: 'Password must be at least 8 characters.' };
-  if (!displayName) return { error: 'Display name is required.' };
+  if (password.length > 1024) return { error: 'Password must be at most 1024 characters.' };
+  if (!displayName || displayName.length > 200) return { error: 'Display name must be between 1 and 200 characters.' };
   return { email, password, displayName };
 }
 
@@ -259,8 +329,9 @@ function validateLoginBody(body) {
   const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
   const password = typeof body.password === 'string' ? body.password : '';
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'A valid email is required.' };
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'A valid email is required.' };
   if (!password) return { error: 'Password is required.' };
+  if (password.length > 1024) return { error: 'Password must be at most 1024 characters.' };
   return { email, password };
 }
 
@@ -312,15 +383,30 @@ function normalizeRProxyPath(rawPath) {
   return p;
 }
 
+function publicAuthUser(user) {
+  return {
+    id: Number(user.id),
+    email: user.email,
+    displayName: user.displayName,
+    createdAt: user.createdAt,
+  };
+}
+
 // Several legacy Plumber GET endpoints mutate the caller's private live R
 // object. For this proxy, cookie-authenticated GET therefore is not considered
 // CSRF-safe; every proxied method needs an allowed same-site Origin/Referer.
 function enforceRProxyCsrfForCookieAuth(req, res, next) {
   if (req.authVia !== 'cookie') return next();
+  // Browser GET fetches often omit Origin, and the production no-referrer
+  // policy intentionally removes Referer. This non-simple header is set by our
+  // first-party client; a cross-site script cannot send it with cookies unless
+  // the configured CORS preflight explicitly admits that origin.
+  if (req.headers['x-benchone-csrf'] === '1') return next();
   const origin = req.headers.origin
     || (req.headers.referer ? originOf(req.headers.referer) : '');
-  if (config.isAllowedOrigin(origin) || isSameOriginRequest(req, origin)) return next();
-  return res.status(403).json({ error: 'CSRF origin check failed.' });
+  if (config.isAllowedOrigin(origin)
+      || (!config.isProduction() && isSameOriginRequest(req, origin))) return next();
+  return res.status(403).json({ error: 'CSRF validation failed for the R request.' });
 }
 
 function isDiagnosticRProxyPath(rawPath) {
@@ -507,7 +593,7 @@ function sanitizeIdSegment(value) {
 
 // Store an uploaded dataset under a server-owned project key. The client never
 // controls the key or final path.
-function storeDatasetFile(file, projectId, datasetId) {
+async function storeDatasetFile(file, projectId, datasetId) {
   const safeName = (db.sanitizeDatasetFilename(file.originalname) || 'upload.bin')
     .replace(/[^a-zA-Z0-9._-]/g, '_');
   const key = storage.projectStorageFileKey(
@@ -516,7 +602,7 @@ function storeDatasetFile(file, projectId, datasetId) {
     sanitizeIdSegment(datasetId),
     safeName
   );
-  const stored = durableStorage.putFileFromPath(file.path, key);
+  const stored = await durableStorage.putFileFromPath(file.path, key);
   return {
     internalStorageKey: stored.key,
     sha256: stored.checksumSha256,
@@ -692,6 +778,7 @@ function rTestDiagnosticsEnabled() {
 // cases (preventing rate-limit leakage across tests).
 const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_AUTH_RATE_LIMIT_MAX = 10;
+const MAX_AUTH_RATE_LIMIT_KEYS = 10000;
 
 // Parse a positive-integer env override, falling back to a safe default. A
 // malformed value (non-numeric, NaN/Infinity, non-integer, or <= 0) must NEVER
@@ -722,6 +809,16 @@ function rateLimitDisabled() {
 
 function createRateLimiter() {
   const hits = new Map(); // ip -> { count, resetAt }
+  let nextSweepAt = 0;
+
+  function sweepExpired(now, windowMs) {
+    for (const [key, entry] of hits) {
+      if (now >= entry.resetAt) hits.delete(key);
+    }
+    // At most one O(n) sweep per minute (or per shorter configured window).
+    // A full map rejects unseen keys immediately between sweeps.
+    nextSweepAt = now + Math.min(windowMs, 60 * 1000);
+  }
 
   function middleware(req, res, next) {
     if (rateLimitDisabled()) return next();
@@ -730,6 +827,16 @@ function createRateLimiter() {
     const max = authRateLimitMax();
     const key = req.ip || req.socket?.remoteAddress || 'unknown';
     const now = Date.now();
+
+    if (now >= nextSweepAt) sweepExpired(now, windowMs);
+
+    // Fail closed for unseen addresses when a distributed source fills the
+    // bounded key table. Existing callers retain their budgets; expired keys
+    // are removed above. Nginx provides a second, independent ingress limit.
+    if (!hits.has(key) && hits.size >= MAX_AUTH_RATE_LIMIT_KEYS) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(windowMs / 1000))));
+      return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+    }
 
     let entry = hits.get(key);
     if (!entry || now >= entry.resetAt) {
@@ -746,7 +853,8 @@ function createRateLimiter() {
     next();
   }
 
-  middleware.reset = () => hits.clear();
+  middleware.reset = () => { hits.clear(); nextSweepAt = 0; };
+  middleware.keyCount = () => hits.size;
   return middleware;
 }
 
@@ -761,6 +869,7 @@ const signupRateLimiter = createRateLimiter();
 // this fence an aborting client could immediately open another expensive request
 // while the first one was still consuming the single shared R process.
 const R_PROXY_ADMISSION_STATE = Symbol('rProxyAdmissionState');
+const R_PROXY_CONCURRENCY_EXEMPT_GET_PATHS = new Set(['/health', '/session-id']);
 
 function markRProxyAdmissionIndeterminate(req) {
   const state = req && req[R_PROXY_ADMISSION_STATE];
@@ -801,6 +910,15 @@ function createRProxyAdmission() {
     if (entry.count > maxRequests) {
       res.setHeader('Retry-After', String(Math.max(1, Math.ceil((entry.resetAt - now) / 1000))));
       return res.status(429).json({ error: 'R request rate limit exceeded. Please retry later.' });
+    }
+
+    // These are constant-size, read-only runtime probes. The UI legitimately
+    // requests them together after login; making them consume the single heavy
+    // analytical slot creates false 429s. They remain authenticated, CSRF
+    // checked, exact-path allowlisted, response-bounded, and rate-limited above.
+    if (String(req.method || '').toUpperCase() === 'GET'
+        && R_PROXY_CONCURRENCY_EXEMPT_GET_PATHS.has(normalizeRProxyPath(req.path))) {
+      return next();
     }
 
     const maxConcurrent = config.rProxyMaxConcurrent();
@@ -1078,6 +1196,35 @@ const rProxyAdmission = createRProxyAdmission();
 const R_PROXY_VALIDATED_PATH_FIELDS = ['path', 'csv_path', 'paths', 'storage_key', 'dataset_storage_key'];
 
 // Middleware
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    "media-src 'self' blob:",
+  ].join('; '));
+  if (config.isProduction() && req.secure) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  const healthPath = req.path === '/livez' || req.path === '/readyz';
+  if (config.isProduction() && !healthPath && !req.secure) {
+    return res.status(426).json({ error: 'HTTPS required.' });
+  }
+  return next();
+});
+
 // CORS must allow credentials so the browser sends/stores the HttpOnly session
 // cookie cross-origin (when the API is on a different origin than the frontend).
 // Origin is reflected only from the configured allowlist; requests without an
@@ -1090,19 +1237,67 @@ app.use(cors({
   credentials: true
 }));
 
+// Process health routes deliberately precede database initialization. Liveness
+// never touches a dependency. Readiness requires Postgres, both persistent
+// storage roots, and the singleton web lock; R is reported as an optional
+// compute component so metadata/API traffic stays available during R recovery.
+app.get('/livez', (req, res) => {
+  const result = webHealth.liveness();
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(result.httpStatus).json(result.body);
+});
+app.get('/readyz', async (req, res) => {
+  const result = await webHealth.readiness();
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(result.httpStatus).json(result.body);
+});
+
+// Public, non-secret UI policy. Keep this ahead of database initialization so
+// the login page can accurately hide registration during a database outage.
+app.get('/api/auth/policy', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const legacyUiEnabled = !config.isProduction();
+  res.json({
+    registrationEnabled: config.registrationEnabled(),
+    legacyLocalImportsEnabled: legacyUiEnabled,
+    legacyLiveMutationToolsEnabled: legacyUiEnabled,
+    serverFigureExportEnabled: legacyUiEnabled,
+  });
+});
+
+// In production this route terminates before database initialization or body
+// parsing. Outside production it falls through to the normal signup handler.
+app.post('/api/auth/signup', requireNetworkRegistrationEnabled);
+
 app.use(async (req, res, next) => {
+  if (req.path === '/api/auth/logout') return next();
   try {
     await initAppDatabase();
-    next();
-  } catch (err) {
-    console.error('[DB] Postgres initialization failed:', err && err.message ? err.message : err);
-    res.status(503).json({ error: 'Database unavailable' });
+    return next();
+  } catch {
+    console.error('[DB] Postgres initialization failed (DATABASE_UNAVAILABLE).');
+    return res.status(503).json({ error: 'Database unavailable' });
   }
 });
 // Do not use express.json() globally, as it consumes the body stream and breaks http-proxy-middleware for POST requests.
 // ── Auth Endpoints ────────────────────────────────────────────────────────
-app.use('/api/auth', express.json());
-app.post('/api/auth/signup', signupRateLimiter, async (req, res) => {
+app.use('/api/auth', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+function requireNetworkRegistrationEnabled(req, res, next) {
+  if (!config.registrationEnabled()) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(403).json({ error: 'Account registration is operator-managed for this deployment.' });
+  }
+  return next();
+}
+
+const authJson = express.json();
+
+// Reject disabled registration and apply the IP limiter before consuming an
+// attacker-controlled JSON body. Production signup bodies are never parsed.
+app.post('/api/auth/signup', signupRateLimiter, authJson, async (req, res) => {
   const validated = validateSignupBody(req.body || {});
   if (validated.error) return res.status(400).json({ error: validated.error });
 
@@ -1110,18 +1305,20 @@ app.post('/api/auth/signup', signupRateLimiter, async (req, res) => {
     const user = await db.createUser(validated.email, validated.password, validated.displayName);
     if (user.error) return res.status(409).json({ error: user.error });
 
-    // Set the HttpOnly session cookie (preferred, hosted-service auth) AND return
-    // the token in JSON for legacy/dev bearer compatibility during the transition.
     const token = issueSession(user);
     setSessionCookie(res, token);
-    res.status(201).json({ success: true, token, user });
-  } catch (err) {
-    console.error('[Auth] Signup failed:', err);
-    res.status(500).json({ error: 'Signup failed' });
+    res.status(201).json({ success: true, user: publicAuthUser(user) });
+  } catch (error) {
+    if (error?.code === 'AUTH_HASH_BUSY') {
+      res.setHeader('Retry-After', '1');
+      return res.status(503).json({ error: 'Authentication is temporarily busy. Please try again.' });
+    }
+    console.error('[Auth] Signup failed (SIGNUP_FAILED).');
+    return res.status(500).json({ error: 'Signup failed' });
   }
 });
 
-app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
+app.post('/api/auth/login', loginRateLimiter, authJson, async (req, res) => {
   const validated = validateLoginBody(req.body || {});
   if (validated.error) return res.status(400).json({ error: validated.error });
 
@@ -1129,38 +1326,54 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
     const user = await db.verifyUser(validated.email, validated.password);
     if (user.error) return res.status(401).json({ error: 'Invalid email or password.' });
 
-    // Set the HttpOnly session cookie (preferred) AND return the token in JSON
-    // for legacy/dev bearer compatibility during the transition.
     const token = issueSession(user);
     setSessionCookie(res, token);
-    res.json({ success: true, token, user });
-  } catch (err) {
-    console.error('[Auth] Login failed:', err);
-    res.status(500).json({ error: 'Login failed' });
+    res.json({ success: true, user: publicAuthUser(user) });
+  } catch (error) {
+    if (error?.code === 'AUTH_HASH_BUSY') {
+      res.setHeader('Retry-After', '1');
+      return res.status(503).json({ error: 'Authentication is temporarily busy. Please try again.' });
+    }
+    console.error('[Auth] Login failed (LOGIN_FAILED).');
+    return res.status(500).json({ error: 'Login failed' });
   }
 });
 
 // Current-session endpoint: lets the browser restore auth state from the
-// HttpOnly cookie (which JavaScript cannot read) instead of trusting a
-// localStorage bearer token. Returns the authenticated user or 401. Accepts
-// cookie (preferred) or legacy bearer via requireAuth.
+// HttpOnly cookie (which JavaScript cannot read). Cookie authentication is the
+// only supported browser transport; bearer credentials are ignored.
 app.get('/api/auth/session', requireAuth, (req, res) => {
-  res.json({ user: req.user, authVia: req.authVia });
+  res.json({ user: publicAuthUser(req.user) });
 });
 
-// Logout: clear the server session cookie. Best-effort — it always clears the
-// cookie even if no valid session is present, so a stale browser cookie is
-// removed. CSRF: only a cookie-authenticated logout is origin-checked (bearer
-// logout, used by legacy/dev, is not a CSRF vector); an unauthenticated call
-// simply clears any cookie and returns success.
+// Logout clears the browser cookie and atomically increments the authenticated
+// user's session version, revoking every outstanding session. A revocation
+// failure is a 503 rather than false success; an unauthenticated request only
+// clears any stale cookie. Any request carrying a session cookie is origin
+// checked before either action.
 app.post('/api/auth/logout', async (req, res) => {
-  const { user, via } = await resolveSessionUser(req);
-  req.authVia = via;
-  if (user && via === 'cookie') {
+  const cookieWasPresent = hasSessionCookie(req);
+  req.authVia = cookieWasPresent ? 'cookie' : null;
+  if (cookieWasPresent) {
     if (!enforceCsrfForCookieAuth(req, res)) return undefined;
   }
-  clearSessionCookie(res);
-  return res.json({ success: true });
+  if (!cookieWasPresent) return res.json({ success: true, allSessionsRevoked: false });
+  try {
+    await initAppDatabase();
+    const { user, sessionVersion } = await resolveSessionUser(req);
+    if (!user) {
+      clearSessionCookie(res);
+      return res.json({ success: true, allSessionsRevoked: false });
+    }
+    await db.revokeUserSessions(user.id, sessionVersion);
+    clearSessionCookie(res);
+    return res.json({ success: true, allSessionsRevoked: true });
+  } catch {
+    // Preserve the still-valid cookie so the browser can retry. Clearing it
+    // here would destroy the only credential capable of revoking other copies.
+    console.error('[Auth] Session revocation failed (SESSION_REVOCATION_UNAVAILABLE).');
+    return res.status(503).json({ error: 'Session revocation unavailable.' });
+  }
 });
 
 // ── Database API Endpoints ──────────────────────────────────────────────
@@ -1195,9 +1408,13 @@ app.post('/api/db/provenance', async (req, res) => {
     // A row owned by another user — or a project-scoped row — is reported as a
     // generic 404 (no cross-user/project existence leak), not a raw 500.
     if (e.code === 'PROVENANCE_NOT_FOUND') {
-      return res.status(404).json({ error: e.message });
+      return res.status(404).json({ error: 'Provenance record not found.' });
     }
-    res.status(500).json({ error: e.message });
+    if (e.code === 'INVALID_PROVENANCE') {
+      return res.status(400).json({ error: 'Invalid provenance record.' });
+    }
+    console.error('[Provenance] Save failed (PROVENANCE_SAVE_FAILED).');
+    return res.status(500).json({ error: 'Provenance save failed.' });
   }
 });
 
@@ -1222,7 +1439,11 @@ app.post('/api/db/figures', async (req, res) => {
     const id = await db.saveFigure({ ...req.body, userEmail: req.user.email });
     res.json({ id });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    if (e.code === 'FIGURE_NOT_FOUND') {
+      return res.status(404).json({ error: 'Figure not found.' });
+    }
+    console.error('[Figures] Save failed (FIGURE_SAVE_FAILED).');
+    return res.status(500).json({ error: 'Figure save failed.' });
   }
 });
 
@@ -1246,7 +1467,10 @@ app.post('/api/db/cache/:key', async (req, res) => {
     await db.setCachedResult(req.params.key, provenanceId, resultData, req.user.email);
     res.json({ success: true });
   } catch (e) {
-    res.status(403).json({ error: e.message });
+    if (e.code === 'CACHE_NOT_FOUND') {
+      return res.status(404).json({ error: 'Cache record not found.' });
+    }
+    return res.status(403).json({ error: 'Cache write is not permitted.' });
   }
 });
 
@@ -1758,7 +1982,14 @@ function cleanupUploadedFiles(files) {
   }
 }
 
-app.post('/api/upload', requireAuth, (req, res) => {
+function requireLegacyVaultUploadsEnabled(req, res, next) {
+  if (config.isProduction()) {
+    return res.status(403).json({ error: 'Legacy private-vault uploads are disabled in production.' });
+  }
+  return next();
+}
+
+app.post('/api/upload', requireAuth, requireLegacyVaultUploadsEnabled, (req, res) => {
   upload.single('file')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -1773,7 +2004,7 @@ app.post('/api/upload', requireAuth, (req, res) => {
   });
 });
 
-app.post('/api/upload-directory', requireAuth, (req, res) => {
+app.post('/api/upload-directory', requireAuth, requireLegacyVaultUploadsEnabled, (req, res) => {
   upload.array('files', config.maxUploadFiles())(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
@@ -1886,7 +2117,19 @@ function sendDatasetError(res, e, context = 'Datasets') {
   }
 }
 
-app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, async (req, res) => {
+// Reject viewers/nonmembers before Multer consumes or stages their multipart
+// body. The database mutation re-checks the role after parsing to close a role-
+// change race; this early gate prevents unauthorized disk/CPU consumption.
+async function requireDatasetWriterBeforeUpload(req, res, next) {
+  try {
+    await db.requireProjectRole(req.user.id, req.params.projectId, ['owner', 'admin', 'analyst']);
+    return next();
+  } catch (error) {
+    return sendDatasetError(res, error);
+  }
+}
+
+app.post('/api/projects/:projectId/datasets', requireDatasetWriterBeforeUpload, maybeDatasetMultipart, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   if (rejectDatasetServerFields(req, res)) return;
 
@@ -1914,7 +2157,7 @@ app.post('/api/projects/:projectId/datasets', maybeDatasetMultipart, async (req,
     if (req.file) {
       let stored = null;
       try {
-        stored = storeDatasetFile(req.file, req.params.projectId, dataset.id);
+        stored = await storeDatasetFile(req.file, req.params.projectId, dataset.id);
         dataset = await db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
       } catch (storageErr) {
         console.error('[Datasets] Storage failed:', storageErr);
@@ -3020,50 +3263,84 @@ async function shutdownJobWorkerAndServer(args = {}) {
 
 // Start Server
 if (require.main === module) {
-  // Fail fast on insecure runtime configuration. Cookie invariants apply in all
-  // environments; the broader hosted-service requirements are production-only.
-  // Never prints secret values — only the offending variable names.
-  const configErrors = config.validateProductionConfig();
-  if (configErrors.length > 0) {
-    console.error('[Config] Refusing to start — invalid runtime configuration:');
-    for (const e of configErrors) console.error(`  - ${e}`);
-    process.exit(1);
-  }
+  // The fail-fast gate above ran before any directory or socket side effects.
+  // This summary is deliberately secret-free.
   console.log('[Config]', JSON.stringify(config.summary()));
 
   let httpServer = null;
-  initAppDatabase().then(() => {
-    httpServer = app.listen(PORT, () => {
-      console.log(`Node.js Web Server running on http://localhost:${PORT}`);
-      if (R_RUNTIME_CONFIG.mode === 'owned') console.log('Starting local R Plumber backend...');
-      startWebRBackend();
-    });
-  }).catch((err) => {
-    console.error('[DB] Refusing to start; Postgres initialization failed:', err && err.message ? err.message : err);
-    process.exit(1);
-  });
-
-  // Stop the worker cleanly on shutdown so no tick is left mid-claim. A single
-  // `shuttingDown` latch makes this safe when SIGINT and SIGTERM arrive close
-  // together (no double-shutdown race / double exit).
+  let ownedRProcess = null;
+  let topologyWatchdog = null;
   let shuttingDown = false;
-  const onShutdownSignal = () => {
+  const onShutdownSignal = (initialExitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const worker = jobWorker;
-    jobWorker = null;
-    shutdownJobWorkerAndServer({
+    topologyWatchdog?.stop?.();
+    topologyWatchdog = null;
+    void shutdownWebRuntime({
       server: httpServer,
-      worker,
+      rProcess: ownedRProcess,
+      topologyLock: webTopologyLock,
+      db,
+      health: webHealth,
       logger: console,
-      timeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
+      timeoutMs: config.webShutdownTimeoutMs(),
+      drainDelayMs: config.webDrainDelayMs(),
+      initialExitCode,
     });
   };
+  const start = async () => {
+    try {
+      await initAppDatabase();
+      if (shuttingDown) throw Object.assign(new Error('Startup aborted.'), { code: 'STARTUP_ABORTED' });
+      webTopologyLock = await db.acquireWebTopologyLock();
+      if (shuttingDown) throw Object.assign(new Error('Startup aborted.'), { code: 'STARTUP_ABORTED' });
+      topologyWatchdog = startTopologyLockWatchdog({
+        lock: webTopologyLock,
+        onLost: () => {
+          console.error('[web] topology lock lost (WEB_TOPOLOGY_LOCK_LOST); shutting down.');
+          onShutdownSignal(1);
+        },
+      });
+      httpServer = app.listen(PORT, WEB_HOST);
+      httpServer.requestTimeout = 10 * 60 * 1000;
+      httpServer.headersTimeout = 15000;
+      httpServer.keepAliveTimeout = 5000;
+      httpServer.maxRequestsPerSocket = 1000;
+      await new Promise((resolve, reject) => {
+        const onError = (error) => {
+          httpServer.off('listening', onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          httpServer.off('error', onError);
+          resolve();
+        };
+        httpServer.once('error', onError);
+        httpServer.once('listening', onListening);
+      });
+      console.log(`[web] listening on ${WEB_HOST}:${PORT}.`);
+      ownedRProcess = startWebRBackend();
+    } catch (error) {
+      const code = error && typeof error.code === 'string'
+        ? error.code.replace(/[^A-Z0-9_]/gi, '').slice(0, 64)
+        : 'STARTUP_FAILED';
+      console.error(`[web] refusing to start (${code || 'STARTUP_FAILED'}).`);
+      topologyWatchdog?.stop?.();
+      topologyWatchdog = null;
+      try { await webTopologyLock?.release?.(); } catch { /* startup already failed */ }
+      webTopologyLock = null;
+      try { await db.close(); } catch { /* startup already failed */ }
+      process.exit(1);
+    }
+  };
+  void start();
+
+  // A single latch makes close signals and fatal topology loss idempotent.
   for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, onShutdownSignal);
+    process.on(sig, () => onShutdownSignal(0));
   }
   process.on('message', (message) => {
-    if (message && message.type === 'benchone:shutdown') onShutdownSignal();
+    if (message && message.type === 'benchone:shutdown') onShutdownSignal(0);
   });
 }
 
@@ -3096,10 +3373,12 @@ module.exports = {
   // Exposed for tests + R proxy ownership verification
   issueSession,
   verifySession,
+  verifySessionDetails,
   isValidObjectIdFormat,
   verifyRObjectOwnership,
   // Exposed for tests: HttpOnly cookie session foundation
   parseCookies,
+  hasSessionCookie,
   buildSessionCookie,
   initAppDatabase,
   resolveSessionUser,
@@ -3110,6 +3389,11 @@ module.exports = {
   authRateLimitMax,
   authRateLimitWindowMs,
   rateLimitDisabled,
+  requireNetworkRegistrationEnabled,
+  createRateLimiter,
+  MAX_AUTH_RATE_LIMIT_KEYS,
+  requireLegacyVaultUploadsEnabled,
+  requireDatasetWriterBeforeUpload,
   R_PROXY_VALIDATED_PATH_FIELDS,
   findRscript,
   buildRuntimeDiagnostics,
@@ -3120,5 +3404,7 @@ module.exports = {
   waitForOwnedRHealth,
   startJobWorkerIfEnabled,
   stopJobWorker,
-  shutdownJobWorkerAndServer
+  shutdownJobWorkerAndServer,
+  webHealth,
+  shutdownWebRuntime,
 };
