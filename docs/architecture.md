@@ -47,7 +47,7 @@ Status legend:
 | Project-scoped datasets | UI-wired (narrow Seurat path) | The Pipeline Manager Seurat panel lists/uploads `tenx_h5` datasets for one supported workflow. General dataset management remains absent. New uploads use server-owned project storage keys plus SHA-256 checksums, and public responses omit internal storage. |
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. |
-| Pipeline Manager / pipeline manifests | UI-wired (declarative registry) | A Pipeline Manager tab lets each user select an active pipeline within a project, upload declarative pipeline manifests, and populate pipeline-generated sidebar tabs from registered modules. Upload is currently allowed to project owners/admins/analysts, not a separate platform-developer role. Uploaded manifests may choose from registered modules/templates only; arbitrary code, endpoints, icons, storage keys, and paths are rejected. Parameter/result template declarations are validated and displayed, but there is not yet a fully generic template-driven execution/result renderer. |
+| Pipeline Manager / pipeline manifests | UI-wired (trusted declarative registry) | Every project member may list approved global manifests and select one for their own user/project pair. Publication is global and requires the server-managed `pipeline_registry.publish` platform capability; project owner/admin/analyst roles do not grant it. Manifests compose only code-shipped modules from the shared frontend/backend contract. The UI renders declared parameter/result templates as a disabled preview, not a generic execution form. Legacy project/user definitions remain stored but quarantined, and their selections safely fall back to the built-in pipeline. |
 | QC / Normalize / PCA / Cluster / UMAP / plots | UI-wired | Run through the private-live-R compatibility proxy. Production uses an exact method/path allowlist, one global slot, rate/deadline/body/response limits, bounded route parameters/results, QC sampling, plot budgets, an explicit outbound-header allowlist, JSON-only upstream responses, and response path/runtime-field sanitization. |
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
@@ -73,6 +73,51 @@ Status legend:
 | Secure cookie sessions | backend-wired (transitional) | HttpOnly + SameSite + Secure-in-production session cookie is set on login/signup and accepted on every route; frontend restores via `/api/auth/session`. localStorage bearer is deprecated fallback. Session revocation/versioning not yet implemented. |
 | Postgres database runtime | backend-wired | `backend/pgDatabase.js` + `backend/pg/schema.sql` are the app metadata runtime for users, projects/members, datasets, analysis objects, project jobs/logs/artifacts, provenance, figures/cache, and lineage. See "Database backend" below. |
 | Shared project live R state | not implemented | Collaboration is via durable metadata, never a shared live R session. |
+
+## Trusted declarative pipeline registry
+
+The pipeline registry is a presentation and workflow-composition boundary, not a
+code-loading boundary:
+
+- `platform_capabilities` stores the narrow `pipeline_registry.publish`
+  capability independently of project RBAC. It is granted, revoked, or inspected
+  only by an operator using
+  `npm run platform-developer -- <grant|revoke|status> <email>`. No browser route
+  grants platform capability.
+- Publishing uses the global authenticated registry endpoint. Project roles,
+  including project owner, admin, and analyst, cannot publish. Ordinary project
+  members may list approved global definitions and keep an independent active
+  selection for each user/project pair.
+- A trusted stored definition has `project_id = NULL`, visibility `platform`, a
+  server-generated row id, and a unique validated manifest id. Older `user` and
+  `project` definitions are retained for rollback/history but excluded from
+  listing and lookup. A selection that points to an unavailable or legacy row
+  returns the built-in definition with an unavailable-selection signal; it never
+  returns the legacy manifest.
+- Every stored platform manifest is parsed and validated again before it reaches
+  a public response. Invalid or corrupt rows fail closed. Publication is bounded
+  to 64 KiB, and at most 200 platform definitions may exist.
+- `shared/pipelineRegistryContract.json` is the data-only frontend/backend source
+  for registered module keys, routes, component keys, parameter templates,
+  result views, artifact types, and executable job types. The manifest supplies
+  labels and a bounded declarative schema; it cannot override those registered
+  bindings.
+- The Pipeline Manager renders a disabled, read-only preview of allowed
+  parameter controls and result cards. Preview controls never submit data or
+  launch a job. There is no generic manifest executor.
+- The only currently registered manifest module that declares a durable
+  executable job is differential expression via `deg.find_markers.v1`. Other
+  registered sidebar modules are views over existing application behavior; they
+  do not claim nonexistent per-step worker handlers or artifact types. The
+  separate, code-shipped default Seurat panel still owns the narrow
+  `seurat.pipeline.v1` launch.
+
+Publishing a manifest cannot add JavaScript, React components, R code, R
+packages, R endpoints, filesystem paths, storage keys, URLs, or a new worker
+handler. New executable modules still require a reviewed application release.
+Arbitrary R in a future BYOC design remains a separate high-risk capability that
+would require per-job container or VM isolation, strict input/output mounts,
+network and secret restrictions, and resource quotas.
 
 ## DEG paths (two implementations)
 
@@ -120,11 +165,11 @@ The first supported end-to-end local/dev pipeline is intentionally narrow:
   rows and server-allocated checkpoint keys. Worker R responses have an explicit
   byte ceiling and total wall-clock deadline.
 - **Module boundary:** The default Seurat workflow is represented as a
-  declarative pipeline manifest whose tabs map to registered frontend module
-  templates and allowlisted job types. Most Seurat preprocessing steps still run
-  through the full `seurat.pipeline.v1` worker path; separately queued module
-  steps are future work. Uploaded manifests cannot introduce
-  arbitrary code execution or unregistered backend endpoints.
+  declarative pipeline manifest whose tabs map to code-shipped frontend module
+  templates. The narrow default Pipeline Manager panel, rather than a generic
+  manifest executor, owns the full `seurat.pipeline.v1` worker launch. Separately
+  queued preprocessing modules remain future work. Approved manifests cannot
+  introduce arbitrary code, packages, worker handlers, or backend endpoints.
 
 This is local/dev pipeline evidence, not hosted-service production readiness.
 There is no object storage, no public download route, no server-side session
@@ -261,10 +306,11 @@ The app runtime is Postgres-only.
 - **Schema/data layer:** `backend/pg/schema.sql` is the durable schema for
   server-owned identity, role/scope columns, job state-machine + worker
   coordination, artifact immutability, provenance/figures/cache, and lineage DAG.
-  `backend/pgDatabase.js` is the async `pg` data layer for users,
-  orgs/projects/members, datasets, analysis objects, project jobs/logs/artifacts,
-  provenance, figures/cache, and lineage. Public projections strip claim tokens,
-  worker internals, storage keys/URIs, object hashes, and raw paths.
+  `backend/pgDatabase.js` is the async `pg` data layer for users, platform
+  capabilities, the trusted pipeline registry, orgs/projects/members, datasets,
+  analysis objects, project jobs/logs/artifacts, provenance, figures/cache, and
+  lineage. Public projections strip claim tokens, worker internals, storage
+  keys/URIs, object hashes, publisher identity, and raw paths.
 - **Backend selection:** `DATABASE_BACKEND` is accepted for readable summaries but
   always resolves to `postgres`; SQLite is no longer a runtime option.
 - **Schema init:** `npm run init:postgres` applies `schema.sql` idempotently
@@ -356,8 +402,9 @@ The app runtime is Postgres-only.
 - `npm run test:backend` runs the FULL backend suite (`backend/*.test.js`)
   against Postgres: config boundaries, the real `pgDatabase` contract, per-user
   isolation, auth (cookie/bearer/rate-limit/credentials), org/project RBAC,
-  datasets, analysis objects, the durable job-worker claim/lease/heartbeat
-  contract, standalone runtime/process behavior, crash-output recovery,
+  the trusted pipeline-registry capability/legacy-quarantine contract, datasets,
+  analysis objects, the durable job-worker claim/lease/heartbeat contract,
+  standalone runtime/process behavior, crash-output recovery,
   artifacts/checkpoints, the lineage DAG, the R-proxy
   ownership/policy/diagnostics gates, and the mocked-R pipeline worker handlers.
   Every DB-backed suite resets the schema per test via `resetSchemaForTests()`

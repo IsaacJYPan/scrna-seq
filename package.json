@@ -11,6 +11,7 @@
     "start": "node server.js",
     "worker": "node --require ./scripts/enable-job-worker.cjs worker.js",
     "worker:once": "node --require ./scripts/enable-job-worker.cjs worker.js --once",
+    "platform-developer": "node scripts/manage-platform-developer.js",
     "test:unit": "node scripts/run_unit_tests.js",
     "test:integration": "node scripts/run_integration_tests.js",
     "test:tutorial": "node scripts/test_pbmc3k_tutorial.js",

@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "defaultPipelineId": "default-seurat-scrna-v1",
+  "limits": {
+    "maxManifestBytes": 65536,
+    "maxTabs": 40,
+    "maxParametersPerTab": 24,
+    "maxResultViewsPerTab": 8,
+    "maxArtifactTypesPerTab": 12,
+    "maxEnumOptions": 40,
+    "maxTextLength": 2000
+  },
+  "modalities": ["scrna"],
+  "parameterTemplateTypes": ["boolean", "number", "integer", "enum", "text"],
+  "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs", "placeholder"],
+  "modules": {
+    "inspectObject": {
+      "routeId": "inspect",
+      "componentKey": "inspect",
+      "defaultLabel": "Inspect",
+      "requiresObject": true,
+      "parameterTemplates": [],
+      "resultViewTemplates": ["summaryMetrics"]
+    },
+    "seuratQc": {
+      "routeId": "qc",
+      "componentKey": "qualityControl",
+      "defaultLabel": "Quality Control",
+      "requiresObject": true,
+      "parameterTemplates": ["number", "integer", "boolean", "text"],
+      "resultViewTemplates": ["summaryMetrics", "placeholder"]
+    },
+    "seuratNormalize": {
+      "routeId": "normalize",
+      "componentKey": "normalization",
+      "defaultLabel": "Normalize",
+      "requiresObject": true,
+      "parameterTemplates": ["enum", "integer"],
+      "resultViewTemplates": ["summaryMetrics"]
+    },
+    "seuratIntegration": {
+      "routeId": "integrate",
+      "componentKey": "batchIntegration",
+      "defaultLabel": "Integration",
+      "optional": true,
+      "requiresObject": true,
+      "parameterTemplates": ["enum", "text"],
+      "resultViewTemplates": ["summaryMetrics", "placeholder"]
+    },
+    "seuratPca": {
+      "routeId": "pca",
+      "componentKey": "pca",
+      "defaultLabel": "PCA",
+      "requiresObject": true,
+      "parameterTemplates": ["integer"],
+      "resultViewTemplates": ["summaryMetrics"]
+    },
+    "seuratCluster": {
+      "routeId": "cluster",
+      "componentKey": "clustering",
+      "defaultLabel": "Cluster",
+      "requiresObject": true,
+      "parameterTemplates": ["number", "integer", "enum"],
+      "resultViewTemplates": ["summaryMetrics"]
+    },
+    "seuratUmap": {
+      "routeId": "umap",
+      "componentKey": "umap",
+      "defaultLabel": "UMAP",
+      "requiresObject": true,
+      "parameterTemplates": ["integer", "number"],
+      "resultViewTemplates": ["summaryMetrics", "placeholder"]
+    },
+    "featurePlot": {
+      "routeId": "featureplot",
+      "componentKey": "featurePlot",
+      "defaultLabel": "Feature Plot",
+      "requiresObject": true,
+      "parameterTemplates": ["text"],
+      "resultViewTemplates": ["placeholder"]
+    },
+    "geneExpression": {
+      "routeId": "geneviewer",
+      "componentKey": "geneViewer",
+      "defaultLabel": "Gene Expression",
+      "requiresObject": true,
+      "parameterTemplates": ["text"],
+      "resultViewTemplates": ["summaryMetrics", "placeholder"]
+    },
+    "heatmap": {
+      "routeId": "heatmap",
+      "componentKey": "heatmap",
+      "defaultLabel": "Heatmap",
+      "requiresObject": true,
+      "parameterTemplates": ["text"],
+      "resultViewTemplates": ["placeholder"]
+    },
+    "dotPlot": {
+      "routeId": "dotplot",
+      "componentKey": "dotPlot",
+      "defaultLabel": "Dot Plot",
+      "requiresObject": true,
+      "parameterTemplates": ["text"],
+      "resultViewTemplates": ["placeholder"]
+    },
+    "differentialExpression": {
+      "routeId": "deg",
+      "componentKey": "differentialExpression",
+      "defaultLabel": "Markers / DEG",
+      "jobType": "deg.find_markers.v1",
+      "executable": true,
+      "requiresObject": true,
+      "parameterTemplates": ["enum", "number", "integer", "boolean"],
+      "resultArtifactTypes": ["deg_summary", "deg_markers"],
+      "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
+    },
+    "projectHistory": {
+      "routeId": "history",
+      "componentKey": "projectHistory",
+      "defaultLabel": "Jobs & Artifacts",
+      "requiresProject": true,
+      "parameterTemplates": [],
+      "resultViewTemplates": ["artifactTable", "jobLogs"]
+    }
+  }
+}

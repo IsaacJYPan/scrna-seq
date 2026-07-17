@@ -22,7 +22,7 @@ import Inspect from './pages/Inspect';
 import Diagnostics from './pages/Diagnostics';
 import PipelineManager from './pages/PipelineManager';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
-import { getDefaultPipelineManifest } from './pipelines/pipelineRegistry';
+import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
 import { hasAttachedLiveRObject } from './liveRState';
 
 import {
@@ -152,8 +152,6 @@ export default function App() {
     clusterCount: 0,
     clusterDims: 15  // default dims; updated when clustering runs
   });
-  const [activePipeline, setActivePipeline] = useState(() => getDefaultPipelineManifest());
-
   // Gate that blocks per-page cache hydration until after the R session
   // restore attempt completes (success or no saved session). Without this
   // gate the pages fire onlyIfCached calls with the wrong (new) session ID
@@ -214,23 +212,11 @@ export default function App() {
   const datasetInfo = selectedObjects.length > 0 ? selectedObjects[0] : (currentWs.objects[0] || null);
   const currentProvId = currentWs.branches[currentWs.activeBranch];
   const activeProjectIdForPipeline = currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
-
-  useEffect(() => {
-    if (!user?.email || !activeProjectIdForPipeline || !window.electronAPI?.getProjectPipelineSelection) {
-      setActivePipeline(getDefaultPipelineManifest());
-      return undefined;
-    }
-    let cancelled = false;
-    window.electronAPI.getProjectPipelineSelection(activeProjectIdForPipeline)
-      .then(selection => {
-        if (cancelled) return;
-        setActivePipeline(selection?.definition?.manifest || getDefaultPipelineManifest());
-      })
-      .catch(() => {
-        if (!cancelled) setActivePipeline(getDefaultPipelineManifest());
-      });
-    return () => { cancelled = true; };
-  }, [activeProjectIdForPipeline, user?.email]);
+  const { activePipeline, handlePipelineSelectionChanged } = useProjectPipelineSelection({
+    api: window.electronAPI,
+    projectId: activeProjectIdForPipeline,
+    userEmail: user?.email,
+  });
 
   const [apiStatus, setApiStatus] = useState('Checking backend');
   const [provenanceRecords, setProvenanceRecords] = useState([]);
@@ -1008,7 +994,7 @@ export default function App() {
           <PipelineManager
             {...props}
             activePipeline={activePipeline}
-            onPipelineSelectionChanged={setActivePipeline}
+            onPipelineSelectionChanged={handlePipelineSelectionChanged}
             setActiveTab={setActiveTab}
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />

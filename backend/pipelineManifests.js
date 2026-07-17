@@ -1,120 +1,28 @@
-const DEFAULT_PIPELINE_ID = 'default-seurat-scrna-v1';
+'use strict';
 
+const CONTRACT = require('../shared/pipelineRegistryContract.json');
+
+const DEFAULT_PIPELINE_ID = CONTRACT.defaultPipelineId;
+const MODULES = Object.freeze(CONTRACT.modules);
+const PARAMETER_TEMPLATE_TYPES = Object.freeze([...CONTRACT.parameterTemplateTypes]);
+const RESULT_VIEW_TEMPLATES = Object.freeze([...CONTRACT.resultViewTemplates]);
 const PIPELINE_ID_RE = /^[a-z][a-z0-9-]{2,63}$/;
 const TAB_ID_RE = /^[a-z][a-z0-9-]{1,39}$/;
-const MAX_TABS = 40;
 
-const PARAMETER_TEMPLATE_TYPES = Object.freeze([
-  'boolean',
-  'number',
-  'integer',
-  'enum',
-  'text',
-  'geneList',
-  'metadataColumn',
-  'clusterSelector',
-  'datasetSelector',
+const MANIFEST_FIELDS = new Set(['schemaVersion', 'id', 'name', 'description', 'modality', 'tabs']);
+const TAB_FIELDS = new Set([
+  'id', 'label', 'moduleKey', 'optional', 'parameterSchema',
+  'resultArtifactTypes', 'resultViews',
 ]);
-
-const RESULT_VIEW_TEMPLATES = Object.freeze([
-  'summaryMetrics',
-  'artifactTable',
-  'jobLogs',
-  'plotlyEmbedding',
-  'plotlyScatter',
-  'plotlyViolin',
-  'plotlyHeatmap',
-  'plotlyDotPlot',
-  'networkGraph',
-  'placeholder',
-]);
-
-const MODULES = Object.freeze({
-  inspectObject: Object.freeze({
-    routeId: 'inspect',
-    componentKey: 'inspect',
-    resultViewTemplates: ['summaryMetrics'],
-  }),
-  seuratQc: Object.freeze({
-    routeId: 'qc',
-    componentKey: 'qualityControl',
-    jobType: 'seurat.qc.v1',
-    resultArtifactTypes: ['qc_summary'],
-    resultViewTemplates: ['plotlyViolin', 'summaryMetrics', 'jobLogs'],
-  }),
-  seuratNormalize: Object.freeze({
-    routeId: 'normalize',
-    componentKey: 'normalization',
-    jobType: 'seurat.normalize.v1',
-    resultArtifactTypes: ['normalization_summary'],
-    resultViewTemplates: ['summaryMetrics', 'jobLogs'],
-  }),
-  seuratIntegration: Object.freeze({
-    routeId: 'integrate',
-    componentKey: 'batchIntegration',
-    jobType: 'seurat.integrate.v1',
-    resultArtifactTypes: ['integration_summary'],
-    resultViewTemplates: ['summaryMetrics', 'plotlyEmbedding', 'jobLogs'],
-  }),
-  seuratPca: Object.freeze({
-    routeId: 'pca',
-    componentKey: 'pca',
-    jobType: 'seurat.pca.v1',
-    resultArtifactTypes: ['pca_summary'],
-    resultViewTemplates: ['plotlyScatter', 'summaryMetrics', 'jobLogs'],
-  }),
-  seuratCluster: Object.freeze({
-    routeId: 'cluster',
-    componentKey: 'clustering',
-    jobType: 'seurat.cluster.v1',
-    resultArtifactTypes: ['cluster_summary'],
-    resultViewTemplates: ['summaryMetrics', 'jobLogs'],
-  }),
-  seuratUmap: Object.freeze({
-    routeId: 'umap',
-    componentKey: 'umap',
-    jobType: 'seurat.umap.v1',
-    resultArtifactTypes: ['umap_summary'],
-    resultViewTemplates: ['plotlyEmbedding', 'summaryMetrics', 'jobLogs'],
-  }),
-  featurePlot: Object.freeze({
-    routeId: 'featureplot',
-    componentKey: 'featurePlot',
-    resultViewTemplates: ['plotlyEmbedding'],
-  }),
-  geneExpression: Object.freeze({
-    routeId: 'geneviewer',
-    componentKey: 'geneViewer',
-    resultViewTemplates: ['plotlyScatter', 'summaryMetrics'],
-  }),
-  heatmap: Object.freeze({
-    routeId: 'heatmap',
-    componentKey: 'heatmap',
-    resultViewTemplates: ['plotlyHeatmap'],
-  }),
-  dotPlot: Object.freeze({
-    routeId: 'dotplot',
-    componentKey: 'dotPlot',
-    resultViewTemplates: ['plotlyDotPlot'],
-  }),
-  differentialExpression: Object.freeze({
-    routeId: 'deg',
-    componentKey: 'differentialExpression',
-    jobType: 'deg.find_markers.v1',
-    resultArtifactTypes: ['deg_summary', 'deg_markers'],
-    resultViewTemplates: ['summaryMetrics', 'artifactTable', 'jobLogs'],
-  }),
-  projectHistory: Object.freeze({
-    routeId: 'history',
-    componentKey: 'projectHistory',
-    resultViewTemplates: ['artifactTable', 'jobLogs'],
-  }),
+const COMMON_PARAMETER_FIELDS = ['key', 'type', 'label', 'description', 'required'];
+const PARAMETER_FIELDS = Object.freeze({
+  boolean: new Set([...COMMON_PARAMETER_FIELDS, 'default']),
+  number: new Set([...COMMON_PARAMETER_FIELDS, 'default', 'min', 'max', 'step']),
+  integer: new Set([...COMMON_PARAMETER_FIELDS, 'default', 'min', 'max', 'step']),
+  enum: new Set([...COMMON_PARAMETER_FIELDS, 'default', 'options']),
+  text: new Set([...COMMON_PARAMETER_FIELDS, 'default', 'placeholder', 'maxLength']),
 });
-
-const UNSAFE_FIELDS = Object.freeze([
-  'code', 'rCode', 'script', 'command', 'shell', 'endpoint', 'path', 'url',
-  'method', 'storageKey', 'storageUri', 'stateKey', 'icon'
-]);
+const RESULT_VIEW_FIELDS = new Set(['type', 'title', 'artifactType']);
 
 function codedError(code, message) {
   const err = new Error(message);
@@ -122,160 +30,278 @@ function codedError(code, message) {
   return err;
 }
 
+function invalid(message) {
+  throw codedError('INVALID_PIPELINE_MANIFEST', message);
+}
+
 function assertPlainObject(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', `${label} must be a plain object.`);
+    invalid(`${label} must be a plain object.`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    invalid(`${label} must be a plain object.`);
   }
 }
 
-function assertNoUnsafeFields(value, label) {
-  if (!value || typeof value !== 'object') return;
-  for (const field of UNSAFE_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(value, field)) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.${field} is not allowed.`);
-    }
+function assertExactFields(value, allowed, label) {
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) invalid(`${label}.${field} is not allowed.`);
   }
+}
+
+function assertShortString(value, label, max, { min = 1 } = {}) {
+  if (typeof value !== 'string') invalid(`${label} must be a string.`);
+  const trimmed = value.trim();
+  if (trimmed.length < min || value.length > max) {
+    invalid(`${label} must contain ${min}-${max} characters.`);
+  }
+  return trimmed;
+}
+
+function assertFiniteNumber(value, label, { integer = false, positive = false } = {}) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    invalid(`${label} must be a finite ${integer ? 'integer' : 'number'}.`);
+  }
+  if (integer && !Number.isInteger(value)) invalid(`${label} must be an integer.`);
+  if (positive && value <= 0) invalid(`${label} must be positive.`);
+  return value;
 }
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function validateParameterSchema(schema, label) {
-  if (schema === undefined) return [];
-  if (!Array.isArray(schema)) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.parameterSchema must be an array.`);
+function assertManifestByteLimit(input) {
+  let encoded;
+  try {
+    encoded = JSON.stringify(input);
+  } catch {
+    invalid('manifest must be JSON serializable.');
   }
-  return schema.map((param, index) => {
-    assertPlainObject(param, `${label}.parameterSchema[${index}]`);
-    assertNoUnsafeFields(param, `${label}.parameterSchema[${index}]`);
-    if (!TAB_ID_RE.test(param.key || '')) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.parameterSchema[${index}].key must be a slug-safe identifier.`);
-    }
-    if (!PARAMETER_TEMPLATE_TYPES.includes(param.type)) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.parameterSchema[${index}].type is not a supported parameter template.`);
-    }
-    if (param.label !== undefined && (typeof param.label !== 'string' || param.label.length > 80)) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.parameterSchema[${index}].label must be a short string.`);
-    }
-    if (param.type === 'enum') {
-      if (!Array.isArray(param.options) || param.options.length === 0 || param.options.length > 40) {
-        throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.parameterSchema[${index}].options must be a non-empty bounded array.`);
-      }
-      for (const option of param.options) {
-        if (typeof option !== 'string' && typeof option !== 'number' && typeof option !== 'boolean') {
-          throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.parameterSchema[${index}].options may only contain scalar values.`);
-        }
-      }
-    }
-    return clone(param);
-  });
+  if (typeof encoded !== 'string'
+      || Buffer.byteLength(encoded, 'utf8') > CONTRACT.limits.maxManifestBytes) {
+    invalid(`manifest exceeds the ${CONTRACT.limits.maxManifestBytes}-byte limit.`);
+  }
 }
 
-function validateResultViews(views, label, moduleDef) {
-  if (views === undefined) return moduleDef.resultViewTemplates || [];
-  if (!Array.isArray(views) || views.length === 0 || views.length > 12) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.resultViews must be a non-empty bounded array.`);
+function validateParameterDefault(param, output, label) {
+  if (param.default === undefined) return;
+  switch (param.type) {
+    case 'boolean':
+      if (typeof param.default !== 'boolean') invalid(`${label}.default must be boolean.`);
+      output.default = param.default;
+      break;
+    case 'number':
+    case 'integer':
+      output.default = assertFiniteNumber(param.default, `${label}.default`, {
+        integer: param.type === 'integer',
+      });
+      break;
+    case 'enum':
+      if (typeof param.default !== 'string' || !output.options.includes(param.default)) {
+        invalid(`${label}.default must match one of the enum options.`);
+      }
+      output.default = param.default;
+      break;
+    case 'text':
+      if (typeof param.default !== 'string' || param.default.length > output.maxLength) {
+        invalid(`${label}.default exceeds the text limit.`);
+      }
+      output.default = param.default;
+      break;
+    default:
+      invalid(`${label}.type is not supported.`);
   }
-  return views.map((view, index) => {
-    const type = typeof view === 'string' ? view : view?.type;
-    if (!RESULT_VIEW_TEMPLATES.includes(type)) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.resultViews[${index}] is not a supported result view template.`);
+}
+
+function validateParameterSchema(schema, label, moduleDef) {
+  if (schema === undefined) return [];
+  if (!Array.isArray(schema) || schema.length > CONTRACT.limits.maxParametersPerTab) {
+    invalid(`${label}.parameterSchema must contain at most ${CONTRACT.limits.maxParametersPerTab} parameters.`);
+  }
+  const seen = new Set();
+  return schema.map((param, index) => {
+    const paramLabel = `${label}.parameterSchema[${index}]`;
+    assertPlainObject(param, paramLabel);
+    if (!PARAMETER_TEMPLATE_TYPES.includes(param.type)
+        || !(moduleDef.parameterTemplates || []).includes(param.type)) {
+      invalid(`${paramLabel}.type is not registered for this module.`);
     }
-    if (typeof view === 'object') {
-      assertNoUnsafeFields(view, `${label}.resultViews[${index}]`);
-      return clone(view);
+    assertExactFields(param, PARAMETER_FIELDS[param.type], paramLabel);
+    if (!TAB_ID_RE.test(param.key || '')) {
+      invalid(`${paramLabel}.key must be a slug-safe identifier.`);
     }
-    return type;
+    if (seen.has(param.key)) invalid(`${paramLabel}.key is duplicated.`);
+    seen.add(param.key);
+    if (param.required !== undefined && typeof param.required !== 'boolean') {
+      invalid(`${paramLabel}.required must be boolean.`);
+    }
+
+    const output = {
+      key: param.key,
+      type: param.type,
+      label: param.label === undefined
+        ? param.key
+        : assertShortString(param.label, `${paramLabel}.label`, 80),
+      description: param.description === undefined
+        ? ''
+        : assertShortString(param.description, `${paramLabel}.description`, 240, { min: 0 }),
+      required: param.required === true,
+    };
+
+    if (param.type === 'number' || param.type === 'integer') {
+      const integer = param.type === 'integer';
+      for (const field of ['min', 'max']) {
+        if (param[field] !== undefined) {
+          output[field] = assertFiniteNumber(param[field], `${paramLabel}.${field}`, { integer });
+        }
+      }
+      if (output.min !== undefined && output.max !== undefined && output.min > output.max) {
+        invalid(`${paramLabel}.min must not exceed max.`);
+      }
+      if (param.step !== undefined) {
+        output.step = assertFiniteNumber(param.step, `${paramLabel}.step`, { integer, positive: true });
+      }
+    } else if (param.type === 'enum') {
+      if (!Array.isArray(param.options) || param.options.length === 0
+          || param.options.length > CONTRACT.limits.maxEnumOptions) {
+        invalid(`${paramLabel}.options must be a non-empty bounded array.`);
+      }
+      const options = param.options.map((option, optionIndex) =>
+        assertShortString(option, `${paramLabel}.options[${optionIndex}]`, 80));
+      if (new Set(options).size !== options.length) invalid(`${paramLabel}.options must be unique.`);
+      output.options = options;
+    } else if (param.type === 'text') {
+      const maxLength = param.maxLength === undefined ? 240 : param.maxLength;
+      if (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > CONTRACT.limits.maxTextLength) {
+        invalid(`${paramLabel}.maxLength must be an integer between 1 and ${CONTRACT.limits.maxTextLength}.`);
+      }
+      output.maxLength = maxLength;
+      if (param.placeholder !== undefined) {
+        output.placeholder = assertShortString(param.placeholder, `${paramLabel}.placeholder`, 120, { min: 0 });
+      }
+    }
+
+    validateParameterDefault(param, output, paramLabel);
+    if ((param.type === 'number' || param.type === 'integer') && output.default !== undefined) {
+      if (output.min !== undefined && output.default < output.min) invalid(`${paramLabel}.default is below min.`);
+      if (output.max !== undefined && output.default > output.max) invalid(`${paramLabel}.default exceeds max.`);
+    }
+    return output;
   });
 }
 
 function validateResultArtifactTypes(types, label, moduleDef) {
-  if (types === undefined) return moduleDef.resultArtifactTypes || [];
-  if (!Array.isArray(types) || types.length > 20) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.resultArtifactTypes must be a bounded array.`);
+  const source = types === undefined ? (moduleDef.resultArtifactTypes || []) : types;
+  if (!Array.isArray(source) || source.length > CONTRACT.limits.maxArtifactTypesPerTab) {
+    invalid(`${label}.resultArtifactTypes must be a bounded array.`);
   }
   const allowed = new Set(moduleDef.resultArtifactTypes || []);
-  return types.map((type, index) => {
+  const output = source.map((type, index) => {
     if (typeof type !== 'string' || !allowed.has(type)) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `${label}.resultArtifactTypes[${index}] is not produced by the registered module.`);
+      invalid(`${label}.resultArtifactTypes[${index}] is not produced by the registered module.`);
     }
     return type;
   });
+  if (new Set(output).size !== output.length) invalid(`${label}.resultArtifactTypes must be unique.`);
+  return output;
 }
 
-function validatePipelineManifest(input) {
+function validateResultViews(views, label, moduleDef, artifactTypes) {
+  const source = views === undefined ? (moduleDef.resultViewTemplates || []) : views;
+  if (!Array.isArray(source) || source.length > CONTRACT.limits.maxResultViewsPerTab) {
+    invalid(`${label}.resultViews must be a bounded array.`);
+  }
+  const moduleViews = new Set(moduleDef.resultViewTemplates || []);
+  const allowedArtifacts = new Set(artifactTypes);
+  return source.map((view, index) => {
+    const viewLabel = `${label}.resultViews[${index}]`;
+    const type = typeof view === 'string' ? view : view?.type;
+    if (!RESULT_VIEW_TEMPLATES.includes(type) || !moduleViews.has(type)) {
+      invalid(`${viewLabel} is not registered for this module.`);
+    }
+    if (typeof view === 'string') return type;
+    assertPlainObject(view, viewLabel);
+    assertExactFields(view, RESULT_VIEW_FIELDS, viewLabel);
+    const output = { type };
+    if (view.title !== undefined) {
+      output.title = assertShortString(view.title, `${viewLabel}.title`, 80);
+    }
+    if (view.artifactType !== undefined) {
+      if (typeof view.artifactType !== 'string' || !allowedArtifacts.has(view.artifactType)) {
+        invalid(`${viewLabel}.artifactType is not available from this module.`);
+      }
+      output.artifactType = view.artifactType;
+    }
+    return output;
+  });
+}
+
+function validatePipelineManifest(input, options = {}) {
   assertPlainObject(input, 'manifest');
-  assertNoUnsafeFields(input, 'manifest');
-  if (input.schemaVersion !== 1) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', 'manifest.schemaVersion must be 1.');
+  assertManifestByteLimit(input);
+  assertExactFields(input, MANIFEST_FIELDS, 'manifest');
+  if (input.schemaVersion !== CONTRACT.schemaVersion) {
+    invalid(`manifest.schemaVersion must be ${CONTRACT.schemaVersion}.`);
   }
   if (!PIPELINE_ID_RE.test(input.id || '')) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', 'manifest.id must be a slug-safe identifier.');
+    invalid('manifest.id must be a slug-safe identifier.');
   }
-  if (typeof input.name !== 'string' || input.name.trim().length < 2 || input.name.length > 100) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', 'manifest.name must be a short string.');
+  if (input.id === DEFAULT_PIPELINE_ID && options.allowBuiltInId !== true) {
+    invalid('manifest.id is reserved for the built-in pipeline.');
   }
-  if (input.modality !== undefined && !['scrna', 'spatial', 'multiomics', 'generic'].includes(input.modality)) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', 'manifest.modality is not supported.');
-  }
-  if (!Array.isArray(input.tabs) || input.tabs.length === 0 || input.tabs.length > MAX_TABS) {
-    throw codedError('INVALID_PIPELINE_MANIFEST', `manifest.tabs must contain 1-${MAX_TABS} tabs.`);
+  const name = assertShortString(input.name, 'manifest.name', 100, { min: 2 });
+  const description = input.description === undefined
+    ? ''
+    : assertShortString(input.description, 'manifest.description', 400, { min: 0 });
+  const modality = input.modality === undefined ? 'scrna' : input.modality;
+  if (!CONTRACT.modalities.includes(modality)) invalid('manifest.modality is not supported.');
+  if (!Array.isArray(input.tabs) || input.tabs.length === 0
+      || input.tabs.length > CONTRACT.limits.maxTabs) {
+    invalid(`manifest.tabs must contain 1-${CONTRACT.limits.maxTabs} tabs.`);
   }
 
   const seen = new Set();
-  const tabs = input.tabs.map((tab, idx) => {
-    assertPlainObject(tab, `manifest.tabs[${idx}]`);
-    assertNoUnsafeFields(tab, `manifest.tabs[${idx}]`);
-    if (!TAB_ID_RE.test(tab.id || '')) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `manifest.tabs[${idx}].id must be a slug-safe identifier.`);
-    }
-    if (seen.has(tab.id)) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `Duplicate pipeline tab id '${tab.id}'.`);
-    }
+  const tabs = input.tabs.map((tab, index) => {
+    const label = `manifest.tabs[${index}]`;
+    assertPlainObject(tab, label);
+    assertExactFields(tab, TAB_FIELDS, label);
+    if (!TAB_ID_RE.test(tab.id || '')) invalid(`${label}.id must be a slug-safe identifier.`);
+    if (seen.has(tab.id)) invalid(`Duplicate pipeline tab id '${tab.id}'.`);
     seen.add(tab.id);
     const moduleDef = MODULES[tab.moduleKey];
-    if (!moduleDef) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `manifest.tabs[${idx}].moduleKey is not registered.`);
-    }
+    if (!moduleDef) invalid(`${label}.moduleKey is not registered.`);
     if (tab.id !== moduleDef.routeId) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `manifest.tabs[${idx}].id must be '${moduleDef.routeId}' for module '${tab.moduleKey}'.`);
+      invalid(`${label}.id must be '${moduleDef.routeId}' for module '${tab.moduleKey}'.`);
     }
-    if (tab.componentKey !== undefined && tab.componentKey !== moduleDef.componentKey) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `manifest.tabs[${idx}].componentKey does not match the registered module.`);
+    if (tab.optional !== undefined && typeof tab.optional !== 'boolean') {
+      invalid(`${label}.optional must be boolean.`);
     }
-    if (tab.jobType !== undefined && tab.jobType !== moduleDef.jobType) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `manifest.tabs[${idx}].jobType does not match the registered module.`);
-    }
-    if (typeof tab.label !== 'string' || tab.label.trim().length < 2 || tab.label.length > 80) {
-      throw codedError('INVALID_PIPELINE_MANIFEST', `manifest.tabs[${idx}].label must be a short string.`);
-    }
+    const resultArtifactTypes = validateResultArtifactTypes(tab.resultArtifactTypes, label, moduleDef);
     return {
       id: tab.id,
-      label: tab.label.trim(),
+      label: assertShortString(tab.label, `${label}.label`, 80, { min: 2 }),
       moduleKey: tab.moduleKey,
-      routeId: moduleDef.routeId,
-      componentKey: moduleDef.componentKey,
-      jobType: moduleDef.jobType || null,
-      optional: tab.optional === true,
-      parameterSchema: validateParameterSchema(tab.parameterSchema, `manifest.tabs[${idx}]`),
-      resultArtifactTypes: validateResultArtifactTypes(tab.resultArtifactTypes, `manifest.tabs[${idx}]`, moduleDef),
-      resultViews: validateResultViews(tab.resultViews, `manifest.tabs[${idx}]`, moduleDef),
+      optional: tab.optional === true || moduleDef.optional === true,
+      parameterSchema: validateParameterSchema(tab.parameterSchema, label, moduleDef),
+      resultArtifactTypes,
+      resultViews: validateResultViews(tab.resultViews, label, moduleDef, resultArtifactTypes),
     };
   });
 
   return {
-    schemaVersion: 1,
+    schemaVersion: CONTRACT.schemaVersion,
     id: input.id,
-    name: input.name.trim(),
-    description: typeof input.description === 'string' ? input.description.slice(0, 400) : '',
-    modality: input.modality || 'scrna',
+    name,
+    description,
+    modality,
     tabs,
   };
 }
 
 const DEFAULT_SEURAT_PIPELINE = validatePipelineManifest({
-  schemaVersion: 1,
+  schemaVersion: CONTRACT.schemaVersion,
   id: DEFAULT_PIPELINE_ID,
   name: 'Default Seurat scRNA-seq Pipeline',
   description: 'Dataset-backed Seurat preprocessing, exploration, DEG, and project history using registered modules.',
@@ -295,10 +321,10 @@ const DEFAULT_SEURAT_PIPELINE = validatePipelineManifest({
     { id: 'deg', label: 'Markers / DEG', moduleKey: 'differentialExpression' },
     { id: 'history', label: 'Jobs & Artifacts', moduleKey: 'projectHistory' },
   ],
-});
+}, { allowBuiltInId: true });
 
 function getDefaultPipelineManifest() {
-  return JSON.parse(JSON.stringify(DEFAULT_SEURAT_PIPELINE));
+  return clone(DEFAULT_SEURAT_PIPELINE);
 }
 
 function isBuiltInPipelineId(id) {
@@ -306,8 +332,11 @@ function isBuiltInPipelineId(id) {
 }
 
 module.exports = {
+  CONTRACT,
   DEFAULT_PIPELINE_ID,
   MODULES,
+  PARAMETER_TEMPLATE_TYPES,
+  RESULT_VIEW_TEMPLATES,
   validatePipelineManifest,
   getDefaultPipelineManifest,
   isBuiltInPipelineId,
