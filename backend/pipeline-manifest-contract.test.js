@@ -102,16 +102,24 @@ describe('shared declarative pipeline manifest contract', () => {
         executable: definition.executable,
         jobType: definition.jobType,
       }));
-    expect(executableModules).toEqual([{
-      moduleKey: 'differentialExpression',
-      executable: true,
-      jobType: 'deg.find_markers.v1',
-    }]);
+    expect(executableModules).toEqual([
+      {
+        moduleKey: 'differentialExpression',
+        executable: true,
+        jobType: 'deg.find_markers.v1',
+      },
+      {
+        moduleKey: 'pathwayEnrichment',
+        executable: true,
+        jobType: 'enrichment.gsea.v1',
+      },
+    ]);
 
     const resolved = resolvePipelineManifest(manifest({
       tabs: [
         { id: 'qc', label: 'Quality Control', moduleKey: 'seuratQc' },
         { id: 'deg', label: 'Differential Expression', moduleKey: 'differentialExpression' },
+        { id: 'enrichment', label: 'Pathway Enrichment', moduleKey: 'pathwayEnrichment' },
       ],
     }));
     expect(resolved.tabs.find((tab) => tab.moduleKey === 'seuratQc')).toEqual(expect.objectContaining({
@@ -121,6 +129,10 @@ describe('shared declarative pipeline manifest contract', () => {
     expect(resolved.tabs.find((tab) => tab.moduleKey === 'differentialExpression')).toEqual(expect.objectContaining({
       executable: true,
       jobType: 'deg.find_markers.v1',
+    }));
+    expect(resolved.tabs.find((tab) => tab.moduleKey === 'pathwayEnrichment')).toEqual(expect.objectContaining({
+      executable: true,
+      jobType: 'enrichment.gsea.v1',
     }));
   });
 });

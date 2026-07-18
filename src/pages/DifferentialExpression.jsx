@@ -650,7 +650,7 @@ export default function DifferentialExpression({
             <ShieldCheck size={16} className="text-primary" />
             Boundary note
           </div>
-          Project membership shows metadata only. The worker still verifies that the job creator owns the private live R object before contacting R, and this UI does not enable pathway enrichment, CellChat, reports, public downloads, or reproducibility bundles.
+          Project membership shows metadata only. The worker still verifies that the job creator owns the private live R object before contacting R, and this page does not enable CellChat, reports, public downloads, or reproducibility bundles.
         </div>
       </div>
     </div>

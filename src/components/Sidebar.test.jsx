@@ -54,7 +54,7 @@ describe('Sidebar component', () => {
     expect(qcButton).not.toBeDisabled();
   });
 
-  it('marks non-integrated scientific features as disabled future actions', () => {
+  it('shows integrated pathway enrichment while keeping future scientific features hidden', () => {
     render(
       <Sidebar
         activeTab="workspace"
@@ -63,7 +63,7 @@ describe('Sidebar component', () => {
       />
     );
 
-    expect(screen.queryByRole('button', { name: /Pathway Enrichment/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Pathway Enrichment/i })).not.toBeDisabled();
     expect(screen.queryByRole('button', { name: /CellChat/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Custom Script/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Cell Annotation/i })).not.toBeInTheDocument();

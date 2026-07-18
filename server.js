@@ -21,6 +21,7 @@ const {
 } = require('./backend/rStateKeys');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
+const { validateEnrichmentGseaParams } = require('./backend/enrichmentGsea');
 
 // Validate the executable web role before resolving R configuration, creating
 // directories, opening Postgres, or binding a socket. Importing the module in
@@ -454,7 +455,8 @@ const RDS_DESERIALIZATION_PROXY_PATHS = new Set(['/load-rds', '/restore-session'
 // checkpoint. It is worker-only for the same durable job/artifact/lineage reasons.
 const R_PROXY_INTERNAL_ONLY_PATHS = new Set([
   '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers',
-  '/object/seurat-pipeline', '/object/inspect', '/internal/worker-readiness'
+  '/object/enrichment-gsea', '/object/seurat-pipeline', '/object/inspect',
+  '/internal/worker-readiness'
 ]);
 
 function isInternalOnlyRProxyPath(rawPath) {
@@ -2492,11 +2494,11 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   // contact. Reject incompatible client references synchronously so they cannot
   // manufacture partial-output/recovery states after dispatch.
   const serverManagedResultTypes = [
-    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1',
+    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
     'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   const noDatasetBindingTypes = [
-    'pbmc.pipeline.v1', 'deg.find_markers.v1',
+    'pbmc.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
     'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   if (serverManagedResultTypes.includes(body.jobType)
@@ -2528,6 +2530,16 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
     }
     if (body.datasetId === undefined || body.datasetId === null) {
       return res.status(400).json({ error: 'seurat.pipeline.v1 requires datasetId.' });
+    }
+  }
+
+  if (body.jobType === 'enrichment.gsea.v1') {
+    try {
+      validateEnrichmentGseaParams(body.parameters);
+    } catch (e) {
+      return res.status(400).json({
+        error: e && e.message ? e.message : 'Invalid enrichment.gsea.v1 parameters.',
+      });
     }
   }
 

@@ -35,6 +35,7 @@ describe('pipelineRegistry', () => {
       'heatmap',
       'dotplot',
       'deg',
+      'enrichment',
       'history',
     ]);
     expect(definition.tabs.some(tab => Object.keys(tab).some(key => [
@@ -63,6 +64,25 @@ describe('pipelineRegistry', () => {
       routeId: 'deg',
       componentKey: 'differentialExpression',
       jobType: 'deg.find_markers.v1',
+      executable: true,
+    }));
+  });
+
+  it('resolves ranked pathway enrichment to its fixed durable job contract', () => {
+    const declarative = validatePipelineManifest(manifest({
+      tabs: [{
+        id: 'enrichment',
+        label: 'Pathways',
+        moduleKey: 'pathwayEnrichment',
+        resultArtifactTypes: ['enrichment_summary', 'enrichment_results'],
+        resultViews: ['summaryMetrics', { type: 'artifactTable', artifactType: 'enrichment_results' }],
+      }],
+    }));
+
+    expect(resolvePipelineManifest(declarative).tabs[0]).toEqual(expect.objectContaining({
+      routeId: 'enrichment',
+      componentKey: 'pathwayEnrichment',
+      jobType: 'enrichment.gsea.v1',
       executable: true,
     }));
   });

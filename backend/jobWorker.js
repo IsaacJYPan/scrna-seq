@@ -40,6 +40,10 @@ const storage = require('./storage');
 const { validatePbmcPipelineParams, allocateCheckpointStorageKey } = require('./pbmcPipeline');
 const { validateDegFindMarkersParams, allocateDegResultStorageKey } = require('./degFindMarkers');
 const {
+  validateEnrichmentGseaParams,
+  allocateEnrichmentGseaResultStorageKey,
+} = require('./enrichmentGsea');
+const {
   validateSeuratPipelineParams,
   allocateSeuratCheckpointStorageKey,
   assertSupportedSeuratPipelineDataset,
@@ -62,6 +66,7 @@ const COMPLETION_RECEIPT_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
   'deg.find_markers.v1',
+  'enrichment.gsea.v1',
   'checkpoint.load.v1',
   'checkpoint.fork.v1',
 ]);
@@ -153,6 +158,9 @@ function deterministicCompletionOutputKey(job) {
   }
   if (job.jobType === 'deg.find_markers.v1') {
     return allocateDegResultStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'enrichment.gsea.v1') {
+    return allocateEnrichmentGseaResultStorageKey(job.projectId, job.id);
   }
   return null;
 }
@@ -1150,13 +1158,140 @@ async function degFindMarkersHandler(ctx) {
   };
 }
 
+/**
+ * Ranked Gene Ontology pathway enrichment for one selected identity versus the
+ * remaining cells. Like DEG, this is a read-only analysis over an owner-verified
+ * live object: it writes a private result table and a bounded public summary, but
+ * creates no new analysis object or lineage edge.
+ */
+async function enrichmentGseaHandler(ctx) {
+  await ctx.heartbeat();
+  await ctx.log({
+    level: 'info',
+    message: 'enrichment.gsea.v1 handler: validating ownership and parameters before any R contact.',
+  });
+
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError(
+      'R_OBJECT_CONTEXT_REQUIRED',
+      'Pathway-enrichment job is missing its input analysis object.'
+    );
+  }
+  if (typeof ctx.getOwnedAnalysisObject !== 'function'
+      || typeof ctx.deriveRObjectStateKey !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+
+  const { params, defaultsApplied } = validateEnrichmentGseaParams(job.parameters);
+  const resultStorageKey = allocateEnrichmentGseaResultStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, resultStorageKey);
+  await ctx.log({
+    level: 'info',
+    message: 'enrichment.gsea.v1 handler: running the allowlisted cluster-versus-rest ranked GO analysis.',
+  });
+
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.enrichment.gsea.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+      objectContext: { objectId, stateKey },
+      enrichment: { params, resultStorageKey },
+      input: job.parameters,
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (err) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey, err);
+    throw err;
+  }
+
+  const result = descriptor.result || {};
+  if (result.saved !== true || typeof result.checksumSha256 !== 'string'
+      || result.checksumSha256 === '' || !Number.isInteger(result.sizeBytes)
+      || result.sizeBytes < 0 || result.sizeBytes > 50 * 1024 * 1024
+      || !Number.isInteger(result.nRows) || result.nRows < 0 || result.nRows > 100000) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
+    throw codedHandlerError(
+      'ENRICHMENT_RESULT_WRITE_FAILED',
+      'Pathway enrichment did not produce a valid durable result table.'
+    );
+  }
+
+  let completion;
+  try {
+    completion = await ctx.completeEnrichmentGseaResult({
+      resultsArtifact: {
+        artifactType: 'enrichment_results',
+        name: 'Ranked pathway-enrichment table',
+        description: 'Private full cluster-versus-rest GO Biological Process enrichment table.',
+        storageKind: 'local_internal',
+        mimeType: 'text/csv',
+        internalStorageKey: resultStorageKey,
+        checksumSha256: result.checksumSha256,
+        sizeBytes: result.sizeBytes,
+        metadata: {
+          operation: 'r.enrichment.gsea.v1',
+          scientific_output: true,
+          downloadable: false,
+          resolvedParams: params,
+          defaultsApplied,
+          nRows: result.nRows,
+        },
+      },
+      summaryArtifact: {
+        artifactType: descriptor.artifactType,
+        name: descriptor.name,
+        description: descriptor.description,
+        storageKind: 'metadata_only',
+        metadata: {
+          ...descriptor.metadata,
+          kind: 'enrichment_summary',
+          scientific_output: true,
+          downloadable: false,
+          resolvedParams: params,
+          defaultsApplied,
+        },
+      },
+    });
+  } catch (err) {
+    throw publicationIndeterminateError(err);
+  }
+
+  await ctx.log({
+    level: 'info',
+    message: `enrichment.gsea.v1 handler: recorded result ${completion.resultsArtifact.id} and summary ${completion.summaryArtifact.id}.`,
+  });
+  return {
+    result: {
+      ok: true,
+      handled: 'enrichment.gsea.v1',
+      operation: 'r.enrichment.gsea.v1',
+      resultsArtifactId: completion.resultsArtifact.id,
+      summaryArtifactId: completion.summaryArtifact.id,
+    },
+  };
+}
+
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
 // inspection bridge, and allowlisted R/scientific handlers: `pbmc.pipeline.v1`,
-// `seurat.pipeline.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`, and
-// `deg.find_markers.v1`. Other analytical job types
-// (normalize/qc_filter/pca/cluster/umap/integrate, pathway enrichment, CellChat)
+// `seurat.pipeline.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`,
+// `deg.find_markers.v1`, and `enrichment.gsea.v1`. Other analytical job types
+// (normalize/qc_filter/pca/cluster/umap/integrate and CellChat)
 // remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
 // instead of pretending to run them.
 const DEFAULT_HANDLERS = Object.freeze({
@@ -1169,6 +1304,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'checkpoint.load.v1': checkpointLoadHandler,
   'checkpoint.fork.v1': checkpointForkHandler,
   'deg.find_markers.v1': degFindMarkersHandler,
+  'enrichment.gsea.v1': enrichmentGseaHandler,
 });
 
 /**
@@ -1411,6 +1547,9 @@ function createJobWorker(options = {}) {
           jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
         ),
         completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        completeEnrichmentGseaResult: (input) => db.completeEnrichmentGseaResultByWorker(
           jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
         ),
         completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(
@@ -1703,6 +1842,7 @@ function createJobWorker(options = {}) {
       // summary artifact in ONE claim-guarded transaction (used only by the deg.find_markers.v1
       // handler) so one artifact can't commit without the other. Creates NO result object/edge.
       completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      completeEnrichmentGseaResult: (input) => db.completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       removeDurableObject: (key) => storageProvider.remove(key),
       // R-bridge seam (used by every R-facing handler: r.runtime.check,
@@ -1972,6 +2112,7 @@ module.exports = {
   checkpointLoadHandler,
   checkpointForkHandler,
   degFindMarkersHandler,
+  enrichmentGseaHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,

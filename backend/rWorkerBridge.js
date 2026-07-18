@@ -48,6 +48,7 @@ const https = require('https');
 const storage = require('./storage');
 const { PBMC_PIPELINE_PARAM_NAMES } = require('./pbmcPipeline');
 const { DEG_FIND_MARKERS_PARAM_NAMES } = require('./degFindMarkers');
+const { ENRICHMENT_GSEA_PARAM_NAMES } = require('./enrichmentGsea');
 const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
 
 /** Coded error helper (mirrors database.js so callers can branch on err.code). */
@@ -95,6 +96,7 @@ const COMPLETION_JOB_TO_R_OPERATION = Object.freeze({
   'pbmc.pipeline.v1': 'r.pbmc.pipeline.v1',
   'seurat.pipeline.v1': 'r.seurat.pipeline.v1',
   'deg.find_markers.v1': 'r.deg.find_markers.v1',
+  'enrichment.gsea.v1': 'r.enrichment.gsea.v1',
   'checkpoint.load.v1': 'r.checkpoint.load.v1',
   'checkpoint.fork.v1': 'r.checkpoint.load.v1',
 });
@@ -223,6 +225,25 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     // FindAllMarkers over many clusters can run long; explicit but bounded so a hung run can
     // never wedge a worker indefinitely.
     defaultTimeoutMs: 120000,
+  }),
+  // Ranked GO enrichment for one selected identity versus all remaining cells. The
+  // worker owns the object context, validated scientific parameters, and output key;
+  // the browser cannot choose an R function, endpoint, path, or live-state key.
+  'r.enrichment.gsea.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/enrichment-gsea',
+    artifactType: 'enrichment_summary',
+    artifactName: 'Ranked pathway-enrichment summary',
+    artifactDescription:
+      'Sanitized, bounded summary of a cluster-versus-rest ranked Gene Ontology Biological Process enrichment run. '
+      + 'The complete pathway table remains in private project storage; no expression matrix, cell-level data, '
+      + 'storage key, R state key, or public download is included.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesEnrichmentParams: true,
+    mutating: false,
+    readOnly: false,
+    defaultTimeoutMs: 300000,
   }),
   // Dataset-backed Seurat pipeline: load one server-resolved 10x HDF5 dataset,
   // create a Seurat object, run QC/preprocessing/clustering/UMAP, and save a
@@ -578,6 +599,112 @@ function sanitizeDegResultInfo(body) {
   };
 }
 
+/**
+ * Keep only a small, bounded pathway-enrichment preview. Full pathway and leading-
+ * edge gene tables stay in the local_internal CSV artifact and never enter public
+ * metadata. Unknown fields from R are dropped.
+ */
+function sanitizeEnrichmentSummary(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
+  const out = {};
+
+  for (const [source, target] of [
+    ['method', 'method'],
+    ['group_by', 'groupBy'],
+    ['assay', 'assay'],
+    ['species', 'species'],
+    ['gene_set_collection', 'geneSetCollection'],
+    ['rank_metric', 'rankMetric'],
+  ]) {
+    const value = sanitizeRuntimeField(s[source], 80);
+    if (value) out[target] = value;
+  }
+
+  if (s.comparison && typeof s.comparison === 'object') {
+    const targetGroup = sanitizeRuntimeField(s.comparison.target_group, 80);
+    const reference = sanitizeRuntimeField(s.comparison.reference, 80);
+    if (targetGroup || reference) {
+      out.comparison = {};
+      if (targetGroup) out.comparison.targetGroup = targetGroup;
+      if (reference) out.comparison.reference = reference;
+    }
+  }
+
+  for (const [source, target] of [
+    ['input_gene_count', 'inputGeneCount'],
+    ['mapped_gene_count', 'mappedGeneCount'],
+    ['tested_pathway_count', 'testedPathwayCount'],
+    ['significant_pathway_count', 'significantPathwayCount'],
+  ]) {
+    const value = sanitizeCount(s[source]);
+    if (value !== null) out[target] = value;
+  }
+  const mappingRate = sanitizeStatNumber(s.mapping_rate);
+  if (mappingRate !== null && mappingRate >= 0 && mappingRate <= 1) {
+    out.mappingRate = mappingRate;
+  }
+
+  if (s.package_versions && typeof s.package_versions === 'object') {
+    const versions = {};
+    for (const [source, target] of [
+      ['r', 'r'],
+      ['seurat', 'seurat'],
+      ['annotation_dbi', 'annotationDbi'],
+      ['go_db', 'goDb'],
+      ['cluster_profiler', 'clusterProfiler'],
+      ['fgsea', 'fgsea'],
+      ['organism_db', 'organismDb'],
+    ]) {
+      const value = sanitizeRuntimeField(s.package_versions[source], 64);
+      if (value) versions[target] = value;
+    }
+    if (Object.keys(versions).length) out.packageVersions = versions;
+  }
+
+  if (Array.isArray(s.top_pathways)) {
+    const rows = [];
+    for (const row of s.top_pathways) {
+      if (!row || typeof row !== 'object') continue;
+      const id = sanitizeRuntimeField(row.pathway_id, 80);
+      const rawName = typeof row.pathway_name === 'string' ? row.pathway_name : '';
+      const pathLikeName = /(?:[A-Za-z]:[\\/]|[\\/]|https?:|file:)/i.test(rawName);
+      const name = pathLikeName ? null : sanitizeRuntimeField(rawName, 160);
+      if (!id || !name) continue;
+      const safe = { id, name };
+      const nes = sanitizeStatNumber(row.normalized_enrichment_score);
+      const pValue = sanitizeStatNumber(row.p_value);
+      const adjustedPValue = sanitizeStatNumber(row.adjusted_p_value);
+      const setSize = sanitizeCount(row.set_size);
+      if (nes !== null) safe.normalizedEnrichmentScore = nes;
+      if (pValue !== null && pValue >= 0 && pValue <= 1) safe.pValue = pValue;
+      if (adjustedPValue !== null && adjustedPValue >= 0 && adjustedPValue <= 1) {
+        safe.adjustedPValue = adjustedPValue;
+      }
+      if (setSize !== null) safe.setSize = setSize;
+      if (typeof row.significant === 'boolean') safe.significant = row.significant;
+      const direction = sanitizeRuntimeField(row.direction, 16);
+      if (direction === 'positive' || direction === 'negative' || direction === 'neutral') {
+        safe.direction = direction;
+      }
+      rows.push(safe);
+      if (rows.length >= 25) break;
+    }
+    if (rows.length) out.topPathways = rows;
+  }
+  out.warnings = sanitizeNameList(s.warnings, 32, 160);
+  return out;
+}
+
+function sanitizeEnrichmentResultInfo(body) {
+  const result = sanitizeDegResultInfo(body);
+  if (result.sizeBytes !== null && result.sizeBytes > 50 * 1024 * 1024) {
+    result.saved = false;
+  }
+  if (result.nRows !== null && result.nRows > 100000) result.saved = false;
+  return result;
+}
+
 const COMPLETION_RECEIPT_BINDING_KEYS = Object.freeze([
   'version',
   'job_id',
@@ -700,6 +827,9 @@ function buildCompletionReceiptBinding(job, operation, args = {}) {
   } else if (jobType === 'deg.find_markers.v1') {
     outputStorageKey = args.deg && args.deg.resultStorageKey;
     outputKind = 'artifacts';
+  } else if (jobType === 'enrichment.gsea.v1') {
+    outputStorageKey = args.enrichment && args.enrichment.resultStorageKey;
+    outputKind = 'artifacts';
   } else {
     sourceCheckpointArtifactId = args.checkpoint && args.checkpoint.checkpointArtifactId;
     targetAnalysisObjectId = args.objectContext && args.objectContext.objectId;
@@ -807,6 +937,36 @@ function validateReceiptPayloadSchema(jobType, payload) {
     }
     return;
   }
+  if (jobType === 'enrichment.gsea.v1') {
+    assertExactObjectKeys(payload, ['ok', 'summary', 'result']);
+    if (payload.ok !== true) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    assertExactObjectKeys(payload.summary, [
+      'method', 'comparison', 'group_by', 'assay', 'species',
+      'gene_set_collection', 'rank_metric', 'input_gene_count',
+      'mapped_gene_count', 'mapping_rate', 'tested_pathway_count',
+      'significant_pathway_count', 'package_versions', 'top_pathways', 'warnings',
+    ]);
+    assertExactObjectKeys(payload.summary.comparison, ['target_group', 'reference']);
+    assertExactObjectKeys(payload.summary.package_versions, [
+      'r', 'seurat', 'annotation_dbi', 'go_db', 'cluster_profiler', 'fgsea',
+      'organism_db',
+    ]);
+    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
+    if (!Array.isArray(payload.summary.top_pathways)
+        || !Array.isArray(payload.summary.warnings)
+        || payload.summary.top_pathways.length > 25) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    for (const row of payload.summary.top_pathways) {
+      assertExactObjectKeys(row, [
+        'pathway_id', 'pathway_name', 'normalized_enrichment_score', 'p_value',
+        'adjusted_p_value', 'set_size', 'significant', 'direction',
+      ]);
+    }
+    return;
+  }
   assertExactObjectKeys(payload, [
     'loaded', 'runtime_instance_id', 'checksum_verified', 'class', 'n_cells',
     'n_features', 'assays', 'reductions', 'n_meta_fields', 'meta_fields',
@@ -871,6 +1031,32 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
         summary,
         ...(jobType === 'seurat.pipeline.v1'
           ? { warnings: sanitizeNameList(body.warnings, 32, 160) } : {}),
+      },
+    };
+  }
+  if (jobType === 'enrichment.gsea.v1') {
+    const summary = sanitizeEnrichmentSummary(body);
+    const result = sanitizeEnrichmentResultInfo(body);
+    if (!result.saved || !result.checksumSha256 || result.sizeBytes === null
+        || result.nRows === null) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return {
+      operation: rOperation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: job.analysisObjectId,
+      summary,
+      result,
+      metadata: {
+        operation: rOperation,
+        kind: 'enrichment_summary',
+        scientific_output: true,
+        downloadable: false,
+        ranAt: new Date().toISOString(),
+        objectId: job.analysisObjectId,
+        summary,
       },
     };
   }
@@ -939,6 +1125,7 @@ function sanitizeRBridgeError(err) {
     R_OBJECT_CONTEXT_REQUIRED: 'Server-derived object context is required for object inspection.',
     R_PIPELINE_PARAMS_REQUIRED: 'Server-validated pipeline parameters are required.',
     R_DEG_PARAMS_REQUIRED: 'Server-validated DEG parameters and result key are required.',
+    R_ENRICHMENT_PARAMS_REQUIRED: 'Server-validated pathway-enrichment parameters and result key are required.',
     R_CHECKPOINT_REQUIRED: 'A server-selected checkpoint is required for a checkpoint load.',
     R_TIMEOUT: 'R runtime did not respond before the timeout.',
     R_RESPONSE_TOO_LARGE: 'R runtime response exceeded its safe limit.',
@@ -949,6 +1136,7 @@ function sanitizeRBridgeError(err) {
     R_PBMC_PIPELINE_FAILED: 'R PBMC pipeline run failed.',
     R_CHECKPOINT_LOAD_FAILED: 'R checkpoint load failed.',
     R_DEG_FIND_MARKERS_FAILED: 'R DEG / marker finding run failed.',
+    R_ENRICHMENT_GSEA_FAILED: 'R ranked pathway-enrichment run failed.',
     R_SEURAT_PIPELINE_FAILED: 'R Seurat pipeline run failed.',
     R_BRIDGE_ERROR: 'R bridge operation failed.',
   };
@@ -1238,7 +1426,28 @@ async function runRBridgeOperation(args = {}) {
     request.body = { operation, params: safeParams, storage_key: resultStorageKey };
   }
 
-  // 2e. Dataset-backed Seurat pipeline op: body reconstructed from ONLY
+  // 2e. Ranked enrichment: only the dedicated validator's fields and the
+  // server-allocated output key can cross the worker/R boundary.
+  if (spec.carriesEnrichmentParams) {
+    const enrichment = args.enrichment;
+    const params = enrichment && typeof enrichment === 'object' ? enrichment.params : null;
+    const resultStorageKey = enrichment && typeof enrichment === 'object'
+      ? enrichment.resultStorageKey : null;
+    if (!params || typeof params !== 'object'
+        || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
+      throw codedError(
+        'R_ENRICHMENT_PARAMS_REQUIRED',
+        'Server-validated pathway-enrichment parameters and result key are required.'
+      );
+    }
+    const safeParams = {};
+    for (const name of ENRICHMENT_GSEA_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    request.body = { operation, params: safeParams, storage_key: resultStorageKey };
+  }
+
+  // 2f. Dataset-backed Seurat pipeline op: body reconstructed from ONLY
   // server-validated params and DB-resolved storage coordinates.
   if (spec.carriesSeuratDatasetParams) {
     const seurat = args.seuratPipeline;
@@ -1318,6 +1527,7 @@ async function runRBridgeOperation(args = {}) {
     if (spec.carriesParams) failCode = 'R_PBMC_PIPELINE_FAILED';
     else if (spec.carriesCheckpoint) failCode = 'R_CHECKPOINT_LOAD_FAILED';
     else if (spec.carriesDegParams) failCode = 'R_DEG_FIND_MARKERS_FAILED';
+    else if (spec.carriesEnrichmentParams) failCode = 'R_ENRICHMENT_GSEA_FAILED';
     else if (spec.carriesSeuratDatasetParams) failCode = 'R_SEURAT_PIPELINE_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     // Server-side diagnostic: the R HTTP status + our coded reason (never the R body,
@@ -1447,6 +1657,36 @@ async function runRBridgeOperation(args = {}) {
     };
   }
 
+  if (operation === 'r.enrichment.gsea.v1') {
+    const summary = sanitizeEnrichmentSummary(body);
+    const result = sanitizeEnrichmentResultInfo(body);
+    if (result.saved === true && (!result.checksumSha256
+        || result.sizeBytes === null || result.nRows === null)) {
+      throw markRSideEffectsPossible(codedError(
+        'R_RESPONSE_INVALID',
+        'R runtime returned an invalid response.'
+      ));
+    }
+    return {
+      operation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: objectContext.objectId,
+      summary,
+      result,
+      metadata: {
+        operation,
+        kind: 'enrichment_summary',
+        scientific_output: true,
+        downloadable: false,
+        ranAt: new Date().toISOString(),
+        objectId: objectContext.objectId,
+        summary,
+      },
+    };
+  }
+
   if (operation === 'r.seurat.pipeline.v1') {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
@@ -1540,6 +1780,8 @@ module.exports = {
   sanitizeStatNumber,
   sanitizeDegSummary,
   sanitizeDegResultInfo,
+  sanitizeEnrichmentSummary,
+  sanitizeEnrichmentResultInfo,
   createCompletionReceiptEnvelope,
   verifyCompletionReceiptEnvelope,
   buildCompletionReceiptBinding,

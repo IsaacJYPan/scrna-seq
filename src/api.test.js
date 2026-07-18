@@ -4,6 +4,7 @@ import {
   apiUrl,
   buildCheckpointForkJobPayload,
   buildDegFindMarkersJobPayload,
+  buildEnrichmentGseaJobPayload,
   buildSeuratPipelineJobPayload,
 } from './api';
 
@@ -80,6 +81,47 @@ describe('buildDegFindMarkersJobPayload', () => {
       },
     });
     expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|completed|vault|stateKey|C:\/private/i);
+  });
+});
+
+describe('buildEnrichmentGseaJobPayload', () => {
+  it('keeps only the ranked-enrichment allowlist and never accepts server-owned fields', () => {
+    const payload = buildEnrichmentGseaJobPayload('ao_abc123', {
+      groupBy: 'seurat_clusters',
+      assay: 'RNA',
+      targetGroup: '0',
+      species: 'human',
+      geneSetCollection: 'GO_BP',
+      minGeneSetSize: 10,
+      maxGeneSetSize: 500,
+      adjustedPValueCutoff: 0.05,
+      topPathways: 20,
+      maxCellsPerIdent: null,
+      randomSeed: 7,
+      ownerUserId: 99,
+      storageUri: 'vault/private/enrichment.csv',
+      stateKey: 'user-1:obj-ao_abc123',
+      endpoint: '/api/r/enrichment',
+    });
+
+    expect(payload).toEqual({
+      jobType: 'enrichment.gsea.v1',
+      analysisObjectId: 'ao_abc123',
+      parameters: {
+        groupBy: 'seurat_clusters',
+        assay: 'RNA',
+        targetGroup: '0',
+        species: 'human',
+        geneSetCollection: 'GO_BP',
+        minGeneSetSize: 10,
+        maxGeneSetSize: 500,
+        adjustedPValueCutoff: 0.05,
+        topPathways: 20,
+        maxCellsPerIdent: null,
+        randomSeed: 7,
+      },
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|vault|stateKey|endpoint|api\/r/i);
   });
 });
 
@@ -476,6 +518,48 @@ describe('API Client (electronAPI)', () => {
         groupBy: 'seurat_clusters',
         assay: 'RNA',
         testUse: 'wilcox',
+      },
+    });
+  });
+
+  it('creates durable ranked pathway-enrichment jobs through the project job API wrapper', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_enrich123', jobType: 'enrichment.gsea.v1', status: 'queued' }),
+    });
+
+    const result = await electronAPI.createEnrichmentGseaJob('proj_1', 'ao_abc123', {
+      groupBy: 'seurat_clusters',
+      assay: 'RNA',
+      targetGroup: '0',
+      species: 'human',
+      geneSetCollection: 'GO_BP',
+      minGeneSetSize: 10,
+      maxGeneSetSize: 500,
+      adjustedPValueCutoff: 0.05,
+      topPathways: 20,
+      storageKey: 'projects/proj_1/private.csv',
+    });
+
+    expect(result.id).toBe('job_enrich123');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'enrichment.gsea.v1',
+      analysisObjectId: 'ao_abc123',
+      parameters: {
+        groupBy: 'seurat_clusters',
+        assay: 'RNA',
+        targetGroup: '0',
+        species: 'human',
+        geneSetCollection: 'GO_BP',
+        minGeneSetSize: 10,
+        maxGeneSetSize: 500,
+        adjustedPValueCutoff: 0.05,
+        topPathways: 20,
       },
     });
   });
