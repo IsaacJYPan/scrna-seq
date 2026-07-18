@@ -933,7 +933,7 @@ async function main() {
     { id: 'geneviewer',   label: 'Gene Expression',           requiresData: true  },
     { id: 'deg',          label: 'Markers / DEG',             requiresData: true  },
     { id: 'annotate',     label: 'Cell Annotation',           requiresData: true, expectedDisabled: true  },
-    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true, expectedDisabled: true  },
+    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true, expectedDisabled: false },
     { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: true  },
     { id: 'customscript', label: 'Custom Script',             requiresData: true, expectedDisabled: true  },
     { id: 'history',      label: 'Jobs & Artifacts',          requiresData: false },

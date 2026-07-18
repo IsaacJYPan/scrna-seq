@@ -52,7 +52,7 @@ Status legend:
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
 | Durable Seurat pipeline worker (`seurat.pipeline.v1`) | UI-wired (10x HDF5 only) | Pipeline Manager can upload/select one `tenx_h5` dataset, create/reuse a raw dataset analysis object, launch a durable Seurat preprocessing job, show logs/status/safe summary metadata, and hand the result to checkpoint load or DEG. See "Seurat pipeline path" below. |
-| Durable jobs | UI-wired (metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1`; Pipeline Manager can create `seurat.pipeline.v1` and result `checkpoint.load.v1`; Jobs & Artifacts can create `checkpoint.fork.v1` when an object has exactly one available, local, loadable checkpoint. General job launch, cancel, and retry flows are not generally UI-wired. |
+| Durable jobs | UI-wired (metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1`; Pathway Enrichment can create `enrichment.gsea.v1`; Pipeline Manager can create `seurat.pipeline.v1` and result `checkpoint.load.v1`; Jobs & Artifacts can create `checkpoint.fork.v1` when an object has exactly one available, local, loadable checkpoint. General job launch, cancel, and retry flows are not generally UI-wired. |
 | Standalone job worker | backend-wired (one-slot topology) | `worker.js` is the queue consumer; Express no longer starts an in-process worker. `npm run dev` supervises Vite, Express, one local R service, and one standalone worker; `npm run dev:no-worker` omits the worker. Claims use Postgres leases and `FOR UPDATE SKIP LOCKED`; a Postgres advisory singleton plus `JOB_WORKER_CONCURRENCY=1` enforce the supported one-process topology using the same private R service as Express. Process tests prove second-entrypoint refusal and lease recovery, not parallel heavy-R execution. Private `/livez` and `/readyz` endpoints expose process/readiness state. |
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
 | Checkpoint artifacts | UI-wired (metadata + reattach/fork actions) | Immutable result checkpoint metadata per successful job can be listed. Pipeline Manager can request owner-only reattach through `checkpoint.load.v1`; project writers can request a private collaborator fork through `checkpoint.fork.v1`; there is still no download route. |
@@ -63,7 +63,7 @@ Status legend:
 | Provenance / figures / cache | UI-wired with production limits | Older `/api/db/*` routes still back the live gallery/cache path. Jobs & Artifacts also shows project-scoped provenance and figure metadata read-only. Production keeps bounded figure preview but disables legacy server-file gallery save because its R export path is outside the durable artifact contract. |
 | Runtime check / object inspect workers | backend-only | Read-only, metadata-only bridge operations. |
 | Default visual theme | UI-wired | The React shell is light-first by default with the existing dark toggle retained. |
-| Pathway enrichment | not implemented (product) | No durable workflow. A legacy authenticated R endpoint may still exist (see below). |
+| Ranked pathway enrichment (`enrichment.gsea.v1`) | UI-wired (local image and real-R smoke verified) | The active Pathway Enrichment page launches one cluster/identity-versus-rest ranked GO Biological Process job, polls status/logs, and displays a bounded `enrichment_summary`. The full `enrichment_results` CSV stays private. The R 4.5.3 image build and real-R smoke pass on this worktree; deployed browser acceptance remains a release gate. |
 | CellChat / cell-cell communication | not implemented (product) | No durable workflow. Legacy authenticated R endpoints may still exist (see below). |
 | Cell annotation | not implemented (product) | UI placeholder only. A legacy authenticated R endpoint may still exist (see below). |
 | Custom Script / arbitrary R execution | not implemented | Out of scope; no arbitrary-R endpoint. |
@@ -135,7 +135,75 @@ durable worker path as its primary workflow:
   R contact. It is not the main DEG UI workflow.
 
 Neither path is removed. The UI migration does not add public downloads,
-generated reports/scripts, pathway enrichment, CellChat, or shared live R state.
+generated reports/scripts, CellChat, or shared live R state.
+
+## Ranked pathway-enrichment path
+
+The active pathway workflow is a fixed, durable `enrichment.gsea.v1` job. It is
+not the legacy synchronous `/api/r/enrichment` prototype.
+
+- **Scientific scope:** one explicit cluster or current identity group is
+  compared with the remaining cells using a fixed two-sided Wilcoxon marker
+  calculation with no significance pre-filter. The complete testable fold-change
+  ranking is mapped from gene symbols to Entrez identifiers and passed to local
+  GO Biological Process GSEA. Species is an explicit human/mouse choice; v1 does
+  not guess species from capitalization and does not call a remote pathway API.
+  A visible `maxCellsPerIdent` limit is always finite (10,000 by default), and
+  the recorded seed makes downsampling and tied-score ordering repeatable.
+- **Interpretation:** this is descriptive cluster-versus-rest enrichment. It does
+  not prove pathway activation, and it is not a sample-aware treated-versus-control
+  test. Condition claims require durable donor/sample/condition metadata and a
+  pseudobulk or other replicate-aware comparison that is not implemented here.
+- **Execution boundary:** the creator must own the selected live R object. The
+  worker validates the exact parameter allowlist, derives the private object key,
+  allocates the output key, and calls only `r.enrichment.gsea.v1` at
+  `POST /object/enrichment-gsea`. Express blocks that endpoint from the public R
+  proxy before R contact. The R operation works on a local copy and restores
+  identities/assay; it never publishes a changed live object.
+- **Outputs and recovery:** R atomically writes a private CSV plus a signed,
+  job/project/object/output-bound completion receipt. The database atomically
+  records one `local_internal` `enrichment_results` artifact and one bounded
+  metadata-only `enrichment_summary`; no result analysis object or lineage edge
+  is created. Summary previews are capped at 25 pathways, complete leading-edge
+  genes remain private, and public artifact projections omit storage keys. The
+  signed summary records R, Seurat, GSEA, annotation, GO, and organism-database
+  versions for result-level software provenance.
+- **Deployment dependency:** `clusterProfiler`, `fgsea`, `AnnotationDbi`,
+  `org.Hs.eg.db`, `org.Mm.eg.db`, and `GO.db` are mandatory in the production R
+  image and audited in CI. The R 4.5.3 image and real-R known-shape smoke pass
+  on this worktree; deployed database/worker/browser acceptance remains a
+  release gate.
+
+## Downstream-analysis roadmap and evidence
+
+There is no single downstream checklist that fits every single-cell study. The
+next features are ordered around recurring analyses in strong publications and
+around what the app can report without inventing experimental design:
+
+1. **Ranked pathway enrichment (implemented):** use the complete testable gene
+   ranking, not only a short list of statistically significant genes. This
+   follows the core design of [Gene Set Enrichment Analysis](https://pmc.ncbi.nlm.nih.gov/articles/PMC1239896/).
+2. **Sample-aware condition comparisons (next metadata foundation):** treated
+   versus control claims must use biological samples or donors as the units of
+   replication. The app needs durable sample, donor, and condition fields before
+   it can offer pseudobulk differential expression or condition-level pathway
+   claims. This guardrail follows the false-positive findings in
+   [Squair et al.](https://www.nature.com/articles/s41467-021-25960-2).
+3. **Cell-to-cell communication (next analysis vertical slice):** CellChat can
+   predict candidate ligand-receptor signaling between annotated cell groups,
+   but the result is hypothesis-generating rather than observed communication.
+   Species, grouping/annotation field, database category, minimum group size,
+   and single-condition versus between-condition intent must be explicit. Both
+   the [CellChat paper](https://www.nature.com/articles/s41467-021-21246-9) and a
+   [multi-method comparison](https://www.nature.com/articles/s41467-022-30755-0)
+   support showing the method/resource choice and treating outputs as predictions.
+4. **Differential abundance, trajectory, and regulatory activity:** add these
+   only after their required sample design, time/order, or lineage assumptions
+   can be represented explicitly in project metadata and the UI.
+
+CellChat is therefore not silently configured from cluster names. The durable
+worker and result shape should be added after the study-level choices above are
+confirmed.
 
 ## Seurat pipeline path
 
@@ -180,13 +248,14 @@ members.
 
 ## Hidden/disabled features vs reachable R endpoints
 
-Pathway enrichment, CellChat, and cell annotation are **not
-production-integrated** and are **not exposed as supported UI workflows** (the
-UI shows placeholders). Some legacy authenticated endpoints remain reachable
-only outside production for development compatibility, for example
-`/api/r/cellchat`, `/api/r/cellchat-infer`, `/api/r/enrichment`,
-`/api/r/annotate-clusters`, and `/api/r/deg`. Production is fail-closed with an
-exact method/path allowlist and blocks those routes before R contact.
+CellChat and cell annotation are **not production-integrated** and remain UI
+placeholders. Ranked pathway enrichment is integrated only through the durable
+`enrichment.gsea.v1` workflow described above. Its worker-only endpoint is not a
+public API. Legacy authenticated endpoints remain reachable only outside
+production for development compatibility, including `/api/r/cellchat`,
+`/api/r/cellchat-infer`, `/api/r/enrichment`, `/api/r/annotate-clusters`, and
+`/api/r/deg`. Production is fail-closed with an exact method/path allowlist and
+blocks those legacy routes before R contact.
 
 The legacy synchronous vault loaders (`/load-local-10x`, `/load-multi-10x`, and
 `/load-h5ad`) are also blocked in production because their aggregate dimensions
@@ -279,7 +348,7 @@ claiming that the existing live-R architecture can scale horizontally:
   cancellation authoritatively wins; canceled checkpoint load/fork state remains
   owner-private and ephemeral until bounded LRU eviction or R restart. Immediate
   compute termination requires a future isolated per-job runtime.
-- PBMC, Seurat, checkpoint load/fork, and DEG jobs receive at most two execution
+- PBMC, Seurat, checkpoint load/fork, DEG, and ranked enrichment jobs receive at most two execution
   attempts, but a claim-guarded dispatch marker prevents a crashed worker from
   issuing the same side-effecting R request twice. R atomically writes a private,
   HMAC-signed, job/project/type/input/output-bound completion receipt after its
@@ -354,7 +423,7 @@ The app runtime is Postgres-only.
   in production, refuses non-HTTPS frontend origins for cross-site cookies.
   Same-origin deployment is the supported Compose default.
 - `backend/storage.js` is the active local-filesystem provider for new durable
-  datasets, checkpoints, and DEG tables. It uses server-owned keys shaped as
+  datasets, checkpoints, DEG tables, and pathway-enrichment tables. It uses server-owned keys shaped as
   `projects/<projectId>/<kind>/<id>/<file>` under `STORAGE_ROOT`. Writes are
   finalized atomically, checked by size and SHA-256, and blocked from following
   links outside the root. Keys are never client-supplied or returned publicly.
@@ -365,9 +434,9 @@ The app runtime is Postgres-only.
   and lineage are the durable source of truth **at the API/DB layer**. Projects
   and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
   lineage are visible as sanitized metadata in Jobs & Artifacts, which also
-  exposes the narrow checkpoint-fork launch. The DEG tab can
-  launch `deg.find_markers.v1` worker jobs and read sanitized DEG summary
-  artifacts. The Pipeline Manager Seurat panel can list/upload `tenx_h5`
+  exposes the narrow checkpoint-fork launch. The DEG and Pathway Enrichment tabs can
+  launch `deg.find_markers.v1` and `enrichment.gsea.v1` worker jobs and read their
+  sanitized summary artifacts. The Pipeline Manager Seurat panel can list/upload `tenx_h5`
   datasets for `seurat.pipeline.v1`, launch that job, and request checkpoint
   reattach for the result object. General dataset management, generic worker job
   launch/cancel/retry flows, and artifact downloads remain
@@ -381,13 +450,13 @@ The app runtime is Postgres-only.
   only genuinely private, projectless resources. Project resources and legacy
   descendants that trace to project data stay behind project RBAC routes, so
   immutable creator metadata cannot become a post-removal access bypass.
-  Receipt-backed PBMC/Seurat/checkpoint/DEG job types are rejected synchronously
+  Receipt-backed PBMC/Seurat/checkpoint/DEG/enrichment job types are rejected synchronously
   on `/api/jobs`; they require project-scoped durable storage and must use the
   project jobs API.
 - The standalone worker is opt-in and allowlisted. Registered handlers include
   PBMC pipeline, dataset-backed Seurat pipeline, checkpoint load, checkpoint
-  fork, DEG marker finding, runtime check, and object inspection. The DEG marker
-  workflow is UI-wired for job launch/status/safe summary metadata; the Seurat
+  fork, DEG marker finding, ranked pathway enrichment, runtime check, and object inspection.
+  The DEG and enrichment workflows are UI-wired for job launch/status/safe summary metadata; the Seurat
   pipeline UI is wired only for `tenx_h5` input plus result checkpoint reattach.
   PBMC pipeline, runtime check, and object inspect worker launches remain
   backend-only. Express never consumes the queue.
@@ -424,8 +493,9 @@ The app runtime is Postgres-only.
   Postgres cutover — the Postgres schema ships every table from `pg/schema.sql`.)
   Durable jobs, artifacts/checkpoints, and lineage are implemented in the backend. The React UI now includes a
   Jobs & Artifacts / durable history surface for safe metadata visibility and
-  controlled checkpoint forks, and the DEG tab launches `deg.find_markers.v1` jobs and reads
-  bounded `deg_summary` metadata, and the Pipeline Manager Seurat panel launches the
+  controlled checkpoint forks; the DEG and Pathway Enrichment tabs launch
+  `deg.find_markers.v1` and `enrichment.gsea.v1` jobs and read bounded summary
+  metadata; and the Pipeline Manager Seurat panel launches the
   narrow `seurat.pipeline.v1` path with result checkpoint reattach. General job
   launching, artifact downloads, and lineage mutation are still not UI-wired. A
   passing backend suite means the API/DB contract holds - **not** that every
@@ -490,7 +560,8 @@ The app runtime is Postgres-only.
   and correct `deg_markers`/`deg_summary` artifacts with no storage path/key
   leak. It needs only Seurat + dplyr (no HDF5 sample data), so it stays fast.
 - The R/workflow checks (`test:seurat-pipeline`, `test:r-state-proxy`,
-  `test:pbmc-parent`, `test:checkpoint-load`, `test:deg-markers`) exercise the
+  `test:pbmc-parent`, `test:checkpoint-load`, `test:deg-markers`,
+  `test:enrichment-gsea`) exercise the
   hardened live paths and require a real R/Seurat backend (`test:seurat-pipeline`
   also needs `hdf5r` for 10x HDF5); they skip cleanly when R/Seurat is absent.
   `test:r-storage` separately checks project-key validation, atomic RDS writes,
@@ -499,7 +570,8 @@ The app runtime is Postgres-only.
   CI installs `hdf5r` and runs `test:seurat-pipeline` so the UI-wired Seurat
   pipeline has a real R/standalone-worker/lease-renewal regression gate in pull
   requests. A separate required CI job also builds the exact production
-  `r-backend/Dockerfile`, verifies every required R package, boots it under the
+  `r-backend/Dockerfile`, verifies every required R package (including the local
+  ranked-enrichment stack), boots it under the
   unprivileged read-only container boundary, proves authenticated `/health`, and
   rejects an unauthenticated health request.
 - CI runs on `pull_request` and `workflow_dispatch` only. The security-critical

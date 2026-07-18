@@ -892,9 +892,81 @@ run_test("/export-figure rejects unsafe export formats", function() {
 })
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TEST 17: AST Security Sandbox
+# TEST 17: Ranked enrichment parameter and output bounds
 # ═════════════════════════════════════════════════════════════════════════════
 
+run_test("ranked enrichment validates a fixed and bounded contract", function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- sub("^--file=", "", args[grep("^--file=", args)])
+  script_dir <- if (length(file_arg) > 0) dirname(normalizePath(file_arg)) else getwd()
+  candidates <- c(
+    file.path(getwd(), "r-backend", "plumber.R"),
+    file.path(getwd(), "..", "plumber.R"),
+    file.path(script_dir, "..", "plumber.R")
+  )
+  existing <- Filter(file.exists, candidates)
+  assert("plumber.R located for ranked enrichment tests", length(existing) > 0)
+  plumber_env <- new.env()
+  sys.source(existing[1], envir = plumber_env)
+
+  normalize_params <- get("normalize_enrichment_gsea_params", envir = plumber_env)
+  empty_table <- get("empty_enrichment_gsea_table", envir = plumber_env)
+  safe_string <- get("enrichment_gsea_safe_summary_string", envir = plumber_env)
+  valid <- list(
+    groupBy = "seurat_clusters",
+    assay = "RNA",
+    targetGroup = "T cells",
+    species = "human",
+    geneSetCollection = "GO_BP",
+    minGeneSetSize = 10L,
+    maxGeneSetSize = 500L,
+    adjustedPValueCutoff = 0.05,
+    topPathways = 25L,
+    maxCellsPerIdent = 10000L,
+    randomSeed = 1L
+  )
+  parsed <- normalize_params(valid)
+  assert("valid parameters preserve the selected comparison group",
+         identical(parsed$target_group, "T cells"))
+  assert("valid parameters preserve the only supported gene-set collection",
+         identical(parsed$gene_set_collection, "GO_BP"))
+  assert("the public pathway preview is capped at 25 rows", parsed$top_pathways == 25L)
+
+  rejects <- function(value) {
+    inherits(tryCatch(normalize_params(value), error = identity), "error")
+  }
+  unknown <- valid
+  unknown$outputPath <- "outside.csv"
+  assert("unknown parameters are rejected", rejects(unknown))
+  bad_collection <- valid
+  bad_collection$geneSetCollection <- "KEGG"
+  assert("remote or unreviewed gene-set collections are rejected", rejects(bad_collection))
+  bad_group <- valid
+  bad_group$targetGroup <- "T cells\nforged"
+  assert("control characters in group labels are rejected", rejects(bad_group))
+  bad_sizes <- valid
+  bad_sizes$minGeneSetSize <- 600L
+  bad_sizes$maxGeneSetSize <- 100L
+  assert("an inverted gene-set size range is rejected", rejects(bad_sizes))
+  bad_top <- valid
+  bad_top$topPathways <- 26L
+  assert("more than 25 preview pathways is rejected", rejects(bad_top))
+  unbounded_cells <- valid
+  unbounded_cells$maxCellsPerIdent <- NULL
+  assert("an unbounded all-cell comparison is rejected", rejects(unbounded_cells))
+
+  result_columns <- c(
+    "pathway_id", "pathway_name", "normalized_enrichment_score", "p_value",
+    "adjusted_p_value", "set_size", "core_gene_entrez_ids", "core_gene_symbols"
+  )
+  assert("zero pathway hits still have a stable CSV schema",
+         identical(colnames(empty_table()), result_columns) && nrow(empty_table()) == 0L)
+  sanitized <- safe_string("T-cell activation (GO:0000000) / unsafe\nname", 240L)
+  assert("receipt pathway names contain only the supported safe character set",
+         !grepl("[()\\/\n]", sanitized) && nchar(sanitized) <= 240L)
+})
+
+# TEST 18: AST Security Sandbox
 run_test("AST Security Sandbox for Custom Code", function() {
   # Copy the check_ast function from plumber.R for testing
   check_ast <- function(expr) {

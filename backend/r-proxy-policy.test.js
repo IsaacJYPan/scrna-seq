@@ -39,6 +39,7 @@ const INTERNAL_ONLY = [
   '/object/pbmc-pipeline',
   '/object/checkpoint-load',
   '/object/deg-find-markers',
+  '/object/enrichment-gsea',
   '/object/seurat-pipeline',
   '/object/inspect',
   '/internal/worker-readiness',

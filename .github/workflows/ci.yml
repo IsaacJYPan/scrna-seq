@@ -102,6 +102,12 @@ jobs:
             any::base64enc
             any::digest
             any::hdf5r
+            any::clusterProfiler
+            any::fgsea
+            any::AnnotationDbi
+            any::org.Hs.eg.db
+            any::org.Mm.eg.db
+            any::GO.db
 
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
@@ -191,6 +197,9 @@ jobs:
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
 
+      - name: Run Ranked Pathway-Enrichment Smoke Test
+        run: npm run test:enrichment-gsea
+
       - name: Run Visual/UX Tests
         # Mocked frontend visual smoke test; it checks UI rendering/layout.
         run: npm run test:visual
@@ -232,7 +241,16 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
           --entrypoint Rscript scrna-seq-r:ci -e
-          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE)))"
+          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE)))"
+
+      - name: Run ranked pathway enrichment in the production R image
+        run: >-
+          docker run --rm --read-only --user 10001:10001
+          --cap-drop ALL --security-opt no-new-privileges
+          --tmpfs /tmp:rw,noexec,nosuid,nodev
+          --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly"
+          --workdir /workspace --entrypoint Rscript scrna-seq-r:ci
+          scripts/verify_enrichment_gsea.R
 
       - name: Boot R image and audit authenticated health
         shell: bash

@@ -87,6 +87,44 @@ function degReceiptPayload({ checksumSha256, sizeBytes }) {
   };
 }
 
+function enrichmentReceiptPayload({ checksumSha256, sizeBytes }) {
+  return {
+    ok: true,
+    summary: {
+      method: 'gsea',
+      comparison: { target_group: '0', reference: 'rest' },
+      group_by: 'seurat_clusters',
+      assay: 'RNA',
+      species: 'human',
+      gene_set_collection: 'GO_BP',
+      rank_metric: 'avg_log2FC',
+      input_gene_count: 100,
+      mapped_gene_count: 90,
+      mapping_rate: 0.9,
+      tested_pathway_count: 1,
+      significant_pathway_count: 1,
+      package_versions: {
+        r: '4.5.3', seurat: '5.3.1',
+        annotation_dbi: '1.72.0', go_db: '3.22.0',
+        cluster_profiler: '4.16.0',
+        fgsea: '1.34.0', organism_db: 'org.Hs.eg.db 3.21.0',
+      },
+      top_pathways: [{
+        pathway_id: 'GO:0006955', pathway_name: 'immune response',
+        normalized_enrichment_score: 2.1, p_value: 0.001,
+        adjusted_p_value: 0.01, set_size: 25, significant: true, direction: 'positive',
+      }],
+      warnings: [],
+    },
+    result: {
+      saved: true,
+      checksum_sha256: checksumSha256,
+      size_bytes: sizeBytes,
+      n_rows: 1,
+    },
+  };
+}
+
 function loadReceiptPayload(runtimeInstanceId) {
   return {
     loaded: true,
@@ -744,6 +782,7 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
     'deg.find_markers.v1',
+    'enrichment.gsea.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ])('adopts a signed %s R completion receipt after timeout without a second R call', async (jobType) => {
@@ -766,7 +805,9 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
       job = await db.createProjectJob(user.id, project.id, {
         jobType,
         analysisObjectId: source.id,
-        parameters: {},
+        parameters: jobType === 'enrichment.gsea.v1'
+          ? { targetGroup: '0', species: 'human' }
+          : {},
       });
     }
 
@@ -782,6 +823,7 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
         sizeBytes: output.length,
       };
       if (jobType === 'deg.find_markers.v1') return degReceiptPayload(integrity);
+      if (jobType === 'enrichment.gsea.v1') return enrichmentReceiptPayload(integrity);
       return pipelineReceiptPayload({
         ...integrity,
         seurat: jobType === 'seurat.pipeline.v1',

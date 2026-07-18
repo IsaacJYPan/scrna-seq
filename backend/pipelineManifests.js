@@ -304,7 +304,7 @@ const DEFAULT_SEURAT_PIPELINE = validatePipelineManifest({
   schemaVersion: CONTRACT.schemaVersion,
   id: DEFAULT_PIPELINE_ID,
   name: 'Default Seurat scRNA-seq Pipeline',
-  description: 'Dataset-backed Seurat preprocessing, exploration, DEG, and project history using registered modules.',
+  description: 'Dataset-backed Seurat preprocessing, exploration, DEG, pathway enrichment, and project history using registered modules.',
   modality: 'scrna',
   tabs: [
     { id: 'inspect', label: 'Inspect', moduleKey: 'inspectObject' },
@@ -319,6 +319,7 @@ const DEFAULT_SEURAT_PIPELINE = validatePipelineManifest({
     { id: 'heatmap', label: 'Heatmap', moduleKey: 'heatmap' },
     { id: 'dotplot', label: 'Dot Plot', moduleKey: 'dotPlot' },
     { id: 'deg', label: 'Markers / DEG', moduleKey: 'differentialExpression' },
+    { id: 'enrichment', label: 'Pathway Enrichment', moduleKey: 'pathwayEnrichment' },
     { id: 'history', label: 'Jobs & Artifacts', moduleKey: 'projectHistory' },
   ],
 }, { allowBuiltInId: true });

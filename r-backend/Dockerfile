@@ -51,8 +51,11 @@ RUN install-r-packages seurat-cran-dependencies \
     -e "install.packages(c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc'), repos='https://cloud.r-project.org/')"
 
 # Install Bioconductor dependencies pinned to the R 4.5-compatible release.
+# Ranked pathway enrichment is a production worker operation, so its local GO
+# databases and execution packages are mandatory image dependencies rather than
+# optional packages fetched at request time.
 RUN install-r-packages bioconductor-dependencies \
-    -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics'), ask=FALSE)"
+    -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db'), ask=FALSE)"
 
 # BiocManager may update Matrix after SeuratObject was first compiled as a
 # Seurat dependency. Rebuild SeuratObject against the final Matrix ABI so the
@@ -64,7 +67,7 @@ RUN install-r-packages seurat-object-abi-rebuild \
 # install.packages() reports individual source-package failures as warnings and
 # can otherwise leave a successfully built but unusable image. Fail the image
 # build unless every runtime dependency is actually loadable.
-RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', '))"
+RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', '))"
 
 # Optional legacy/prototype dependencies. CellChat is not a production-integrated
 # workflow in the app, and SeuratDisk-backed H5AD/H5Seurat import remains optional;
@@ -72,7 +75,7 @@ RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r'
 ARG INSTALL_OPTIONAL_R_PACKAGES=false
 RUN if [ "$INSTALL_OPTIONAL_R_PACKAGES" = "true" ]; then \
       install-r-packages optional-nmf -e "install.packages('NMF', repos='https://cloud.r-project.org/')" && \
-      install-r-packages optional-cellchat -e "remotes::install_github('sqjin/CellChat')" && \
+      install-r-packages optional-cellchat -e "remotes::install_github('jinworks/CellChat')" && \
       install-r-packages optional-seurat-disk -e "remotes::install_github('mojaveazure/seurat-disk')"; \
     else \
       echo "Skipping optional legacy R packages (CellChat, SeuratDisk). Set INSTALL_OPTIONAL_R_PACKAGES=true to include them."; \

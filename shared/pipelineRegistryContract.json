@@ -114,6 +114,17 @@
       "resultArtifactTypes": ["deg_summary", "deg_markers"],
       "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
     },
+    "pathwayEnrichment": {
+      "routeId": "enrichment",
+      "componentKey": "pathwayEnrichment",
+      "defaultLabel": "Pathway Enrichment",
+      "jobType": "enrichment.gsea.v1",
+      "executable": true,
+      "requiresObject": true,
+      "parameterTemplates": ["enum", "number", "integer", "text"],
+      "resultArtifactTypes": ["enrichment_summary", "enrichment_results"],
+      "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
+    },
     "projectHistory": {
       "routeId": "history",
       "componentKey": "projectHistory",
