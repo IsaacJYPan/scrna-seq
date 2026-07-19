@@ -55,7 +55,7 @@ RUN install-r-packages seurat-cran-dependencies \
 # databases and execution packages are mandatory image dependencies rather than
 # optional packages fetched at request time.
 RUN install-r-packages bioconductor-dependencies \
-    -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db'), ask=FALSE)"
+    -e "if (!require('BiocManager', quietly = TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(version='3.22', ask=FALSE); BiocManager::install(c('ComplexHeatmap', 'BiocGenerics', 'BiocNeighbors', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db'), ask=FALSE)"
 
 # BiocManager may update Matrix after SeuratObject was first compiled as a
 # Seurat dependency. Rebuild SeuratObject against the final Matrix ABI so the
@@ -83,7 +83,7 @@ RUN install-r-packages cellchat-v2.1.2 \
 # install.packages() reports individual source-package failures as warnings and
 # can otherwise leave a successfully built but unusable image. Fail the image
 # build unless every runtime dependency is actually loadable.
-RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db', 'NMF', 'presto', 'CellChat'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', ')); if (!identical(as.character(utils::packageVersion('CellChat')), '2.1.2')) stop('Unexpected CellChat version: ', as.character(utils::packageVersion('CellChat')))"
+RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'BiocNeighbors', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db', 'NMF', 'presto', 'CellChat'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', ')); if (!identical(as.character(utils::packageVersion('CellChat')), '2.1.2')) stop('Unexpected CellChat version: ', as.character(utils::packageVersion('CellChat')))"
 
 # Optional legacy/prototype dependency. SeuratDisk-backed H5AD/H5Seurat import remains
 # outside the supported durable input contract, so a trusted local build must opt in.
