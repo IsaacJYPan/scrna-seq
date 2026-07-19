@@ -246,6 +246,7 @@ qc_distributions_endpoint <- endpoint_handler("get", "/qc-distributions")
 object_info_endpoint <- endpoint_handler("get", "/object-info")
 pipeline_state_endpoint <- endpoint_handler("get", "/pipeline-state")
 meta_values_endpoint <- endpoint_handler("get", "/meta-values")
+cellchat_group_map_endpoint <- endpoint_handler("get", "/cellchat-group-map")
 add_meta_mapping_endpoint <- endpoint_handler("post", "/add-meta-mapping")
 qc_endpoint <- endpoint_handler("post", "/qc")
 integrate_endpoint <- endpoint_handler("get", "/integrate")
@@ -347,6 +348,87 @@ response <- new_response()
 expect_bad_request(response, gene_expression_endpoint(response, gene = c("G1", "G2")), "single gene")
 response <- new_response()
 expect_bad_request(response, feature_values_endpoint(response, gene = strrep("G", 300)), "no longer than")
+
+# The owner-local CellChat key has its own metadata-only admission because it
+# reads one grouping vector rather than duplicating the full expression object.
+# It accepts only the two fixed grouping choices and keeps opaque Group N values
+# distinct from raw labels. Invalid grouping input must fail generically without
+# exposing a label.
+private_group_label <- paste0("Private donor\n", strrep("x", 200L))
+cellchat_counts <- Matrix::sparseMatrix(
+  i = c(1L, 2L, 1L, 2L),
+  j = c(1L, 2L, 3L, 4L),
+  x = rep(1, 4L),
+  dims = c(2L, 4L),
+  dimnames = list(c("G1", "G2"), c("C1", "C2", "C3", "C4"))
+)
+global_obj <- suppressMessages(CreateSeuratObject(
+  counts = cellchat_counts, min.cells = 0, min.features = 0
+))
+global_obj$seurat_clusters <- factor(c(
+  "Alpha", private_group_label, "Alpha", private_group_label
+))
+Idents(global_obj) <- factor(c("Identity A", "Identity B", "Identity A", "Identity B"))
+
+# The generic synchronous-object cap would reject this source after one cell,
+# but the mapping needs only bounded metadata and remains available for a valid
+# durable CellChat result.
+old_sync_cell_cap <- MAX_PUBLIC_SYNC_CELLS
+MAX_PUBLIC_SYNC_CELLS <- 1L
+response <- new_response()
+response$status <- 200L
+cellchat_group_map <- cellchat_group_map_endpoint(response, group_by = "seurat_clusters")
+MAX_PUBLIC_SYNC_CELLS <- old_sync_cell_cap
+stopifnot(identical(response$status, 200L))
+stopifnot(identical(cellchat_group_map$group_by, "seurat_clusters"))
+stopifnot(identical(
+  vapply(cellchat_group_map$groups, `[[`, character(1), "group"),
+  c("Group 1", "Group 2")
+))
+stopifnot(identical(
+  vapply(cellchat_group_map$groups, `[[`, integer(1), "input_cells"),
+  c(2L, 2L)
+))
+cellchat_group_labels <- vapply(cellchat_group_map$groups, `[[`, character(1), "label")
+stopifnot(identical(cellchat_group_labels[[1]], "Alpha"))
+stopifnot(startsWith(cellchat_group_labels[[2]], "Private donor"))
+stopifnot(nchar(cellchat_group_labels[[2]], type = "chars") == 160L)
+stopifnot(!any(grepl("[[:cntrl:]]", cellchat_group_labels)))
+
+# The dedicated map admission still rejects an implausibly large metadata
+# vector before it can build a character grouping or table.
+global_obj <- matrix(
+  0,
+  nrow = 1L,
+  ncol = CELLCHAT_INFERENCE_MAX_GROUP_MAP_CELLS + 1L
+)
+response <- new_response()
+oversized_group_map <- cellchat_group_map_endpoint(response, group_by = "seurat_clusters")
+stopifnot(identical(response$status, 413L))
+stopifnot(identical(
+  oversized_group_map$error,
+  "CellChat group mapping exceeds the supported metadata limit."
+))
+
+# Restore the small Seurat fixture for fixed-group validation below.
+global_obj <- suppressMessages(CreateSeuratObject(
+  counts = cellchat_counts, min.cells = 0, min.features = 0
+))
+global_obj$seurat_clusters <- factor(c(
+  "Alpha", private_group_label, "Alpha", private_group_label
+))
+Idents(global_obj) <- factor(c("Identity A", "Identity B", "Identity A", "Identity B"))
+
+for (invalid_group_by in list(
+  "private_metadata_column",
+  c("seurat_clusters", "private_metadata_column")
+)) {
+  response <- new_response()
+  invalid_group_map <- cellchat_group_map_endpoint(response, group_by = invalid_group_by)
+  expect_bad_request(response, invalid_group_map, "CellChat group mapping is unavailable.")
+  stopifnot(!grepl("private_metadata_column", invalid_group_map$error, fixed = TRUE))
+  stopifnot(!grepl("Private donor", invalid_group_map$error, fixed = TRUE))
+}
 
 # /genes returns a deterministic prefix and reports both total and returned size.
 gene_names <- paste0("GENE", seq_len(MAX_PUBLIC_GENE_LIST + 5L))

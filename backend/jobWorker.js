@@ -44,6 +44,11 @@ const {
   allocateEnrichmentGseaResultStorageKey,
 } = require('./enrichmentGsea');
 const {
+  validateCellChatInferenceParams,
+  allocateCellChatInferenceResultStorageKey,
+  MAX_CELLCHAT_RESULT_ROWS,
+} = require('./cellChatInference');
+const {
   validateSeuratPipelineParams,
   allocateSeuratCheckpointStorageKey,
   assertSupportedSeuratPipelineDataset,
@@ -67,6 +72,7 @@ const COMPLETION_RECEIPT_JOB_TYPES = new Set([
   'seurat.pipeline.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
+  'cellchat.infer.v1',
   'checkpoint.load.v1',
   'checkpoint.fork.v1',
 ]);
@@ -161,6 +167,9 @@ function deterministicCompletionOutputKey(job) {
   }
   if (job.jobType === 'enrichment.gsea.v1') {
     return allocateEnrichmentGseaResultStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'cellchat.infer.v1') {
+    return allocateCellChatInferenceResultStorageKey(job.projectId, job.id);
   }
   return null;
 }
@@ -1285,13 +1294,142 @@ async function enrichmentGseaHandler(ctx) {
   };
 }
 
+/**
+ * Infer ligand-receptor signaling candidates within exactly one selected
+ * biological context. This is an output-producing, read-only CellChat analysis:
+ * it never mutates the owner-attached live object, never compares conditions,
+ * and writes its complete candidate table only to private project storage.
+ */
+async function cellChatInferenceHandler(ctx) {
+  await ctx.heartbeat();
+  await ctx.log({
+    level: 'info',
+    message: 'cellchat.infer.v1 handler: validating ownership and fixed single-context parameters before any R contact.',
+  });
+
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError(
+      'R_OBJECT_CONTEXT_REQUIRED',
+      'Cell-communication job is missing its input analysis object.'
+    );
+  }
+  if (typeof ctx.getOwnedAnalysisObject !== 'function'
+      || typeof ctx.deriveRObjectStateKey !== 'function'
+      || typeof ctx.completeCellChatInferenceResult !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+
+  const { params, defaultsApplied } = validateCellChatInferenceParams(job.parameters);
+  const resultStorageKey = allocateCellChatInferenceResultStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, resultStorageKey);
+  await ctx.log({
+    level: 'info',
+    message: 'cellchat.infer.v1 handler: running the allowlisted CellChat candidate-inference workflow.',
+  });
+
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.cellchat.infer.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+      objectContext: { objectId, stateKey },
+      cellChat: { params, resultStorageKey },
+      input: job.parameters,
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (err) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey, err);
+    throw err;
+  }
+
+  const result = descriptor.result || {};
+  if (descriptor.artifactType !== 'cellchat_summary'
+      || result.saved !== true || typeof result.checksumSha256 !== 'string'
+      || result.checksumSha256 === '' || !Number.isInteger(result.sizeBytes)
+      || result.sizeBytes < 0 || result.sizeBytes > 50 * 1024 * 1024
+      || !Number.isInteger(result.nRows) || result.nRows < 0 || result.nRows > MAX_CELLCHAT_RESULT_ROWS) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
+    throw codedHandlerError(
+      'CELLCHAT_RESULT_WRITE_FAILED',
+      'Cell-communication inference did not produce a valid durable result table.'
+    );
+  }
+
+  let completion;
+  try {
+    completion = await ctx.completeCellChatInferenceResult({
+      resultsArtifact: {
+        artifactType: 'cellchat_results',
+        name: 'Cell-cell communication candidate table',
+        description: 'Private full CellChat ligand-receptor signaling candidate table for one selected biological context.',
+        storageKind: 'local_internal',
+        mimeType: 'text/csv',
+        internalStorageKey: resultStorageKey,
+        checksumSha256: result.checksumSha256,
+        sizeBytes: result.sizeBytes,
+        metadata: {
+          operation: 'r.cellchat.infer.v1',
+          scientific_output: true,
+          downloadable: false,
+          resolvedParams: params,
+          defaultsApplied,
+          nRows: result.nRows,
+        },
+      },
+      summaryArtifact: {
+        artifactType: descriptor.artifactType,
+        name: descriptor.name,
+        description: descriptor.description,
+        storageKind: 'metadata_only',
+        metadata: {
+          ...descriptor.metadata,
+          kind: 'cellchat_summary',
+          scientific_output: true,
+          downloadable: false,
+          resolvedParams: params,
+          defaultsApplied,
+        },
+      },
+    });
+  } catch (err) {
+    throw publicationIndeterminateError(err);
+  }
+
+  await ctx.log({
+    level: 'info',
+    message: `cellchat.infer.v1 handler: recorded candidate table ${completion.resultsArtifact.id} and summary ${completion.summaryArtifact.id}.`,
+  });
+  return {
+    result: {
+      ok: true,
+      handled: 'cellchat.infer.v1',
+      operation: 'r.cellchat.infer.v1',
+      resultsArtifactId: completion.resultsArtifact.id,
+      summaryArtifactId: completion.summaryArtifact.id,
+    },
+  };
+}
+
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
 // inspection bridge, and allowlisted R/scientific handlers: `pbmc.pipeline.v1`,
 // `seurat.pipeline.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`,
-// `deg.find_markers.v1`, and `enrichment.gsea.v1`. Other analytical job types
-// (normalize/qc_filter/pca/cluster/umap/integrate and CellChat)
+// `deg.find_markers.v1`, `enrichment.gsea.v1`, and `cellchat.infer.v1`. Other analytical job types
+// (normalize/qc_filter/pca/cluster/umap/integrate and cross-condition CellChat)
 // remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
 // instead of pretending to run them.
 const DEFAULT_HANDLERS = Object.freeze({
@@ -1305,6 +1443,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'checkpoint.fork.v1': checkpointForkHandler,
   'deg.find_markers.v1': degFindMarkersHandler,
   'enrichment.gsea.v1': enrichmentGseaHandler,
+  'cellchat.infer.v1': cellChatInferenceHandler,
 });
 
 /**
@@ -1550,6 +1689,9 @@ function createJobWorker(options = {}) {
           jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
         ),
         completeEnrichmentGseaResult: (input) => db.completeEnrichmentGseaResultByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        completeCellChatInferenceResult: (input) => db.completeCellChatInferenceResultByWorker(
           jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
         ),
         completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(
@@ -1843,6 +1985,7 @@ function createJobWorker(options = {}) {
       // handler) so one artifact can't commit without the other. Creates NO result object/edge.
       completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeEnrichmentGseaResult: (input) => db.completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      completeCellChatInferenceResult: (input) => db.completeCellChatInferenceResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       removeDurableObject: (key) => storageProvider.remove(key),
       // R-bridge seam (used by every R-facing handler: r.runtime.check,
@@ -2113,6 +2256,7 @@ module.exports = {
   checkpointForkHandler,
   degFindMarkersHandler,
   enrichmentGseaHandler,
+  cellChatInferenceHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,

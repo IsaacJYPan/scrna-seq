@@ -185,6 +185,14 @@ async function createAnalysisObject(token) {
   return res.body.id;
 }
 
+async function diagnosticStateKey(token, objectId) {
+  const res = await request('GET', '/api/r/__test/state-key', { token, objectId });
+  if (res.status !== 200 || !res.body || typeof res.body.stateKey !== 'string') {
+    throw new Error(`state-key diagnostic failed: ${JSON.stringify(res.body)}`);
+  }
+  return res.body;
+}
+
 async function main() {
   const safeEmail = sanitizeVaultSegment(TEST_EMAIL);
   const fixtureDir = path.join(WORKSPACE, 'vault', safeEmail, 'state-proxy-smoke');
@@ -254,7 +262,8 @@ async function main() {
     // ── No X-Object-ID: legacy user-scoped key ────────────────────────────
     const noObject = await request('GET', '/api/r/__test/session-state', { token });
     assert(noObject.status === 200, 'authenticated diagnostic request without object id reaches R', `HTTP ${noObject.status}`);
-    assert(noObject.body.x_object_id === expectedKey(userId), 'no X-Object-ID maps to user-scoped key', noObject.body.x_object_id);
+    const noObjectKey = await diagnosticStateKey(token);
+    assert(noObjectKey.stateKey === expectedKey(userId), 'no X-Object-ID maps to user-scoped key', noObjectKey.stateKey);
 
     // ── Per-object isolation across two DB-backed objects ─────────────────
     const loadA = await request('POST', '/api/r/load-rds', { token, objectId: objectA, body: { path: relObjectA } });
@@ -269,8 +278,11 @@ async function main() {
     const pcaA = await request('GET', '/api/r/pca?npcs=5&seed=123', { token, objectId: objectA });
     assert(pcaA.status === 200 && !pcaA.body.error, 'objectA PCA succeeds', JSON.stringify(pcaA.body));
 
+    const objectAKey = await diagnosticStateKey(token, objectA);
+    const objectBKey = await diagnosticStateKey(token, objectB);
+    assert(objectBKey.stateKey === expectedKey(userId, objectB) && objectBKey.stateKey !== objectAKey.stateKey,
+      'objectB maps to distinct user/object key', objectBKey.stateKey);
     const beforeB = await request('GET', '/api/r/__test/session-state', { token, objectId: objectB });
-    assert(beforeB.body.x_object_id === expectedKey(userId, objectB), 'objectB maps to distinct user/object key', beforeB.body.x_object_id);
     assert(beforeB.body.has_global_obj === false, 'objectB starts with no R object before load');
 
     const loadB = await request('POST', '/api/r/load-rds', { token, objectId: objectB, body: { path: relObjectB } });
@@ -300,7 +312,8 @@ async function main() {
     const defaultLoad = await request('POST', '/api/r/load-rds', { token, body: { path: relObjectA } });
     assert(defaultLoad.status === 200 && !defaultLoad.body.error, 'single-object behavior without X-Object-ID still loads', JSON.stringify(defaultLoad.body));
     const defaultState = await request('GET', '/api/r/__test/session-state', { token });
-    assert(defaultState.body.x_object_id === expectedKey(userId), 'single-object behavior uses base user key', defaultState.body.x_object_id);
+    const defaultStateKey = await diagnosticStateKey(token);
+    assert(defaultStateKey.stateKey === expectedKey(userId), 'single-object behavior uses base user key', defaultStateKey.stateKey);
     assert(defaultState.body.n_cells === 12, 'single-object behavior keeps its own base-key state', JSON.stringify(defaultState.body));
 
     console.log(`SUMMARY passed=${passCount} userId=${userId} objectAKey=${expectedKey(userId, objectA)} objectBKey=${expectedKey(userId, objectB)}`);

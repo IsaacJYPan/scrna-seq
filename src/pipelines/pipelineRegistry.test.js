@@ -36,6 +36,7 @@ describe('pipelineRegistry', () => {
       'dotplot',
       'deg',
       'enrichment',
+      'cellchat',
       'history',
     ]);
     expect(definition.tabs.some(tab => Object.keys(tab).some(key => [
@@ -83,6 +84,25 @@ describe('pipelineRegistry', () => {
       routeId: 'enrichment',
       componentKey: 'pathwayEnrichment',
       jobType: 'enrichment.gsea.v1',
+      executable: true,
+    }));
+  });
+
+  it('resolves CellChat to its fixed single-context durable job contract', () => {
+    const declarative = validatePipelineManifest(manifest({
+      tabs: [{
+        id: 'cellchat',
+        label: 'CellChat',
+        moduleKey: 'cellChat',
+        resultArtifactTypes: ['cellchat_summary', 'cellchat_results'],
+        resultViews: ['summaryMetrics', { type: 'artifactTable', artifactType: 'cellchat_results' }],
+      }],
+    }));
+
+    expect(resolvePipelineManifest(declarative).tabs[0]).toEqual(expect.objectContaining({
+      routeId: 'cellchat',
+      componentKey: 'cellChat',
+      jobType: 'cellchat.infer.v1',
       executable: true,
     }));
   });

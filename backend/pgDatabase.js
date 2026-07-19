@@ -28,6 +28,10 @@ const {
 } = require('./seuratPipeline');
 const { validateEnrichmentGseaParams } = require('./enrichmentGsea');
 const {
+  validateCellChatInferenceParams,
+  MAX_CELLCHAT_RESULT_ROWS,
+} = require('./cellChatInference');
+const {
   DEFAULT_PIPELINE_ID,
   validatePipelineManifest,
   getDefaultPipelineManifest,
@@ -90,7 +94,8 @@ const ALLOWED_JOB_TYPES = new Set([
   'checkpoint.load.v1',
   'checkpoint.fork.v1',
   'deg.find_markers.v1',
-  'enrichment.gsea.v1'
+  'enrichment.gsea.v1',
+  'cellchat.infer.v1'
 ]);
 const RETRYABLE_DURABLE_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
@@ -99,6 +104,7 @@ const RETRYABLE_DURABLE_JOB_TYPES = new Set([
   'checkpoint.fork.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
+  'cellchat.infer.v1',
 ]);
 
 // An HTTP timeout does not prove the R operation stopped. Keep the original
@@ -132,7 +138,8 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   'checkpoint', 'metrics', 'log', 'figure', 'script_fragment', 'other_metadata',
   'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_load',
   'checkpoint_fork', 'deg_markers', 'deg_summary', 'result_checkpoint',
-  'enrichment_results', 'enrichment_summary'
+  'enrichment_results', 'enrichment_summary',
+  'cellchat_results', 'cellchat_summary'
 ]);
 const ALLOWED_ARTIFACT_STORAGE_KINDS = new Set(['metadata_only', 'local_internal']);
 const ALLOWED_ARTIFACT_STATUSES = new Set(['available', 'pending', 'error']);
@@ -2484,6 +2491,7 @@ async function createProjectJob(userId, projectId, input = {}) {
     'seurat.pipeline.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
+    'cellchat.infer.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
@@ -2491,6 +2499,7 @@ async function createProjectJob(userId, projectId, input = {}) {
     'pbmc.pipeline.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
+    'cellchat.infer.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
@@ -2499,6 +2508,7 @@ async function createProjectJob(userId, projectId, input = {}) {
     'seurat.pipeline.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
+    'cellchat.infer.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
@@ -2567,6 +2577,17 @@ async function createProjectJob(userId, projectId, input = {}) {
   }
   if (jobType === 'enrichment.gsea.v1') {
     validateEnrichmentGseaParams(parameters);
+  }
+  if (jobType === 'cellchat.infer.v1') {
+    validateCellChatInferenceParams(parameters);
+    // CellChat reads a creator-owned, process-local live R object. A project
+    // collaborator may view the durable analysis-object metadata, but cannot
+    // use another member's private R state. Reject before queue insertion so a
+    // cross-owner request cannot consume the one-worker capacity only to fail
+    // later at the worker ownership recheck.
+    if (!analysisObject || analysisObject.ownerUserId !== owner) {
+      throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+    }
   }
   if (jobType === 'checkpoint.load.v1' && analysisObject.ownerUserId !== owner) {
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
@@ -3752,6 +3773,7 @@ const CLAIMED_OWNED_OBJECT_JOB_TYPES = new Set([
   'checkpoint.load.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
+  'cellchat.infer.v1',
 ]);
 
 async function requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts = {}, expectedJobType = null) {
@@ -4226,6 +4248,9 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
     'deg.find_markers.v1': { artifacts: ['deg_markers', 'deg_summary'], result: false, edges: 0 },
     'enrichment.gsea.v1': {
       artifacts: ['enrichment_results', 'enrichment_summary'], result: false, edges: 0,
+    },
+    'cellchat.infer.v1': {
+      artifacts: ['cellchat_results', 'cellchat_summary'], result: false, edges: 0,
     },
   };
   const spec = recoverySpecs[row.job_type];
@@ -5269,6 +5294,131 @@ async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken,
   };
 }
 
+/**
+ * Atomically publish the two outputs of `cellchat.infer.v1`. The complete
+ * ligand-receptor candidate table remains in private project storage; the
+ * metadata-only companion is already strictly sanitized by rWorkerBridge and
+ * is the only CellChat content exposed through project artifact APIs.
+ */
+async function completeCellChatInferenceResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.job_type !== 'cellchat.infer.v1') {
+    throw codedError('INVALID_JOB_TYPE', 'A claimed cellchat.infer.v1 job is required.');
+  }
+  const existing = await query(
+    "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'cellchat_results' LIMIT 1",
+    [String(row.id)]
+  );
+  if (existing.rows[0]) {
+    throw codedError('CELLCHAT_RESULT_EXISTS', 'Job already has a cell-communication result artifact.');
+  }
+
+  const table = input.resultsArtifact && typeof input.resultsArtifact === 'object'
+    ? input.resultsArtifact : {};
+  const tableSpec = validateLocalInternalArtifactSpec(table, {
+    defaultArtifactType: 'cellchat_results',
+    helperName: 'completeCellChatInferenceResultByWorker'
+  });
+  if (tableSpec.artifactType !== 'cellchat_results') {
+    throw codedError('INVALID_ARTIFACT_TYPE', 'The cell-communication result artifact type is fixed.');
+  }
+  assertProjectArtifactStorageKey(row, tableSpec.storageUri, 'artifacts');
+  if (tableSpec.sizeBytes > 50 * 1024 * 1024) {
+    throw codedError('CELLCHAT_RESULT_TOO_LARGE', 'Cell-communication result exceeds its safe size limit.');
+  }
+  const nRows = tableSpec.metadata && tableSpec.metadata.nRows;
+  if (!Number.isInteger(nRows) || nRows < 0 || nRows > MAX_CELLCHAT_RESULT_ROWS) {
+    throw codedError('INVALID_CELLCHAT_RESULT', 'Cell-communication result row count is invalid.');
+  }
+
+  const summary = input.summaryArtifact && typeof input.summaryArtifact === 'object'
+    ? input.summaryArtifact : {};
+  const summarySpec = validateMetadataOnlyArtifactSpec(summary, {
+    defaultArtifactType: 'cellchat_summary', artifactTypeRequired: false
+  });
+  if (summarySpec.artifactType !== 'cellchat_summary'
+      || summarySpec.storageKind !== 'metadata_only') {
+    throw codedError('INVALID_ARTIFACT_TYPE', 'The cell-communication summary artifact type is fixed.');
+  }
+  const encodedSummary = JSON.stringify(summarySpec.metadata);
+  if (Buffer.byteLength(encodedSummary, 'utf8') > 128 * 1024) {
+    throw codedError('INVALID_CELLCHAT_SUMMARY', 'Cell-communication summary exceeds its safe size limit.');
+  }
+
+  const resultsArtifactId = generateJobArtifactId();
+  const summaryArtifactId = generateJobArtifactId();
+  const refs = {
+    datasetId: row.dataset_id || null,
+    analysisObjectId: row.analysis_object_id || null,
+    resultAnalysisObjectId: null
+  };
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const claimRow = await client.query(
+      `SELECT 1 FROM jobs
+       WHERE id = $1 AND worker_id = $2 AND claim_token = $3
+         AND status = 'running' AND lease_expires_at > $4
+       FOR UPDATE`,
+      [String(row.id), wid, token, now]
+    );
+    if (!claimRow.rows[0]) {
+      throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    }
+    const duplicate = await client.query(
+      "SELECT 1 FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'cellchat_results' LIMIT 1",
+      [String(row.id)]
+    );
+    if (duplicate.rows[0]) {
+      throw codedError('CELLCHAT_RESULT_EXISTS', 'Job already has a cell-communication result artifact.');
+    }
+    await insertJobArtifactRow(client, {
+      id: resultsArtifactId,
+      jobRow: row,
+      refs,
+      artifactType: tableSpec.artifactType,
+      name: table.name != null ? String(table.name) : null,
+      description: table.description != null ? String(table.description) : null,
+      mimeType: table.mimeType != null ? String(table.mimeType) : null,
+      storageKind: tableSpec.storageKind,
+      storageUri: tableSpec.storageUri,
+      checksumSha256: tableSpec.checksumSha256,
+      sizeBytes: tableSpec.sizeBytes,
+      status: tableSpec.status,
+      metadata: tableSpec.metadata
+    });
+    await insertJobArtifactRow(client, {
+      id: summaryArtifactId,
+      jobRow: row,
+      refs,
+      artifactType: summarySpec.artifactType,
+      name: summary.name != null ? String(summary.name) : null,
+      description: summary.description != null ? String(summary.description) : null,
+      storageKind: summarySpec.storageKind,
+      status: summarySpec.status,
+      metadata: summarySpec.metadata
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return {
+    resultsArtifact: await getJobArtifactRowById(resultsArtifactId),
+    summaryArtifact: await getJobArtifactRowById(summaryArtifactId)
+  };
+}
+
 async function resolveCheckpointArtifact(analysisObjectId, projectId) {
   const { rows } = await query(
     `SELECT * FROM job_artifacts
@@ -5690,6 +5840,7 @@ module.exports = {
   completeSeuratPipelineResultByWorker,
   completeDegFindMarkersResultByWorker,
   completeEnrichmentGseaResultByWorker,
+  completeCellChatInferenceResultByWorker,
   getLoadableCheckpointForAnalysisObject,
   getForkableCheckpointForAnalysisObject,
   completeCheckpointForkByWorker,

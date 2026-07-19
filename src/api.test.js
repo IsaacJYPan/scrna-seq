@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   electronAPI,
   apiUrl,
+  buildCellChatInferenceJobPayload,
   buildCheckpointForkJobPayload,
   buildDegFindMarkersJobPayload,
   buildEnrichmentGseaJobPayload,
@@ -122,6 +123,52 @@ describe('buildEnrichmentGseaJobPayload', () => {
       },
     });
     expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|vault|stateKey|endpoint|api\/r/i);
+  });
+});
+
+describe('buildCellChatInferenceJobPayload', () => {
+  it('keeps only the fixed CellChat v1 parameter contract and excludes server-owned fields', () => {
+    const payload = buildCellChatInferenceJobPayload('ao_abc123', {
+      groupBy: 'seurat_clusters',
+      assay: 'RNA',
+      species: 'human',
+      databaseCategory: 'secreted_signaling',
+      analysisIntent: 'single_context',
+      minCellsPerGroup: 10,
+      maxCellsPerGroup: 5000,
+      maxTotalCells: 10000,
+      pValueCutoff: 0.05,
+      topInteractions: 25,
+      topPathways: 15,
+      randomSeed: 1,
+      ownerUserId: 99,
+      status: 'completed',
+      storageUri: 'vault/private/cellchat.csv',
+      storageKey: 'projects/proj_1/artifacts/job_1/cellchat.csv',
+      stateKey: 'user-1:obj-ao_abc123',
+      endpoint: '/api/r/cellchat-infer',
+      path: 'C:/private/cellchat.csv',
+    });
+
+    expect(payload).toEqual({
+      jobType: 'cellchat.infer.v1',
+      analysisObjectId: 'ao_abc123',
+      parameters: {
+        groupBy: 'seurat_clusters',
+        assay: 'RNA',
+        species: 'human',
+        databaseCategory: 'secreted_signaling',
+        analysisIntent: 'single_context',
+        minCellsPerGroup: 10,
+        maxCellsPerGroup: 5000,
+        maxTotalCells: 10000,
+        pValueCutoff: 0.05,
+        topInteractions: 25,
+        topPathways: 15,
+        randomSeed: 1,
+      },
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|completed|vault|storageKey|stateKey|endpoint|api\/r|C:\/private/i);
   });
 });
 
@@ -560,6 +607,55 @@ describe('API Client (electronAPI)', () => {
         maxGeneSetSize: 500,
         adjustedPValueCutoff: 0.05,
         topPathways: 20,
+      },
+    });
+  });
+
+  it('creates fixed durable CellChat inference jobs through the project job API wrapper', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_cellchat123', jobType: 'cellchat.infer.v1', status: 'queued' }),
+    });
+
+    const result = await electronAPI.createCellChatInferenceJob('proj_1', 'ao_abc123', {
+      groupBy: 'ident',
+      assay: 'RNA',
+      species: 'mouse',
+      databaseCategory: 'cell_cell_contact',
+      analysisIntent: 'single_context',
+      minCellsPerGroup: 10,
+      maxCellsPerGroup: 5000,
+      maxTotalCells: 10000,
+      pValueCutoff: 0.05,
+      topInteractions: 25,
+      topPathways: 15,
+      randomSeed: 1,
+      storageKey: 'projects/proj_1/private.csv',
+      endpoint: '/api/r/cellchat-infer',
+    });
+
+    expect(result.id).toBe('job_cellchat123');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'cellchat.infer.v1',
+      analysisObjectId: 'ao_abc123',
+      parameters: {
+        groupBy: 'ident',
+        assay: 'RNA',
+        species: 'mouse',
+        databaseCategory: 'cell_cell_contact',
+        analysisIntent: 'single_context',
+        minCellsPerGroup: 10,
+        maxCellsPerGroup: 5000,
+        maxTotalCells: 10000,
+        pValueCutoff: 0.05,
+        topInteractions: 25,
+        topPathways: 15,
+        randomSeed: 1,
       },
     });
   });
