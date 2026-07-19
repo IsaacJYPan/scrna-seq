@@ -680,6 +680,25 @@ async function main() {
     });
   });
 
+  // Pathway Enrichment asks the attached R object for a bounded list of cluster
+  // labels. This frontend-only suite has no R service, so provide the same safe
+  // response shape the real /api/r/meta-values endpoint returns. React may run
+  // the effect twice in development; the route is intentionally repeatable.
+  await page.route('**/meta-values*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        values: [
+          { value: '0', count: 420 },
+          { value: '1', count: 380 },
+          { value: '2', count: 295 },
+        ],
+      }),
+    });
+  });
+
   await page.route('**/qc-distributions*', async route => {
     await route.fulfill({
       status: 200,
