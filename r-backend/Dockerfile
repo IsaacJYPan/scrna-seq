@@ -70,13 +70,20 @@ RUN install-r-packages seurat-object-abi-rebuild \
 RUN install-r-packages cellchat-nmf \
     -e "install.packages('NMF', repos='https://cloud.r-project.org/')"
 
+# CellChat 2.1.2 imports `presto`, which is no longer available from the
+# configured CRAN repository. Install the upstream R package from an immutable
+# reviewed commit before CellChat so image builds never fall back to an
+# unresolvable package name.
+RUN install-r-packages cellchat-presto \
+    -e "remotes::install_github('immunogenomics/presto@a24772a135c7895a8183b007376050556c60a05b', upgrade='never')"
+
 RUN install-r-packages cellchat-v2.1.2 \
     -e "remotes::install_github('jinworks/CellChat@a0d3b2d231d46c8787177fffeac908270c253747', upgrade='never')"
 
 # install.packages() reports individual source-package failures as warnings and
 # can otherwise leave a successfully built but unusable image. Fail the image
 # build unless every runtime dependency is actually loadable.
-RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db', 'NMF', 'CellChat'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', ')); if (!identical(as.character(utils::packageVersion('CellChat')), '2.1.2')) stop('Unexpected CellChat version: ', as.character(utils::packageVersion('CellChat')))"
+RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db', 'NMF', 'presto', 'CellChat'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', ')); if (!identical(as.character(utils::packageVersion('CellChat')), '2.1.2')) stop('Unexpected CellChat version: ', as.character(utils::packageVersion('CellChat')))"
 
 # Optional legacy/prototype dependency. SeuratDisk-backed H5AD/H5Seurat import remains
 # outside the supported durable input contract, so a trusted local build must opt in.

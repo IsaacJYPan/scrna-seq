@@ -307,8 +307,9 @@ keeps figure preview while disabling the legacy server-file save action.
 RDS imports are disabled by default because RDS deserialization can execute R
 code. Set `ALLOW_TRUSTED_RDS_LOAD=true` only for trusted local/dev `.rds` files;
 production always blocks public load and restore regardless of that setting.
-The Docker image includes ranked-enrichment plus CellChat/NMF as required runtime
-dependencies; CI pins and verifies CellChat v2.1.2. SeuratDisk remains optional
+The Docker image includes ranked-enrichment plus CellChat/NMF and CellChat's pinned
+GitHub `presto` dependency as required runtime dependencies; CI verifies CellChat
+v2.1.2. SeuratDisk remains optional
 and is installed only with `--build-arg INSTALL_OPTIONAL_R_PACKAGES=true`.
 The CellChat tab is a durable, owner-only single-context candidate workflow: it
 uses a private capped CSV and opaque group identifiers, not a public download,
