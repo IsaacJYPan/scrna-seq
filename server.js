@@ -22,6 +22,7 @@ const {
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
 const { validateEnrichmentGseaParams } = require('./backend/enrichmentGsea');
+const { validateCellChatInferenceParams } = require('./backend/cellChatInference');
 
 // Validate the executable web role before resolving R configuration, creating
 // directories, opening Postgres, or binding a socket. Importing the module in
@@ -455,7 +456,7 @@ const RDS_DESERIALIZATION_PROXY_PATHS = new Set(['/load-rds', '/restore-session'
 // checkpoint. It is worker-only for the same durable job/artifact/lineage reasons.
 const R_PROXY_INTERNAL_ONLY_PATHS = new Set([
   '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers',
-  '/object/enrichment-gsea', '/object/seurat-pipeline', '/object/inspect',
+  '/object/enrichment-gsea', '/object/cellchat-infer', '/object/seurat-pipeline', '/object/inspect',
   '/internal/worker-readiness'
 ]);
 
@@ -483,7 +484,7 @@ const R_PROXY_PRODUCTION_BLOCKED_PATHS = new Set([
 const R_PROXY_PRODUCTION_ALLOWLIST = Object.freeze({
   GET: new Set([
     '/health', '/session-id', '/qc-distributions', '/load-data',
-    '/object-info', '/pipeline-state', '/meta-values',
+    '/object-info', '/pipeline-state', '/meta-values', '/cellchat-group-map',
     '/normalize', '/pca', '/cluster', '/umap',
     '/genes', '/gene-expression', '/feature-values', '/heatmap', '/dot-plot', '/validate',
   ]),
@@ -1098,8 +1099,16 @@ const R_PROXY_PRIVATE_RESPONSE_KEYS = new Set([
 
 function redactAbsolutePaths(value) {
   return String(value)
+    // Do this before drive-path matching: the `e:///` suffix in `file:///…`
+    // and the `s://` suffix in `https://…` otherwise look like Windows paths.
+    .replace(/\b(?:https?|file):\/\/[^\s'"`]+/gi, '[redacted-url]')
     .replace(/[A-Za-z]:[\\/][^\s'"`]+/g, '[redacted-path]')
-    .replace(/(^|[\s'"`])\/(?:[^\s'"`/]+\/)+[^\s'"`]+/g, '$1[redacted-path]');
+    .replace(/(^|[\s'"`])\/(?:[^\s'"`/]+\/)+[^\s'"`]+/g, '$1[redacted-path]')
+    // Metadata and identity labels are user-controlled values in some legacy
+    // live-R routes. Do not let a label bypass the path/key boundary merely by
+    // placing a URI or internal storage reference in an otherwise safe field.
+    .replace(/\b(?:vault|projects)\/[^\s'"`]+/gi, '[redacted-storage]')
+    .replace(/\buser-\d+:obj-[A-Za-z0-9_-]+\b/g, '[redacted-state]');
 }
 
 function sanitizeRProxyJson(value) {
@@ -2495,10 +2504,11 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   // manufacture partial-output/recovery states after dispatch.
   const serverManagedResultTypes = [
     'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
+    'cellchat.infer.v1',
     'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   const noDatasetBindingTypes = [
-    'pbmc.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
+    'pbmc.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'cellchat.infer.v1',
     'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   if (serverManagedResultTypes.includes(body.jobType)
@@ -2539,6 +2549,15 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
     } catch (e) {
       return res.status(400).json({
         error: e && e.message ? e.message : 'Invalid enrichment.gsea.v1 parameters.',
+      });
+    }
+  }
+  if (body.jobType === 'cellchat.infer.v1') {
+    try {
+      validateCellChatInferenceParams(body.parameters);
+    } catch (e) {
+      return res.status(400).json({
+        error: e && e.message ? e.message : 'Invalid cellchat.infer.v1 parameters.',
       });
     }
   }

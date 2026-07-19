@@ -64,21 +64,27 @@ RUN install-r-packages bioconductor-dependencies \
 RUN install-r-packages seurat-object-abi-rebuild \
     -e "install.packages('SeuratObject', repos='https://cloud.r-project.org/'); stopifnot(requireNamespace('SeuratObject', quietly=TRUE))"
 
+# CellChat inference is a durable worker operation. Keep its numerical backend and
+# exact reviewed CellChat source revision in the default image rather than fetching
+# packages at request time or relying on the old optional legacy build path.
+RUN install-r-packages cellchat-nmf \
+    -e "install.packages('NMF', repos='https://cloud.r-project.org/')"
+
+RUN install-r-packages cellchat-v2.1.2 \
+    -e "remotes::install_github('jinworks/CellChat@a0d3b2d231d46c8787177fffeac908270c253747', upgrade='never')"
+
 # install.packages() reports individual source-package failures as warnings and
 # can otherwise leave a successfully built but unusable image. Fail the image
 # build unless every runtime dependency is actually loadable.
-RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', '))"
+RUN Rscript -e "required <- c('plumber', 'jsonlite', 'digest', 'Seurat', 'hdf5r', 'ggplot2', 'base64enc', 'ComplexHeatmap', 'BiocGenerics', 'clusterProfiler', 'fgsea', 'AnnotationDbi', 'org.Hs.eg.db', 'org.Mm.eg.db', 'GO.db', 'NMF', 'CellChat'); missing <- required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)]; if (length(missing)) stop('Missing required R packages: ', paste(missing, collapse=', ')); if (!identical(as.character(utils::packageVersion('CellChat')), '2.1.2')) stop('Unexpected CellChat version: ', as.character(utils::packageVersion('CellChat')))"
 
-# Optional legacy/prototype dependencies. CellChat is not a production-integrated
-# workflow in the app, and SeuratDisk-backed H5AD/H5Seurat import remains optional;
-# keep them out of the default image unless a trusted local build explicitly asks.
+# Optional legacy/prototype dependency. SeuratDisk-backed H5AD/H5Seurat import remains
+# outside the supported durable input contract, so a trusted local build must opt in.
 ARG INSTALL_OPTIONAL_R_PACKAGES=false
 RUN if [ "$INSTALL_OPTIONAL_R_PACKAGES" = "true" ]; then \
-      install-r-packages optional-nmf -e "install.packages('NMF', repos='https://cloud.r-project.org/')" && \
-      install-r-packages optional-cellchat -e "remotes::install_github('jinworks/CellChat')" && \
       install-r-packages optional-seurat-disk -e "remotes::install_github('mojaveazure/seurat-disk')"; \
     else \
-      echo "Skipping optional legacy R packages (CellChat, SeuratDisk). Set INSTALL_OPTIONAL_R_PACKAGES=true to include them."; \
+      echo "Skipping optional SeuratDisk package. Set INSTALL_OPTIONAL_R_PACKAGES=true to include it."; \
     fi
 
 # Copy only the runtime files admitted by r-backend/.dockerignore. Application

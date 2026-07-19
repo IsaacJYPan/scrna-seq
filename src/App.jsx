@@ -13,6 +13,7 @@ import DotPlot from './pages/DotPlot';
 import GeneViewer from './pages/GeneViewer';
 import DifferentialExpression from './pages/DifferentialExpression';
 import PathwayEnrichment from './pages/PathwayEnrichment';
+import CellChat from './pages/CellChat';
 import Publication from './pages/Publication';
 import Validation from './pages/Validation';
 import LineageExplorer from './pages/LineageExplorer';
@@ -102,11 +103,6 @@ const FUTURE_FEATURES = {
     title: 'Cell Annotation Not Integrated',
     subtitle: 'Cell annotation is intentionally disabled in this workflow. Any future support must keep biological interpretation reviewable by the researcher.',
     icon: 'Not implemented'
-  },
-  cellchat: {
-    title: 'CellChat Not Integrated',
-    subtitle: 'CellChat requires the pinned R 4.5 environment and a durable job/artifact workflow. This branch does not enable CellChat execution.',
-    icon: 'Coming later'
   },
   customscript: {
     title: 'Custom Script Disabled',
@@ -1049,7 +1045,7 @@ export default function App() {
         <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.annotate} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.cellchat} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="customscript"><TabContent id="customscript" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.customscript} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} /></TabContent></ErrorBoundary>

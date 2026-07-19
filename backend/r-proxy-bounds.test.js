@@ -323,4 +323,24 @@ describe('bounded authenticated R proxy policy', () => {
       provenance: { script: "readRDS('[redacted-path]')" },
     });
   });
+
+  it('redacts URI, storage, and derived-state strings even when they arrive in a benign-looking label', () => {
+    expect(sanitizeRProxyJson({
+      labels: [
+        'file:///srv/private/cellchat.csv',
+        'https://example.invalid/private/result',
+        'vault/owner/cellchat.csv',
+        'projects/proj_1/artifacts/job_1/cellchat.csv',
+        'user-7:obj-ao_abc123',
+      ],
+    })).toEqual({
+      labels: [
+        '[redacted-url]',
+        '[redacted-url]',
+        '[redacted-storage]',
+        '[redacted-storage]',
+        '[redacted-state]',
+      ],
+    });
+  });
 });

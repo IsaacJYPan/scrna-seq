@@ -302,7 +302,7 @@ export const DEFAULT_SEURAT_PIPELINE = validatePipelineManifest({
   schemaVersion: PIPELINE_CONTRACT.schemaVersion,
   id: DEFAULT_PIPELINE_ID,
   name: 'Default Seurat scRNA-seq Pipeline',
-  description: 'Dataset-backed Seurat preprocessing, exploration, DEG, pathway enrichment, and project history using registered modules.',
+  description: 'Dataset-backed Seurat preprocessing, exploration, DEG, pathway enrichment, CellChat candidate inference, and project history using registered modules.',
   modality: 'scrna',
   tabs: [
     { id: 'inspect', label: 'Inspect', moduleKey: 'inspectObject' },
@@ -318,6 +318,7 @@ export const DEFAULT_SEURAT_PIPELINE = validatePipelineManifest({
     { id: 'dotplot', label: 'Dot Plot', moduleKey: 'dotPlot' },
     { id: 'deg', label: 'Markers / DEG', moduleKey: 'differentialExpression' },
     { id: 'enrichment', label: 'Pathway Enrichment', moduleKey: 'pathwayEnrichment' },
+    { id: 'cellchat', label: 'CellChat', moduleKey: 'cellChat' },
     { id: 'history', label: 'Jobs & Artifacts', moduleKey: 'projectHistory' },
   ],
 }, { allowBuiltInId: true });
@@ -357,7 +358,7 @@ export function buildPipelineSidebarSections(manifest, pipelineState = {}) {
     safeManifest = resolvePipelineManifest(getDefaultPipelineManifest());
   }
   const exploreModuleKeys = new Set(['featurePlot', 'geneExpression', 'heatmap', 'dotPlot']);
-  const outputModuleKeys = new Set(['differentialExpression', 'pathwayEnrichment', 'projectHistory']);
+  const outputModuleKeys = new Set(['differentialExpression', 'pathwayEnrichment', 'cellChat', 'projectHistory']);
   const mainTabs = safeManifest.tabs.filter(tab => !exploreModuleKeys.has(tab.moduleKey) && !outputModuleKeys.has(tab.moduleKey));
   const exploreTabs = safeManifest.tabs.filter(tab => exploreModuleKeys.has(tab.moduleKey));
   const outputTabs = safeManifest.tabs.filter(tab => outputModuleKeys.has(tab.moduleKey));

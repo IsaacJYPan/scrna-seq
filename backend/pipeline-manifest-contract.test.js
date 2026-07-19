@@ -113,6 +113,11 @@ describe('shared declarative pipeline manifest contract', () => {
         executable: true,
         jobType: 'enrichment.gsea.v1',
       },
+      {
+        moduleKey: 'cellChat',
+        executable: true,
+        jobType: 'cellchat.infer.v1',
+      },
     ]);
 
     const resolved = resolvePipelineManifest(manifest({
@@ -120,6 +125,7 @@ describe('shared declarative pipeline manifest contract', () => {
         { id: 'qc', label: 'Quality Control', moduleKey: 'seuratQc' },
         { id: 'deg', label: 'Differential Expression', moduleKey: 'differentialExpression' },
         { id: 'enrichment', label: 'Pathway Enrichment', moduleKey: 'pathwayEnrichment' },
+        { id: 'cellchat', label: 'CellChat', moduleKey: 'cellChat' },
       ],
     }));
     expect(resolved.tabs.find((tab) => tab.moduleKey === 'seuratQc')).toEqual(expect.objectContaining({
@@ -133,6 +139,10 @@ describe('shared declarative pipeline manifest contract', () => {
     expect(resolved.tabs.find((tab) => tab.moduleKey === 'pathwayEnrichment')).toEqual(expect.objectContaining({
       executable: true,
       jobType: 'enrichment.gsea.v1',
+    }));
+    expect(resolved.tabs.find((tab) => tab.moduleKey === 'cellChat')).toEqual(expect.objectContaining({
+      executable: true,
+      jobType: 'cellchat.infer.v1',
     }));
   });
 });
