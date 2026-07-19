@@ -40,6 +40,7 @@ const INTERNAL_ONLY = [
   '/object/checkpoint-load',
   '/object/deg-find-markers',
   '/object/enrichment-gsea',
+  '/object/cellchat-infer',
   '/object/seurat-pipeline',
   '/object/inspect',
   '/internal/worker-readiness',
@@ -127,8 +128,12 @@ afterEach(() => {
 describe('production R proxy exact allowlist', () => {
   it('contains only reviewed method/path pairs and rejects unknown or wrong-method variants', () => {
     expect(R_PROXY_PRODUCTION_ALLOWLIST.GET.has('/normalize')).toBe(true);
+    // The owner-local CellChat key is a fixed, read-only group choice endpoint;
+    // it never accepts arbitrary metadata columns and is not a worker route.
+    expect(R_PROXY_PRODUCTION_ALLOWLIST.GET.has('/cellchat-group-map')).toBe(true);
     expect(R_PROXY_PRODUCTION_ALLOWLIST.POST.has('/export-preview')).toBe(true);
     expect(isAllowedProductionRProxyRequest('GET', '/normalize', { NODE_ENV: 'production' })).toBe(true);
+    expect(isAllowedProductionRProxyRequest('GET', '/cellchat-group-map', { NODE_ENV: 'production' })).toBe(true);
     expect(isAllowedProductionRProxyRequest('POST', '/normalize', { NODE_ENV: 'production' })).toBe(false);
     expect(isAllowedProductionRProxyRequest('GET', '/Normalize', { NODE_ENV: 'production' })).toBe(false);
     expect(isAllowedProductionRProxyRequest('GET', '/unknown', { NODE_ENV: 'production' })).toBe(false);

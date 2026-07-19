@@ -23,6 +23,46 @@ function pipelinePayload() {
   };
 }
 
+function cellChatPayload() {
+  return {
+    ok: true,
+    summary: {
+      method: 'cellchat_v2_predicted_signaling',
+      analysis_intent: 'single_context',
+      group_by: 'seurat_clusters',
+      assay: 'RNA',
+      species: 'human',
+      database_category: 'all',
+      p_value_cutoff: 0.05,
+      input_cell_count: 100,
+      analyzed_cell_count: 100,
+      input_group_count: 2,
+      analyzed_group_count: 2,
+      excluded_group_count: 0,
+      candidate_interaction_count: 1,
+      retained_interaction_count: 1,
+      retained_pathway_count: 1,
+      groups: [
+        { group: 'Group 1', input_cells: 50, analyzed_cells: 50 },
+        { group: 'Group 2', input_cells: 50, analyzed_cells: 50 },
+      ],
+      excluded_groups: [],
+      package_versions: {
+        r: '4.5.3', seurat: '5.3.1', cellchat: '2.1.2', cellchat_db: 'CellChatDB.human 2.1.2',
+      },
+      top_interactions: [{
+        source: 'Group 1', target: 'Group 2', interaction: 'TGFB1.TGFBR1_TGFBR2',
+        pathway: 'TGFb', probability: 0.42, p_value: 0.001, category: 'all',
+      }],
+      top_pathways: [{
+        source: 'Group 1', target: 'Group 2', pathway: 'TGFb', probability: 0.42, p_value: 0.001,
+      }],
+      warnings: [],
+    },
+    result: { saved: true, checksum_sha256: 'a'.repeat(64), size_bytes: 123, n_rows: 1 },
+  };
+}
+
 describe('signed R completion receipts', () => {
   it('uses a bounded domain-separated HMAC and rejects forged envelopes', () => {
     const receipt = { version: 1, payload: { ok: true } };
@@ -76,6 +116,34 @@ describe('signed R completion receipts', () => {
       target_analysis_object_id: null,
       output_storage_key: outputStorageKey,
     });
+  });
+
+  it('rejects a signed CellChat receipt that tries to republish a raw group label', () => {
+    const job = {
+      id: 'job_aaaaaaaaaaaaaaaaaaaaaaaa',
+      jobType: 'cellchat.infer.v1',
+      projectId: 'proj_bbbbbbbbbbbbbbbbbbbbbbbb',
+      analysisObjectId: 'ao_cccccccccccccccccccccccc',
+      datasetId: null,
+    };
+    const outputStorageKey = storage.projectStorageFileKey(
+      job.projectId, 'artifacts', job.id, 'cellchat-inference.csv'
+    );
+    const binding = rBridge.buildCompletionReceiptBinding(job, 'r.cellchat.infer.v1', {
+      cellChat: { resultStorageKey: outputStorageKey },
+    });
+    const safe = rBridge.descriptorFromCompletionReceipt(
+      job, { ...binding, payload: cellChatPayload() }, { outputStorageKey }
+    );
+    expect(safe.summary.groups.map((row) => row.group)).toEqual(['Group 1', 'Group 2']);
+
+    const unsafe = cellChatPayload();
+    unsafe.summary.groups[0].group = 'Private donor';
+    unsafe.summary.top_interactions[0].source = 'Private donor';
+    unsafe.summary.top_pathways[0].source = 'Private donor';
+    expect(() => rBridge.descriptorFromCompletionReceipt(
+      job, { ...binding, payload: unsafe }, { outputStorageKey }
+    )).toThrowError(/invalid/i);
   });
 
   it.each([

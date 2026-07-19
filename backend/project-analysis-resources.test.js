@@ -437,10 +437,12 @@ describe.skipIf(!CONFIGURED)('project analysis resources — references stay wit
 
     const receiptTypes = [
       'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
+      'cellchat.infer.v1',
       'checkpoint.load.v1', 'checkpoint.fork.v1',
     ];
     const noDatasetTypes = [
       'pbmc.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
+      'cellchat.infer.v1',
       'checkpoint.load.v1', 'checkpoint.fork.v1',
     ];
     const invalidBodies = [
@@ -476,6 +478,91 @@ describe.skipIf(!CONFIGURED)('project analysis resources — references stay wit
         datasetId: dataset.id,
       })).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
     }
+  });
+
+  it('accepts only the fixed CellChat parameter surface at the project HTTP boundary', async () => {
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
+    const source = await createAO(proj.id, alice.token);
+    const parameters = {
+      groupBy: 'seurat_clusters',
+      assay: 'RNA',
+      species: 'human',
+      databaseCategory: 'all',
+      analysisIntent: 'single_context',
+      minCellsPerGroup: 10,
+      maxCellsPerGroup: 1000,
+      maxTotalCells: 10000,
+      pValueCutoff: 0.05,
+      topInteractions: 25,
+      topPathways: 15,
+      randomSeed: 1,
+    };
+    const created = await createJob(proj.id, alice.token, {
+      jobType: 'cellchat.infer.v1',
+      analysisObjectId: source.data.id,
+      parameters,
+    });
+    expect(created.status).toBe(201);
+    expect(created.data).toMatchObject({
+      jobType: 'cellchat.infer.v1',
+      analysisObjectId: source.data.id,
+      parameters,
+    });
+    expect(JSON.stringify(created.data)).not.toMatch(/storage(?:Key|Uri)|stateKey/i);
+
+    for (const rejected of [
+      { ...parameters, metadataColumn: 'orig.ident' },
+      { ...parameters, rCode: 'system("whoami")' },
+      (() => {
+        const missing = { ...parameters };
+        delete missing.species;
+        return missing;
+      })(),
+    ]) {
+      const response = await createJob(proj.id, alice.token, {
+        jobType: 'cellchat.infer.v1',
+        analysisObjectId: source.data.id,
+        parameters: rejected,
+      });
+      expect(response.status).toBe(400);
+      expect(response.data.error).toMatch(/Unknown parameter|required/i);
+    }
+  });
+
+  it('rejects a collaborator CellChat job against another owner\'s private live R object before queueing', async () => {
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'analyst');
+    const source = await createAO(proj.id, alice.token);
+    const parameters = {
+      groupBy: 'seurat_clusters',
+      assay: 'RNA',
+      species: 'human',
+      databaseCategory: 'all',
+      analysisIntent: 'single_context',
+      minCellsPerGroup: 10,
+      maxCellsPerGroup: 1000,
+      maxTotalCells: 10000,
+      pValueCutoff: 0.05,
+      topInteractions: 25,
+      topPathways: 15,
+      randomSeed: 1,
+    };
+
+    const httpResponse = await createJob(proj.id, bob.token, {
+      jobType: 'cellchat.infer.v1',
+      analysisObjectId: source.data.id,
+      parameters,
+    });
+    expect(httpResponse.status).toBe(404);
+    expect(httpResponse.data.error).toBe('Analysis object not found.');
+
+    await expect(db.createProjectJob(bob.user.id, proj.id, {
+      jobType: 'cellchat.infer.v1',
+      analysisObjectId: source.data.id,
+      parameters,
+    })).rejects.toMatchObject({ code: 'ANALYSIS_OBJECT_NOT_FOUND' });
   });
 
   it('cross-project object/job reads return 404', async () => {

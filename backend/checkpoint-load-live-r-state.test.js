@@ -156,7 +156,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — inventory & scope', () => {
 
   it('registers checkpoint.load.v1 alongside the existing handlers (existing handlers unchanged)', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(checkpointLoadHandler);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(worker.pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(worker.rObjectInspectHandler);
@@ -181,21 +181,23 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — inventory & scope', () => {
 
   it('the bridge op/target sets stay exact/closed (adds only the checkpoint-load op/target)', async () => {
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
+      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
   });
 
-  it('keeps legacy enrichment names and CellChat job types or bridge ops unregistered', async () => {
+  it('keeps legacy enrichment and CellChat aliases unregistered while allowing only the reviewed durable CellChat type', async () => {
     // The checkpoint.load.v1 branch adds only its own type/op. The legacy plain analytical
     // types (deg/find_markers/enrichment/cellchat) remain UNREGISTERED handlers. (DEG is
     // productionized as deg.find_markers.v1 by a SEPARATE branch — see that test file.)
     for (const t of ['deg', 'find_markers', 'enrichment', 'cellchat', 'cellchat.infer',
-      'enrichment.ora.v1', 'cellchat.infer.v1']) {
+      'enrichment.ora.v1']) {
       expect(DEFAULT_HANDLERS[t]).toBeUndefined();
     }
-    // No pathway/CellChat production job type or bridge op exists.
-    for (const t of ['enrichment.ora.v1', 'cellchat.infer.v1', 'checkpoint.download.v1']) {
+    expect(DEFAULT_HANDLERS['cellchat.infer.v1']).toBe(worker.cellChatInferenceHandler);
+    expect(isValidJobType('cellchat.infer.v1')).toBe(true);
+    // Legacy aliases remain absent; the new durable type does not broaden the bridge.
+    for (const t of ['enrichment.ora.v1', 'checkpoint.download.v1']) {
       expect(isValidJobType(t)).toBe(false);
     }
     for (const op of ['r.enrichment.v1', 'r.cellchat.v1', 'r.checkpoint.download.v1']) {

@@ -52,7 +52,7 @@ Status legend:
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs and reads job status, logs, and bounded `deg_summary` artifact metadata. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. The DEG tab launches this job and displays sanitized summary metadata only; full marker tables remain internal and are not downloadable. |
 | Durable Seurat pipeline worker (`seurat.pipeline.v1`) | UI-wired (10x HDF5 only) | Pipeline Manager can upload/select one `tenx_h5` dataset, create/reuse a raw dataset analysis object, launch a durable Seurat preprocessing job, show logs/status/safe summary metadata, and hand the result to checkpoint load or DEG. See "Seurat pipeline path" below. |
-| Durable jobs | UI-wired (metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG tab can create `deg.find_markers.v1`; Pathway Enrichment can create `enrichment.gsea.v1`; Pipeline Manager can create `seurat.pipeline.v1` and result `checkpoint.load.v1`; Jobs & Artifacts can create `checkpoint.fork.v1` when an object has exactly one available, local, loadable checkpoint. General job launch, cancel, and retry flows are not generally UI-wired. |
+| Durable jobs | UI-wired (metadata + selected launches) | Durable ownership-scoped job records + API are shown in Jobs & Artifacts. The DEG, Pathway Enrichment, and CellChat tabs can create `deg.find_markers.v1`, `enrichment.gsea.v1`, and `cellchat.infer.v1` respectively; Pipeline Manager can create `seurat.pipeline.v1` and result `checkpoint.load.v1`; Jobs & Artifacts can create `checkpoint.fork.v1` when an object has exactly one available, local, loadable checkpoint. General job launch, cancel, and retry flows are not generally UI-wired. |
 | Standalone job worker | backend-wired (one-slot topology) | `worker.js` is the queue consumer; Express no longer starts an in-process worker. `npm run dev` supervises Vite, Express, one local R service, and one standalone worker; `npm run dev:no-worker` omits the worker. Claims use Postgres leases and `FOR UPDATE SKIP LOCKED`; a Postgres advisory singleton plus `JOB_WORKER_CONCURRENCY=1` enforce the supported one-process topology using the same private R service as Express. Process tests prove second-entrypoint refusal and lease recovery, not parallel heavy-R execution. Private `/livez` and `/readyz` endpoints expose process/readiness state. |
 | PBMC pipeline worker (`pbmc.pipeline.v1`) | backend-only | Copy-on-modify Seurat preprocessing as a durable job; not wired into the UI. |
 | Checkpoint artifacts | UI-wired (metadata + reattach/fork actions) | Immutable result checkpoint metadata per successful job can be listed. Pipeline Manager can request owner-only reattach through `checkpoint.load.v1`; project writers can request a private collaborator fork through `checkpoint.fork.v1`; there is still no download route. |
@@ -64,7 +64,7 @@ Status legend:
 | Runtime check / object inspect workers | backend-only | Read-only, metadata-only bridge operations. |
 | Default visual theme | UI-wired | The React shell is light-first by default with the existing dark toggle retained. |
 | Ranked pathway enrichment (`enrichment.gsea.v1`) | UI-wired (local image and real-R smoke verified) | The active Pathway Enrichment page launches one cluster/identity-versus-rest ranked GO Biological Process job, polls status/logs, and displays a bounded `enrichment_summary`. The full `enrichment_results` CSV stays private. The R 4.5.3 image build and real-R smoke pass on this worktree; deployed browser acceptance remains a release gate. |
-| CellChat / cell-cell communication | not implemented (product) | No durable workflow. Legacy authenticated R endpoints may still exist (see below). |
+| CellChat / cell-cell communication (`cellchat.infer.v1`) | UI-wired (narrow durable single-context path) | The CellChat tab requires an owner-attached live R object and explicit fixed choices for grouping (`seurat_clusters` or current identities), species, CellChatDB category, cell caps, and `single_context` intent. It launches an allowlisted worker job, polls its durable status, and shows a bounded sanitized candidate summary. The complete candidate CSV is `local_internal`; its metadata-only `cellchat_summary` companion has no storage path/key or public download. Raw group labels are replaced with opaque `Group N` identifiers in durable outputs; an owner-local key is read only from the currently attached private R object. This is candidate inference, not evidence of physical contact, causality, or a condition comparison. Real-R smoke and receipt-interoperability checks are separate from the mocked API-transport Playwright UI check; deployed browser/backend/R acceptance remains a release gate. |
 | Cell annotation | not implemented (product) | UI placeholder only. A legacy authenticated R endpoint may still exist (see below). |
 | Custom Script / arbitrary R execution | not implemented | Out of scope; no arbitrary-R endpoint. |
 | Reports / generated R scripts | not implemented | No supported report or script-export surface. Legacy live-R provenance script preview is copy-only and not a complete reproducibility export. |
@@ -107,12 +107,13 @@ code-loading boundary:
 - The Pipeline Manager renders a disabled, read-only preview of allowed
   parameter controls and result cards. Preview controls never submit data or
   launch a job. There is no generic manifest executor.
-- The only currently registered manifest module that declares a durable
-  executable job is differential expression via `deg.find_markers.v1`. Other
-  registered sidebar modules are views over existing application behavior; they
-  do not claim nonexistent per-step worker handlers or artifact types. The
-  separate, code-shipped default Seurat panel still owns the narrow
-  `seurat.pipeline.v1` launch.
+- The registered manifest modules that declare durable executable jobs are
+  differential expression (`deg.find_markers.v1`), ranked pathway enrichment
+  (`enrichment.gsea.v1`), and the narrow CellChat candidate-inference workflow
+  (`cellchat.infer.v1`). Other registered sidebar modules are views over
+  existing application behavior; they do not claim nonexistent per-step worker
+  handlers or artifact types. The separate, code-shipped default Seurat panel
+  still owns the narrow `seurat.pipeline.v1` launch.
 
 Publishing a manifest cannot add JavaScript, React components, R code, R
 packages, R endpoints, filesystem paths, storage keys, URLs, or a new worker
@@ -134,8 +135,9 @@ durable worker path as its primary workflow:
   for temporary legacy/development compatibility. Production blocks it before
   R contact. It is not the main DEG UI workflow.
 
-Neither path is removed. The UI migration does not add public downloads,
-generated reports/scripts, CellChat, or shared live R state.
+Neither path is removed. The DEG UI migration does not add public downloads,
+generated reports/scripts, or shared live R state; CellChat has its separate,
+narrow durable path below.
 
 ## Ranked pathway-enrichment path
 
@@ -174,6 +176,68 @@ not the legacy synchronous `/api/r/enrichment` prototype.
   on this worktree; deployed database/worker/browser acceptance remains a
   release gate.
 
+## CellChat candidate-inference path
+
+The active CellChat workflow is a fixed, durable `cellchat.infer.v1` job. It is
+not the legacy synchronous `/api/r/cellchat` or `/api/r/cellchat-infer` path.
+
+- **Scientific scope:** the user must explicitly choose `seurat_clusters` or
+  current Seurat identities, human or mouse, one reviewed CellChatDB category,
+  and the only supported intent, `single_context`. The worker accepts no
+  arbitrary metadata column, condition/comparison definition, R code, endpoint,
+  path, or state key. It requires two through 32 populated groups and applies
+  validated, recorded per-group and total-cell bounds with deterministic sampling.
+  The RNA assay is fixed to normalized `RNA` data. The helper extracts only the
+  reviewed CellChatDB signaling-gene layer, rather than cloning a multiomic
+  Seurat subset; it rejects a changed resource over 2,000 signaling features or
+  an estimated dense input over 128 MiB.
+- **Interpretation:** CellChat predicts ligand-receptor signaling candidates
+  from expression and a curated resource; it does not observe communication,
+  establish physical contact, or establish causality. It is deliberately not a
+  treated-versus-control, patient-versus-patient, or other sample-aware
+  comparison. Because each eligible group may be capped, probabilities describe
+  capped per-group expression and do not encode original population abundance.
+  The method/resource choice is recorded in the sanitized summary. This matches
+  the hypothesis-generating framing in the
+  [CellChat paper](https://www.nature.com/articles/s41467-021-21246-9) and the
+  method/resource sensitivity demonstrated by the
+  [multi-method comparison](https://www.nature.com/articles/s41467-022-30755-0).
+- **Execution boundary:** creation and the worker both require the selected
+  live R object's owner, so a project collaborator cannot queue work against a
+  different member's private R state. The worker rechecks ownership, derives
+  its private R state key, validates the
+  exact parameter allowlist, allocates the output key, and calls only
+  `r.cellchat.infer.v1` at `POST /object/cellchat-infer`. The R helper works on
+  a local subset and preserves the source object's identities, assay, metadata,
+  and process RNG state. Express blocks the worker endpoint from the public R
+  proxy before R contact.
+- **Outputs and privacy:** R atomically writes the complete candidate table and
+  a signed job/project/object/output-bound completion receipt. The worker
+  atomically records one private `local_internal` `cellchat_results` CSV and one
+  bounded metadata-only `cellchat_summary`; it creates no result analysis object
+  or lineage edge. Public projections omit storage keys, paths, receipt fields,
+  state keys, and raw group labels. Durable summaries and the private CSV use
+  opaque `Group N` labels, including receipt recovery; both Node and the UI
+  reject any other group identifier. The private CSV is streamed from bounded
+  CellChat array slices and retains at most 50,000 globally ranked interactions.
+  The owner UI may request a short-lived mapping from
+  its attached private R object, but that mapping is neither persisted with the
+  job/artifact nor a historical label guarantee if identities change later. No
+  general byte-download route exists.
+- **Dependencies and evidence:** the production R image requires `NMF` and
+  pinned CellChat 2.1.2. `test:cellchat-inference` runs the real R helper over a
+  synthetic Seurat object, including deterministic sampling, barcode/group
+  alignment, non-mutation, opaque durable labels, private CSV/receipt output,
+  bounded summary checks, direct equivalence with CellChat's native extraction,
+  and a dense 50,000-row-cap fixture. `test:cellchat-receipt-interop` verifies
+  that Node can authenticate and reconstruct the R-written receipt.
+  `test:cellchat-worker-pipeline` runs real Postgres, standalone workers, and
+  spawned R/CellChat, deliberately loses the first response after receipt write,
+  and proves receipt-only recovery does not execute CellChat twice. Those are
+  still not a full deployed browser/Express/Postgres/worker acceptance run.
+  The focused Playwright flow uses a real React browser with mocked project/job
+  transport and therefore proves UI contract/rendering only.
+
 ## Downstream-analysis roadmap and evidence
 
 There is no single downstream checklist that fits every single-cell study. The
@@ -189,21 +253,18 @@ around what the app can report without inventing experimental design:
    it can offer pseudobulk differential expression or condition-level pathway
    claims. This guardrail follows the false-positive findings in
    [Squair et al.](https://www.nature.com/articles/s41467-021-25960-2).
-3. **Cell-to-cell communication (next analysis vertical slice):** CellChat can
-   predict candidate ligand-receptor signaling between annotated cell groups,
-   but the result is hypothesis-generating rather than observed communication.
-   Species, grouping/annotation field, database category, minimum group size,
-   and single-condition versus between-condition intent must be explicit. Both
-   the [CellChat paper](https://www.nature.com/articles/s41467-021-21246-9) and a
-   [multi-method comparison](https://www.nature.com/articles/s41467-022-30755-0)
-   support showing the method/resource choice and treating outputs as predictions.
+3. **Cell-to-cell communication (implemented narrow slice):** CellChat now
+   provides a fixed one-context candidate-inference workflow. Cross-condition
+   CellChat comparisons remain out of scope until the sample/donor/condition
+   model above exists; the implementation must not silently pool cells into a
+   condition claim.
 4. **Differential abundance, trajectory, and regulatory activity:** add these
    only after their required sample design, time/order, or lineage assumptions
    can be represented explicitly in project metadata and the UI.
 
-CellChat is therefore not silently configured from cluster names. The durable
-worker and result shape should be added after the study-level choices above are
-confirmed.
+CellChat is not silently configured from cluster names, and its durable job
+records the explicit scientific and capacity choices. It remains deliberately
+separate from the future sample-aware comparison foundation.
 
 ## Seurat pipeline path
 
@@ -248,11 +309,23 @@ members.
 
 ## Hidden/disabled features vs reachable R endpoints
 
-CellChat and cell annotation are **not production-integrated** and remain UI
-placeholders. Ranked pathway enrichment is integrated only through the durable
-`enrichment.gsea.v1` workflow described above. Its worker-only endpoint is not a
-public API. Legacy authenticated endpoints remain reachable only outside
-production for development compatibility, including `/api/r/cellchat`,
+CellChat is UI-wired only through the narrow durable
+`cellchat.infer.v1` workflow described above. Cell annotation remains a UI
+placeholder. Ranked pathway enrichment is likewise integrated only through its
+durable `enrichment.gsea.v1` workflow. Their worker-only inference endpoints are
+not public APIs.
+
+The one CellChat-specific public-proxy route is the reviewed,
+owner-scoped `GET /api/r/cellchat-group-map`: after a result is displayed, it
+returns the current attached owner's mapping from opaque `Group N` labels to the
+fixed selected grouping (`seurat_clusters` or `ident`). It accepts neither an
+arbitrary metadata field nor a result/storage path, and the UI keeps the result
+in memory rather than persisting it with project metadata. It does not make a
+collaborator's private live R state visible or reconstruct an historical mapping
+after identities change.
+
+Legacy authenticated endpoints remain reachable only outside production for
+development compatibility, including `/api/r/cellchat`,
 `/api/r/cellchat-infer`, `/api/r/enrichment`, `/api/r/annotate-clusters`, and
 `/api/r/deg`. Production is fail-closed with an exact method/path allowlist and
 blocks those legacy routes before R contact.
@@ -284,7 +357,8 @@ server-file save.
 
 By contrast, the internal worker-only R endpoints
 (`/api/r/object/pbmc-pipeline`, `/api/r/object/checkpoint-load`,
-`/api/r/object/deg-find-markers`, `/api/r/object/seurat-pipeline`, and
+`/api/r/object/deg-find-markers`, `/api/r/object/enrichment-gsea`,
+`/api/r/object/cellchat-infer`, `/api/r/object/seurat-pipeline`, and
 `/api/r/object/inspect`, plus `/internal/worker-readiness`) are
 **blocked** from the public proxy before any R contact (404, no existence leak);
 they run only through the trusted standalone-worker bridge/readiness client. The current policy is pinned
@@ -348,7 +422,8 @@ claiming that the existing live-R architecture can scale horizontally:
   cancellation authoritatively wins; canceled checkpoint load/fork state remains
   owner-private and ephemeral until bounded LRU eviction or R restart. Immediate
   compute termination requires a future isolated per-job runtime.
-- PBMC, Seurat, checkpoint load/fork, DEG, and ranked enrichment jobs receive at most two execution
+- PBMC, Seurat, checkpoint load/fork, DEG, ranked enrichment, and CellChat
+  candidate-inference jobs receive at most two execution
   attempts, but a claim-guarded dispatch marker prevents a crashed worker from
   issuing the same side-effecting R request twice. R atomically writes a private,
   HMAC-signed, job/project/type/input/output-bound completion receipt after its
@@ -423,7 +498,8 @@ The app runtime is Postgres-only.
   in production, refuses non-HTTPS frontend origins for cross-site cookies.
   Same-origin deployment is the supported Compose default.
 - `backend/storage.js` is the active local-filesystem provider for new durable
-  datasets, checkpoints, DEG tables, and pathway-enrichment tables. It uses server-owned keys shaped as
+  datasets, checkpoints, DEG tables, pathway-enrichment tables, and CellChat
+  candidate tables. It uses server-owned keys shaped as
   `projects/<projectId>/<kind>/<id>/<file>` under `STORAGE_ROOT`. Writes are
   finalized atomically, checked by size and SHA-256, and blocked from following
   links outside the root. Keys are never client-supplied or returned publicly.
@@ -434,9 +510,10 @@ The app runtime is Postgres-only.
   and lineage are the durable source of truth **at the API/DB layer**. Projects
   and analysis objects are active UI surfaces; jobs, artifacts, checkpoints, and
   lineage are visible as sanitized metadata in Jobs & Artifacts, which also
-  exposes the narrow checkpoint-fork launch. The DEG and Pathway Enrichment tabs can
-  launch `deg.find_markers.v1` and `enrichment.gsea.v1` worker jobs and read their
-  sanitized summary artifacts. The Pipeline Manager Seurat panel can list/upload `tenx_h5`
+  exposes the narrow checkpoint-fork launch. The DEG, Pathway Enrichment, and
+  CellChat tabs can launch `deg.find_markers.v1`, `enrichment.gsea.v1`, and
+  `cellchat.infer.v1` worker jobs and read their sanitized summary artifacts.
+  The Pipeline Manager Seurat panel can list/upload `tenx_h5`
   datasets for `seurat.pipeline.v1`, launch that job, and request checkpoint
   reattach for the result object. General dataset management, generic worker job
   launch/cancel/retry flows, and artifact downloads remain
@@ -450,14 +527,15 @@ The app runtime is Postgres-only.
   only genuinely private, projectless resources. Project resources and legacy
   descendants that trace to project data stay behind project RBAC routes, so
   immutable creator metadata cannot become a post-removal access bypass.
-  Receipt-backed PBMC/Seurat/checkpoint/DEG/enrichment job types are rejected synchronously
+  Receipt-backed PBMC/Seurat/checkpoint/DEG/enrichment/CellChat job types are rejected synchronously
   on `/api/jobs`; they require project-scoped durable storage and must use the
   project jobs API.
 - The standalone worker is opt-in and allowlisted. Registered handlers include
   PBMC pipeline, dataset-backed Seurat pipeline, checkpoint load, checkpoint
-  fork, DEG marker finding, ranked pathway enrichment, runtime check, and object inspection.
-  The DEG and enrichment workflows are UI-wired for job launch/status/safe summary metadata; the Seurat
-  pipeline UI is wired only for `tenx_h5` input plus result checkpoint reattach.
+  fork, DEG marker finding, ranked pathway enrichment, CellChat candidate
+  inference, runtime check, and object inspection. The DEG, enrichment, and
+  CellChat workflows are UI-wired for job launch/status/safe summary metadata;
+  the Seurat pipeline UI is wired only for `tenx_h5` input plus result checkpoint reattach.
   PBMC pipeline, runtime check, and object inspect worker launches remain
   backend-only. Express never consumes the queue.
 - Project authorization is checked when a job is created and revalidated under a
@@ -486,16 +564,18 @@ The app runtime is Postgres-only.
   analysis objects, the durable job-worker claim/lease/heartbeat contract,
   standalone runtime/process behavior, crash-output recovery,
   artifacts/checkpoints, the lineage DAG, the R-proxy
-  ownership/policy/diagnostics gates, and the mocked-R pipeline worker handlers.
+  ownership/policy/diagnostics gates, and the mocked-R pipeline worker handlers
+  (including the CellChat handler/bridge contract).
   Every DB-backed suite resets the schema per test via `resetSchemaForTests()`
   and skips cleanly without `DATABASE_URL`; pure suites always run. (The SQLite-era
   schema-migration/backfill and `busy_timeout` tests were removed with the
   Postgres cutover — the Postgres schema ships every table from `pg/schema.sql`.)
   Durable jobs, artifacts/checkpoints, and lineage are implemented in the backend. The React UI now includes a
   Jobs & Artifacts / durable history surface for safe metadata visibility and
-  controlled checkpoint forks; the DEG and Pathway Enrichment tabs launch
-  `deg.find_markers.v1` and `enrichment.gsea.v1` jobs and read bounded summary
-  metadata; and the Pipeline Manager Seurat panel launches the
+  controlled checkpoint forks; the DEG, Pathway Enrichment, and CellChat tabs
+  launch `deg.find_markers.v1`, `enrichment.gsea.v1`, and
+  `cellchat.infer.v1` jobs and read bounded summary metadata; and the Pipeline
+  Manager Seurat panel launches the
   narrow `seurat.pipeline.v1` path with result checkpoint reattach. General job
   launching, artifact downloads, and lineage mutation are still not UI-wired. A
   passing backend suite means the API/DB contract holds - **not** that every
@@ -517,6 +597,13 @@ The app runtime is Postgres-only.
   change the project/object UI flow. It proves the UI *model* wiring (what the
   app requests and how it renders responses); it does **not** prove real
   backend, auth, ownership, or tenant isolation.
+- `npm run test:cellchat-browser` is a focused **mocked-transport Playwright**
+  test. It starts the actual React/Vite app and Chromium, but route-intercepts
+  auth, project, object, job, artifact, and owner-local group-key responses. It
+  verifies explicit scope selection, the exact durable job payload, sanitized
+  bounded summary rendering, private-result messaging, and absence of console
+  or request failures. It does **not** prove Express authorization, a worker
+  claim, R ownership, storage, or CellChat computation.
 - `npm run test:deployment:browser` is the real frontend deployment flow. It
   drives Chromium without route interception through the built React bundle,
   actual Express, real Postgres, and a private deterministic R service. It
@@ -571,9 +658,22 @@ The app runtime is Postgres-only.
   pipeline has a real R/standalone-worker/lease-renewal regression gate in pull
   requests. A separate required CI job also builds the exact production
   `r-backend/Dockerfile`, verifies every required R package (including the local
-  ranked-enrichment stack), boots it under the
+  ranked-enrichment and CellChat/NMF stacks), boots it under the
   unprivileged read-only container boundary, proves authenticated `/health`, and
   rejects an unauthenticated health request.
+- `npm run test:cellchat-inference` is a **real R/Seurat/CellChat helper**
+  smoke: it exercises deterministic bounded sampling, barcode-to-group
+  alignment, source-object/RNG non-mutation, opaque durable group labels, and
+  atomic private CSV plus signed completion-receipt output. It is not an
+  Express/Postgres/worker or browser integration test.
+  `npm run test:cellchat-receipt-interop` runs that real-R smoke and then proves
+  the Node receipt verifier can authenticate and reconstruct its descriptor.
+  `npm run test:cellchat-worker-pipeline` adds a real Postgres + standalone
+  worker + spawned CellChat recovery path; it skips locally without a test
+  `DATABASE_URL` and runs in CI.
+  CI installs the exact CellChat 2.1.2 source pin and runs the same inference
+  smoke in the production R image, but deployed browser + real Express/Postgres/
+  worker + real R acceptance remains a release gate.
 - CI runs on `pull_request` and `workflow_dispatch` only. The security-critical
   suites are additionally named explicitly in the workflow so their regression
   coverage is auditable.

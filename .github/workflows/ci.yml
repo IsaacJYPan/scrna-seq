@@ -108,6 +108,8 @@ jobs:
             any::org.Hs.eg.db
             any::org.Mm.eg.db
             any::GO.db
+            any::NMF
+            github::jinworks/CellChat@a0d3b2d231d46c8787177fffeac908270c253747
 
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
@@ -200,9 +202,34 @@ jobs:
       - name: Run Ranked Pathway-Enrichment Smoke Test
         run: npm run test:enrichment-gsea
 
+      - name: Run CellChat Inference Smoke Test
+        # Real R/Seurat/CellChat helper coverage: deterministic bounded sampling,
+        # opaque group labels, receipt-safe summary schema, private CSV output, and
+        # input-object/RNG non-mutation. It does not claim browser integration.
+        run: npm run test:cellchat-inference
+
+      - name: Verify CellChat R-to-Node receipt interoperability
+        # Uses a receipt emitted by the real R CellChat smoke to prove that the
+        # Node worker can authenticate and reconstruct the recovery descriptor.
+        run: npm run test:cellchat-receipt-interop
+
+      - name: Run CellChat durable worker receipt-recovery smoke test
+        # Real Postgres + standalone workers + spawned R/CellChat. The first
+        # successful R response is deliberately disconnected after it writes its
+        # private CSV and signed receipt; the bounded recovery-only claim must
+        # publish that exact output without executing CellChat a second time.
+        run: npm run test:cellchat-worker-pipeline
+
       - name: Run Visual/UX Tests
         # Mocked frontend visual smoke test; it checks UI rendering/layout.
         run: npm run test:visual
+
+      - name: Run CellChat Playwright browser flow
+        # Real React browser flow with a mocked project/job transport. It proves
+        # explicit scope selection, durable job creation, owner-local group-key
+        # rendering, and sanitized summary display; real CellChat R execution is
+        # covered by the dedicated R smoke above.
+        run: npm run test:cellchat-browser
 
       - name: Run real Chromium deployment flow
         # No request interception: browser -> built React app -> actual Express
@@ -241,7 +268,7 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
           --entrypoint Rscript scrna-seq-r:ci -e
-          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE)))"
+          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','NMF','CellChat'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE))); stopifnot(identical(as.character(utils::packageVersion('CellChat')), '2.1.2'))"
 
       - name: Run ranked pathway enrichment in the production R image
         run: >-
@@ -251,6 +278,15 @@ jobs:
           --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly"
           --workdir /workspace --entrypoint Rscript scrna-seq-r:ci
           scripts/verify_enrichment_gsea.R
+
+      - name: Run CellChat inference in the production R image
+        run: >-
+          docker run --rm --read-only --user 10001:10001
+          --cap-drop ALL --security-opt no-new-privileges
+          --tmpfs /tmp:rw,noexec,nosuid,nodev
+          --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly"
+          --workdir /workspace --entrypoint Rscript scrna-seq-r:ci
+          scripts/verify_cellchat_inference.R
 
       - name: Boot R image and audit authenticated health
         shell: bash
