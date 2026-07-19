@@ -49,6 +49,10 @@ const storage = require('./storage');
 const { PBMC_PIPELINE_PARAM_NAMES } = require('./pbmcPipeline');
 const { DEG_FIND_MARKERS_PARAM_NAMES } = require('./degFindMarkers');
 const { ENRICHMENT_GSEA_PARAM_NAMES } = require('./enrichmentGsea');
+const {
+  CELLCHAT_INFERENCE_PARAM_NAMES,
+  MAX_CELLCHAT_RESULT_ROWS,
+} = require('./cellChatInference');
 const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
 
 /** Coded error helper (mirrors database.js so callers can branch on err.code). */
@@ -97,6 +101,7 @@ const COMPLETION_JOB_TO_R_OPERATION = Object.freeze({
   'seurat.pipeline.v1': 'r.seurat.pipeline.v1',
   'deg.find_markers.v1': 'r.deg.find_markers.v1',
   'enrichment.gsea.v1': 'r.enrichment.gsea.v1',
+  'cellchat.infer.v1': 'r.cellchat.infer.v1',
   'checkpoint.load.v1': 'r.checkpoint.load.v1',
   'checkpoint.fork.v1': 'r.checkpoint.load.v1',
 });
@@ -244,6 +249,27 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     mutating: false,
     readOnly: false,
     defaultTimeoutMs: 300000,
+  }),
+  // Cell-cell communication inference is a fixed, single-context CellChat v2
+  // workflow. It only reads the owner-verified object, samples cells under
+  // server-enforced caps, writes a private candidate table, and returns a
+  // bounded summary. It is deliberately not a cross-condition comparison or
+  // an arbitrary metadata/code execution surface.
+  'r.cellchat.infer.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/cellchat-infer',
+    artifactType: 'cellchat_summary',
+    artifactName: 'Cell-cell communication summary',
+    artifactDescription:
+      'Sanitized, bounded summary of predicted ligand-receptor signaling candidates from one selected biological context. '
+      + 'The complete candidate table remains in private project storage; no expression matrix, cell-level data, storage key, '
+      + 'R state key, causal claim, or public download is included.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesCellChatParams: true,
+    mutating: false,
+    readOnly: false,
+    defaultTimeoutMs: 600000,
   }),
   // Dataset-backed Seurat pipeline: load one server-resolved 10x HDF5 dataset,
   // create a Seurat object, run QC/preprocessing/clustering/UMAP, and save a
@@ -705,6 +731,228 @@ function sanitizeEnrichmentResultInfo(body) {
   return result;
 }
 
+function sanitizeCellChatEnum(value, allowed) {
+  return typeof value === 'string' && allowed.includes(value) ? value : null;
+}
+
+function sanitizeCellChatText(value, maxLen = 80) {
+  // Unlike a generic runtime label, this content can appear in the public
+  // CellChat preview. Reject path/URL-shaped source values outright rather than
+  // merely stripping separators and retaining an accidental secret segment.
+  if (typeof value === 'string' && /(?:[A-Za-z]:[\\/]|[\\/]|https?:|file:)/i.test(value)) {
+    return null;
+  }
+  return sanitizeRuntimeField(value, maxLen);
+}
+
+// Raw grouping/identity labels are intentionally absent from durable CellChat
+// output. Unlike pathway or ligand names, every persisted source/target/group
+// identifier must be the exact opaque presentation token produced by the R
+// helper. Keep this check at the Node boundary too so an accidental R change or
+// even a valid signed receipt cannot republish a safe-looking raw identity.
+function sanitizeCellChatGroup(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^Group ([1-9]\d*)$/.exec(value);
+  if (!match) return null;
+  const index = Number(match[1]);
+  if (!Number.isSafeInteger(index) || index > 32) return null;
+  return `Group ${index}`;
+}
+
+function sanitizeCellChatProbability(value) {
+  const n = sanitizeStatNumber(value);
+  return n !== null && n >= 0 ? n : null;
+}
+
+function sanitizeCellChatPValue(value) {
+  const n = sanitizeStatNumber(value);
+  return n !== null && n >= 0 && n <= 1 ? n : null;
+}
+
+function sanitizeCellChatWarnings(value) {
+  if (!Array.isArray(value)) return [];
+  const warnings = [];
+  for (const item of value) {
+    const text = sanitizeCellChatText(item, 160);
+    if (text) warnings.push(text);
+    if (warnings.length >= 32) break;
+  }
+  return warnings;
+}
+
+// CellChat summaries are deliberately narrower than the private CSV result.
+// The fields below are all aggregate counts, package versions, or a small,
+// safe preview of predicted candidates. Unknown R fields never escape this
+// boundary, so an accidental R-side response change cannot expose cell metadata,
+// storage paths, state keys, or a large candidate table through the public
+// artifact projection.
+function sanitizeCellChatSummary(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
+  const out = {};
+
+  const method = sanitizeCellChatText(s.method, 80);
+  if (method) out.method = method;
+  const analysisIntent = sanitizeCellChatEnum(s.analysis_intent, ['single_context']);
+  if (analysisIntent) out.analysisIntent = analysisIntent;
+  const groupBy = sanitizeCellChatEnum(s.group_by, ['seurat_clusters', 'ident']);
+  if (groupBy) out.groupBy = groupBy;
+  const assay = sanitizeCellChatEnum(s.assay, ['RNA']);
+  if (assay) out.assay = assay;
+  const species = sanitizeCellChatEnum(s.species, ['human', 'mouse']);
+  if (species) out.species = species;
+  const databaseCategory = sanitizeCellChatEnum(s.database_category, [
+    'all', 'secreted_signaling', 'ecm_receptor', 'cell_cell_contact',
+  ]);
+  if (databaseCategory) out.databaseCategory = databaseCategory;
+  const pValueCutoff = sanitizeCellChatPValue(s.p_value_cutoff);
+  if (pValueCutoff !== null && pValueCutoff >= 0.000001 && pValueCutoff <= 0.1) {
+    out.pValueCutoff = pValueCutoff;
+  }
+
+  for (const [source, target] of [
+    ['input_cell_count', 'inputCellCount'],
+    ['analyzed_cell_count', 'analyzedCellCount'],
+    ['input_group_count', 'inputGroupCount'],
+    ['analyzed_group_count', 'analyzedGroupCount'],
+    ['excluded_group_count', 'excludedGroupCount'],
+    ['candidate_interaction_count', 'candidateInteractionCount'],
+    ['retained_interaction_count', 'retainedInteractionCount'],
+    ['retained_pathway_count', 'retainedPathwayCount'],
+  ]) {
+    const value = sanitizeCount(s[source]);
+    if (value !== null) out[target] = value;
+  }
+
+  const groups = [];
+  if (Array.isArray(s.groups)) {
+    for (const row of s.groups) {
+      if (!row || typeof row !== 'object') continue;
+      const group = sanitizeCellChatGroup(row.group);
+      const inputCells = sanitizeCount(row.input_cells);
+      const analyzedCells = sanitizeCount(row.analyzed_cells);
+      if (group && inputCells !== null && analyzedCells !== null && analyzedCells <= inputCells) {
+        groups.push({ group, inputCells, analyzedCells });
+      }
+      if (groups.length >= 64) break;
+    }
+  }
+  out.groups = groups;
+
+  const excludedGroups = [];
+  if (Array.isArray(s.excluded_groups)) {
+    for (const row of s.excluded_groups) {
+      if (!row || typeof row !== 'object') continue;
+      const group = sanitizeCellChatGroup(row.group);
+      const inputCells = sanitizeCount(row.input_cells);
+      const reason = sanitizeCellChatText(row.reason, 80);
+      if (group && inputCells !== null && reason) excludedGroups.push({ group, inputCells, reason });
+      if (excludedGroups.length >= 64) break;
+    }
+  }
+  out.excludedGroups = excludedGroups;
+
+  const versions = {};
+  if (s.package_versions && typeof s.package_versions === 'object') {
+    for (const key of ['r', 'seurat', 'cellchat', 'cellchat_db']) {
+      const value = sanitizeCellChatText(s.package_versions[key], 80);
+      if (value) versions[key === 'cellchat_db' ? 'cellchatDb' : key] = value;
+    }
+  }
+  out.packageVersions = versions;
+
+  const topInteractions = [];
+  if (Array.isArray(s.top_interactions)) {
+    for (const row of s.top_interactions) {
+      if (!row || typeof row !== 'object') continue;
+      const source = sanitizeCellChatGroup(row.source);
+      const target = sanitizeCellChatGroup(row.target);
+      const interaction = sanitizeCellChatText(row.interaction, 160);
+      const pathway = sanitizeCellChatText(row.pathway, 160);
+      const probability = sanitizeCellChatProbability(row.probability);
+      const pValue = sanitizeCellChatPValue(row.p_value);
+      const category = sanitizeCellChatEnum(row.category, [
+        'all', 'secreted_signaling', 'ecm_receptor', 'cell_cell_contact',
+      ]);
+      if (source && target && interaction && pathway && probability !== null
+          && pValue !== null && pValue <= pValueCutoff && category) {
+        topInteractions.push({ source, target, interaction, pathway, probability, pValue, category });
+      }
+      if (topInteractions.length >= 100) break;
+    }
+  }
+  out.topInteractions = topInteractions;
+
+  const topPathways = [];
+  if (Array.isArray(s.top_pathways)) {
+    for (const row of s.top_pathways) {
+      if (!row || typeof row !== 'object') continue;
+      const source = sanitizeCellChatGroup(row.source);
+      const target = sanitizeCellChatGroup(row.target);
+      const pathway = sanitizeCellChatText(row.pathway, 160);
+      const probability = sanitizeCellChatProbability(row.probability);
+      const pValue = sanitizeCellChatPValue(row.p_value);
+      if (source && target && pathway && probability !== null
+          && pValue !== null && pValue <= pValueCutoff) {
+        topPathways.push({ source, target, pathway, probability, pValue });
+      }
+      if (topPathways.length >= 100) break;
+    }
+  }
+  out.topPathways = topPathways;
+  out.warnings = sanitizeCellChatWarnings(s.warnings);
+  return out;
+}
+
+function isCompleteCellChatSummary(summary) {
+  if (!summary || typeof summary !== 'object') return false;
+  const scalarKeys = [
+    'method', 'analysisIntent', 'groupBy', 'assay', 'species', 'databaseCategory', 'pValueCutoff',
+    'inputCellCount', 'analyzedCellCount', 'inputGroupCount', 'analyzedGroupCount',
+    'excludedGroupCount', 'candidateInteractionCount', 'retainedInteractionCount',
+    'retainedPathwayCount',
+  ];
+  if (scalarKeys.some((key) => !Object.prototype.hasOwnProperty.call(summary, key))) return false;
+  if (!Array.isArray(summary.groups) || !Array.isArray(summary.excludedGroups)
+      || !Array.isArray(summary.topInteractions) || !Array.isArray(summary.topPathways)
+      || !Array.isArray(summary.warnings) || !summary.packageVersions
+      || typeof summary.packageVersions !== 'object') return false;
+  if (summary.inputCellCount < summary.analyzedCellCount
+      || summary.inputGroupCount < summary.analyzedGroupCount
+      || summary.excludedGroupCount !== summary.excludedGroups.length
+      || summary.analyzedGroupCount !== summary.groups.length
+      || summary.inputGroupCount !== summary.analyzedGroupCount + summary.excludedGroupCount
+      || summary.inputGroupCount < 2 || summary.inputGroupCount > 32
+      || summary.analyzedGroupCount < 2 || summary.analyzedGroupCount > 32
+      || summary.candidateInteractionCount < summary.retainedInteractionCount
+      || summary.retainedInteractionCount > MAX_CELLCHAT_RESULT_ROWS
+      || !summary.groups.every((row) => sanitizeCellChatGroup(row.group) === row.group)
+      || !summary.excludedGroups.every((row) => sanitizeCellChatGroup(row.group) === row.group)
+      || !summary.topInteractions.every((row) =>
+        sanitizeCellChatGroup(row.source) === row.source
+          && sanitizeCellChatGroup(row.target) === row.target
+          && row.pValue <= summary.pValueCutoff)
+      || !summary.topPathways.every((row) =>
+        sanitizeCellChatGroup(row.source) === row.source
+          && sanitizeCellChatGroup(row.target) === row.target
+          && row.pValue <= summary.pValueCutoff)
+      || (summary.retainedInteractionCount > 0 && summary.topInteractions.length === 0)
+      || (summary.retainedPathwayCount > 0 && summary.topPathways.length === 0)) return false;
+  // A pathway-level aggregation can legitimately contain more retained
+  // source/target rows than the interaction-level table after CellChat's
+  // respective filters. It is therefore not a safe invariant to compare
+  // `retainedPathwayCount` with `candidateInteractionCount` here.
+  return ['r', 'seurat', 'cellchat', 'cellchatDb']
+    .every((key) => typeof summary.packageVersions[key] === 'string');
+}
+
+function sanitizeCellChatResultInfo(body) {
+  const result = sanitizeDegResultInfo(body);
+  if (result.sizeBytes !== null && result.sizeBytes > 50 * 1024 * 1024) result.saved = false;
+  if (result.nRows !== null && result.nRows > MAX_CELLCHAT_RESULT_ROWS) result.saved = false;
+  return result;
+}
+
 const COMPLETION_RECEIPT_BINDING_KEYS = Object.freeze([
   'version',
   'job_id',
@@ -829,6 +1077,9 @@ function buildCompletionReceiptBinding(job, operation, args = {}) {
     outputKind = 'artifacts';
   } else if (jobType === 'enrichment.gsea.v1') {
     outputStorageKey = args.enrichment && args.enrichment.resultStorageKey;
+    outputKind = 'artifacts';
+  } else if (jobType === 'cellchat.infer.v1') {
+    outputStorageKey = args.cellChat && args.cellChat.resultStorageKey;
     outputKind = 'artifacts';
   } else {
     sourceCheckpointArtifactId = args.checkpoint && args.checkpoint.checkpointArtifactId;
@@ -967,6 +1218,44 @@ function validateReceiptPayloadSchema(jobType, payload) {
     }
     return;
   }
+  if (jobType === 'cellchat.infer.v1') {
+    assertExactObjectKeys(payload, ['ok', 'summary', 'result']);
+    if (payload.ok !== true) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    assertExactObjectKeys(payload.summary, [
+      'method', 'analysis_intent', 'group_by', 'assay', 'species', 'database_category',
+      'p_value_cutoff', 'input_cell_count', 'analyzed_cell_count', 'input_group_count',
+      'analyzed_group_count', 'excluded_group_count', 'candidate_interaction_count',
+      'retained_interaction_count', 'retained_pathway_count', 'groups', 'excluded_groups',
+      'package_versions', 'top_interactions', 'top_pathways', 'warnings',
+    ]);
+    assertExactObjectKeys(payload.summary.package_versions, ['r', 'seurat', 'cellchat', 'cellchat_db']);
+    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
+    if (!Array.isArray(payload.summary.groups) || !Array.isArray(payload.summary.excluded_groups)
+        || !Array.isArray(payload.summary.top_interactions) || !Array.isArray(payload.summary.top_pathways)
+        || !Array.isArray(payload.summary.warnings)
+        || payload.summary.groups.length > 64 || payload.summary.excluded_groups.length > 64
+        || payload.summary.top_interactions.length > 100 || payload.summary.top_pathways.length > 100
+        || payload.summary.warnings.length > 32) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    for (const row of payload.summary.groups) {
+      assertExactObjectKeys(row, ['group', 'input_cells', 'analyzed_cells']);
+    }
+    for (const row of payload.summary.excluded_groups) {
+      assertExactObjectKeys(row, ['group', 'input_cells', 'reason']);
+    }
+    for (const row of payload.summary.top_interactions) {
+      assertExactObjectKeys(row, [
+        'source', 'target', 'interaction', 'pathway', 'probability', 'p_value', 'category',
+      ]);
+    }
+    for (const row of payload.summary.top_pathways) {
+      assertExactObjectKeys(row, ['source', 'target', 'pathway', 'probability', 'p_value']);
+    }
+    return;
+  }
   assertExactObjectKeys(payload, [
     'loaded', 'runtime_instance_id', 'checksum_verified', 'class', 'n_cells',
     'n_features', 'assays', 'reductions', 'n_meta_fields', 'meta_fields',
@@ -1060,6 +1349,32 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
       },
     };
   }
+  if (jobType === 'cellchat.infer.v1') {
+    const summary = sanitizeCellChatSummary(body);
+    const result = sanitizeCellChatResultInfo(body);
+    if (!isCompleteCellChatSummary(summary) || !result.saved || !result.checksumSha256
+        || result.sizeBytes === null || result.nRows === null) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return {
+      operation: rOperation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: job.analysisObjectId,
+      summary,
+      result,
+      metadata: {
+        operation: rOperation,
+        kind: 'cellchat_summary',
+        scientific_output: true,
+        downloadable: false,
+        ranAt: new Date().toISOString(),
+        objectId: job.analysisObjectId,
+        summary,
+      },
+    };
+  }
   if (jobType === 'deg.find_markers.v1') {
     const summary = sanitizeDegSummary(body);
     const result = sanitizeDegResultInfo(body);
@@ -1126,6 +1441,7 @@ function sanitizeRBridgeError(err) {
     R_PIPELINE_PARAMS_REQUIRED: 'Server-validated pipeline parameters are required.',
     R_DEG_PARAMS_REQUIRED: 'Server-validated DEG parameters and result key are required.',
     R_ENRICHMENT_PARAMS_REQUIRED: 'Server-validated pathway-enrichment parameters and result key are required.',
+    R_CELLCHAT_PARAMS_REQUIRED: 'Server-validated cell-communication parameters and result key are required.',
     R_CHECKPOINT_REQUIRED: 'A server-selected checkpoint is required for a checkpoint load.',
     R_TIMEOUT: 'R runtime did not respond before the timeout.',
     R_RESPONSE_TOO_LARGE: 'R runtime response exceeded its safe limit.',
@@ -1137,6 +1453,7 @@ function sanitizeRBridgeError(err) {
     R_CHECKPOINT_LOAD_FAILED: 'R checkpoint load failed.',
     R_DEG_FIND_MARKERS_FAILED: 'R DEG / marker finding run failed.',
     R_ENRICHMENT_GSEA_FAILED: 'R ranked pathway-enrichment run failed.',
+    R_CELLCHAT_INFERENCE_FAILED: 'R cell-communication inference run failed.',
     R_SEURAT_PIPELINE_FAILED: 'R Seurat pipeline run failed.',
     R_BRIDGE_ERROR: 'R bridge operation failed.',
   };
@@ -1447,7 +1764,30 @@ async function runRBridgeOperation(args = {}) {
     request.body = { operation, params: safeParams, storage_key: resultStorageKey };
   }
 
-  // 2f. Dataset-backed Seurat pipeline op: body reconstructed from ONLY
+  // 2f. CellChat inference: only the dedicated validator's fixed scientific
+  // choices and a server-allocated private result key cross this boundary. The
+  // caller cannot select a metadata column, database path, R function, or live
+  // object state key.
+  if (spec.carriesCellChatParams) {
+    const cellChat = args.cellChat;
+    const params = cellChat && typeof cellChat === 'object' ? cellChat.params : null;
+    const resultStorageKey = cellChat && typeof cellChat === 'object'
+      ? cellChat.resultStorageKey : null;
+    if (!params || typeof params !== 'object'
+        || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
+      throw codedError(
+        'R_CELLCHAT_PARAMS_REQUIRED',
+        'Server-validated cell-communication parameters and result key are required.'
+      );
+    }
+    const safeParams = {};
+    for (const name of CELLCHAT_INFERENCE_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    request.body = { operation, params: safeParams, storage_key: resultStorageKey };
+  }
+
+  // 2g. Dataset-backed Seurat pipeline op: body reconstructed from ONLY
   // server-validated params and DB-resolved storage coordinates.
   if (spec.carriesSeuratDatasetParams) {
     const seurat = args.seuratPipeline;
@@ -1528,6 +1868,7 @@ async function runRBridgeOperation(args = {}) {
     else if (spec.carriesCheckpoint) failCode = 'R_CHECKPOINT_LOAD_FAILED';
     else if (spec.carriesDegParams) failCode = 'R_DEG_FIND_MARKERS_FAILED';
     else if (spec.carriesEnrichmentParams) failCode = 'R_ENRICHMENT_GSEA_FAILED';
+    else if (spec.carriesCellChatParams) failCode = 'R_CELLCHAT_INFERENCE_FAILED';
     else if (spec.carriesSeuratDatasetParams) failCode = 'R_SEURAT_PIPELINE_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     // Server-side diagnostic: the R HTTP status + our coded reason (never the R body,
@@ -1687,6 +2028,37 @@ async function runRBridgeOperation(args = {}) {
     };
   }
 
+  if (operation === 'r.cellchat.infer.v1') {
+    const summary = sanitizeCellChatSummary(body);
+    const result = sanitizeCellChatResultInfo(body);
+    if (!isCompleteCellChatSummary(summary)
+        || (result.saved === true && (!result.checksumSha256
+          || result.sizeBytes === null || result.nRows === null))) {
+      throw markRSideEffectsPossible(codedError(
+        'R_RESPONSE_INVALID',
+        'R runtime returned an invalid response.'
+      ));
+    }
+    return {
+      operation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: objectContext.objectId,
+      summary,
+      result,
+      metadata: {
+        operation,
+        kind: 'cellchat_summary',
+        scientific_output: true,
+        downloadable: false,
+        ranAt: new Date().toISOString(),
+        objectId: objectContext.objectId,
+        summary,
+      },
+    };
+  }
+
   if (operation === 'r.seurat.pipeline.v1') {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
@@ -1765,6 +2137,7 @@ async function runRBridgeOperation(args = {}) {
 module.exports = {
   DEFAULT_R_BRIDGE_TIMEOUT_MS,
   MAX_R_BRIDGE_TIMEOUT_MS,
+  MAX_CELLCHAT_RESULT_ROWS,
   R_BRIDGE_OPERATIONS,
   R_BRIDGE_ALLOWED_TARGETS,
   isAllowedRBridgeOperation,
@@ -1782,6 +2155,9 @@ module.exports = {
   sanitizeDegResultInfo,
   sanitizeEnrichmentSummary,
   sanitizeEnrichmentResultInfo,
+  sanitizeCellChatGroup,
+  sanitizeCellChatSummary,
+  sanitizeCellChatResultInfo,
   createCompletionReceiptEnvelope,
   verifyCompletionReceiptEnvelope,
   buildCompletionReceiptBinding,

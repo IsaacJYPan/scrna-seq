@@ -953,7 +953,7 @@ async function main() {
     { id: 'deg',          label: 'Markers / DEG',             requiresData: true  },
     { id: 'annotate',     label: 'Cell Annotation',           requiresData: true, expectedDisabled: true  },
     { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true, expectedDisabled: false },
-    { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: true  },
+    { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: false },
     { id: 'customscript', label: 'Custom Script',             requiresData: true, expectedDisabled: true  },
     { id: 'history',      label: 'Jobs & Artifacts',          requiresData: false },
     { id: 'publication',  label: 'Reports / Export',          requiresData: true  },

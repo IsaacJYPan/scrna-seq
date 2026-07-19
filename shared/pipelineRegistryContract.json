@@ -125,6 +125,17 @@
       "resultArtifactTypes": ["enrichment_summary", "enrichment_results"],
       "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
     },
+    "cellChat": {
+      "routeId": "cellchat",
+      "componentKey": "cellChat",
+      "defaultLabel": "CellChat",
+      "jobType": "cellchat.infer.v1",
+      "executable": true,
+      "requiresObject": true,
+      "parameterTemplates": ["enum", "number", "integer"],
+      "resultArtifactTypes": ["cellchat_summary", "cellchat_results"],
+      "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
+    },
     "projectHistory": {
       "routeId": "history",
       "componentKey": "projectHistory",

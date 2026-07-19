@@ -1,718 +1,924 @@
-// LEGACY / PROTOTYPE — NOT IMPORTED.
-// CellChat is not a production-integrated UI workflow; App.jsx renders a
-// PlaceholderPage for the "cellchat" tab instead of this component. This file is
-// kept as a legacy live-R prototype (it calls the authenticated /api/r/* proxy).
-// Do not build on it without deciding the CellChat product direction first.
-// See the "Implemented vs UI-wired" table in README.md.
-import React, { useState, useEffect, useRef } from 'react';
-import { MessageSquare, Play, Loader2, AlertCircle, Download, Search } from 'lucide-react';
-import Plot from 'react-plotly.js';
-import { usePipelineStep } from '../hooks/usePipelineStep';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  Archive,
+  Clock,
+  FileText,
+  Loader2,
+  MessageSquare,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react';
+import { useTabParams } from '../hooks/useTabParams';
+import { hasAttachedLiveRObject } from '../liveRState';
 
-// ─── Publication color palette (matches CellChat R package defaults) ───────────
-const CELL_COLORS = [
-  '#E41A1C','#377EB8','#4DAF4A','#984EA3','#FF7F00',
-  '#A65628','#F781BF','#999999','#66C2A5','#FC8D62',
-  '#8DA0CB','#E78AC3','#A6D854','#FFD92F','#E5C494',
-  '#B3B3B3','#8DD3C7','#FFFFB3','#BEBADA','#FB8072',
+const CELLCHAT_JOB_TYPE = 'cellchat.infer.v1';
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
+const POLL_MS = 3000;
+const JOB_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
+const MAX_VISIBLE_GROUPS = 50;
+const MAX_VISIBLE_ROWS = 100;
+const OPAQUE_GROUP_RE = /^Group ([1-9]\d*)$/;
+
+const GROUP_BY_OPTIONS = [
+  ['seurat_clusters', 'Seurat clusters'],
+  ['ident', 'Current identities'],
+];
+const SPECIES_OPTIONS = [
+  ['human', 'Human'],
+  ['mouse', 'Mouse'],
+];
+const DATABASE_CATEGORY_OPTIONS = [
+  ['all', 'All CellChatDB categories'],
+  ['secreted_signaling', 'Secreted signaling'],
+  ['ecm_receptor', 'ECM–receptor'],
+  ['cell_cell_contact', 'Cell–cell contact'],
+];
+const ANALYSIS_INTENT_OPTIONS = [
+  ['single_context', 'One biological context only'],
 ];
 
-function getColor(i) { return CELL_COLORS[i % CELL_COLORS.length]; }
+const DEFAULT_PARAMS = {
+  groupBy: '',
+  assay: 'RNA',
+  species: '',
+  databaseCategory: '',
+  analysisIntent: '',
+  minCellsPerGroup: 10,
+  maxCellsPerGroup: 5000,
+  maxTotalCells: 10000,
+  pValueCutoff: 0.05,
+  topInteractions: 25,
+  topPathways: 15,
+  randomSeed: 1,
+};
 
-// ─── Circle (Chord) Plot ─────────────────────────────────────────────────────
-function CirclePlot({ nodes, edges, threshold }) {
-  const svgRef = useRef(null);
-  const [hovered, setHovered] = useState(null);
-  const [tooltip, setTooltip] = useState(null);
+function allowedValue(value, options, fallback = '') {
+  return options.some(([candidate]) => candidate === value) ? value : fallback;
+}
 
-  const filtered = edges.filter(e => e.weight >= threshold);
-  const maxW = filtered.length ? Math.max(...filtered.map(e => e.weight)) : 1;
+function clampNumber(value, min, max, fallback) {
+  if (value === '' || value === null || value === undefined) return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
 
-  const N = nodes.length;
-  const cx = 250, cy = 250, R = 185, nodeR = 14;
+function clampInteger(value, min, max, fallback) {
+  return Math.trunc(clampNumber(value, min, max, fallback));
+}
 
-  const angle = (i) => (2 * Math.PI * i / N) - Math.PI / 2;
-  const px = (i) => cx + R * Math.cos(angle(i));
-  const py = (i) => cy + R * Math.sin(angle(i));
+function buildCellChatParams(params) {
+  const minCellsPerGroup = clampInteger(params.minCellsPerGroup, 5, 200, 10);
+  const maxCellsPerGroup = Math.max(
+    minCellsPerGroup,
+    clampInteger(params.maxCellsPerGroup, 100, 10000, 5000)
+  );
+  const maxTotalCells = Math.max(
+    minCellsPerGroup * 2,
+    clampInteger(params.maxTotalCells, 1000, 10000, 10000)
+  );
+  return {
+    groupBy: allowedValue(params.groupBy, GROUP_BY_OPTIONS),
+    assay: 'RNA',
+    species: allowedValue(params.species, SPECIES_OPTIONS),
+    databaseCategory: allowedValue(params.databaseCategory, DATABASE_CATEGORY_OPTIONS),
+    analysisIntent: allowedValue(params.analysisIntent, ANALYSIS_INTENT_OPTIONS),
+    minCellsPerGroup,
+    maxCellsPerGroup,
+    maxTotalCells,
+    pValueCutoff: clampNumber(params.pValueCutoff, 0.000001, 0.1, 0.05),
+    topInteractions: clampInteger(params.topInteractions, 5, 100, 25),
+    topPathways: clampInteger(params.topPathways, 5, 100, 15),
+    randomSeed: clampInteger(params.randomSeed, 0, 2147483647, 1),
+  };
+}
 
-  const nodeIndex = Object.fromEntries(nodes.map((n, i) => [n, i]));
+function parseErrorMessage(error) {
+  const raw = error?.message || String(error || 'Request failed.');
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.error || raw;
+  } catch {
+    return raw;
+  }
+}
 
-  // build bezier path from node i to node j
-  const arcPath = (i, j, isSelf) => {
-    if (isSelf) {
-      // small loop outside the circle
-      const ax = px(i), ay = py(i);
-      const outR = nodeR + 18;
-      const nx = ax + outR * Math.cos(angle(i));
-      const ny = ay + outR * Math.sin(angle(i));
-      const lx = ax + outR * Math.cos(angle(i) - 0.35);
-      const ly = ay + outR * Math.sin(angle(i) - 0.35);
-      const rx = ax + outR * Math.cos(angle(i) + 0.35);
-      const ry = ay + outR * Math.sin(angle(i) + 0.35);
-      return `M ${lx} ${ly} Q ${nx + Math.cos(angle(i))*22} ${ny + Math.sin(angle(i))*22} ${rx} ${ry}`;
+function redactUnsafeText(value) {
+  return String(value || '')
+    .replace(/[A-Za-z]:[\\/][^\s'")]+/g, '[redacted path]')
+    .replace(/(?:^|\s)\/(?:[^\s'")]+\/){1,}[^\s'")]+/g, '[redacted path]')
+    .replace(/\b(?:https?|file):\/\/[^\s'")]+/gi, '[redacted URL]')
+    .replace(/\bvault\/[^\s'")]+/gi, '[redacted storage]')
+    .replace(/\b(?:storage_?(?:uri|key)|claim_?token|state_?key)\b/gi, '[redacted field]')
+    .replace(/\buser-\d+:obj-[A-Za-z0-9_-]+/g, '[redacted state]');
+}
+
+function safeText(value, maxLength = 160) {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/(?:[A-Za-z]:[\\/]|(?:https?|file):\/\/|\bvault\/|\bstorage_?(?:uri|key)\b|\bstate_?key\b)/i.test(text)) {
+    return null;
+  }
+  return redactUnsafeText(text).slice(0, maxLength);
+}
+
+function safeCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : null;
+}
+
+function safeStat(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+// Raw labels belong exclusively in the owner-local mapping. Public summary
+// artifacts can render only the fixed opaque identifiers produced by Node/R.
+function opaqueGroup(value) {
+  const group = safeText(value, 80);
+  const match = group && OPAQUE_GROUP_RE.exec(group);
+  if (!match) return null;
+  const index = Number(match[1]);
+  return Number.isSafeInteger(index) && index <= 32 ? `Group ${index}` : null;
+}
+
+function summaryGroup(row, index) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const name = opaqueGroup(row.group);
+  if (!name) return null;
+  const safe = { name };
+  const inputCells = safeCount(
+    row.inputCells ?? row.input_cells ?? row.cellCount ?? row.cell_count ?? row.count ?? row.cells,
+  );
+  const analyzedCells = safeCount(row.analyzedCells ?? row.analyzed_cells);
+  if (inputCells !== null) safe.inputCells = inputCells;
+  if (analyzedCells !== null) safe.analyzedCells = analyzedCells;
+  const reason = safeText(row.reason, 160);
+  if (reason) safe.reason = reason;
+  return { ...safe, key: `${name}-${index}` };
+}
+
+function summaryInteraction(row, index) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const source = opaqueGroup(row.source);
+  const target = opaqueGroup(row.target);
+  const ligand = safeText(row.ligand, 80);
+  const receptor = safeText(row.receptor, 80);
+  const interaction = safeText(row.interaction ?? row.ligandReceptor, 120)
+    || (ligand && receptor ? `${ligand}–${receptor}` : null);
+  if (!source || !target || !interaction) return null;
+  const safe = { source, target, interaction, key: `${source}-${target}-${interaction}-${index}` };
+  const pathway = safeText(row.pathway ?? row.signalingPathway, 80);
+  const probability = safeStat(row.probability ?? row.communicationProbability ?? row.score);
+  const pValue = safeStat(row.pValue ?? row.p_value);
+  if (pathway) safe.pathway = pathway;
+  if (probability !== null) safe.probability = probability;
+  if (pValue !== null && pValue >= 0 && pValue <= 1) safe.pValue = pValue;
+  return safe;
+}
+
+function summaryPathway(row, index) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const name = safeText(row.name ?? row.pathway ?? row.signalingPathway, 120);
+  if (!name) return null;
+  const safe = { name, key: `${name}-${index}` };
+  const source = opaqueGroup(row.source);
+  const target = opaqueGroup(row.target);
+  const probability = safeStat(row.probability ?? row.communicationProbability ?? row.score);
+  const pValue = safeStat(row.pValue ?? row.p_value);
+  if (!source || !target) return null;
+  if (source) safe.source = source;
+  if (target) safe.target = target;
+  if (probability !== null) safe.probability = probability;
+  if (pValue !== null && pValue >= 0 && pValue <= 1) safe.pValue = pValue;
+  return safe;
+}
+
+function sanitizePackageVersions(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  return Object.entries(raw)
+    .filter(([name]) => /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(name))
+    .map(([name, value]) => ({ name, value: safeText(value, 64) }))
+    .filter(entry => entry.value)
+    .slice(0, 8);
+}
+
+function sanitizeSummary(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const summary = {
+    groupBy: allowedValue(raw.groupBy, GROUP_BY_OPTIONS),
+    assay: raw.assay === 'RNA' ? 'RNA' : '',
+    species: allowedValue(raw.species, SPECIES_OPTIONS),
+    databaseCategory: allowedValue(raw.databaseCategory, DATABASE_CATEGORY_OPTIONS),
+    analysisIntent: allowedValue(raw.analysisIntent, ANALYSIS_INTENT_OPTIONS),
+    groups: Array.isArray(raw.groups)
+      ? raw.groups.map(summaryGroup).filter(Boolean).slice(0, MAX_VISIBLE_GROUPS)
+      : [],
+    excludedGroups: Array.isArray(raw.excludedGroups)
+      ? raw.excludedGroups.map(summaryGroup).filter(Boolean).slice(0, MAX_VISIBLE_GROUPS)
+      : [],
+    topInteractions: Array.isArray(raw.topInteractions)
+      ? raw.topInteractions.map(summaryInteraction).filter(Boolean).slice(0, MAX_VISIBLE_ROWS)
+      : [],
+    topPathways: Array.isArray(raw.topPathways)
+      ? raw.topPathways.map(summaryPathway).filter(Boolean).slice(0, MAX_VISIBLE_ROWS)
+      : [],
+    packageVersions: sanitizePackageVersions(raw.packageVersions),
+    warnings: Array.isArray(raw.warnings)
+      ? raw.warnings.map(value => safeText(value, 240)).filter(Boolean).slice(0, 32)
+      : [],
+  };
+  for (const name of [
+    'inputCellCount', 'analyzedCellCount', 'inputGroupCount', 'analyzedGroupCount',
+    'excludedGroupCount', 'candidateInteractionCount', 'retainedInteractionCount',
+    'retainedPathwayCount',
+  ]) {
+    const value = safeCount(raw[name]);
+    if (value !== null) summary[name] = value;
+  }
+  return summary;
+}
+
+// Raw group labels are intentionally absent from the project-visible artifact.
+// This short-lived key is fetched only from the job owner's attached live R
+// object and is kept in component memory; it is never persisted to a job,
+// artifact, log, or tab parameter cache.
+function sanitizeOwnerGroupKey(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const groupBy = allowedValue(raw.group_by ?? raw.groupBy, GROUP_BY_OPTIONS);
+  if (!groupBy || !Array.isArray(raw.groups)) return null;
+  const groups = [];
+  for (const row of raw.groups) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+    const group = opaqueGroup(row.group);
+    const label = safeText(row.label, 160);
+    const inputCells = safeCount(row.input_cells ?? row.inputCells);
+    if (group && label && inputCells !== null) {
+      groups.push({ group, label, inputCells });
     }
-    const x1 = px(i), y1 = py(i);
-    const x2 = px(j), y2 = py(j);
-    // pull control point towards center
-    const cpx = cx + (x1 + x2 - 2 * cx) * 0.15;
-    const cpy = cy + (y1 + y2 - 2 * cy) * 0.15;
-    return `M ${x1} ${y1} Q ${cpx} ${cpy} ${x2} ${y2}`;
+    if (groups.length >= 32) break;
+  }
+  return { groupBy, groups };
+}
+
+function formatDate(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function formatNumber(value, digits = 3) {
+  if (value === null || value === undefined || value === '') return 'NA';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 'NA';
+  if (number !== 0 && Math.abs(number) < 0.001) return number.toExponential(2);
+  return Number.isInteger(number) ? String(number) : number.toFixed(digits);
+}
+
+function formatCategory(value) {
+  return DATABASE_CATEGORY_OPTIONS.find(([candidate]) => candidate === value)?.[1] || 'Not recorded';
+}
+
+function formatGroupBy(value) {
+  return GROUP_BY_OPTIONS.find(([candidate]) => candidate === value)?.[1] || 'Not recorded';
+}
+
+function badgeTone(status) {
+  if (status === 'completed') return 'green';
+  if (status === 'failed' || status === 'canceled') return 'rose';
+  if (status === 'running') return 'blue';
+  return 'amber';
+}
+
+function StatusBadge({ children, tone = 'slate' }) {
+  const tones = {
+    blue: 'bg-primary/10 text-text border-primary/20',
+    green: 'bg-success/10 text-success border-success/30',
+    amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
+    rose: 'bg-danger/10 text-danger border-danger/30',
+    slate: 'bg-slate-800 text-slate-300 border-slate-700',
   };
-
-  const isActive = (e) => {
-    if (hovered === null) return true;
-    const si = nodeIndex[e.source], ti = nodeIndex[e.target];
-    return si === hovered || ti === hovered;
-  };
-
-  // counts for summary sidebar
-  const outCount = hovered !== null ? filtered.filter(e => nodeIndex[e.source] === hovered).length : 0;
-  const inCount  = hovered !== null ? filtered.filter(e => nodeIndex[e.target] === hovered).length : 0;
-  const outStr   = hovered !== null ? filtered.filter(e => nodeIndex[e.source] === hovered).reduce((s,e)=>s+e.weight,0).toFixed(3) : 0;
-  const inStr    = hovered !== null ? filtered.filter(e => nodeIndex[e.target] === hovered).reduce((s,e)=>s+e.weight,0).toFixed(3) : 0;
-
   return (
-    <div className="flex gap-4 h-full">
-      <div className="flex-1 relative">
-        <svg
-          ref={svgRef}
-          viewBox="0 0 500 500"
-          className="w-full h-full"
-          style={{ maxHeight: 480 }}
-        >
-          {/* arrowhead marker defs */}
-          <defs>
-            {nodes.map((n, i) => (
-              <marker
-                key={i}
-                id={`arrow-${i}`}
-                markerWidth="6" markerHeight="6"
-                refX="5" refY="3"
-                orient="auto"
-              >
-                <path d="M0,0 L0,6 L6,3 z" fill={getColor(i)} />
-              </marker>
-            ))}
-            <marker id="arrow-dim" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-              <path d="M0,0 L0,6 L6,3 z" fill="#cbd5e1" />
-            </marker>
-          </defs>
+    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${tones[tone] || tones.slate}`}>
+      {children}
+    </span>
+  );
+}
 
-          {/* edges */}
-          {filtered.map((e, idx) => {
-            const si = nodeIndex[e.source], ti = nodeIndex[e.target];
-            const isSelf = si === ti;
-            const active = isActive(e);
-            const isOut = hovered !== null && si === hovered;
-            const strokeW = Math.max(0.8, (e.weight / maxW) * 6);
-            const color = active ? (isOut ? getColor(si) : (hovered !== null && ti === hovered ? getColor(si) : getColor(si))) : '#cbd5e1';
-            const opacity = active ? (hovered !== null ? 0.85 : 0.45) : 0.12;
-            return (
-              <path
-                key={idx}
-                d={arcPath(si, ti, isSelf)}
-                stroke={color}
-                strokeWidth={strokeW}
-                fill="none"
-                opacity={opacity}
-                markerEnd={active && !isSelf ? `url(#arrow-${si})` : undefined}
-                style={{ transition: 'opacity 0.2s' }}
-                onMouseEnter={(ev) => {
-                  const rect = svgRef.current.getBoundingClientRect();
-                  setTooltip({
-                    x: ev.clientX - rect.left,
-                    y: ev.clientY - rect.top,
-                    text: `${e.source} → ${e.target}: ${e.weight.toFixed(4)}`
-                  });
-                }}
-                onMouseLeave={() => setTooltip(null)}
-              />
-            );
-          })}
-
-          {/* nodes */}
-          {nodes.map((n, i) => {
-            const dim = hovered !== null && hovered !== i;
-            return (
-              <g key={i}
-                onMouseEnter={() => setHovered(i)}
-                onMouseLeave={() => setHovered(null)}
-                style={{ cursor: 'pointer' }}
-              >
-                <circle
-                  cx={px(i)} cy={py(i)} r={nodeR}
-                  fill={getColor(i)}
-                  stroke="#fff" strokeWidth={2}
-                  opacity={dim ? 0.35 : 1}
-                  style={{ transition: 'opacity 0.2s' }}
-                />
-                {/* label */}
-                {(() => {
-                  const a = angle(i);
-                  const labelR = R + nodeR + 12;
-                  const lx = cx + labelR * Math.cos(a);
-                  const ly = cy + labelR * Math.sin(a);
-                  const anchor = Math.cos(a) > 0.1 ? 'start' : Math.cos(a) < -0.1 ? 'end' : 'middle';
-                  return (
-                    <text
-                      x={lx} y={ly}
-                      textAnchor={anchor}
-                      dominantBaseline="central"
-                      fontSize={10}
-                      fontFamily="Inter, sans-serif"
-                      fontWeight={hovered === i ? '700' : '500'}
-                      fill={dim ? '#94a3b8' : '#1e293b'}
-                      style={{ transition: 'fill 0.2s, font-weight 0.1s', userSelect: 'none' }}
-                    >
-                      {n}
-                    </text>
-                  );
-                })()}
-              </g>
-            );
-          })}
-        </svg>
-
-        {/* SVG tooltip */}
-        {tooltip && (
-          <div
-            className="absolute z-10 pointer-events-none bg-slate-900 text-white text-xs px-2 py-1 rounded shadow-lg"
-            style={{ left: tooltip.x + 8, top: tooltip.y - 20 }}
-          >
-            {tooltip.text}
-          </div>
-        )}
-      </div>
-
-      {/* Sidebar summary */}
-      <div className="w-44 flex flex-col gap-3 justify-center shrink-0">
-        {hovered !== null ? (
-          <>
-            <div className="rounded-lg p-3 border" style={{ borderColor: getColor(hovered), background: getColor(hovered) + '18' }}>
-              <div className="text-xs font-bold mb-1" style={{ color: getColor(hovered) }}>{nodes[hovered]}</div>
-              <div className="text-xs text-slate-500 mb-2">Outgoing signals</div>
-              <div className="text-lg font-black text-slate-800">{outCount}</div>
-              <div className="text-xs text-slate-400">interactions</div>
-              <div className="text-sm font-semibold text-slate-600 mt-1">{outStr}</div>
-              <div className="text-xs text-slate-400">total strength</div>
-            </div>
-            <div className="rounded-lg p-3 border border-slate-200 bg-slate-50">
-              <div className="text-xs text-slate-500 mb-2">Incoming signals</div>
-              <div className="text-lg font-black text-slate-800">{inCount}</div>
-              <div className="text-xs text-slate-400">interactions</div>
-              <div className="text-sm font-semibold text-slate-600 mt-1">{inStr}</div>
-              <div className="text-xs text-slate-400">total strength</div>
-            </div>
-          </>
-        ) : (
-          <div className="text-center text-xs text-slate-400 px-2">
-            Hover a node to see its signaling statistics
-          </div>
-        )}
-        {/* legend */}
-        <div className="mt-4 space-y-1">
-          {nodes.map((n, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <div className="w-3 h-3 rounded-full shrink-0" style={{ background: getColor(i) }} />
-              <span className="text-xs text-slate-600 truncate">{n}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+function EmptyNotice({ title, children }) {
+  return (
+    <div className="rounded-lg border border-dashed border-border p-6 text-center">
+      <p className="font-bold text-text">{title}</p>
+      <p className="mt-2 text-sm text-textMuted">{children}</p>
     </div>
   );
 }
 
-// ─── Interaction Heatmap ─────────────────────────────────────────────────────
-function InteractionHeatmap({ nodes, edges, threshold }) {
-  const filtered = edges.filter(e => e.weight >= threshold);
-  const matrix = Array.from({ length: nodes.length }, () => Array(nodes.length).fill(0));
-  const nodeIdx = Object.fromEntries(nodes.map((n, i) => [n, i]));
-  filtered.forEach(e => { matrix[nodeIdx[e.source]][nodeIdx[e.target]] += e.weight; });
-
-  const zValues = matrix;
-  const maxZ = Math.max(...zValues.flat());
-
+function Metric({ label, value, detail }) {
   return (
-    <Plot
-      data={[{
-        type: 'heatmap',
-        z: zValues,
-        x: nodes,
-        y: nodes,
-        colorscale: [
-          [0, '#f8fafc'],
-          [0.001, '#dbeafe'],
-          [0.3, '#3b82f6'],
-          [0.7, '#1d4ed8'],
-          [1, '#172554'],
-        ],
-        zmin: 0,
-        zmax: maxZ || 1,
-        showscale: true,
-        hoverongaps: false,
-        colorbar: {
-          title: { text: 'Communication<br>Probability', side: 'right', font: { size: 11, color: '#475569' } },
-          thickness: 14,
-          len: 0.8,
-          tickfont: { size: 10, color: '#475569' },
-          outlinecolor: '#e2e8f0',
-          outlinewidth: 1,
-        },
-        hovertemplate: '<b>Sender:</b> %{y}<br><b>Receiver:</b> %{x}<br><b>Prob:</b> %{z:.4f}<extra></extra>',
-      }]}
-      layout={{
-        paper_bgcolor: '#ffffff',
-        plot_bgcolor: '#ffffff',
-        margin: { t: 20, l: 90, r: 20, b: 100 },
-        xaxis: {
-          title: { text: 'Receiver', font: { size: 12, color: '#475569' }, standoff: 12 },
-          tickfont: { size: 10, color: '#374151' },
-          tickangle: -40,
-          showgrid: false,
-          linecolor: '#e2e8f0',
-          side: 'bottom',
-        },
-        yaxis: {
-          title: { text: 'Sender', font: { size: 12, color: '#475569' }, standoff: 8 },
-          tickfont: { size: 10, color: '#374151' },
-          showgrid: false,
-          linecolor: '#e2e8f0',
-          autorange: 'reversed',
-        },
-        autosize: true,
-        font: { family: 'Inter, sans-serif' },
-      }}
-      useResizeHandler
-      className="w-full h-full min-h-[420px]"
-      config={{ displayModeBar: false, responsive: true }}
-    />
+    <div className="rounded border border-border bg-surface/70 p-4">
+      <div className="text-2xl font-black text-text">{value}</div>
+      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-textMuted">{label}</div>
+      {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
+    </div>
   );
 }
 
-// ─── Interaction Count Bubble Plot ───────────────────────────────────────────
-function BubblePlot({ nodes, edges, threshold }) {
-  const filtered = edges.filter(e => e.weight >= threshold);
-  const nodeIdx = Object.fromEntries(nodes.map((n, i) => [n, i]));
-
-  // Build sender × receiver interaction count and mean probability
-  const countMatrix = Array.from({ length: nodes.length }, () => Array(nodes.length).fill(0));
-  const sumMatrix   = Array.from({ length: nodes.length }, () => Array(nodes.length).fill(0));
-  filtered.forEach(e => {
-    const si = nodeIdx[e.source], ti = nodeIdx[e.target];
-    countMatrix[si][ti]++;
-    sumMatrix[si][ti] += e.weight;
-  });
-
-  const xArr = [], yArr = [], sizeArr = [], colorArr = [], textArr = [];
-  nodes.forEach((sender, si) => {
-    nodes.forEach((receiver, ti) => {
-      const cnt = countMatrix[si][ti];
-      if (cnt > 0) {
-        xArr.push(receiver);
-        yArr.push(sender);
-        sizeArr.push(cnt);
-        colorArr.push(sumMatrix[si][ti] / cnt);
-        textArr.push(`${sender} → ${receiver}<br>Interactions: ${cnt}<br>Mean prob: ${(sumMatrix[si][ti]/cnt).toFixed(4)}`);
-      }
-    });
-  });
-
-  const maxSize = Math.max(...sizeArr, 1);
-  const bubbleSizes = sizeArr.map(s => 8 + (s / maxSize) * 28);
-
+function JobLogs({ logs }) {
+  const rows = Array.isArray(logs) ? logs.slice(0, 100) : [];
+  if (!rows.length) {
+    return <EmptyNotice title="No job logs yet">Logs appear after the worker starts this job.</EmptyNotice>;
+  }
   return (
-    <Plot
-      data={[{
-        type: 'scatter',
-        mode: 'markers',
-        x: xArr,
-        y: yArr,
-        text: textArr,
-        hovertemplate: '%{text}<extra></extra>',
-        marker: {
-          size: bubbleSizes,
-          color: colorArr,
-          colorscale: [
-            [0, '#f0fdf4'],
-            [0.3, '#86efac'],
-            [0.6, '#16a34a'],
-            [1, '#052e16'],
-          ],
-          showscale: true,
-          colorbar: {
-            title: { text: 'Mean<br>Prob.', side: 'right', font: { size: 11, color: '#475569' } },
-            thickness: 14,
-            len: 0.75,
-            tickfont: { size: 10, color: '#475569' },
-            outlinecolor: '#e2e8f0',
-            outlinewidth: 1,
-          },
-          line: { color: '#fff', width: 1 },
-          sizemode: 'diameter',
-        },
-      }]}
-      layout={{
-        paper_bgcolor: '#ffffff',
-        plot_bgcolor: '#f8fafc',
-        margin: { t: 20, l: 100, r: 20, b: 110 },
-        xaxis: {
-          title: { text: 'Receiver', font: { size: 12, color: '#475569' }, standoff: 14 },
-          tickfont: { size: 10, color: '#374151' },
-          tickangle: -40,
-          showgrid: true,
-          gridcolor: '#e2e8f0',
-          linecolor: '#e2e8f0',
-          zeroline: false,
-        },
-        yaxis: {
-          title: { text: 'Sender', font: { size: 12, color: '#475569' }, standoff: 8 },
-          tickfont: { size: 10, color: '#374151' },
-          showgrid: true,
-          gridcolor: '#e2e8f0',
-          linecolor: '#e2e8f0',
-          zeroline: false,
-          autorange: 'reversed',
-        },
-        autosize: true,
-        font: { family: 'Inter, sans-serif' },
-      }}
-      useResizeHandler
-      className="w-full h-full min-h-[420px]"
-      config={{ displayModeBar: false, responsive: true }}
-    />
-  );
-}
-
-// ─── Interactions Table ──────────────────────────────────────────────────────
-function InteractionsTable({ nodes, edges, threshold }) {
-  const [search, setSearch] = useState('');
-  const [sortField, setSortField] = useState('weight');
-  const [sortAsc, setSortAsc] = useState(false);
-
-  const filtered = edges
-    .filter(e => e.weight >= threshold)
-    .filter(e => {
-      const q = search.toLowerCase();
-      return !q || e.source.toLowerCase().includes(q) || e.target.toLowerCase().includes(q);
-    })
-    .sort((a, b) => {
-      const va = a[sortField] ?? 0, vb = b[sortField] ?? 0;
-      if (typeof va === 'string') return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
-      return sortAsc ? va - vb : vb - va;
-    });
-
-  const handleSort = (field) => {
-    if (sortField === field) setSortAsc(!sortAsc);
-    else { setSortField(field); setSortAsc(field === 'source' || field === 'target'); }
-  };
-
-  const exportCSV = () => {
-    const rows = [['Sender', 'Receiver', 'Weight'], ...filtered.map(e => [e.source, e.target, e.weight])];
-    const csv = rows.map(r => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'cellchat_interactions.csv'; a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const SortIcon = ({ field }) => {
-    if (sortField !== field) return <span className="ml-1 text-slate-300">↕</span>;
-    return <span className="ml-1 text-blue-500">{sortAsc ? '↑' : '↓'}</span>;
-  };
-
-  const thClass = 'px-4 py-2 text-left text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-slate-700 whitespace-nowrap';
-  const tdClass = 'px-4 py-2 text-sm text-slate-700';
-
-  return (
-    <div className="flex flex-col h-full gap-3">
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1 max-w-xs">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Filter by cell type..."
-            className="w-full pl-8 pr-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white text-slate-700 focus:outline-none focus:border-blue-400"
-          />
+    <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-black/20 custom-scrollbar">
+      {rows.map((entry, index) => (
+        <div key={`${entry?.ts || index}-${index}`} className="border-b border-border/40 p-3 text-xs last:border-b-0">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <StatusBadge tone={entry?.level === 'error' ? 'rose' : entry?.level === 'warn' ? 'amber' : 'slate'}>
+              {entry?.level || 'info'}
+            </StatusBadge>
+            <span className="font-mono text-textMuted">{formatDate(entry?.ts)}</span>
+          </div>
+          <p className="text-textMuted">{redactUnsafeText(entry?.message).slice(0, 500)}</p>
         </div>
-        <span className="text-xs text-slate-400">{filtered.length} interactions</span>
-        <button onClick={exportCSV} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors ml-auto">
-          <Download size={13} /> Export CSV
-        </button>
-      </div>
+      ))}
+    </div>
+  );
+}
 
-      <div className="flex-1 overflow-auto rounded-lg border border-slate-200">
-        <table className="w-full border-collapse bg-white">
-          <thead className="sticky top-0 bg-slate-50 border-b border-slate-200">
-            <tr>
-              <th className={thClass} onClick={() => handleSort('source')}>Sender <SortIcon field="source" /></th>
-              <th className={thClass} onClick={() => handleSort('target')}>Receiver <SortIcon field="target" /></th>
-              <th className={thClass} onClick={() => handleSort('weight')}>Comm. Probability <SortIcon field="weight" /></th>
-              <th className={`${thClass} w-32`}>Strength</th>
+function InteractionTable({ interactions }) {
+  if (!interactions.length) {
+    return <EmptyNotice title="No retained interactions in the safe preview">The private result table may contain no retained candidates for the configured thresholds.</EmptyNotice>;
+  }
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full min-w-[760px] text-left text-xs">
+        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+          <tr>
+            <th className="p-3">Source group</th>
+            <th className="p-3">Target group</th>
+            <th className="p-3">Ligand–receptor candidate</th>
+            <th className="p-3">Pathway</th>
+            <th className="p-3">Probability</th>
+            <th className="p-3">p-value</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border/40 bg-surface/70">
+          {interactions.map(row => (
+            <tr key={row.key}>
+              <td className="p-3 font-bold text-text">{row.source}</td>
+              <td className="p-3 font-bold text-text">{row.target}</td>
+              <td className="p-3 text-textMuted">{row.interaction}</td>
+              <td className="p-3 text-textMuted">{row.pathway || 'NA'}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(row.probability)}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(row.pValue)}</td>
             </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {filtered.map((e, idx) => {
-              const si = nodes.indexOf(e.source);
-              const maxW = Math.max(...edges.map(x => x.weight));
-              const pct = ((e.weight / maxW) * 100).toFixed(0);
-              return (
-                <tr key={idx} className="hover:bg-blue-50/40 transition-colors">
-                  <td className={tdClass}>
-                    <span className="flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: getColor(si) }} />
-                      {e.source}
-                    </span>
-                  </td>
-                  <td className={tdClass}>
-                    <span className="flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: getColor(nodes.indexOf(e.target)) }} />
-                      {e.target}
-                    </span>
-                  </td>
-                  <td className={tdClass + ' font-mono'}>{e.weight.toExponential(3)}</td>
-                  <td className={tdClass}>
-                    <div className="w-full bg-slate-100 rounded-full h-1.5">
-                      <div className="h-1.5 rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={4} className="text-center py-12 text-slate-400 text-sm">No interactions match the current filter.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
 
-// ─── Main CellChat Page ──────────────────────────────────────────────────────
-const VIEWS = [
-  { id: 'circle',  label: 'Circle Plot' },
-  { id: 'heatmap', label: 'Heatmap' },
-  { id: 'bubble',  label: 'Bubble Plot' },
-  { id: 'table',   label: 'Interactions' },
-];
+function PathwayTable({ pathways }) {
+  if (!pathways.length) {
+    return <EmptyNotice title="No pathway preview returned">No pathway-level candidate rows were retained in the bounded public summary.</EmptyNotice>;
+  }
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full min-w-[680px] text-left text-xs">
+        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+          <tr>
+            <th className="p-3">Signaling pathway</th>
+            <th className="p-3">Source group</th>
+            <th className="p-3">Target group</th>
+            <th className="p-3">Probability</th>
+            <th className="p-3">p-value</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border/40 bg-surface/70">
+          {pathways.map(row => (
+            <tr key={row.key}>
+              <td className="p-3 font-bold text-text">{row.name}</td>
+              <td className="p-3 text-textMuted">{row.source || 'NA'}</td>
+              <td className="p-3 text-textMuted">{row.target || 'NA'}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(row.probability)}</td>
+              <td className="p-3 font-mono text-textMuted">{formatNumber(row.pValue)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function GroupList({ groups, title, emptyText, showReason = false }) {
+  if (!groups.length) return <p className="text-sm text-textMuted">{emptyText}</p>;
+  return (
+    <div>
+      <h4 className="mb-2 text-sm font-bold text-text">{title}</h4>
+      <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {groups.map(group => (
+          <li key={group.key} className="rounded border border-border bg-surface/60 px-3 py-2 text-xs">
+            <div className="font-bold text-text">{group.name}</div>
+            {group.inputCells !== undefined && <div className="mt-1 font-mono text-textMuted">{formatNumber(group.inputCells, 0)} input cells</div>}
+            {group.analyzedCells !== undefined && <div className="mt-1 font-mono text-textMuted">{formatNumber(group.analyzedCells, 0)} analyzed cells</div>}
+            {showReason && group.reason && <div className="mt-1 text-textMuted">{group.reason}</div>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 export default function CellChat({
   callApi,
   datasetInfo,
-  pipelineState,
-  rSessionId,
+  currentWs,
+  userEmail,
+  objectId,
   sessionReady,
-  clusterProvId,
 }) {
-  const [groupBy, setGroupBy]   = useState('seurat_clusters');
-  const [database, setDatabase] = useState('human');
-  const [columns, setColumns]   = useState([]);
-  const [viewMode, setViewMode] = useState('circle');
-  const [threshold, setThreshold] = useState(0);
-  const [maxWeight, setMaxWeight] = useState(1);
+  const [params, setParam] = useTabParams('cellchat', userEmail, objectId, DEFAULT_PARAMS);
+  const [job, setJob] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [artifacts, setArtifacts] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
+  const [ownerGroupKey, setOwnerGroupKey] = useState(null);
+  const [ownerGroupKeyUnavailable, setOwnerGroupKeyUnavailable] = useState(false);
 
-  const { running, result, error, runStep } = usePipelineStep({
-    callApi,
-    endpoint: '/cellchat-infer',
-    payload: {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ group_by: groupBy, database }),
-    },
-    ipcContext: {
-      operation: 'cellchat',
-      step: 'cellchat',
-      parentIds: clusterProvId ? [clusterProvId] : [],
-      useCache: true,
-      cacheParams: { type: 'cellchat', groupBy, database },
-    },
-    readyToHydrate: false,
-    sessionReady,
-    rSessionId,
-  });
+  const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
+  const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
+  const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
+  const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
+  const liveObjectAttached = hasAttachedLiveRObject(datasetInfo);
+  const canWriteProject = JOB_WRITE_ROLES.has(activeProject?.role);
+  const safeParams = useMemo(() => buildCellChatParams(params), [params]);
+  const canLaunch = Boolean(
+    userEmail
+      && activeProjectId
+      && isDbBackedObject
+      && canWriteProject
+      && sessionReady
+      && liveObjectAttached
+      && safeParams.groupBy
+      && safeParams.species
+      && safeParams.databaseCategory
+      && safeParams.analysisIntent
+      && !loading
+  );
+  const terminal = job?.status ? TERMINAL_STATUSES.has(job.status) : false;
+  const summaryArtifact = artifacts.find(artifact => artifact.artifactType === 'cellchat_summary') || null;
+  const resultsArtifact = artifacts.find(artifact => artifact.artifactType === 'cellchat_results') || null;
+  const summary = useMemo(
+    () => sanitizeSummary(summaryArtifact?.metadata?.summary),
+    [summaryArtifact]
+  );
+  const visibleLogs = logs.length ? logs : (Array.isArray(job?.logs) ? job.logs : []);
+  const resolvedParams = {
+    ...safeParams,
+    ...(job?.parameters && typeof job.parameters === 'object' ? job.parameters : {}),
+    ...(summaryArtifact?.metadata?.resolvedParams && typeof summaryArtifact.metadata.resolvedParams === 'object'
+      ? summaryArtifact.metadata.resolvedParams
+      : {}),
+  };
+  const groupKeyGroupBy = summary?.groupBy || resolvedParams.groupBy || '';
+  const selectionKey = `${activeProjectId || ''}:${selectedObjectId || ''}`;
+  const selectionKeyRef = useRef(selectionKey);
+  selectionKeyRef.current = selectionKey;
+
+  const refreshJobState = useCallback(async (
+    jobId,
+    { silent = false, expectedSelectionKey = selectionKeyRef.current } = {}
+  ) => {
+    if (!jobId || !activeProjectId) return null;
+    const api = window.electronAPI || {};
+    if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
+      setError('The project job service is unavailable in this frontend runtime.');
+      return null;
+    }
+    if (!silent) setRefreshing(true);
+    try {
+      const [nextJob, logResponse, nextArtifacts] = await Promise.all([
+        api.getProjectJob(activeProjectId, jobId),
+        api.getProjectJobLogs(activeProjectId, jobId),
+        api.listProjectJobArtifacts(activeProjectId, jobId),
+      ]);
+      if (selectionKeyRef.current !== expectedSelectionKey) return null;
+      setJob(nextJob || null);
+      setLogs(Array.isArray(logResponse?.logs) ? logResponse.logs : []);
+      setArtifacts(Array.isArray(nextArtifacts) ? nextArtifacts : []);
+      setLastRefreshedAt(new Date().toISOString());
+      return nextJob || null;
+    } catch (requestError) {
+      if (selectionKeyRef.current === expectedSelectionKey) setError(parseErrorMessage(requestError));
+      return null;
+    } finally {
+      if (!silent && selectionKeyRef.current === expectedSelectionKey) setRefreshing(false);
+    }
+  }, [activeProjectId]);
 
   useEffect(() => {
-    if (datasetInfo) {
-      callApi('/object-info').then(data => {
-        if (data?.meta_cols) {
-          const catCols = data.meta_cols.filter(c => c.type !== 'numeric').map(c => c.name);
-          setColumns(catCols);
-          if (catCols.includes('seurat_clusters')) setGroupBy('seurat_clusters');
-          else if (catCols.length > 0) setGroupBy(catCols[0]);
+    let canceled = false;
+    setJob(null);
+    setLogs([]);
+    setArtifacts([]);
+    setError(null);
+    setLastRefreshedAt(null);
+    setRefreshing(false);
+    setLoading(false);
+
+    const api = window.electronAPI || {};
+    if (!activeProjectId || !selectedObjectId || !api.listProjectJobs) {
+      return () => { canceled = true; };
+    }
+    const restoreLatestJob = async () => {
+      try {
+        const jobs = await api.listProjectJobs(activeProjectId, {
+          jobType: CELLCHAT_JOB_TYPE,
+          analysisObjectId: selectedObjectId,
+        });
+        const latest = Array.isArray(jobs) ? jobs[0] : null;
+        if (!canceled && latest?.id) {
+          await refreshJobState(latest.id, { silent: true, expectedSelectionKey: selectionKey });
         }
-      });
-    }
-  }, [datasetInfo, callApi]);
+      } catch (requestError) {
+        if (!canceled) setError(parseErrorMessage(requestError));
+      }
+    };
+    restoreLatestJob();
+    return () => { canceled = true; };
+  }, [activeProjectId, refreshJobState, selectedObjectId, selectionKey]);
 
-  // update threshold range when new results arrive
   useEffect(() => {
-    if (result?.result?.edges?.length) {
-      const weights = result.result.edges.map(e => e.weight);
-      const mx = Math.max(...weights);
-      setMaxWeight(mx);
-      setThreshold(0);
-    }
-  }, [result]);
+    if (!job?.id || terminal) return undefined;
+    const intervalId = window.setInterval(() => refreshJobState(job.id, { silent: true }), POLL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [job?.id, terminal, refreshJobState]);
 
-  const hasResult = !!(result?.result?.edges?.length);
-  const nodes  = hasResult ? result.result.nodes  : [];
-  const edges  = hasResult ? result.result.edges  : [];
-  const activeCount = edges.filter(e => e.weight >= threshold).length;
+  useEffect(() => {
+    let canceled = false;
+    setOwnerGroupKey(null);
+    setOwnerGroupKeyUnavailable(false);
+    if (!summary || !job?.id || !groupKeyGroupBy || !liveObjectAttached || typeof callApi !== 'function') {
+      return () => { canceled = true; };
+    }
+
+    const loadOwnerGroupKey = async () => {
+      try {
+        const response = await callApi(
+          `/cellchat-group-map?group_by=${encodeURIComponent(groupKeyGroupBy)}`,
+          {},
+          { useCache: false }
+        );
+        const safeKey = response?.error ? null : sanitizeOwnerGroupKey(response);
+        if (!canceled) {
+          setOwnerGroupKey(safeKey);
+          setOwnerGroupKeyUnavailable(!safeKey || safeKey.groups.length === 0);
+        }
+      } catch {
+        if (!canceled) setOwnerGroupKeyUnavailable(true);
+      }
+    };
+    loadOwnerGroupKey();
+    return () => { canceled = true; };
+  }, [callApi, groupKeyGroupBy, job?.id, liveObjectAttached, summary]);
+
+  const launchJob = useCallback(async () => {
+    setError(null);
+    if (!userEmail) return setError('Sign in before starting CellChat inference.');
+    if (!activeProjectId) return setError('Select a project before starting CellChat inference.');
+    if (!selectedObjectId || !isDbBackedObject) {
+      return setError('Select a saved analysis object before starting CellChat inference.');
+    }
+    if (!canWriteProject) return setError('Your project role can view results but cannot start analysis jobs.');
+    if (!sessionReady || !liveObjectAttached) {
+      return setError('Attach or restore this analysis object in R before starting the job.');
+    }
+    if (!safeParams.groupBy || !safeParams.species || !safeParams.databaseCategory || !safeParams.analysisIntent) {
+      return setError('Choose a grouping, species, CellChat database category, and the single-context analysis intent.');
+    }
+
+    const api = window.electronAPI || {};
+    if (!api.createCellChatInferenceJob) {
+      return setError('The fixed CellChat project-job service is unavailable in this frontend runtime.');
+    }
+
+    const requestSelectionKey = selectionKeyRef.current;
+    setLoading(true);
+    setLogs([]);
+    setArtifacts([]);
+    try {
+      const created = await api.createCellChatInferenceJob(activeProjectId, selectedObjectId, safeParams);
+      if (selectionKeyRef.current !== requestSelectionKey) return undefined;
+      setJob(created);
+      setLastRefreshedAt(new Date().toISOString());
+      await refreshJobState(created.id, { silent: true, expectedSelectionKey: requestSelectionKey });
+    } catch (requestError) {
+      setError(parseErrorMessage(requestError));
+    } finally {
+      setLoading(false);
+    }
+    return undefined;
+  }, [
+    activeProjectId,
+    canWriteProject,
+    isDbBackedObject,
+    liveObjectAttached,
+    refreshJobState,
+    safeParams,
+    selectedObjectId,
+    sessionReady,
+    userEmail,
+  ]);
 
   if (!datasetInfo) {
-    return <div className="p-8 text-center text-textMuted">Please load a dataset first.</div>;
-  }
-  if (!pipelineState?.normalize) {
     return (
-      <div className="h-full flex items-center justify-center p-8 bg-background">
-        <div className="text-center max-w-md">
-          <AlertCircle size={48} className="mx-auto text-amber-500 mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">Normalization Required</h2>
-          <p className="text-slate-400 text-sm">CellChat requires normalized expression data. Please run Normalization first.</p>
+      <div className="flex h-full items-center justify-center bg-background p-8 text-center">
+        <div className="max-w-sm">
+          <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
+          <h2 className="mb-2 text-xl font-bold text-white">No analysis object selected</h2>
+          <p className="text-sm text-textMuted">Select a saved, clustered analysis object before running CellChat inference.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col p-6 bg-background overflow-hidden">
-      <div className="max-w-6xl w-full mx-auto h-full flex flex-col gap-5">
-
-        {/* Header */}
-        <header>
-          <h1 className="text-3xl font-black text-text flex items-center gap-3">
-            <MessageSquare className="text-primary" size={32} />
-            CellChat Inference
-          </h1>
-          <p className="text-textMuted mt-1">
-            Infer cell-cell communication networks from single-cell gene expression data.
-          </p>
+    <div className="h-full w-full overflow-y-auto bg-background p-6 custom-scrollbar">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6">
+        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
+          <div>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <h2 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white"><MessageSquare size={24} className="text-primary" /> CellChat communication candidates</h2>
+              <StatusBadge tone="green">durable worker</StatusBadge>
+              <StatusBadge tone="amber">candidate predictions</StatusBadge>
+              <StatusBadge tone="amber">no public download</StatusBadge>
+            </div>
+            <p className="max-w-3xl text-sm text-textMuted">
+              Uses CellChat&apos;s curated ligand–receptor resource to generate bounded, hypothesis-generating candidate signaling between selected cell groups.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            {job?.id && (
+              <button onClick={() => refreshJobState(job.id)} disabled={refreshing} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+                {refreshing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                Refresh
+              </button>
+            )}
+            <button onClick={launchJob} disabled={!canLaunch} className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50">
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+              Start CellChat Inference
+            </button>
+          </div>
         </header>
 
-        {/* Controls */}
-        <section className="bg-surface border border-border rounded-xl p-5 shadow-sm shrink-0">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
-            <div>
-              <label htmlFor="cc-group" className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Cell Grouping</label>
-              <select
-                id="cc-group"
-                value={groupBy}
-                onChange={e => setGroupBy(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-4 py-2 text-text text-sm focus:outline-none focus:border-primary"
-              >
-                {columns.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div>
-              <label htmlFor="cc-db" className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Ligand-Receptor Database</label>
-              <select
-                id="cc-db"
-                value={database}
-                onChange={e => setDatabase(e.target.value)}
-                className="w-full bg-background border border-border rounded-lg px-4 py-2 text-text text-sm focus:outline-none focus:border-primary"
-              >
-                <option value="human">Human (CellChatDB.human)</option>
-                <option value="mouse">Mouse (CellChatDB.mouse)</option>
-              </select>
-            </div>
-            <div>
-              <button
-                onClick={() => runStep()}
-                disabled={running}
-                className="btn btn-primary w-full flex items-center justify-center gap-2"
-              >
-                {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-                {running ? 'Inferring…' : 'Run CellChat'}
-              </button>
-            </div>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="rounded-lg border border-border bg-surface/60 p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
+            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || activeProjectId || 'None'}</div>
           </div>
-          {error && (
-            <div className="mt-4 p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger text-sm flex items-start gap-2">
-              <AlertCircle size={16} className="mt-0.5 shrink-0" />
-              <span className="whitespace-pre-wrap">{error}</span>
+          <div className="rounded-lg border border-border bg-surface/60 p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Analysis object</div>
+            <div className="mt-1 truncate font-mono text-text">{selectedObjectId || 'None'}</div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface/60 p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Assay</div>
+            <div className="mt-1 text-sm text-text">RNA (fixed in v1)</div>
+          </div>
+        </div>
+
+        {error && (
+          <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger" role="alert">
+            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> CellChat job unavailable</div>
+            <p className="mt-1 text-sm">{redactUnsafeText(error)}</p>
+          </div>
+        )}
+
+        {!isDbBackedObject && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Select a saved analysis object with an ID beginning with <span className="font-mono">ao_</span> before starting this job.
+          </div>
+        )}
+
+        {isDbBackedObject && !canWriteProject && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Your project role is read-only. You can inspect saved CellChat summaries, but only an owner, administrator, or analyst can start a new job.
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && (!sessionReady || !liveObjectAttached) && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            This saved object is not attached to the private R session yet. Load or restore it before starting CellChat inference.
+          </div>
+        )}
+
+        <section className="rounded-lg border border-border bg-surface/50 p-5">
+          <h3 className="text-lg font-bold text-text">Analysis settings</h3>
+          <p className="mt-1 max-w-4xl text-sm text-textMuted">
+            Select every biological choice deliberately. This workflow is limited to one biological context; it does not perform a treated-versus-control or other between-condition comparison.
+          </p>
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Group labels (required)</span>
+              <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+                <option value="">Choose grouping</option>
+                {GROUP_BY_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Assay</span>
+              <input value="RNA" readOnly aria-label="Assay" className="w-full cursor-not-allowed rounded border border-border bg-surface/70 p-2.5 text-sm text-textMuted" />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Species (required)</span>
+              <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+                <option value="">Choose species</option>
+                {SPECIES_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Database category (required)</span>
+              <select value={params.databaseCategory} onChange={event => setParam('databaseCategory', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+                <option value="">Choose database category</option>
+                {DATABASE_CATEGORY_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Analysis intent (required)</span>
+              <select value={params.analysisIntent} onChange={event => setParam('analysisIntent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+                <option value="">Confirm analysis scope</option>
+                {ANALYSIS_INTENT_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Minimum cells per group</span>
+              <input type="number" min="5" max="200" value={params.minCellsPerGroup} onChange={event => setParam('minCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Maximum cells per group</span>
+              <input type="number" min="100" max="10000" value={params.maxCellsPerGroup} onChange={event => setParam('maxCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Maximum cells total</span>
+              <input type="number" min="1000" max="10000" value={params.maxTotalCells} onChange={event => setParam('maxTotalCells', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">p-value cutoff</span>
+              <input type="number" min="0.000001" max="0.1" step="0.01" value={params.pValueCutoff} onChange={event => setParam('pValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Interactions shown</span>
+              <input type="number" min="5" max="100" value={params.topInteractions} onChange={event => setParam('topInteractions', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Pathways shown</span>
+              <input type="number" min="5" max="100" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
+              <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+            </label>
+          </div>
+          <p className="mt-3 text-xs text-textMuted">
+            The deployment total is capped at 10,000 cells while the singleton R-service capacity is being measured. The recorded random seed makes any sampling repeatable.
+          </p>
+        </section>
+
+        <section className="rounded-lg border border-border bg-surface/50 p-5">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Job status</h3>
+              <p className="mt-1 text-sm text-textMuted">The job stays queued until the separate worker process is running.</p>
+            </div>
+            {job?.status && <StatusBadge tone={badgeTone(job.status)}>{job.status}</StatusBadge>}
+          </div>
+          {!job ? (
+            <EmptyNotice title="No CellChat job started">Choose the required study choices above, then start the durable job.</EmptyNotice>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job ID</div><div className="mt-1 font-mono text-text">{job.id}</div></div>
+                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job type</div><div className="mt-1 font-mono text-text">{job.jobType || CELLCHAT_JOB_TYPE}</div></div>
+                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
+              </div>
+              {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{redactUnsafeText(job.error.message)}</div>}
+              <JobLogs logs={visibleLogs} />
             </div>
           )}
         </section>
 
-        {/* Results panel */}
-        <section className="flex-1 bg-surface border border-border rounded-xl shadow-sm min-h-0 flex flex-col overflow-hidden">
-
-          {/* Toolbar — only visible once we have data */}
-          {hasResult && (
-            <div className="flex items-center gap-4 px-5 py-3 border-b border-border shrink-0 flex-wrap">
-              {/* view mode tabs */}
-              <div className="flex rounded-lg overflow-hidden border border-border">
-                {VIEWS.map(v => (
-                  <button
-                    key={v.id}
-                    onClick={() => setViewMode(v.id)}
-                    className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                      viewMode === v.id
-                        ? 'bg-primary text-white'
-                        : 'bg-surface text-textMuted hover:text-text'
-                    }`}
-                  >
-                    {v.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* threshold slider */}
-              <div className="flex items-center gap-3 flex-1 min-w-[200px] max-w-sm">
-                <span className="text-xs text-slate-400 whitespace-nowrap">Min. prob.</span>
-                <input
-                  type="range"
-                  min={0} max={maxWeight}
-                  step={maxWeight / 200}
-                  value={threshold}
-                  onChange={e => setThreshold(parseFloat(e.target.value))}
-                  className="flex-1 accent-primary h-1"
-                />
-                <span className="text-xs font-mono text-textMuted w-16 text-right">
-                  {threshold.toExponential(2)}
-                </span>
-              </div>
-
-              {/* interaction count badge */}
-              <span className="ml-auto text-xs text-textMuted">
-                <span className="font-bold text-text">{activeCount}</span> / {edges.length} interactions
-              </span>
+        <section className="rounded-lg border border-border bg-surface/50 p-5">
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Archive size={18} className="text-primary" /> CellChat summary</h3>
+              <p className="mt-1 text-sm text-textMuted">This page shows a bounded, metadata-only candidate summary. The complete interaction table remains private project storage.</p>
             </div>
+            {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}
+          </div>
+
+          {summary ? (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <Metric label="Cells analyzed" value={`${formatNumber(summary.analyzedCellCount, 0)} / ${formatNumber(summary.inputCellCount, 0)}`} detail="After bounded sampling" />
+                <Metric label="Groups analyzed" value={`${formatNumber(summary.analyzedGroupCount, 0)} / ${formatNumber(summary.inputGroupCount, 0)}`} detail={`${formatNumber(summary.excludedGroupCount, 0)} excluded`} />
+                <Metric label="Candidate interactions" value={formatNumber(summary.candidateInteractionCount, 0)} detail="Before retention cutoff" />
+                <Metric label="Retained interactions" value={formatNumber(summary.retainedInteractionCount, 0)} detail={`${formatNumber(summary.retainedPathwayCount, 0)} signaling pathways`} />
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Grouping</div><div className="mt-1 font-bold text-text">{formatGroupBy(summary.groupBy || resolvedParams.groupBy)}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Species / assay</div><div className="mt-1 font-bold text-text">{summary.species || resolvedParams.species || 'Not recorded'} / {summary.assay || resolvedParams.assay || 'RNA'}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Database category</div><div className="mt-1 font-bold text-text">{formatCategory(summary.databaseCategory || resolvedParams.databaseCategory)}</div></div>
+                <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Analysis scope</div><div className="mt-1 font-bold text-text">{(summary.analysisIntent || resolvedParams.analysisIntent) === 'single_context' ? 'One biological context' : 'Not recorded'}</div></div>
+              </div>
+
+              {summary.warnings.length > 0 && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+                  <div className="mb-2 font-bold">Analysis notes</div>
+                  <ul className="list-disc space-y-1 pl-5">
+                    {summary.warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                <GroupList groups={summary.groups} title="Analyzed groups" emptyText="No group rows were included in the bounded summary." />
+                <GroupList groups={summary.excludedGroups} title="Excluded groups" emptyText="No groups were excluded in the bounded summary." showReason />
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface/60 p-4 text-sm">
+                <h4 className="font-bold text-text">Owner-local group key</h4>
+                <p className="mt-1 text-textMuted">
+                  Result artifacts retain opaque group identifiers. This key is read only from your currently attached private R object and is not saved in the project artifact. If identities changed after this job ran, rerun the analysis before interpreting the mapping.
+                </p>
+                {ownerGroupKey?.groups?.length ? (
+                  <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {ownerGroupKey.groups.map(row => (
+                      <li key={row.group} className="rounded border border-border/70 bg-background/30 px-3 py-2 text-xs">
+                        <span className="font-mono font-bold text-text">{row.group}</span>
+                        <span className="mx-2 text-textMuted">→</span>
+                        <span className="font-bold text-text">{row.label}</span>
+                        <span className="ml-2 font-mono text-textMuted">({formatNumber(row.inputCells, 0)} input cells)</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-3 text-xs text-textMuted">
+                    {ownerGroupKeyUnavailable
+                      ? 'The owner-local key is unavailable. Reattach the source object to your private R session to recover it.'
+                      : 'Loading the owner-local key from the attached private R object…'}
+                  </p>
+                )}
+              </div>
+
+              <p className="rounded border border-border bg-surface/40 p-3 text-xs text-textMuted">
+                Communication probabilities use capped per-group expression and do not encode original population abundance. Compare candidates within this configured run; do not interpret probability as an abundance-weighted communication rate.
+              </p>
+
+              <div>
+                <h4 className="mb-2 text-sm font-bold text-text">Top candidate interactions</h4>
+                <p className="mb-3 text-xs text-textMuted">These are database-guided ligand–receptor predictions, not observations of direct physical contact or causal signaling.</p>
+                <InteractionTable interactions={summary.topInteractions} />
+              </div>
+
+              <div>
+                <h4 className="mb-2 text-sm font-bold text-text">Top candidate signaling pathways</h4>
+                <PathwayTable pathways={summary.topPathways} />
+              </div>
+
+              <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
+                Summary artifact <span className="font-mono text-text">{summaryArtifact.id}</span> is available. The full interaction table is not exposed as a public download.
+                {summary.packageVersions.length > 0 && (
+                  <div className="mt-2 text-xs">
+                    Software versions: {summary.packageVersions.map(entry => `${entry.name} ${entry.value}`).join(' · ')}.
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : job?.status === 'completed' ? (
+            <EmptyNotice title="Job completed without a public summary">Review the sanitized job logs. The private result table is not downloadable from this page.</EmptyNotice>
+          ) : (
+            <EmptyNotice title="No CellChat summary yet">A bounded summary appears here after the worker finishes successfully.</EmptyNotice>
           )}
 
-          {/* Chart area */}
-          <div className="flex-1 min-h-0 overflow-hidden">
-            {!running && !hasResult && (
-              <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-2">
-                <MessageSquare size={40} className="opacity-20" />
-                <p className="text-sm text-slate-300">Configure parameters and click <strong>Run CellChat</strong> to begin.</p>
-              </div>
-            )}
-            {running && (
-              <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                <Loader2 size={36} className="animate-spin mb-4 text-primary" />
-                <p>Computing communication probabilities…</p>
-                <p className="text-xs mt-2 text-slate-500">This may take several minutes for large datasets.</p>
-              </div>
-            )}
-
-            {!running && hasResult && (
-              /* White "paper" wrapper — publication feel */
-              <div className="h-full overflow-auto bg-white p-5">
-                {viewMode === 'circle'  && <CirclePlot  nodes={nodes} edges={edges} threshold={threshold} />}
-                {viewMode === 'heatmap' && <InteractionHeatmap nodes={nodes} edges={edges} threshold={threshold} />}
-                {viewMode === 'bubble'  && <BubblePlot  nodes={nodes} edges={edges} threshold={threshold} />}
-                {viewMode === 'table'   && <InteractionsTable nodes={nodes} edges={edges} threshold={threshold} />}
-              </div>
-            )}
-          </div>
+          {resultsArtifact && (
+            <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+              Private result artifact <span className="font-mono">{resultsArtifact.id}</span> is recorded for the project. Its storage location is intentionally hidden.
+            </div>
+          )}
         </section>
 
+        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
+          <div className="mb-1 flex items-center gap-2 font-bold text-text"><ShieldCheck size={16} className="text-primary" /> How to interpret this result</div>
+          CellChat produces candidate predictions from expression patterns and a curated ligand–receptor database. It does not prove that cells communicated, physically contacted, or caused a response. This v1 supports one biological context only; condition or patient comparisons require sample-aware study metadata and are not available here.
+        </div>
       </div>
     </div>
   );

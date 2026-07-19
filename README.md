@@ -56,8 +56,8 @@ At a glance:
 - **Backend implemented with selected UI actions and read-only metadata:** durable jobs,
   artifacts/checkpoints, and lineage exist in the backend, and the React UI now
   includes a Jobs & Artifacts / durable history surface for safe metadata plus
-  controlled checkpoint forks. DEG and pathway-enrichment launches are wired in their
-  result tabs, and the Pipeline
+  controlled checkpoint forks. DEG, ranked pathway-enrichment, and narrow
+  single-context CellChat launches are wired in their result tabs, and the Pipeline
   Manager Seurat panel can launch the supported 10x HDF5 pipeline plus checkpoint
   reattach. Artifact downloads, general job launch/cancel/retry, and lineage
   mutation are still not UI-wired.
@@ -74,12 +74,13 @@ At a glance:
   a standalone Postgres-lease queue consumer, hardened container packaging, and
   offline manifest-verified backup/restore that invalidates pre-restore sessions
   and cancels restored active jobs.
-- **Durable local storage:** new dataset, checkpoint, DEG, and pathway-enrichment files use
-  server-owned project keys under `STORAGE_ROOT`. Existing private-vault records
+- **Durable local storage:** new dataset, checkpoint, DEG, pathway-enrichment, and
+  CellChat candidate-table files use server-owned project keys under `STORAGE_ROOT`.
+  Existing private-vault records
   remain readable. Project writers can fork a member's durable checkpoint into a
   new object that they own from Jobs & Artifacts, without sharing live R state;
   the fork records its source object, checkpoint, job, and lineage edge.
-- **Not implemented (product):** CellChat, cell annotation,
+- **Not implemented (product):** sample-aware condition comparisons, cell annotation,
   custom/arbitrary R execution, reports, generated scripts, artifact downloads,
   object storage, shared project live R state, high availability, and parallel R
   worker scaling.
@@ -306,9 +307,13 @@ keeps figure preview while disabling the legacy server-file save action.
 RDS imports are disabled by default because RDS deserialization can execute R
 code. Set `ALLOW_TRUSTED_RDS_LOAD=true` only for trusted local/dev `.rds` files;
 production always blocks public load and restore regardless of that setting.
-The Docker image includes the ranked-enrichment packages as required runtime
-dependencies. It still skips optional legacy packages such as CellChat and
-SeuratDisk unless built with `--build-arg INSTALL_OPTIONAL_R_PACKAGES=true`.
+The Docker image includes ranked-enrichment plus CellChat/NMF and CellChat's pinned
+GitHub `presto`/Bioconductor `BiocNeighbors` dependencies as required runtime
+dependencies; CI verifies CellChat v2.1.2. SeuratDisk remains optional
+and is installed only with `--build-arg INSTALL_OPTIONAL_R_PACKAGES=true`.
+The CellChat tab is a durable, owner-only single-context candidate workflow: it
+uses a private capped CSV and opaque group identifiers, not a public download,
+causal claim, or cross-condition comparison.
 
 ### Testing without erasing your development data
 

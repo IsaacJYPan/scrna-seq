@@ -125,6 +125,51 @@ function enrichmentReceiptPayload({ checksumSha256, sizeBytes }) {
   };
 }
 
+function cellChatReceiptPayload({ checksumSha256, sizeBytes }) {
+  return {
+    ok: true,
+    summary: {
+      method: 'CellChat',
+      analysis_intent: 'single_context',
+      group_by: 'seurat_clusters',
+      assay: 'RNA',
+      species: 'human',
+      database_category: 'all',
+      p_value_cutoff: 0.05,
+      input_cell_count: 120,
+      analyzed_cell_count: 100,
+      input_group_count: 2,
+      analyzed_group_count: 2,
+      excluded_group_count: 0,
+      candidate_interaction_count: 1,
+      retained_interaction_count: 1,
+      retained_pathway_count: 1,
+      groups: [
+        { group: 'Group 1', input_cells: 50, analyzed_cells: 50 },
+        { group: 'Group 2', input_cells: 50, analyzed_cells: 50 },
+      ],
+      excluded_groups: [],
+      package_versions: {
+        r: '4.5.3', seurat: '5.3.1', cellchat: '2.1.2', cellchat_db: 'CellChatDB.human',
+      },
+      top_interactions: [{
+        source: 'Group 1', target: 'Group 2', interaction: 'TGFB1.TGFBR1_TGFBR2',
+        pathway: 'TGFb', probability: 0.42, p_value: 0.001, category: 'secreted_signaling',
+      }],
+      top_pathways: [{
+        source: 'Group 1', target: 'Group 2', pathway: 'TGFb', probability: 0.42, p_value: 0.001,
+      }],
+      warnings: [],
+    },
+    result: {
+      saved: true,
+      checksum_sha256: checksumSha256,
+      size_bytes: sizeBytes,
+      n_rows: 1,
+    },
+  };
+}
+
 function loadReceiptPayload(runtimeInstanceId) {
   return {
     loaded: true,
@@ -783,6 +828,7 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
     'seurat.pipeline.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
+    'cellchat.infer.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ])('adopts a signed %s R completion receipt after timeout without a second R call', async (jobType) => {
@@ -807,7 +853,13 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
         analysisObjectId: source.id,
         parameters: jobType === 'enrichment.gsea.v1'
           ? { targetGroup: '0', species: 'human' }
-          : {},
+          : (jobType === 'cellchat.infer.v1'
+            ? {
+              groupBy: 'seurat_clusters', species: 'human', databaseCategory: 'all',
+              analysisIntent: 'single_context', minCellsPerGroup: 10,
+              maxCellsPerGroup: 1000, maxTotalCells: 10000,
+            }
+            : {}),
       });
     }
 
@@ -824,6 +876,7 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
       };
       if (jobType === 'deg.find_markers.v1') return degReceiptPayload(integrity);
       if (jobType === 'enrichment.gsea.v1') return enrichmentReceiptPayload(integrity);
+      if (jobType === 'cellchat.infer.v1') return cellChatReceiptPayload(integrity);
       return pipelineReceiptPayload({
         ...integrity,
         seurat: jobType === 'seurat.pipeline.v1',

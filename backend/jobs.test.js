@@ -102,6 +102,7 @@ describe.skipIf(!CONFIGURED)('jobs API', () => {
       'checkpoint.fork.v1',
       'deg.find_markers.v1',
       'enrichment.gsea.v1',
+      'cellchat.infer.v1',
     ]) {
       const res = await createJob(alice.token, { jobType });
       expect(res.status, jobType).toBe(400);
