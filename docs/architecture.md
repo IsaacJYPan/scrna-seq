@@ -224,8 +224,9 @@ not the legacy synchronous `/api/r/cellchat` or `/api/r/cellchat-infer` path.
   its attached private R object, but that mapping is neither persisted with the
   job/artifact nor a historical label guarantee if identities change later. No
   general byte-download route exists.
-- **Dependencies and evidence:** the production R image requires `NMF` and
-  pinned CellChat 2.1.2. `test:cellchat-inference` runs the real R helper over a
+- **Dependencies and evidence:** the production R image requires `NMF`, the
+  exact reviewed GitHub `presto` dependency, and pinned CellChat 2.1.2.
+  `test:cellchat-inference` runs the real R helper over a
   synthetic Seurat object, including deterministic sampling, barcode/group
   alignment, non-mutation, opaque durable labels, private CSV/receipt output,
   bounded summary checks, direct equivalence with CellChat's native extraction,

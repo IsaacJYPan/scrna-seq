@@ -109,6 +109,7 @@ jobs:
             any::org.Mm.eg.db
             any::GO.db
             any::NMF
+            github::immunogenomics/presto@a24772a135c7895a8183b007376050556c60a05b
             github::jinworks/CellChat@a0d3b2d231d46c8787177fffeac908270c253747
 
       - name: Install Playwright Browsers
@@ -268,7 +269,7 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
           --entrypoint Rscript scrna-seq-r:ci -e
-          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','NMF','CellChat'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE))); stopifnot(identical(as.character(utils::packageVersion('CellChat')), '2.1.2'))"
+          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','NMF','presto','CellChat'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE))); stopifnot(identical(as.character(utils::packageVersion('CellChat')), '2.1.2'))"
 
       - name: Run ranked pathway enrichment in the production R image
         run: >-
