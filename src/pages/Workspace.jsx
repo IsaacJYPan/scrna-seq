@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Database, FileUp, Zap, CheckCircle, Info, Globe, Lock,
   LayoutGrid, List, Edit2, FolderOpen, HardDrive, FlaskConical,
@@ -26,6 +26,11 @@ function LoadModal({
   const [error, setError] = useState(null);
 
   const isLoading = !!loadingId;
+  const dialogRef = useRef(null);
+  const previousFocusRef = useRef(null);
+  const requestClose = () => {
+    if (!isLoading) onClose();
+  };
 
   React.useEffect(() => {
     const handleKeyDown = (e) => {
@@ -36,6 +41,22 @@ function LoadModal({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose, isLoading]);
+
+  React.useEffect(() => {
+    previousFocusRef.current = document.activeElement;
+    dialogRef.current?.querySelector('button, input, select, textarea')?.focus();
+    return () => previousFocusRef.current?.focus?.();
+  }, []);
+
+  const trapDialogFocus = (event) => {
+    if (event.key !== 'Tab') return;
+    const controls = [...(dialogRef.current?.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+    if (!controls.length) return;
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
 
   // Multi-10X setup state
   const [multiStep, setMultiStep] = useState(null); // null | 'setup'
@@ -313,13 +334,13 @@ function LoadModal({
   if (multiStep === 'setup') {
     return (
       <>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40" onClick={onClose} />
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40" onClick={requestClose} aria-hidden="true" />
         <div className="fixed inset-0 z-50 flex items-center justify-center p-8 pointer-events-none">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-2xl pointer-events-auto flex flex-col max-h-[85vh]">
+          <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="multi-sample-loader-title" onKeyDown={trapDialogFocus} className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-2xl pointer-events-auto flex flex-col max-h-[85vh]">
             {/* Header */}
             <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800 flex-shrink-0">
               <div>
-                <h3 className="text-lg font-black text-white tracking-tight flex items-center gap-2">
+                <h3 id="multi-sample-loader-title" className="text-lg font-black text-white tracking-tight flex items-center gap-2">
                   <FolderTree size={18} className="text-cyan-400" />
                   Configure Multi-Sample Merge
                 </h3>
@@ -327,7 +348,7 @@ function LoadModal({
                   {multiPaths.length} folder{multiPaths.length !== 1 ? 's' : ''} selected — edit sample names and metadata column below.
                 </p>
               </div>
-              <button onClick={onClose} aria-label="Close dataset loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
+              <button onClick={requestClose} disabled={isLoading} aria-label="Close dataset loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
                 <X size={16} />
               </button>
             </div>
@@ -484,16 +505,16 @@ function LoadModal({
   // ── Default: Source Selection Step ───────────────────────────────
   return (
     <>
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40" onClick={requestClose} aria-hidden="true" />
       <div className="fixed inset-0 z-50 flex items-center justify-center p-8 pointer-events-none">
-        <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-xl pointer-events-auto">
+        <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="dataset-loader-title" onKeyDown={trapDialogFocus} className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-xl pointer-events-auto max-h-[90vh] overflow-y-auto">
           {/* Header */}
           <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800">
             <div>
-              <h3 className="text-lg font-black text-white tracking-tight">Load / Attach Object</h3>
+              <h3 id="dataset-loader-title" className="text-lg font-black text-white tracking-tight">Load / Attach Object</h3>
               <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a DB-backed object and attach private live R state.</p>
             </div>
-            <button onClick={onClose} aria-label="Close demo loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
+            <button onClick={requestClose} disabled={isLoading} aria-label="Close demo loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
               <X size={16} />
             </button>
           </div>
@@ -1422,6 +1443,8 @@ export default function Workspace({
   const [activeProjectId, setActiveProjectId] = useState(defaultProjectId);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
+  const createProjectInFlightRef = useRef(false);
+  const [isSubmittingProject, setIsSubmittingProject] = useState(false);
   const [openMenuId, setOpenMenuId] = useState(null);
 
   // Sync active project if workspace changes
@@ -1532,7 +1555,9 @@ export default function Workspace({
   // ── Project Management ──────────────────────────────────────────
 
   const handleCreateProject = async () => {
-    if (!newProjectName.trim() || newProjectName.trim().length > 100) return;
+    if (createProjectInFlightRef.current || !newProjectName.trim() || newProjectName.trim().length > 100) return;
+    createProjectInFlightRef.current = true;
+    setIsSubmittingProject(true);
     try {
       const project = await onCreateProject?.({ name: newProjectName.trim(), description: '' });
       if (project?.id) setActiveProjectId(project.id);
@@ -1540,6 +1565,9 @@ export default function Workspace({
       setIsCreatingProject(false);
     } catch (err) {
       alert(err.message || 'Failed to create project.');
+    } finally {
+      createProjectInFlightRef.current = false;
+      setIsSubmittingProject(false);
     }
   };
 
@@ -1651,8 +1679,8 @@ export default function Workspace({
                     className="bg-surface border border-border text-sm text-text px-3 py-1.5 rounded focus:outline-none focus:border-primary w-40"
                     autoFocus
                   />
-                  <button onClick={handleCreateProject} disabled={!newProjectName.trim()} className="btn btn-primary text-xs px-3 py-1.5">Save</button>
-                  <button onClick={() => setIsCreatingProject(false)} aria-label="Cancel project creation" className="text-textMuted hover:text-text px-2"><X size={14} /></button>
+                  <button onClick={handleCreateProject} disabled={!newProjectName.trim() || isSubmittingProject} className="btn btn-primary text-xs px-3 py-1.5">{isSubmittingProject ? 'Saving…' : 'Save'}</button>
+                  <button onClick={() => setIsCreatingProject(false)} disabled={isSubmittingProject} aria-label="Cancel project creation" className="text-textMuted hover:text-text px-2"><X size={14} /></button>
                 </div>
               ) : (
                 <button
@@ -1689,10 +1717,11 @@ export default function Workspace({
                 const projObjects = currentWs.objects.filter(o => o.projectId === proj.id);
 
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={proj.id}
                     onClick={() => handleProjectSelect(proj.id)}
-                    className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border transition-all cursor-pointer min-w-max group ${
+                    className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border transition-all min-w-max group text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
                       isActive ? 'bg-primary/10 border-primary text-white shadow-sm' : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
                     }`}
                   >
@@ -1706,7 +1735,7 @@ export default function Workspace({
                         {projObjects.length}
                       </span>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -1765,6 +1794,17 @@ export default function Workspace({
                   <div
                     key={obj.id}
                     onClick={() => { selectObject(obj.id); setOpenMenuId(null); }}
+                    onKeyDown={event => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        selectObject(obj.id);
+                        setOpenMenuId(null);
+                      }
+                    }}
+                    role="group"
+                    aria-label={`Analysis object ${obj.name}. Press Enter or Space to select.`}
+                    tabIndex={0}
                     onMouseLeave={() => setOpenMenuId(null)}
                     className={`p-5 rounded-xl border transition-all cursor-pointer group relative flex items-center gap-5 ${
                       isSelected
@@ -1788,13 +1828,14 @@ export default function Workspace({
                             className="bg-background text-text px-2 py-0.5 rounded border border-primary text-sm font-bold w-48 focus:outline-none"
                             value={editName}
                             onChange={e => setEditName(e.target.value)}
+                            maxLength={100}
                             onBlur={e => saveRename(e, obj.id)}
                             onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
                             onClick={e => e.stopPropagation()}
                           />
                         ) : (
                           <>
-                            <div className="text-sm font-bold text-text">{obj.name}</div>
+                            <div className="text-sm font-bold text-text break-words" title={obj.name}>{obj.name}</div>
                             {obj.isSubset && (
                               <span className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide text-amber-400 bg-amber-500/10 border-amber-500/20">
                                 subset
@@ -1803,7 +1844,7 @@ export default function Workspace({
                             {!obj.isBackendAnalysisObject && (
                               <button
                                 onClick={e => handleRenameObject(e, obj.id, obj.name)}
-                                className="text-textMuted hover:text-text opacity-0 group-hover/edit:opacity-100 transition-opacity"
+                                className="text-textMuted hover:text-text opacity-0 group-hover/edit:opacity-100 group-focus-within/edit:opacity-100 focus-visible:opacity-100 transition-opacity"
                                 title="Rename"
                               >
                                 <Edit2 size={12} />

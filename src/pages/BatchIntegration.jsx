@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Layers, AlertTriangle, CheckCircle2, RefreshCw, Zap, GitMerge } from 'lucide-react';
+import { Layers, AlertTriangle, CheckCircle2, RefreshCw, Zap, GitMerge, FileText } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
@@ -168,7 +168,7 @@ export default function BatchIntegration({
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            >📝 View Step Script</button>
+            ><FileText size={15} /> View Step Script</button>
           )}
           <button
             onClick={() => runStep(false)}
@@ -198,9 +198,9 @@ export default function BatchIntegration({
         </div>
       )}
 
-      <div className="grid grid-cols-5 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
         {/* Left config panel */}
-        <div className="col-span-2 space-y-5">
+        <div className="lg:col-span-2 space-y-5">
 
           {/* Method selector */}
           <div className="card p-5 border-l-4 border-l-primary">
@@ -324,7 +324,7 @@ export default function BatchIntegration({
         </div>
 
         {/* Right: result / instructions */}
-        <div className="col-span-3 space-y-5">
+        <div className="lg:col-span-3 space-y-5">
           {/* Loading state */}
           {running && (
             <div className="card p-8 flex flex-col items-center justify-center gap-4 min-h-[300px]">

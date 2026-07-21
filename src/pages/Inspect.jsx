@@ -434,7 +434,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
           <Check size={14} className="flex-shrink-0 mt-0.5" />
           <div>
             <div className="font-bold">{result.message}</div>
-            <div className="text-emerald-600 mt-0.5">
+            <div className="text-emerald-400 mt-0.5">
               {result.added_columns ? `Added: ${result.added_columns.join(', ')}` : `${result.mapped_cells?.toLocaleString()} cells mapped.`}
             </div>
           </div>

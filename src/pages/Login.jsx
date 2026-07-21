@@ -152,10 +152,11 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'signup' && (
               <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Full Name</label>
+                <label htmlFor="signup-name" className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Full Name</label>
                 <div className="relative group">
                   <User className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                   <input
+                    id="signup-name"
                     type="text"
                     value={displayName}
                     onChange={e => setDisplayName(e.target.value)}
@@ -167,10 +168,11 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             )}
 
             <div className="space-y-1.5">
-              <label className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Email</label>
+              <label htmlFor="login-email" className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Email</label>
               <div className="relative group">
                 <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
+                  id="login-email"
                   type="email"
                   required
                   value={email}
@@ -183,10 +185,11 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Password</label>
+              <label htmlFor="login-password" className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Password</label>
               <div className="relative group">
                 <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
+                  id="login-password"
                   type={showPassword ? 'text' : 'password'}
                   required
                   value={password}

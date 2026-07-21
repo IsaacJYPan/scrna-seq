@@ -324,6 +324,9 @@ async function main() {
     await page.reload({ waitUntil: 'networkidle' });
     await page.getByText('DB Flow Project').first().waitFor({ timeout: 10_000 });
     await page.locator('text=PBMC_3k_Tutorial').first().waitFor({ timeout: 10_000 });
+    await page.getByRole('button', { name: /Lineage, Provenance DAG/i }).click();
+    await page.getByText('Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.')
+      .waitFor({ timeout: 10_000 });
     await page.screenshot({ path: SCREENSHOT, fullPage: false });
 
     const loadHeader = state.verifiedObjectHeaders.find(item => item.endpoint === 'load-data');
@@ -332,6 +335,9 @@ async function main() {
     if (loadHeader?.objectId !== 'ao_mockdemo') fail('PBMC load did not use the DB analysis object id');
     if (qcHeader?.objectId !== 'ao_mockdemo') fail('QC distributions did not use the DB analysis object id');
     if (pipelineHeader?.objectId !== 'ao_mockdemo') fail('Pipeline-state probe did not use the DB analysis object id');
+    if (!state.apiRequestUrls.some(url => /\/api\/projects\/proj_mock\/analysis-objects\/ao_mockdemo\/lineage$/.test(url))) {
+      fail('Lineage view did not request the selected project object DAG.');
+    }
     assertNoLeaks();
 
     await page.close();
