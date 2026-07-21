@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  CheckCircle2, ChevronDown, ChevronLeft, Database, LayoutPanelTop,
+  CheckCircle2, ChevronDown, ChevronLeft, Database, GitBranch, LayoutPanelTop,
   Lock, LogOut, Menu, Microscope, Moon, Sun, Users, Wrench,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
@@ -173,7 +173,7 @@ export default function Sidebar({
             <button
               onClick={handleAddWorkspace}
               aria-label="Create new local workspace"
-              className="w-12 h-12 rounded-[24px] bg-black/5 dark:bg-slate-800 flex items-center justify-center text-success hover:bg-success hover:text-white hover:rounded-[16px] transition-all duration-200 shadow-sm"
+              className="w-12 h-12 rounded-[24px] bg-black/5 dark:bg-slate-800 flex items-center justify-center text-success hover:bg-success hover:text-on-accent hover:rounded-[16px] transition-all duration-200 shadow-sm"
               title="Create local workspace shell"
             >
               <span className="text-3xl font-light mb-1">+</span>
@@ -193,7 +193,7 @@ export default function Sidebar({
             </button>
             <button
               aria-label="Log out"
-              className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-danger hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-white"
+              className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-danger hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-on-accent"
               onClick={onLogout}
               title="Log Out"
             >
@@ -222,6 +222,7 @@ export default function Sidebar({
             <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project RBAC' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
               <SectionLabel>Data / Object</SectionLabel>
+              <NavButton item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Provenance DAG' : 'Requires loaded object' }} disabled={!hasData} />
               <NavButton item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
               <NavButton item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
             </div>
@@ -250,9 +251,11 @@ export default function Sidebar({
           ))}
         </div>
 
-        <div
-          className="h-14 bg-black/5 dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-slate-800 transition-colors"
+        <button
+          type="button"
+          className="h-14 w-full text-left bg-black/5 dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-slate-800 transition-colors"
           onClick={() => setActiveTab('diagnostics')}
+          aria-label={`Open Diagnostics & Environment. ${backendConnected ? 'Backend connected' : 'Backend offline'}: ${apiStatus || 'Connection lost'}`}
           title="Open Diagnostics & Environment"
         >
           <div className="flex flex-col justify-center min-w-0 pr-2 pb-0.5 flex-1">
@@ -263,7 +266,7 @@ export default function Sidebar({
             <span className="text-[11px] text-slate-400 truncate leading-none">{apiStatus || 'Connection lost'}</span>
           </div>
           <Wrench size={16} className="text-slate-400" />
-        </div>
+        </button>
       </aside>
     </div>
   );

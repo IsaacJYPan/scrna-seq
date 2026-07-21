@@ -623,7 +623,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
               </div>
             </div>
           ) : currentPlot && (
-            <div className="flex gap-8">
+            <div className="flex flex-col lg:flex-row gap-8">
               {/* Plot Column */}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between mb-4">
@@ -689,7 +689,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
               {/* Side Panel for Individual Violin Plots */}
               {['mt', 'features', 'counts'].includes(activePlot) && (
-                <div className="w-64 flex-shrink-0 flex flex-col gap-3">
+                <div className="w-full lg:w-64 lg:flex-shrink-0 flex flex-col gap-3">
                   <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
                     <Info size={16} className="text-primary" />
                     Related Statistics

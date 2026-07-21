@@ -275,7 +275,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
   return (
     <div className="h-full w-full flex flex-col bg-background p-6">
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-wrap gap-y-3 justify-between items-center mb-6">
         <div>
           <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">UMAP Embedding</h2>
           <p className="text-textMuted">Uniform Manifold Approximation and Projection for visualization.</p>
@@ -395,7 +395,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                 </div>
               ) : base64Image ? (
                 <>
-                  <img src={base64Image} className="max-w-full max-h-full object-contain p-2" />
+                  <img src={base64Image} alt={`UMAP embedding scatter plot (${nComponents}D), cells colored by cluster`} className="max-w-full max-h-full object-contain p-2" />
                   <div className="absolute top-4 right-4 bg-primary/20 text-primary border border-primary/40 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase">
                     High-Performance View
                   </div>

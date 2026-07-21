@@ -61,6 +61,44 @@ describe('FigureSavePanel component', () => {
     });
   });
 
+  it('sends X-Object-ID so the server can resolve the live R object for the preview', async () => {
+    render(
+      <FigureSavePanel
+        isOpen={true}
+        onClose={() => {}}
+        plotType="UMAP"
+        baseParams={{}}
+        objectId="ao_test_123"
+        deploymentPolicy={{ serverFigureExportEnabled: true }}
+      />
+    );
+    await waitFor(() => expect(global.window.electronAPI.apiRequest).toHaveBeenCalledWith(
+      '/export-preview', expect.any(Object)
+    ));
+    const [, options] = global.window.electronAPI.apiRequest.mock.calls.find(c => c[0] === '/export-preview');
+    expect(options.headers['X-Object-ID']).toBe('ao_test_123');
+  });
+
+  it('does not call R for a feature-required plot with no genes; shows a clear notice', async () => {
+    render(
+      <FigureSavePanel
+        isOpen={true}
+        onClose={() => {}}
+        plotType="DotPlot"
+        baseParams={{ features: [] }}
+        objectId="ao_test_123"
+        deploymentPolicy={{ serverFigureExportEnabled: true }}
+      />
+    );
+    expect(screen.getByText(/Add at least one gene to preview a DotPlot/i)).toBeInTheDocument();
+    // Wait past the 800ms preview debounce to be sure no doomed R call is made.
+    await new Promise(r => setTimeout(r, 900));
+    expect(global.window.electronAPI.apiRequest).not.toHaveBeenCalledWith(
+      '/export-preview', expect.any(Object)
+    );
+    expect(screen.getByRole('button', { name: /save to figure gallery/i })).toBeDisabled();
+  });
+
   it('keeps previews available but disables server-file export in production', async () => {
     render(
       <FigureSavePanel

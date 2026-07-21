@@ -44,10 +44,13 @@ function formatViolinData(data) {
   });
 }
 
-function formatFeaturePlot(data) {
+function formatFeaturePlot(data, theme) {
   if (!data || !data.u1) return [];
   const { expression, u1, u2 } = data;
-  
+  // Theme-aware colorbar text; a fixed dark gray rendered at ~2.6:1 on the
+  // light-mode transparent plot background.
+  const colorbarText = theme === 'dark' ? '#94a3b8' : '#475569';
+
   return [{
     type: 'scattergl',
     mode: 'markers',
@@ -58,7 +61,7 @@ function formatFeaturePlot(data) {
       color: expression,
       colorscale: [[0, '#1e293b'], [0.5, '#7c3aed'], [1, '#facc15']],
       showscale: true,
-      colorbar: { thickness: 15, tickfont: { color: '#94a3b8' }, titlefont: { color: '#94a3b8' } }
+      colorbar: { thickness: 15, tickfont: { color: colorbarText }, titlefont: { color: colorbarText } }
     },
     hovertemplate: `<b>${data.gene}</b><br>Expr: %{marker.color:.2f}<extra></extra>`
   }];
@@ -139,15 +142,16 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, 
   const plotGrid = isDark ? '#334155' : '#d8e0ea';
 
   return (
-    <div className="h-full w-full flex bg-background overflow-hidden">
+    <div className="h-full w-full flex flex-col md:flex-row bg-background overflow-hidden">
       {/* Gene browser sidebar */}
-      <div className="w-72 border-r border-border flex flex-col bg-surface flex-shrink-0">
+      <div className="w-full md:w-72 max-h-[38vh] md:max-h-none border-b md:border-b-0 md:border-r border-border flex flex-col bg-surface flex-shrink-0">
         <div className="p-4 border-b border-border">
           <h3 className="text-sm font-bold text-white mb-3">Gene Browser</h3>
           <form onSubmit={handleSearch} className="relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input 
+            <input
               type="text"
+              aria-label="Search gene by symbol"
               value={query}
               onChange={e => handleQueryChange(e.target.value)}
               placeholder="Search gene (CD3E, LYZ...)"
@@ -271,7 +275,7 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, 
               </div>
               <div className="w-full h-[480px]">
                 <Plot 
-                  data={viewMode === 'violin' ? formatViolinData(geneData) : formatFeaturePlot(geneData)}
+                  data={viewMode === 'violin' ? formatViolinData(geneData) : formatFeaturePlot(geneData, theme)}
                   layout={{
                     autosize: true,
                     paper_bgcolor: 'transparent',

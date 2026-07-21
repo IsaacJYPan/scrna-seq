@@ -1,502 +1,283 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { GitBranch, GitFork, History, Code, Save, Trash2, Share2 } from 'lucide-react';
-import { ReactFlow, Controls, Background, MiniMap, useNodesState, useEdgesState, Handle, Position } from '@xyflow/react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, GitBranch, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import {
+  Background, Controls, MiniMap, Position, ReactFlow, Handle,
+  useEdgesState, useNodesState,
+} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
-import { forkBranch, setAsHead, mergeBranches } from '../gitOperations';
-import { saveProvenance, deleteProvenance } from '../provenance';
 
-const nodeWidth = 250;
-const nodeHeight = 80;
+const NODE_WIDTH = 250;
+const NODE_HEIGHT = 92;
 
-const getLayoutedElements = (nodes, edges, direction = 'TB') => {
-  const dagreGraph = new dagre.graphlib.Graph();
-  dagreGraph.setDefaultEdgeLabel(() => ({}));
-  dagreGraph.setGraph({ rankdir: direction, nodesep: 60, ranksep: 100 });
+function formatObjectLabel(node) {
+  if (typeof node?.label === 'string' && node.label.trim()) return node.label.trim();
+  if (typeof node?.objectType === 'string' && node.objectType.trim()) return node.objectType.trim();
+  return 'Analysis object';
+}
 
-  nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
-  });
+function layoutGraph(nodes, edges) {
+  const graph = new dagre.graphlib.Graph();
+  graph.setDefaultEdgeLabel(() => ({}));
+  graph.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 86, marginx: 20, marginy: 20 });
+  nodes.forEach((node) => graph.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT }));
+  edges.forEach((edge) => graph.setEdge(edge.source, edge.target));
+  dagre.layout(graph);
 
-  edges.forEach((edge) => {
-    dagreGraph.setEdge(edge.source, edge.target);
-  });
+  return {
+    nodes: nodes.map((node) => {
+      const position = graph.node(node.id);
+      return {
+        ...node,
+        targetPosition: Position.Top,
+        sourcePosition: Position.Bottom,
+        position: { x: position.x - (NODE_WIDTH / 2), y: position.y - (NODE_HEIGHT / 2) },
+      };
+    }),
+    edges,
+  };
+}
 
-  dagre.layout(dagreGraph);
-
-  const newNodes = nodes.map((node) => {
-    const nodeWithPosition = dagreGraph.node(node.id);
-    return {
-      ...node,
-      targetPosition: Position.Top,
-      sourcePosition: Position.Bottom,
-      position: {
-        x: nodeWithPosition.x - nodeWidth / 2,
-        y: nodeWithPosition.y - nodeHeight / 2,
-      },
-    };
-  });
-
-  return { nodes: newNodes, edges };
-};
-
-const CustomNode = ({ data }) => {
+function LineageNode({ data }) {
   return (
-    <div className={`px-4 py-3 rounded-lg border-2 shadow-lg bg-surface flex flex-col w-[250px] cursor-pointer hover:border-slate-400 transition-colors
-      ${data.isSelected ? 'border-primary shadow-primary/20 bg-primary/5' : 'border-border'}
-      ${data.isHead ? '!border-success shadow-success/20' : ''}
-    `}>
-      <Handle type="target" position={Position.Top} className="w-2 h-2 !bg-primary" />
-      <div className="flex items-center gap-2 mb-1">
-        <History size={14} className={data.isSelected ? 'text-primary' : 'text-slate-400'} />
-        <span className="text-sm font-bold text-white truncate flex-1">{data.label}</span>
-        {data.isHead && (
-           <div className="w-2 h-2 rounded-full bg-success shadow-[0_0_8px_rgba(34,197,94,0.5)]" title="Branch Head"></div>
-        )}
+    <div className={`w-[250px] rounded-xl border-2 bg-surface px-4 py-3 shadow-lg transition-colors ${
+      data.selected ? 'border-primary ring-2 ring-primary/20' : 'border-border hover:border-primary/60'
+    }`}>
+      <Handle type="target" position={Position.Top} className="!h-2 !w-2 !bg-primary" />
+      <div className="flex items-start gap-2">
+        <GitBranch size={16} className="mt-0.5 shrink-0 text-primary" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-bold text-text">{data.label}</p>
+          <p className="mt-1 truncate font-mono text-[10px] text-textMuted">{data.id}</p>
+        </div>
       </div>
-      <div className="text-[10px] text-slate-400 font-mono truncate">{data.timeStr}</div>
-      <Handle type="source" position={Position.Bottom} className="w-2 h-2 !bg-primary" />
+      <div className="mt-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-textMuted">
+        <span>{data.objectType || 'object'}</span>
+        {data.isRoot && <span className="rounded bg-success/10 px-1.5 py-0.5 text-success">root</span>}
+      </div>
+      <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-primary" />
     </div>
   );
-};
+}
 
-const nodeTypes = { custom: CustomNode };
+const nodeTypes = { lineage: LineageNode };
 
-export default function LineageExplorer({ provenanceRecords, setProvenanceRecords, currentWs, updateActiveWorkspace, openProvenance }) {
+function getActiveSelection(currentWs, datasetInfo) {
+  const projectId = datasetInfo?.projectId || currentWs?.selectedProjectId || null;
+  if (!projectId) return { projectId: null, objectId: null };
+  if (datasetInfo?.id && datasetInfo?.projectId === projectId) {
+    return { projectId, objectId: datasetInfo.id };
+  }
+  const selectedIds = Array.isArray(currentWs?.selectedObjectIds) ? currentWs.selectedObjectIds : [];
+  const selectedObject = (currentWs?.objects || []).find((object) => (
+    object?.projectId === projectId && selectedIds.includes(object.id)
+  ));
+  return { projectId, objectId: selectedObject?.id || null };
+}
+
+function EdgeList({ title, edges, nodeById }) {
+  return (
+    <section className="rounded-xl border border-border bg-surface/70 p-4">
+      <h3 className="text-sm font-bold text-text">{title}</h3>
+      {edges.length === 0 ? (
+        <p className="mt-2 text-sm text-textMuted">None recorded.</p>
+      ) : (
+        <ul className="mt-3 space-y-2">
+          {edges.map((edge) => {
+            const relatedId = title === 'Parents' ? edge.parentAnalysisObjectId : edge.childAnalysisObjectId;
+            const related = nodeById.get(relatedId);
+            return (
+              <li key={edge.id} className="rounded-lg border border-border/70 bg-background/60 p-3">
+                <p className="truncate text-sm font-semibold text-text">{formatObjectLabel(related)}</p>
+                <p className="mt-1 font-mono text-[10px] text-textMuted">{relatedId}</p>
+                <p className="mt-2 text-xs text-textMuted">{edge.edgeType || 'derived from'} / {edge.parentRole || 'input'}</p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Read-only project lineage. Durable edges are created only by reviewed worker
+ * handlers, so this UI never offers client-side graph or provenance mutation.
+ */
+export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
+  const { projectId, objectId } = getActiveSelection(currentWs, datasetInfo);
+  const [graph, setGraph] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-  const [groupSequential, setGroupSequential] = useState(false);
+  const requestRef = useRef(0);
 
-
-  const lineage = useMemo(() => {
-    if (!provenanceRecords || provenanceRecords.length === 0) return [];
-    if (!currentWs || !currentWs.branches) return [];
-
-    const headIds = Object.values(currentWs.branches).filter(Boolean);
-    if (headIds.length === 0) return [];
-
-    const recordMap = new Map(provenanceRecords.map(r => [r.id, r]));
-    const visited = new Set();
-    const queue = [...headIds];
-
-    while (queue.length > 0) {
-      const id = queue.shift();
-      if (visited.has(id)) continue;
-      visited.add(id);
-
-      const record = recordMap.get(id);
-      if (record && record.parentIds) {
-        record.parentIds.forEach(parentId => {
-          if (parentId && recordMap.has(parentId)) {
-            queue.push(parentId);
-          }
-        });
-      }
+  const loadLineage = useCallback(async () => {
+    const requestId = ++requestRef.current;
+    if (!projectId || !objectId) {
+      setGraph(null);
+      setNodes([]);
+      setEdges([]);
+      setSelectedNodeId(null);
+      setFailed(false);
+      return;
     }
-
-    return provenanceRecords.filter(r => visited.has(r.id));
-  }, [provenanceRecords, currentWs]);
-
-  const selectedNode = lineage.find(n => n.id === selectedNodeId);
-  const branches = currentWs?.branches || {};
+    const getLineage = window.electronAPI?.getProjectAnalysisObjectLineage;
+    if (typeof getLineage !== 'function') {
+      setGraph(null);
+      setFailed(true);
+      return;
+    }
+    setLoading(true);
+    setFailed(false);
+    try {
+      const response = await getLineage(projectId, objectId);
+      if (requestRef.current !== requestId) return;
+      const safeGraph = response && typeof response === 'object' ? response : null;
+      setGraph(safeGraph);
+      setSelectedNodeId(objectId);
+    } catch {
+      if (requestRef.current !== requestId) return;
+      setGraph(null);
+      setSelectedNodeId(null);
+      setFailed(true);
+    } finally {
+      if (requestRef.current === requestId) setLoading(false);
+    }
+  }, [objectId, projectId, setEdges, setNodes]);
 
   useEffect(() => {
-    const initialNodes = [];
-    const initialEdges = [];
+    loadLineage();
+    return () => { requestRef.current += 1; };
+  }, [loadLineage]);
 
-    lineage.forEach((node) => {
-      const rawOp = Array.isArray(node.operation) ? node.operation[0] : node.operation;
-      const opName = rawOp && typeof rawOp === 'string'
-        ? rawOp.replace(/[_-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-        : 'Computation Step';
-      
-      let timeStr = '';
-      try {
-        const d = new Date(node.timestamp);
-        timeStr = !isNaN(d.getTime()) ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : node.timestamp || '';
-      } catch { timeStr = ''; }
+  // Keep the empty fallbacks referentially stable. Without this memoization an
+  // unavailable/initial graph continuously retriggers the layout effect.
+  const graphNodes = useMemo(() => (Array.isArray(graph?.nodes) ? graph.nodes : []), [graph]);
+  const graphEdges = useMemo(() => (Array.isArray(graph?.edges) ? graph.edges : []), [graph]);
+  const nodeById = useMemo(() => new Map(graphNodes.map((node) => [node.id, node])), [graphNodes]);
+  const selectedNode = nodeById.get(selectedNodeId) || null;
+  const selectedParents = graphEdges.filter((edge) => edge.childAnalysisObjectId === selectedNodeId);
+  const selectedChildren = graphEdges.filter((edge) => edge.parentAnalysisObjectId === selectedNodeId);
 
-      const isHead = Object.values(branches).includes(node.id);
-      
-      initialNodes.push({
+  useEffect(() => {
+    const rawNodes = graphNodes
+      .filter((node) => typeof node?.id === 'string' && node.id)
+      .map((node) => ({
         id: node.id,
-        type: 'custom',
-        data: { 
-           label: opName, 
-           timeStr, 
-           isHead,
-           isSelected: selectedNodeId === node.id
+        type: 'lineage',
+        data: {
+          id: node.id,
+          label: formatObjectLabel(node),
+          objectType: typeof node.objectType === 'string' ? node.objectType : 'analysis object',
+          isRoot: node.id === graph?.rootObjectId,
+          selected: node.id === selectedNodeId,
         },
-      });
+      }));
+    const knownIds = new Set(rawNodes.map((node) => node.id));
+    const rawEdges = graphEdges
+      .filter((edge) => knownIds.has(edge.parentAnalysisObjectId) && knownIds.has(edge.childAnalysisObjectId))
+      .map((edge) => ({
+        id: typeof edge.id === 'string' ? edge.id : `${edge.parentAnalysisObjectId}-${edge.childAnalysisObjectId}`,
+        source: edge.parentAnalysisObjectId,
+        target: edge.childAnalysisObjectId,
+        type: 'smoothstep',
+        animated: false,
+        label: edge.edgeType || undefined,
+        labelStyle: { fill: 'currentColor', fontSize: 10 },
+        style: { stroke: '#3b82f6', strokeWidth: 2 },
+      }));
+    const layout = layoutGraph(rawNodes, rawEdges);
+    setNodes(layout.nodes);
+    setEdges(layout.edges);
+  }, [graph, graphEdges, graphNodes, selectedNodeId, setEdges, setNodes]);
 
-      if (node.parentIds && node.parentIds.length > 0) {
-        node.parentIds.forEach((parentId) => {
-          initialEdges.push({
-            id: `e-${parentId}-${node.id}`,
-            source: parentId,
-            target: node.id,
-            type: 'smoothstep',
-            animated: true,
-            style: { stroke: '#3b82f6', strokeWidth: 2 },
-          });
-        });
-      }
-    });
+  const onNodeClick = useCallback((_event, node) => setSelectedNodeId(node.id), []);
 
-    let processedNodes = initialNodes;
-    
-    // Safety check: ensure all edges point to valid nodes before layout
-    const initialNodeIds = new Set(initialNodes.map(n => n.id));
-    const safeEdges = initialEdges.filter(e => initialNodeIds.has(e.source) && initialNodeIds.has(e.target));
-    let processedEdges = safeEdges;
+  if (!projectId) {
+    return (
+      <div className="flex h-full items-center justify-center bg-background p-8">
+        <div className="max-w-lg rounded-xl border border-dashed border-border bg-surface p-8 text-center">
+          <GitBranch size={38} className="mx-auto text-primary" aria-hidden="true" />
+          <h2 className="mt-4 text-xl font-bold text-text">Select a backend project</h2>
+          <p className="mt-2 text-sm text-textMuted">Lineage is durable project metadata and is unavailable until a backend project is selected.</p>
+        </div>
+      </div>
+    );
+  }
 
-    if (groupSequential) {
-      let currentNodes = [...initialNodes];
-      let currentEdges = [...safeEdges];
-      let changed = true;
-      while (changed) {
-        changed = false;
-        
-        const inDeg = {};
-        const outDeg = {};
-        currentNodes.forEach(n => { inDeg[n.id] = 0; outDeg[n.id] = 0; });
-        currentEdges.forEach(e => {
-          outDeg[e.source] = (outDeg[e.source] || 0) + 1;
-          inDeg[e.target] = (inDeg[e.target] || 0) + 1;
-        });
-
-        // Exclude nodes that are the selected node or active branches from being compressed
-        // Actually, it's fine if they are compressed, they will just be represented by the last node in the block
-        // But to make sure HEAD nodes remain distinct, we can prevent compression if 'u' is a branch head
-        const compressibleEdge = currentEdges.find(e => {
-          if (outDeg[e.source] !== 1 || inDeg[e.target] !== 1) return false;
-          const uNode = currentNodes.find(n => n.id === e.source);
-          return !(uNode && uNode.data.isHead);
-        });
-
-        if (compressibleEdge) {
-           const u = compressibleEdge.source;
-           const v = compressibleEdge.target;
-           
-           const uNode = currentNodes.find(n => n.id === u);
-           const vNode = currentNodes.find(n => n.id === v);
-           
-           if (uNode && vNode) {
-             vNode.data.originalLabel = vNode.data.originalLabel || vNode.data.label;
-             const uLabel = uNode.data.originalLabel || uNode.data.label;
-             vNode.data.label = `${uLabel} + ${vNode.data.originalLabel}`;
-             
-             // If u was selected, move selection to v
-             if (uNode.data.isSelected) {
-               vNode.data.isSelected = true;
-             }
-             
-             currentEdges = currentEdges.map(e => {
-               if (e.target === u) return { ...e, id: `e-${e.source}-${v}`, target: v };
-               return e;
-             }).filter(e => e.source !== u);
-             
-             currentNodes = currentNodes.filter(n => n.id !== u);
-             changed = true;
-           }
-        }
-      }
-      processedNodes = currentNodes;
-      processedEdges = currentEdges;
-    }
-
-    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(processedNodes, processedEdges);
-    setNodes(layoutedNodes);
-    setEdges(layoutedEdges);
-
-  }, [provenanceRecords, branches, selectedNodeId, groupSequential, setNodes, setEdges]);
-
-  const onNodeClick = useCallback((event, node) => {
-    setSelectedNodeId(node.id);
-  }, []);
-
-  const forkFromHere = (node) => {
-    const branchName = prompt("Enter name for new analysis fork:");
-    if (!branchName || !currentWs) return;
-    try {
-      const updatedWs = forkBranch(currentWs, branchName, node.id);
-      updateActiveWorkspace(updatedWs);
-      alert(`Switched to new fork: ${branchName}`);
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-
-  const assignHead = (node) => {
-    if (!currentWs) return;
-    try {
-      const updatedWs = setAsHead(currentWs, node.id);
-      updateActiveWorkspace(updatedWs);
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-
-  const pruneNodeAction = async (node) => {
-    if (!confirm(`Are you sure you want to prune node ${node.id}? This will permanently remove it from the session and database.`)) {
-      return;
-    }
-
-    try {
-      await deleteProvenance(node.id);
-
-      if (setProvenanceRecords) {
-        setProvenanceRecords(prev => prev.filter(r => r.id !== node.id));
-      }
-
-      if (currentWs?.branches) {
-        let wsChanged = false;
-        const updatedBranches = { ...currentWs.branches };
-        
-        Object.keys(updatedBranches).forEach(branchName => {
-          if (updatedBranches[branchName] === node.id) {
-            const parentId = node.parentIds && node.parentIds.length > 0 ? node.parentIds[0] : null;
-            updatedBranches[branchName] = parentId;
-            wsChanged = true;
-          }
-        });
-
-        if (wsChanged) {
-          updateActiveWorkspace({
-            ...currentWs,
-            branches: updatedBranches
-          });
-        }
-      }
-
-      setSelectedNodeId(null);
-    } catch (err) {
-      alert(`Error pruning node: ${err.message}`);
-    }
-  };
-
-  const createNewBranch = () => {
-    const name = prompt("Enter a name for the new branch:");
-    if (!name || !currentWs) return;
-    try {
-      const updatedWs = forkBranch(currentWs, name, currentWs.branches[currentWs.activeBranch]);
-      updateActiveWorkspace(updatedWs);
-    } catch (err) {
-      alert(err.message);
-    }
-  };
-
-  const mergeAction = async (node) => {
-    if (!currentWs) return;
-    const targetBranch = currentWs.activeBranch;
-    const targetNodeId = currentWs.branches[targetBranch];
-    if (targetNodeId === node.id) {
-      alert("Cannot merge a branch into itself.");
-      return;
-    }
-
-    const sourceBranch = Object.keys(currentWs.branches).find(b => currentWs.branches[b] === node.id);
-    if (!sourceBranch) {
-      if (!confirm(`This node is not the HEAD of any branch. Merge anyway?`)) return;
-    } else {
-      if (!confirm(`Merge branch '${sourceBranch}' into '${targetBranch}'?`)) return;
-    }
-
-    const parentIds = [];
-    if (targetNodeId) parentIds.push(targetNodeId);
-    if (node.id && targetNodeId !== node.id) parentIds.push(node.id);
-
-    const mergeNodeId = `prov-${Date.now()}`;
-    const mergeEnvelope = {
-      provenance: {
-        id: mergeNodeId,
-        timestamp: new Date().toISOString(),
-        operation: 'merge',
-        parentIds: parentIds,
-        script: `# Merged node ${node.id} into branch ${targetBranch}\n`
-      }
-    };
-    
-    try {
-      await saveProvenance(mergeEnvelope);
-      if (setProvenanceRecords) {
-        setProvenanceRecords(prev => [mergeEnvelope.provenance, ...prev]);
-      }
-      
-      let updatedWs;
-      if (sourceBranch) {
-        updatedWs = mergeBranches(currentWs, targetBranch, sourceBranch, mergeNodeId);
-      } else {
-        updatedWs = {
-          ...currentWs,
-          branches: {
-            ...currentWs.branches,
-            [targetBranch]: mergeNodeId
-          }
-        };
-      }
-      updateActiveWorkspace(updatedWs);
-    } catch (err) {
-      alert(err.message);
-    }
-  };
+  if (!objectId) {
+    return (
+      <div className="flex h-full items-center justify-center bg-background p-8">
+        <div className="max-w-lg rounded-xl border border-dashed border-border bg-surface p-8 text-center">
+          <GitBranch size={38} className="mx-auto text-primary" aria-hidden="true" />
+          <h2 className="mt-4 text-xl font-bold text-text">Select an analysis object</h2>
+          <p className="mt-2 text-sm text-textMuted">Choose a project analysis object in Workbench to view its durable lineage graph.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="h-full w-full flex flex-col bg-background">
-      <div className="p-8 border-b border-border bg-slate-800/20 shrink-0">
-        <div className="flex justify-between items-center mb-6">
-          <div>
-            <h2 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
-              <History size={24} className="text-primary" /> Legacy Session DAG
-            </h2>
-            <p className="text-textMuted text-sm">Inspect live-R session provenance. Durable project lineage is shown in Jobs & Artifacts.</p>
-          </div>
-
-          <div className="flex gap-4">
-            <div className="flex items-center gap-2 px-4 py-2 bg-black/30 rounded-lg border border-border">
-              <span className="text-[10px] text-textMuted font-bold uppercase tracking-widest">Active Branch:</span>
-              <span className="text-xs font-mono text-blue-400 font-bold">{currentWs?.activeBranch || 'main'}</span>
-            </div>
-          </div>
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <header className="flex shrink-0 flex-wrap items-start justify-between gap-4 border-b border-border bg-surface/60 px-6 py-5">
+        <div>
+          <h2 className="flex items-center gap-2 text-2xl font-black tracking-tight text-text"><GitBranch size={24} className="text-primary" /> Lineage</h2>
+          <p className="mt-1 max-w-3xl text-sm text-textMuted">Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.</p>
+          <p className="mt-2 font-mono text-[11px] text-textMuted">Object: {objectId}</p>
         </div>
+        <button onClick={loadLineage} disabled={loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+          {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+          Refresh
+        </button>
+      </header>
 
-        <div className="flex gap-4 overflow-x-auto pb-2 custom-scrollbar">
-          {(currentWs?.branches ? Object.keys(currentWs.branches) : []).map(b => (
-            <button
-              key={b}
-              onClick={() => updateActiveWorkspace({ activeBranch: b })}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${currentWs.activeBranch === b ? 'bg-blue-500/10 border-blue-500/40 text-blue-900 dark:border-blue-300/60 dark:text-blue-200' : 'bg-slate-800 border-border text-slate-400'}`}
-            >
-              {b}
-            </button>
-          ))}
-          <button
-            onClick={createNewBranch}
-            className="px-4 py-2 rounded-lg text-xs font-bold border border-dashed border-slate-600 text-slate-400 hover:border-primary hover:text-primary transition-colors flex items-center gap-2"
-          >
-            <GitBranch size={14} /> New Branch
-          </button>
-          <div className="w-px bg-border mx-2"></div>
-          <button
-            onClick={() => setGroupSequential(prev => !prev)}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${groupSequential ? 'bg-blue-500/10 border-blue-500/40 text-blue-900 dark:border-blue-300/60 dark:text-blue-200' : 'bg-slate-800 border-border text-slate-400'}`}
-          >
-            {groupSequential ? 'Expand DAG' : 'Collapse Sequential Steps'}
-          </button>
+      {failed ? (
+        <div className="m-6 flex max-w-2xl items-start gap-3 rounded-xl border border-danger/30 bg-danger/10 p-4 text-danger">
+          <AlertTriangle size={20} className="mt-0.5 shrink-0" />
+          <div><p className="font-bold">Lineage unavailable</p><p className="mt-1 text-sm">The lineage metadata could not be loaded. Check your project access and retry.</p></div>
         </div>
-      </div>
-
-      <div className="flex-1 overflow-hidden grid grid-cols-12 min-h-0">
-        {/* DAG Column */}
-        <div className="col-span-8 border-r border-border relative bg-slate-900/50 h-full">
-          <ReactFlow style={{ width: "100%", height: "100%" }}
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onNodeClick={onNodeClick}
-            nodeTypes={nodeTypes}
-            fitView
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background color="#334155" gap={16} />
-            <Controls className="bg-surface border border-border fill-slate-400" />
-            <MiniMap 
-              nodeColor="#3b82f6" 
-              maskColor="rgba(15, 23, 42, 0.7)" 
-              className="bg-surface border border-border"
-            />
-          </ReactFlow>
-        </div>
-
-        {/* Node Detail Column */}
-        <div className="col-span-4 bg-surface overflow-y-auto p-8 custom-scrollbar">
-          {selectedNode ? (
-            <div className="space-y-8 animate-in fade-in slide-in-from-right-4 duration-300">
-              <div className="flex flex-col gap-3">
+      ) : loading && !graph ? (
+        <div className="flex flex-1 items-center justify-center"><Loader2 size={34} className="animate-spin text-primary" aria-label="Loading lineage" /></div>
+      ) : (
+        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12">
+          <section className="relative min-h-[340px] border-b border-border bg-slate-900/40 lg:col-span-8 lg:border-b-0 lg:border-r">
+            {graphNodes.length === 0 ? (
+              <div className="flex h-full min-h-[340px] items-center justify-center p-8 text-center">
+                <div><GitBranch size={38} className="mx-auto text-textMuted" aria-hidden="true" /><p className="mt-3 font-bold text-text">No lineage metadata returned</p><p className="mt-1 text-sm text-textMuted">This object may not have durable lineage records yet.</p></div>
+              </div>
+            ) : (
+              <ReactFlow
+                nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
+                onNodeClick={onNodeClick} nodeTypes={nodeTypes} fitView proOptions={{ hideAttribution: true }}
+              >
+                <Background color={theme === 'dark' ? '#334155' : '#d8e0ea'} gap={16} />
+                <Controls className="border border-border bg-surface fill-slate-400" />
+                <MiniMap nodeColor="#3b82f6" maskColor="rgba(15, 23, 42, 0.7)" className="border border-border bg-surface" />
+              </ReactFlow>
+            )}
+          </section>
+          <aside className="min-h-0 overflow-y-auto bg-surface p-6 custom-scrollbar lg:col-span-4">
+            {selectedNode ? (
+              <div className="space-y-5">
                 <div>
-                  <span className="text-[10px] font-black text-primary uppercase tracking-[.2em]">Selected Step</span>
-                  <h4 className="text-2xl font-bold text-white mt-1">
-                    {selectedNode.operation
-                      ? (Array.isArray(selectedNode.operation) ? selectedNode.operation[0] : selectedNode.operation).replace(/[_-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-                      : 'Computation Step'}
-                  </h4>
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">Selected object</p>
+                  <h3 className="mt-1 text-xl font-bold text-text">{formatObjectLabel(selectedNode)}</h3>
+                  <p className="mt-2 break-all font-mono text-xs text-textMuted">{selectedNode.id}</p>
+                  <p className="mt-2 text-sm text-textMuted">Type: {selectedNode.objectType || 'analysis object'}</p>
                 </div>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  <button
-                    onClick={() => forkFromHere(selectedNode)}
-                    className="btn btn-secondary text-xs px-3 py-1.5 flex items-center gap-2 hover:bg-primary/10 hover:text-primary hover:border-primary/40 border-slate-700"
-                  >
-                    <GitFork size={14} /> Fork Branch
-                  </button>
-                  <button
-                    onClick={() => assignHead(selectedNode)}
-                    className="btn btn-secondary text-xs px-3 py-1.5 flex items-center gap-2 border-slate-700"
-                  >
-                    <Save size={14} /> Set as Head
-                  </button>
-                  <button
-                    onClick={() => pruneNodeAction(selectedNode)}
-                    className="btn btn-secondary text-xs px-3 py-1.5 flex items-center gap-2 text-danger border-danger/20 hover:bg-danger/10"
-                  >
-                    <Trash2 size={14} /> Prune
-                  </button>
-                  <button
-                    onClick={() => mergeAction(selectedNode)}
-                    className="btn btn-secondary text-xs px-3 py-1.5 flex items-center gap-2 border-slate-700 hover:bg-primary/10 hover:text-primary hover:border-primary/40"
-                  >
-                    <GitBranch size={14} /> Merge into Current
-                  </button>
-                </div>
+                <EdgeList title="Parents" edges={selectedParents} nodeById={nodeById} />
+                <EdgeList title="Children" edges={selectedChildren} nodeById={nodeById} />
               </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="card p-3 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted uppercase font-bold mb-1">State Type</div>
-                  <div className="text-xs text-slate-300 font-mono">Immutable</div>
-                </div>
-                <div className="card p-3 bg-black/20 text-center">
-                  <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Packages</div>
-                  <div className="text-xs text-slate-300">{selectedNode.packages?.length || 0} Built-in</div>
-                </div>
-              </div>
-
-              <div>
-                <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-[.2em] mb-4 flex items-center gap-2">
-                  <Code size={14} /> Extraction Logic (R)
-                </h5>
-                <pre className="bg-slate-900 border border-border/50 rounded-xl p-6 overflow-auto text-xs font-mono text-slate-400 leading-relaxed shadow-inner">
-                  {selectedNode.script}
-                </pre>
-              </div>
-
-              <div className="p-6 bg-primary/5 border border-primary/20 rounded-2xl flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center text-primary">
-                    <Share2 size={20} />
-                  </div>
-                  <div>
-                    <div className="text-sm font-bold text-white">Legacy Script Preview</div>
-                    <div className="text-[10px] text-textMuted">Preview this transient live-R step.</div>
-                  </div>
-                </div>
-                <button
-                  onClick={() => openProvenance(selectedNode.id)}
-                  className="btn btn-primary text-xs px-4 py-2 shadow-lg shadow-primary/20"
-                >
-                  Preview
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="h-full flex flex-col items-center justify-center text-center  p-4">
-              <GitBranch size={48} className="mb-4 text-slate-400" />
-              <p className="text-lg font-medium text-slate-400">Select a node from the DAG<br />to inspect and branch.</p>
-            </div>
-          )}
+            ) : (
+              <div className="flex h-full min-h-64 flex-col items-center justify-center text-center"><GitBranch size={38} className="text-textMuted" aria-hidden="true" /><p className="mt-3 text-sm text-textMuted">Select an object to inspect its recorded relationships.</p></div>
+            )}
+            <div className="mt-6 flex gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-textMuted"><ShieldCheck size={16} className="shrink-0 text-primary" />Project lineage visibility does not grant access to another member&apos;s private live R state.</div>
+          </aside>
         </div>
-      </div>
+      )}
     </div>
   );
 }
