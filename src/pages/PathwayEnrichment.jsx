@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Archive,
+  Ban,
   Clock,
   FileText,
   Loader2,
@@ -232,6 +233,7 @@ export default function PathwayEnrichment({
   const [artifacts, setArtifacts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
   const [targetGroups, setTargetGroups] = useState([]);
@@ -242,6 +244,10 @@ export default function PathwayEnrichment({
   const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
   const liveObjectAttached = hasAttachedLiveRObject(datasetInfo);
   const canWriteProject = JOB_WRITE_ROLES.has(activeProject?.role);
+  // The API also limits analysts to cancelling only their own jobs. Until the
+  // job projection carries an explicit capability, expose cancellation only to
+  // roles that can cancel every project job rather than offering a dead action.
+  const canCancelJob = activeProject?.role === 'owner' || activeProject?.role === 'admin';
   const targetGroupIsValid = isSafeTargetGroup(params.targetGroup);
   const safeParams = useMemo(() => buildEnrichmentParams(params), [params]);
   const geneSetSizesAreValid = safeParams.minGeneSetSize < safeParams.maxGeneSetSize;
@@ -418,9 +424,9 @@ export default function PathwayEnrichment({
         expectedSelectionKey: requestSelectionKey,
       });
     } catch (requestError) {
-      setError(parseErrorMessage(requestError));
+      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(requestError));
     } finally {
-      setLoading(false);
+      if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
     }
     return undefined;
   }, [
@@ -436,6 +442,28 @@ export default function PathwayEnrichment({
     targetGroupIsValid,
     userEmail,
   ]);
+
+  const cancelJob = useCallback(async () => {
+    if (!activeProjectId || !job?.id || !canCancelJob) return;
+    const api = window.electronAPI || {};
+    if (!api.cancelProjectJob) {
+      setError('Job cancellation is unavailable in this frontend runtime.');
+      return;
+    }
+    const requestSelectionKey = selectionKeyRef.current;
+    const requestProjectId = activeProjectId;
+    const requestJobId = job.id;
+    setCanceling(true);
+    setError(null);
+    try {
+      await api.cancelProjectJob(requestProjectId, requestJobId);
+      await refreshJobState(requestJobId, { silent: true, expectedSelectionKey: requestSelectionKey });
+    } catch (requestError) {
+      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(requestError));
+    } finally {
+      if (selectionKeyRef.current === requestSelectionKey) setCanceling(false);
+    }
+  }, [activeProjectId, canCancelJob, job?.id, refreshJobState]);
 
   if (!datasetInfo) {
     return (
@@ -600,7 +628,19 @@ export default function PathwayEnrichment({
               <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Job status</h3>
               <p className="mt-1 text-sm text-textMuted">The job stays queued until the separate worker process is running.</p>
             </div>
-            {job?.status && <StatusBadge tone={badgeTone(job.status)}>{job.status}</StatusBadge>}
+            <div className="flex items-center gap-2">
+              {job?.status && <StatusBadge tone={badgeTone(job.status)}>{job.status}</StatusBadge>}
+              {job?.id && !terminal && canCancelJob && (
+                <button
+                  onClick={cancelJob}
+                  disabled={canceling}
+                  className="btn btn-secondary inline-flex items-center gap-1.5 text-xs disabled:opacity-50"
+                >
+                  {canceling ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
+                  Cancel job
+                </button>
+              )}
+            </div>
           </div>
           {!job ? (
             <EmptyNotice title="No pathway job started">Choose the settings above, select the correct species, then start the durable job.</EmptyNotice>

@@ -51,6 +51,20 @@ import {
 // Pipeline step ordering — used for downstream invalidation
 const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'];
 
+// Human-readable name per tab, used for a visually-hidden <h1> so every
+// authenticated view has a level-1 heading (pages render their own <h2>). This
+// keeps the screen-reader heading tree rooted instead of starting at h2.
+const TAB_TITLES = {
+  workspace: 'Workbench', 'pipeline-manager': 'Pipeline Manager', team: 'Collaborators',
+  inspect: 'Inspect', lineage: 'Lineage', qc: 'Quality Control', normalize: 'Normalization',
+  integrate: 'Batch Integration', pca: 'Principal Component Analysis', cluster: 'Clustering',
+  umap: 'UMAP Embedding', featureplot: 'Feature Plot', heatmap: 'Marker Heatmap',
+  dotplot: 'Dot Plot', geneviewer: 'Gene Expression', deg: 'Differential Expression',
+  history: 'Project History', annotate: 'Cell Annotation', enrichment: 'Pathway Enrichment',
+  cellchat: 'CellChat', customscript: 'Custom Script', publication: 'Figure Gallery',
+  validation: 'Validation', diagnostics: 'Diagnostics',
+};
+
 // Error boundary to prevent full-app crashes from individual page errors
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -71,7 +85,9 @@ class ErrorBoundary extends React.Component {
             <div className="text-6xl mb-4">⚠️</div>
             <h2 className="text-xl font-bold text-text mb-2">Component Error</h2>
             <p className="text-slate-400 text-sm mb-4">{this.state.error?.message || 'An unexpected error occurred in this module.'}</p>
-            <pre className="text-xs text-slate-400 bg-black/30 p-3 rounded-lg overflow-auto max-h-32 text-left mb-4">{this.state.error?.stack?.split('\n').slice(0, 5).join('\n')}</pre>
+            {import.meta.env.DEV && (
+              <pre className="text-xs text-slate-400 bg-black/30 p-3 rounded-lg overflow-auto max-h-32 text-left mb-4">{this.state.error?.stack?.split('\n').slice(0, 5).join('\n')}</pre>
+            )}
             <button onClick={() => this.setState({ hasError: false, error: null })} className="btn btn-primary text-sm">Retry</button>
           </div>
         </div>
@@ -111,11 +127,23 @@ const FUTURE_FEATURES = {
   }
 };
 
-const TabContent = ({ id, activeTab, children }) => (
-  <div className={`absolute inset-0 ${activeTab === id ? 'block' : 'hidden'}`}>
-    {children}
-  </div>
-);
+// Lazy-mount tab content. A tab's subtree is not mounted until the tab is first
+// activated; after that it stays mounted (just visually hidden) so per-tab state
+// survives navigation. Deferring the initial mount is important: every analysis
+// tab fires its own live-R probes on mount (e.g. /genes, /meta-values), and the
+// R proxy admits only one in-flight analytical request per user — mounting all
+// tabs at once produced a burst of "R service is busy" (429) responses on load.
+const TabContent = ({ id, activeTab, children }) => {
+  const [hasBeenActive, setHasBeenActive] = useState(activeTab === id);
+  useEffect(() => {
+    if (activeTab === id) setHasBeenActive(true);
+  }, [activeTab, id]);
+  return (
+    <div className={`absolute inset-0 ${activeTab === id ? 'block' : 'hidden'}`}>
+      {hasBeenActive ? children : null}
+    </div>
+  );
+};
 
 const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
   registrationEnabled: false,
@@ -201,6 +229,9 @@ export default function App() {
 
   const [figuresCount, setFiguresCount] = useState(0);
 
+  // Refresh the gallery badge on login and when entering/leaving the Figure
+  // Gallery, rather than firing getFigures on every unrelated tab navigation.
+  const onPublicationTab = activeTab === 'publication';
   useEffect(() => {
     if (window.electronAPI && window.electronAPI.getFigures && user?.email) {
       window.electronAPI.getFigures(user.email).then(figures => {
@@ -209,7 +240,7 @@ export default function App() {
         console.error('[App] Failed to load figures count:', err);
       });
     }
-  }, [activeTab, user?.email]);
+  }, [onPublicationTab, user?.email]);
 
   // Local workspace shell. Backend projects/analysis objects are loaded after
   // login; localStorage is no longer a durable project/object source.
@@ -678,7 +709,13 @@ export default function App() {
       }
       return data;
     } catch (err) {
-      console.error(err);
+      // The R proxy admits one analytical request per user at a time and returns
+      // 429 "R service is busy" for concurrent ones — an expected, retryable
+      // condition, not an app fault. Log those quietly so genuine failures stay
+      // visible as console errors.
+      const msg = String(err?.message || '');
+      if (/\bbusy\b|rate limit|too many/i.test(msg)) console.warn('[callApi] transient:', msg);
+      else console.error(err);
       return { error: err.message };
     }
   }, [markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
@@ -831,6 +868,7 @@ export default function App() {
   const pipelineProbeKeyRef = React.useRef(null);
   const pipelineProbeAttachedRef = React.useRef(false);
   const pipelineProbeAttemptsRef = React.useRef(0);
+  const pipelineProbeRetryTimeoutRef = React.useRef(null);
   const [pipelineProbeRetry, setPipelineProbeRetry] = useState(0);
   useEffect(() => {
     const objectId = datasetInfo?.id;
@@ -849,6 +887,20 @@ export default function App() {
     window.electronAPI.apiRequest('/pipeline-state', {
       headers: { 'X-Object-ID': objectId }
     }).then(state => {
+      // A transient proxy/R failure (e.g. HTTP 429 "R service is busy", a network
+      // blip, or a temporarily unreachable backend) comes back as { error } — NOT
+      // as an authoritative "object does not exist". Treat it as retryable and
+      // leave the current attachment intact; detaching a live object on a transient
+      // error wrongly tears down a working session. Only an explicit exists:false
+      // from the backend detaches the object.
+      if (state?.error) {
+        pipelineProbeKeyRef.current = null;
+        if (pipelineProbeAttemptsRef.current < 3) {
+          pipelineProbeAttemptsRef.current += 1;
+          pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
+        }
+        return;
+      }
       if (!state?.exists) {
         pipelineProbeAttemptsRef.current = 0;
         pipelineProbeAttachedRef.current = false;
@@ -878,9 +930,18 @@ export default function App() {
       pipelineProbeKeyRef.current = null;
       if (pipelineProbeAttemptsRef.current < 3) {
         pipelineProbeAttemptsRef.current += 1;
-        window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
+        pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
       }
     });
+    // Clear a pending retry if the effect re-runs (dataset/session change) or the
+    // component unmounts, so a stale timer can't fire a probe against the wrong
+    // object/session after switching.
+    return () => {
+      if (pipelineProbeRetryTimeoutRef.current) {
+        window.clearTimeout(pipelineProbeRetryTimeoutRef.current);
+        pipelineProbeRetryTimeoutRef.current = null;
+      }
+    };
   }, [user?.email, datasetInfo?.id, datasetInfo?.liveState, rSessionId, sessionCheckDone, pipelineProbeRetry, resetPipelineState, patchActiveWorkspace]);
 
 
@@ -1080,6 +1141,7 @@ export default function App() {
         deploymentPolicy={deploymentPolicy}
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
+        <h1 className="sr-only">BenchOne Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
         {renderContent()}
       </main>
 

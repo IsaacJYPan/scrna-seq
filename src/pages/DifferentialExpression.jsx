@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
+  Ban,
   CheckCircle2,
   Clock,
   FileText,
@@ -227,6 +228,7 @@ export default function DifferentialExpression({
   const [artifacts, setArtifacts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
 
@@ -334,6 +336,25 @@ export default function DifferentialExpression({
       setLoading(false);
     }
   }, [activeProjectId, isDbBackedObject, refreshJobState, safeParams, selectedObjectId, userEmail]);
+
+  const cancelDegJob = useCallback(async () => {
+    if (!activeProjectId || !job?.id) return;
+    const api = window.electronAPI || {};
+    if (!api.cancelProjectJob) {
+      setError('Job cancellation is unavailable in this frontend runtime.');
+      return;
+    }
+    setCanceling(true);
+    setError(null);
+    try {
+      await api.cancelProjectJob(activeProjectId, job.id);
+      await refreshJobState(job.id, { silent: true });
+    } catch (err) {
+      setError(parseErrorMessage(err));
+    } finally {
+      setCanceling(false);
+    }
+  }, [activeProjectId, job?.id, refreshJobState]);
 
   if (!datasetInfo) {
     return (
@@ -544,7 +565,19 @@ export default function DifferentialExpression({
                 The job will remain queued until the opt-in worker is running.
               </p>
             </div>
-            {job?.status && <StatusBadge tone={statusTone(job.status)}>{job.status}</StatusBadge>}
+            <div className="flex items-center gap-2">
+              {job?.status && <StatusBadge tone={statusTone(job.status)}>{job.status}</StatusBadge>}
+              {job?.id && !terminal && (
+                <button
+                  onClick={cancelDegJob}
+                  disabled={canceling}
+                  className="btn btn-secondary inline-flex items-center gap-1.5 text-xs disabled:opacity-50"
+                >
+                  {canceling ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
+                  Cancel job
+                </button>
+              )}
+            </div>
           </div>
 
           {!job ? (

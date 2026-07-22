@@ -1,8 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   X, Image, Download, RefreshCw, ChevronDown, ChevronRight,
-  Type, Palette, Settings2, Layers, Loader2, CheckCircle2, AlertCircle
+  Type, Palette, Settings2, Layers, Loader2, CheckCircle2, AlertCircle, Info
 } from 'lucide-react';
+
+// Plot types whose R renderer requires explicit features/genes. Mirrors the
+// guards in r-backend/plumber.R build_pub_plot() (FeaturePlot/DotPlot/Heatmap/
+// Violin stop() without features); UMAP renders from the embedding alone.
+const FEATURE_REQUIRED_PLOT_TYPES = ['FeaturePlot', 'DotPlot', 'Heatmap', 'Violin'];
 
 const PALETTES = [
   { name: 'Set2',    label: 'Set2 (Default)',    colors: ['#66c2a5','#fc8d62','#8da0cb','#e78ac3','#a6d854'] },
@@ -76,6 +81,17 @@ export default function FigureSavePanel({
   deploymentPolicy = {},
 }) {
   const serverFigureExportEnabled = deploymentPolicy.serverFigureExportEnabled === true;
+  // Preview rendering is intentionally NOT gated by serverFigureExportEnabled —
+  // only the server-file *export/save* is (see the Save button + proxy allowlist,
+  // which permits /export-preview but blocks /export-figure). But a feature-plot
+  // preview with no genes will always fail in R ("Features required for …"), which
+  // the R proxy masks as a generic "R request failed." 502. Predict that case and
+  // show a clear, actionable notice instead of round-tripping to a doomed render.
+  const requiresFeatures = FEATURE_REQUIRED_PLOT_TYPES.includes(plotType);
+  const hasFeatures = Array.isArray(baseParams.features) && baseParams.features.length > 0;
+  const previewUnavailableReason = (requiresFeatures && !hasFeatures)
+    ? `Add at least one gene to preview a ${plotType}.`
+    : null;
   // ── Label params ────────────────────────────────────────────────
   const [title, setTitle] = useState('');
   const [subtitle, setSubtitle] = useState('');
@@ -146,7 +162,12 @@ export default function FigureSavePanel({
     try {
       const data = await window.electronAPI.apiRequest('/export-preview', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // X-Object-ID scopes the request to this user's live R object. Unlike the
+        // pipeline pages (which go through App.callApi), this panel calls apiRequest
+        // directly, so it must attach the header itself — without it the server
+        // resolves the owner-only R state key, R finds no object, and returns
+        // {error:"No object loaded"} which the proxy masks as a generic 502.
+        headers: { 'Content-Type': 'application/json', 'X-Object-ID': objectId },
         body: JSON.stringify(params)
       });
       if (data.error) throw new Error(data.error);
@@ -156,18 +177,27 @@ export default function FigureSavePanel({
     } finally {
       setPreviewLoading(false);
     }
-  }, []);
+  }, [objectId]);
 
   // Trigger debounced refresh on any param change
   useEffect(() => {
     if (!isOpen) return;
+    if (previewUnavailableReason) {
+      // Known-doomed request: don't call R. Clear any stale preview/error so the
+      // pane shows the informational notice rather than a spinner or "Preview failed".
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      setPreviewB64(null);
+      setPreviewError(null);
+      setPreviewLoading(false);
+      return undefined;
+    }
     const params = buildParams();
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => refreshPreview(params), 800);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [buildParams, isOpen, refreshPreview]);
+  }, [buildParams, isOpen, refreshPreview, previewUnavailableReason]);
 
   // Reset on open
   useEffect(() => {
@@ -190,7 +220,7 @@ export default function FigureSavePanel({
     try {
       const data = await window.electronAPI.apiRequest('/export-figure', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Object-ID': objectId },
         body: JSON.stringify(exportParams),
       });
       if (data.error) throw new Error(data.error);
@@ -249,9 +279,9 @@ export default function FigureSavePanel({
         </div>
 
         {/* Body: params (left) + preview (right) */}
-        <div className="flex-1 flex min-h-0">
+        <div className="flex-1 flex flex-col md:flex-row min-h-0">
           {/* Left: parameter controls */}
-          <div className="w-72 flex-shrink-0 overflow-y-auto custom-scrollbar p-4 border-r border-border">
+          <div className="w-full md:w-72 flex-shrink-0 overflow-y-auto custom-scrollbar p-4 border-b md:border-b-0 md:border-r border-border max-h-[45vh] md:max-h-none">
 
             <CollapsibleSection title="Labels" icon={Type}>
               <FieldRow label="Title" value={title} onChange={setTitle} placeholder={plotType} />
@@ -263,6 +293,9 @@ export default function FigureSavePanel({
                   <div className="flex items-center justify-between">
                     <label className="text-xs text-textMuted font-medium">Cluster Labels</label>
                     <button
+                      role="switch"
+                      aria-checked={doLabel}
+                      aria-label="Cluster Labels"
                       onClick={() => setDoLabel(v => !v)}
                       className={`relative w-10 h-5 rounded-full transition-colors ${doLabel ? 'bg-primary' : 'bg-slate-600'}`}
                     >
@@ -275,6 +308,9 @@ export default function FigureSavePanel({
                       <div className="flex items-center justify-between">
                         <label className="text-xs text-textMuted font-medium">Repel Labels</label>
                         <button
+                          role="switch"
+                          aria-checked={repel}
+                          aria-label="Repel Labels"
                           onClick={() => setRepel(v => !v)}
                           className={`relative w-10 h-5 rounded-full transition-colors ${repel ? 'bg-primary' : 'bg-slate-600'}`}
                         >
@@ -347,6 +383,9 @@ export default function FigureSavePanel({
                     <p className="text-[10px] text-slate-500">log_scale in FeaturePlot</p>
                   </div>
                   <button
+                    role="switch"
+                    aria-checked={logScale}
+                    aria-label="Log Scale Colors"
                     onClick={() => setLogScale(v => !v)}
                     className={`relative w-10 h-5 rounded-full transition-colors ${logScale ? 'bg-primary' : 'bg-slate-600'}`}
                   >
@@ -420,8 +459,8 @@ export default function FigureSavePanel({
                 <span className="text-xs font-bold text-textMuted uppercase tracking-wider">Preview (white background)</span>
                 <button
                   onClick={() => refreshPreview(buildParams())}
-                  disabled={previewLoading}
-                  className="flex items-center gap-1.5 text-xs text-primary hover:text-white border border-primary/40 hover:border-primary px-2.5 py-1.5 rounded transition-all"
+                  disabled={previewLoading || Boolean(previewUnavailableReason)}
+                  className="flex items-center gap-1.5 text-xs text-primary hover:text-on-accent border border-primary/40 hover:border-primary px-2.5 py-1.5 rounded transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <RefreshCw size={12} className={previewLoading ? 'animate-spin' : ''} />
                   Refresh
@@ -435,21 +474,28 @@ export default function FigureSavePanel({
                     <p className="text-slate-500 text-xs font-medium">Rendering preview…</p>
                   </div>
                 )}
-                {previewError && !previewLoading && (
+                {previewUnavailableReason && !previewLoading && (
+                  <div className="text-center p-6 text-slate-500">
+                    <Info size={30} className="mx-auto mb-2 text-primary/70" />
+                    <p className="text-xs font-medium text-slate-600 mb-1">Preview unavailable</p>
+                    <p className="text-[11px] text-slate-400">{previewUnavailableReason}</p>
+                  </div>
+                )}
+                {previewError && !previewLoading && !previewUnavailableReason && (
                   <div className="text-center p-6 text-slate-500">
                     <AlertCircle size={32} className="mx-auto mb-2 text-amber-500" />
                     <p className="text-xs font-medium text-slate-600 mb-1">Preview failed</p>
                     <p className="text-[11px] text-slate-400">{previewError}</p>
                   </div>
                 )}
-                {previewB64 && !previewError && (
+                {previewB64 && !previewError && !previewUnavailableReason && (
                   <img
                     src={previewB64}
                     alt="Plot preview"
                     className="max-w-full max-h-full object-contain"
                   />
                 )}
-                {!previewB64 && !previewLoading && !previewError && (
+                {!previewB64 && !previewLoading && !previewError && !previewUnavailableReason && (
                   <div className="text-center text-slate-400 p-6">
                     <Image size={40} className="mx-auto mb-3 opacity-30" />
                     <p className="text-xs">Preview will appear here after R renders it</p>

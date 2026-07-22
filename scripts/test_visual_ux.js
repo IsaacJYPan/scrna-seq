@@ -72,6 +72,50 @@ function assert(desc, cond, detail = '') {
 // ── Sleep Helper ───────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// A solid primary fill must keep a readable foreground while hovered. This
+// catches CSS cascade regressions where a generic light-theme text remap wins
+// over the primary button's white foreground.
+async function primaryButtonHoverContrast(button) {
+  await button.hover();
+  return button.evaluate(el => {
+    const parseRgb = value => (value.match(/\d+(?:\.\d+)?/g) || []).slice(0, 3).map(Number);
+    const relativeLuminance = ([red, green, blue]) => {
+      const channel = value => {
+        const normalized = value / 255;
+        return normalized <= 0.03928
+          ? normalized / 12.92
+          : Math.pow((normalized + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue);
+    };
+    const style = window.getComputedStyle(el);
+    const foreground = parseRgb(style.color);
+    const background = parseRgb(style.backgroundColor);
+    const foregroundLum = relativeLuminance(foreground);
+    const backgroundLum = relativeLuminance(background);
+    return {
+      foreground: style.color,
+      background: style.backgroundColor,
+      contrast: (Math.max(foregroundLum, backgroundLum) + 0.05) /
+        (Math.min(foregroundLum, backgroundLum) + 0.05),
+    };
+  });
+}
+
+async function checkPrimaryButtonHover(page, name) {
+  const button = page.getByRole('button', { name, exact: true }).first();
+  if (await button.count() === 0) {
+    fail(`Primary action ${name} is present for hover contrast testing`);
+    return;
+  }
+  const { foreground, background, contrast } = await primaryButtonHoverContrast(button);
+  assert(
+    `Primary action ${name} keeps readable text on hover`,
+    foreground !== background && contrast >= 4.5,
+    `foreground ${foreground}, background ${background}, contrast ${contrast.toFixed(2)}:1`
+  );
+}
+
 // ── Screenshot Snapshot Check ──────────────────────────────────────────────────
 async function checkSnapshot(page, name) {
   const file = path.join(SNAPSHOTS_DIR, `${name}.png`);
@@ -99,7 +143,7 @@ async function checkSnapshot(page, name) {
   // @playwright/test test, we call the comparison manually via PNG comparison.
   try {
     const { PNG } = require('pngjs');
-    const pixelmatch = require('pixelmatch');
+    const { default: pixelmatch } = await import('pixelmatch');
 
     const img1 = PNG.sync.read(baseline);
     const img2 = PNG.sync.read(buf);
@@ -147,6 +191,10 @@ async function checkOverflow(page, context) {
           rect.height <= 2
         );
       if (isVisuallyHidden) return;
+      // React Flow deliberately gives its panning surface a larger internal
+      // canvas than its viewport. The viewport remains clipped, so those
+      // scroll widths are not page-layout overflow.
+      if (el.classList.contains('react-flow') || el.closest('.react-flow')) return;
       // Skip elements inside collapsed/hidden containers (w-0, opacity-0, overflow-hidden with 0 width)
       let parent = el.parentElement;
       let hiddenByParent = false;
@@ -235,22 +283,30 @@ async function startVite() {
   });
 
   let ready = false;
-  const deadline = Date.now() + VITE_STARTUP_WAIT_MS;
 
   await new Promise((resolve, reject) => {
+    const startupTimer = setTimeout(() => {
+      reject(new Error(`Vite did not become ready on port ${VITE_PORT} within ${VITE_STARTUP_WAIT_MS}ms.`));
+    }, VITE_STARTUP_WAIT_MS);
+    const failStartup = (error) => {
+      if (ready) return;
+      clearTimeout(startupTimer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
     viteProc.stdout.on('data', d => {
       const msg = d.toString();
       process.stdout.write(`[Vite] ${msg}`);
       if (msg.includes('Local:') || msg.includes('ready in') || msg.includes('localhost')) {
         ready = true;
+        clearTimeout(startupTimer);
         resolve();
       }
     });
     viteProc.stderr.on('data', d => process.stdout.write(`[Vite:err] ${d}`));
-    viteProc.on('error', reject);
-    setTimeout(() => {
-      if (!ready) resolve(); // timeout: assume it started
-    }, VITE_STARTUP_WAIT_MS);
+    viteProc.once('error', failStartup);
+    viteProc.once('exit', (code, signal) => {
+      if (!ready) failStartup(new Error(`Vite exited before readiness (code ${code ?? 'unknown'}, signal ${signal ?? 'none'}).`));
+    });
   });
 
   // Additional wait to ensure fully ready
@@ -794,6 +850,8 @@ async function main() {
   await checkSnapshot(page, `workspace_${initialTheme}`);
   await checkOverflow(page, `Workspace ${initialTheme}`);
   await runA11yAudit(page, `Workspace ${initialTheme}`);
+  await checkPrimaryButtonHover(page, 'New Project');
+  await checkPrimaryButtonHover(page, 'Load Object');
 
   // ── Test 1b: Theme toggle to opposite mode ────────────────────────────────
   section(`STEP 3: Theme toggle (${initialTheme} → ${oppositeTheme})`);
@@ -810,6 +868,8 @@ async function main() {
     await checkSnapshot(page, `workspace_${activeTheme}`);
     await checkOverflow(page, `Workspace ${activeTheme}`);
     await runA11yAudit(page, `Workspace ${activeTheme}`);
+    await checkPrimaryButtonHover(page, 'New Project');
+    await checkPrimaryButtonHover(page, 'Load Object');
     // Toggle back to the default theme before continuing tab checks.
     const restoreTitle = initialTheme === 'dark' ? 'Dark Mode' : 'Light Mode';
     const restoreBtn = page.locator(`nav button[title*="${restoreTitle}"]`).first();
@@ -857,7 +917,10 @@ async function main() {
   section('STEP 6: Load Object modal flow');
   let dataLoaded = false;
   try {
-    const loadBtn = page.locator('button:has-text("Load Object"), button:has-text("Load / Attach Object"), button:has-text("Load Dataset"), button:has-text("Import Object"), button:has-text("Load")').first();
+    // Keep this selector exact. A broad "Load" match can accidentally choose
+    // unrelated disabled navigation (for example Lineage's "requires loaded
+    // object" status) before the actual workspace action.
+    const loadBtn = page.getByRole('button', { name: 'Load Object', exact: true }).first();
     if (await loadBtn.count() > 0) {
       await loadBtn.click();
       await sleep(1000);
@@ -956,9 +1019,9 @@ async function main() {
     { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: false },
     { id: 'customscript', label: 'Custom Script',             requiresData: true, expectedDisabled: true  },
     { id: 'history',      label: 'Jobs & Artifacts',          requiresData: false },
-    { id: 'publication',  label: 'Reports / Export',          requiresData: true  },
+    { id: 'publication',  label: 'Figure Gallery',            requiresData: true  },
     { id: 'validation',   label: 'Validation',                requiresData: true  },
-    { id: 'lineage',      label: 'Session DAG',               requiresData: false },
+    { id: 'lineage',      label: 'Lineage',                   requiresData: true },
     { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, clickVia: 'engine-status' },
   ];
 
@@ -1009,6 +1072,13 @@ async function main() {
             await page.getByRole('heading', { name: 'Publish Trusted Pipeline Manifest', exact: true }).count() === 0);
         }
 
+        if (tab.id === 'lineage') {
+          const durableLineageCopy = page.getByText(
+            'Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.'
+          );
+          assert('Lineage: durable read-only graph copy visible', await durableLineageCopy.count() === 1);
+        }
+
         // 2. Screenshot regression
         await checkSnapshot(page, `tab_${tab.id}`);
 
@@ -1053,17 +1123,17 @@ async function main() {
         await umapBtn.click();
         await sleep(PAGE_SETTLE_MS);
         
-        const saveFigBtn = page.locator('button:has-text("Save Figure")').first();
+        const saveFigBtn = page.locator('button:visible').filter({ hasText: 'Save Figure' }).first();
         if (await saveFigBtn.count() > 0) {
           await saveFigBtn.click();
           await sleep(1000);
           
-          const saveToGalleryBtn = page.locator('button:has-text("Save to Figure Gallery")').first();
+          const saveToGalleryBtn = page.locator('button:visible').filter({ hasText: 'Save to Figure Gallery' }).first();
           if (await saveToGalleryBtn.count() > 0) {
             await saveToGalleryBtn.click();
             await sleep(2000); // Wait for R backend generation and API state
             
-            const galleryBtn = page.locator('aside button:has-text("Reports / Export"), aside button:has-text("Figures")').first();
+            const galleryBtn = page.locator('aside button:has-text("Figure Gallery")').first();
             await galleryBtn.click();
             await sleep(PAGE_SETTLE_MS);
             
