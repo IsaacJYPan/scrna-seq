@@ -89,7 +89,10 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
 
     const allClusters = ensureArray(dotData.clusters);
     const allGenes = ensureArray(dotData.genes);
-    
+    // Theme-aware colorbar text (matches plotText below); a hardcoded dark gray
+    // here rendered at ~2.6:1 on the light-mode transparent plot background.
+    const colorbarText = theme === 'dark' ? '#94a3b8' : '#475569';
+
     const avgData = (allGenes.length === 1 && !Array.isArray(dotData.avg_expr?.[0])) 
       ? [dotData.avg_expr] 
       : dotData.avg_expr;
@@ -134,10 +137,10 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         ],
         showscale: true,
         colorbar: {
-          title: { text: 'Avg Expr', side: 'right', font: { color: '#94a3b8' } },
+          title: { text: 'Avg Expr', side: 'right', font: { color: colorbarText } },
           thickness: 15,
           len: 0.6,
-          tickfont: { color: '#94a3b8' }
+          tickfont: { color: colorbarText }
         },
         line: { color: '#1e293b', width: 0.5 },
       },
@@ -175,7 +178,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">
-      <div className="px-8 pt-6 pb-4 border-b border-border flex items-start justify-between shrink-0">
+      <div className="px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-3 items-start justify-between shrink-0">
         <div>
           <h2 className="text-2xl font-bold text-text tracking-tight">Dot Plot</h2>
           <p className="text-textMuted text-sm">Bubble size = % cells expressing gene; color = average expression.</p>

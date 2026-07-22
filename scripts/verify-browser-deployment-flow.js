@@ -246,7 +246,7 @@ async function main() {
     await page.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
 
     await page.getByRole('button', { name: /Collaborators, Project RBAC/ }).click();
-    await page.getByRole('heading', { name: 'Collaborators' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Collaborators', exact: true }).waitFor({ state: 'visible' });
     await page.getByLabel('Account email').fill(second.email);
     await page.locator('form').filter({ hasText: 'Add existing user' }).locator('select').selectOption('viewer');
     await page.getByRole('button', { name: /Add member/ }).click();

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ImageIcon, Trash2, Filter,
+  ImageIcon, Trash2, Filter, Check, X,
   BookImage, Loader2, LayoutGrid, Rows3, RefreshCw
 } from 'lucide-react';
 
@@ -24,6 +24,7 @@ function PlotTypeBadge({ plotType }) {
 
 function FigureCard({ figure, onDelete, compact }) {
   const [deleting, setDeleting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [imgError, setImgError] = useState(false);
   const dateStr = figure.createdAt
     ? new Date(figure.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -62,10 +63,21 @@ function FigureCard({ figure, onDelete, compact }) {
             <p className="text-[10px] text-slate-500 truncate font-mono">{figure.filePath.split(/[/\\]/).pop()}</p>
           )}
         </div>
-        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button onClick={handleDelete} disabled={deleting} title="Delete" className="p-1.5 text-textMuted hover:text-danger transition-colors rounded hover:bg-danger/10">
-            {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-          </button>
+        <div className={`flex gap-1 transition-opacity ${confirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'}`}>
+          {confirming ? (
+            <>
+              <button onClick={handleDelete} disabled={deleting} title="Confirm delete" aria-label="Confirm delete figure" className="p-1.5 text-on-accent bg-danger hover:bg-danger/80 transition-colors rounded">
+                {deleting ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+              </button>
+              <button onClick={() => setConfirming(false)} disabled={deleting} title="Cancel" aria-label="Cancel delete" className="p-1.5 text-textMuted hover:text-text transition-colors rounded hover:bg-black/5">
+                <X size={14} />
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setConfirming(true)} title="Delete" aria-label="Delete figure" className="p-1.5 text-textMuted hover:text-danger transition-colors rounded hover:bg-danger/10">
+              <Trash2 size={14} />
+            </button>
+          )}
         </div>
       </div>
     );
@@ -89,10 +101,21 @@ function FigureCard({ figure, onDelete, compact }) {
           </div>
         )}
         {/* Overlay actions */}
-        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
-          <button onClick={handleDelete} disabled={deleting} title="Delete from gallery" className="p-2.5 bg-white/10 hover:bg-danger/40 rounded-full text-white transition-colors">
-            {deleting ? <Loader2 size={18} className="animate-spin" /> : <Trash2 size={18} />}
-          </button>
+        <div className={`absolute inset-0 bg-black/50 transition-opacity flex items-center justify-center gap-3 ${confirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'}`}>
+          {confirming ? (
+            <>
+              <button onClick={handleDelete} disabled={deleting} title="Confirm delete" aria-label="Confirm delete figure" className="px-3 py-2 bg-danger hover:bg-danger/80 rounded-full text-on-accent text-xs font-bold transition-colors flex items-center gap-1.5">
+                {deleting ? <Loader2 size={16} className="animate-spin" /> : <><Trash2 size={16} /> Confirm</>}
+              </button>
+              <button onClick={() => setConfirming(false)} disabled={deleting} title="Cancel" aria-label="Cancel delete" className="px-3 py-2 bg-white/15 hover:bg-white/25 rounded-full text-on-accent text-xs font-bold transition-colors">
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setConfirming(true)} title="Delete from gallery" aria-label="Delete figure from gallery" className="p-2.5 bg-white/10 hover:bg-danger/40 rounded-full text-on-accent transition-colors">
+              <Trash2 size={18} />
+            </button>
+          )}
         </div>
       </div>
 

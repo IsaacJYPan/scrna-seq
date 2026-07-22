@@ -87,7 +87,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
 
   return (
     <div className="h-full w-full p-8 overflow-y-auto bg-background custom-scrollbar">
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex flex-wrap gap-y-3 justify-between items-center mb-8">
         <div>
           <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">Principal Component Analysis</h2>
           <p className="text-textMuted">Scale data and compute PCA for dimensionality reduction.</p>

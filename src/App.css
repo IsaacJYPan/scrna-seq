@@ -53,10 +53,15 @@
   }
   .btn-primary {
     @apply bg-primary text-white focus-visible:ring-primary;
+    /* Keep the foreground explicit across interactive states. The light-theme
+       readability remaps below intentionally affect prose/headings, but must
+       never override an action on a solid brand fill. */
+    color: #ffffff !important;
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18);
   }
   .btn-primary:hover {
     @apply bg-blue-600;
+    color: #ffffff !important;
     box-shadow: var(--elev-2);
   }
   .btn-primary:active { transform: translateY(0.5px); }
@@ -115,6 +120,14 @@
     color: var(--color-textMuted) !important;
   }
 
+  /* text-slate-500 is used for small caption/hint text. It was never remapped:
+     on the dark canvas (#0e1626/#182236) it only reaches ~3.3-3.8:1, failing AA
+     for the ~10px text it usually styles. Map it to the semantic muted token in
+     BOTH themes so it is AA-safe and consistent with slate-400 above. */
+  .text-slate-500 {
+    color: var(--color-textMuted) !important;
+  }
+
   :root:not([data-theme="dark"]) h1.text-white,
   :root:not([data-theme="dark"]) h2.text-white,
   :root:not([data-theme="dark"]) h3.text-white,
@@ -165,7 +178,8 @@
     box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12) !important;
   }
 
-  :root:not([data-theme="dark"]) .btn-primary,
+  :root:not([data-theme="dark"]) .btn.btn-primary,
+  :root:not([data-theme="dark"]) .btn.btn-primary:hover,
   :root:not([data-theme="dark"]) .bg-primary.text-white,
   :root:not([data-theme="dark"]) .bg-blue-600.text-white,
   :root:not([data-theme="dark"]) .bg-red-500.text-white,
@@ -208,6 +222,11 @@
      chips) must stay white in BOTH themes. Use this instead of text-white
      there, since the light-mode text-white remap would otherwise mute it. */
   .text-on-accent { color: #ffffff !important; }
+  /* Hover variant for the same purpose: a button that only turns into an accent
+     fill on hover (e.g. hover:bg-success / hover:bg-danger) needs its text to
+     stay white ON hover. Authored manually because .text-on-accent is a hand
+     written utility, so Tailwind does not generate a hover: variant for it. */
+  .hover\:text-on-accent:hover { color: #ffffff !important; }
 
   /* Accent text/icons: the brand blue (#3371e3) only reaches ~3.9:1 on the
      dark canvas, which fails WCAG AA for small text. Lighten accent *text*
@@ -252,6 +271,15 @@
   :root:not([data-theme="dark"]) .text-blue-400,
   :root:not([data-theme="dark"]) .text-blue-500 {
     color: #1e3a8a !important;
+  }
+  :root:not([data-theme="dark"]) .text-indigo-300,
+  :root:not([data-theme="dark"]) .text-indigo-400,
+  :root:not([data-theme="dark"]) .text-indigo-500 {
+    color: #3730a3 !important;
+  }
+  :root:not([data-theme="dark"]) .text-pink-300,
+  :root:not([data-theme="dark"]) .text-pink-400 {
+    color: #be185d !important;
   }
 
   /* Brand accent text is fine at large sizes on light, but the smallest
