@@ -15,6 +15,7 @@ const currentWs = {
 
 describe('ProjectHistory', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     window.electronAPI = {
       listProjectJobs: vi.fn(async () => [{
         id: 'job_safe_1',
@@ -110,11 +111,13 @@ describe('ProjectHistory', () => {
         resultAnalysisObjectId: 'ao_fork123',
         status: 'completed',
       })),
+      createCheckpointLoadJob: vi.fn(),
       getProjectJob: vi.fn(),
     };
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     delete window.electronAPI;
     vi.restoreAllMocks();
   });
@@ -220,6 +223,91 @@ describe('ProjectHistory', () => {
 
     expect(await screen.findByText(/Writer role required/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /fork checkpoint/i })).not.toBeInTheDocument();
+  });
+
+  it('reattaches an owner-owned selected checkpoint only after its durable job completes', async () => {
+    const ownedResultWorkspace = {
+      ...currentWs,
+      objects: [{
+        id: 'ao_result123',
+        projectId: 'proj_1',
+        displayName: 'Normalized PBMC',
+        ownerUserId: 7,
+        liveState: 'unknown',
+      }],
+      selectedObjectIds: ['ao_result123'],
+    };
+    window.electronAPI.createCheckpointLoadJob.mockResolvedValueOnce({
+      id: 'job_attach_poll',
+      jobType: 'checkpoint.load.v1',
+      analysisObjectId: 'ao_result123',
+      status: 'queued',
+    });
+    window.electronAPI.getProjectJob
+      .mockResolvedValueOnce({ id: 'job_attach_poll', status: 'queued' })
+      .mockResolvedValueOnce({ id: 'job_attach_poll', status: 'completed' });
+    const refreshAnalysisObjects = vi.fn(async () => {});
+    const onLiveObjectAttached = vi.fn();
+    render(
+      <ProjectHistory
+        currentWs={ownedResultWorkspace}
+        datasetInfo={{ id: 'ao_result123', projectId: 'proj_1' }}
+        userId={7}
+        refreshAnalysisObjects={refreshAnalysisObjects}
+        onLiveObjectAttached={onLiveObjectAttached}
+      />
+    );
+
+    const attachButton = await screen.findByRole('button', { name: /attach saved checkpoint/i });
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.click(attachButton);
+        await Promise.resolve();
+      });
+      expect(window.electronAPI.createCheckpointLoadJob).toHaveBeenCalledWith('proj_1', 'ao_result123');
+      expect(screen.getByRole('status')).toHaveTextContent(/checkpoint attachment queued/i);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+      expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status')).toHaveTextContent(/checkpoint attachment queued/i);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+      expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(refreshAnalysisObjects).toHaveBeenCalledWith('proj_1');
+      expect(onLiveObjectAttached).toHaveBeenCalledWith('proj_1', 'ao_result123');
+      expect(screen.getByRole('button', { name: /checkpoint attached/i })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never offers owner reattach for a different member\'s private object', async () => {
+    const collaboratorResultWorkspace = {
+      ...currentWs,
+      objects: [{
+        id: 'ao_result123',
+        projectId: 'proj_1',
+        displayName: 'Collaborator PBMC',
+        ownerUserId: 99,
+        liveState: 'unknown',
+      }],
+      selectedObjectIds: ['ao_result123'],
+    };
+    render(
+      <ProjectHistory
+        currentWs={collaboratorResultWorkspace}
+        datasetInfo={{ id: 'ao_result123', projectId: 'proj_1' }}
+        userId={7}
+      />
+    );
+
+    expect(await screen.findByRole('button', { name: /fork saved checkpoint/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /attach saved checkpoint/i })).not.toBeInTheDocument();
+    expect(window.electronAPI.createCheckpointLoadJob).not.toHaveBeenCalled();
   });
 
   it('continues polling a queued fork until the completed result can be opened', async () => {

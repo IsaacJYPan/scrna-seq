@@ -25,7 +25,7 @@ const path = require('path');
 const fs = require('fs');
 
 // ── Configuration ──────────────────────────────────────────────────────────────
-const VITE_PORT     = 5173;
+const VITE_PORT     = Number(process.env.VISUAL_VITE_PORT || 5173);
 const VITE_URL      = `http://localhost:${VITE_PORT}`;
 const WORKSPACE     = path.resolve(__dirname, '..');
 const SNAPSHOTS_DIR = path.join(WORKSPACE, 'playwright', 'snapshots');
@@ -219,6 +219,12 @@ async function checkOverflow(page, context) {
     document.querySelectorAll('*').forEach(el => {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
+      // SVG text nodes do not participate in CSS box overflow. Plotly uses
+      // them for tick labels, where clientWidth is frequently zero or rounded
+      // below scrollWidth even though the containing HTML plot is clipped.
+      // Keep checking the HTML plot container, which is the meaningful layout
+      // boundary for a user-visible horizontal overflow.
+      if (el instanceof SVGElement) return;
       const style = window.getComputedStyle(el);
       const isVisuallyHidden =
         el.classList.contains('sr-only') ||
@@ -388,10 +394,22 @@ async function main() {
       displayName: 'Visual Tester'
     }));
     window.mockFigures = [];
+    // Provenance can be absent after a local cache reset even when the attached
+    // R session has completed preprocessing. The visual UMAP flow deliberately
+    // starts without historical records so it catches any attempt to replace
+    // server-verified pipeline availability with a partial browser-side graph.
+    window.mockProvenance = [];
     window.electronAPI = {
       getFigures: async () => window.mockFigures,
       saveFigure: async (fig) => { window.mockFigures.push(fig); return { success: true }; },
       deleteFigure: async (id) => { window.mockFigures = window.mockFigures.filter(f => f.id !== id); return { success: true }; },
+      getAllProvenance: async () => window.mockProvenance,
+      getProvenance: async (id) => window.mockProvenance.find(record => record.id === id) || null,
+      saveProvenance: async (envelope) => {
+        const record = { ...(envelope?.provenance || {}), result: envelope?.result };
+        window.mockProvenance = [record, ...window.mockProvenance.filter(existing => existing.id !== record.id)];
+        return record.id;
+      },
       setTheme: () => {}
     };
   });
@@ -458,12 +476,51 @@ async function main() {
     });
   });
 
-  await page.route('**/api/db/**', async route => {
+  await page.route('**/api/runtime/compute-status*', async route => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       headers: corsHeaders,
-      body: JSON.stringify([])
+      body: JSON.stringify({ status: 'ready', updatedAt: '2026-08-01T00:00:00.000Z' })
+    });
+  });
+
+  // The browser API replaces the injected Electron bridge during app startup, so
+  // retain saved figures in this route mock rather than relying on window state.
+  // This models the small GET/POST gallery contract used by the save-figure flow.
+  const visualFigures = [];
+  await page.route('**/api/db/**', async route => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    let status = 200;
+    let body = [];
+
+    if (pathname === '/api/db/figures') {
+      if (request.method() === 'POST') {
+        let record = {};
+        try {
+          record = request.postDataJSON() || {};
+        } catch {
+          // A malformed request is not expected from the client under test, but
+          // keep the mock response JSON-shaped so the smoke can report the flow.
+        }
+        const figure = {
+          ...record,
+          createdAt: '2026-08-01T00:00:00.000Z',
+        };
+        visualFigures.push(figure);
+        status = 201;
+        body = figure;
+      } else if (request.method() === 'GET') {
+        body = visualFigures;
+      }
+    }
+
+    await route.fulfill({
+      status,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify(body)
     });
   });
 
@@ -733,7 +790,7 @@ async function main() {
         pca_dims: 15,
         has_clusters: true,
         n_clusters: 8,
-        has_umap: true
+        has_umap: false
       })
     });
   });
@@ -753,9 +810,17 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        cells: 2700,
-        features: 32738,
-        result: true
+        provenance: {
+          operation: 'load'
+        },
+        result: {
+          message: 'Matrix successfully loaded into Seurat.',
+          cells: 2700,
+          features: 32738,
+          genes: 32738,
+          sparsity: 97.41,
+          density: 2.59
+        }
       })
     });
   });
@@ -766,8 +831,14 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        data: [{ "UMAP_1": 1, "UMAP_2": 2, "Cell": "cell1" }, { "UMAP_1": 2, "UMAP_2": 3, "Cell": "cell2" }],
-        metadata: { "ident": ["A", "B"] }
+        provenance: { id: 'prov_visual_umap' },
+        result: {
+          n_components: 2,
+          trace_data: [
+            { name: 'Cluster 0', x: [1, 2], y: [2, 4] },
+            { name: 'Cluster 1', x: [3, 4], y: [1, 3] }
+          ]
+        }
       })
     });
   });
@@ -866,9 +937,9 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
-        width: 800,
-        height: 600
+        result: {
+          base64: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        }
       })
     });
   });
@@ -879,9 +950,12 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        id: "fig_" + Date.now(),
-        path: "mock_path.png",
-        success: true
+        provenance: { id: 'prov_visual_export' },
+        result: {
+          message: 'Successfully exported UMAP to visual-umap.png',
+          file_name: 'visual-umap.png',
+          thumbnail_b64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+        }
       })
     });
   });
@@ -1070,18 +1144,26 @@ async function main() {
     { id: 'dotplot',      label: 'Dot Plot',                  requiresData: true  },
     { id: 'geneviewer',   label: 'Gene Expression',           requiresData: true  },
     { id: 'deg',          label: 'Markers / DEG',             requiresData: true  },
-    { id: 'annotate',     label: 'Cell Annotation',           requiresData: true, expectedDisabled: true  },
-    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true, expectedDisabled: false },
-    { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: false },
-    { id: 'customscript', label: 'Custom Script',             requiresData: true, expectedDisabled: true  },
+    { id: 'annotate',     label: 'Cell Annotation',           requiresData: false, expectedHidden: true  },
+    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true },
+    { id: 'cellchat',     label: 'CellChat',                  requiresData: true },
+    { id: 'customscript', label: 'Custom Script',             requiresData: false, expectedHidden: true  },
     { id: 'history',      label: 'Jobs & Artifacts',          requiresData: false },
     { id: 'publication',  label: 'Figure Gallery',            requiresData: true  },
     { id: 'validation',   label: 'Validation',                requiresData: true  },
     { id: 'lineage',      label: 'Lineage',                   requiresData: true },
-    { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, clickVia: 'engine-status' },
+    { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, clickVia: 'runtime-status' },
   ];
 
   for (const tab of allTabs) {
+    if (tab.expectedHidden) {
+      section(`TAB: ${tab.label}`);
+      const hiddenControl = page.locator(`aside button:has-text("${tab.label}")`).first();
+      assert(`${tab.label}: intentionally not exposed in the sidebar`, await hiddenControl.count() === 0);
+      allResults.push({ tab: tab.label, hidden: true, consoleErrorsAtTime: consoleErrors.length });
+      continue;
+    }
+
     if (tab.requiresData && !dataLoaded) {
       warn(`Tab "${tab.label}": skipped (requires data — R backend may be offline)`);
       continue;
@@ -1090,23 +1172,19 @@ async function main() {
     section(`TAB: ${tab.label}`);
 
     try {
-      if (tab.clickVia === 'engine-status') {
-        // Diagnostics is opened via Engine Status block
-        const engineBlock = page.locator('aside div:has-text("Backend connected"), aside div:has-text("Backend offline"), aside div:has-text("R/Seurat runtime connected")').first();
-        if (await engineBlock.count() > 0) {
-          await engineBlock.click();
+      if (tab.clickVia === 'runtime-status') {
+        // Diagnostics is opened through the accessible runtime-status button.
+        const runtimeStatusButton = page.getByRole('button', { name: /open diagnostics & environment/i }).first();
+        if (await runtimeStatusButton.count() > 0) {
+          await runtimeStatusButton.click();
         } else {
-          warn(`${tab.label}: engine status block not found`);
+          fail(`${tab.label}: runtime-status control not found`);
           continue;
         }
       } else {
         const btn = page.locator(`aside button:has-text("${tab.label}")`).first();
         if (await btn.count() === 0) {
           warn(`${tab.label}: sidebar button not found`);
-          continue;
-        }
-        if (tab.expectedDisabled) {
-          assert(`${tab.label}: marked disabled / not integrated`, await btn.isDisabled());
           continue;
         }
         await btn.click();
@@ -1181,36 +1259,102 @@ async function main() {
         await umapBtn.click();
         await sleep(PAGE_SETTLE_MS);
         
-        const saveFigBtn = page.locator('button:visible').filter({ hasText: 'Save Figure' }).first();
-        if (await saveFigBtn.count() > 0) {
+        const saveFigBtn = page.getByRole('button', { name: 'Save Figure', exact: true }).first();
+        let saveFigureReady = await saveFigBtn.count() > 0;
+        let savePanelOpened = false;
+
+        // UMAP only cache-hydrates on navigation. A first-time visitor must use
+        // the visible Run control before a result (and its Save Figure action)
+        // exists, so exercise that user workflow rather than treating the
+        // deliberately empty initial state as a missing control.
+        if (!saveFigureReady) {
+          const runUmapBtn = page.getByRole('button', { name: /^(Run 2D UMAP|Re-compute UMAP)$/ }).first();
+          if (await runUmapBtn.count() === 0) {
+            fail('UMAP run control not found before the figure-save flow');
+          } else if (await runUmapBtn.isDisabled()) {
+            fail('UMAP run control is disabled before the figure-save flow');
+          } else {
+            try {
+              // Let Playwright wait and deliver the user-visible click as soon
+              // as the action is actionable. A separate wait followed by a
+              // second interaction can race a React state update in dev mode.
+              await runUmapBtn.click();
+              await saveFigBtn.click({ timeout: 10000 });
+              assert(
+                'UMAP retains server-verified PCA readiness when provenance history is empty',
+                await page.getByRole('heading', { name: 'PCA Required', exact: true }).count() === 0
+              );
+              saveFigureReady = true;
+              savePanelOpened = true;
+              pass('UMAP result rendered before the figure-save flow');
+            } catch {
+              fail('Save Figure could not be opened after running mocked UMAP');
+            }
+          }
+        }
+
+        if (saveFigureReady && !savePanelOpened) {
           await saveFigBtn.click();
+          savePanelOpened = true;
+        }
+
+        if (savePanelOpened) {
+          const figurePanelTitle = page.getByRole('heading', { name: 'Save to Figure Gallery', exact: true }).first();
+          try {
+            await figurePanelTitle.waitFor({ state: 'visible', timeout: 3000 });
+            await sleep(300);
+            assert('Figure save panel remains visibly open after activation', await figurePanelTitle.isVisible());
+          } catch {
+            fail('Figure save panel did not remain visibly open after activation');
+          }
           await sleep(1000);
           
-          const saveToGalleryBtn = page.locator('button:visible').filter({ hasText: 'Save to Figure Gallery' }).first();
+          const saveToGalleryBtn = page.getByRole('button', { name: 'Save to Figure Gallery', exact: true }).first();
           if (await saveToGalleryBtn.count() > 0) {
             await saveToGalleryBtn.click();
-            await sleep(2000); // Wait for R backend generation and API state
-            
-            const galleryBtn = page.locator('aside button:has-text("Figure Gallery")').first();
-            await galleryBtn.click();
-            await sleep(PAGE_SETTLE_MS);
-            
-            // Check for presence of saved figure card
-            const figureCard = page.locator('text=UMAP').first();
-            assert('Saved figure appears in Figures gallery', await figureCard.count() > 0);
-            await checkSnapshot(page, 'e2e_saved_figure');
+            const saveFeedback = page.getByText('Saved as visual-umap.png', { exact: true }).first();
+            try {
+              await saveFeedback.waitFor({ state: 'visible', timeout: 5000 });
+              pass('Figure save completion is shown to the user');
+            } catch {
+              fail('Figure save completion feedback did not appear');
+            }
+
+            // The panel deliberately blocks background controls while it is
+            // open. Close it through the same visible affordance a user uses
+            // before returning to the gallery.
+            const closeFigurePanelBtn = page.getByRole('button', { name: 'Close figure editor', exact: true }).first();
+            if (await closeFigurePanelBtn.count() === 0) {
+              fail('Figure editor close control not found after saving');
+            } else {
+              await closeFigurePanelBtn.click();
+              await figurePanelTitle.waitFor({ state: 'hidden', timeout: 3000 });
+
+              const galleryBtn = page.locator('aside button:has-text("Figure Gallery")').first();
+              await galleryBtn.click();
+              await sleep(PAGE_SETTLE_MS);
+
+              // The saved thumbnail is specific to the gallery card, unlike
+              // the sidebar's UMAP navigation label. Returning to an already
+              // visited gallery must refresh it without requiring a manual
+              // reload, so this remains a strict automatic-persistence check.
+              const figureCard = page.getByRole('img', { name: 'UMAP', exact: true }).first();
+              assert('Saved figure appears in Figures gallery', await figureCard.count() > 0);
+              await checkSnapshot(page, 'e2e_saved_figure_gallery');
+
+            }
           } else {
-            warn('Save to Gallery button not found inside save panel');
+            fail('Save to Gallery button not found inside save panel');
           }
-        } else {
-          warn('Save Figure button not found on UMAP tab');
         }
+      } else {
+        fail('UMAP navigation control not found for the figure-save flow');
       }
     } else {
-      warn('Save Figure flow skipped (requires data)');
+      info('Save Figure flow skipped because no data object was loaded.');
     }
   } catch (e) {
-    warn('Save Figure flow error', e.message);
+    fail('Save Figure flow error', e.message);
   }
 
   // ── Test 7: Console Errors Summary ────────────────────────────────────────

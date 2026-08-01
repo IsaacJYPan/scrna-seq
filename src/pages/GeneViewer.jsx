@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Search, BarChart3, Play, Layers, ChevronDown, ChevronRight, ImageDown } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import FigureSavePanel from '../components/FigureSavePanel';
 
 const GENE_CATEGORIES = {

@@ -58,6 +58,7 @@ function fakeDb(overrides = {}) {
     initSchema: vi.fn(async () => {}),
     checkHealth: vi.fn(async () => true),
     acquireStandaloneWorkerLock: vi.fn(async () => topologyLock),
+    reportStandaloneWorkerRuntimeState: vi.fn(async () => {}),
     topologyLock,
     close: vi.fn(async () => {}),
     ...overrides,
@@ -163,6 +164,17 @@ describe('standalone worker readiness and drain lifecycle', () => {
     expect(db.close).toHaveBeenCalledTimes(1);
     expect(db.topologyLock.release).toHaveBeenCalledTimes(1);
     expect(fs.readdirSync(root).filter((name) => name.startsWith(STORAGE_PROBE_PREFIX))).toEqual([]);
+  });
+
+  it('publishes ready then draining runtime status around the worker lifecycle', async () => {
+    const db = fakeDb();
+    const { runtime } = makeRuntime({ db });
+
+    await runtime.start();
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenCalledWith('ready');
+
+    await runtime.shutdown();
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenLastCalledWith('draining');
   });
 
   it('fails closed and never constructs a worker when R readiness misses the startup deadline', async () => {

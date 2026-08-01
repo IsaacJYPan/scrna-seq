@@ -440,8 +440,11 @@ export default function CellChat({
   datasetInfo,
   currentWs,
   userEmail,
+  userId,
   objectId,
   sessionReady,
+  setActiveTab,
+  computeStatus,
 }) {
   const [params, setParam] = useTabParams('cellchat', userEmail, objectId, DEFAULT_PARAMS);
   const [job, setJob] = useState(null);
@@ -461,6 +464,9 @@ export default function CellChat({
   const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
   const liveObjectAttached = hasAttachedLiveRObject(datasetInfo);
   const canWriteProject = JOB_WRITE_ROLES.has(activeProject?.role);
+  const ownsPrivateLiveObject = !datasetInfo?.ownerUserId
+    || Number(datasetInfo.ownerUserId) === Number(userId);
+  const computeReady = !computeStatus?.status || computeStatus.status === 'ready';
   // The API limits analysts to their own jobs; without a projected per-job
   // capability we only expose cancellation to project-wide privileged roles.
   const canCancelJob = activeProject?.role === 'owner' || activeProject?.role === 'admin';
@@ -472,6 +478,8 @@ export default function CellChat({
       && canWriteProject
       && sessionReady
       && liveObjectAttached
+      && ownsPrivateLiveObject
+      && computeReady
       && safeParams.groupBy
       && safeParams.species
       && safeParams.databaseCategory
@@ -603,8 +611,14 @@ export default function CellChat({
       return setError('Select a saved analysis object before starting CellChat inference.');
     }
     if (!canWriteProject) return setError('Your project role can view results but cannot start analysis jobs.');
+    if (!ownsPrivateLiveObject) {
+      return setError('This object belongs to another member. Fork a saved checkpoint into your own private object before starting CellChat inference.');
+    }
     if (!sessionReady || !liveObjectAttached) {
       return setError('Attach or restore this analysis object in R before starting the job.');
+    }
+    if (!computeReady) {
+      return setError('The analysis worker is not ready. Jobs are not queued while compute is unavailable.');
     }
     if (!safeParams.groupBy || !safeParams.species || !safeParams.databaseCategory || !safeParams.analysisIntent) {
       return setError('Choose a grouping, species, CellChat database category, and the single-context analysis intent.');
@@ -636,6 +650,8 @@ export default function CellChat({
     canWriteProject,
     isDbBackedObject,
     liveObjectAttached,
+    ownsPrivateLiveObject,
+    computeReady,
     refreshJobState,
     safeParams,
     selectedObjectId,
@@ -684,7 +700,7 @@ export default function CellChat({
           <div>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <h2 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white"><MessageSquare size={24} className="text-primary" /> CellChat communication candidates</h2>
-              <StatusBadge tone="green">durable worker</StatusBadge>
+              <StatusBadge tone="slate">durable job</StatusBadge>
               <StatusBadge tone="amber">candidate predictions</StatusBadge>
               <StatusBadge tone="amber">no public download</StatusBadge>
             </div>
@@ -693,16 +709,16 @@ export default function CellChat({
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
+            <button onClick={launchJob} disabled={!canLaunch} className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50">
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+              Start CellChat Inference
+            </button>
             {job?.id && (
               <button onClick={() => refreshJobState(job.id)} disabled={refreshing} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
                 {refreshing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                 Refresh
               </button>
             )}
-            <button onClick={launchJob} disabled={!canLaunch} className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50">
-              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-              Start CellChat Inference
-            </button>
           </div>
         </header>
 
@@ -740,9 +756,25 @@ export default function CellChat({
           </div>
         )}
 
-        {isDbBackedObject && canWriteProject && (!sessionReady || !liveObjectAttached) && (
+        {isDbBackedObject && canWriteProject && !ownsPrivateLiveObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This saved object is not attached to the private R session yet. Load or restore it before starting CellChat inference.
+            This object belongs to another member. Use Jobs &amp; Artifacts to fork a saved checkpoint into your own private R object.
+            <button onClick={() => setActiveTab?.('history')} className="btn btn-secondary ml-3 text-xs">Open recovery</button>
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            This saved object is not attached to the private R session yet. {datasetInfo?.source === 'pbmc3k_demo' ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open recovery to attach a saved checkpoint.'}
+            <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
+              {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open recovery'}
+            </button>
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Compute is not ready, so new jobs are disabled rather than left indefinitely queued. Start or restore the standalone worker, then wait for the Compute ready status in the sidebar.
           </div>
         )}
 
@@ -822,7 +854,7 @@ export default function CellChat({
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Job status</h3>
-              <p className="mt-1 text-sm text-textMuted">The job stays queued until the separate worker process is running.</p>
+              <p className="mt-1 text-sm text-textMuted">This deployment runs one analysis job at a time. Queued jobs start when the worker is available.</p>
             </div>
             <div className="flex items-center gap-2">
               {job?.status && <StatusBadge tone={badgeTone(job.status)}>{job.status}</StatusBadge>}

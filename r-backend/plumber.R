@@ -1116,24 +1116,30 @@ function(res, min_cells = 3, min_features = 200) {
   min_features <- as.integer(min_features)
 
   tryCatch({
+    # This built-in tutorial dataset is part of the server deployment, not a
+    # browser-supplied path. Resolve it from the configured analysis root so
+    # Docker and a locally launched R process agree regardless of their cwd.
+    data_path <- file.path(
+      Sys.getenv("ANALYSIS_ROOT", unset = getwd()),
+      "data", "pbmc3k", "filtered_gene_bc_matrices", "hg19"
+    )
     script <- paste0(
       "library(Seurat)\n",
       "# 1. Read 10X sparse matrix\n",
-      "mat <- Read10X(data.dir = 'data/pbmc3k/filtered_gene_bc_matrices/hg19')\n",
+      "mat <- Read10X(data.dir = '<server built-in PBMC tutorial dataset>')\n",
       "# 2. Initialize Seurat object\n",
       "obj <- CreateSeuratObject(counts = mat, min.cells = ", min_cells, ", min.features = ", min_features, ")\n"
     )
 
-    # Actual R execution
-    data_path <- '../data/pbmc3k/filtered_gene_bc_matrices/hg19'
-    
     if (!dir.exists(data_path)) {
-       stop(paste("Data directory not found at:", normalizePath(data_path, mustWork = FALSE)))
+       stop("The built-in PBMC tutorial data is unavailable.")
     }
     
     mat <- Read10X(data.dir = data_path)
-    global_obj <<- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
-    raw_obj <<- global_obj
+    # Build the full response before mutating the private session. The postroute
+    # persistence hook runs for error responses too, so assigning `global_obj`
+    # early would make a failed load look attached to the browser.
+    loaded_obj <- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
 
     # Calculate real density
     nnz <- length(mat@x)
@@ -1141,19 +1147,27 @@ function(res, min_cells = 3, min_features = 200) {
     density_val <- (nnz / total_elements) * 100
     sparsity_val <- 100 - density_val
 
-    make_provenance(
-      result = list(
-        message = "Matrix successfully loaded into Seurat.",
-        cells = ncol(global_obj),
-        features = nrow(global_obj),
-        genes = nrow(global_obj),
-        sparsity = round(sparsity_val, 2),
-        density = round(density_val, 2)
-      ),
+    result <- list(
+      message = "Matrix successfully loaded into Seurat.",
+      cells = ncol(loaded_obj),
+      features = nrow(loaded_obj),
+      genes = nrow(loaded_obj),
+      sparsity = round(sparsity_val, 2),
+      density = round(density_val, 2)
+    )
+
+    response <- make_provenance(
+      result = result,
       script_text = script,
       operation = "load",
       parameters = list(file = "pbmc3k", engine = "Seurat")
     )
+
+    # Commit the new object only after all response/provenance work above has
+    # succeeded. Each request remains scoped to its server-derived private key.
+    global_obj <<- loaded_obj
+    raw_obj <<- loaded_obj
+    response
   }, error = function(e) { res$status <- 500; list(error = paste("R Error:", e$message))
   })
 }

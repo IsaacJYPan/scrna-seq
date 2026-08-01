@@ -15,11 +15,12 @@ const currentWs = {
 function renderDeg(overrides = {}) {
   return render(
     <DifferentialExpression
-      datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k' }}
+      datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'attached' }}
       pipelineState={{ cluster: true }}
       currentWs={currentWs}
       userEmail="owner@example.com"
       objectId="ao_abc123"
+      sessionReady
       {...overrides}
     />
   );
@@ -162,5 +163,15 @@ describe('DifferentialExpression durable worker UI', () => {
 
     expect(screen.getByRole('button', { name: /Launch Durable DEG Job/i })).toBeDisabled();
     expect(screen.getByText(/Select a DB-backed analysis object/i)).toBeInTheDocument();
+  });
+
+  it('does not queue DEG when the selected private R object is not attached', () => {
+    renderDeg({
+      datasetInfo: { id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'unknown' },
+    });
+
+    expect(screen.getByRole('button', { name: /Launch Durable DEG Job/i })).toBeDisabled();
+    expect(screen.getByText(/not attached to the private R session/i)).toBeInTheDocument();
+    expect(window.electronAPI.createDegFindMarkersJob).not.toHaveBeenCalled();
   });
 });

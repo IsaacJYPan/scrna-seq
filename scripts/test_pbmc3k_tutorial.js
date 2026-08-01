@@ -221,7 +221,10 @@ async function main() {
       API_TOKEN:       API_TOKEN
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-    cwd: path.join(WORKSPACE, 'r-backend'),
+    // Run from the repository root. The server must resolve the built-in fixture
+    // through ANALYSIS_ROOT rather than accidentally succeeding because its cwd
+    // is r-backend/.
+    cwd: WORKSPACE,
   });
 
   let rStdout = '';

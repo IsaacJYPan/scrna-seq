@@ -8,8 +8,10 @@
   --color-surface: #ffffff;
   --color-border: #d2d2d7;
   --color-text: #1d1d1f;
-  --color-textMuted: #6e6e73;
-  --color-success: #248a3d;
+  /* Keep supporting copy and compact status labels comfortably above AA on
+     both white and lightly tinted surfaces. */
+  --color-textMuted: #5c5c62;
+  --color-success: #1f6f35;
   --color-danger: #d70015;
 }
 
@@ -63,7 +65,7 @@
   .btn-primary:hover {
     background-color: #0077ed;
     color: #ffffff !important;
-    box-shadow: var(--elev-2);
+    box-shadow: none;
   }
   .btn-secondary {
     @apply bg-surface border border-border text-text focus-visible:ring-primary;
@@ -236,6 +238,13 @@
      stay white ON hover. Authored manually because .text-on-accent is a hand
      written utility, so Tailwind does not generate a hover: variant for it. */
   .hover\:text-on-accent:hover { color: #ffffff !important; }
+
+  /* Selection cards use a pale blue fill, not a solid brand button. Their
+     title therefore needs a dark blue foreground in light mode rather than
+     the generic near-white fallback authored for the older dark dashboard. */
+  :root:not([data-theme="dark"]) .bg-primary\/10.text-white {
+    color: #1e3a8a !important;
+  }
 
   /* Accent text/icons: the brand blue (#3371e3) only reaches ~3.9:1 on the
      dark canvas, which fails WCAG AA for small text. Lighten accent *text*

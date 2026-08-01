@@ -156,7 +156,6 @@ describe('Workspace backend-backed project/object UI', () => {
 
     expect(screen.getByText(/No analysis object selected/i)).toBeInTheDocument();
     expect(screen.getByText(/Select a DB-backed analysis object from the project list below/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/Select object/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Data Info: Unselected PBMC/i)).not.toBeInTheDocument();
   });
 
@@ -204,6 +203,81 @@ describe('Workspace backend-backed project/object UI', () => {
         expect.objectContaining({ cells: 2700, features: 13714 })
       );
     });
+  });
+
+  it('surfaces a failed PBMC live load as a recoverable selected object', async () => {
+    const onCreateAnalysisObjectForLoad = vi.fn(async () => ({
+      id: 'ao_failed123',
+      projectId: 'proj_1',
+      objectType: 'seurat',
+      displayName: 'PBMC_3k_Tutorial',
+      metadata: { sourceType: 'pbmc3k_demo' },
+    }));
+    const onAnalysisObjectLoadFailed = vi.fn();
+    window.electronAPI.apiRequest.mockResolvedValueOnce({ error: 'R request failed.' });
+
+    renderWorkspace({
+      currentWs: {
+        ...baseWorkspace,
+        projects: [{ id: 'proj_1', name: 'PBMC Project', role: 'owner', isBackendProject: true }],
+        selectedProjectId: 'proj_1',
+      },
+      onCreateAnalysisObjectForLoad,
+      onAnalysisObjectLoadFailed,
+    });
+
+    fireEvent.click(screen.getAllByRole('button', { name: /Load Object/i })[0]);
+    fireEvent.click(screen.getByRole('button', { name: /PBMC 3k Demo Dataset/i }));
+
+    await waitFor(() => {
+      expect(onAnalysisObjectLoadFailed).toHaveBeenCalledWith(
+        'proj_1',
+        expect.objectContaining({ id: 'ao_failed123' })
+      );
+    });
+    expect(screen.getByText(/PBMC demo could not attach/i)).toBeInTheDocument();
+  });
+
+  it('retries the selected PBMC demo with the same verified object ID', async () => {
+    const onCreateAnalysisObjectForLoad = vi.fn();
+    const onAnalysisObjectLoaded = vi.fn();
+    renderWorkspace({
+      currentWs: {
+        ...baseWorkspace,
+        projects: [{ id: 'proj_1', name: 'PBMC Project', role: 'owner', isBackendProject: true }],
+        selectedProjectId: 'proj_1',
+        objects: [{
+          id: 'ao_demo123',
+          projectId: 'proj_1',
+          ownerUserId: 7,
+          name: 'PBMC_3k_Tutorial',
+          objectType: 'seurat',
+          source: 'pbmc3k_demo',
+          metadata: { sourceType: 'pbmc3k_demo', minCells: 3, minFeatures: 200 },
+          isBackendAnalysisObject: true,
+          liveState: 'unknown',
+        }],
+        selectedObjectIds: ['ao_demo123'],
+      },
+      userId: 7,
+      onCreateAnalysisObjectForLoad,
+      onAnalysisObjectLoaded,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Reload PBMC demo/i }));
+
+    await waitFor(() => {
+      expect(window.electronAPI.apiRequest).toHaveBeenCalledWith(
+        '/load-data?min_cells=3&min_features=200',
+        expect.objectContaining({ headers: { 'X-Object-ID': 'ao_demo123' } })
+      );
+    });
+    expect(onCreateAnalysisObjectForLoad).not.toHaveBeenCalled();
+    expect(onAnalysisObjectLoaded).toHaveBeenCalledWith(
+      'proj_1',
+      expect.objectContaining({ id: 'ao_demo123' }),
+      expect.objectContaining({ cells: 2700, features: 13714 })
+    );
   });
 
   it('routes production imports to the durable Pipeline Manager and hides blocked local loaders', () => {

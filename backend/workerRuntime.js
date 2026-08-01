@@ -27,6 +27,7 @@ const STANDALONE_WORKER_DEFAULTS = Object.freeze({
   healthHost: '127.0.0.1',
   healthPort: 3101,
 });
+const RUNTIME_STATUS_INTERVAL_MS = 5000;
 
 function strictInteger(raw, name, options = {}) {
   const value = raw === undefined || raw === null || String(raw).trim() === ''
@@ -206,6 +207,7 @@ function createStandaloneWorkerRuntime(options = {}) {
   let healthServer = null;
   let storageProbe = null;
   let topologyLock = null;
+  let runtimeStatusTimer = null;
   let started = false;
   let startPromise = null;
   let shutdownPromise = null;
@@ -221,6 +223,36 @@ function createStandaloneWorkerRuntime(options = {}) {
       workerId: worker ? worker.workerId : null,
       healthAddress: healthServer && healthServer.listening ? healthServer.address() : null,
     });
+  }
+
+  async function publishRuntimeStatus() {
+    if (typeof db.reportStandaloneWorkerRuntimeState !== 'function') return;
+    const status = state.draining
+      ? 'draining'
+      : state.ready && state.acceptingClaims
+        ? 'ready'
+        : 'unavailable';
+    try {
+      await db.reportStandaloneWorkerRuntimeState(status);
+    } catch (error) {
+      // Status reporting must never weaken the worker's admission and claim
+      // gates. A failed heartbeat naturally becomes unavailable after its TTL.
+      if (typeof logger.warn === 'function') {
+        logger.warn(`[worker] Runtime status heartbeat failed (${safeErrorCode(error, 'STATUS_HEARTBEAT_FAILED')}).`);
+      }
+    }
+  }
+
+  function startRuntimeStatusHeartbeat() {
+    if (runtimeStatusTimer || typeof db.reportStandaloneWorkerRuntimeState !== 'function') return;
+    runtimeStatusTimer = setInterval(() => { void publishRuntimeStatus(); }, RUNTIME_STATUS_INTERVAL_MS);
+    if (typeof runtimeStatusTimer.unref === 'function') runtimeStatusTimer.unref();
+  }
+
+  function stopRuntimeStatusHeartbeat() {
+    if (!runtimeStatusTimer) return;
+    clearInterval(runtimeStatusTimer);
+    runtimeStatusTimer = null;
   }
 
   async function checkDependencies() {
@@ -321,6 +353,8 @@ function createStandaloneWorkerRuntime(options = {}) {
       });
       state.acceptingClaims = true;
       state.ready = true;
+      await publishRuntimeStatus();
+      startRuntimeStatusHeartbeat();
       if (startOptions.autoStart !== false) worker.start();
       if (typeof logger.info === 'function') {
         logger.info(`[worker] Standalone worker ready (id=${worker.workerId}, concurrency=1).`);
@@ -329,6 +363,7 @@ function createStandaloneWorkerRuntime(options = {}) {
     } catch (error) {
       state.ready = false;
       state.acceptingClaims = false;
+      stopRuntimeStatusHeartbeat();
       await closeHttpServer(healthServer);
       if (storageProbe) {
         try { removeStorageProbe(storageProbe); } catch { /* startup is already failing */ }
@@ -364,6 +399,8 @@ function createStandaloneWorkerRuntime(options = {}) {
       state.draining = true;
       state.ready = false;
       state.acceptingClaims = false;
+      await publishRuntimeStatus();
+      stopRuntimeStatusHeartbeat();
       const timeoutMs = shutdownOptions.timeoutMs === undefined
         ? runtimeConfig.drainTimeoutMs
         : Number(shutdownOptions.timeoutMs);
@@ -417,6 +454,7 @@ function createStandaloneWorkerRuntime(options = {}) {
 
 module.exports = {
   STANDALONE_WORKER_DEFAULTS,
+  RUNTIME_STATUS_INTERVAL_MS,
   strictInteger,
   parseAllowedJobTypes,
   parseStandaloneWorkerConfig,

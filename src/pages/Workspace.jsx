@@ -7,6 +7,19 @@ import {
 } from 'lucide-react';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 
+function isLiveLoadResult(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+  const cells = Number(result.cells ?? result.n_cells);
+  const features = Number(result.features ?? result.genes ?? result.n_features);
+  return Number.isFinite(cells) && cells > 0 && Number.isFinite(features) && features > 0;
+}
+
+function boundedDemoSetting(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+}
+
 // Removed API constant
 // ── Load Object Modal ──────────────────────────────────────────────
 
@@ -17,6 +30,7 @@ function LoadModal({
   setLoadingId,
   activeProjectId,
   onCreateAnalysisObjectForLoad,
+  onLoadFailed,
   legacyLocalImportsEnabled = false,
   onOpenPipelineManager,
 }) {
@@ -78,16 +92,26 @@ function LoadModal({
     metadata = {},
   }) => {
     if (!activeProjectId) throw new Error('Select or create a backend project before loading data.');
-    const analysisObject = await onCreateAnalysisObjectForLoad({
-      projectId: activeProjectId,
-      displayName,
-      sourceType,
-      metadata,
-    });
-    const headers = { ...(options.headers || {}), 'X-Object-ID': analysisObject.id };
-    const data = await window.electronAPI.apiRequest(endpoint, { ...options, headers });
-    if (data.error) throw new Error(data.error);
-    if (data.result) onLoaded(data, displayName, analysisObject);
+    let analysisObject = null;
+    try {
+      analysisObject = await onCreateAnalysisObjectForLoad({
+        projectId: activeProjectId,
+        displayName,
+        sourceType,
+        metadata,
+      });
+      const headers = { ...(options.headers || {}), 'X-Object-ID': analysisObject.id };
+      const data = await window.electronAPI.apiRequest(endpoint, { ...options, headers });
+      if (data?.error) throw new Error(data.error);
+      if (!isLiveLoadResult(data?.result)) {
+        throw new Error('The R runtime returned an incomplete load summary.');
+      }
+      onLoaded(data, displayName, analysisObject);
+      return analysisObject;
+    } catch (error) {
+      if (analysisObject && error && typeof error === 'object') error.analysisObject = analysisObject;
+      throw error;
+    }
   };
 
   const loadDemo = async () => {
@@ -101,7 +125,8 @@ function LoadModal({
         metadata: { minCells, minFeatures },
       });
     } catch (err) {
-      setError(`Request failed: ${err.message}`);
+      if (err?.analysisObject) onLoadFailed?.(err.analysisObject);
+      setError(`PBMC demo could not attach to this private R session: ${err.message}`);
     }
     setLoadingId(null);
   };
@@ -568,13 +593,13 @@ function LoadModal({
                   key={opt.id}
                   onClick={opt.action}
                   disabled={isLoading}
-                  className={`w-full flex items-center gap-4 p-4 rounded-xl border text-left transition-all group ${
+                className={`w-full flex items-center gap-4 p-4 rounded-xl border text-left transition-colors group ${
                     active
                       ? 'bg-primary/10 border-primary'
                       : 'bg-slate-800/60 border-slate-700/50 hover:border-slate-600 hover:bg-slate-800'
                   } disabled:opacity-50`}
                 >
-                  <div className="w-10 h-10 rounded-lg bg-slate-700/60 flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform">
+                  <div className="w-10 h-10 rounded-lg bg-slate-700/60 flex items-center justify-center flex-shrink-0 transition-colors">
                     {active
                       ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
                       : opt.icon}
@@ -700,12 +725,6 @@ function scrubEmptyParams(params) {
   return out;
 }
 
-function pipelineStatus(done, hasObject, liveAttached, fallback = 'Requires loaded object') {
-  if (!hasObject) return { label: fallback, tone: 'slate' };
-  if (!liveAttached) return { label: 'Attach object', tone: 'amber' };
-  return done ? { label: 'Complete', tone: 'green' } : { label: 'Not run', tone: 'blue' };
-}
-
 function WorkbenchOverview({
   activeProject,
   selectedObject,
@@ -715,6 +734,7 @@ function WorkbenchOverview({
   rSessionId,
   setActiveTab,
   setShowLoadModal,
+  onReloadPbmcDemo,
 }) {
   const hasProject = !!activeProject;
   const hasObject = !!selectedObject;
@@ -727,36 +747,6 @@ function WorkbenchOverview({
       ? { label: 'Live R: attached', tone: 'green' }
       : { label: 'Live R: not attached', tone: sessionReady && rSessionId ? 'amber' : 'slate' };
 
-  const sections = [
-    { label: 'Project context', status: hasProject ? { label: 'Ready', tone: 'green' } : { label: 'Select project', tone: 'slate' }, detail: 'Durable backend project metadata.' },
-    {
-      label: 'Dataset / object',
-      status: hasObject
-        ? { label: 'Ready', tone: 'green' }
-        : hasObjectsInProject
-          ? { label: 'Select object', tone: 'amber' }
-          : { label: 'Requires loaded object', tone: 'slate' },
-      detail: 'DB-backed analysis object identity.',
-    },
-    { label: 'Inspect', status: pipelineStatus(liveAttached, hasObject, liveAttached), detail: 'Live object metadata and subsetting.' },
-    { label: 'Quality control', status: pipelineStatus(pipelineState?.qc, hasObject, liveAttached), detail: 'Transient live-R workflow.' },
-    { label: 'Normalize', status: pipelineStatus(pipelineState?.normalize, hasObject, liveAttached), detail: 'Transient live-R workflow.' },
-    { label: 'PCA', status: pipelineStatus(pipelineState?.pca, hasObject, liveAttached), detail: 'Transient live-R workflow.' },
-    { label: 'Cluster / UMAP', status: !hasObject ? { label: 'Requires loaded object', tone: 'slate' } : !liveAttached ? { label: 'Attach object', tone: 'amber' } : pipelineState?.pca ? { label: 'Ready', tone: 'blue' } : { label: 'Requires PCA', tone: 'amber' }, detail: 'Live-R analysis and visualization.' },
-    {
-      label: 'Markers / DEG',
-      status: !hasObject
-        ? { label: 'Requires loaded object', tone: 'slate' }
-        : isDbBacked
-          ? { label: 'Durable worker job', tone: 'green' }
-          : { label: 'Requires DB-backed object', tone: 'amber' },
-      detail: 'Current UI launches deg.find_markers.v1 jobs for DB-backed objects and shows bounded summary metadata.',
-    },
-    { label: 'Jobs & artifacts', status: hasProject ? { label: 'Metadata plus DEG launch', tone: 'blue' } : { label: 'Select project', tone: 'slate' }, detail: 'Durable backend foundation; no download UI.' },
-    { label: 'Reports / export', status: { label: 'Future workflow', tone: 'slate' }, detail: 'Figure gallery exists; full reports are not implemented.' },
-    { label: 'Diagnostics', status: { label: 'Ready', tone: 'green' }, detail: 'Backend and R runtime checks.' },
-  ];
-
   let nextAction = 'Select or create a backend project.';
   let actionLabel = 'Create Project';
   let action = null;
@@ -768,8 +758,15 @@ function WorkbenchOverview({
     actionLabel = 'Load Object';
     action = () => setShowLoadModal(true);
   } else if (hasProject && hasObject && !liveAttached) {
-    nextAction = 'This DB-backed object is selected, but its private live R state is not attached in this browser session.';
-    actionLabel = 'Open Object List';
+    if (selectedObject?.source === 'pbmc3k_demo' && typeof onReloadPbmcDemo === 'function') {
+      nextAction = 'This PBMC demo object is selected but not attached to this private R session. Reload the built-in demo to attach it again.';
+      actionLabel = 'Reload PBMC demo';
+      action = onReloadPbmcDemo;
+    } else {
+      nextAction = 'This DB-backed object is selected but its private live R state is not attached. Open Jobs & Artifacts to attach your saved checkpoint or fork one into your own private object.';
+      actionLabel = 'Open recovery';
+      action = () => setActiveTab('history');
+    }
   } else if (hasProject && hasObject && !pipelineState?.qc) {
     nextAction = 'Run quality control against the attached private live R object.';
     actionLabel = 'Open Quality Control';
@@ -852,17 +849,9 @@ function WorkbenchOverview({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {sections.map(section => (
-          <div key={section.label} className="rounded-lg border border-border bg-surface/70 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="font-bold text-text">{section.label}</div>
-              <StatusPill label={section.status.label} tone={section.status.tone} />
-            </div>
-            <p className="mt-2 text-xs leading-relaxed text-textMuted">{section.detail}</p>
-          </div>
-        ))}
-      </div>
+      <p className="px-1 text-xs leading-relaxed text-textMuted">
+        Live analysis follows the selected object in this browser session. Durable jobs, artifacts, and checkpoint forks stay in project history.
+      </p>
     </section>
   );
 }
@@ -1419,11 +1408,13 @@ export default function Workspace({
   resetPipelineAfterSubset: _resetPipelineAfterSubset,
   setActiveTab,
   userEmail: _userEmail,
+  userId,
   backendModelStatus,
   onSelectProject,
   onCreateProject,
   onCreateAnalysisObjectForLoad,
   onAnalysisObjectLoaded,
+  onAnalysisObjectLoadFailed,
   onSelectAnalysisObject,
   pipelineState,
   sessionReady,
@@ -1436,6 +1427,7 @@ export default function Workspace({
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [loadError, setLoadError] = useState(null);
 
   // Projects come from the backend. The selected project ID may be cached as a
   // UI preference, but the project list itself is not localStorage truth.
@@ -1467,6 +1459,7 @@ export default function Workspace({
       setLoadingId(null);
       return;
     }
+    setLoadError(null);
     let baseName = suggestedName || 'Dataset';
     let finalName = baseName;
     let counter = 1;
@@ -1481,6 +1474,11 @@ export default function Workspace({
 
     setDataVersion(v => v + 1);
     setShowLoadModal(false);
+  };
+
+  const handleLoadFailed = (analysisObject) => {
+    if (!analysisObject?.id) return;
+    onAnalysisObjectLoadFailed?.(activeProjectId, analysisObject);
   };
 
   const selectObject = (id) => {
@@ -1593,6 +1591,34 @@ export default function Workspace({
   const displayObject = activeSelectedObjects[0] || null;
   const selectedObject = displayObject;
   const activeProject = currentWs.projects?.find(project => project.id === activeProjectId) || null;
+  const canReloadPbmcDemo = selectedObject?.source === 'pbmc3k_demo'
+    && (!selectedObject?.ownerUserId || Number(selectedObject.ownerUserId) === Number(userId));
+
+  const reloadPbmcDemo = async () => {
+    if (!selectedObject?.id || !canReloadPbmcDemo) return;
+    const minCells = boundedDemoSetting(selectedObject.metadata?.minCells, 3, 1, 1000);
+    const minFeatures = boundedDemoSetting(selectedObject.metadata?.minFeatures, 200, 1, 100000);
+    setLoadError(null);
+    setLoadingId('reload-demo');
+    try {
+      const data = await window.electronAPI.apiRequest(
+        `/load-data?min_cells=${minCells}&min_features=${minFeatures}`,
+        { headers: { 'X-Object-ID': selectedObject.id } }
+      );
+      if (data?.error) throw new Error(data.error);
+      if (!isLiveLoadResult(data?.result)) {
+        throw new Error('The R runtime returned an incomplete load summary.');
+      }
+      handleLoaded(data, selectedObject.name || 'PBMC_3k_Tutorial', {
+        ...selectedObject,
+        displayName: selectedObject.name || 'PBMC_3k_Tutorial',
+      });
+    } catch (error) {
+      setLoadError(`PBMC demo could not attach to this private R session: ${error.message || 'Request failed.'}`);
+    } finally {
+      setLoadingId(null);
+    }
+  };
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">
@@ -1619,7 +1645,14 @@ export default function Workspace({
             rSessionId={rSessionId}
             setActiveTab={setActiveTab}
             setShowLoadModal={setShowLoadModal}
+            onReloadPbmcDemo={canReloadPbmcDemo ? reloadPbmcDemo : undefined}
           />
+
+          {loadError && (
+            <div role="alert" className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
+              {loadError}
+            </div>
+          )}
 
           {/* Stats Block */}
           {displayObject && (
@@ -1639,16 +1672,16 @@ export default function Workspace({
                   { label: 'Density',            value: (displayObject.density || '0.00') + '%',              info: 'Percentage of non-zero entries in the sparse matrix. Typical: 1–5%.', icon: ScatterChart },
                   { label: 'Branch',             value: currentWs.activeBranch.toUpperCase(),                 info: 'Current analytical provenance branch.', icon: FolderTree },
                 ].map((stat, i) => (
-                  <div key={i} className="card p-6 bg-surface/50 border-border/50 hover:border-primary/40 transition-all group relative flex flex-col justify-center items-center min-h-[130px]">
-                    <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <div className="relative">
+                  <div key={i} className="card p-6 bg-surface/50 border-border/50 relative flex flex-col justify-center items-center min-h-[130px]">
+                    <div className="absolute top-2 right-2">
+                      <div className="group/info relative">
                         <Info size={12} className="text-slate-400 cursor-help" />
-                        <div className="absolute bottom-full right-0 mb-2 w-48 p-2 bg-slate-800 border border-slate-700 rounded-lg text-[10px] text-slate-300 shadow-2xl invisible group-hover:visible z-50 pointer-events-none text-center">
+                        <div className="absolute bottom-full right-0 mb-2 w-48 p-2 bg-slate-800 border border-slate-700 rounded-lg text-[10px] text-slate-300 shadow-2xl invisible group-hover/info:visible z-50 pointer-events-none text-center">
                           {stat.info}
                         </div>
                       </div>
                     </div>
-                    <stat.icon size={24} className="text-slate-500/50 mb-2 group-hover:text-primary/50 transition-colors" />
+                    <stat.icon size={24} className="text-slate-500/50 mb-2" />
                     <div className="text-2xl font-black text-text mb-1 tracking-tighter text-center">{stat.value}</div>
                     <div className="text-[10px] font-bold text-text uppercase tracking-widest text-center">{stat.label}</div>
                   </div>
@@ -1685,7 +1718,7 @@ export default function Workspace({
               ) : (
                 <button
                   onClick={() => setIsCreatingProject(true)}
-                  className="btn btn-primary text-xs px-4 py-2 flex items-center gap-2 font-bold shadow-sm transition-all"
+                  className="btn btn-primary text-xs px-4 py-2 flex items-center gap-2 font-bold shadow-sm transition-colors"
                 >
                   <Plus size={14} /> New Project
                 </button>
@@ -1721,8 +1754,8 @@ export default function Workspace({
                     type="button"
                     key={proj.id}
                     onClick={() => handleProjectSelect(proj.id)}
-                    className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border transition-all min-w-max group text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
-                      isActive ? 'bg-primary/10 border-primary text-white shadow-sm' : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                    className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border transition-colors min-w-max group text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+                      isActive ? 'bg-primary/10 border-primary text-primary shadow-sm' : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
                     }`}
                   >
                     <div className="flex flex-col">
@@ -1806,7 +1839,7 @@ export default function Workspace({
                     aria-label={`Analysis object ${obj.name}. Press Enter or Space to select.`}
                     tabIndex={0}
                     onMouseLeave={() => setOpenMenuId(null)}
-                    className={`p-5 rounded-xl border transition-all cursor-pointer group relative flex items-center gap-5 ${
+                    className={`p-5 rounded-xl border transition-colors cursor-pointer group relative flex items-center gap-5 ${
                       isSelected
                         ? 'bg-primary/5 border-primary shadow-lg'
                         : 'bg-surface border-border hover:border-slate-700'
@@ -1814,7 +1847,7 @@ export default function Workspace({
                   >
                     {/* Icon */}
                     <div className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors flex-shrink-0 ${
-                      isSelected ? 'bg-primary text-white scale-110' : 'bg-slate-800 text-slate-400'
+                      isSelected ? 'bg-primary text-white' : 'bg-slate-800 text-slate-400'
                     }`}>
                       {obj.isSubset ? <Scissors size={18} /> : <LayoutGrid size={20} />}
                     </div>
@@ -1993,6 +2026,7 @@ export default function Workspace({
           setLoadingId={setLoadingId}
           activeProjectId={activeProjectId}
           onCreateAnalysisObjectForLoad={onCreateAnalysisObjectForLoad}
+          onLoadFailed={handleLoadFailed}
           legacyLocalImportsEnabled={deploymentPolicy.legacyLocalImportsEnabled === true}
           onOpenPipelineManager={() => {
             setShowLoadModal(false);

@@ -2,9 +2,9 @@ import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// react-plotly.js pulls in the full Plotly bundle; stub it so the QC page can
-// render in jsdom without WebGL/canvas.
-vi.mock('react-plotly.js', () => ({
+// The shared plot wrapper is covered separately; keep this page test focused
+// on QC behavior without a real canvas in jsdom.
+vi.mock('../components/Plot', () => ({
   default: () => <div data-testid="plot-stub" />,
 }));
 

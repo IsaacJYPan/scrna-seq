@@ -29,6 +29,16 @@ function isProjectAccessError(error) {
   return error?.status === 403 || error?.status === 404;
 }
 
+function loadableCheckpointCandidates(artifacts, objectId) {
+  if (!objectId) return [];
+  return (Array.isArray(artifacts) ? artifacts : []).filter((artifact) => (
+    artifact?.artifactType === 'checkpoint'
+      && artifact?.storageKind === 'local_internal'
+      && artifact?.status === 'available'
+      && artifact?.resultAnalysisObjectId === objectId
+  ));
+}
+
 function emptyHistoryState(projectId = null, selectedObjectId = null, loading = false, error = null) {
   return {
     projectId,
@@ -350,9 +360,11 @@ function FigureList({ figures }) {
 export default function ProjectHistory({
   currentWs,
   datasetInfo,
+  userId,
   refreshAnalysisObjects,
   refreshProjects,
   onSelectAnalysisObject,
+  onLiveObjectAttached,
   setActiveTab,
 }) {
   const activeProjectId = currentWs?.selectedProjectId || datasetInfo?.projectId || currentWs?.projects?.[0]?.id || null;
@@ -370,6 +382,7 @@ export default function ProjectHistory({
   const activeProjectRef = useRef(activeProjectId);
   const historyRequestRef = useRef(0);
   const forkRequestRef = useRef(0);
+  const attachRequestRef = useRef(0);
   activeProjectRef.current = activeProjectId;
 
   const [state, setState] = useState(() => emptyHistoryState());
@@ -377,18 +390,33 @@ export default function ProjectHistory({
     ? state
     : emptyHistoryState(activeProjectId, selectedObjectId, Boolean(activeProjectId));
   const [forkState, setForkState] = useState(null);
+  const [attachState, setAttachState] = useState(null);
   const activeForkState = forkState?.projectId === activeProjectId ? forkState : null;
+  const activeAttachState = attachState?.projectId === activeProjectId
+    && attachState?.objectId === selectedObjectId
+    ? attachState
+    : null;
   const forkBusy = Boolean(
     activeForkState?.launching || ['queued', 'running'].includes(activeForkState?.job?.status)
   );
+  const attachBusy = Boolean(
+    activeAttachState?.launching || ['queued', 'running'].includes(activeAttachState?.job?.status)
+  );
+  const checkpointCandidates = loadableCheckpointCandidates(historyState.artifacts, selectedObjectId);
+  const selectedCheckpoint = checkpointCandidates.length === 1 ? checkpointCandidates[0] : null;
+  const selectedObjectIsOwnedByUser = Number.isInteger(Number(userId))
+    && Number(selectedObject?.ownerUserId) === Number(userId);
 
   useEffect(() => {
     forkRequestRef.current += 1;
+    attachRequestRef.current += 1;
     setForkState(null);
+    setAttachState(null);
     return () => {
       forkRequestRef.current += 1;
+      attachRequestRef.current += 1;
     };
-  }, [activeProjectId]);
+  }, [activeProjectId, selectedObjectId]);
 
   const loadHistory = useCallback(async () => {
     const requestId = ++historyRequestRef.current;
@@ -503,6 +531,79 @@ export default function ProjectHistory({
     };
   }, [activeForkState?.accessLost, activeForkState?.job?.id, activeForkState?.job?.status, refreshForkJob]);
 
+  const refreshAttachJob = useCallback(async () => {
+    if (!activeProjectId || !selectedObjectId || !activeAttachState?.job?.id) return;
+    const projectId = activeProjectId;
+    const objectId = selectedObjectId;
+    const requestId = activeAttachState.requestId;
+    const jobId = activeAttachState.job.id;
+    const api = window.electronAPI || {};
+    if (!api.getProjectJob) return;
+    try {
+      const job = await api.getProjectJob(projectId, jobId);
+      if (activeProjectRef.current !== projectId || attachRequestRef.current !== requestId) return;
+      const jobError = ['failed', 'canceled'].includes(job?.status)
+        ? (job?.error?.message || `Checkpoint attach ${job.status}.`)
+        : null;
+      setAttachState(previous => previous?.requestId === requestId
+        ? { ...previous, job, error: jobError }
+        : previous);
+      if (job?.status === 'completed') {
+        if (typeof refreshAnalysisObjects === 'function') await refreshAnalysisObjects(projectId);
+        if (activeProjectRef.current !== projectId || attachRequestRef.current !== requestId) return;
+        onLiveObjectAttached?.(projectId, objectId);
+        await loadHistory();
+      }
+    } catch (error) {
+      if (activeProjectRef.current !== projectId || attachRequestRef.current !== requestId) return;
+      setAttachState(previous => previous?.requestId === requestId
+        ? { ...previous, error: formatApiError(error, 'Failed to refresh checkpoint attachment.') }
+        : previous);
+    }
+  }, [activeAttachState?.job?.id, activeAttachState?.requestId, activeProjectId, loadHistory, onLiveObjectAttached, refreshAnalysisObjects, selectedObjectId]);
+
+  useEffect(() => {
+    if (!activeAttachState?.job?.id || !['queued', 'running'].includes(activeAttachState.job.status)) {
+      return undefined;
+    }
+    let canceled = false;
+    let timer = null;
+    const poll = async () => {
+      await refreshAttachJob();
+      if (!canceled) timer = window.setTimeout(poll, 2500);
+    };
+    timer = window.setTimeout(poll, 2500);
+    return () => {
+      canceled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeAttachState?.job?.id, activeAttachState?.job?.status, refreshAttachJob]);
+
+  const launchCheckpointAttach = async () => {
+    const api = window.electronAPI || {};
+    const projectId = activeProjectId;
+    const objectId = selectedObjectId;
+    if (!projectId || !objectId || !selectedCheckpoint || !selectedObjectIsOwnedByUser
+        || !api.createCheckpointLoadJob || attachBusy) return;
+    const requestId = ++attachRequestRef.current;
+    setAttachState({ projectId, objectId, requestId, launching: true, job: null, error: null });
+    try {
+      const job = await api.createCheckpointLoadJob(projectId, objectId);
+      if (activeProjectRef.current !== projectId || attachRequestRef.current !== requestId) return;
+      setAttachState({ projectId, objectId, requestId, launching: false, job, error: null });
+    } catch (error) {
+      if (activeProjectRef.current !== projectId || attachRequestRef.current !== requestId) return;
+      setAttachState({
+        projectId,
+        objectId,
+        requestId,
+        launching: false,
+        job: null,
+        error: formatApiError(error, 'Failed to create checkpoint attachment.'),
+      });
+    }
+  };
+
   const launchCheckpointFork = async artifact => {
     const api = window.electronAPI || {};
     const sourceObjectId = artifact?.resultAnalysisObjectId;
@@ -532,6 +633,10 @@ export default function ProjectHistory({
   const openFork = async objectId => {
     if (!objectId) return;
     await onSelectAnalysisObject?.(activeProjectId, objectId);
+    if (activeForkState?.job?.status === 'completed'
+        && activeForkState.job.resultAnalysisObjectId === objectId) {
+      onLiveObjectAttached?.(activeProjectId, objectId);
+    }
     setActiveTab?.('workspace');
   };
 
@@ -591,6 +696,58 @@ export default function ProjectHistory({
             </div>
           </div>
         </div>
+
+        {selectedObject && selectedObject.liveState !== 'attached' && (
+          <section className="rounded-lg border border-primary/20 bg-primary/5 p-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h3 className="flex items-center gap-2 text-lg font-bold text-text">
+                  <Archive size={18} className="text-primary" />
+                  Restore private live state
+                </h3>
+                <p className="mt-1 max-w-3xl text-sm text-textMuted">
+                  A saved checkpoint can be restored only into its owner&apos;s private R session. Other writers can fork it into a new private object; viewers can inspect the durable history only.
+                </p>
+              </div>
+              {selectedCheckpoint && selectedObjectIsOwnedByUser && (
+                <button
+                  onClick={launchCheckpointAttach}
+                  disabled={attachBusy || activeAttachState?.job?.status === 'completed'}
+                  className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                >
+                  {activeAttachState?.launching ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
+                  {activeAttachState?.job?.status === 'completed' ? 'Checkpoint attached' : 'Attach saved checkpoint'}
+                </button>
+              )}
+              {selectedCheckpoint && !selectedObjectIsOwnedByUser && canFork && (
+                <button
+                  onClick={() => launchCheckpointFork(selectedCheckpoint)}
+                  disabled={forkBusy}
+                  className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                >
+                  {activeForkState?.launching ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
+                  Fork saved checkpoint
+                </button>
+              )}
+            </div>
+            {checkpointCandidates.length > 1 && (
+              <p className="mt-3 text-sm text-danger">Multiple eligible checkpoints exist for this object, so no checkpoint was selected.</p>
+            )}
+            {checkpointCandidates.length === 0 && (
+              <p className="mt-3 text-sm text-textMuted">No eligible saved checkpoint exists for this selected object.</p>
+            )}
+            {selectedCheckpoint && !selectedObjectIsOwnedByUser && !canFork && (
+              <p className="mt-3 text-sm text-textMuted">Your Viewer role cannot create a private fork from this checkpoint.</p>
+            )}
+            {activeAttachState?.job && ['queued', 'running'].includes(activeAttachState.job.status) && (
+              <p role="status" className="mt-3 inline-flex items-center gap-2 text-sm text-textMuted"><Loader2 size={15} className="animate-spin" /> Checkpoint attachment {activeAttachState.job.status}.</p>
+            )}
+            {activeAttachState?.error && <p role="alert" className="mt-3 text-sm text-danger">{activeAttachState.error}</p>}
+            {activeForkState?.artifactId === selectedCheckpoint?.id && activeForkState?.error && (
+              <p role="alert" className="mt-3 text-sm text-danger">{activeForkState.error}</p>
+            )}
+          </section>
+        )}
 
         {historyState.error && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">

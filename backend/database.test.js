@@ -5,7 +5,8 @@ const db = require('./pgDatabase');
 
 const {
   saveProvenance, getProvenance,
-  saveFigure, getFiguresByUser, deleteFigure
+  saveFigure, getFiguresByUser, deleteFigure,
+  reportStandaloneWorkerRuntimeState, getStandaloneWorkerRuntimeStatus
 } = db;
 
 const CONFIGURED = config.hasPostgresConnection();
@@ -39,6 +40,18 @@ describe.skipIf(!CONFIGURED)('pgDatabase.js tests', () => {
     const figures = await getFiguresByUser('test@example.com');
     expect(figures.length).toBe(1);
     expect(figures[0].id).toBe('test-init-id');
+  });
+
+  it('resets the worker readiness singleton with the rest of the test schema', async () => {
+    await reportStandaloneWorkerRuntimeState('ready');
+    expect((await getStandaloneWorkerRuntimeStatus()).status).toBe('ready');
+
+    await db.resetSchemaForTests();
+
+    await expect(getStandaloneWorkerRuntimeStatus()).resolves.toEqual({
+      status: 'unknown',
+      updatedAt: null,
+    });
   });
 
   it('should save and retrieve a provenance record', async () => {

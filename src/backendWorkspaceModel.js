@@ -78,6 +78,12 @@ export function mapBackendAnalysisObject(object, liveResult = {}) {
   return {
     id: object.id,
     projectId: object.projectId,
+    // This is public project metadata used only to explain whether the current
+    // member can reattach a private live-R object. Authorization remains
+    // enforced by the server and worker.
+    ownerUserId: Number.isInteger(Number(object.ownerUserId)) && Number(object.ownerUserId) > 0
+      ? Number(object.ownerUserId)
+      : null,
     name: object.displayName || metadata.displayName || metadata.name || 'Analysis Object',
     objectType: object.objectType,
     cells,

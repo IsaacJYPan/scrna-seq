@@ -6,7 +6,7 @@
 // See the "Implemented vs UI-wired" table in README.md.
 import React, { useState, useCallback, useEffect } from 'react';
 import { Microscope, Activity, ChevronRight, AlertTriangle, RefreshCw, BarChart2, Zap } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 
 const DB_OPTIONS = [

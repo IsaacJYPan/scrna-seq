@@ -288,6 +288,15 @@ CREATE INDEX IF NOT EXISTS idx_jobs_project_analysis_object ON jobs(project_id, 
 CREATE INDEX IF NOT EXISTS idx_jobs_project_result_object ON jobs(project_id, result_analysis_object_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
 
+-- Singleton heartbeat published only by the standalone worker. It lets the web
+-- process present a truthful compute state without proxying the worker health
+-- port or exposing worker identity, topology, paths, or R credentials.
+CREATE TABLE IF NOT EXISTS worker_runtime_status (
+  singleton   BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  state       TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── Job artifacts / checkpoints (metadata-first; server-owned) ───────────────
 CREATE TABLE IF NOT EXISTS job_artifacts (
   id                        TEXT PRIMARY KEY,

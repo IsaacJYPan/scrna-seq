@@ -74,6 +74,7 @@
   "build": {
     "appId": "org.benchone.workbench",
     "productName": "BenchOne",
+    "icon": "build/icon.svg",
     "asar": true,
     "files": [
       "dist/**/*",

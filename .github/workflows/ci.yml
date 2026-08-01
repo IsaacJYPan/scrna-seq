@@ -159,6 +159,7 @@ jobs:
           npx vitest run
           backend/standalone-worker-runtime.test.js
           backend/standalone-worker-process.test.js
+          scripts/dev-runtime.test.js
           backend/job-output-recovery.test.js
           backend/job-recovery-lease-fence.test.js
           backend/r-worker-caller-bounds.test.js

@@ -565,6 +565,40 @@ describe.skipIf(!CONFIGURED)('project analysis resources — references stay wit
     })).rejects.toMatchObject({ code: 'ANALYSIS_OBJECT_NOT_FOUND' });
   });
 
+  it('rejects collaborator DEG and enrichment jobs against another owner\'s private live R object before queueing', async () => {
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, 'bob@example.com', 'analyst');
+    const source = await createAO(proj.id, alice.token);
+    const privateLiveJobs = [
+      { jobType: 'deg.find_markers.v1', parameters: {} },
+      {
+        jobType: 'enrichment.gsea.v1',
+        parameters: { targetGroup: '0', species: 'human' },
+      },
+    ];
+
+    for (const { jobType, parameters } of privateLiveJobs) {
+      const httpResponse = await createJob(proj.id, bob.token, {
+        jobType,
+        analysisObjectId: source.data.id,
+        parameters,
+      });
+      expect(httpResponse.status, jobType).toBe(404);
+      expect(httpResponse.data.error, jobType).toBe('Analysis object not found.');
+
+      await expect(db.createProjectJob(bob.user.id, proj.id, {
+        jobType,
+        analysisObjectId: source.data.id,
+        parameters,
+      })).rejects.toMatchObject({ code: 'ANALYSIS_OBJECT_NOT_FOUND' });
+
+      const queued = await api(server, `/api/projects/${proj.id}/jobs`, { token: bob.token });
+      expect(queued.status, jobType).toBe(200);
+      expect(queued.data, jobType).toEqual([]);
+    }
+  });
+
   it('cross-project object/job reads return 404', async () => {
     const { alice } = await users();
     const projA = await seedProject(alice.user.id, 'A');

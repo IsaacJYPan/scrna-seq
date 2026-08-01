@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -15,6 +15,7 @@ import { useTabParams } from '../hooks/useTabParams';
 
 const DEG_JOB_TYPE = 'deg.find_markers.v1';
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
+const JOB_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const POLL_MS = 3000;
 
 const DEFAULT_PARAMS = {
@@ -220,7 +221,11 @@ export default function DifferentialExpression({
   pipelineState,
   currentWs,
   userEmail,
+  userId,
   objectId,
+  sessionReady,
+  setActiveTab,
+  computeStatus,
 }) {
   const [params, setParam] = useTabParams('deg', userEmail, objectId, DEFAULT_PARAMS);
   const [job, setJob] = useState(null);
@@ -236,7 +241,24 @@ export default function DifferentialExpression({
   const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
   const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
-  const canLaunch = !!userEmail && !!activeProjectId && !!selectedObjectId && isDbBackedObject && !loading;
+  const liveObjectAttached = datasetInfo?.liveState === 'attached';
+  const canWriteProject = JOB_WRITE_ROLES.has(activeProject?.role);
+  const ownsPrivateLiveObject = !datasetInfo?.ownerUserId
+    || Number(datasetInfo.ownerUserId) === Number(userId);
+  const computeReady = !computeStatus?.status || computeStatus.status === 'ready';
+  const canCancelJob = activeProject?.role === 'owner' || activeProject?.role === 'admin';
+  const canLaunch = Boolean(
+    userEmail
+      && activeProjectId
+      && selectedObjectId
+      && isDbBackedObject
+      && canWriteProject
+      && sessionReady
+      && liveObjectAttached
+      && ownsPrivateLiveObject
+      && computeReady
+      && !loading
+  );
 
   const safeParams = useMemo(() => buildDegParams(params), [params]);
   const terminal = job?.status ? TERMINAL_STATUSES.has(job.status) : false;
@@ -245,20 +267,20 @@ export default function DifferentialExpression({
   const summary = summaryArtifact?.metadata?.summary || null;
   const resolvedParams = summaryArtifact?.metadata?.resolvedParams || job?.parameters || safeParams;
   const visibleLogs = logs.length ? logs : (Array.isArray(job?.logs) ? job.logs : []);
+  const selectionKey = `${activeProjectId || ''}:${selectedObjectId || ''}`;
+  const selectionKeyRef = useRef(selectionKey);
+  selectionKeyRef.current = selectionKey;
 
-  useEffect(() => {
-    setJob(null);
-    setLogs([]);
-    setArtifacts([]);
-    setError(null);
-    setLastRefreshedAt(null);
-  }, [activeProjectId, selectedObjectId]);
-
-  const refreshJobState = useCallback(async (jobId = job?.id, { silent = false } = {}) => {
+  const refreshJobState = useCallback(async (
+    jobId,
+    { silent = false, expectedSelectionKey = selectionKeyRef.current } = {}
+  ) => {
     if (!jobId || !activeProjectId) return null;
     const api = window.electronAPI || {};
     if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
-      setError('Project job APIs are unavailable in this frontend runtime.');
+      if (selectionKeyRef.current === expectedSelectionKey) {
+        setError('Project job APIs are unavailable in this frontend runtime.');
+      }
       return null;
     }
 
@@ -269,31 +291,68 @@ export default function DifferentialExpression({
         api.getProjectJobLogs(activeProjectId, jobId),
         api.listProjectJobArtifacts(activeProjectId, jobId),
       ]);
+      if (selectionKeyRef.current !== expectedSelectionKey) return null;
       setJob(nextJob || null);
       setLogs(Array.isArray(logResponse?.logs) ? logResponse.logs : []);
       setArtifacts(Array.isArray(nextArtifacts) ? nextArtifacts : []);
       setLastRefreshedAt(new Date().toISOString());
       return nextJob || null;
     } catch (err) {
-      setError(parseErrorMessage(err));
+      if (selectionKeyRef.current === expectedSelectionKey) setError(parseErrorMessage(err));
       return null;
     } finally {
-      if (!silent) setRefreshing(false);
+      if (!silent && selectionKeyRef.current === expectedSelectionKey) setRefreshing(false);
     }
-  }, [activeProjectId, job?.id]);
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    let canceled = false;
+    setJob(null);
+    setLogs([]);
+    setArtifacts([]);
+    setError(null);
+    setLastRefreshedAt(null);
+    setRefreshing(false);
+    setLoading(false);
+
+    const api = window.electronAPI || {};
+    if (!activeProjectId || !selectedObjectId || !api.listProjectJobs) {
+      return () => { canceled = true; };
+    }
+
+    const restoreLatestJob = async () => {
+      try {
+        const jobs = await api.listProjectJobs(activeProjectId, {
+          jobType: DEG_JOB_TYPE,
+          analysisObjectId: selectedObjectId,
+        });
+        const latest = Array.isArray(jobs) ? jobs[0] : null;
+        if (!canceled && latest?.id) {
+          await refreshJobState(latest.id, {
+            silent: true,
+            expectedSelectionKey: selectionKey,
+          });
+        }
+      } catch (err) {
+        if (!canceled) setError(parseErrorMessage(err));
+      }
+    };
+    restoreLatestJob();
+    return () => { canceled = true; };
+  }, [activeProjectId, refreshJobState, selectedObjectId, selectionKey]);
 
   useEffect(() => {
     if (!job?.id || terminal) return undefined;
     let canceled = false;
     const poll = async () => {
-      if (!canceled) await refreshJobState(job.id, { silent: true });
+      if (!canceled) await refreshJobState(job.id, { silent: true, expectedSelectionKey: selectionKey });
     };
     const id = window.setInterval(poll, POLL_MS);
     return () => {
       canceled = true;
       window.clearInterval(id);
     };
-  }, [job?.id, terminal, refreshJobState]);
+  }, [job?.id, selectionKey, terminal, refreshJobState]);
 
   const launchDegJob = useCallback(async () => {
     setError(null);
@@ -309,6 +368,22 @@ export default function DifferentialExpression({
       setError('Select a DB-backed analysis object before launching DEG.');
       return;
     }
+    if (!canWriteProject) {
+      setError('Your project role can view results but cannot start analysis jobs.');
+      return;
+    }
+    if (!ownsPrivateLiveObject) {
+      setError('This object belongs to another member. Fork a saved checkpoint into your own private object before launching DEG.');
+      return;
+    }
+    if (!sessionReady || !liveObjectAttached) {
+      setError('Attach or restore this analysis object in R before launching DEG.');
+      return;
+    }
+    if (!computeReady) {
+      setError('The analysis worker is not ready. Jobs are not queued while compute is unavailable.');
+      return;
+    }
 
     const api = window.electronAPI || {};
     if (!api.createDegFindMarkersJob && !api.createProjectJob) {
@@ -316,6 +391,7 @@ export default function DifferentialExpression({
       return;
     }
 
+    const requestSelectionKey = selectionKeyRef.current;
     setLoading(true);
     setLogs([]);
     setArtifacts([]);
@@ -327,34 +403,37 @@ export default function DifferentialExpression({
           analysisObjectId: selectedObjectId,
           parameters: safeParams,
         });
+      if (selectionKeyRef.current !== requestSelectionKey) return undefined;
       setJob(created);
       setLastRefreshedAt(new Date().toISOString());
-      await refreshJobState(created.id, { silent: true });
+      await refreshJobState(created.id, { silent: true, expectedSelectionKey: requestSelectionKey });
     } catch (err) {
-      setError(parseErrorMessage(err));
+      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(err));
     } finally {
-      setLoading(false);
+      if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
     }
-  }, [activeProjectId, isDbBackedObject, refreshJobState, safeParams, selectedObjectId, userEmail]);
+    return undefined;
+  }, [activeProjectId, canWriteProject, computeReady, isDbBackedObject, liveObjectAttached, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, sessionReady, userEmail]);
 
   const cancelDegJob = useCallback(async () => {
-    if (!activeProjectId || !job?.id) return;
+    if (!activeProjectId || !job?.id || !canCancelJob) return;
     const api = window.electronAPI || {};
     if (!api.cancelProjectJob) {
       setError('Job cancellation is unavailable in this frontend runtime.');
       return;
     }
+    const requestSelectionKey = selectionKeyRef.current;
     setCanceling(true);
     setError(null);
     try {
       await api.cancelProjectJob(activeProjectId, job.id);
-      await refreshJobState(job.id, { silent: true });
+      await refreshJobState(job.id, { silent: true, expectedSelectionKey: requestSelectionKey });
     } catch (err) {
-      setError(parseErrorMessage(err));
+      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(err));
     } finally {
-      setCanceling(false);
+      if (selectionKeyRef.current === requestSelectionKey) setCanceling(false);
     }
-  }, [activeProjectId, job?.id, refreshJobState]);
+  }, [activeProjectId, canCancelJob, job?.id, refreshJobState]);
 
   if (!datasetInfo) {
     return (
@@ -375,7 +454,7 @@ export default function DifferentialExpression({
           <div>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <h2 className="text-2xl font-bold tracking-tight text-white">Markers / Differential Expression</h2>
-              <StatusBadge tone="green">durable worker</StatusBadge>
+              <StatusBadge tone="slate">durable job</StatusBadge>
               <StatusBadge tone="amber">no public download</StatusBadge>
             </div>
             <p className="max-w-3xl text-sm text-textMuted">
@@ -383,6 +462,14 @@ export default function DifferentialExpression({
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
+            <button
+              onClick={launchDegJob}
+              disabled={!canLaunch}
+              className="btn btn-primary inline-flex items-center gap-2 text-sm shadow-lg shadow-primary/20 disabled:opacity-50"
+            >
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+              Launch Durable DEG Job
+            </button>
             {job?.id && (
               <button
                 onClick={() => refreshJobState(job.id)}
@@ -393,14 +480,6 @@ export default function DifferentialExpression({
                 Refresh
               </button>
             )}
-            <button
-              onClick={launchDegJob}
-              disabled={!canLaunch}
-              className="btn btn-primary inline-flex items-center gap-2 text-sm shadow-lg shadow-primary/20 disabled:opacity-50"
-            >
-              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-              Launch Durable DEG Job
-            </button>
           </div>
         </header>
 
@@ -429,6 +508,34 @@ export default function DifferentialExpression({
         {!isDbBackedObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
             Select a DB-backed analysis object (`ao_*`) before launching the durable DEG worker.
+          </div>
+        )}
+
+        {isDbBackedObject && !canWriteProject && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Your project role is read-only. You can inspect saved DEG summaries, but only an owner, administrator, or analyst can start a new job.
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && !ownsPrivateLiveObject && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            This object belongs to another member. Use Jobs &amp; Artifacts to fork a saved checkpoint into your own private R object.
+            <button onClick={() => setActiveTab?.('history')} className="btn btn-secondary ml-3 text-xs">Open recovery</button>
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            This saved object is not attached to the private R session yet. {datasetInfo?.source === 'pbmc3k_demo' ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open recovery to attach a saved checkpoint.'}
+            <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
+              {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open recovery'}
+            </button>
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Compute is not ready, so new jobs are disabled rather than left indefinitely queued. Start or restore the standalone worker, then wait for the Compute ready status in the sidebar.
           </div>
         )}
 
@@ -562,12 +669,12 @@ export default function DifferentialExpression({
                 Job Status
               </h3>
               <p className="mt-1 text-sm text-textMuted">
-                The job will remain queued until the opt-in worker is running.
+                This deployment runs one analysis job at a time. Queued jobs start when the worker is available.
               </p>
             </div>
             <div className="flex items-center gap-2">
               {job?.status && <StatusBadge tone={statusTone(job.status)}>{job.status}</StatusBadge>}
-              {job?.id && !terminal && (
+              {job?.id && !terminal && canCancelJob && (
                 <button
                   onClick={cancelDegJob}
                   disabled={canceling}
