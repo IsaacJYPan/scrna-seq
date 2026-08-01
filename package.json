@@ -2,7 +2,7 @@
   "name": "scrna-seq-workbench",
   "version": "1.0.0",
   "description": "Web-based scRNA-seq analysis platform: React/Vite frontend, Express API, Postgres, and an R Plumber/Seurat backend",
-  "main": "server.js",
+  "main": "desktop/main.cjs",
   "engines": {
     "node": ">=22.15.0 <25"
   },
@@ -12,6 +12,9 @@
     "vite": "vite",
     "build": "vite build",
     "start": "node server.js",
+    "desktop": "electron .",
+    "desktop:package": "npm run build && electron-builder --dir",
+    "desktop:dist": "npm run build && electron-builder",
     "worker": "node --require ./scripts/enable-job-worker.cjs worker.js",
     "worker:once": "node --require ./scripts/enable-job-worker.cjs worker.js --once",
     "platform-developer": "node scripts/manage-platform-developer.js",
@@ -68,6 +71,19 @@
     "react-plotly.js": "^2.6.0",
     "uuid": "^14.0.0"
   },
+  "build": {
+    "appId": "org.benchone.workbench",
+    "productName": "BenchOne",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"]
+    }
+  },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.3",
     "@eslint/js": "^9.39.4",
@@ -76,6 +92,8 @@
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.27",
     "concurrently": "^9.1.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.3",

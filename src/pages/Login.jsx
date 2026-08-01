@@ -89,9 +89,9 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
   };
 
   const inputBase =
-    'w-full rounded-xl border bg-background py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-all';
+    'w-full rounded-xl border bg-background py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
   const tabBase =
-    'py-2 rounded-lg text-xs font-semibold uppercase tracking-wider transition-all';
+    'py-2 rounded-lg text-sm font-medium transition-colors';
 
   return (
     <div className="login-bg min-h-screen w-full flex items-center justify-center p-4 sm:p-6 relative overflow-hidden">
@@ -119,22 +119,20 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
         {/* Card */}
         <div className="bg-surface border border-border rounded-2xl shadow-xl shadow-slate-900/5 p-6 sm:p-7">
           {/* Mode Toggle — segmented control */}
-          <div className={`${registrationEnabled ? 'grid grid-cols-2' : ''} gap-1 p-1 mb-6 bg-background border border-border rounded-xl`}>
+          {registrationEnabled && <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-background border border-border rounded-xl">
             <button
               onClick={() => { setMode('login'); setError(''); setSuccess(''); }}
               className={`${tabBase} ${mode === 'login' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
             >
               Log In
             </button>
-            {registrationEnabled && (
               <button
                 onClick={() => { setMode('signup'); setError(''); setSuccess(''); }}
                 className={`${tabBase} ${mode === 'signup' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
               >
                 Sign Up
               </button>
-            )}
-          </div>
+          </div>}
 
           {!registrationEnabled && (
             <p className="mb-5 text-center text-xs text-textMuted">
@@ -152,7 +150,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'signup' && (
               <div className="space-y-1.5">
-                <label htmlFor="signup-name" className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Full Name</label>
+                <label htmlFor="signup-name" className="text-[13px] font-medium text-textMuted ml-0.5">Full name</label>
                 <div className="relative group">
                   <User className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                   <input
@@ -168,7 +166,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             )}
 
             <div className="space-y-1.5">
-              <label htmlFor="login-email" className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Email</label>
+              <label htmlFor="login-email" className="text-[13px] font-medium text-textMuted ml-0.5">Email</label>
               <div className="relative group">
                 <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
@@ -185,7 +183,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="login-password" className="text-[11px] font-semibold text-textMuted uppercase tracking-wider ml-0.5">Password</label>
+              <label htmlFor="login-password" className="text-[13px] font-medium text-textMuted ml-0.5">Password</label>
               <div className="relative group">
                 <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                 <input
@@ -237,7 +235,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             <button
               type="submit"
               disabled={loading || !emailValid || !password || (mode === 'signup' && !passwordStrong)}
-              className="w-full bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold py-3.5 rounded-xl shadow-lg shadow-primary/20 active:scale-[0.99] transition-all flex items-center justify-center gap-2.5"
+              className="w-full bg-primary hover:bg-[#0077ed] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold py-3.5 rounded-xl transition-colors flex items-center justify-center gap-2.5"
             >
               {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : (
                 <>
@@ -247,18 +245,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             </button>
           </form>
 
-          <div className="mt-6 pt-5 border-t border-border text-center">
-            <p className="text-[11px] text-textMuted uppercase font-semibold tracking-wider">
-              {mode === 'login'
-                ? 'Credentials verified via PBKDF2-SHA512'
-                : 'Passwords hashed with 600k PBKDF2 iterations'}
-            </p>
-          </div>
         </div>
-
-        <p className="text-center mt-6 text-textMuted text-[11px] uppercase tracking-wider font-medium">
-          BenchOne experimental workflow
-        </p>
       </div>
     </div>
   );

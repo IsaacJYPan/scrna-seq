@@ -75,13 +75,21 @@ export default [
 
   // ── Root build/config files: ESM + node ───────────────────────────────
   {
-    files: ['*.config.js', '*.config.mjs'],
+    files: ['*.config.js', '*.config.mjs', 'desktop/**/*.{js,cjs}'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
       globals: { ...globals.node }
     },
     rules: { ...js.configs.recommended.rules }
+  },
+
+  // The desktop connection screen is a local browser page loaded by Electron.
+  {
+    files: ['desktop/setup.js'],
+    languageOptions: {
+      globals: { ...globals.browser }
+    }
   },
 
   // ── Test files: ESM (vitest imported explicitly), mixed node + browser ─

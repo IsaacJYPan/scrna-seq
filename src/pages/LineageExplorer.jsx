@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, GitBranch, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Clock3, GitBranch, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import {
   Background, Controls, MiniMap, Position, ReactFlow, Handle,
   useEdgesState, useNodesState,
@@ -14,6 +14,45 @@ function formatObjectLabel(node) {
   if (typeof node?.label === 'string' && node.label.trim()) return node.label.trim();
   if (typeof node?.objectType === 'string' && node.objectType.trim()) return node.objectType.trim();
   return 'Analysis object';
+}
+
+const RELATIONSHIP_COPY = {
+  checkpoint_fork: {
+    label: 'Checkpoint fork',
+    description: 'Created from a durable checkpoint. The source object remains unchanged.',
+  },
+  checkpoint: {
+    label: 'Checkpoint result',
+    description: 'Recorded from a durable checkpoint in this analysis path.',
+  },
+  derived_from: {
+    label: 'Derived result',
+    description: 'Created by a reviewed analysis step using this object as input.',
+  },
+  branch: {
+    label: 'Analysis branch',
+    description: 'Started a separate durable analysis branch from this object.',
+  },
+  integration_input: {
+    label: 'Integration input',
+    description: 'Used as an input to an integration result.',
+  },
+  comparison_input: {
+    label: 'Comparison input',
+    description: 'Used as an input to a recorded comparison.',
+  },
+  manual_link: {
+    label: 'Recorded relationship',
+    description: 'A reviewed workflow recorded this relationship.',
+  },
+};
+
+function describeRelationship(edge) {
+  const type = typeof edge?.edgeType === 'string' ? edge.edgeType : '';
+  return RELATIONSHIP_COPY[type] || {
+    label: 'Recorded relationship',
+    description: 'A reviewed workflow recorded this relationship.',
+  };
 }
 
 function layoutGraph(nodes, edges) {
@@ -40,9 +79,22 @@ function layoutGraph(nodes, edges) {
 
 function LineageNode({ data }) {
   return (
-    <div className={`w-[250px] rounded-xl border-2 bg-surface px-4 py-3 shadow-lg transition-colors ${
-      data.selected ? 'border-primary ring-2 ring-primary/20' : 'border-border hover:border-primary/60'
-    }`}>
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => data.onSelect?.(data.id)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          data.onSelect?.(data.id);
+        }
+      }}
+      aria-label={`Inspect ${data.label}`}
+      title={`Inspect ${data.label}`}
+      className={`w-[250px] rounded-xl border-2 bg-surface px-4 py-3 text-left shadow-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+        data.selected ? 'border-primary ring-2 ring-primary/20' : 'border-border hover:border-primary/60'
+      }`}
+    >
       <Handle type="target" position={Position.Top} className="!h-2 !w-2 !bg-primary" />
       <div className="flex items-start gap-2">
         <GitBranch size={16} className="mt-0.5 shrink-0 text-primary" aria-hidden="true" />
@@ -75,7 +127,7 @@ function getActiveSelection(currentWs, datasetInfo) {
   return { projectId, objectId: selectedObject?.id || null };
 }
 
-function EdgeList({ title, edges, nodeById }) {
+function EdgeList({ title, edges, nodeById, onSelect }) {
   return (
     <section className="rounded-xl border border-border bg-surface/70 p-4">
       <h3 className="text-sm font-bold text-text">{title}</h3>
@@ -86,11 +138,28 @@ function EdgeList({ title, edges, nodeById }) {
           {edges.map((edge) => {
             const relatedId = title === 'Parents' ? edge.parentAnalysisObjectId : edge.childAnalysisObjectId;
             const related = nodeById.get(relatedId);
+            const relationship = describeRelationship(edge);
+            const isVisible = Boolean(related);
             return (
-              <li key={edge.id} className="rounded-lg border border-border/70 bg-background/60 p-3">
-                <p className="truncate text-sm font-semibold text-text">{formatObjectLabel(related)}</p>
-                <p className="mt-1 font-mono text-[10px] text-textMuted">{relatedId}</p>
-                <p className="mt-2 text-xs text-textMuted">{edge.edgeType || 'derived from'} / {edge.parentRole || 'input'}</p>
+              <li key={edge.id}>
+                {isVisible ? (
+                  <button
+                    type="button"
+                    onClick={() => onSelect?.(relatedId)}
+                    className="w-full rounded-lg border border-border/70 bg-background/60 p-3 text-left transition-colors hover:border-primary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  >
+                    <p className="truncate text-sm font-semibold text-text">{formatObjectLabel(related)}</p>
+                    <p className="mt-1 font-mono text-[10px] text-textMuted">{relatedId}</p>
+                    <p className="mt-2 text-xs font-semibold text-primary">{relationship.label}</p>
+                    <p className="mt-1 text-xs leading-relaxed text-textMuted">{relationship.description}</p>
+                  </button>
+                ) : (
+                  <div className="rounded-lg border border-border/70 bg-background/60 p-3 text-left">
+                    <p className="text-sm font-semibold text-text">Related object not shown</p>
+                    <p className="mt-1 text-xs leading-relaxed text-textMuted">This relationship is recorded, but its other object is outside this bounded lineage view.</p>
+                    <p className="mt-2 text-xs font-semibold text-primary">{relationship.label}</p>
+                  </div>
+                )}
               </li>
             );
           })}
@@ -110,6 +179,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [isFreshForSelection, setIsFreshForSelection] = useState(false);
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const requestRef = useRef(0);
@@ -121,6 +191,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
       setNodes([]);
       setEdges([]);
       setSelectedNodeId(null);
+      setIsFreshForSelection(false);
       setFailed(false);
       return;
     }
@@ -132,16 +203,19 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
     }
     setLoading(true);
     setFailed(false);
+    setIsFreshForSelection(false);
     try {
       const response = await getLineage(projectId, objectId);
       if (requestRef.current !== requestId) return;
       const safeGraph = response && typeof response === 'object' ? response : null;
       setGraph(safeGraph);
       setSelectedNodeId(objectId);
+      setIsFreshForSelection(true);
     } catch {
       if (requestRef.current !== requestId) return;
       setGraph(null);
       setSelectedNodeId(null);
+      setIsFreshForSelection(false);
       setFailed(true);
     } finally {
       if (requestRef.current === requestId) setLoading(false);
@@ -174,6 +248,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
           objectType: typeof node.objectType === 'string' ? node.objectType : 'analysis object',
           isRoot: node.id === graph?.rootObjectId,
           selected: node.id === selectedNodeId,
+          onSelect: setSelectedNodeId,
         },
       }));
     const knownIds = new Set(rawNodes.map((node) => node.id));
@@ -185,14 +260,15 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
         target: edge.childAnalysisObjectId,
         type: 'smoothstep',
         animated: false,
-        label: edge.edgeType || undefined,
-        labelStyle: { fill: 'currentColor', fontSize: 10 },
+        label: describeRelationship(edge).label,
+        labelStyle: { fill: theme === 'dark' ? '#e2e8f0' : '#0f172a', fontSize: 10, fontWeight: 700 },
+        labelBgStyle: { fill: theme === 'dark' ? '#0f172a' : '#f8fafc', fillOpacity: 0.88 },
         style: { stroke: '#3b82f6', strokeWidth: 2 },
       }));
     const layout = layoutGraph(rawNodes, rawEdges);
     setNodes(layout.nodes);
     setEdges(layout.edges);
-  }, [graph, graphEdges, graphNodes, selectedNodeId, setEdges, setNodes]);
+  }, [graph, graphEdges, graphNodes, selectedNodeId, setEdges, setNodes, theme]);
 
   const onNodeClick = useCallback((_event, node) => setSelectedNodeId(node.id), []);
 
@@ -227,6 +303,10 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
           <h2 className="flex items-center gap-2 text-2xl font-black tracking-tight text-text"><GitBranch size={24} className="text-primary" /> Lineage</h2>
           <p className="mt-1 max-w-3xl text-sm text-textMuted">Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.</p>
           <p className="mt-2 font-mono text-[11px] text-textMuted">Object: {objectId}</p>
+          <p className="mt-2 flex items-center gap-1.5 text-xs text-textMuted" aria-live="polite">
+            <Clock3 size={13} aria-hidden="true" />
+            {isFreshForSelection ? 'Current view loaded. Refresh to check for collaborator changes.' : 'Refresh to check for collaborator changes.'}
+          </p>
         </div>
         <button onClick={loadLineage} disabled={loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
           {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
@@ -242,11 +322,18 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
       ) : loading && !graph ? (
         <div className="flex flex-1 items-center justify-center"><Loader2 size={34} className="animate-spin text-primary" aria-label="Loading lineage" /></div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12">
-          <section className="relative min-h-[340px] border-b border-border bg-slate-900/40 lg:col-span-8 lg:border-b-0 lg:border-r">
+        <div className="flex min-h-0 flex-1 flex-col">
+          {graph?.truncated && (
+            <div className="mx-6 mt-5 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-amber-900 dark:text-amber-100" role="status">
+              <AlertTriangle size={20} className="mt-0.5 shrink-0" />
+              <div><p className="font-bold">Lineage view is bounded</p><p className="mt-1 text-sm">This graph reached its safe display limit. It may not include every recorded relationship.</p></div>
+            </div>
+          )}
+          <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12">
+          <section className="relative min-h-[340px] border-b border-border bg-slate-100 dark:bg-slate-950/40 lg:col-span-8 lg:border-b-0 lg:border-r">
             {graphNodes.length === 0 ? (
               <div className="flex h-full min-h-[340px] items-center justify-center p-8 text-center">
-                <div><GitBranch size={38} className="mx-auto text-textMuted" aria-hidden="true" /><p className="mt-3 font-bold text-text">No lineage metadata returned</p><p className="mt-1 text-sm text-textMuted">This object may not have durable lineage records yet.</p></div>
+                <div><GitBranch size={38} className="mx-auto text-textMuted" aria-hidden="true" /><p className="mt-3 font-bold text-text">This is a root object</p><p className="mt-1 text-sm text-textMuted">No durable parent or child relationships have been recorded yet.</p></div>
               </div>
             ) : (
               <ReactFlow
@@ -263,19 +350,26 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
             {selectedNode ? (
               <div className="space-y-5">
                 <div>
-                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">Selected object</p>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">Selected object</p>
+                    {graph?.rootObjectId && nodeById.has(graph.rootObjectId) && selectedNodeId !== graph.rootObjectId && (
+                      <button type="button" onClick={() => setSelectedNodeId(graph.rootObjectId)} className="text-xs font-bold text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">Jump to root</button>
+                    )}
+                  </div>
                   <h3 className="mt-1 text-xl font-bold text-text">{formatObjectLabel(selectedNode)}</h3>
                   <p className="mt-2 break-all font-mono text-xs text-textMuted">{selectedNode.id}</p>
                   <p className="mt-2 text-sm text-textMuted">Type: {selectedNode.objectType || 'analysis object'}</p>
+                  <p className="mt-3 text-xs leading-relaxed text-textMuted">Choose a node on the graph or a relationship below to inspect its recorded provenance.</p>
                 </div>
-                <EdgeList title="Parents" edges={selectedParents} nodeById={nodeById} />
-                <EdgeList title="Children" edges={selectedChildren} nodeById={nodeById} />
+                <EdgeList title="Parents" edges={selectedParents} nodeById={nodeById} onSelect={setSelectedNodeId} />
+                <EdgeList title="Children" edges={selectedChildren} nodeById={nodeById} onSelect={setSelectedNodeId} />
               </div>
             ) : (
               <div className="flex h-full min-h-64 flex-col items-center justify-center text-center"><GitBranch size={38} className="text-textMuted" aria-hidden="true" /><p className="mt-3 text-sm text-textMuted">Select an object to inspect its recorded relationships.</p></div>
             )}
             <div className="mt-6 flex gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-textMuted"><ShieldCheck size={16} className="shrink-0 text-primary" />Project lineage visibility does not grant access to another member&apos;s private live R state.</div>
           </aside>
+        </div>
         </div>
       )}
     </div>

@@ -116,6 +116,44 @@ async function checkPrimaryButtonHover(page, name) {
   );
 }
 
+// Visual state checks deliberately use the rendered screen rather than DOM
+// semantics alone. A hover should not make surrounding controls jump, and the
+// focused/hovered appearances are captured alongside the resting screenshot.
+async function checkCalmInteractiveStates(page, locator, name) {
+  if (await locator.count() === 0) {
+    warn(`Interactive state ${name} is present for visual review`);
+    return;
+  }
+
+  const before = await locator.boundingBox();
+  await locator.hover();
+  await sleep(220);
+  const after = await locator.boundingBox();
+  const shifted = !before || !after || [
+    Math.abs(before.x - after.x), Math.abs(before.y - after.y),
+    Math.abs(before.width - after.width), Math.abs(before.height - after.height),
+  ].some(value => value > 0.5);
+  assert(`Interactive state ${name} does not shift layout on hover`, !shifted);
+  await checkSnapshot(page, `state_hover_${name}`);
+
+  await locator.focus();
+  await sleep(100);
+  const isFocused = await locator.evaluate(element => document.activeElement === element);
+  assert(`Interactive state ${name} can receive keyboard focus`, isFocused);
+  await checkSnapshot(page, `state_focus_${name}`);
+}
+
+async function checkReducedMotion(page, locator, name) {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const transition = await locator.evaluate(element => window.getComputedStyle(element).transitionDuration);
+  const longestDurationMs = Math.max(...transition.split(',').map(value => {
+    const duration = Number.parseFloat(value);
+    return value.trim().endsWith('ms') ? duration : duration * 1000;
+  }));
+  assert(`Reduced motion removes prolonged ${name} animation`, longestDurationMs <= 1, `transition duration is ${transition}`);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+}
+
 // ── Screenshot Snapshot Check ──────────────────────────────────────────────────
 async function checkSnapshot(page, name) {
   const file = path.join(SNAPSHOTS_DIR, `${name}.png`);
@@ -592,8 +630,24 @@ async function main() {
         projectId: visualProject.id,
         objectId: 'ao_visualmock0001',
         rootObjectId: 'ao_visualmock0001',
-        nodes: demoObjectExists ? [visualAnalysisObject()] : [],
-        edges: [],
+        nodes: demoObjectExists ? [
+          visualAnalysisObject(),
+          visualAnalysisObject({
+            id: 'ao_visualfork0002',
+            parentObjectId: 'ao_visualmock0001',
+            lineageRootId: 'ao_visualmock0001',
+            displayName: 'Forked PBMC branch',
+            createdAt: '2026-01-02 00:00:00',
+          }),
+        ] : [],
+        edges: demoObjectExists ? [{
+          id: 'aoe_visualfork0001',
+          parentAnalysisObjectId: 'ao_visualmock0001',
+          childAnalysisObjectId: 'ao_visualfork0002',
+          jobId: 'job_visual_fork_1',
+          edgeType: 'checkpoint_fork',
+          parentRole: 'input',
+        }] : [],
         truncated: false
       };
     } else if (/\/artifacts$/.test(path)) {
@@ -852,6 +906,8 @@ async function main() {
   await runA11yAudit(page, `Workspace ${initialTheme}`);
   await checkPrimaryButtonHover(page, 'New Project');
   await checkPrimaryButtonHover(page, 'Load Object');
+  await checkCalmInteractiveStates(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new_project');
+  await checkReducedMotion(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new project button');
 
   // ── Test 1b: Theme toggle to opposite mode ────────────────────────────────
   section(`STEP 3: Theme toggle (${initialTheme} → ${oppositeTheme})`);
@@ -1077,6 +1133,8 @@ async function main() {
             'Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.'
           );
           assert('Lineage: durable read-only graph copy visible', await durableLineageCopy.count() === 1);
+          const forkExplanation = page.getByText('Created from a durable checkpoint. The source object remains unchanged.');
+          assert('Lineage: fork relationship is explained in researcher language', await forkExplanation.count() === 1);
         }
 
         // 2. Screenshot regression
