@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Layers, ListFilter, AlertTriangle, ImageDown, FileText } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot, { supportsWebGL } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import FigureSavePanel from '../components/FigureSavePanel';
@@ -17,7 +17,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     nNeighbors: 30,
     minDist: 0.3,
   });
-  const { nComponents, nNeighbors, minDist } = params;
+  const { nComponents: storedNComponents, nNeighbors, minDist } = params;
+  // Plotly's scatter3d renderer has no SVG equivalent. Never mount or request
+  // it in a renderer without WebGL; a saved 3D preference safely falls back to
+  // the usable 2D view instead.
+  const canUse3D = React.useMemo(() => supportsWebGL(), []);
+  const nComponents = canUse3D ? storedNComponents : 2;
   // dims defaults to the PC count used for clustering (from pipelineState)
   const [clusterParams] = useTabParams('cluster', userEmail, objectId, { dims: 15 });
   const [dims, setDims] = useState(clusterParams.dims);
@@ -51,6 +56,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   const [params2, setParam2] = useTabParams('umap_meta', userEmail, objectId, { resultNComponents: null, camera3D: null });
   const savedResultNComponents = params2.resultNComponents;
 
+  useEffect(() => {
+    if (!canUse3D && storedNComponents === 3) {
+      setParam('nComponents', 2);
+    }
+  }, [canUse3D, storedNComponents, setParam]);
+
   // Bug A fix: keep the debounce timer in its own ref (not on cameraRef itself).
   // cameraRef holds the latest camera position for the debounce closure.
   const cameraRef = React.useRef(params2.camera3D || null);
@@ -81,7 +92,8 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   }, [pipelineState?.clusterDims, pipelineState?.clusterCount]);
 
   const runUMAP = useCallback(async (isInitial = false, nComponentsOverride = null) => {
-    const nc = nComponentsOverride ?? nComponents;
+    const requestedComponents = nComponentsOverride ?? nComponents;
+    const nc = !canUse3D && requestedComponents === 3 ? 2 : requestedComponents;
     const ep = `/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`;
     const ipc = {
       operation: 'umap',
@@ -97,11 +109,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       setCachedDims(prev => ({ ...prev, [nc]: data }));
       setParam2('resultNComponents', nc);  // persist for hydration on reload
     }
-  }, [runStep, dims, nComponents, nNeighbors, minDist, activeProjectSeed, setParam2, umapParentIds]);
+  }, [runStep, dims, nComponents, nNeighbors, minDist, activeProjectSeed, setParam2, umapParentIds, canUse3D]);
 
   // Silent cache-only prefetch — populates cachedDims without touching running/error state.
   // Used to warm the other dimension during hydration so 2D↔3D toggle is instant.
   const prefetchDim = useCallback(async (nc) => {
+    if (!canUse3D && nc === 3) return;
     const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`, {}, {
       operation: 'umap',
       step: 'umap',
@@ -113,7 +126,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     if (data?.result) {
       setCachedDims(prev => ({ ...prev, [nc]: data }));
     }
-  }, [callApi, umapParentIds, dims, nNeighbors, minDist, activeProjectSeed]);
+  }, [callApi, umapParentIds, dims, nNeighbors, minDist, activeProjectSeed, canUse3D]);
 
   const is2D = nComponents === 2;
 
@@ -175,12 +188,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       // so toggling 2D↔3D is instant without an extra network round-trip.
       ; (async () => {
         await runUMAP(true, activeNC);
-        if (savedNC && savedNC !== activeNC) {
+        if (canUse3D && savedNC && savedNC !== activeNC) {
           await prefetchDim(savedNC);  // silent — no spinner, no error state
         }
       })();
     }
-  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated]);
+  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated, canUse3D]);
 
   // When the user toggles the dimension in the UI, clear the stale result
   // and eagerly try to load the required dimension from the local cache.
@@ -326,10 +339,18 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               >2D</button>
               <button
                 onClick={() => setParam('nComponents', 3)}
-                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-textMuted'}`}
+                disabled={!canUse3D}
+                aria-describedby={!canUse3D ? 'umap-3d-unavailable' : undefined}
+                title={!canUse3D ? '3D UMAP requires WebGL, which is unavailable in this renderer.' : undefined}
+                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-textMuted'} ${!canUse3D ? 'cursor-not-allowed opacity-50' : ''}`}
               >3D</button>
             </div>
             <p className="text-[10px] text-textMuted mt-1">2D for publications</p>
+            {!canUse3D && (
+              <p id="umap-3d-unavailable" role="status" className="text-[10px] text-textMuted mt-1.5">
+                3D UMAP requires WebGL. This renderer supports the 2D view only.
+              </p>
+            )}
           </div>
           <div>
             <label htmlFor="umap-neighbors" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of Neighbors</label>
@@ -413,8 +434,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                   config={plotConfig}
                 />
               </div>
-              <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-                <Plot
+              {canUse3D && (
+                <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                  <Plot
                   data={traces3D}
                   layout={layout3D}
                   useResizeHandler
@@ -443,8 +465,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                       }, 1000); // 1000ms provides a safer buffer to avoid saving mid-interaction
                     }
                   }}
-                />
-              </div>
+                  />
+                </div>
+              )}
             </>
           )}
         </div>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Network, AlertTriangle, FileText, ChevronRight, SlidersHorizontal } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 

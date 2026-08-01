@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 

@@ -3,11 +3,18 @@
 const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
-const { isAllowedNavigation, normalizeServerUrl } = require('./desktopConfig');
+const { isAllowedNavigation, normalizeServerUrl } = require('./desktopConfig.cjs');
 
 const SETTINGS_FILE = 'desktop-settings.json';
 let mainWindow = null;
 let serverUrl = null;
+
+// Plotly uses WebGL for high-density single-cell views. Ask Chromium to keep
+// WebGL available when a desktop session's GPU is blocklisted, while leaving
+// backend selection to Chromium so an unavailable software renderer cannot
+// blank the entire desktop window.
+app.commandLine.appendSwitch('enable-webgl');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
 function settingsPath() {
   return path.join(app.getPath('userData'), SETTINGS_FILE);

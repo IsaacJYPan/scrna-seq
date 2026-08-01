@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
@@ -246,6 +246,12 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         mode: 'markers',
         marker: { size: 2, opacity: pointOpacity[id], color: theme === 'light' ? '#000000' : '#ffffff' },
         hoverinfo: 'skip',
+        // In SVG mode, use the real cell marks for hover rather than mounting
+        // the 20,000-point invisible WebGL hover grid below.
+        svgFallback: {
+          hoverinfo: 'all',
+          hovertemplate: hover,
+        },
         showlegend: false
       }] : []),
       {
@@ -256,6 +262,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         marker: { size: 10, opacity: 0 },
         hovertemplate: hover,
         hoverlabel: { bgcolor: '#1e293b', font: { color: color, size: 12 } },
+        svgFallback: { omit: true },
         showlegend: false
       }
     ];

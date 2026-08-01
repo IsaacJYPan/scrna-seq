@@ -1402,6 +1402,19 @@ app.get('/api/runtime/diagnostics', async (req, res) => {
   }
 });
 
+// Compute availability is projected from a short-lived DB heartbeat written by
+// the standalone worker. Do not proxy the private worker health port or expose
+// worker ids, paths, topology, R URLs, or raw errors to browser clients.
+app.get('/api/runtime/compute-status', async (req, res) => {
+  try {
+    const status = await db.getStandaloneWorkerRuntimeStatus();
+    res.json(status);
+  } catch {
+    console.error('[Runtime] Compute status unavailable.');
+    res.status(503).json({ status: 'unknown', updatedAt: null });
+  }
+});
+
 // Database API endpoints.
 app.use('/api/db', express.json());
 app.use('/api/db', requireAuth);

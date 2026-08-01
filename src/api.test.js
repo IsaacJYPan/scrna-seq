@@ -538,6 +538,40 @@ describe('API Client (electronAPI)', () => {
     expect(result.packages).toMatchObject({ Seurat: true, CellChat: false });
   });
 
+  it('reads the public compute-runtime state without exposing worker internals', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({
+        status: 'ready',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        workerId: 'private-worker-id',
+        stateKey: 'private-r-state-key',
+      }),
+    });
+
+    await expect(electronAPI.getComputeRuntimeStatus()).resolves.toEqual({
+      status: 'ready',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/runtime/compute-status', expect.any(Object));
+  });
+
+  it('fails closed to an unknown compute-runtime state for malformed public responses', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ status: 'draining', updatedAt: 12345 }),
+    });
+
+    await expect(electronAPI.getComputeRuntimeStatus()).resolves.toEqual({
+      status: 'unknown',
+      updatedAt: null,
+    });
+  });
+
   it('creates durable DEG jobs through the project job API wrapper', async () => {
     global.fetch.mockResolvedValue({
       ok: true,
@@ -711,6 +745,27 @@ describe('API Client (electronAPI)', () => {
     expect(JSON.parse(options.body)).toEqual({
       jobType: 'checkpoint.fork.v1',
       analysisObjectId: 'ao_source123',
+      parameters: {},
+    });
+  });
+
+  it('creates owner-only checkpoint reattach jobs through the fixed project job API wrapper', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_attach123', jobType: 'checkpoint.load.v1', status: 'queued' }),
+    });
+
+    const result = await electronAPI.createCheckpointLoadJob('proj_1', 'ao_owner123');
+
+    expect(result.id).toBe('job_attach123');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'checkpoint.load.v1',
+      analysisObjectId: 'ao_owner123',
       parameters: {},
     });
   });

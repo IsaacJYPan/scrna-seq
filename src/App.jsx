@@ -268,6 +268,7 @@ export default function App() {
   });
 
   const [apiStatus, setApiStatus] = useState('Checking backend');
+  const [computeStatus, setComputeStatus] = useState({ status: 'unknown', updatedAt: null });
   const [provenanceRecords, setProvenanceRecords] = useState([]);
   const [drawerProvId, setDrawerProvId] = useState(null);
   const [drawerChain, setDrawerChain] = useState(null);
@@ -291,6 +292,28 @@ export default function App() {
     window.electronAPI.apiRequest('/health')
       .then(data => setApiStatus(data?.error ? 'Backend disconnected' : (data?.mode || 'R/Seurat runtime connected')))
       .catch(() => setApiStatus('Backend disconnected'));
+  }, [user?.email]);
+
+  useEffect(() => {
+    if (!user?.email || typeof window.electronAPI?.getComputeRuntimeStatus !== 'function') {
+      setComputeStatus({ status: 'unknown', updatedAt: null });
+      return undefined;
+    }
+    let active = true;
+    const refreshComputeStatus = async () => {
+      try {
+        const next = await window.electronAPI.getComputeRuntimeStatus();
+        if (active) setComputeStatus(next);
+      } catch {
+        if (active) setComputeStatus({ status: 'unknown', updatedAt: null });
+      }
+    };
+    void refreshComputeStatus();
+    const intervalId = window.setInterval(refreshComputeStatus, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
   }, [user?.email]);
 
   const updateActiveWorkspace = useCallback((updates) => {
@@ -441,6 +464,43 @@ export default function App() {
       },
     }));
   }, [patchActiveWorkspace, user]);
+
+  // A DB-backed object must be created before R can accept its server-verified
+  // private key. If the live load fails, keep that durable record visible and
+  // selected so the owner gets a concrete recovery action instead of an
+  // unexplained object appearing after the next sign-in.
+  const handleAnalysisObjectLoadFailed = useCallback((projectId, analysisObject) => {
+    if (!projectId || !analysisObject?.id) return;
+    const objectCard = mapBackendAnalysisObject(analysisObject);
+    cacheSelectedProject(localStorage, user, projectId);
+    cacheSelectedAnalysisObject(localStorage, user, projectId, analysisObject.id);
+    patchActiveWorkspace(ws => ({
+      selectedProjectId: projectId,
+      objects: [
+        objectCard,
+        ...ws.objects.filter(obj => obj.id !== analysisObject.id),
+      ],
+      selectedObjectIds: [analysisObject.id],
+      lastSelectedByProject: {
+        ...(ws.lastSelectedByProject || {}),
+        [projectId]: analysisObject.id,
+      },
+    }));
+  }, [patchActiveWorkspace, user]);
+
+  // This is a UI projection of a just-completed server-authorized restore/fork
+  // job. It never grants access to another member's live R state; the worker
+  // has already verified the requesting owner and selected the checkpoint.
+  const handleLiveObjectAttached = useCallback((projectId, objectId) => {
+    if (!projectId || !objectId) return;
+    patchActiveWorkspace(ws => ({
+      objects: ws.objects.map(object => (
+        object.projectId === projectId && object.id === objectId
+          ? { ...object, liveState: 'attached' }
+          : object
+      )),
+    }));
+  }, [patchActiveWorkspace]);
 
   const handleSelectAnalysisObject = useCallback((projectId, objectId) => {
     cacheSelectedAnalysisObject(localStorage, user, projectId, objectId);
@@ -946,69 +1006,14 @@ export default function App() {
 
 
 
-  // 3. Recalculate pipeline state when active node (currentProvId) changes
-  useEffect(() => {
-    if (datasetInfo?.liveState !== 'attached') {
-      resetPipelineState();
-      return;
-    }
-    if (!currentProvId || provenanceRecords.length === 0) {
-      return;
-    }
-    
-    const computeState = (nodeId) => {
-      const state = {
-        qc: false,
-        normalize: false,
-        integrate: false,
-        pca: false,
-        cluster: false,
-        annotate: false,
-        umap: false,
-        clusterCount: 0,
-        clusterDims: 15
-      };
-      const visited = new Set();
-      const queue = [nodeId];
-      
-      while (queue.length > 0) {
-        const currentId = queue.shift();
-        if (visited.has(currentId)) continue;
-        visited.add(currentId);
-        
-        const r = provenanceRecords.find(x => x.id === currentId);
-        if (r) {
-          const op = Array.isArray(r.operation) ? r.operation[0] : r.operation;
-          if (op === 'quality-control' || op === 'qc') {
-            state.qc = true;
-            if (r.result) state.qcSummary = r.result;
-            else if (r.parameters?.summary) state.qcSummary = r.parameters.summary;
-          }
-          if (op === 'normalize') state.normalize = true;
-          if (op === 'integrate') state.integrate = true;
-          if (op === 'pca') state.pca = true;
-          if (op === 'cluster') {
-            state.cluster = true;
-            if (r.result?.n_clusters) state.clusterCount = r.result.n_clusters;
-            else if (r.parameters?.n_clusters) state.clusterCount = r.parameters.n_clusters;
-            
-            if (r.result?.dims_used) state.clusterDims = r.result.dims_used;
-            else if (r.parameters?.dims) state.clusterDims = r.parameters.dims;
-          }
-          if (op === 'umap') state.umap = true;
-          if (op === 'annotate') state.annotate = true;
-          
-          if (r.parentIds) {
-            r.parentIds.forEach(pId => queue.push(pId));
-          }
-        }
-      }
-      return state;
-    };
-    
-    const nextState = computeState(currentProvId);
-    setPipelineState(nextState);
-  }, [currentProvId, provenanceRecords, datasetInfo?.liveState, resetPipelineState]);
+  // Pipeline availability belongs to the server-verified private R session, not
+  // the browser's provenance cache. Provenance can be incomplete for sessions
+  // created by older releases or after a local cache reset; treating a partial
+  // history as authoritative used to turn a completed PCA/cluster into a false
+  // "PCA Required" gate immediately after a downstream action. The pipeline
+  // probe above and successful current-session actions are the only sources
+  // allowed to change these live-state controls. Provenance remains available
+  // for history, script viewing, and parent links without changing R state.
   // ────────────────────────────────────────────────────────────────
 
   if (!isLoggedIn) return (
@@ -1061,6 +1066,8 @@ export default function App() {
       userId: user?.id ?? null,
       objectId: datasetInfo?.id ?? null,
       deploymentPolicy,
+      setActiveTab,
+      computeStatus,
     };
 
     return (
@@ -1079,6 +1086,7 @@ export default function App() {
             onCreateProject={handleCreateProject}
             onCreateAnalysisObjectForLoad={handleCreateAnalysisObjectForLoad}
             onAnalysisObjectLoaded={handleAnalysisObjectLoaded}
+            onAnalysisObjectLoadFailed={handleAnalysisObjectLoadFailed}
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
@@ -1103,13 +1111,13 @@ export default function App() {
         <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} onLiveObjectAttached={handleLiveObjectAttached} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.annotate} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="customscript"><TabContent id="customscript" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.customscript} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="team"><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="diagnostics"><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
@@ -1123,6 +1131,7 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         apiStatus={apiStatus}
+        computeStatus={computeStatus}
         records={provenanceRecords.length}
         currentProvId={currentProvId}
         openProvenance={openProvenance}

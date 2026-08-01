@@ -147,7 +147,7 @@ function FigureCard({ figure, onDelete, compact }) {
 
 const ALL_TYPES = ['UMAP', 'FeaturePlot', 'DotPlot', 'Heatmap', 'Violin'];
 
-export default function Publication({ userEmail }) {
+export default function Publication({ userEmail, isActive = true }) {
   const [figures, setFigures] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState('All');
@@ -167,9 +167,12 @@ export default function Publication({ userEmail }) {
     }
   }, [userEmail]);
 
+  // TabContent keeps this page mounted while another workspace view is active.
+  // Refresh on entry so a figure saved elsewhere appears immediately instead of
+  // requiring the user to discover and press the manual refresh control.
   useEffect(() => {
-    loadFigures();
-  }, [loadFigures]);
+    if (isActive) loadFigures();
+  }, [isActive, loadFigures]);
 
   const handleDelete = (id) => {
     setFigures(prev => prev.filter(f => f.id !== id));

@@ -9,10 +9,9 @@ export default function Sidebar({
   activeTab,
   setActiveTab,
   apiStatus,
+  computeStatus = { status: 'unknown' },
   workspaces = [],
-  setWorkspaces,
   activeWsIndex = 0,
-  setActiveWsIndex,
   selectedObjects = [],
   user,
   onLogout,
@@ -42,33 +41,17 @@ export default function Sidebar({
     }
   };
 
-  const personalWs = workspaces.filter(ws => ws.type === 'personal');
-  const sharedWs = workspaces.filter(ws => ws.type === 'shared');
   const currentWorkspace = workspaces[activeWsIndex];
   const hasData = selectedObjects.length > 0;
   const hasProject = !!currentWorkspace?.selectedProjectId || (currentWorkspace?.projects || []).length > 0;
   const backendConnected = typeof apiStatus === 'string' && /connected/i.test(apiStatus) && !/disconnected/i.test(apiStatus);
+  const computeLabel = computeStatus?.status === 'ready'
+    ? 'Compute ready'
+    : computeStatus?.status === 'unavailable'
+      ? 'Compute unavailable'
+      : 'Compute status unknown';
 
   const pipelineSections = buildPipelineSidebarSections(activePipeline, pipelineState);
-
-  const handleAddWorkspace = () => {
-    if (!setWorkspaces || !setActiveWsIndex) return;
-    const newWs = {
-      id: `ws-${Date.now()}`,
-      name: `New Workspace ${workspaces.length}`,
-      projects: [],
-      objects: [],
-      selectedProjectId: null,
-      selectedObjectIds: [],
-      activeBranch: 'main',
-      branches: { main: null },
-      collaborators: [],
-      type: 'personal',
-      dataVersion: 0,
-    };
-    setWorkspaces([...workspaces, newWs]);
-    setActiveWsIndex(workspaces.length);
-  };
 
   const NavButton = ({ item, disabled = false }) => {
     const Icon = item.icon;
@@ -121,26 +104,6 @@ export default function Sidebar({
     </div>
   );
 
-  const WorkspaceButton = ({ ws, demo = false }) => {
-    const i = workspaces.indexOf(ws);
-    const isActive = activeWsIndex === i;
-    const initials = ws.name.substring(0, 2).toUpperCase();
-    return (
-      <div key={ws.id} className="relative group w-full flex justify-center">
-        <button
-          onClick={() => { setActiveWsIndex?.(i); setIsCollapsed(false); }}
-          aria-label={demo ? `Switch to demo workspace ${ws.name}` : `Switch to ${ws.name}`}
-          title={demo ? `${ws.name} demo shell, not project RBAC` : ws.name}
-          className={`w-11 h-11 flex items-center justify-center text-[14px] font-semibold transition-colors duration-150 relative rounded-xl
-            ${isActive ? 'bg-primary text-white shadow-sm' : 'bg-black/5 dark:bg-slate-800 text-text hover:bg-primary/10'}
-          `}
-        >
-          {initials}
-        </button>
-      </div>
-    );
-  };
-
   return (
     <div className="flex h-full flex-shrink-0 z-20 relative w-[72px] lg:w-auto">
       <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0 border-r border-border">
@@ -162,23 +125,7 @@ export default function Sidebar({
 
         <div className="w-8 h-0.5 bg-black/10 dark:bg-slate-800 rounded-full my-1" />
 
-        <div className="flex-1 w-full overflow-y-auto no-scrollbar flex flex-col items-center gap-2">
-          {personalWs.map(ws => <WorkspaceButton key={ws.id} ws={ws} />)}
-
-          {sharedWs.length > 0 && <div className="w-8 h-0.5 bg-black/10 dark:bg-slate-800 rounded-full my-1" />}
-          {sharedWs.map(ws => <WorkspaceButton key={ws.id} ws={ws} demo />)}
-
-          <div className="relative group w-full flex justify-center mt-2">
-            <button
-              onClick={handleAddWorkspace}
-              aria-label="Create new local workspace"
-              className="w-11 h-11 rounded-xl bg-black/5 dark:bg-slate-800 flex items-center justify-center text-success hover:bg-success hover:text-on-accent transition-colors duration-150 shadow-sm"
-              title="Create local workspace shell"
-            >
-              <span className="text-3xl font-light mb-1">+</span>
-            </button>
-          </div>
-        </div>
+        <div className="flex-1" />
 
         {user && (
           <div className="mt-auto mb-2 w-full flex flex-col items-center gap-2 group relative">
@@ -254,15 +201,15 @@ export default function Sidebar({
           type="button"
           className="h-14 w-full text-left bg-black/[0.02] dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-black/5 transition-colors"
           onClick={() => setActiveTab('diagnostics')}
-          aria-label={`Open Diagnostics & Environment. ${backendConnected ? 'Backend connected' : 'Backend offline'}: ${apiStatus || 'Connection lost'}`}
+          aria-label={`Open Diagnostics & Environment. ${backendConnected ? 'R service connected' : 'R service offline'}: ${computeLabel}.`}
           title="Open Diagnostics & Environment"
         >
           <div className="flex flex-col justify-center min-w-0 pr-2 pb-0.5 flex-1">
             <div className="flex items-center gap-1.5 mb-[2px]">
               <div className={`w-2.5 h-2.5 rounded-full border border-black dark:border-white shadow-sm ${backendConnected ? 'bg-success' : 'animate-pulse bg-danger'}`} />
-              <span className="text-[13px] font-bold text-text truncate leading-none mt-1">{backendConnected ? 'Backend connected' : 'Backend offline'}</span>
+              <span className="text-[13px] font-bold text-text truncate leading-none mt-1">{backendConnected ? 'R service connected' : 'R service offline'}</span>
             </div>
-            <span className="text-[11px] text-slate-400 truncate leading-none">{apiStatus || 'Connection lost'}</span>
+            <span className="text-[11px] text-slate-400 truncate leading-none">{computeLabel}</span>
           </div>
           <Wrench size={16} className="text-slate-400" />
         </button>

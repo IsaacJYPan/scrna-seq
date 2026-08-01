@@ -48,6 +48,8 @@ let pool = null;
 // claim itself if that session lock is lost between a topology check and the
 // database mutation.
 const WORKER_CLAIM_GATE_LOCK = [0x5343524e, 501];
+const WORKER_RUNTIME_STATES = new Set(['ready', 'draining', 'unavailable']);
+const DEFAULT_WORKER_RUNTIME_STALE_AFTER_MS = 15000;
 
 // ── Job state machine ───────────────────────────────────────────────────────
 const JOB_STATUSES = new Set([
@@ -429,6 +431,42 @@ async function checkHealth(options = {}) {
   return true;
 }
 
+async function reportStandaloneWorkerRuntimeState(state) {
+  const normalized = typeof state === 'string' ? state.trim().toLowerCase() : '';
+  if (!WORKER_RUNTIME_STATES.has(normalized)) {
+    throw codedError('INVALID_WORKER_RUNTIME_STATE', 'Worker runtime state is invalid.');
+  }
+  const { rows } = await query(
+    `INSERT INTO worker_runtime_status (singleton, state, updated_at)
+     VALUES (TRUE, $1, now())
+     ON CONFLICT (singleton) DO UPDATE SET state = EXCLUDED.state, updated_at = now()
+     RETURNING state, updated_at`,
+    [normalized]
+  );
+  return {
+    state: rows[0]?.state || normalized,
+    updatedAt: toCanonicalTs(rows[0]?.updated_at),
+  };
+}
+
+async function getStandaloneWorkerRuntimeStatus(options = {}) {
+  const staleAfterMs = Number.isInteger(Number(options.staleAfterMs)) && Number(options.staleAfterMs) > 0
+    ? Number(options.staleAfterMs)
+    : DEFAULT_WORKER_RUNTIME_STALE_AFTER_MS;
+  const now = options.now === undefined ? new Date() : normalizeTimestamp(options.now);
+  const { rows } = await query(
+    'SELECT state, updated_at FROM worker_runtime_status WHERE singleton = TRUE LIMIT 1'
+  );
+  const row = rows[0];
+  if (!row) return { status: 'unknown', updatedAt: null };
+  const updatedAt = row.updated_at instanceof Date ? row.updated_at : new Date(row.updated_at);
+  const fresh = !Number.isNaN(updatedAt.getTime()) && now.getTime() - updatedAt.getTime() <= staleAfterMs;
+  return {
+    status: fresh && row.state === 'ready' ? 'ready' : 'unavailable',
+    updatedAt: toCanonicalTs(row.updated_at),
+  };
+}
+
 async function acquireWebTopologyLock() {
   const p = await connect();
   const client = await p.connect();
@@ -558,7 +596,7 @@ async function resetSchemaForTests() {
       analysis_object_edges, job_artifacts, jobs, analysis_objects,
       datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
-      platform_capabilities, operator_audit_events, users
+      worker_runtime_status, platform_capabilities, operator_audit_events, users
     CASCADE;
   `);
   await initSchema();
@@ -2580,16 +2618,19 @@ async function createProjectJob(userId, projectId, input = {}) {
   }
   if (jobType === 'cellchat.infer.v1') {
     validateCellChatInferenceParams(parameters);
-    // CellChat reads a creator-owned, process-local live R object. A project
-    // collaborator may view the durable analysis-object metadata, but cannot
-    // use another member's private R state. Reject before queue insertion so a
-    // cross-owner request cannot consume the one-worker capacity only to fail
-    // later at the worker ownership recheck.
-    if (!analysisObject || analysisObject.ownerUserId !== owner) {
-      throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
-    }
   }
-  if (jobType === 'checkpoint.load.v1' && analysisObject.ownerUserId !== owner) {
+  // These handlers read or mutate a process-local R object. Project membership
+  // permits durable metadata access, but never lets a collaborator use another
+  // member's live state. Reject before queue insertion so an invalid request
+  // cannot consume the deployment's single worker slot only to fail later.
+  const privateLiveInputJobTypes = new Set([
+    'deg.find_markers.v1',
+    'enrichment.gsea.v1',
+    'cellchat.infer.v1',
+    'checkpoint.load.v1',
+  ]);
+  if (privateLiveInputJobTypes.has(jobType)
+      && (!analysisObject || analysisObject.ownerUserId !== owner)) {
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
   const id = genId('job');
@@ -5653,6 +5694,8 @@ module.exports = {
   query,
   initSchema,
   checkHealth,
+  reportStandaloneWorkerRuntimeState,
+  getStandaloneWorkerRuntimeStatus,
   acquireWebTopologyLock,
   acquireStandaloneWorkerLock,
   resetSchemaForTests,
@@ -5661,6 +5704,7 @@ module.exports = {
   JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
   INITIAL_JOB_STATUS,
+  DEFAULT_WORKER_RUNTIME_STALE_AFTER_MS,
   PROJECT_ROLES,
   ALLOWED_OBJECT_TYPES,
   ALLOWED_JOB_TYPES,

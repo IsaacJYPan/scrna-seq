@@ -282,6 +282,15 @@ async function checkRuntimeDiagnostics() {
   };
 }
 
+async function getComputeRuntimeStatus() {
+  const data = await req('/api/runtime/compute-status');
+  const status = ['ready', 'unavailable', 'unknown'].includes(data?.status) ? data.status : 'unknown';
+  return {
+    status,
+    updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : null,
+  };
+}
+
 export const electronAPI = {
   // R Plumber Proxy
   apiRequest: async (endpoint, options = {}) => {
@@ -531,6 +540,15 @@ export const electronAPI = {
       method: 'POST',
       body: JSON.stringify(buildCellChatInferenceJobPayload(objectId, params)),
     }),
+  createCheckpointLoadJob: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        jobType: 'checkpoint.load.v1',
+        analysisObjectId: objectId,
+        parameters: {},
+      }),
+    }),
   createSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
     req(`/api/projects/${projectId}/jobs`, {
       method: 'POST',
@@ -609,6 +627,7 @@ export const electronAPI = {
   setTheme: (_theme) => { /* No-op in browser, handled by CSS */ },
 
   // Diagnostics
+  getComputeRuntimeStatus,
   getRScriptPath: async () => {
     try {
       const result = await checkRuntimeDiagnostics();

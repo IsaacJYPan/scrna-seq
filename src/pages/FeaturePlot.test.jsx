@@ -2,7 +2,7 @@ import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 
-vi.mock('react-plotly.js', () => ({ default: () => <div data-testid="plot-stub" /> }));
+vi.mock('../components/Plot', () => ({ default: () => <div data-testid="plot-stub" /> }));
 vi.mock('../components/FigureSavePanel', () => ({ default: () => null }));
 import FeaturePlot from './FeaturePlot';
 

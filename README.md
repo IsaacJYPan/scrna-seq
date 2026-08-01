@@ -251,6 +251,13 @@ so both can talk to the same local R process. `npm run dev:no-worker` omits the
 background job worker; use the full `npm run dev` command when testing the
 durable Seurat and differential-expression workflows.
 
+When `JOB_WORKER_MIN_FREE_MEMORY_MB` is omitted, this local supervisor gives
+only its worker a 256 MiB admission fallback so the development workflow can run
+on constrained workstations. An explicit value is preserved. Standalone workers
+and deployments retain the 1 GiB default documented in `.env.example`; this is
+an admission gate, not a substitute for measured RAM capacity and real resource
+limits.
+
 ### Advanced local runtime details
 
 You can skip this section for the normal quick-start setup above.
