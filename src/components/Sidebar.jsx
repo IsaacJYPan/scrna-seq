@@ -84,11 +84,11 @@ export default function Sidebar({
         disabled={isDisabled}
         title={item.status || item.label}
         aria-label={item.status ? `${item.label}, ${item.status}` : item.label}
-        className={`w-full flex items-center gap-3 px-3 py-[7px] rounded border text-[15px] font-medium transition-colors group
+        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] font-medium transition-colors group
           ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}
           ${isActive
-            ? 'border-primary/30 bg-primary/10 text-text dark:border-slate-600 dark:bg-slate-700'
-            : 'border-transparent text-textMuted hover:bg-black/5 dark:hover:bg-slate-700 hover:text-text'
+            ? 'border-primary/20 bg-primary/10 text-text'
+            : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'
           }
         `}
       >
@@ -114,7 +114,7 @@ export default function Sidebar({
 
   const SectionLabel = ({ children }) => (
     <div className="px-2 mb-1">
-      <h3 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+      <h3 className="text-[11px] font-semibold text-textMuted flex items-center gap-1.5">
         <ChevronDown size={12} className="opacity-70" />
         {children}
       </h3>
@@ -127,13 +127,12 @@ export default function Sidebar({
     const initials = ws.name.substring(0, 2).toUpperCase();
     return (
       <div key={ws.id} className="relative group w-full flex justify-center">
-        <div className={`absolute left-0 w-[4px] bg-white rounded-r-lg transition-all duration-300 ${isActive ? 'h-10 top-1' : 'h-0 top-6 group-hover:h-5 group-hover:top-3.5'}`} />
         <button
           onClick={() => { setActiveWsIndex?.(i); setIsCollapsed(false); }}
           aria-label={demo ? `Switch to demo workspace ${ws.name}` : `Switch to ${ws.name}`}
           title={demo ? `${ws.name} demo shell, not project RBAC` : ws.name}
-          className={`w-12 h-12 flex items-center justify-center text-[15px] font-black transition-all duration-200 relative group-hover:rounded-[16px] group-hover:bg-primary group-hover:text-white
-            ${isActive ? 'rounded-[16px] bg-primary text-white shadow-lg' : 'rounded-[24px] bg-black/5 dark:bg-slate-800 text-text'}
+          className={`w-11 h-11 flex items-center justify-center text-[14px] font-semibold transition-colors duration-150 relative rounded-xl
+            ${isActive ? 'bg-primary text-white shadow-sm' : 'bg-black/5 dark:bg-slate-800 text-text hover:bg-primary/10'}
           `}
         >
           {initials}
@@ -143,9 +142,9 @@ export default function Sidebar({
   };
 
   return (
-    <div className="flex h-full flex-shrink-0 z-20 shadow-2xl relative w-[72px] lg:w-auto">
-      <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0">
-        <div className="w-12 h-12 rounded-[24px] bg-primary flex items-center justify-center shadow-lg shadow-black/50 mb-1 hover:rounded-[16px] transition-all duration-200 cursor-pointer" title="BenchOne">
+    <div className="flex h-full flex-shrink-0 z-20 relative w-[72px] lg:w-auto">
+      <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0 border-r border-border">
+        <div className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center shadow-sm mb-1" title="BenchOne">
           <Microscope size={22} className="text-on-accent" />
         </div>
 
@@ -173,7 +172,7 @@ export default function Sidebar({
             <button
               onClick={handleAddWorkspace}
               aria-label="Create new local workspace"
-              className="w-12 h-12 rounded-[24px] bg-black/5 dark:bg-slate-800 flex items-center justify-center text-success hover:bg-success hover:text-on-accent hover:rounded-[16px] transition-all duration-200 shadow-sm"
+              className="w-11 h-11 rounded-xl bg-black/5 dark:bg-slate-800 flex items-center justify-center text-success hover:bg-success hover:text-on-accent transition-colors duration-150 shadow-sm"
               title="Create local workspace shell"
             >
               <span className="text-3xl font-light mb-1">+</span>
@@ -185,7 +184,7 @@ export default function Sidebar({
           <div className="mt-auto mb-2 w-full flex flex-col items-center gap-2 group relative">
             <button
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-slate-700 hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-white"
+              className="w-11 h-11 rounded-xl bg-transparent hover:bg-black/5 transition-colors duration-150 flex items-center justify-center text-textMuted hover:text-text"
               onClick={() => setTheme?.(theme === 'dark' ? 'light' : 'dark')}
               title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
             >
@@ -193,7 +192,7 @@ export default function Sidebar({
             </button>
             <button
               aria-label="Log out"
-              className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-danger hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-on-accent"
+              className="w-11 h-11 rounded-xl bg-transparent hover:bg-danger hover:text-on-accent transition-colors duration-150 flex items-center justify-center text-textMuted"
               onClick={onLogout}
               title="Log Out"
             >
@@ -203,14 +202,14 @@ export default function Sidebar({
         )}
       </nav>
 
-      <aside className={`bg-surface flex flex-col h-full select-none transition-all duration-300 overflow-hidden ${isCollapsed ? 'w-0 opacity-0 pointer-events-none' : 'absolute left-[72px] top-0 z-40 w-[calc(100vw-72px)] max-w-60 opacity-100 shadow-2xl lg:static lg:left-auto lg:top-auto lg:z-auto lg:w-60 lg:max-w-none'}`}>
+      <aside className={`bg-surface flex flex-col h-full select-none transition-[width,opacity] duration-200 overflow-hidden ${isCollapsed ? 'w-0 opacity-0 pointer-events-none' : 'absolute left-[72px] top-0 z-40 w-[calc(100vw-72px)] max-w-60 opacity-100 shadow-xl lg:static lg:left-auto lg:top-auto lg:z-auto lg:w-60 lg:max-w-none'}`}>
         <button
           type="button"
           aria-label="Collapse sidebar"
-          className="h-12 w-full flex items-center px-4 shadow-sm border-b border-border hover:bg-slate-700 transition-colors cursor-pointer group text-left"
+          className="h-12 w-full flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"
           onClick={() => setIsCollapsed(true)}
         >
-          <span className="text-[15px] font-black text-slate-100 truncate flex-1 leading-none">{currentWorkspace?.name || 'BenchOne'}</span>
+          <span className="text-[15px] font-semibold text-text truncate flex-1 leading-none">{currentWorkspace?.name || 'BenchOne'}</span>
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </button>
 
@@ -253,7 +252,7 @@ export default function Sidebar({
 
         <button
           type="button"
-          className="h-14 w-full text-left bg-black/5 dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-slate-800 transition-colors"
+          className="h-14 w-full text-left bg-black/[0.02] dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-black/5 transition-colors"
           onClick={() => setActiveTab('diagnostics')}
           aria-label={`Open Diagnostics & Environment. ${backendConnected ? 'Backend connected' : 'Backend offline'}: ${apiStatus || 'Connection lost'}`}
           title="Open Diagnostics & Environment"
