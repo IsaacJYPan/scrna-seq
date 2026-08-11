@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { BarChart3, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 

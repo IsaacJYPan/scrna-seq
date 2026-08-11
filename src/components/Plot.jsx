@@ -1,5 +1,9 @@
 import React from 'react';
-import PlotlyPlot from 'react-plotly.js';
+
+// Plotly is the largest browser dependency in the application. Load the
+// curated renderer only when a chart is actually mounted so the workspace and
+// non-visual workflows do not pay its parse/startup cost.
+const PlotlyPlot = React.lazy(() => import('./PlotlyRenderer'));
 
 // Plotly's WebGL trace types provide a useful performance win in browsers that
 // support them. Electron can run with GPU acceleration disabled, however, and
@@ -105,11 +109,22 @@ export default function Plot({ data = [], onError, onWebGlContextLost, ...props 
   }, [fallBackToSvg, onWebGlContextLost]);
 
   return (
-    <PlotlyPlot
-      {...props}
-      data={plotData}
-      onError={handleError}
-      onWebGlContextLost={handleWebGlContextLost}
-    />
+    <React.Suspense fallback={(
+      <div
+        role="status"
+        aria-label="Preparing visualization"
+        className={`flex min-h-60 items-center justify-center text-sm text-textMuted ${props.className || ''}`}
+        style={props.style}
+      >
+        Preparing visualization…
+      </div>
+    )}>
+      <PlotlyPlot
+        {...props}
+        data={plotData}
+        onError={handleError}
+        onWebGlContextLost={handleWebGlContextLost}
+      />
+    </React.Suspense>
   );
 }
