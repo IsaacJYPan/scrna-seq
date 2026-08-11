@@ -25,12 +25,12 @@ function assertSupportedSpatialSeuratDataset(dataset) {
   if (dataset.fileType !== SPATIAL_SEURAT_DATASET_TYPE) {
     throw codedError('INVALID_PARAMETERS', 'spatial.seurat.v1 supports classic 10x Visium Space Ranger ZIP bundles only.');
   }
-  if (dataset.uploadStatus !== 'uploaded' || dataset.validationStatus === 'invalid'
+  if (dataset.uploadStatus !== 'uploaded' || dataset.validationStatus !== 'valid'
       || typeof dataset.internalStorageKey !== 'string'
       || !isProjectStorageKey(dataset.internalStorageKey, {
         projectId: dataset.projectId, kind: 'datasets',
       })) {
-    throw codedError('INVALID_PARAMETERS', 'Spatial dataset is not ready for analysis.');
+    throw codedError('INVALID_PARAMETERS', 'Spatial dataset validation must pass before analysis can start.');
   }
 }
 

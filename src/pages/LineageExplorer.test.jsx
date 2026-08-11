@@ -48,6 +48,7 @@ describe('LineageExplorer', () => {
           edgeType: 'checkpoint_fork', parentRole: 'source', claimToken: 'secret-claim-token',
         }],
       })),
+      listAnalysisBranches: vi.fn(async () => []),
     };
   });
 
@@ -86,6 +87,22 @@ describe('LineageExplorer', () => {
     expect(await screen.findByText('Parents')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Forked PBMC' })).toBeInTheDocument();
     expect(screen.queryByText('ao_child')).not.toBeInTheDocument();
+  });
+
+  it('shows branches based on the selected saved version even before they create a child object', async () => {
+    window.electronAPI.getProjectAnalysisObjectLineage.mockResolvedValueOnce({
+      projectId: 'proj_1', objectId: 'ao_root', rootObjectId: 'ao_root',
+      truncated: false, nodes: [{ id: 'ao_root', label: 'PBMC root' }], edges: [],
+    });
+    window.electronAPI.listAnalysisBranches.mockResolvedValueOnce([{
+      id: 'br_private', name: 'alternate QC strategy', visibility: 'private', version: 1,
+      baseAnalysisObjectId: 'ao_root', headAnalysisObjectId: 'ao_root',
+    }]);
+
+    render(<LineageExplorer currentWs={workspace} datasetInfo={{ id: 'ao_root', projectId: 'proj_1' }} />);
+
+    expect(await screen.findByText('alternate QC strategy')).toBeInTheDocument();
+    expect(screen.getByText(/Private draft.*saved version 1/i)).toBeInTheDocument();
   });
 
   it('explains an omitted related object without offering a broken selection', async () => {

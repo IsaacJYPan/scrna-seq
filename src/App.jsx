@@ -220,8 +220,9 @@ export default function App() {
     clusterCount: 0,
     clusterDims: 15  // default dims; updated when clustering runs
   });
+  const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
   // Gate that blocks per-page cache hydration until after the R session
-  // restore attempt completes (success or no saved session). Without this
+  // identity and selected-object attachment probes complete. Without this
   // gate the pages fire onlyIfCached calls with the wrong (new) session ID
   // and always miss the SQLite cache.
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
@@ -545,6 +546,7 @@ export default function App() {
   // has already verified the requesting owner and selected the checkpoint.
   const handleLiveObjectAttached = useCallback((projectId, objectId) => {
     if (!projectId || !objectId) return;
+    setUnsavedLiveChanges(false);
     patchActiveWorkspace(ws => ({
       objects: ws.objects.map(object => (
         object.projectId === projectId && object.id === objectId
@@ -553,6 +555,16 @@ export default function App() {
       )),
     }));
   }, [patchActiveWorkspace]);
+
+  useEffect(() => {
+    if (!unsavedLiveChanges) return undefined;
+    const warnBeforeClose = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeClose);
+    return () => window.removeEventListener('beforeunload', warnBeforeClose);
+  }, [unsavedLiveChanges]);
 
   const handleSelectAnalysisObject = useCallback((projectId, objectId) => {
     cacheSelectedAnalysisObject(localStorage, user, projectId, objectId);
@@ -698,6 +710,7 @@ export default function App() {
       clusterDims: 15,
     };
     setPipelineState(initialSubsetPS);
+    setUnsavedLiveChanges(true);
 
     // The subset object is DB-backed metadata; live R state remains transient.
   }, [activeWsIndex, currentWs, datasetInfo, pipelineState.qcSummary, user]);
@@ -731,8 +744,9 @@ export default function App() {
       if (cached) {
         const prov = await (window.electronAPI?.getProvenance?.(cached.provenanceId));
         if (prov) {
-          // [PATCH] Update pipeline state even for cached results
-          if (step) {
+          // Cached provenance can render a prior result, but it cannot prove
+          // that the selected object exists in the current private R process.
+          if (step && hasAttachedLiveRObject(datasetInfo)) {
             const extraState = {};
             if (step === 'cluster') {
               if (cached.result?.n_clusters) extraState.clusterCount = cached.result.n_clusters;
@@ -802,6 +816,7 @@ export default function App() {
             extraState.qcSummary = data.result;
           }
           markPipelineStep(step, extraState);
+          setUnsavedLiveChanges(true);
           // QC: update workspace object cell count to post-filter value
           if (step === 'qc' && data.result?.post_filter_cells) {
             updateActiveWorkspace({
@@ -872,91 +887,8 @@ export default function App() {
   // ────────────────────────────────────────────────────────────────
 
   // ── R Session / Pipeline Persistence ─────────────────────────────
-  // Live R state is private and transient. The UI probes the server for the
-  // current process session ID only; it does not restore objects from
-  // client-selected paths or localStorage session metadata.
-  const getSessionPath = () => null;
-  const currentlyRestoredObjectRef = React.useRef(null);
-
-  // Track the currently restored object ID (avoid re-firing if React re-renders)
-
-  // 0. Keep sessionPathRef in sync so callApi can always find the save path
-  useEffect(() => {
-    return undefined;
-  }); // runs every render — cheap, keeps ref always fresh
-
-
-
-  // 1. Auto-restore on login + active object available
-  useEffect(() => {
-    if (!user?.email || !datasetInfo?.id) {
-      // No object yet — nothing to restore, unblock hydration immediately
-      setSessionCheckDone(true);
-      return;
-    }
-    if (currentlyRestoredObjectRef.current === datasetInfo.id) return;
-    currentlyRestoredObjectRef.current = datasetInfo.id;
-
-    // Block hydration until this async restore resolves
-    setSessionCheckDone(false);
-
-    const path = getSessionPath(user.email, datasetInfo.id);
-    if (!path) { setSessionCheckDone(true); return; }
- 
-    console.log('[Vault] Checking for stored object:', path);
-    window.electronAPI.apiRequest('/session-id')
-      .then(d => {
-        if (!d.exists) {
-          console.log('[Vault] No stored object found — initializing fresh state.');
-          return window.electronAPI.apiRequest('/session-id').then(data => {
-            if (data.sessionId) setRSessionId(data.sessionId);
-            resetPipelineState();
-          });
-        }
-        console.log('[Vault] Found stored object, restoring state…');
-        return window.electronAPI.apiRequest('/session-id')
-          .then(d2 => {
-            if (d2?.success) {
-              const reductionsStr = Array.isArray(d2.reductions) 
-                ? d2.reductions.join(', ') 
-                : (d2.reductions ? String(d2.reductions) : 'none');
-              console.log('[Vault] ✅ Restored:', d2.cells, 'cells, reductions:', reductionsStr);
-              if (d2.session_id) {
-                console.log('[Vault] Linking to provenance cache:', d2.session_id);
-                setRSessionId(d2.session_id);
-              } else {
-                console.warn('[Vault] Metadata missing session_id — fetching fresh ID.');
-                return window.electronAPI.apiRequest('/session-id').then(data => {
-                  if (data.sessionId) setRSessionId(data.sessionId);
-                });
-              }
-            } else if (d2?.error) {
-              console.warn('[Vault] Object restore failed:', d2.error);
-              return window.electronAPI.apiRequest('/session-id').then(data => {
-                if (data.sessionId) setRSessionId(data.sessionId);
-                resetPipelineState();
-              });
-            } else {
-              console.warn('[Vault] Unexpected restore response, unblocking with fresh ID.');
-              return window.electronAPI.apiRequest('/session-id').then(data => {
-                if (data.sessionId) setRSessionId(data.sessionId);
-              });
-            }
-          });
-      })
-      .catch(e => {
-        console.warn('[Vault] Restore check failed:', e);
-        return window.electronAPI.apiRequest('/session-id').then(data => {
-          if (data.sessionId) setRSessionId(data.sessionId);
-          resetPipelineState();
-        }).catch(() => resetPipelineState());
-      })
-      .finally(() => {
-        console.log('[Vault] Ready.');
-        setSessionCheckDone(true);
-      });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.email, datasetInfo?.id]);
+  // Live R state is private and transient. A selected database object is never
+  // treated as attached until the current R process confirms it.
 
   useEffect(() => {
     if (!user?.email) {
@@ -964,10 +896,19 @@ export default function App() {
       return;
     }
     setSessionCheckDone(false);
+    setUnsavedLiveChanges(false);
+    resetPipelineState();
+    if (datasetInfo?.id) {
+      const objectId = datasetInfo.id;
+      patchActiveWorkspace(ws => ({
+        objects: ws.objects.map(object => object.id === objectId
+          ? { ...object, liveState: 'unknown' }
+          : object),
+      }));
+    }
     window.electronAPI.apiRequest('/session-id')
       .then(data => {
         if (data?.sessionId) setRSessionId(data.sessionId);
-        if (!datasetInfo?.id) resetPipelineState();
       })
       .catch(e => {
         console.warn('[Session] R session probe failed:', e);
@@ -975,7 +916,7 @@ export default function App() {
         resetPipelineState();
       })
       .finally(() => setSessionCheckDone(true));
-  }, [user?.email, datasetInfo?.id, resetPipelineState]);
+  }, [user?.email, datasetInfo?.id, resetPipelineState, patchActiveWorkspace]);
 
   const pipelineProbeKeyRef = React.useRef(null);
   const pipelineProbeAttachedRef = React.useRef(false);
@@ -992,15 +933,10 @@ export default function App() {
       serverAttached: pipelineProbeAttachedRef.current,
       liveState: datasetInfo?.liveState,
     });
-    if (probeAction === 'project-attached') {
-      patchActiveWorkspace(ws => ({
-        objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
-      }));
-      return;
-    }
     if (probeAction === 'skip') {
       return;
     }
+    if (pipelineProbeKeyRef.current !== key) pipelineProbeAttachedRef.current = false;
     pipelineProbeKeyRef.current = key;
 
     window.electronAPI.apiRequest('/pipeline-state', {
@@ -1216,7 +1152,14 @@ export default function App() {
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
-        {renderContent()}
+        {unsavedLiveChanges && (
+          <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-text" role="status">
+            <span className="font-bold">Unsaved live changes.</span>{' '}
+            Closing this window or restarting compute can discard them. Run an approved workflow to create a durable saved version.
+            <button type="button" className="ml-2 underline" onClick={() => setActiveTab('pipeline-manager')}>Open approved workflows</button>
+          </div>
+        )}
+        <div className="min-h-0 flex-1">{renderContent()}</div>
       </main>
 
       <ProvenanceDrawer

@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ProjectHistory from './ProjectHistory';
 
@@ -209,6 +209,30 @@ describe('ProjectHistory', () => {
     expect(screen.getAllByText(/Recorded:/)).toHaveLength(2);
   });
 
+  it('keeps runs for other analyses out of the selected-analysis section', async () => {
+    window.electronAPI.listProjectJobs.mockResolvedValueOnce([{
+      id: 'job_selected', jobType: 'pbmc.pipeline.v1', analysisObjectId: 'ao_abc123',
+      ownerUserId: 7, status: 'completed', createdAt: '2026-07-01T00:00:00.000Z',
+    }, {
+      id: 'job_other', jobType: 'spatial.seurat.v1', analysisObjectId: 'ao_spatial',
+      ownerUserId: 9, status: 'failed', createdAt: '2026-07-02T00:00:00.000Z',
+      error: { code: 'HANDLER_ERROR', message: 'spatial pipeline failed' },
+    }]);
+    const mixedWorkspace = {
+      ...currentWs,
+      objects: [...currentWs.objects, {
+        id: 'ao_spatial', projectId: 'proj_1', displayName: 'Visium section', ownerUserId: 9,
+      }],
+    };
+
+    render(<ProjectHistory currentWs={mixedWorkspace} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} userId={7} />);
+
+    const selectedSection = (await screen.findByText('Selected Analysis Runs')).closest('section');
+    expect(within(selectedSection).getByText('PBMC preprocessing')).toBeInTheDocument();
+    expect(within(selectedSection).queryByText('Spatial preprocessing')).not.toBeInTheDocument();
+    expect(screen.getByText(/Other project activity \(1 runs/i)).toBeInTheDocument();
+  });
+
   it('uses a generic history error when a response contains private runtime details', async () => {
     window.electronAPI.listProjectJobs.mockRejectedValueOnce(new Error(JSON.stringify({
       error: 'Traceback at C:\\private\\history.R from https://worker.internal/api/job_unsafe_2',
@@ -416,16 +440,16 @@ describe('ProjectHistory', () => {
     window.electronAPI.listProjectArtifacts.mockResolvedValueOnce([
       {
         id: 'artifact_checkpoint_1', artifactType: 'checkpoint', status: 'available',
-        storageKind: 'local_internal', jobId: 'job_1', resultAnalysisObjectId: 'ao_result123',
+        storageKind: 'local_internal', jobId: 'job_1', resultAnalysisObjectId: 'ao_abc123',
       },
       {
         id: 'artifact_checkpoint_2', artifactType: 'checkpoint', status: 'available',
-        storageKind: 'local_internal', jobId: 'job_2', resultAnalysisObjectId: 'ao_result123',
+        storageKind: 'local_internal', jobId: 'job_2', resultAnalysisObjectId: 'ao_abc123',
       },
     ]);
     render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
 
-    expect((await screen.findAllByText(/cannot be selected automatically/i)).length).toBe(2);
+    expect((await screen.findAllByText(/cannot be selected automatically/i)).length).toBe(3);
     expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
   });
 
@@ -491,15 +515,17 @@ describe('ProjectHistory', () => {
     window.electronAPI.listProjectFigures.mockResolvedValue([]);
     const workspaceA = {
       projects: [{ id: 'proj_a', name: 'Project A', role: 'owner' }],
-      selectedProjectId: 'proj_a', objects: [], selectedObjectIds: [],
+      selectedProjectId: 'proj_a',
+      objects: [{ id: 'ao_a', projectId: 'proj_a', displayName: 'Project A analysis' }],
+      selectedObjectIds: ['ao_a'],
     };
     const workspaceB = {
       projects: [{ id: 'proj_b', name: 'Project B', role: 'owner' }],
       selectedProjectId: 'proj_b', objects: [], selectedObjectIds: [],
     };
-    const { rerender } = render(<ProjectHistory currentWs={workspaceA} datasetInfo={null} />);
+    const { rerender } = render(<ProjectHistory currentWs={workspaceA} datasetInfo={workspaceA.objects[0]} />);
     expect((await screen.findAllByText('PBMC preprocessing')).length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: /create branch from this version/i })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /create branch from this version/i }).length).toBeGreaterThan(0);
 
     rerender(<ProjectHistory currentWs={workspaceB} datasetInfo={null} />);
 

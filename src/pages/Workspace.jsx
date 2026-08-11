@@ -28,6 +28,22 @@ function datasetResearchStatus(dataset) {
   return 'Preparing data';
 }
 
+const CLASSIC_VISIUM_REQUIRED_FILES = [
+  'filtered_feature_bc_matrix.h5',
+  'spatial/tissue_positions.csv or spatial/tissue_positions_list.csv',
+  'spatial/scalefactors_json.json',
+  'spatial/tissue_lowres_image.png',
+];
+
+function datasetValidationMessages(dataset) {
+  const value = dataset?.validationErrors;
+  if (Array.isArray(value)) return value.filter((item) => typeof item === 'string').slice(0, 4);
+  if (value && typeof value === 'object' && Array.isArray(value.errors)) {
+    return value.errors.filter((item) => typeof item === 'string').slice(0, 4);
+  }
+  return [];
+}
+
 // Removed API constant
 // ── Load Object Modal ──────────────────────────────────────────────
 
@@ -924,6 +940,8 @@ export function SeuratPipelinePanel({
   };
 
   const activeDataset = datasets.find(dataset => dataset.id === selectedDatasetId) || null;
+  const activeDatasetReady = activeDataset?.uploadStatus === 'uploaded'
+    && activeDataset?.validationStatus === 'valid';
   const inputObjects = (currentWs.objects || [])
     .filter(object => object.projectId === activeProjectId && object.datasetId === selectedDatasetId);
   const selectedInputObject = selectedObject?.projectId === activeProjectId && selectedObject?.datasetId === selectedDatasetId
@@ -1164,7 +1182,8 @@ export function SeuratPipelinePanel({
     setActiveTab('deg');
   };
 
-  const canLaunch = !!activeProjectId && !!selectedDatasetId && !jobStatus.launching;
+  const canLaunch = !!activeProjectId && !!selectedDatasetId && !jobStatus.launching
+    && (!spatialMode || activeDatasetReady);
 
   const selectWorkflowMode = (nextMode) => {
     if (nextMode === workflowMode) return;
@@ -1274,6 +1293,13 @@ export function SeuratPipelinePanel({
                         <span className="mt-1 block text-xs text-textMuted">
                           {workflow.shortFormatLabel} · {datasetResearchStatus(dataset)}
                         </span>
+                        {dataset.validationStatus === 'invalid' && (
+                          <span className="mt-2 block text-xs text-danger">
+                            {datasetValidationMessages(dataset)[0]
+                              ? safeMessage(datasetValidationMessages(dataset)[0])
+                              : 'This upload did not pass format validation.'}
+                          </span>
+                        )}
                       </span>
                     </label>
                   ))}
@@ -1350,6 +1376,22 @@ export function SeuratPipelinePanel({
               <div className="mt-3 rounded border border-border bg-surface px-3 py-2 text-xs text-textMuted">
                 Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || 'Will be created from the selected dataset'}</span>
               </div>
+              {spatialMode && activeDataset && !activeDatasetReady && (
+                <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-xs text-textMuted" role="status">
+                  <p className="font-bold text-text">
+                    {activeDataset.validationStatus === 'invalid'
+                      ? 'This Visium ZIP cannot be started until its contents are corrected.'
+                      : 'This Visium ZIP is still being checked. Refresh datasets before starting the run.'}
+                  </p>
+                  <p className="mt-2">Required files under one Space Ranger output directory:</p>
+                  <ul className="mt-1 list-disc space-y-1 pl-5">
+                    {CLASSIC_VISIUM_REQUIRED_FILES.map((file) => <li key={file}>{file}</li>)}
+                  </ul>
+                  {datasetValidationMessages(activeDataset).map((message) => (
+                    <p key={message} className="mt-2 text-danger">{safeMessage(message)}</p>
+                  ))}
+                </div>
+              )}
               <button
                 onClick={launchPipeline}
                 disabled={!canLaunch}

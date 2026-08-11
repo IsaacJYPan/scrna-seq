@@ -195,8 +195,10 @@ unavailable; operators manage access with
 
 The spatial workflow currently supports one classic 10x Visium Space Ranger ZIP
 containing `filtered_feature_bc_matrix.h5` plus its `spatial/` directory. The
-allowlisted `spatial.seurat.v1` worker validates and extracts only the required
-entries, loads counts/image/coordinates with Seurat, performs bounded QC,
+server inspects a bounded archive inventory first and enables the run only after
+the matrix, positions, scalefactors, and low-resolution image pass validation.
+The allowlisted `spatial.seurat.v1` worker independently validates and extracts
+only those required entries, loads counts/image/coordinates with Seurat, performs bounded QC,
 normalization, PCA, clustering, and UMAP, and saves a reusable checkpoint with
 lineage and provenance. Visium HD, Xenium, arbitrary spatial layouts, and
 multi-sample spatial integration are not yet supported.

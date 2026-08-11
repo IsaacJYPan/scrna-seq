@@ -35,9 +35,14 @@ function formatApiError(error, fallback) {
 
 function formatJobError(job) {
   const fallback = 'This analysis needs attention. Review the settings and try again.';
-  return job?.jobType === 'expert.r.v1'
-    ? publicErrorMessage(job.error, fallback)
-    : formatApiError(job?.error, fallback);
+  const jobFallbacks = {
+    'expert.r.v1': 'The R script stopped with an error. Check input names, columns, and function arguments.',
+    'explore.summarize.v1': 'Exploratory analysis could not read the requested data. Open the saved version and verify the selected metadata before trying again.',
+    'spatial.seurat.v1': 'Spatial preprocessing could not use this Visium bundle. Review dataset validation and the required Space Ranger files before trying again.',
+    'condition.pseudobulk_de.v1': 'Condition comparison could not use the registered design. Review sample bindings, replication, and the selected contrast before trying again.',
+  };
+  if (job?.jobType === 'expert.r.v1') return publicErrorMessage(job.error, jobFallbacks[job.jobType]);
+  return formatApiError(job?.error, jobFallbacks[job?.jobType] || fallback);
 }
 
 function isProjectAccessError(error) {
@@ -192,18 +197,26 @@ function SummaryCard({ label, value, detail }) {
   );
 }
 
-function JobList({ jobs }) {
+function JobList({ jobs, analysisObjects = [], userId, emptyTitle = 'No analysis runs yet', emptyCopy = 'No recorded analysis runs are associated with this analysis.' }) {
   if (!jobs.length) {
     return (
-      <EmptyState title="No analysis runs yet">
-        This project has no recorded analysis runs yet.
+      <EmptyState title={emptyTitle}>
+        {emptyCopy}
       </EmptyState>
     );
   }
 
+  const analysisNamesById = new Map(analysisObjects.map((analysis) => [
+    analysis.id, analysis.displayName || analysis.name || 'Saved analysis',
+  ]));
+
   return (
     <div className="space-y-2">
-      {jobs.map(job => (
+      {jobs.map(job => {
+        const sourceName = analysisNamesById.get(job.analysisObjectId);
+        const resultName = analysisNamesById.get(job.resultAnalysisObjectId);
+        const owner = Number(job.ownerUserId) === Number(userId) ? 'You' : 'Project collaborator';
+        return (
         <div key={job.id} className="rounded-lg border border-border bg-surface p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -213,17 +226,22 @@ function JobList({ jobs }) {
                   {displayStatus(job.status)}
                 </StatusBadge>
               </div>
-              <p className="mt-1 text-sm text-textMuted">Recorded in this project&apos;s analysis history.</p>
+              <div className="mt-2 grid gap-1 text-xs text-textMuted sm:grid-cols-2">
+                <span>Owner: <span className="text-text">{owner}</span></span>
+                <span>Input: <span className="text-text">{sourceName || 'No saved-analysis input'}</span></span>
+                {resultName && <span>Saved result: <span className="text-text">{resultName}</span></span>}
+              </div>
             </div>
             <p className="text-xs text-textMuted">{formatDate(job.createdAt)}</p>
           </div>
-          {job.error?.message && (
+          {(job.status === 'failed' || job.error) && (
             <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
               {formatJobError(job)}
+              <div className="mt-1 text-textMuted">Recovery: review the input and settings, then start a new run from the named input analysis.</div>
             </div>
           )}
         </div>
-      ))}
+      );})}
     </div>
   );
 }
@@ -518,6 +536,22 @@ export default function ProjectHistory({
   const selectedCheckpoint = checkpointCandidates.length === 1 ? checkpointCandidates[0] : null;
   const selectedObjectIsOwnedByUser = Number.isInteger(Number(userId))
     && Number(selectedObject?.ownerUserId) === Number(userId);
+  const selectedJobs = selectedObjectId
+    ? historyState.jobs.filter((job) => (
+      job.analysisObjectId === selectedObjectId || job.resultAnalysisObjectId === selectedObjectId
+    ))
+    : [];
+  const selectedJobIds = new Set(selectedJobs.map((job) => job.id));
+  const selectedArtifacts = selectedObjectId
+    ? historyState.artifacts.filter((artifact) => (
+      artifact.analysisObjectId === selectedObjectId
+      || artifact.resultAnalysisObjectId === selectedObjectId
+      || selectedJobIds.has(artifact.jobId)
+    ))
+    : [];
+  const otherJobs = historyState.jobs.filter((job) => !selectedJobIds.has(job.id));
+  const selectedArtifactIds = new Set(selectedArtifacts.map((artifact) => artifact.id));
+  const otherArtifacts = historyState.artifacts.filter((artifact) => !selectedArtifactIds.has(artifact.id));
 
   useEffect(() => {
     forkRequestRef.current += 1;
@@ -876,19 +910,19 @@ export default function ProjectHistory({
         ) : (
           <>
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-              <SummaryCard label="Runs" value={historyState.jobs.length} detail="Recorded analysis runs" />
-              <SummaryCard label="Results" value={historyState.artifacts.length} detail="Saved results and exports" />
+              <SummaryCard label="Selected runs" value={selectedJobs.length} detail="Runs tied to the selected analysis" />
+              <SummaryCard label="Selected results" value={selectedArtifacts.length} detail="Saved results tied to the selection" />
               <SummaryCard label="Provenance" value={historyState.provenance.length} detail="Project records" />
               <SummaryCard label="Lineage" value={historyState.lineage?.edges?.length || 0} detail="Saved-analysis relationships" />
             </div>
 
-            <Section title="Analysis Runs" icon={<Clock size={18} className="text-primary" />} subtitle="Recorded runs and their status are shown here.">
-              <JobList jobs={historyState.jobs} />
+            <Section title="Selected Analysis Runs" icon={<Clock size={18} className="text-primary" />} subtitle="Only runs whose input or saved result is the selected analysis are shown here.">
+              <JobList jobs={selectedJobs} analysisObjects={currentWs?.objects || []} userId={userId} />
             </Section>
 
-            <Section title="Saved Results" icon={<Archive size={18} className="text-primary" />} subtitle="Reviewed result tables and Expert R bundles have authenticated, audited downloads. Saved versions are never downloadable.">
+            <Section title="Selected Analysis Results" icon={<Archive size={18} className="text-primary" />} subtitle="Only saved results associated with the selected analysis are shown here. Reviewed result tables and Expert R bundles have authenticated, audited downloads; saved versions are never downloadable.">
               <ArtifactList
-                artifacts={historyState.artifacts}
+                artifacts={selectedArtifacts}
                 jobs={historyState.jobs}
                 analysisObjects={currentWs?.objects || []}
                 canFork={canFork}
@@ -901,6 +935,24 @@ export default function ProjectHistory({
                 )}
               />
             </Section>
+
+            {(otherJobs.length > 0 || otherArtifacts.length > 0) && (
+              <details className="rounded-lg border border-border bg-surface/50 p-4">
+                <summary className="cursor-pointer font-bold text-text">
+                  Other project activity ({otherJobs.length} runs, {otherArtifacts.length} results)
+                </summary>
+                <p className="mb-3 mt-2 text-sm text-textMuted">
+                  These records belong to other saved analyses in this project. Select the relevant analysis before taking a recovery action.
+                </p>
+                <JobList
+                  jobs={otherJobs}
+                  analysisObjects={currentWs?.objects || []}
+                  userId={userId}
+                  emptyTitle="No other project runs"
+                  emptyCopy="Only saved results from other analyses are recorded."
+                />
+              </details>
+            )}
 
             <div className="rounded-lg border border-primary/20 bg-primary/5 p-5 text-sm text-textMuted">
               <div className="mb-2 flex items-center gap-2 font-bold text-text">

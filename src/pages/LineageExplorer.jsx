@@ -174,6 +174,7 @@ function EdgeList({ title, edges, nodeById, onSelect }) {
 export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
   const { projectId, objectId } = getActiveSelection(currentWs, datasetInfo);
   const [graph, setGraph] = useState(null);
+  const [branches, setBranches] = useState([]);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
@@ -186,6 +187,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
     const requestId = ++requestRef.current;
     if (!projectId || !objectId) {
       setGraph(null);
+      setBranches([]);
       setNodes([]);
       setEdges([]);
       setSelectedNodeId(null);
@@ -203,15 +205,22 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
     setFailed(false);
     setIsFreshForSelection(false);
     try {
-      const response = await getLineage(projectId, objectId);
+      const [response, branchRows] = await Promise.all([
+        getLineage(projectId, objectId),
+        typeof window.electronAPI?.listAnalysisBranches === 'function'
+          ? window.electronAPI.listAnalysisBranches(projectId).catch(() => [])
+          : Promise.resolve([]),
+      ]);
       if (requestRef.current !== requestId) return;
       const safeGraph = response && typeof response === 'object' ? response : null;
       setGraph(safeGraph);
+      setBranches(Array.isArray(branchRows) ? branchRows : []);
       setSelectedNodeId(objectId);
       setIsFreshForSelection(true);
     } catch {
       if (requestRef.current !== requestId) return;
       setGraph(null);
+      setBranches([]);
       setSelectedNodeId(null);
       setIsFreshForSelection(false);
       setFailed(true);
@@ -233,6 +242,9 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
   const selectedNode = nodeById.get(selectedNodeId) || null;
   const selectedParents = graphEdges.filter((edge) => edge.childAnalysisObjectId === selectedNodeId);
   const selectedChildren = graphEdges.filter((edge) => edge.parentAnalysisObjectId === selectedNodeId);
+  const selectedBranches = branches.filter((branch) => (
+    branch.baseAnalysisObjectId === selectedNodeId || branch.headAnalysisObjectId === selectedNodeId
+  ));
 
   useEffect(() => {
     const rawNodes = graphNodes
@@ -358,6 +370,23 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
                 </div>
                 <EdgeList title="Parents" edges={selectedParents} nodeById={nodeById} onSelect={setSelectedNodeId} />
                 <EdgeList title="Children" edges={selectedChildren} nodeById={nodeById} onSelect={setSelectedNodeId} />
+                <section className="rounded-xl border border-border bg-surface/70 p-4">
+                  <h3 className="text-sm font-bold text-text">Analysis branches</h3>
+                  {selectedBranches.length === 0 ? (
+                    <p className="mt-2 text-sm text-textMuted">None based on this saved version.</p>
+                  ) : (
+                    <ul className="mt-3 space-y-2">
+                      {selectedBranches.map((branch) => (
+                        <li key={branch.id} className="rounded-lg border border-border/70 bg-background/60 p-3">
+                          <p className="text-sm font-semibold text-text">{branch.name || 'Analysis branch'}</p>
+                          <p className="mt-1 text-xs text-textMuted">
+                            {branch.visibility === 'project' ? 'Shared with the project' : 'Private draft'} · saved version {branch.version}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
               </div>
             ) : (
               <div className="flex h-full min-h-64 flex-col items-center justify-center text-center"><GitBranch size={38} className="text-textMuted" aria-hidden="true" /><p className="mt-3 text-sm text-textMuted">Select a saved analysis to inspect its recorded relationships.</p></div>

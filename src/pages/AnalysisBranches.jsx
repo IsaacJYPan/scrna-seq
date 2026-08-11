@@ -201,8 +201,26 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
                   </div>
                   {branch.description && <p className="text-sm text-textMuted">{branch.description}</p>}
                   {branchReviews.length > 0 && (
-                    <div className="flex flex-wrap gap-2">
-                      {branchReviews.map((review) => <span key={review.id} className="text-xs border border-border rounded px-2 py-1 text-textMuted">{review.title}: {reviewStatusLabel(review.status)}</span>)}
+                    <div className="space-y-2 border-t border-border pt-3">
+                      {branchReviews.map((review) => (
+                        <div key={review.id} className="rounded border border-border bg-background/50 p-3 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-semibold text-text">{review.title}</span>
+                            <span className="rounded border border-border px-2 py-1 text-textMuted">{reviewStatusLabel(review.status)}</span>
+                          </div>
+                          {review.summary && <p className="mt-2 text-textMuted">{review.summary}</p>}
+                          {review.decisionNote && (
+                            <p className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 p-2 text-text">
+                              <span className="font-semibold">Decision note:</span> {review.decisionNote}
+                            </p>
+                          )}
+                          {(commentsByReview[review.id] || []).map((comment) => (
+                            <p key={comment.id} className="mt-2 rounded border border-border bg-surface p-2 text-textMuted">
+                              <span className="font-semibold text-text">Review comment:</span> {comment.body}
+                            </p>
+                          ))}
+                        </div>
+                      ))}
                     </div>
                   )}
                   <div className="flex flex-wrap gap-2">

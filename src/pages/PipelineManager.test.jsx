@@ -401,7 +401,7 @@ describe('PipelineManager', () => {
       fileType: 'visium_zip',
       originalFilename: 'sample_outs.zip',
       uploadStatus: 'uploaded',
-      validationStatus: 'pending',
+      validationStatus: 'valid',
     }));
     window.electronAPI.createProjectAnalysisObject = vi.fn(async () => ({
       id: 'ao_spatial_input',

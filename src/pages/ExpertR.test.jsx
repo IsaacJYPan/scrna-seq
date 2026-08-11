@@ -79,9 +79,13 @@ describe('ExpertR', () => {
     expect(container.textContent || '').not.toMatch(/C:\\private\\expert\.R|worker\.internal|job_unsafe_expert/i);
   });
 
-  it('uses a concise research-facing unavailable state', () => {
-    render(<ExpertR currentWs={currentWs} userId={7} deploymentPolicy={{ expertREnabled: false }} />);
-    expect(screen.getByText(/not available for this account or deployment/i)).toBeInTheDocument();
+  it('explains unavailable access and provides a project-owner route', () => {
+    const setActiveTab = vi.fn();
+    render(<ExpertR currentWs={currentWs} userId={7} setActiveTab={setActiveTab} deploymentPolicy={{ expertREnabled: false }} />);
+    expect(screen.getByText(/not been enabled for this account or deployment/i)).toBeInTheDocument();
+    expect(screen.getByText(/project owner or deployment administrator/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /open project collaborators/i }));
+    expect(setActiveTab).toHaveBeenCalledWith('team');
     expect(screen.queryByText(/ephemeral Expert R sandbox/i)).not.toBeInTheDocument();
   });
 

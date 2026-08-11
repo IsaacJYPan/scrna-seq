@@ -130,8 +130,8 @@ describe('Sidebar component', () => {
 
     const advancedAnalysisButtons = screen.getAllByRole('button', { name: /Advanced analysis/i });
     expect(advancedAnalysisButtons).toHaveLength(1);
-    advancedAnalysisButtons.forEach(button => expect(button).toBeDisabled());
-    expect(advancedAnalysisButtons.every(button => button.getAttribute('aria-label') === 'Advanced analysis, Not configured')).toBe(true);
+    advancedAnalysisButtons.forEach(button => expect(button).toBeEnabled());
+    expect(advancedAnalysisButtons.every(button => button.getAttribute('aria-label') === 'Advanced analysis, Access required')).toBe(true);
   });
 
   it('does not require icons for pipeline-generated tabs', () => {

@@ -117,4 +117,25 @@ describe('AnalysisBranches', () => {
     const text = container.textContent || '';
     expect(text).not.toMatch(/ao_abc123|ao_def456|br_left123|br_right123|rev_open123|Member 42|differentialExpression|canonical|new head|shared_lineage/i);
   });
+
+  it('keeps reviewer comments and the decision note visible to a branch author after changes are requested', async () => {
+    window.electronAPI.listAnalysisBranches.mockResolvedValueOnce([{
+      id: 'br_author', ownerUserId: 1, name: 'alternate normalization', visibility: 'project',
+      status: 'active', baseAnalysisObjectId: 'ao_abc123', headAnalysisObjectId: 'ao_abc123', version: 1,
+    }]);
+    window.electronAPI.listAnalysisBranchReviews.mockResolvedValueOnce([{
+      id: 'rev_changes', branchId: 'br_author', title: 'Review alternate normalization',
+      summary: 'Check the normalization choice.', status: 'changes_requested',
+      decisionNote: 'Document why SCTransform was selected.', headAnalysisObjectId: 'ao_abc123',
+    }]);
+    window.electronAPI.listAnalysisBranchReviewComments.mockResolvedValueOnce([{
+      id: 'com_changes', authorUserId: 2, body: 'Add the normalization comparison figure.',
+    }]);
+
+    render(<AnalysisBranches currentWs={workspace} datasetInfo={workspace.objects[0]} userId={1} />);
+
+    expect(await screen.findByText('Changes requested')).toBeInTheDocument();
+    expect(screen.getByText(/Document why SCTransform was selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/Add the normalization comparison figure/i)).toBeInTheDocument();
+  });
 });

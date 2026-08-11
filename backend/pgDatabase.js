@@ -2542,6 +2542,31 @@ async function markDatasetUploadFailed(projectId, datasetId) {
   return getDatasetRow(datasetId, projectId);
 }
 
+async function setDatasetValidationResult(projectId, datasetId, validationStatus, validationErrors = null) {
+  if (!['valid', 'invalid'].includes(validationStatus)) {
+    throw codedError('INVALID_VALIDATION_STATUS', 'Dataset validation must finish as valid or invalid.');
+  }
+  const existing = await getDatasetRow(datasetId, projectId);
+  if (!existing) throw codedError('NOT_FOUND', 'Dataset not found.');
+  if (existing.uploadStatus !== 'uploaded' || !existing.internalStorageKey) {
+    throw codedError('INVALID_STATUS_COMBO', 'Only a stored dataset can receive a validation result.');
+  }
+  await query(
+    `UPDATE datasets
+        SET validation_status = $1,
+            validation_errors = $2,
+            updated_at = now()
+      WHERE id = $3 AND project_id = $4`,
+    [
+      validationStatus,
+      normalizeValidationErrors(validationErrors),
+      String(datasetId),
+      String(projectId),
+    ]
+  );
+  return getDatasetRow(datasetId, projectId);
+}
+
 async function createAnalysisObject(ownerUserId, input = {}) {
   const owner = Number(ownerUserId);
   if (!Number.isInteger(owner) || owner <= 0) {
@@ -7000,6 +7025,7 @@ module.exports = {
   updateDatasetForProject,
   markDatasetUploaded,
   markDatasetUploadFailed,
+  setDatasetValidationResult,
   rowToDataset,
   toPublicDataset,
   // analysis objects

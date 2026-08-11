@@ -23,6 +23,7 @@ const {
 } = require('./backend/expertR');
 const config = require('./backend/config');
 const storage = require('./backend/storage');
+const { validateStoredDataset } = require('./backend/datasetValidation');
 const rRuntime = require('./backend/rRuntime');
 const { createWebHealthController } = require('./backend/webHealth');
 const { shutdownWebRuntime } = require('./backend/webShutdown');
@@ -2208,6 +2209,8 @@ const REJECTED_DATASET_FIELDS = [
   'createdByUserId', 'created_by_user_id', 'userId', 'user_id',
   'internalStorageKey', 'internal_storage_key', 'storageUri', 'storage_uri',
   'sha256', 'fileSizeBytes', 'file_size_bytes',
+  'uploadStatus', 'upload_status', 'validationStatus', 'validation_status',
+  'validationErrors', 'validation_errors',
   'path', 'filePath', 'file_path', 'storagePath', 'storage_path'
 ];
 
@@ -2223,9 +2226,8 @@ function rejectDatasetServerFields(req, res) {
   return false;
 }
 
-// Coerce a metadata/validation_errors field that may arrive as a JSON string
-// (multipart form field) or a native object (JSON body). Returns { ok:false }
-// when a non-empty string is not valid JSON.
+// Coerce dataset metadata, which arrives as a string for multipart uploads or
+// a native object for JSON requests. Returns { ok:false } for invalid JSON.
 function coerceDatasetJsonField(value) {
   if (value === undefined) return { ok: true, value: undefined };
   if (typeof value === 'string') {
@@ -2278,19 +2280,13 @@ app.post('/api/projects/:projectId/datasets', requireDatasetWriterBeforeUpload, 
   const fileType = body.fileType !== undefined ? body.fileType : body.file_type;
   const meta = coerceDatasetJsonField(body.metadata);
   if (!meta.ok) { cleanupDatasetReqFile(req); return res.status(400).json({ error: 'metadata must be valid JSON.' }); }
-  const verrs = coerceDatasetJsonField(body.validationErrors);
-  if (!verrs.ok) { cleanupDatasetReqFile(req); return res.status(400).json({ error: 'validation_errors must be valid JSON.' }); }
-
   try {
     let dataset = await db.createDatasetForProject(req.user.id, req.params.projectId, {
       fileType,
       originalFilename: body.originalFilename !== undefined
         ? body.originalFilename
         : (req.file ? req.file.originalname : undefined),
-      uploadStatus: body.uploadStatus,
-      validationStatus: body.validationStatus,
       metadata: meta.value,
-      validationErrors: verrs.value
     });
 
     // If a file rode along, the server stores it under a server-chosen key and
@@ -2301,6 +2297,15 @@ app.post('/api/projects/:projectId/datasets', requireDatasetWriterBeforeUpload, 
       try {
         stored = await storeDatasetFile(req.file, req.params.projectId, dataset.id);
         dataset = await db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
+        const validation = await validateStoredDataset(durableStorage, dataset);
+        if (validation.validationStatus !== 'pending') {
+          dataset = await db.setDatasetValidationResult(
+            req.params.projectId,
+            dataset.id,
+            validation.validationStatus,
+            validation.validationErrors
+          );
+        }
       } catch (storageErr) {
         console.error('[Datasets] Storage failed:', storageErr);
         if (stored && stored.internalStorageKey) {

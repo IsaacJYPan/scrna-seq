@@ -20,15 +20,18 @@ describe('pipelineProbeAction', () => {
     })).toBe('probe');
   });
 
-  it('reuses a positive probe and otherwise skips a stable projection', () => {
+  it('never treats cached project metadata as proof of a live attachment', () => {
     expect(pipelineProbeAction({
       currentKey: key, nextKey: key, serverAttached: true, liveState: 'not_attached',
-    })).toBe('project-attached');
+    })).toBe('skip');
     expect(pipelineProbeAction({
       currentKey: key, nextKey: key, serverAttached: false, liveState: 'not_attached',
     })).toBe('skip');
     expect(pipelineProbeAction({
       currentKey: key, nextKey: `${key}:new`, serverAttached: false, liveState: 'not_attached',
+    })).toBe('probe');
+    expect(pipelineProbeAction({
+      currentKey: null, nextKey: key, serverAttached: false, liveState: 'attached',
     })).toBe('probe');
   });
 });
