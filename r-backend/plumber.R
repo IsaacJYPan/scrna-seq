@@ -584,7 +584,7 @@ load_active_session <- function(sid) {
 job_scoped_active_session_key <- function(value) {
   sid <- tryCatch(validate_internal_state_key(value), error = function(error) NULL)
   if (is.null(sid) ||
-      !grepl("^user-[0-9]+:obj-ao_[0-9a-f]{24}-job-job_[0-9a-f]{24}$", sid)) {
+      !grepl("^user-[0-9]+:obj-ao_([0-9a-f]{24}|[0-9a-f]{64})-job-job_[0-9a-f]{24}$", sid)) {
     return(NULL)
   }
   sid

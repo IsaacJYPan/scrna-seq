@@ -128,6 +128,28 @@ stopifnot(!exists(job_state_key, envir = active_sessions, inherits = FALSE))
 stopifnot(is.null(global_obj), is.null(raw_obj))
 stopifnot(identical(release_req$traceomics_session_persist, FALSE))
 
+# Deterministic checkpoint forks use a 64-hex analysis-object id. Their heavy
+# jobs must receive the same erase-on-route-exit treatment as ordinary 24-hex
+# objects; otherwise a reusable compute process retains the forked expression state.
+fork_job_state_key <- paste0(
+  "user-2:obj-ao_", strrep("d", 64), "-job-job_", strrep("e", 24)
+)
+fork_release_req <- new.env(parent = emptyenv())
+fork_release_req$traceomics_session_persist <- TRUE
+global_obj <- list(private_fork = 1L)
+raw_obj <- list(private_fork = 2L)
+store_active_session(fork_job_state_key, global_obj, raw_obj)
+stopifnot(identical(job_scoped_active_session_key(fork_job_state_key), fork_job_state_key))
+stopifnot(isTRUE(release_job_scoped_active_session(fork_release_req, fork_job_state_key)))
+stopifnot(!exists(fork_job_state_key, envir = active_sessions, inherits = FALSE))
+stopifnot(is.null(global_obj), is.null(raw_obj))
+stopifnot(identical(fork_release_req$traceomics_session_persist, FALSE))
+
+unsupported_length_key <- paste0(
+  "user-2:obj-ao_", strrep("f", 32), "-job-job_", strrep("a", 24)
+)
+stopifnot(is.null(job_scoped_active_session_key(unsupported_length_key)))
+
 canonical_req <- new.env(parent = emptyenv())
 canonical_req$traceomics_session_persist <- TRUE
 global_obj <- list(interactive = 1L)
