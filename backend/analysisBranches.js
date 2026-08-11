@@ -542,7 +542,7 @@ async function headSummary(projectId, object) {
   );
   const producingJob = jobRows[0] || null;
   const reviewedParameterJobs = new Set([
-    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'checkpoint.fork.v1',
+    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1', 'checkpoint.fork.v1',
   ]);
   return {
     objectType: object.objectType,

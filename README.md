@@ -58,7 +58,8 @@ At a glance:
   through durable `enrichment.gsea.v1` jobs, bounded `explore.summarize.v1`
   exploratory recipes, replicate-aware `condition.pseudobulk_de.v1` edgeR
   comparisons over explicit biological samples and immutable contrast snapshots,
-  and summary artifacts, the narrow 10x HDF5 `seurat.pipeline.v1` flow and
+  and summary artifacts, the single-dataset 10x HDF5 `seurat.pipeline.v1` flow,
+  the multi-sample/multi-condition 10x HDF5 `seurat.multisample.v1` preparation flow, and
   classic Space Ranger Visium ZIP `spatial.seurat.v1` flow in Approved workflows,
   explicit saving of modified private live analyses, result saved-version reattach,
   project member/role management, private collaborator checkpoint
@@ -69,7 +70,7 @@ At a glance:
   includes a Runs & Results / durable history surface for safe metadata plus
   controlled checkpoint forks. DEG, ranked pathway-enrichment, and narrow
   single-context CellChat launches are wired in their result tabs, and the Pipeline
-  Approved workflows Seurat panel can launch the supported 10x HDF5 pipeline plus saved-version
+  Approved workflows Seurat panel can launch the supported single- or multi-sample 10x HDF5 pipeline plus saved-version
   reattach. Selected result-table/Expert-R downloads and reproducibility-manifest
   exports are UI-wired; general job launch/cancel/retry and lineage mutation are not.
 - **Backend-only (implemented + tested, no UI yet):** general dataset management,
@@ -205,13 +206,26 @@ normalization, PCA, clustering, and UMAP, and saves a reusable checkpoint with
 lineage and provenance. Visium HD, Xenium, arbitrary spatial layouts, and
 multi-sample spatial integration are not yet supported.
 
+The approved multi-condition preparation workflow accepts 2-48 separately
+uploaded, validated 10x HDF5 datasets from one project. Each dataset is bound to
+one unique sample name and an explicit condition, with optional donor and batch
+labels. The allowlisted `seurat.multisample.v1` worker resolves every dataset from
+the claimed project job, merges the count matrices with unique cell identifiers,
+adds `sample_id`, `condition`, `donor_code`, and `batch` metadata, runs the bounded
+Seurat preprocessing recipe, and saves one reusable checkpoint-backed result. It
+does not perform automatic batch correction or make a biological condition claim.
+The UI reports when fewer than two samples are present in a condition because the
+downstream pseudobulk gate will reject that comparison.
+
 Study Design may register more than two conditions, but each saved
 `condition.pseudobulk_de.v1` run is one explicit numerator-versus-denominator
 contrast. It requires at least two independent samples or donors in each selected
 condition, supports donor-paired designs only when donor identities match, and
 runs edgeR quasi-likelihood pseudobulk separately per cell type. Multi-arm omnibus
-models, general covariate formulas, and automatic integration of multiple raw
-condition datasets are not implemented. The existing Batch Integration tab can
+models, general covariate formulas, and automatic batch correction/integration of
+multiple raw condition datasets are not implemented. The approved multi-condition
+workflow can now ingest and merge separate raw 10x HDF5 samples into one saved
+analysis with explicit sample/condition metadata. The existing Batch Integration tab can
 apply Harmony or Seurat CCA to 2-100 technical-batch labels already present in one
 loaded Seurat object; it is not a multi-file importer or a substitute for a
 biological condition contrast.
@@ -448,6 +462,7 @@ main workflow tests. Keep `DATABASE_URL` pointed at `scrna_test`:
 node scripts/download_sample_data.js
 npm run test:r-state-proxy
 npm run test:seurat-pipeline
+npm run test:seurat-multisample
 npm run test:deg-worker-pipeline
 ```
 

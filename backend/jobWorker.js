@@ -54,6 +54,11 @@ const {
   assertSupportedSeuratPipelineDataset,
 } = require('./seuratPipeline');
 const {
+  validateMultiSampleSeuratParams,
+  allocateMultiSampleSeuratCheckpointStorageKey,
+  assertSupportedMultiSampleDatasets,
+} = require('./multiSampleSeuratPipeline');
+const {
   validateSpatialSeuratParams,
   allocateSpatialSeuratCheckpointStorageKey,
   assertSupportedSpatialSeuratDataset,
@@ -87,6 +92,7 @@ const R_TIMEOUT_RECOVERY_GRACE_SECONDS = 300;
 const COMPLETION_RECEIPT_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
+  'seurat.multisample.v1',
   'spatial.seurat.v1',
   'checkpoint.save.v1',
   'deg.find_markers.v1',
@@ -181,6 +187,9 @@ function deterministicCompletionOutputKey(job) {
   }
   if (job.jobType === 'seurat.pipeline.v1') {
     return allocateSeuratCheckpointStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'seurat.multisample.v1') {
+    return allocateMultiSampleSeuratCheckpointStorageKey(job.projectId, job.id);
   }
   if (job.jobType === 'spatial.seurat.v1') {
     return allocateSpatialSeuratCheckpointStorageKey(job.projectId, job.id);
@@ -797,9 +806,12 @@ async function checkpointSaveHandler(ctx) {
 
 async function seuratPipelineHandler(ctx) {
   await ctx.heartbeat();
-  await ctx.log({ level: 'info', message: 'seurat.pipeline.v1 handler: resolving dataset + parameters before any R contact.' });
 
   const job = ctx.job;
+  const multiSample = job.jobType === 'seurat.multisample.v1';
+  const handlerName = multiSample ? 'seurat.multisample.v1' : 'seurat.pipeline.v1';
+  const operation = multiSample ? 'r.seurat.multisample.v1' : 'r.seurat.pipeline.v1';
+  await ctx.log({ level: 'info', message: `${handlerName} handler: resolving dataset inputs + parameters before any R contact.` });
   const datasetId = job.datasetId;
   const objectId = job.analysisObjectId;
   if (typeof job.projectId !== 'string' || job.projectId === '') {
@@ -811,16 +823,25 @@ async function seuratPipelineHandler(ctx) {
   if (typeof objectId !== 'string' || objectId === '') {
     throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Seurat pipeline job is missing its raw dataset analysis object.');
   }
-  if (typeof ctx.getSeuratPipelineInputs !== 'function') {
+  const inputResolver = multiSample ? ctx.getMultiSampleSeuratPipelineInputs : ctx.getSeuratPipelineInputs;
+  if (typeof inputResolver !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
 
-  const resolvedInputs = await ctx.getSeuratPipelineInputs();
-  const dataset = resolvedInputs && resolvedInputs.dataset;
+  const resolvedInputs = await inputResolver();
+  const datasets = multiSample
+    ? (resolvedInputs && resolvedInputs.datasets)
+    : [resolvedInputs && resolvedInputs.dataset];
+  const dataset = datasets && datasets[0];
   const inputObject = resolvedInputs && resolvedInputs.inputObject;
   if (!dataset || dataset.id !== datasetId) throw codedHandlerError('DATASET_NOT_FOUND', 'Dataset not found.');
   try {
-    assertSupportedSeuratPipelineDataset(dataset);
+    if (multiSample) {
+      const validated = resolvedInputs && resolvedInputs.validated;
+      assertSupportedMultiSampleDatasets(datasets, validated && validated.samples);
+    } else {
+      assertSupportedSeuratPipelineDataset(dataset);
+    }
   } catch (err) {
     throw codedHandlerError(err.code || 'DATASET_NOT_READY', err.message || 'Dataset is not ready for analysis.');
   }
@@ -831,22 +852,39 @@ async function seuratPipelineHandler(ctx) {
     throw codedHandlerError('INVALID_PARAMETERS', 'Seurat pipeline input object must reference the same dataset as the job.');
   }
 
-  const { params, defaultsApplied } = validateSeuratPipelineParams(job.parameters);
-  const checkpointStorageKey = allocateSeuratCheckpointStorageKey(job.projectId, job.id);
+  const validated = multiSample
+    ? validateMultiSampleSeuratParams(job.parameters)
+    : validateSeuratPipelineParams(job.parameters);
+  const { params, defaultsApplied } = validated;
+  const samples = multiSample ? validated.samples : [];
+  const checkpointStorageKey = multiSample
+    ? allocateMultiSampleSeuratCheckpointStorageKey(job.projectId, job.id)
+    : allocateSeuratCheckpointStorageKey(job.projectId, job.id);
   await removeRetryOrphanOutput(ctx, checkpointStorageKey);
 
   let descriptor;
   try {
     descriptor = await ctx.runRBridgeOperation({
       job,
-      operation: 'r.seurat.pipeline.v1',
+      operation,
       actor: { userId: job.ownerUserId, projectId: job.projectId },
-      seuratPipeline: {
+      ...(multiSample ? { multiSampleSeuratPipeline: {
+        params,
+        inputs: samples.map((sample, index) => ({
+          datasetStorageKey: datasets[index].internalStorageKey,
+          datasetFileType: datasets[index].fileType,
+          sampleName: sample.sampleName,
+          conditionName: sample.conditionName,
+          donorCode: sample.donorCode,
+          batch: sample.batch,
+        })),
+        checkpointStorageKey,
+      } } : { seuratPipeline: {
         params,
         datasetStorageKey: dataset.internalStorageKey,
         datasetFileType: dataset.fileType,
         checkpointStorageKey,
-      },
+      } }),
       input: job.parameters,
       claimContext: { workerId: ctx.workerId },
       logger: ctx.logger,
@@ -857,7 +895,7 @@ async function seuratPipelineHandler(ctx) {
     const rCode = typeof (err && err.rCode) === 'string' && err.rCode ? err.rCode : null;
     await ctx.log({
       level: 'error',
-      message: `seurat.pipeline.v1 handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
+      message: `${handlerName} handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
     });
     await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, err);
     throw err;
@@ -872,57 +910,69 @@ async function seuratPipelineHandler(ctx) {
   let completion;
   try {
     completion = await ctx.completeSeuratPipelineResult({
-    source: {
-      displayName: 'Dataset input',
-      metadata: {
-        source: 'dataset',
-        datasetId,
-        fileType: dataset.fileType,
-        scientific_output: false,
+      source: {
+        displayName: multiSample ? 'Multi-sample dataset input' : 'Dataset input',
+        metadata: {
+          source: 'dataset',
+          datasetId,
+          ...(multiSample ? { datasetIds: samples.map(sample => sample.datasetId) } : {}),
+          fileType: dataset.fileType,
+          scientific_output: false,
+        },
       },
-    },
-    result: {
-      objectType: descriptor.resultObjectType || 'seurat',
-      displayName: 'Seurat pipeline result',
-      metadata: {
-        source: 'seurat.pipeline.v1',
-        operation: 'r.seurat.pipeline.v1',
-        scientific_output: true,
-        datasetId,
-        checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
-        resolvedParams: params,
-        defaultsApplied,
-        summary: descriptor.summary,
-        warnings: descriptor.metadata && descriptor.metadata.warnings ? descriptor.metadata.warnings : [],
+      result: {
+        objectType: descriptor.resultObjectType || 'seurat',
+        displayName: multiSample ? 'Multi-condition Seurat result' : 'Seurat pipeline result',
+        metadata: {
+          source: handlerName,
+          operation,
+          scientific_output: true,
+          datasetId,
+          ...(multiSample ? {
+            datasetIds: samples.map(sample => sample.datasetId),
+            sampleDesign: samples,
+            sampleMetadataColumn: 'sample_id',
+            conditionMetadataColumn: 'condition',
+          } : {}),
+          checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+          resolvedParams: params,
+          defaultsApplied,
+          summary: descriptor.summary,
+          warnings: descriptor.metadata && descriptor.metadata.warnings ? descriptor.metadata.warnings : [],
+        },
       },
-    },
-    checkpointArtifact: {
-      artifactType: 'checkpoint',
-      name: 'Seurat pipeline checkpoint',
-      description: 'Durable internal checkpoint of the Seurat pipeline result object. No public download in this branch.',
-      storageKind: 'local_internal',
-      internalStorageKey: checkpointStorageKey,
-      checksumSha256: checkpoint.checksumSha256,
-      sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
-      metadata: {
-        operation: 'r.seurat.pipeline.v1',
-        scientific_output: true,
-        downloadable: false,
-        datasetId,
+      checkpointArtifact: {
+        artifactType: 'checkpoint',
+        name: 'Seurat pipeline checkpoint',
+        description: 'Durable internal checkpoint of the Seurat pipeline result object. No public download in this branch.',
+        storageKind: 'local_internal',
+        internalStorageKey: checkpointStorageKey,
+        checksumSha256: checkpoint.checksumSha256,
+        sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
+        metadata: {
+          operation,
+          scientific_output: true,
+          downloadable: false,
+          datasetId,
+          ...(multiSample ? { datasetIds: samples.map(sample => sample.datasetId) } : {}),
+        },
       },
-    },
-    summaryArtifact: {
-      artifactType: descriptor.artifactType,
-      name: descriptor.name,
-      description: descriptor.description,
-      storageKind: 'metadata_only',
-      metadata: {
-        ...descriptor.metadata,
-        datasetId,
-        resolvedParams: params,
-        defaultsApplied,
+      summaryArtifact: {
+        artifactType: descriptor.artifactType,
+        name: descriptor.name,
+        description: descriptor.description,
+        storageKind: 'metadata_only',
+        metadata: {
+          ...descriptor.metadata,
+          datasetId,
+          ...(multiSample ? {
+            datasetIds: samples.map(sample => sample.datasetId),
+            sampleDesign: samples,
+          } : {}),
+          resolvedParams: params,
+          defaultsApplied,
+        },
       },
-    },
     });
   } catch (err) {
     throw publicationIndeterminateError(err);
@@ -932,14 +982,14 @@ async function seuratPipelineHandler(ctx) {
   const checkpointArtifact = completion.checkpointArtifact;
   const summaryArtifact = completion.summaryArtifact;
 
-  await ctx.log({ level: 'info', message: `seurat.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id}.` });
+  await ctx.log({ level: 'info', message: `${handlerName} handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id}.` });
 
   return {
     resultAnalysisObjectId: resultObject.id,
     result: {
       ok: true,
-      handled: 'seurat.pipeline.v1',
-      operation: 'r.seurat.pipeline.v1',
+      handled: handlerName,
+      operation,
       resultAnalysisObjectId: resultObject.id,
       checkpointArtifactId: checkpointArtifact.id,
       summaryArtifactId: summaryArtifact.id,
@@ -2001,6 +2051,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'r.object.inspect': rObjectInspectHandler,
   'pbmc.pipeline.v1': pbmcPipelineHandler,
   'seurat.pipeline.v1': seuratPipelineHandler,
+  'seurat.multisample.v1': seuratPipelineHandler,
   'spatial.seurat.v1': spatialSeuratPipelineHandler,
   'checkpoint.save.v1': checkpointSaveHandler,
   'checkpoint.load.v1': checkpointLoadHandler,
@@ -2295,6 +2346,9 @@ function createJobWorker(options = {}) {
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
         ),
         getSeuratPipelineInputs: () => db.getSeuratPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        getMultiSampleSeuratPipelineInputs: () => db.getMultiSampleSeuratPipelineInputsForJobByWorker(
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
         ),
         getSpatialPipelineInputs: () => db.getSpatialPipelineInputsForJobByWorker(
@@ -2625,6 +2679,10 @@ function createJobWorker(options = {}) {
         ),
       getSeuratPipelineInputs: () =>
         db.getSeuratPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+      getMultiSampleSeuratPipelineInputs: () =>
+        db.getMultiSampleSeuratPipelineInputsForJobByWorker(
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
         ),
       getSpatialPipelineInputs: () =>

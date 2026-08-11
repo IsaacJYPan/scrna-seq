@@ -100,6 +100,7 @@ const COMPLETION_RECEIPT_ALGORITHM = 'hmac-sha256';
 const COMPLETION_JOB_TO_R_OPERATION = Object.freeze({
   'pbmc.pipeline.v1': 'r.pbmc.pipeline.v1',
   'seurat.pipeline.v1': 'r.seurat.pipeline.v1',
+  'seurat.multisample.v1': 'r.seurat.multisample.v1',
   'spatial.seurat.v1': 'r.spatial.seurat.v1',
   'checkpoint.save.v1': 'r.checkpoint.save.v1',
   'deg.find_markers.v1': 'r.deg.find_markers.v1',
@@ -363,6 +364,21 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     // scientific operations so successful work does not enter receipt recovery.
     defaultTimeoutMs: 600000,
   }),
+  'r.seurat.multisample.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/seurat-pipeline',
+    artifactType: 'pipeline_summary',
+    artifactName: 'Multi-sample Seurat pipeline summary',
+    artifactDescription:
+      'Sanitized summary of a reviewed multi-sample Seurat preprocessing run over server-selected 10x HDF5 datasets. '
+      + 'Bounded counts, sample and condition names, resolved parameters, warnings, and runtime versions only.',
+    touchesAnalysisObject: false,
+    requiresObjectContext: false,
+    carriesMultiSampleSeuratParams: true,
+    mutating: true,
+    readOnly: false,
+    defaultTimeoutMs: 600000,
+  }),
   'r.spatial.seurat.v1': Object.freeze({
     method: 'POST',
     path: '/object/spatial-seurat-pipeline',
@@ -510,6 +526,21 @@ function sanitizePipelineSummary(body) {
   if (nPcs !== null) out.nPcs = nPcs;
   const nClusters = sanitizeCount(s.n_clusters);
   if (nClusters !== null) out.nClusters = nClusters;
+  const nSamples = sanitizeCount(s.n_samples);
+  if (nSamples !== null) out.nSamples = nSamples;
+  const conditions = sanitizeNameList(s.conditions, 48, 80);
+  if (conditions.length) out.conditions = conditions;
+  if (Array.isArray(s.samples_per_condition)) {
+    const counts = [];
+    for (const row of s.samples_per_condition) {
+      if (!row || typeof row !== 'object') continue;
+      const condition = sanitizeRuntimeField(row.condition, 80);
+      const n = sanitizeCount(row.n);
+      if (condition && n !== null) counts.push({ condition, n });
+      if (counts.length >= 48) break;
+    }
+    if (counts.length) out.samplesPerCondition = counts;
+  }
 
   const reductions = sanitizeNameList(s.reductions);
   if (reductions.length) out.reductions = reductions;
@@ -1241,6 +1272,9 @@ function buildCompletionReceiptBinding(job, operation, args = {}) {
   } else if (jobType === 'seurat.pipeline.v1') {
     outputStorageKey = args.seuratPipeline && args.seuratPipeline.checkpointStorageKey;
     outputKind = 'checkpoints';
+  } else if (jobType === 'seurat.multisample.v1') {
+    outputStorageKey = args.multiSampleSeuratPipeline && args.multiSampleSeuratPipeline.checkpointStorageKey;
+    outputKind = 'checkpoints';
   } else if (jobType === 'spatial.seurat.v1') {
     outputStorageKey = args.spatialPipeline && args.spatialPipeline.checkpointStorageKey;
     outputKind = 'checkpoints';
@@ -1325,8 +1359,8 @@ function validateBoundedReceiptValue(value, depth = 0, state = { nodes: 0 }) {
 
 function validateReceiptPayloadSchema(jobType, payload) {
   validateBoundedReceiptValue(payload);
-  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
-    const topKeys = jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1'
+  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
+    const topKeys = ['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)
       ? ['ok', 'summary', 'checkpoint', 'versions', 'warnings']
       : ['ok', 'summary', 'checkpoint', 'versions'];
     assertExactObjectKeys(payload, topKeys);
@@ -1335,12 +1369,21 @@ function validateReceiptPayloadSchema(jobType, payload) {
       'n_cells', 'n_features', 'pre_filter_cells', 'post_filter_cells',
       'percent_mt_available', 'n_variable_features', 'n_pcs', 'n_clusters',
       'cluster_sizes', 'reductions', 'normalization_method', 'resolution', 'used_seed',
+      'n_samples', 'conditions', 'samples_per_condition',
     ], ['n_cells', 'n_features']);
     assertExactObjectKeys(payload.checkpoint, ['saved', 'checksum_sha256', 'size_bytes']);
     assertExactObjectKeys(payload.versions, ['seurat_version', 'r_version']);
-    if ((jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1')
+    if (['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)
         && !Array.isArray(payload.warnings)) {
       throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    if (jobType === 'seurat.multisample.v1') {
+      if (!Array.isArray(payload.summary.conditions) || !Array.isArray(payload.summary.samples_per_condition)) {
+        throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+      }
+      for (const row of payload.summary.samples_per_condition) {
+        assertExactObjectKeys(row, ['condition', 'n']);
+      }
     }
     return;
   }
@@ -1494,7 +1537,7 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
   validateReceiptPayloadSchema(jobType, receipt.payload);
   const body = receipt.payload;
   const spec = R_BRIDGE_OPERATIONS[rOperation];
-  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
+  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (!checkpoint.saved || !checkpoint.checksumSha256 || checkpoint.sizeBytes === null) {
@@ -1515,7 +1558,7 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
         ranAt: new Date().toISOString(),
         ...(job.analysisObjectId ? { objectId: job.analysisObjectId } : {}),
         summary,
-        ...(jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1'
+        ...(['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)
           ? { warnings: sanitizeNameList(body.warnings, 32, 160) } : {}),
       },
     };
@@ -2086,6 +2129,50 @@ async function runRBridgeOperation(args = {}) {
     };
   }
 
+  if (spec.carriesMultiSampleSeuratParams) {
+    const multi = args.multiSampleSeuratPipeline;
+    const params = multi && typeof multi === 'object' ? multi.params : null;
+    const inputs = multi && Array.isArray(multi.inputs) ? multi.inputs : null;
+    const checkpointStorageKey = multi && typeof multi === 'object' ? multi.checkpointStorageKey : null;
+    if (!params || typeof params !== 'object' || !inputs || inputs.length < 2 || inputs.length > 48
+        || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
+      throw codedError(
+        'R_MULTI_SAMPLE_SEURAT_PARAMS_REQUIRED',
+        'Server-validated multi-sample Seurat parameters and storage keys are required.'
+      );
+    }
+    const safeParams = {};
+    for (const name of SEURAT_PIPELINE_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    const datasetInputs = inputs.map((input) => {
+      if (!input || typeof input !== 'object'
+          || typeof input.datasetStorageKey !== 'string' || input.datasetStorageKey === ''
+          || input.datasetFileType !== 'tenx_h5'
+          || typeof input.sampleName !== 'string' || input.sampleName === ''
+          || typeof input.conditionName !== 'string' || input.conditionName === '') {
+        throw codedError(
+          'R_MULTI_SAMPLE_SEURAT_PARAMS_REQUIRED',
+          'Server-validated multi-sample Seurat parameters and storage keys are required.'
+        );
+      }
+      return {
+        storage_key: input.datasetStorageKey,
+        file_type: input.datasetFileType,
+        sample_name: input.sampleName,
+        condition_name: input.conditionName,
+        donor_code: input.donorCode || null,
+        batch: input.batch || null,
+      };
+    });
+    request.body = {
+      operation,
+      params: safeParams,
+      dataset_inputs: datasetInputs,
+      storage_key: checkpointStorageKey,
+    };
+  }
+
   if (spec.carriesSpatialDatasetParams) {
     const spatial = args.spatialPipeline;
     const params = spatial && typeof spatial === 'object' ? spatial.params : null;
@@ -2172,6 +2259,7 @@ async function runRBridgeOperation(args = {}) {
     else if (spec.carriesExplorationParams) failCode = 'R_EXPLORATION_FAILED';
     else if (spec.carriesConditionComparison) failCode = 'R_CONDITION_COMPARISON_FAILED';
     else if (spec.carriesSeuratDatasetParams) failCode = 'R_SEURAT_PIPELINE_FAILED';
+    else if (spec.carriesMultiSampleSeuratParams) failCode = 'R_MULTI_SAMPLE_SEURAT_PIPELINE_FAILED';
     else if (spec.carriesSpatialDatasetParams) failCode = 'R_SPATIAL_PIPELINE_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     // Server-side diagnostic: the R HTTP status + our coded reason (never the R body,
@@ -2440,7 +2528,7 @@ async function runRBridgeOperation(args = {}) {
     };
   }
 
-  if (operation === 'r.seurat.pipeline.v1') {
+  if (operation === 'r.seurat.pipeline.v1' || operation === 'r.seurat.multisample.v1') {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {

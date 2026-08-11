@@ -11,6 +11,7 @@ const DEG_FIND_MARKERS_JOB_TYPE = 'deg.find_markers.v1';
 const ENRICHMENT_GSEA_JOB_TYPE = 'enrichment.gsea.v1';
 const CELLCHAT_INFERENCE_JOB_TYPE = 'cellchat.infer.v1';
 const SEURAT_PIPELINE_JOB_TYPE = 'seurat.pipeline.v1';
+const MULTI_SAMPLE_SEURAT_PIPELINE_JOB_TYPE = 'seurat.multisample.v1';
 const SPATIAL_SEURAT_PIPELINE_JOB_TYPE = 'spatial.seurat.v1';
 const CHECKPOINT_SAVE_JOB_TYPE = 'checkpoint.save.v1';
 const CHECKPOINT_FORK_JOB_TYPE = 'checkpoint.fork.v1';
@@ -134,6 +135,29 @@ export function buildSpatialSeuratPipelineJobPayload({ datasetId, analysisObject
   return {
     ...buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params }),
     jobType: SPATIAL_SEURAT_PIPELINE_JOB_TYPE,
+  };
+}
+
+export function buildMultiSampleSeuratPipelineJobPayload({ samples = [], analysisObjectId, params = {} } = {}) {
+  const primaryDatasetId = Array.isArray(samples) ? samples[0]?.datasetId : null;
+  const base = buildSeuratPipelineJobPayload({
+    datasetId: primaryDatasetId,
+    analysisObjectId,
+    params,
+  });
+  return {
+    ...base,
+    jobType: MULTI_SAMPLE_SEURAT_PIPELINE_JOB_TYPE,
+    parameters: {
+      ...base.parameters,
+      samples: Array.isArray(samples) ? samples.map(sample => ({
+        datasetId: sample?.datasetId,
+        sampleName: sample?.sampleName,
+        conditionName: sample?.conditionName,
+        donorCode: sample?.donorCode || null,
+        batch: sample?.batch || null,
+      })) : [],
+    },
   };
 }
 
@@ -681,6 +705,11 @@ export const electronAPI = {
     req(`/api/projects/${projectId}/jobs`, {
       method: 'POST',
       body: JSON.stringify(buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params })),
+    }),
+  createMultiSampleSeuratPipelineJob: async (projectId, { samples = [], analysisObjectId, params = {} } = {}) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildMultiSampleSeuratPipelineJobPayload({ samples, analysisObjectId, params })),
     }),
   createSpatialSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
     req(`/api/projects/${projectId}/jobs`, {

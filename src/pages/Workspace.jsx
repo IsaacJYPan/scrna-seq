@@ -35,6 +35,15 @@ const CLASSIC_VISIUM_REQUIRED_FILES = [
   'spatial/tissue_lowres_image.png',
 ];
 
+const MAX_MULTI_SAMPLE_INPUTS = 48;
+const SAFE_MULTI_SAMPLE_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
+
+function isValidMultiSampleLabel(value, { optional = false } = {}) {
+  const normalized = String(value || '').trim().replace(/\s+/g, ' ');
+  if (!normalized) return optional;
+  return normalized.length <= 80 && SAFE_MULTI_SAMPLE_LABEL_PATTERN.test(normalized);
+}
+
 function datasetValidationMessages(dataset) {
   const value = dataset?.validationErrors;
   if (Array.isArray(value)) return value.filter((item) => typeof item === 'string').slice(0, 4);
@@ -42,6 +51,15 @@ function datasetValidationMessages(dataset) {
     return value.errors.filter((item) => typeof item === 'string').slice(0, 4);
   }
   return [];
+}
+
+function defaultSampleName(dataset) {
+  const raw = String(dataset?.originalFilename || dataset?.name || 'sample')
+    .replace(/\.h5$/i, '')
+    .replace(/[^A-Za-z0-9 ._-]+/g, '_')
+    .trim()
+    .slice(0, 80);
+  return /^[A-Za-z0-9]/.test(raw) ? raw : `sample_${raw}`.slice(0, 80);
 }
 
 // Removed API constant
@@ -915,6 +933,7 @@ export function SeuratPipelinePanel({
   const [workflowMode, setWorkflowMode] = useState('scrna');
   const [datasets, setDatasets] = useState([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState('');
+  const [multiSampleRows, setMultiSampleRows] = useState([]);
   const [datasetStatus, setDatasetStatus] = useState({ loading: false, uploading: false, error: null });
   const [job, setJob] = useState(null);
   const [loadJob, setLoadJob] = useState(null);
@@ -925,12 +944,19 @@ export function SeuratPipelinePanel({
   const [params, setParams] = useState(() => ({ ...DEFAULT_SEURAT_PIPELINE_PARAMS }));
 
   const spatialMode = workflowMode === 'spatial';
+  const multiSampleMode = workflowMode === 'multisample';
   const workflow = spatialMode ? {
     datasetFileType: 'visium_zip',
     jobType: 'spatial.seurat.v1',
     sourceType: 'classic_visium_dataset',
     formatLabel: 'classic 10x Visium Space Ranger ZIP bundle',
     shortFormatLabel: 'Visium ZIP',
+  } : multiSampleMode ? {
+    datasetFileType: 'tenx_h5',
+    jobType: 'seurat.multisample.v1',
+    sourceType: 'tenx_h5_multisample_dataset',
+    formatLabel: 'two or more 10x Genomics filtered feature-barcode matrix HDF5 files (.h5)',
+    shortFormatLabel: 'Multi-sample 10x HDF5',
   } : {
     datasetFileType: 'tenx_h5',
     jobType: 'seurat.pipeline.v1',
@@ -940,8 +966,27 @@ export function SeuratPipelinePanel({
   };
 
   const activeDataset = datasets.find(dataset => dataset.id === selectedDatasetId) || null;
-  const activeDatasetReady = activeDataset?.uploadStatus === 'uploaded'
-    && activeDataset?.validationStatus === 'valid';
+  const selectedMultiDatasets = multiSampleRows.map(row => datasets.find(dataset => dataset.id === row.datasetId));
+  const activeDatasetReady = multiSampleMode
+    ? selectedMultiDatasets.length >= 2 && selectedMultiDatasets.every(dataset => (
+      dataset?.uploadStatus === 'uploaded' && dataset?.validationStatus === 'valid'
+    ))
+    : activeDataset?.uploadStatus === 'uploaded' && activeDataset?.validationStatus === 'valid';
+  const multiSampleConditionCounts = multiSampleRows.reduce((counts, row) => {
+    const condition = String(row.conditionName || '').trim().toLocaleLowerCase('en-US');
+    if (condition) counts.set(condition, (counts.get(condition) || 0) + 1);
+    return counts;
+  }, new Map());
+  const multiSampleDesignValid = multiSampleRows.length >= 2
+    && multiSampleRows.length <= MAX_MULTI_SAMPLE_INPUTS
+    && multiSampleRows.every(row => (
+      isValidMultiSampleLabel(row.sampleName)
+      && isValidMultiSampleLabel(row.conditionName)
+      && isValidMultiSampleLabel(row.donorCode, { optional: true })
+      && isValidMultiSampleLabel(row.batch, { optional: true })
+    ))
+    && new Set(multiSampleRows.map(row => String(row.sampleName || '').trim().toLocaleLowerCase('en-US'))).size === multiSampleRows.length
+    && multiSampleConditionCounts.size >= 2;
   const inputObjects = (currentWs.objects || [])
     .filter(object => object.projectId === activeProjectId && object.datasetId === selectedDatasetId);
   const selectedInputObject = selectedObject?.projectId === activeProjectId && selectedObject?.datasetId === selectedDatasetId
@@ -977,13 +1022,17 @@ export function SeuratPipelinePanel({
       const rows = await api.listDatasets(activeProjectId, { fileType: workflow.datasetFileType });
       const next = Array.isArray(rows) ? rows : [];
       setDatasets(next);
-      setSelectedDatasetId(prev => (next.some(dataset => dataset.id === prev) ? prev : (next[0]?.id || '')));
+      if (multiSampleMode) {
+        setMultiSampleRows(prev => prev.filter(row => next.some(dataset => dataset.id === row.datasetId)));
+      } else {
+        setSelectedDatasetId(prev => (next.some(dataset => dataset.id === prev) ? prev : (next[0]?.id || '')));
+      }
     } catch (error) {
       setDatasetStatus(prev => ({ ...prev, error: parseApiError(error) }));
     } finally {
       setDatasetStatus(prev => ({ ...prev, loading: false }));
     }
-  }, [activeProjectId, workflow.datasetFileType]);
+  }, [activeProjectId, multiSampleMode, workflow.datasetFileType]);
 
   React.useEffect(() => {
     loadDatasets();
@@ -1063,13 +1112,22 @@ export function SeuratPipelinePanel({
   }, [job?.id, job?.status, jobStatus.refreshing, refreshJob]);
 
   const uploadDataset = async (event) => {
-    const file = event.target.files?.[0] || null;
+    const files = Array.from(event.target.files || []);
     event.target.value = '';
-    if (!file) return;
-    const supported = spatialMode
-      ? isSupportedClassicVisiumZipFile(file)
-      : isSupportedTenxH5File(file);
-    if (!supported) {
+    if (files.length === 0) return;
+    const selectedFiles = multiSampleMode ? files : files.slice(0, 1);
+    if (multiSampleMode && multiSampleRows.length + selectedFiles.length > MAX_MULTI_SAMPLE_INPUTS) {
+      setDatasetStatus({
+        loading: false,
+        uploading: false,
+        error: `A multi-condition run supports at most ${MAX_MULTI_SAMPLE_INPUTS} sample datasets.`,
+      });
+      return;
+    }
+    const unsupported = selectedFiles.some(file => (
+      spatialMode ? !isSupportedClassicVisiumZipFile(file) : !isSupportedTenxH5File(file)
+    ));
+    if (unsupported) {
       setDatasetStatus({
         loading: false,
         uploading: false,
@@ -1086,12 +1144,25 @@ export function SeuratPipelinePanel({
     }
     setDatasetStatus({ loading: false, uploading: true, error: null });
     try {
-      const created = await api.uploadDataset(activeProjectId, file, {
-        supportedWorkflow: workflow.jobType,
-        supportedFormat: workflow.formatLabel,
-      }, workflow.datasetFileType);
-      setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
-      setSelectedDatasetId(created.id);
+      for (const file of selectedFiles) {
+        const created = await api.uploadDataset(activeProjectId, file, {
+          supportedWorkflow: workflow.jobType,
+          supportedFormat: workflow.formatLabel,
+        }, workflow.datasetFileType);
+        setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
+        if (multiSampleMode) {
+          setMultiSampleRows(prev => prev.some(row => row.datasetId === created.id) ? prev : [...prev, {
+            datasetId: created.id,
+            sampleName: defaultSampleName(created),
+            conditionName: '',
+            donorCode: '',
+            batch: '',
+          }]);
+          setSelectedDatasetId(prev => prev || created.id);
+        } else {
+          setSelectedDatasetId(created.id);
+        }
+      }
     } catch (error) {
       setDatasetStatus(prev => ({ ...prev, error: parseApiError(error) }));
     } finally {
@@ -1104,7 +1175,9 @@ export function SeuratPipelinePanel({
     const api = window.electronAPI || {};
     const createJob = spatialMode
       ? api.createSpatialSeuratPipelineJob
-      : api.createSeuratPipelineJob;
+      : multiSampleMode
+        ? api.createMultiSampleSeuratPipelineJob
+        : api.createSeuratPipelineJob;
     if (!createJob) {
       setJobStatus(prev => ({ ...prev, error: 'This approved workflow is temporarily unavailable.' }));
       return;
@@ -1116,6 +1189,7 @@ export function SeuratPipelinePanel({
       const input = await ensureDatasetInputObject();
       const created = await createJob(activeProjectId, {
         datasetId: selectedDatasetId,
+        ...(multiSampleMode ? { samples: multiSampleRows } : {}),
         analysisObjectId: input.id,
         params: scrubEmptyParams(params),
       });
@@ -1183,13 +1257,15 @@ export function SeuratPipelinePanel({
   };
 
   const canLaunch = !!activeProjectId && !!selectedDatasetId && !jobStatus.launching
-    && (!spatialMode || activeDatasetReady);
+    && (!spatialMode || activeDatasetReady)
+    && (!multiSampleMode || (activeDatasetReady && multiSampleDesignValid));
 
   const selectWorkflowMode = (nextMode) => {
     if (nextMode === workflowMode) return;
     setWorkflowMode(nextMode);
     setDatasets([]);
     setSelectedDatasetId('');
+    setMultiSampleRows([]);
     setJob(null);
     setLoadJob(null);
     setLogs([]);
@@ -1198,6 +1274,46 @@ export function SeuratPipelinePanel({
     setJobStatus({ launching: false, refreshing: false, error: null });
     setLoadStatus({ launching: false, refreshing: false, error: null });
   };
+
+  const continueToStudyDesign = () => {
+    if (!canContinueToDeg) return;
+    onSelectAnalysisObject?.(activeProjectId, resultObjectId);
+    setActiveTab('study-design');
+  };
+
+  const toggleMultiSampleDataset = (dataset) => {
+    const alreadySelected = multiSampleRows.some(row => row.datasetId === dataset.id);
+    if (!alreadySelected && multiSampleRows.length >= MAX_MULTI_SAMPLE_INPUTS) {
+      setDatasetStatus(prev => ({
+        ...prev,
+        error: `A multi-condition run supports at most ${MAX_MULTI_SAMPLE_INPUTS} sample datasets.`,
+      }));
+      return;
+    }
+    setMultiSampleRows(prev => {
+      const exists = prev.some(row => row.datasetId === dataset.id);
+      return exists
+        ? prev.filter(row => row.datasetId !== dataset.id)
+        : [...prev, {
+          datasetId: dataset.id,
+          sampleName: defaultSampleName(dataset),
+          conditionName: '',
+          donorCode: '',
+          batch: '',
+        }];
+    });
+  };
+
+  const updateMultiSampleRow = (datasetId, field, value) => {
+    setMultiSampleRows(prev => prev.map(row => (
+      row.datasetId === datasetId ? { ...row, [field]: value } : row
+    )));
+  };
+
+  React.useEffect(() => {
+    if (!multiSampleMode) return;
+    setSelectedDatasetId(multiSampleRows[0]?.datasetId || '');
+  }, [multiSampleMode, multiSampleRows]);
 
   return (
     <section className="rounded-lg border border-border bg-surface/70 p-5" data-testid="seurat-pipeline-panel">
@@ -1211,16 +1327,26 @@ export function SeuratPipelinePanel({
           <p className="max-w-3xl text-sm text-textMuted">
             {spatialMode
               ? 'This path supports classic 10x Visium Space Ranger output bundles containing the filtered matrix plus spatial image and coordinate files. Visium HD and Xenium are not accepted by this workflow.'
-              : 'This path supports 10x Genomics filtered feature-barcode matrix HDF5 files (`.h5`). Other formats are not labeled as supported here.'}
+              : multiSampleMode
+                ? 'Upload one 10x HDF5 file per biological sample, assign each sample to a condition, and create one checkpoint-backed Seurat analysis with sample and condition metadata.'
+                : 'This path supports 10x Genomics filtered feature-barcode matrix HDF5 files (`.h5`). Other formats are not labeled as supported here.'}
           </p>
           <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Seurat workflow type">
             <button
               type="button"
-              aria-pressed={!spatialMode}
+              aria-pressed={workflowMode === 'scrna'}
               onClick={() => selectWorkflowMode('scrna')}
-              className={`btn text-xs ${!spatialMode ? 'btn-primary' : 'btn-secondary'}`}
+              className={`btn text-xs ${workflowMode === 'scrna' ? 'btn-primary' : 'btn-secondary'}`}
             >
               Single-cell RNA
+            </button>
+            <button
+              type="button"
+              aria-pressed={multiSampleMode}
+              onClick={() => selectWorkflowMode('multisample')}
+              className={`btn text-xs ${multiSampleMode ? 'btn-primary' : 'btn-secondary'}`}
+            >
+              Multiple conditions
             </button>
             <button
               type="button"
@@ -1253,11 +1379,16 @@ export function SeuratPipelinePanel({
                 </div>
                 {datasetUploadsEnabled ? <label className="btn btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
                   <FileUp size={16} />
-                  {datasetStatus.uploading ? 'Uploading...' : spatialMode ? 'Upload Visium .zip' : 'Upload 10x .h5'}
+                  {datasetStatus.uploading
+                    ? 'Uploading...'
+                    : spatialMode
+                      ? 'Upload Visium .zip'
+                      : multiSampleMode ? 'Upload sample .h5 files' : 'Upload 10x .h5'}
                   <input
                     data-testid="seurat-pipeline-upload"
                     type="file"
                     accept={spatialMode ? '.zip' : '.h5'}
+                    multiple={multiSampleMode}
                     className="sr-only"
                     disabled={datasetStatus.uploading}
                     onChange={uploadDataset}
@@ -1279,30 +1410,58 @@ export function SeuratPipelinePanel({
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {datasets.map(dataset => (
-                    <label key={dataset.id} className="flex cursor-pointer items-start gap-3 rounded border border-border bg-surface p-3 hover:border-primary/40">
-                      <input
-                        type="radio"
-                        name="seurat-pipeline-dataset"
-                        checked={selectedDatasetId === dataset.id}
-                        onChange={() => setSelectedDatasetId(dataset.id)}
-                        className="mt-1"
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate font-bold text-text">{dataset.originalFilename || dataset.name || 'Uploaded dataset'}</span>
-                        <span className="mt-1 block text-xs text-textMuted">
-                          {workflow.shortFormatLabel} · {datasetResearchStatus(dataset)}
-                        </span>
-                        {dataset.validationStatus === 'invalid' && (
-                          <span className="mt-2 block text-xs text-danger">
-                            {datasetValidationMessages(dataset)[0]
-                              ? safeMessage(datasetValidationMessages(dataset)[0])
-                              : 'This upload did not pass format validation.'}
+                  {datasets.map(dataset => {
+                    const designRow = multiSampleRows.find(row => row.datasetId === dataset.id);
+                    const selected = multiSampleMode ? Boolean(designRow) : selectedDatasetId === dataset.id;
+                    return (
+                      <div key={dataset.id} className="rounded border border-border bg-surface p-3 hover:border-primary/40">
+                        <label className="flex cursor-pointer items-start gap-3">
+                          <input
+                            type={multiSampleMode ? 'checkbox' : 'radio'}
+                            name="seurat-pipeline-dataset"
+                            checked={selected}
+                            onChange={() => (multiSampleMode
+                              ? toggleMultiSampleDataset(dataset)
+                              : setSelectedDatasetId(dataset.id))}
+                            className="mt-1"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-bold text-text">{dataset.originalFilename || dataset.name || 'Uploaded dataset'}</span>
+                            <span className="mt-1 block text-xs text-textMuted">
+                              {workflow.shortFormatLabel} · {datasetResearchStatus(dataset)}
+                            </span>
+                            {dataset.validationStatus === 'invalid' && (
+                              <span className="mt-2 block text-xs text-danger">
+                                {datasetValidationMessages(dataset)[0]
+                                  ? safeMessage(datasetValidationMessages(dataset)[0])
+                                  : 'This upload did not pass format validation.'}
+                              </span>
+                            )}
                           </span>
+                        </label>
+                        {multiSampleMode && designRow && (
+                          <div className="mt-3 grid grid-cols-1 gap-2 border-t border-border pt-3 sm:grid-cols-2">
+                            <label className="text-xs text-textMuted">
+                              Sample name
+                              <input className="input mt-1 w-full" aria-label={`Sample name for ${dataset.originalFilename || dataset.id}`} value={designRow.sampleName} onChange={event => updateMultiSampleRow(dataset.id, 'sampleName', event.target.value)} />
+                            </label>
+                            <label className="text-xs text-textMuted">
+                              Condition
+                              <input className="input mt-1 w-full" aria-label={`Condition for ${dataset.originalFilename || dataset.id}`} placeholder="e.g. treated" value={designRow.conditionName} onChange={event => updateMultiSampleRow(dataset.id, 'conditionName', event.target.value)} />
+                            </label>
+                            <label className="text-xs text-textMuted">
+                              Donor code (optional)
+                              <input className="input mt-1 w-full" aria-label={`Donor code for ${dataset.originalFilename || dataset.id}`} value={designRow.donorCode} onChange={event => updateMultiSampleRow(dataset.id, 'donorCode', event.target.value)} />
+                            </label>
+                            <label className="text-xs text-textMuted">
+                              Batch (optional)
+                              <input className="input mt-1 w-full" aria-label={`Batch for ${dataset.originalFilename || dataset.id}`} value={designRow.batch} onChange={event => updateMultiSampleRow(dataset.id, 'batch', event.target.value)} />
+                            </label>
+                          </div>
                         )}
-                      </span>
-                    </label>
-                  ))}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1376,6 +1535,30 @@ export function SeuratPipelinePanel({
               <div className="mt-3 rounded border border-border bg-surface px-3 py-2 text-xs text-textMuted">
                 Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || 'Will be created from the selected dataset'}</span>
               </div>
+              {multiSampleMode && (
+                <div className="mt-3 rounded border border-primary/20 bg-primary/5 px-3 py-3 text-xs text-textMuted" role="status">
+                  <p className="font-bold text-text">Multi-condition preparation</p>
+                  <p className="mt-1">
+                    {multiSampleRows.length} selected sample{multiSampleRows.length === 1 ? '' : 's'} across {multiSampleConditionCounts.size} condition{multiSampleConditionCounts.size === 1 ? '' : 's'}.
+                  </p>
+                  {!multiSampleDesignValid && (
+                    <p className="mt-2 text-amber-800 dark:text-amber-200">
+                      Select 2-{MAX_MULTI_SAMPLE_INPUTS} datasets, enter unique sample names, and assign at least two conditions. Labels must be 1-80 characters and use letters, numbers, spaces, periods, underscores, or hyphens.
+                    </p>
+                  )}
+                  {multiSampleDesignValid && [...multiSampleConditionCounts.values()].some(count => count < 2) && (
+                    <p className="mt-2 text-amber-800 dark:text-amber-200">
+                      The combined analysis can run, but replicate-aware condition testing requires at least two independent samples in each compared condition.
+                    </p>
+                  )}
+                  {multiSampleDesignValid && [...multiSampleConditionCounts.values()].every(count => count >= 2) && (
+                    <p className="mt-2 text-success">
+                      The sample counts meet the minimum replication gate for sample-level condition comparisons.
+                    </p>
+                  )}
+                  <p className="mt-2">The saved object will contain <code>sample_id</code>, <code>condition</code>, <code>donor_code</code>, and <code>batch</code> metadata.</p>
+                </div>
+              )}
               {spatialMode && activeDataset && !activeDatasetReady && (
                 <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-xs text-textMuted" role="status">
                   <p className="font-bold text-text">
@@ -1398,7 +1581,9 @@ export function SeuratPipelinePanel({
                 className="btn btn-primary mt-4 inline-flex items-center gap-2 text-sm disabled:opacity-50"
               >
                 {jobStatus.launching ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
-                {spatialMode ? 'Run spatial Seurat preprocessing' : 'Run Seurat preprocessing'}
+                {spatialMode
+                  ? 'Run spatial Seurat preprocessing'
+                  : multiSampleMode ? 'Prepare multi-condition analysis' : 'Run Seurat preprocessing'}
               </button>
               {jobStatus.error && (
                 <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
@@ -1420,16 +1605,16 @@ export function SeuratPipelinePanel({
                 )}
               </div>
               {!job ? (
-                <p className="text-sm text-textMuted">No {spatialMode ? 'spatial Seurat' : 'Seurat'} preprocessing run has been launched from this panel yet.</p>
+                <p className="text-sm text-textMuted">No {spatialMode ? 'spatial Seurat' : multiSampleMode ? 'multi-condition Seurat' : 'Seurat'} preprocessing run has been launched from this panel yet.</p>
               ) : (
                 <div className="space-y-3 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-bold text-text">{spatialMode ? 'Spatial Seurat preprocessing' : 'Seurat preprocessing'}</span>
+                    <span className="font-bold text-text">{spatialMode ? 'Spatial Seurat preprocessing' : multiSampleMode ? 'Multi-condition Seurat preparation' : 'Seurat preprocessing'}</span>
                     <StatusPill label={displayRunStatus(job.status)} tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'amber' : 'blue'} />
                   </div>
                   <div className="text-xs text-textMuted">Created: {formatDate(job.createdAt)}</div>
                   <div className="grid grid-cols-1 gap-2 text-xs">
-                    <div>Dataset: <span className="text-text">{activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset'}</span></div>
+                    <div>{multiSampleMode ? 'Primary dataset' : 'Dataset'}: <span className="text-text">{activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset'}</span></div>
                     <div>Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || selectedObject?.displayName || selectedObject?.name || 'Selected analysis'}</span></div>
                     <div>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Saved analysis is ready' : 'Preparing saved analysis')}</span></div>
                   </div>
@@ -1461,6 +1646,9 @@ export function SeuratPipelinePanel({
                 <p>Saved version: <span className="text-text">{checkpointArtifact ? 'Available' : 'Not available yet'}</span></p>
                 {resultObjectId && resultObject?.liveState !== 'attached' && (
                   <p>Open this saved version in your private analysis workspace before continuing with downstream analysis.</p>
+                )}
+                {multiSampleMode && resultObjectId && (
+                  <p>Before condition-level inference, confirm the biological samples, conditions, and object bindings in Study Design.</p>
                 )}
                 {loadJob?.id && (
                   <p>Open saved version: <span className="text-text">{displayRunStatus(loadJob.status)}</span></p>
@@ -1502,6 +1690,15 @@ export function SeuratPipelinePanel({
                 >
                   Continue to marker analysis
                 </button>
+                {multiSampleMode && (
+                  <button
+                    onClick={continueToStudyDesign}
+                    disabled={!canContinueToDeg}
+                    className="btn btn-secondary inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                  >
+                    Continue to Study Design
+                  </button>
+                )}
                 <button onClick={() => setActiveTab('history')} className="btn btn-secondary text-sm">
                   Open Runs & Results
                 </button>

@@ -7,6 +7,7 @@ import {
   buildCheckpointSaveJobPayload,
   buildDegFindMarkersJobPayload,
   buildEnrichmentGseaJobPayload,
+  buildMultiSampleSeuratPipelineJobPayload,
   buildSeuratPipelineJobPayload,
 } from './api';
 
@@ -228,6 +229,32 @@ describe('buildSeuratPipelineJobPayload', () => {
       },
     });
     expect(JSON.stringify(payload)).not.toMatch(/ownerUserId|completed|vault|stateKey/i);
+  });
+});
+
+describe('buildMultiSampleSeuratPipelineJobPayload', () => {
+  it('uses the first dataset as lineage primary and only carries reviewed sample fields', () => {
+    const payload = buildMultiSampleSeuratPipelineJobPayload({
+      analysisObjectId: 'ao_primary',
+      samples: [
+        { datasetId: 'ds_a1', sampleName: 'control 1', conditionName: 'control', donorCode: 'd1', path: '../../x' },
+        { datasetId: 'ds_b2', sampleName: 'treated 1', conditionName: 'treated', batch: 'run 2', stateKey: 'private' },
+      ],
+      params: { pcaDims: 20, storageUri: 'vault/private/result.rds' },
+    });
+    expect(payload).toEqual({
+      jobType: 'seurat.multisample.v1',
+      datasetId: 'ds_a1',
+      analysisObjectId: 'ao_primary',
+      parameters: {
+        pcaDims: 20,
+        samples: [
+          { datasetId: 'ds_a1', sampleName: 'control 1', conditionName: 'control', donorCode: 'd1', batch: null },
+          { datasetId: 'ds_b2', sampleName: 'treated 1', conditionName: 'treated', donorCode: null, batch: 'run 2' },
+        ],
+      },
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/\.\.\/|storageUri|stateKey/);
   });
 });
 
