@@ -1,13 +1,15 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { publicErrorMessage } from '../publicError';
 
 export function friendlyPipelineError(value) {
-  const message = String(value || '').trim();
+  const raw = String(value?.message || value || '').trim();
+  if (/backend exception|subscript|stack|traceback|simpleError|execution halted/i.test(raw)) {
+    return 'The analysis could not run with these values. Check the settings and try again.';
+  }
+  const message = publicErrorMessage(value, 'The analysis could not run. Check the settings and try again.');
   if (!message) return 'The analysis could not run. Check the settings and try again.';
   if (/no cells|0 cells|matched these filters/i.test(message)) {
     return 'No cells matched these filters. Loosen the thresholds and try again.';
-  }
-  if (/backend exception|subscript|stack|traceback|simpleError|execution halted/i.test(message)) {
-    return 'The analysis could not run with these values. Check the settings and try again.';
   }
   return message;
 }
@@ -109,7 +111,7 @@ export function usePipelineStep({
       } else if (data?.error && !isInitial) {
         setError(friendlyPipelineError(data.error));
       } else if (!data && !isInitial) {
-        setError('R backend error. Check the console for details.');
+        setError(publicErrorMessage(null, 'The analysis could not run. Check the settings and try again.'));
       }
       setRunning(false);
       return data;

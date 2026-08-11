@@ -87,7 +87,7 @@ function waitForExit(child, timeoutMs = 10000) {
 
 function stopWeb(child) {
   if (!child || child.exitCode !== null) return;
-  if (process.platform === 'win32' && child.connected) child.send({ type: 'benchone:shutdown' });
+  if (process.platform === 'win32' && child.connected) child.send({ type: 'traceomics:shutdown' });
   else child.kill('SIGTERM');
 }
 
@@ -297,14 +297,14 @@ async function main() {
     await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible' });
     assert(await page.getByText(projectName, { exact: true }).count() > 0,
       'Cookie restore did not reload the durable project.');
-    assert(await page.evaluate(() => localStorage.getItem('benchone_auth_token')) === null,
+    assert(await page.evaluate(() => localStorage.getItem('traceomics_auth_token')) === null,
       'Browser stored a bearer credential in localStorage.');
-    const ownerCookie = (await context.cookies()).find((cookie) => cookie.name === 'benchone_session');
+    const ownerCookie = (await context.cookies()).find((cookie) => cookie.name === 'traceomics_session');
     assert(ownerCookie?.httpOnly === true, 'Browser session cookie is not HttpOnly.');
 
     await page.getByRole('button', { name: 'Log out' }).click();
     await page.getByRole('button', { name: /Open Workbench/ }).waitFor({ state: 'visible' });
-    assert(!(await context.cookies()).some((cookie) => cookie.name === 'benchone_session'),
+    assert(!(await context.cookies()).some((cookie) => cookie.name === 'traceomics_session'),
       'Logout did not clear the browser session cookie.');
 
     const unexpectedConsole = consoleErrors.filter((message) => (

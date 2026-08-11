@@ -387,8 +387,8 @@ async function main() {
   
   // Mock Electron API
   await context.addInitScript(() => {
-    localStorage.setItem('benchone_auth_token', 'visual-test-token');
-    localStorage.setItem('benchone_auth_user', JSON.stringify({
+    localStorage.setItem('traceomics_auth_token', 'visual-test-token');
+    localStorage.setItem('traceomics_auth_user', JSON.stringify({
       id: 'visual-user',
       email: 'researcher@lab.edu',
       displayName: 'Visual Tester'
@@ -573,6 +573,14 @@ async function main() {
       body: JSON.stringify({ canPublishPipelineManifests: false })
     });
   });
+  await page.route('**/api/expert-r/capabilities*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({ expertREnabled: false, expertRProfile: null })
+    });
+  });
 
   // ── DB-backed project / analysis-object model (mocked; no backend in CI) ─────
   // The app loads the backend project model on startup and during the PBMC demo
@@ -607,7 +615,7 @@ async function main() {
       visualPipelineTab('heatmap', 'Heatmap', 'heatmap'),
       visualPipelineTab('dotplot', 'Dot Plot', 'dotPlot'),
       visualPipelineTab('deg', 'Markers / DEG', 'differentialExpression'),
-      visualPipelineTab('history', 'Jobs & Artifacts', 'projectHistory')
+      visualPipelineTab('history', 'Runs & Results', 'projectHistory')
     ]
   };
   const visualDefaultPipelineDefinition = {
@@ -979,7 +987,7 @@ async function main() {
   await checkOverflow(page, `Workspace ${initialTheme}`);
   await runA11yAudit(page, `Workspace ${initialTheme}`);
   await checkPrimaryButtonHover(page, 'New Project');
-  await checkPrimaryButtonHover(page, 'Load Object');
+  await checkPrimaryButtonHover(page, 'Add analysis');
   await checkCalmInteractiveStates(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new_project');
   await checkReducedMotion(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new project button');
 
@@ -999,7 +1007,7 @@ async function main() {
     await checkOverflow(page, `Workspace ${activeTheme}`);
     await runA11yAudit(page, `Workspace ${activeTheme}`);
     await checkPrimaryButtonHover(page, 'New Project');
-    await checkPrimaryButtonHover(page, 'Load Object');
+    await checkPrimaryButtonHover(page, 'Add analysis');
     // Toggle back to the default theme before continuing tab checks.
     const restoreTitle = initialTheme === 'dark' ? 'Dark Mode' : 'Light Mode';
     const restoreBtn = page.locator(`nav button[title*="${restoreTitle}"]`).first();
@@ -1043,14 +1051,14 @@ async function main() {
     warn('QC button not found — skipping gate check');
   }
 
-  // ── Test 4: Load Object Modal ──────────────────────────────────────────────
-  section('STEP 6: Load Object modal flow');
+  // ── Test 4: Add analysis modal ────────────────────────────────────────────
+  section('STEP 6: Add analysis modal flow');
   let dataLoaded = false;
   try {
-    // Keep this selector exact. A broad "Load" match can accidentally choose
+    // Keep this selector exact. A broad "Add" match can accidentally choose
     // unrelated disabled navigation (for example Lineage's "requires loaded
     // object" status) before the actual workspace action.
-    const loadBtn = page.getByRole('button', { name: 'Load Object', exact: true }).first();
+    const loadBtn = page.getByRole('button', { name: 'Add analysis', exact: true }).first();
     if (await loadBtn.count() > 0) {
       await loadBtn.click();
       await sleep(1000);
@@ -1064,19 +1072,19 @@ async function main() {
         try {
           await page.waitForSelector('text=PBMC_3k_Tutorial', { timeout: 90000 });
           dataLoaded = true;
-          pass('Load Object modal: PBMC3k demo dataset loaded successfully');
+          pass('Add analysis modal: PBMC3k demo dataset loaded successfully');
 
           await sleep(1500);
 
           // Inject mock PCA pipeline state so UMAP tab is accessible
           await page.evaluate(() => {
             try {
-              const wsRaw = localStorage.getItem('benchone_ws_researcher@lab.edu');
+              const wsRaw = localStorage.getItem('traceomics_ws_researcher@lab.edu');
               if (wsRaw) {
                 const workspaces = JSON.parse(wsRaw);
                 if (workspaces && workspaces.length > 0 && workspaces[0].objects && workspaces[0].objects.length > 0) {
                   const objId = workspaces[0].objects[0].id;
-                  const psKey = `benchone_ps_researcher@lab.edu_${objId}`;
+                  const psKey = `traceomics_ps_researcher@lab.edu_${objId}`;
                   const currentPs = JSON.parse(localStorage.getItem(psKey) || '{}');
                   currentPs.qc = true;
                   currentPs.normalize = true;
@@ -1095,7 +1103,7 @@ async function main() {
 
           // DEBUG STATE
           await page.evaluate(() => {
-            console.log('[DEBUG] LocalStorage after reload:', localStorage.getItem('benchone_ws_researcher@lab.edu'));
+            console.log('[DEBUG] LocalStorage after reload:', localStorage.getItem('traceomics_ws_researcher@lab.edu'));
           });
 
           await checkSnapshot(page, 'workspace_data_loaded');
@@ -1120,10 +1128,10 @@ async function main() {
         await sleep(500);
       }
     } else {
-      warn('Load Object button not found — skipping modal test');
+      warn('Add analysis button not found — skipping modal test');
     }
   } catch (e) {
-    warn('Load Object flow error', e.message);
+    warn('Add analysis flow error', e.message);
     // Safety dismiss
     await page.keyboard.press('Escape').catch(() => {});
     await sleep(300);
@@ -1131,7 +1139,7 @@ async function main() {
 
   // ── Test 5: Per-Tab Rendering ──────────────────────────────────────────────
   const allTabs = [
-    { id: 'pipeline-manager', label: 'Pipeline Manager',     requiresData: false },
+    { id: 'pipeline-manager', label: 'Approved workflows',   requiresData: false },
     { id: 'inspect',      label: 'Inspect',                  requiresData: true  },
     { id: 'qc',           label: 'Quality Control',           requiresData: true  },
     { id: 'normalize',    label: 'Normalize',                 requiresData: true  },
@@ -1148,11 +1156,11 @@ async function main() {
     { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true },
     { id: 'cellchat',     label: 'CellChat',                  requiresData: true },
     { id: 'customscript', label: 'Custom Script',             requiresData: false, expectedHidden: true  },
-    { id: 'history',      label: 'Jobs & Artifacts',          requiresData: false },
+    { id: 'history',      label: 'Runs & Results',            requiresData: false },
     { id: 'publication',  label: 'Figure Gallery',            requiresData: true  },
     { id: 'validation',   label: 'Validation',                requiresData: true  },
     { id: 'lineage',      label: 'Lineage',                   requiresData: true },
-    { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, clickVia: 'runtime-status' },
+    { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, expectedHidden: true },
   ];
 
   for (const tab of allTabs) {
@@ -1200,18 +1208,18 @@ async function main() {
         if (tab.id === 'pipeline-manager') {
           const trustedDefinition = page.getByText('Visual Inspection View', { exact: true });
           const trustedDefinitionCount = await trustedDefinition.count();
-          assert('Pipeline Manager: trusted registry definition visible after navigation',
+          assert('Approved workflows: trusted registry definition visible after navigation',
             trustedDefinitionCount === 1 && await trustedDefinition.isVisible());
-          assert('Pipeline Manager: non-developer publication controls hidden',
+          assert('Approved workflows: non-developer publication controls hidden',
             await page.getByRole('heading', { name: 'Publish Trusted Pipeline Manifest', exact: true }).count() === 0);
         }
 
         if (tab.id === 'lineage') {
           const durableLineageCopy = page.getByText(
-            'Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.'
+            'Recorded relationships for the selected saved analysis. This view is read-only.'
           );
-          assert('Lineage: durable read-only graph copy visible', await durableLineageCopy.count() === 1);
-          const forkExplanation = page.getByText('Created from a durable checkpoint. The source object remains unchanged.');
+          assert('Lineage: recorded read-only relationships visible', await durableLineageCopy.count() === 1);
+          const forkExplanation = page.getByText('Created from a saved version. The source analysis remains unchanged.');
           assert('Lineage: fork relationship is explained in researcher language', await forkExplanation.count() === 1);
         }
 

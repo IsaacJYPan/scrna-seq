@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Login from './Login';
 import auth from '../auth';
@@ -9,6 +9,7 @@ vi.mock('../auth', () => ({
     registrationPolicy: vi.fn(),
     signup: vi.fn(),
     login: vi.fn(),
+    startDemoGuest: vi.fn(),
   },
 }));
 
@@ -34,6 +35,17 @@ describe('Login registration policy', () => {
     const signup = await screen.findByRole('button', { name: 'Sign Up' });
     fireEvent.click(signup);
     expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
+  });
+
+  it('starts an ephemeral curated workspace in public demo mode', async () => {
+    auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false, demoMode: true });
+    auth.startDemoGuest.mockResolvedValue({ id: 7, email: 'guest@demo.invalid', displayName: 'Demo Guest' });
+    const onLogin = vi.fn();
+    render(<Login onLogin={onLogin} />);
+    fireEvent.click(await screen.findByRole('button', { name: /start temporary demo/i }));
+    await waitFor(() => expect(auth.startDemoGuest).toHaveBeenCalledTimes(1));
+    expect(onLogin).toHaveBeenCalledWith(expect.objectContaining({ id: 7 }));
+    expect(screen.getByText(/uploads and expert r are disabled/i)).toBeInTheDocument();
   });
 
   it('fails closed when the policy probe is unavailable', async () => {

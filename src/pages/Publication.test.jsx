@@ -8,6 +8,7 @@ describe('Publication', () => {
     id: 'fig-1',
     title: 'UMAP',
     plotType: 'UMAP',
+    filePath: 'C:\\private\\figures\\sensitive-output.png',
     thumbnailB64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
   };
 
@@ -19,7 +20,7 @@ describe('Publication', () => {
   });
 
   it('refreshes saved figures when the previously mounted tab becomes active', async () => {
-    const { rerender } = render(<Publication userEmail="researcher@example.com" isActive={false} />);
+    const { container, rerender } = render(<Publication userEmail="researcher@example.com" isActive={false} />);
 
     expect(window.electronAPI.getFigures).not.toHaveBeenCalled();
 
@@ -27,5 +28,9 @@ describe('Publication', () => {
 
     await waitFor(() => expect(window.electronAPI.getFigures).toHaveBeenCalledWith('researcher@example.com'));
     expect(await screen.findByRole('img', { name: 'UMAP' })).toBeInTheDocument();
+    expect(screen.getByText('sensitive-output.png')).toBeInTheDocument();
+    expect(container.textContent || '').not.toContain('C:\\private\\figures\\sensitive-output.png');
+    expect([...container.querySelectorAll('[title]')].map(node => node.getAttribute('title')))
+      .not.toContain('C:\\private\\figures\\sensitive-output.png');
   });
 });

@@ -73,8 +73,8 @@ jobs:
         run: |
           docker build --check --target runtime .
           docker build --check -f r-backend/Dockerfile r-backend
-          docker build --target runtime -t scrna-seq-workbench:ci .
-          docker build --target operations -t scrna-seq-operations:ci .
+          docker build --target runtime -t traceomics:ci .
+          docker build --target operations -t traceomics-operations:ci .
 
       - name: Boot Compose and run containerized backup/restore drill
         # Uses the real hardened Node/Postgres/operations images and namespace.
@@ -261,7 +261,7 @@ jobs:
           context: r-backend
           file: r-backend/Dockerfile
           load: true
-          tags: scrna-seq-r:ci
+          tags: traceomics-r:ci
           cache-from: type=gha,scope=production-r-image
           cache-to: type=gha,mode=max,scope=production-r-image
 
@@ -270,8 +270,8 @@ jobs:
           docker run --rm --read-only --user 10001:10001
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
-          --entrypoint Rscript scrna-seq-r:ci -e
-          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','BiocNeighbors','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','NMF','presto','CellChat'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE))); stopifnot(identical(as.character(utils::packageVersion('CellChat')), '2.1.2'))"
+          --entrypoint Rscript traceomics-r:ci -e
+          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','BiocNeighbors','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','edgeR','limma','NMF','presto','CellChat'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE))); stopifnot(identical(as.character(utils::packageVersion('CellChat')), '2.1.2'))"
 
       - name: Run ranked pathway enrichment in the production R image
         run: >-
@@ -279,7 +279,7 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
           --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly"
-          --workdir /workspace --entrypoint Rscript scrna-seq-r:ci
+          --workdir /workspace --entrypoint Rscript traceomics-r:ci
           scripts/verify_enrichment_gsea.R
 
       - name: Run CellChat inference in the production R image
@@ -288,7 +288,7 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
           --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly"
-          --workdir /workspace --entrypoint Rscript scrna-seq-r:ci
+          --workdir /workspace --entrypoint Rscript traceomics-r:ci
           scripts/verify_cellchat_inference.R
 
       - name: Boot R image and audit authenticated health
@@ -300,7 +300,7 @@ jobs:
             --pids-limit 1024 --memory 4g --cpus 2 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev \
             -e API_TOKEN="$token" -e PLUMBER_HOST=127.0.0.1 \
-            scrna-seq-r:ci)"
+            traceomics-r:ci)"
           cleanup() {
             docker logs "$container" || true
             docker rm -f "$container" >/dev/null 2>&1 || true

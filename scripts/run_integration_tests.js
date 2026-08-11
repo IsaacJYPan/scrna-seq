@@ -40,7 +40,7 @@ const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
 const TEST_EMAIL   = `integration-${Date.now()}@example.com`;
 const TEST_PASSWORD = 'IntegrationTest123!';
 let authToken = null;
-const SESSION_COOKIE_NAME = 'benchone_session';
+const SESSION_COOKIE_NAME = 'traceomics_session';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

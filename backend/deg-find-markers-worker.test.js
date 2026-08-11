@@ -39,6 +39,7 @@ const {
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
   getProjectJob,
   claimNextJob, reapExpiredJobs, cancelProjectJob,
+  completeJobByWorker, completePbmcPipelineResultByWorker,
   getJobArtifactsByJobId,
   listProjectAnalysisObjectChildren,
   completeDegFindMarkersResultByWorker,
@@ -109,6 +110,23 @@ function recordingCaller(record, byPath) {
 }
 function degCaller(record, degResponse = { status: 200, body: degBody() }) {
   return recordingCaller(record, {
+    '/object/checkpoint-load': () => ({
+      status: 200,
+      body: {
+        loaded: true,
+        runtime_instance_id: 'deg-private-runtime-0001',
+        checksum_verified: true,
+        class: 'Seurat',
+        n_cells: 2700,
+        n_features: 13714,
+        assays: ['RNA'],
+        reductions: ['pca', 'umap'],
+        n_meta_fields: 2,
+        meta_fields: ['orig.ident', 'seurat_clusters'],
+        seurat_version: '5.0.1',
+        r_version: 'R version 4.6.0',
+      },
+    }),
     '/object/deg-find-markers': () => degResponse,
     '/object/inspect': () => ({ status: 200, body: { exists: true, class: 'Seurat', n_cells: 2700, n_features: 13714 } }),
   });
@@ -128,12 +146,43 @@ async function seedProject(ownerUserId, name = 'P') {
   return createProjectForUser(ownerUserId, { organizationId: org.id, name });
 }
 
-// Seed alice + project + an owned analysis object that DEG runs over. (The R call is faked,
-// so the object only needs to exist + be owned; no real live R state is needed here.)
+// Seed an immutable result object with a durable checkpoint. DEG must hydrate this
+// checkpoint into job-scoped R state before it executes its scientific operation.
 async function seedDegInput() {
   const alice = await createUser('alice@example.com', 'password123', 'Alice');
   const proj = await seedProject(alice.id);
-  const obj = await createProjectAnalysisObject(alice.id, proj.id, { objectType: 'seurat', displayName: 'pbmc-clustered' });
+  const parent = await createProjectAnalysisObject(alice.id, proj.id, {
+    objectType: 'seurat', displayName: 'pbmc-parent',
+  });
+  const producer = await createProjectJob(alice.id, proj.id, {
+    jobType: 'pbmc.pipeline.v1', analysisObjectId: parent.id, parameters: {},
+  });
+  const workerId = 'pool-1:deg-checkpoint-seed';
+  const claim = await claimNextJob(workerId, { now: T0, leaseSeconds: 30 });
+  const committed = await completePbmcPipelineResultByWorker(
+    producer.id,
+    workerId,
+    claim.claimToken,
+    {
+      result: { displayName: 'pbmc-clustered', metadata: {} },
+      checkpointArtifact: {
+        artifactType: 'checkpoint',
+        storageKind: 'local_internal',
+        internalStorageKey: `projects/${proj.id}/checkpoints/${producer.id}/checkpoint.rds`,
+        checksumSha256: '8'.repeat(64),
+        sizeBytes: 1024,
+        metadata: {},
+      },
+      summaryArtifact: {
+        artifactType: 'pipeline_summary', storageKind: 'metadata_only', metadata: {},
+      },
+    },
+    { now: T0 }
+  );
+  await completeJobByWorker(producer.id, workerId, claim.claimToken, {
+    now: T0, resultAnalysisObjectId: committed.resultObject.id,
+  });
+  const obj = committed.resultObject;
   return { alice, proj, obj };
 }
 
@@ -161,7 +210,7 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — inventory & scope', () => 
 
   it('registers deg.find_markers.v1 alongside the existing handlers (existing handlers unchanged)', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1', 'spatial.seurat.v1']);
     expect(DEFAULT_HANDLERS['deg.find_markers.v1']).toBe(degFindMarkersHandler);
     // Existing handlers still point at their existing functions.
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(worker.checkpointLoadHandler);
@@ -187,11 +236,11 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — inventory & scope', () => 
     expect(spec.mutating).toBe(false);
   });
 
-  it('the bridge op/target sets stay exact/closed (adds only the DEG op/target)', async () => {
+  it('the bridge op/target sets stay exact/closed', async () => {
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
+      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.hydrate.v1', 'r.checkpoint.load.v1', 'r.condition.pseudobulk_de.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.explore.summarize.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1', 'r.spatial.seurat.v1']);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
   });
 
   it('keeps legacy enrichment and CellChat aliases unregistered', async () => {
@@ -568,7 +617,8 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker success', () => {
     // Exactly one DEG request to R, with the SERVER-allocated key + the owner's canonical key.
     const degReqs = calls.filter((c) => c.path === '/object/deg-find-markers');
     expect(degReqs).toHaveLength(1);
-    expect(degReqs[0].objectStateKey).toBe(deriveRObjectStateKey(alice.id, obj.id));
+    expect(degReqs[0].objectStateKey)
+      .toBe(deriveRObjectStateKey(alice.id, `${obj.id}-job-${job.id}`));
     expect(degReqs[0].body.storage_key)
       .toMatch(new RegExp(`^projects/${proj.id}/artifacts/job_[0-9a-f]+/markers\\.csv$`));
 
@@ -719,9 +769,11 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — worker failure / cancel', 
   it('a canceled job creates no successful DEG artifact (claim lost mid-run, not resurrected)', async () => {
     const { alice, proj, obj } = await seedDegInput();
     const job = await seedDegJob(alice.id, proj.id, obj.id);
+    const hydrationCaller = degCaller([]);
     const cancelingCaller = async (req) => {
       if (req.path === '/object/deg-find-markers') await cancelProjectJob(alice.id, proj.id, job.id);
-      return { status: 200, body: degBody() };
+      if (req.path === '/object/deg-find-markers') return { status: 200, body: degBody() };
+      return hydrationCaller(req);
     };
     const res = await drain(cancelingCaller, T0);
     expect(['claim_lost', 'failed']).toContain(res.status);
@@ -785,29 +837,20 @@ describe.skipIf(!CONFIGURED)('deg.find_markers.v1 — authorization & ownership'
     expect(err && err.code).toBe('NOT_FOUND');
   });
 
-  it('a co-member ANALYST who does NOT own the object is rejected BEFORE R contact (job fails, no R, no artifact)', async () => {
+  it('a co-member ANALYST cannot enqueue work against another member\'s private object', async () => {
     const { proj, obj } = await seedDegInput();
     const carol = await createUser('carol@example.com', 'password123', 'Carol');
     await addProjectMemberByEmail(proj.id, 'carol@example.com', 'analyst', 'owner');
-    // Carol CAN create the job (object is in her project) but the worker owner-gate fails it.
-    const job = await seedDegJob(carol.id, proj.id, obj.id);
-    const calls = [];
-    const res = await drain(degCaller(calls), T0);
-    expect(res.status).toBe('failed');
-    expect(calls.filter((c) => c.path === '/object/deg-find-markers')).toHaveLength(0); // never reached R
-    expect((await degArtifacts(job.id)).all).toHaveLength(0);
+    await expect(seedDegJob(carol.id, proj.id, obj.id))
+      .rejects.toMatchObject({ code: 'ANALYSIS_OBJECT_NOT_FOUND' });
   });
 
   it('a co-member ADMIN who does NOT own the object is ALSO rejected before R contact (membership ≠ live R)', async () => {
     const { proj, obj } = await seedDegInput();
     const bob = await createUser('bob@example.com', 'password123', 'Bob');
     await addProjectMemberByEmail(proj.id, 'bob@example.com', 'admin', 'owner');
-    const job = await seedDegJob(bob.id, proj.id, obj.id);
-    const calls = [];
-    const res = await drain(degCaller(calls), T0);
-    expect(res.status).toBe('failed');
-    expect(calls.filter((c) => c.path === '/object/deg-find-markers')).toHaveLength(0);
-    expect((await degArtifacts(job.id)).all).toHaveLength(0);
+    await expect(seedDegJob(bob.id, proj.id, obj.id))
+      .rejects.toMatchObject({ code: 'ANALYSIS_OBJECT_NOT_FOUND' });
   });
 
   it('a cross-project object cannot be referenced by a DEG job (404 at creation)', async () => {

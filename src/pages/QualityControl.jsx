@@ -3,6 +3,7 @@ import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Inf
 import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
+import { publicErrorMessage } from '../publicError';
 
 // Shared dark-themed hover template style
 const hoverStyle = {
@@ -22,17 +23,17 @@ const PLOT_TABS = [
 function qcUnavailableMessage(rawError, { datasetInfo, sessionReady } = {}) {
   if (!datasetInfo) return 'Load a dataset in the Workspace first.';
   if (!sessionReady) {
-    return 'A dataset is selected, but the live R session is not ready. Reload or restore the session before running QC.';
+    return 'A dataset is selected, but the private analysis workspace is not ready. Reload or open the saved version before running QC.';
   }
 
   const message = String(rawError || '').trim();
   if (/analysis object not found/i.test(message)) {
-    return 'This analysis object exists in project history, but its live R session is not currently attached. Reload the demo object or load a checkpoint when checkpoint restore is wired for this workflow.';
+    return 'This saved analysis appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis or open its saved version when that workflow is available.';
   }
   if (/no object loaded|load data first/i.test(message)) {
-    return 'This analysis object exists in project history, but its live R session is not currently attached. Reload the demo object to continue interactive analysis.';
+    return 'This saved analysis appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis to continue interactive work.';
   }
-  return message || 'QC distribution data is unavailable for the selected object.';
+  return publicErrorMessage(message, 'QC distribution data is unavailable for the selected analysis.');
 }
 
 export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, objectId, sessionReady }) {
@@ -341,7 +342,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center justify-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            ><FileText size={15} /> View Step Script</button>
+            ><FileText size={15} /> View recorded analysis</button>
           )}
           <button
             onClick={handleFiltering}
@@ -560,7 +561,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '150ms' }}></div>
                 <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '300ms' }}></div>
               </div>
-              <p className="text-textMuted font-medium animate-pulse">Computing QC distributions from Seurat object...</p>
+              <p className="text-textMuted font-medium animate-pulse">Computing QC distributions from the selected analysis...</p>
             </div>
           ) : !distributions ? (
             <div className="flex items-center justify-center h-[420px] text-slate-400 text-sm">

@@ -30,7 +30,7 @@ function verifiedStorage() {
 }
 
 function temporaryStorageProvider() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'benchone-receipts-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-receipts-'));
   tempStorageRoots.push(root);
   return storage.createLocalStorageProvider({ root });
 }
@@ -264,23 +264,25 @@ async function seedCheckpoint(user, project, suffix) {
   return committed;
 }
 
-async function seedSeuratPipelineJob(user, project) {
+async function seedSeuratPipelineJob(user, project, { spatial = false } = {}) {
+  const fileType = spatial ? 'visium_zip' : 'tenx_h5';
+  const filename = spatial ? 'input.zip' : 'input.h5';
   const dataset = await db.createDatasetForProject(user.id, project.id, {
-    fileType: 'tenx_h5',
-    originalFilename: 'input.h5',
+    fileType,
+    originalFilename: filename,
   });
   const uploaded = await db.markDatasetUploaded(project.id, dataset.id, {
-    internalStorageKey: `projects/${project.id}/datasets/${dataset.id}/input.h5`,
+    internalStorageKey: `projects/${project.id}/datasets/${dataset.id}/${filename}`,
     sha256: 'b'.repeat(64),
     fileSizeBytes: 123,
   });
   const inputObject = await db.createProjectAnalysisObject(user.id, project.id, {
     objectType: 'matrix',
     datasetId: uploaded.id,
-    metadata: { source: 'dataset', fileType: 'tenx_h5' },
+    metadata: { source: 'dataset', fileType },
   });
   const job = await db.createProjectJob(user.id, project.id, {
-    jobType: 'seurat.pipeline.v1',
+    jobType: spatial ? 'spatial.seurat.v1' : 'seurat.pipeline.v1',
     datasetId: uploaded.id,
     analysisObjectId: inputObject.id,
     parameters: {},
@@ -826,6 +828,7 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
   it.each([
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
+    'spatial.seurat.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
@@ -835,8 +838,10 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
     const emailLabel = jobType.replace(/[^a-z]/g, '-');
     const { user, project } = await seedProject(`receipt-${emailLabel}@example.com`);
     let job;
-    if (jobType === 'seurat.pipeline.v1') {
-      ({ job } = await seedSeuratPipelineJob(user, project));
+    if (jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1') {
+      ({ job } = await seedSeuratPipelineJob(user, project, {
+        spatial: jobType === 'spatial.seurat.v1',
+      }));
     } else if (jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1') {
       const source = await seedCheckpoint(user, project, `receipt-${emailLabel}`);
       job = await db.createProjectJob(user.id, project.id, {
@@ -845,9 +850,12 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
         parameters: {},
       });
     } else {
-      const source = await db.createProjectAnalysisObject(user.id, project.id, {
-        objectType: 'seurat',
-      });
+      const checkpointBacked = [
+        'deg.find_markers.v1', 'enrichment.gsea.v1', 'cellchat.infer.v1',
+      ].includes(jobType);
+      const source = checkpointBacked
+        ? (await seedCheckpoint(user, project, `receipt-source-${emailLabel}`)).resultObject
+        : await db.createProjectAnalysisObject(user.id, project.id, { objectType: 'seurat' });
       job = await db.createProjectJob(user.id, project.id, {
         jobType,
         analysisObjectId: source.id,
@@ -879,8 +887,20 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
       if (jobType === 'cellchat.infer.v1') return cellChatReceiptPayload(integrity);
       return pipelineReceiptPayload({
         ...integrity,
-        seurat: jobType === 'seurat.pipeline.v1',
+        seurat: jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1',
       });
+    });
+    const callR = async (request) => {
+      // Checkpoint-backed downstream jobs now perform a trusted hydration call
+      // before their receipt-backed scientific operation. Hydration has no
+      // completion receipt because it creates only job-scoped transient state.
+      if (!request.body?.completion_receipt) {
+        return { status: 200, body: loadReceiptPayload(runtimeInstanceId) };
+      }
+      return fake.callR(request);
+    };
+    Object.defineProperty(callR, 'verifyCompletionReceipt', {
+      value: fake.callR.verifyCompletionReceipt,
     });
     let now = T0;
     const worker = createJobWorker({
@@ -888,7 +908,7 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
       workerId: `worker-receipt-${emailLabel}`,
       now: () => now,
       claimGate: async () => ({ ready: true, rRuntimeInstanceHash: runtimeInstanceHash }),
-      callR: fake.callR,
+      callR,
       deriveRObjectStateKey,
       storageProvider: provider,
       logger: silentLogger(),
@@ -1706,6 +1726,7 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
       now: () => now,
       claimGate: async () => ({
         ready: true,
+        recoveryBarrierSafe: true,
         rRuntimeInstanceHash: 'f'.repeat(64),
       }),
       callR: async () => {

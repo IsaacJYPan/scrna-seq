@@ -54,6 +54,7 @@ const {
   MAX_CELLCHAT_RESULT_ROWS,
 } = require('./cellChatInference');
 const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
+const { EXPLORATORY_ANALYSIS_PARAM_NAMES } = require('./exploratoryAnalysis');
 
 /** Coded error helper (mirrors database.js so callers can branch on err.code). */
 function codedError(code, message) {
@@ -99,9 +100,11 @@ const COMPLETION_RECEIPT_ALGORITHM = 'hmac-sha256';
 const COMPLETION_JOB_TO_R_OPERATION = Object.freeze({
   'pbmc.pipeline.v1': 'r.pbmc.pipeline.v1',
   'seurat.pipeline.v1': 'r.seurat.pipeline.v1',
+  'spatial.seurat.v1': 'r.spatial.seurat.v1',
   'deg.find_markers.v1': 'r.deg.find_markers.v1',
   'enrichment.gsea.v1': 'r.enrichment.gsea.v1',
   'cellchat.infer.v1': 'r.cellchat.infer.v1',
+  'condition.pseudobulk_de.v1': 'r.condition.pseudobulk_de.v1',
   'checkpoint.load.v1': 'r.checkpoint.load.v1',
   'checkpoint.fork.v1': 'r.checkpoint.load.v1',
 });
@@ -231,6 +234,24 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     // never wedge a worker indefinitely.
     defaultTimeoutMs: 120000,
   }),
+  // Idempotent job-scoped hydration for isolated compute runtimes. Unlike the
+  // user-visible checkpoint-load job, this auxiliary operation does not publish
+  // a completion receipt or durable artifact; it only prepares a private runtime
+  // immediately before an allowlisted analysis.
+  'r.checkpoint.hydrate.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/checkpoint-load',
+    artifactType: 'checkpoint_load',
+    artifactName: 'Private compute hydration',
+    artifactDescription: 'Private job-scoped checkpoint hydration for isolated compute.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesCheckpoint: true,
+    auxiliary: true,
+    mutating: true,
+    readOnly: false,
+    defaultTimeoutMs: 120000,
+  }),
   // Ranked GO enrichment for one selected identity versus all remaining cells. The
   // worker owns the object context, validated scientific parameters, and output key;
   // the browser cannot choose an R function, endpoint, path, or live-state key.
@@ -271,6 +292,33 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     readOnly: false,
     defaultTimeoutMs: 600000,
   }),
+  'r.explore.summarize.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/explore-summary',
+    artifactType: 'exploration_summary',
+    artifactName: 'Exploratory analysis summary',
+    artifactDescription:
+      'Bounded aggregate exploratory-analysis output from a reviewed recipe. No raw matrix, cell table, code, path, or state key.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesExplorationParams: true,
+    mutating: false,
+    readOnly: true,
+    defaultTimeoutMs: 120000,
+  }),
+  'r.condition.pseudobulk_de.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/condition-pseudobulk-de',
+    artifactType: 'condition_de_summary',
+    artifactName: 'Replicate-aware condition comparison',
+    artifactDescription: 'Sanitized summary of an edgeR pseudobulk condition comparison. The complete table remains in private project storage.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesConditionComparison: true,
+    mutating: false,
+    readOnly: false,
+    defaultTimeoutMs: 600000,
+  }),
   // Dataset-backed Seurat pipeline: load one server-resolved 10x HDF5 dataset,
   // create a Seurat object, run QC/preprocessing/clustering/UMAP, and save a
   // server-allocated checkpoint. Dataset and checkpoint storage keys are rebuilt
@@ -289,7 +337,27 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     carriesSeuratDatasetParams: true,
     mutating: true,
     readOnly: false,
-    defaultTimeoutMs: 120000,
+    // A normal PBMC3K preprocessing run can exceed two minutes on the bounded
+    // deployment CPUs. Keep the deadline explicit and finite, but give this
+    // full-pipeline operation the same ten-minute ceiling as the other heavy
+    // scientific operations so successful work does not enter receipt recovery.
+    defaultTimeoutMs: 600000,
+  }),
+  'r.spatial.seurat.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/spatial-seurat-pipeline',
+    artifactType: 'pipeline_summary',
+    artifactName: 'Spatial Seurat pipeline summary',
+    artifactDescription:
+      'Sanitized summary of a classic 10x Visium Space Ranger bundle loaded with Seurat. '
+      + 'The durable checkpoint retains the spatial assay, tissue image, and spot coordinates; '
+      + 'public metadata contains only bounded counts, reductions, parameters, and warnings.',
+    touchesAnalysisObject: false,
+    requiresObjectContext: false,
+    carriesSpatialDatasetParams: true,
+    mutating: true,
+    readOnly: false,
+    defaultTimeoutMs: 600000,
   }),
 });
 
@@ -625,6 +693,51 @@ function sanitizeDegResultInfo(body) {
   };
 }
 
+function sanitizeExplorationSummary(body) {
+  const source = body && typeof body === 'object' ? body : {};
+  const recipe = sanitizeRuntimeField(source.recipe, 64);
+  const out = {
+    recipe: ['overview', 'feature_by_group', 'metadata_distribution'].includes(recipe)
+      ? recipe : 'overview',
+    panels: [],
+  };
+  const nCells = sanitizeCount(source.n_cells);
+  const nFeatures = sanitizeCount(source.n_features);
+  if (nCells !== null) out.nCells = nCells;
+  if (nFeatures !== null) out.nFeatures = nFeatures;
+  out.metadataFields = sanitizeNameList(source.metadata_fields, 128, 128);
+
+  const panels = Array.isArray(source.panels) ? source.panels : [];
+  for (const panel of panels.slice(0, 24)) {
+    if (!panel || typeof panel !== 'object') continue;
+    const type = sanitizeRuntimeField(panel.type, 32);
+    if (!['histogram', 'bar', 'feature_group'].includes(type)) continue;
+    const safe = {
+      type,
+      title: sanitizeRuntimeField(panel.title, 160) || 'Exploratory summary',
+      rows: [],
+    };
+    const field = sanitizeRuntimeField(panel.field, 128);
+    if (field) safe.field = field;
+    const rows = Array.isArray(panel.rows) ? panel.rows : [];
+    for (const row of rows.slice(0, 512)) {
+      if (!row || typeof row !== 'object') continue;
+      const clean = {};
+      for (const key of ['label', 'feature', 'group']) {
+        const value = sanitizeRuntimeField(row[key], 128);
+        if (value) clean[key] = value;
+      }
+      for (const key of ['start', 'end', 'count', 'average', 'pct_detected', 'q25', 'median', 'q75']) {
+        const value = sanitizeStatNumber(row[key]);
+        if (value !== null) clean[key === 'pct_detected' ? 'pctDetected' : key] = value;
+      }
+      if (Object.keys(clean).length > 0) safe.rows.push(clean);
+    }
+    if (safe.rows.length > 0) out.panels.push(safe);
+  }
+  return out;
+}
+
 /**
  * Keep only a small, bounded pathway-enrichment preview. Full pathway and leading-
  * edge gene tables stay in the local_internal CSV artifact and never enter public
@@ -729,6 +842,37 @@ function sanitizeEnrichmentResultInfo(body) {
   }
   if (result.nRows !== null && result.nRows > 100000) result.saved = false;
   return result;
+}
+
+function sanitizeConditionComparisonSummary(body) {
+  const source = body && typeof body === 'object' && body.summary && typeof body.summary === 'object'
+    ? body.summary : {};
+  const top = Array.isArray(source.top_results) ? source.top_results.slice(0, 50) : [];
+  return {
+    method: sanitizeRuntimeField(source.method, 40),
+    cellTypeColumn: sanitizeRuntimeField(source.cell_type_column, 64),
+    unitOfReplication: sanitizeRuntimeField(source.unit_of_replication, 20),
+    paired: source.paired === true,
+    sampleCount: sanitizeCount(source.sample_count, 1000),
+    testedCellTypeCount: sanitizeCount(source.tested_cell_type_count, 1000),
+    testedGeneCount: sanitizeCount(source.tested_gene_count, 100000),
+    significantResultCount: sanitizeCount(source.significant_result_count, 500000),
+    skippedCellTypes: sanitizeNameList(source.skipped_cell_types, 128, 100),
+    warnings: sanitizeNameList(source.warnings, 32, 160),
+    packageVersions: {
+      r: sanitizeRuntimeField(source.package_versions && source.package_versions.r, 40),
+      seurat: sanitizeRuntimeField(source.package_versions && source.package_versions.seurat, 40),
+      edgeR: sanitizeRuntimeField(source.package_versions && source.package_versions.edger, 40),
+      limma: sanitizeRuntimeField(source.package_versions && source.package_versions.limma, 40),
+    },
+    topResults: top.map((row) => ({
+      cellType: sanitizeRuntimeField(row && row.cell_type, 100),
+      gene: sanitizeRuntimeField(row && row.gene, 100),
+      logFc: sanitizeStatNumber(row && row.log_fc),
+      pValue: sanitizeStatNumber(row && row.p_value),
+      fdr: sanitizeStatNumber(row && row.fdr),
+    })).filter((row) => row.cellType && row.gene),
+  };
 }
 
 function sanitizeCellChatEnum(value, allowed) {
@@ -972,7 +1116,7 @@ const COMPLETION_RECEIPT_KEYS = Object.freeze([
 ]);
 // Printable domain separation is intentionally shared byte-for-byte with R.
 // Avoid an embedded NUL because R character values cannot safely represent it.
-const COMPLETION_RECEIPT_HMAC_DOMAIN = 'BENCHONE_R_COMPLETION_RECEIPT_V1:';
+const COMPLETION_RECEIPT_HMAC_DOMAIN = 'TRACEOMICS_R_COMPLETION_RECEIPT_V1:';
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -1056,6 +1200,8 @@ function buildCompletionReceiptBinding(job, operation, args = {}) {
   const jobType = job && job.jobType;
   const expectedOperation = COMPLETION_JOB_TO_R_OPERATION[jobType];
   if (!expectedOperation) return null;
+  const operationSpec = R_BRIDGE_OPERATIONS[operation];
+  if (operationSpec && operationSpec.auxiliary === true) return null;
   if (operation !== expectedOperation
       || typeof job.id !== 'string' || job.id === ''
       || typeof job.projectId !== 'string' || job.projectId === '') {
@@ -1072,6 +1218,9 @@ function buildCompletionReceiptBinding(job, operation, args = {}) {
   } else if (jobType === 'seurat.pipeline.v1') {
     outputStorageKey = args.seuratPipeline && args.seuratPipeline.checkpointStorageKey;
     outputKind = 'checkpoints';
+  } else if (jobType === 'spatial.seurat.v1') {
+    outputStorageKey = args.spatialPipeline && args.spatialPipeline.checkpointStorageKey;
+    outputKind = 'checkpoints';
   } else if (jobType === 'deg.find_markers.v1') {
     outputStorageKey = args.deg && args.deg.resultStorageKey;
     outputKind = 'artifacts';
@@ -1080,6 +1229,9 @@ function buildCompletionReceiptBinding(job, operation, args = {}) {
     outputKind = 'artifacts';
   } else if (jobType === 'cellchat.infer.v1') {
     outputStorageKey = args.cellChat && args.cellChat.resultStorageKey;
+    outputKind = 'artifacts';
+  } else if (jobType === 'condition.pseudobulk_de.v1') {
+    outputStorageKey = args.conditionComparison && args.conditionComparison.resultStorageKey;
     outputKind = 'artifacts';
   } else {
     sourceCheckpointArtifactId = args.checkpoint && args.checkpoint.checkpointArtifactId;
@@ -1150,8 +1302,8 @@ function validateBoundedReceiptValue(value, depth = 0, state = { nodes: 0 }) {
 
 function validateReceiptPayloadSchema(jobType, payload) {
   validateBoundedReceiptValue(payload);
-  if (jobType === 'pbmc.pipeline.v1' || jobType === 'seurat.pipeline.v1') {
-    const topKeys = jobType === 'seurat.pipeline.v1'
+  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1'].includes(jobType)) {
+    const topKeys = jobType !== 'pbmc.pipeline.v1'
       ? ['ok', 'summary', 'checkpoint', 'versions', 'warnings']
       : ['ok', 'summary', 'checkpoint', 'versions'];
     assertExactObjectKeys(payload, topKeys);
@@ -1163,7 +1315,7 @@ function validateReceiptPayloadSchema(jobType, payload) {
     ], ['n_cells', 'n_features']);
     assertExactObjectKeys(payload.checkpoint, ['saved', 'checksum_sha256', 'size_bytes']);
     assertExactObjectKeys(payload.versions, ['seurat_version', 'r_version']);
-    if (jobType === 'seurat.pipeline.v1' && !Array.isArray(payload.warnings)) {
+    if (jobType !== 'pbmc.pipeline.v1' && !Array.isArray(payload.warnings)) {
       throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
     }
     return;
@@ -1256,6 +1408,27 @@ function validateReceiptPayloadSchema(jobType, payload) {
     }
     return;
   }
+  if (jobType === 'condition.pseudobulk_de.v1') {
+    assertExactObjectKeys(payload, ['ok', 'summary', 'result']);
+    if (payload.ok !== true) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    assertExactObjectKeys(payload.summary, [
+      'method', 'cell_type_column', 'unit_of_replication', 'paired', 'sample_count',
+      'tested_cell_type_count', 'tested_gene_count', 'significant_result_count',
+      'skipped_cell_types', 'top_results', 'package_versions', 'warnings',
+    ]);
+    assertExactObjectKeys(payload.summary.package_versions, ['r', 'seurat', 'edger', 'limma']);
+    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
+    if (!Array.isArray(payload.summary.skipped_cell_types)
+        || !Array.isArray(payload.summary.top_results)
+        || !Array.isArray(payload.summary.warnings)
+        || payload.summary.top_results.length > 50) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    for (const row of payload.summary.top_results) {
+      assertExactObjectKeys(row, ['cell_type', 'gene', 'log_fc', 'p_value', 'fdr']);
+    }
+    return;
+  }
   assertExactObjectKeys(payload, [
     'loaded', 'runtime_instance_id', 'checksum_verified', 'class', 'n_cells',
     'n_features', 'assays', 'reductions', 'n_meta_fields', 'meta_fields',
@@ -1297,7 +1470,7 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
   validateReceiptPayloadSchema(jobType, receipt.payload);
   const body = receipt.payload;
   const spec = R_BRIDGE_OPERATIONS[rOperation];
-  if (jobType === 'pbmc.pipeline.v1' || jobType === 'seurat.pipeline.v1') {
+  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1'].includes(jobType)) {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (!checkpoint.saved || !checkpoint.checksumSha256 || checkpoint.sizeBytes === null) {
@@ -1318,7 +1491,7 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
         ranAt: new Date().toISOString(),
         ...(job.analysisObjectId ? { objectId: job.analysisObjectId } : {}),
         summary,
-        ...(jobType === 'seurat.pipeline.v1'
+        ...(jobType !== 'pbmc.pipeline.v1'
           ? { warnings: sanitizeNameList(body.warnings, 32, 160) } : {}),
       },
     };
@@ -1372,6 +1545,23 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
         ranAt: new Date().toISOString(),
         objectId: job.analysisObjectId,
         summary,
+      },
+    };
+  }
+  if (jobType === 'condition.pseudobulk_de.v1') {
+    const summary = sanitizeConditionComparisonSummary(body);
+    const result = sanitizeEnrichmentResultInfo(body);
+    if (!result.saved || !result.checksumSha256 || result.sizeBytes === null || result.nRows === null) {
+      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
+    }
+    return {
+      operation: rOperation, artifactType: spec.artifactType,
+      name: spec.artifactName, description: spec.artifactDescription,
+      objectId: job.analysisObjectId, summary, result,
+      metadata: {
+        operation: rOperation, kind: 'condition_de_summary', scientific_output: true,
+        downloadable: false, ranAt: new Date().toISOString(),
+        objectId: job.analysisObjectId, summary,
       },
     };
   }
@@ -1787,6 +1977,48 @@ async function runRBridgeOperation(args = {}) {
     request.body = { operation, params: safeParams, storage_key: resultStorageKey };
   }
 
+  if (spec.carriesExplorationParams) {
+    const exploration = args.exploration;
+    const params = exploration && typeof exploration === 'object' ? exploration.params : null;
+    if (!params || typeof params !== 'object') {
+      throw codedError('R_EXPLORATION_PARAMS_REQUIRED', 'Server-validated exploratory-analysis parameters are required.');
+    }
+    const safeParams = {};
+    for (const name of EXPLORATORY_ANALYSIS_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    request.body = { operation, params: safeParams };
+  }
+
+  if (spec.carriesConditionComparison) {
+    const comparison = args.conditionComparison;
+    const design = comparison && comparison.design;
+    const contrast = design && design.contrast;
+    const samples = design && design.samples;
+    const resultStorageKey = comparison && comparison.resultStorageKey;
+    if (!contrast || !Array.isArray(samples) || samples.length < 4 || samples.length > 1000
+        || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
+      throw codedError('R_CONDITION_COMPARISON_REQUIRED', 'Server-resolved condition comparison is required.');
+    }
+    request.body = {
+      operation,
+      design: {
+        unit_of_replication: contrast.unitOfReplication,
+        paired: contrast.paired === true,
+        cell_type_column: contrast.cellTypeColumn,
+        samples: samples.map((sample) => ({
+          sample_id: sample.sampleId,
+          condition: sample.condition,
+          donor_code: sample.donorCode,
+          unit_id: sample.unitId,
+          cell_metadata_column: sample.cellMetadataColumn,
+          cell_metadata_value: sample.cellMetadataValue,
+        })),
+      },
+      storage_key: resultStorageKey,
+    };
+  }
+
   // 2g. Dataset-backed Seurat pipeline op: body reconstructed from ONLY
   // server-validated params and DB-resolved storage coordinates.
   if (spec.carriesSeuratDatasetParams) {
@@ -1801,6 +2033,32 @@ async function runRBridgeOperation(args = {}) {
       || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
       throw codedError('R_SEURAT_PIPELINE_PARAMS_REQUIRED',
         'Server-validated Seurat pipeline parameters and storage keys are required.');
+    }
+    const safeParams = {};
+    for (const name of SEURAT_PIPELINE_PARAM_NAMES) {
+      if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
+    }
+    request.body = {
+      operation,
+      params: safeParams,
+      dataset_storage_key: datasetStorageKey,
+      dataset_file_type: datasetFileType,
+      storage_key: checkpointStorageKey,
+    };
+  }
+
+  if (spec.carriesSpatialDatasetParams) {
+    const spatial = args.spatialPipeline;
+    const params = spatial && typeof spatial === 'object' ? spatial.params : null;
+    const datasetStorageKey = spatial && typeof spatial === 'object' ? spatial.datasetStorageKey : null;
+    const datasetFileType = spatial && typeof spatial === 'object' ? spatial.datasetFileType : null;
+    const checkpointStorageKey = spatial && typeof spatial === 'object' ? spatial.checkpointStorageKey : null;
+    if (!params || typeof params !== 'object'
+        || typeof datasetStorageKey !== 'string' || datasetStorageKey === ''
+        || datasetFileType !== 'visium_zip'
+        || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
+      throw codedError('R_SPATIAL_PIPELINE_PARAMS_REQUIRED',
+        'Server-validated spatial pipeline parameters and storage keys are required.');
     }
     const safeParams = {};
     for (const name of SEURAT_PIPELINE_PARAM_NAMES) {
@@ -1845,8 +2103,10 @@ async function runRBridgeOperation(args = {}) {
     await args.markRDispatchStarted();
   }
 
-  // Call R, mapping any failure to a sanitized, coded error. Once the durable
-  // marker has been written, every caller/response failure is side-effect-possible.
+  // Call R, mapping any failure to a sanitized, coded error. Transport failures,
+  // malformed successes, and server errors remain side-effect-possible after the
+  // durable marker. A completed 400 response is the reviewed endpoint contract for
+  // pre-write input rejection and therefore cannot have published output/receipt.
   let response;
   try {
     response = await callR(request);
@@ -1869,7 +2129,10 @@ async function runRBridgeOperation(args = {}) {
     else if (spec.carriesDegParams) failCode = 'R_DEG_FIND_MARKERS_FAILED';
     else if (spec.carriesEnrichmentParams) failCode = 'R_ENRICHMENT_GSEA_FAILED';
     else if (spec.carriesCellChatParams) failCode = 'R_CELLCHAT_INFERENCE_FAILED';
+    else if (spec.carriesExplorationParams) failCode = 'R_EXPLORATION_FAILED';
+    else if (spec.carriesConditionComparison) failCode = 'R_CONDITION_COMPARISON_FAILED';
     else if (spec.carriesSeuratDatasetParams) failCode = 'R_SEURAT_PIPELINE_FAILED';
+    else if (spec.carriesSpatialDatasetParams) failCode = 'R_SPATIAL_PIPELINE_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     // Server-side diagnostic: the R HTTP status + our coded reason (never the R body,
     // which the R endpoint already logs in full to its own stderr). Pairs with the
@@ -1882,7 +2145,8 @@ async function runRBridgeOperation(args = {}) {
     const err = codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
     err.rStatus = rStatus;
     err.rCode = rCode;
-    throw completionReceipt ? markRSideEffectsPossible(err) : err;
+    const preWriteInputRejection = rStatus === 400;
+    throw completionReceipt && !preWriteInputRejection ? markRSideEffectsPossible(err) : err;
   }
 
   // 4. Build SAFE, metadata-only artifact metadata. Only a small, sanitized allowlist
@@ -1998,6 +2262,35 @@ async function runRBridgeOperation(args = {}) {
     };
   }
 
+  if (operation === 'r.checkpoint.hydrate.v1') {
+    const loaded = sanitizeLoadSummary(body);
+    if (loaded.loaded !== true || loaded.checksumVerified !== true || !loaded.runtimeInstanceHash) {
+      throw codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.');
+    }
+    return { operation, loaded };
+  }
+
+  if (operation === 'r.explore.summarize.v1') {
+    const summary = sanitizeExplorationSummary(body);
+    if (summary.panels.length === 0) {
+      throw codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.');
+    }
+    return {
+      operation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      summary,
+      metadata: {
+        operation,
+        kind: 'exploration_summary',
+        scientific_output: true,
+        aggregate_only: true,
+        summary,
+      },
+    };
+  }
+
   if (operation === 'r.enrichment.gsea.v1') {
     const summary = sanitizeEnrichmentSummary(body);
     const result = sanitizeEnrichmentResultInfo(body);
@@ -2024,6 +2317,25 @@ async function runRBridgeOperation(args = {}) {
         ranAt: new Date().toISOString(),
         objectId: objectContext.objectId,
         summary,
+      },
+    };
+  }
+
+  if (operation === 'r.condition.pseudobulk_de.v1') {
+    const summary = sanitizeConditionComparisonSummary(body);
+    const result = sanitizeEnrichmentResultInfo(body);
+    if (result.saved === true && (!result.checksumSha256
+        || result.sizeBytes === null || result.nRows === null)) {
+      throw markRSideEffectsPossible(codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.'));
+    }
+    return {
+      operation, artifactType: spec.artifactType, name: spec.artifactName,
+      description: spec.artifactDescription, objectId: objectContext.objectId,
+      summary, result,
+      metadata: {
+        operation, kind: 'condition_de_summary', scientific_output: true,
+        downloadable: false, ranAt: new Date().toISOString(),
+        objectId: objectContext.objectId, summary,
       },
     };
   }
@@ -2082,6 +2394,28 @@ async function runRBridgeOperation(args = {}) {
         scientific_output: true,
         ranAt: new Date().toISOString(),
         summary,
+        warnings: sanitizeNameList(body.warnings, 32, 160),
+      },
+    };
+  }
+
+  if (operation === 'r.spatial.seurat.v1') {
+    const summary = sanitizePipelineSummary(body);
+    const checkpoint = sanitizeCheckpointInfo(body);
+    if (checkpoint.saved === true && !checkpoint.checksumSha256) {
+      throw markRSideEffectsPossible(codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.'));
+    }
+    return {
+      operation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      resultObjectType: 'seurat',
+      summary,
+      checkpoint,
+      metadata: {
+        operation, kind: 'spatial_pipeline', modality: 'spatial',
+        scientific_output: true, ranAt: new Date().toISOString(), summary,
         warnings: sanitizeNameList(body.warnings, 32, 160),
       },
     };
@@ -2150,11 +2484,13 @@ module.exports = {
   sanitizePipelineSummary,
   sanitizeCheckpointInfo,
   sanitizeLoadSummary,
+  sanitizeExplorationSummary,
   sanitizeStatNumber,
   sanitizeDegSummary,
   sanitizeDegResultInfo,
   sanitizeEnrichmentSummary,
   sanitizeEnrichmentResultInfo,
+  sanitizeConditionComparisonSummary,
   sanitizeCellChatGroup,
   sanitizeCellChatSummary,
   sanitizeCellChatResultInfo,

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { X, FileCode2, Copy } from 'lucide-react';
+import { X, FileCode2 } from 'lucide-react';
 
 export default function ProvenanceDrawer({ provId, chain, onClose }) {
   const panelRef = useRef(null);
@@ -55,51 +55,21 @@ export default function ProvenanceDrawer({ provId, chain, onClose }) {
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
           
-          {/* Environment Context */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-black/20 p-4 rounded-lg border border-border">
-            <div>
-              <span className="block text-[10px] text-textMuted mb-1 font-semibold tracking-wider">ENVIRONMENT</span>
-              <span className="text-xs text-slate-300 font-mono">{target.language} {target.languageVersion}</span>
-            </div>
-            <div>
-              <span className="block text-[10px] text-textMuted mb-1 font-semibold tracking-wider">PACKAGES</span>
-              <div className="flex flex-wrap gap-1">
-                {target.packages?.length > 0 ? (
-                  target.packages.map(p => <span key={p} className="text-[10px] bg-slate-700 text-slate-300 px-2 py-0.5 rounded border border-slate-600">{p}</span>)
-                ) : <span className="text-xs text-textMuted italic">Base syntax only</span>}
-              </div>
-            </div>
-          </div>
-
-          {/* Legacy live-R script preview for this step */}
-          <div>
-            <span className="block text-[10px] text-textMuted mb-2 font-semibold tracking-wider uppercase">Legacy step script preview (R)</span>
-            <pre className="bg-slate-900 border border-slate-700/50 rounded-lg p-4 overflow-auto text-xs font-mono text-slate-300 shadow-inner leading-relaxed">
-              <code>{target.script}</code>
-            </pre>
-            <p className="mt-2 text-xs text-textMuted">
-              This preview is from the live-R provenance path. It is not a supported generated report or complete reproducibility export.
-            </p>
+          <div className="rounded-lg border border-border bg-black/20 p-4">
+            <span className="block text-[10px] text-textMuted mb-2 font-semibold tracking-wider uppercase">Recorded analysis</span>
+            <p className="text-sm text-slate-300">This record summarizes an approved analysis step. Technical implementation details and source text are not shown here.</p>
           </div>
 
           {hasAncestors && (
             <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl text-center">
               <p className="text-xs text-textMuted">
-                This step is part of a <span className="text-primary font-bold">{chain.length}-step</span> pipeline.
-                Visit <span className="text-white font-bold">Session DAG</span> to inspect the transient live-R lineage.
+                This step is part of a <span className="text-primary font-bold">{chain.length}-step</span> recorded analysis history.
+                Open <span className="text-white font-bold">Analysis lineage</span> to inspect its saved relationships.
               </p>
             </div>
           )}
         </div>
 
-        <div className="p-4 bg-slate-800/80 border-t border-border flex justify-between items-center shadow-inner">
-           <button
-             onClick={() => navigator.clipboard.writeText(target.script)}
-             className="btn btn-secondary flex items-center gap-2 hover:bg-slate-700"
-           >
-             <Copy size={16} /> Copy Preview
-           </button>
-        </div>
       </div>
     </>
   );

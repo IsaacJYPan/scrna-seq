@@ -103,6 +103,17 @@
       "parameterTemplates": ["text"],
       "resultViewTemplates": ["placeholder"]
     },
+    "exploratoryAnalysis": {
+      "routeId": "explore",
+      "componentKey": "exploratoryAnalysis",
+      "defaultLabel": "Exploratory Analysis",
+      "jobType": "explore.summarize.v1",
+      "executable": true,
+      "requiresObject": true,
+      "parameterTemplates": ["enum", "text", "integer"],
+      "resultArtifactTypes": ["exploration_summary"],
+      "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
+    },
     "differentialExpression": {
       "routeId": "deg",
       "componentKey": "differentialExpression",
@@ -136,10 +147,32 @@
       "resultArtifactTypes": ["cellchat_summary", "cellchat_results"],
       "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
     },
+    "conditionComparison": {
+      "routeId": "study-design",
+      "componentKey": "studyDesign",
+      "defaultLabel": "Study Design & Conditions",
+      "jobType": "condition.pseudobulk_de.v1",
+      "executable": true,
+      "requiresProject": true,
+      "parameterTemplates": [],
+      "resultArtifactTypes": ["condition_de_summary", "condition_de_results"],
+      "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
+    },
+    "expertR": {
+      "routeId": "expert-r",
+      "componentKey": "expertR",
+      "defaultLabel": "Expert R",
+      "jobType": "expert.r.v1",
+      "executable": true,
+      "requiresObject": true,
+      "parameterTemplates": [],
+      "resultArtifactTypes": ["expert_r_summary", "expert_r_bundle"],
+      "resultViewTemplates": ["summaryMetrics", "artifactTable", "jobLogs"]
+    },
     "projectHistory": {
       "routeId": "history",
       "componentKey": "projectHistory",
-      "defaultLabel": "Jobs & Artifacts",
+      "defaultLabel": "Runs & Results",
       "requiresProject": true,
       "parameterTemplates": [],
       "resultViewTemplates": ["artifactTable", "jobLogs"]

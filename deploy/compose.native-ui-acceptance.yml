@@ -1,0 +1,11 @@
+# Test-only browser/Electron overlay. Scientific workers still use the isolated
+# compute services from compose.private-compute-acceptance.yml. Only the web
+# edge is relaxed to loopback HTTP so local Chromium and Electron can exercise
+# the real Compose stack without installing a test certificate on the host.
+services:
+  web:
+    environment:
+      NODE_ENV: test
+      TRUST_PROXY_HOPS: "0"
+      FRONTEND_ORIGIN: http://127.0.0.1:${WEB_PORT}
+      COOKIE_SECURE: "false"

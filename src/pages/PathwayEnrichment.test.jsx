@@ -155,8 +155,9 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(screen.getByText('higher in target')).toBeInTheDocument();
     expect(screen.getByText(/Adjusted p ≤ 0\.010/)).toBeInTheDocument();
     expect(screen.getByText(/94.7%/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_enrichment_summary/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_enrichment_results/i)).toBeInTheDocument();
+    expect(screen.getByText(/A saved summary is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/private result table is available/i)).toBeInTheDocument();
+    expect(screen.queryByText(/art_enrichment_summary|art_enrichment_results/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Saved with R 4\.5\.3 and Seurat 5\.3\.1/i)).toBeInTheDocument();
 
     const text = container.textContent || '';
@@ -164,6 +165,7 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(text).not.toMatch(/C:\/private/i);
     expect(text).not.toMatch(/state_key/i);
     expect(text).not.toMatch(/user-1:obj/i);
+    expect(text).not.toMatch(/art_enrichment_summary|art_enrichment_results|job_enrichment/i);
   });
 
   it('explains that enrichment is descriptive and is not proof of pathway activity', () => {
@@ -186,7 +188,7 @@ describe('PathwayEnrichment durable worker UI', () => {
     });
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
-    expect(screen.getByText(/Select a saved analysis object/i)).toBeInTheDocument();
+    expect(screen.getByText(/Select a saved analysis before starting pathway enrichment/i)).toBeInTheDocument();
   });
 
   it('restores the latest saved pathway job for the selected object', async () => {
@@ -229,7 +231,7 @@ describe('PathwayEnrichment durable worker UI', () => {
     });
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
-    expect(screen.getByText(/not attached to the private R session/i)).toBeInTheDocument();
+    expect(screen.getByText(/not open in your private analysis workspace/i)).toBeInTheDocument();
   });
 
   it('offers bounded cluster labels from the attached private R object', async () => {

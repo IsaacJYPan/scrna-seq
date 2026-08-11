@@ -3,6 +3,7 @@ import {
   AlertTriangle, Archive, Briefcase, Clock, FileText,
   GitBranch, ImageIcon, Loader2, RefreshCw, ShieldCheck,
 } from 'lucide-react';
+import { publicErrorMessage } from '../publicError';
 
 function formatDate(value) {
   if (!value) return 'Unknown';
@@ -11,18 +12,32 @@ function formatDate(value) {
   return date.toLocaleString();
 }
 
-function formatId(value) {
-  return value ? String(value) : 'None';
+const SAFE_RESEARCHER_ERROR_MESSAGES = new Set([
+  'Project not found.',
+]);
+
+function safeApiErrorMessage(error) {
+  const rawMessage = typeof error === 'string' ? error : error?.message;
+  if (typeof rawMessage !== 'string') return '';
+  let message = rawMessage.trim();
+  try {
+    const parsed = JSON.parse(message);
+    message = typeof parsed?.error === 'string' ? parsed.error.trim() : '';
+  } catch {
+    // Only explicitly approved, whole messages may be displayed below.
+  }
+  return SAFE_RESEARCHER_ERROR_MESSAGES.has(message) ? message : '';
 }
 
 function formatApiError(error, fallback) {
-  if (!error) return fallback;
-  try {
-    const parsed = JSON.parse(error.message);
-    return parsed.error || fallback;
-  } catch {
-    return error.message || fallback;
-  }
+  return safeApiErrorMessage(error) || fallback;
+}
+
+function formatJobError(job) {
+  const fallback = 'This analysis needs attention. Review the settings and try again.';
+  return job?.jobType === 'expert.r.v1'
+    ? publicErrorMessage(job.error, fallback)
+    : formatApiError(job?.error, fallback);
 }
 
 function isProjectAccessError(error) {
@@ -72,6 +87,75 @@ function StatusBadge({ children, tone = 'slate' }) {
   );
 }
 
+const JOB_LABELS = {
+  'pbmc.pipeline.v1': 'PBMC preprocessing',
+  'seurat.pipeline.v1': 'Standard preprocessing',
+  'spatial.seurat.v1': 'Spatial preprocessing',
+  'checkpoint.load.v1': 'Open saved version',
+  'checkpoint.fork.v1': 'Create branch from saved version',
+  'deg.find_markers.v1': 'Cluster marker analysis',
+  'enrichment.gsea.v1': 'Pathway enrichment',
+  'cellchat.infer.v1': 'CellChat candidate analysis',
+  'explore.summarize.v1': 'Exploratory analysis',
+  'condition.pseudobulk_de.v1': 'Condition comparison',
+  'expert.r.v1': 'Advanced analysis',
+};
+
+const ARTIFACT_LABELS = {
+  checkpoint: 'Saved version',
+  deg_markers: 'Marker results',
+  deg_summary: 'Marker summary',
+  enrichment_results: 'Pathway enrichment results',
+  enrichment_summary: 'Pathway enrichment summary',
+  cellchat_results: 'CellChat candidate results',
+  cellchat_summary: 'CellChat candidate summary',
+  condition_de_results: 'Condition comparison results',
+  condition_de_summary: 'Condition comparison summary',
+  expert_r_bundle: 'R analysis output',
+  pipeline_summary: 'Analysis summary',
+  object_summary: 'Analysis summary',
+  explore_summary: 'Exploratory analysis summary',
+};
+
+const PROVENANCE_LABELS = {
+  normalize: 'Normalization',
+  'pbmc.pipeline.v1': 'PBMC preprocessing',
+  'seurat.pipeline.v1': 'Standard preprocessing',
+  'spatial.seurat.v1': 'Spatial preprocessing',
+  'checkpoint.load.v1': 'Open saved version',
+  'checkpoint.fork.v1': 'Create branch from saved version',
+  'deg.find_markers.v1': 'Cluster marker analysis',
+  'enrichment.gsea.v1': 'Pathway enrichment',
+  'cellchat.infer.v1': 'CellChat candidate analysis',
+  'explore.summarize.v1': 'Exploratory analysis',
+  'condition.pseudobulk_de.v1': 'Condition comparison',
+  'expert.r.v1': 'Advanced analysis',
+};
+
+function displayJobLabel(jobType) {
+  return JOB_LABELS[jobType] || 'Analysis run';
+}
+
+function displayArtifactLabel(artifactType) {
+  return ARTIFACT_LABELS[artifactType] || 'Saved result';
+}
+
+function displayProvenanceLabel(operation) {
+  return PROVENANCE_LABELS[operation] || 'Recorded analysis step';
+}
+
+function displayStatus(status) {
+  const labels = {
+    queued: 'Waiting for compute',
+    running: 'Running',
+    completed: 'Complete',
+    available: 'Available',
+    failed: 'Needs attention',
+    canceled: 'Canceled',
+  };
+  return labels[status] || 'Unknown';
+}
+
 function Section({ title, icon, subtitle, children }) {
   return (
     <section className="space-y-3">
@@ -111,8 +195,8 @@ function SummaryCard({ label, value, detail }) {
 function JobList({ jobs }) {
   if (!jobs.length) {
     return (
-      <EmptyState title="No durable jobs yet">
-        Durable jobs are implemented in the backend, but no project jobs are recorded for this project yet.
+      <EmptyState title="No analysis runs yet">
+        This project has no recorded analysis runs yet.
       </EmptyState>
     );
   }
@@ -124,23 +208,18 @@ function JobList({ jobs }) {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <p className="font-mono text-sm font-bold text-text">{job.id}</p>
+                <p className="text-sm font-bold text-text">{displayJobLabel(job.jobType)}</p>
                 <StatusBadge tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'rose' : 'amber'}>
-                  {job.status || 'unknown'}
+                  {displayStatus(job.status)}
                 </StatusBadge>
               </div>
-              <p className="mt-1 text-sm text-textMuted">{job.jobType || 'Unknown job type'}</p>
+              <p className="mt-1 text-sm text-textMuted">Recorded in this project&apos;s analysis history.</p>
             </div>
             <p className="text-xs text-textMuted">{formatDate(job.createdAt)}</p>
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-2 text-xs text-textMuted md:grid-cols-3">
-            <span>Input object: <span className="font-mono text-slate-300">{formatId(job.analysisObjectId)}</span></span>
-            <span>Result object: <span className="font-mono text-slate-300">{formatId(job.resultAnalysisObjectId)}</span></span>
-            <span>Dataset: <span className="font-mono text-slate-300">{formatId(job.datasetId)}</span></span>
-          </div>
           {job.error?.message && (
             <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-              {job.error.code ? `${job.error.code}: ` : ''}{job.error.message}
+              {formatJobError(job)}
             </div>
           )}
         </div>
@@ -149,16 +228,24 @@ function JobList({ jobs }) {
   );
 }
 
-function ArtifactList({ artifacts, canFork, forkBusy, forkState, onFork, onOpenFork }) {
+const DOWNLOADABLE_ARTIFACT_TYPES = new Set([
+  'deg_markers', 'enrichment_results', 'cellchat_results',
+  'condition_de_results', 'expert_r_bundle',
+]);
+
+function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, forkBusy, forkState, onFork, onOpenFork, onDownload }) {
+  const [downloadState, setDownloadState] = useState(null);
   if (!artifacts.length) {
     return (
-      <EmptyState title="No artifact metadata yet">
-        The backend artifact foundation exists, but this project has no checkpoint, summary, or marker artifacts to show.
+      <EmptyState title="No saved results yet">
+        This project has no saved versions, summaries, or result tables to show yet.
       </EmptyState>
     );
   }
 
   const loadableCheckpointsByObject = new Map();
+  const jobsById = new Map(jobs.map((job) => [job.id, job]));
+  const analysisNamesById = new Map(analysisObjects.map((analysis) => [analysis.id, analysis.displayName || analysis.name]));
   for (const artifact of artifacts) {
     if (artifact.artifactType === 'checkpoint'
         && artifact.storageKind === 'local_internal'
@@ -172,19 +259,20 @@ function ArtifactList({ artifacts, canFork, forkBusy, forkState, onFork, onOpenF
 
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
-      <table className="min-w-[900px] w-full text-left text-xs">
+      <table className="min-w-[560px] w-full text-left text-xs">
         <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
           <tr>
-            <th className="p-3">Artifact</th>
-            <th className="p-3">Type</th>
+            <th className="p-3">Saved result</th>
             <th className="p-3">Status</th>
-            <th className="p-3">Storage</th>
-            <th className="p-3">Job</th>
-            <th className="p-3">Collaboration</th>
+            <th className="p-3">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border/40 bg-surface/70">
           {artifacts.map(artifact => {
+            const sourceJob = jobsById.get(artifact.jobId);
+            const sourceAnalysisId = artifact.analysisObjectId || sourceJob?.analysisObjectId;
+            const sourceAnalysisName = analysisNamesById.get(sourceAnalysisId);
+            const recordedAt = artifact.createdAt || sourceJob?.createdAt;
             const isCheckpoint = artifact.artifactType === 'checkpoint';
             const isLoadableCheckpoint = isCheckpoint
               && artifact.storageKind === 'local_internal'
@@ -196,21 +284,48 @@ function ArtifactList({ artifacts, canFork, forkBusy, forkState, onFork, onOpenF
             const isAmbiguousCheckpoint = checkpointCandidates.length > 1;
             const isForkableCheckpoint = isLoadableCheckpoint && checkpointCandidates.length === 1;
             const activeFork = forkState?.artifactId === artifact.id ? forkState : null;
+            const canDownload = artifact.status === 'available'
+              && artifact.storageKind === 'local_internal'
+              && DOWNLOADABLE_ARTIFACT_TYPES.has(artifact.artifactType);
             return (
             <tr key={artifact.id}>
               <td className="p-3">
-                <div className="font-mono font-bold text-text">{artifact.id}</div>
-                {artifact.name && <div className="mt-1 text-textMuted">{artifact.name}</div>}
+                <div className="font-bold text-text">{displayArtifactLabel(artifact.artifactType)}</div>
+                {sourceAnalysisName && <div className="mt-1 text-xs text-textMuted">From {sourceAnalysisName}</div>}
+                {recordedAt && <div className="mt-1 text-xs text-textMuted">Recorded: {formatDate(recordedAt)}</div>}
               </td>
-              <td className="p-3 text-textMuted">{artifact.artifactType || 'unknown'}</td>
-              <td className="p-3"><StatusBadge tone={artifact.status === 'available' ? 'green' : 'amber'}>{artifact.status || 'unknown'}</StatusBadge></td>
-              <td className="p-3 text-textMuted">{artifact.storageKind || 'metadata_only'}</td>
-              <td className="p-3 font-mono text-textMuted">{formatId(artifact.jobId)}</td>
+              <td className="p-3"><StatusBadge tone={artifact.status === 'available' ? 'green' : 'amber'}>{displayStatus(artifact.status)}</StatusBadge></td>
               <td className="p-3">
-                {isAmbiguousCheckpoint ? (
-                  <span className="text-textMuted">Multiple loadable checkpoints; server selection is ambiguous</span>
+                {canDownload ? (
+                  <div>
+                    <button
+                      onClick={async () => {
+                        setDownloadState({ artifactId: artifact.id, loading: true, error: '' });
+                        try {
+                          await onDownload(artifact);
+                          setDownloadState(null);
+                        } catch (error) {
+                          setDownloadState({
+                            artifactId: artifact.id,
+                            loading: false,
+                            error: formatApiError(error, 'Download failed.'),
+                          });
+                        }
+                      }}
+                      disabled={downloadState?.artifactId === artifact.id && downloadState.loading}
+                      className="btn btn-secondary text-xs"
+                    >
+                      {downloadState?.artifactId === artifact.id && downloadState.loading
+                        ? 'Preparing…' : 'Download result'}
+                    </button>
+                    {downloadState?.artifactId === artifact.id && downloadState.error && (
+                      <div className="mt-2 max-w-xs text-danger">{downloadState.error}</div>
+                    )}
+                  </div>
+                ) : isAmbiguousCheckpoint ? (
+                  <span className="text-textMuted">Multiple saved versions are available, so this version cannot be selected automatically.</span>
                 ) : isCheckpoint && !isLoadableCheckpoint ? (
-                  <span className="text-textMuted">Checkpoint is not loadable</span>
+                  <span className="text-textMuted">This saved version is unavailable.</span>
                 ) : !isForkableCheckpoint ? (
                   <span className="text-textMuted">—</span>
                 ) : !canFork ? (
@@ -221,13 +336,17 @@ function ArtifactList({ artifacts, canFork, forkBusy, forkState, onFork, onOpenF
                   <span className="text-danger">Project access changed; refresh required</span>
                 ) : activeFork?.job?.status === 'completed' && activeFork.job.resultAnalysisObjectId ? (
                   <button onClick={() => onOpenFork(activeFork.job.resultAnalysisObjectId)} className="btn btn-primary text-xs">
-                    Open fork
+                    Open branch
                   </button>
                 ) : activeFork?.job && ['queued', 'running'].includes(activeFork.job.status) ? (
-                  <span role="status" className="inline-flex items-center gap-2 text-textMuted"><Loader2 size={13} className="animate-spin" /> {activeFork.job.status}</span>
+                  <span role="status" className="inline-flex items-center gap-2 text-textMuted"><Loader2 size={13} className="animate-spin" /> {displayStatus(activeFork.job.status)}</span>
+                ) : !activeFork?.launching ? (
+                  <button onClick={() => onFork(artifact)} className="btn btn-secondary text-xs">
+                    Create branch from this version
+                  </button>
                 ) : (
                   <button onClick={() => onFork(artifact)} disabled={activeFork?.launching} className="btn btn-secondary text-xs">
-                    {activeFork?.launching ? 'Creating…' : 'Fork checkpoint'}
+                    Creating branch…
                   </button>
                 )}
                 {activeFork?.error && <div className="mt-2 max-w-xs text-danger">{activeFork.error}</div>}
@@ -243,8 +362,8 @@ function ArtifactList({ artifacts, canFork, forkBusy, forkState, onFork, onOpenF
 function ProvenanceList({ provenance }) {
   if (!provenance.length) {
     return (
-      <EmptyState title="No project provenance records yet">
-        Legacy live-R provenance may exist in the session graph, but no project-scoped provenance records are available here.
+      <EmptyState title="No recorded analysis steps yet">
+        No recorded analysis steps are available for this project yet.
       </EmptyState>
     );
   }
@@ -254,12 +373,10 @@ function ProvenanceList({ provenance }) {
       {provenance.map(record => (
         <div key={record.id} className="rounded-lg border border-border bg-surface p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="font-mono text-xs font-bold text-text">{record.id}</p>
-            <StatusBadge tone="blue">{record.operation || 'operation'}</StatusBadge>
+            <p className="text-sm font-bold text-text">Recorded analysis step</p>
+            <StatusBadge tone="blue">{displayProvenanceLabel(record.operation)}</StatusBadge>
           </div>
           <div className="mt-3 grid grid-cols-1 gap-1 text-xs text-textMuted">
-            <span>Object: <span className="font-mono text-slate-300">{formatId(record.analysisObjectId)}</span></span>
-            <span>Job: <span className="font-mono text-slate-300">{formatId(record.jobId)}</span></span>
             <span>Created: {formatDate(record.createdAt || record.timestamp)}</span>
           </div>
         </div>
@@ -271,15 +388,15 @@ function ProvenanceList({ provenance }) {
 function LineageSummary({ lineage, selectedObjectId }) {
   if (!selectedObjectId) {
     return (
-      <EmptyState title="No selected object">
-        Select a DB-backed analysis object to read its durable project lineage graph.
+      <EmptyState title="No analysis selected">
+        Select a saved analysis to view its recorded lineage.
       </EmptyState>
     );
   }
   if (!lineage) {
     return (
       <EmptyState title="No lineage graph available">
-        This object has no recorded durable lineage edges yet.
+        This analysis has no recorded relationships yet.
       </EmptyState>
     );
   }
@@ -291,7 +408,7 @@ function LineageSummary({ lineage, selectedObjectId }) {
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
       <div className="rounded-lg border border-border bg-surface p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h4 className="text-sm font-bold text-text">Objects</h4>
+          <h4 className="text-sm font-bold text-text">Saved analyses</h4>
           <StatusBadge tone={lineage.truncated ? 'amber' : 'green'}>{lineage.truncated ? 'truncated' : 'bounded'}</StatusBadge>
         </div>
         {nodes.length === 0 ? (
@@ -300,8 +417,8 @@ function LineageSummary({ lineage, selectedObjectId }) {
           <div className="space-y-2">
             {nodes.map(node => (
               <div key={node.id} className="rounded border border-border/60 bg-black/10 p-3">
-                <div className="font-mono text-xs font-bold text-text">{node.id}</div>
-                <div className="mt-1 text-xs text-textMuted">{node.label || node.objectType || 'Analysis object'}</div>
+                <div className="text-sm font-bold text-text">{node.label || 'Saved analysis'}</div>
+                <div className="mt-1 text-xs text-textMuted">Saved analysis</div>
               </div>
             ))}
           </div>
@@ -310,18 +427,13 @@ function LineageSummary({ lineage, selectedObjectId }) {
       <div className="rounded-lg border border-border bg-surface p-4">
         <h4 className="mb-3 text-sm font-bold text-text">Edges</h4>
         {edges.length === 0 ? (
-          <p className="text-sm text-textMuted">No durable lineage edges recorded for this object.</p>
+          <p className="text-sm text-textMuted">No recorded relationships for this analysis.</p>
         ) : (
           <div className="space-y-2">
             {edges.map(edge => (
               <div key={edge.id} className="rounded border border-border/60 bg-black/10 p-3 text-xs">
-                <div className="font-mono font-bold text-text">{edge.parentAnalysisObjectId}{' -> '}{edge.childAnalysisObjectId}</div>
-                <div className="mt-1 text-textMuted">{edge.edgeType || 'edge'} / {edge.parentRole || 'primary'}</div>
-                {edge.jobId && <div className="mt-1 text-textMuted">Job: <span className="font-mono">{edge.jobId}</span></div>}
-                {edge.metadata?.checkpointArtifactId && (
-                  <div className="mt-1 text-textMuted">Source checkpoint: <span className="font-mono">{edge.metadata.checkpointArtifactId}</span></div>
-                )}
-                {edge.createdByUserId && <div className="mt-1 text-textMuted">Created by member: {edge.createdByUserId}</div>}
+                <div className="font-bold text-text">Source analysis → derived analysis</div>
+                <div className="mt-1 text-textMuted">Recorded lineage relationship</div>
                 {edge.createdAt && <div className="mt-1 text-textMuted">Recorded: {formatDate(edge.createdAt)}</div>}
               </div>
             ))}
@@ -346,10 +458,9 @@ function FigureList({ figures }) {
       {figures.map(figure => (
         <div key={figure.id} className="rounded-lg border border-border bg-surface p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="font-mono text-xs font-bold text-text">{figure.id}</p>
-            <StatusBadge tone="blue">{figure.plotType || 'figure'}</StatusBadge>
+            <p className="text-sm font-bold text-text">{figure.title || 'Saved figure'}</p>
+            <StatusBadge tone="blue">{figure.plotType || 'Figure'}</StatusBadge>
           </div>
-          <p className="mt-2 text-sm text-text">{figure.title || 'Untitled figure'}</p>
           <p className="mt-2 text-xs text-textMuted">Created: {formatDate(figure.createdAt)}</p>
         </div>
       ))}
@@ -366,6 +477,7 @@ export default function ProjectHistory({
   onSelectAnalysisObject,
   onLiveObjectAttached,
   setActiveTab,
+  historyRefreshToken,
 }) {
   const activeProjectId = currentWs?.selectedProjectId || datasetInfo?.projectId || currentWs?.projects?.[0]?.id || null;
   const activeProject = currentWs?.projects?.find(project => project.id === activeProjectId) || null;
@@ -458,7 +570,7 @@ export default function ProjectHistory({
         projectId,
         selectedObjectId: objectId,
         loading: false,
-        error: formatApiError(error, 'Failed to load project history.'),
+        error: formatApiError(error, 'Failed to load Runs & Results.'),
         jobs: [],
         artifacts: [],
         provenance: [],
@@ -476,7 +588,7 @@ export default function ProjectHistory({
     return () => {
       historyRequestRef.current += 1;
     };
-  }, [loadHistory]);
+  }, [historyRefreshToken, loadHistory]);
 
   const refreshForkJob = useCallback(async () => {
     if (!activeProjectId || !activeForkState?.job?.id) return;
@@ -489,7 +601,7 @@ export default function ProjectHistory({
       const job = await api.getProjectJob(projectId, jobId);
       if (activeProjectRef.current !== projectId || forkRequestRef.current !== requestId) return;
       const jobError = ['failed', 'canceled'].includes(job?.status)
-        ? (job?.error?.message || `Checkpoint fork ${job.status}.`)
+        ? formatApiError(job?.error, `Creating a branch from the saved version ${displayStatus(job.status).toLowerCase()}.`)
         : null;
       const accessLost = job?.error?.code === 'PROJECT_ACCESS_REVOKED';
       setForkState(previous => previous?.requestId === requestId
@@ -507,7 +619,7 @@ export default function ProjectHistory({
       if (activeProjectRef.current !== projectId || forkRequestRef.current !== requestId) return;
       const accessLost = isProjectAccessError(error);
       setForkState(previous => previous?.requestId === requestId
-        ? { ...previous, error: formatApiError(error, 'Failed to refresh checkpoint fork.'), accessLost }
+        ? { ...previous, error: formatApiError(error, 'Failed to refresh saved-version branch.'), accessLost }
         : previous);
       if (accessLost && typeof refreshProjects === 'function') {
         await refreshProjects();
@@ -543,7 +655,7 @@ export default function ProjectHistory({
       const job = await api.getProjectJob(projectId, jobId);
       if (activeProjectRef.current !== projectId || attachRequestRef.current !== requestId) return;
       const jobError = ['failed', 'canceled'].includes(job?.status)
-        ? (job?.error?.message || `Checkpoint attach ${job.status}.`)
+        ? formatApiError(job?.error, `Opening the saved version ${displayStatus(job.status).toLowerCase()}.`)
         : null;
       setAttachState(previous => previous?.requestId === requestId
         ? { ...previous, job, error: jobError }
@@ -557,7 +669,7 @@ export default function ProjectHistory({
     } catch (error) {
       if (activeProjectRef.current !== projectId || attachRequestRef.current !== requestId) return;
       setAttachState(previous => previous?.requestId === requestId
-        ? { ...previous, error: formatApiError(error, 'Failed to refresh checkpoint attachment.') }
+        ? { ...previous, error: formatApiError(error, 'Failed to refresh saved version.') }
         : previous);
     }
   }, [activeAttachState?.job?.id, activeAttachState?.requestId, activeProjectId, loadHistory, onLiveObjectAttached, refreshAnalysisObjects, selectedObjectId]);
@@ -599,7 +711,7 @@ export default function ProjectHistory({
         requestId,
         launching: false,
         job: null,
-        error: formatApiError(error, 'Failed to create checkpoint attachment.'),
+        error: formatApiError(error, 'Failed to open saved version.'),
       });
     }
   };
@@ -624,7 +736,7 @@ export default function ProjectHistory({
         sourceObjectId,
         launching: false,
         job: null,
-        error: formatApiError(error, 'Failed to create checkpoint fork.'),
+        error: formatApiError(error, 'Failed to create branch from saved version.'),
       });
       if (typeof refreshProjects === 'function') await refreshProjects();
     }
@@ -644,8 +756,8 @@ export default function ProjectHistory({
     return (
       <div className="h-full w-full overflow-y-auto bg-background p-8 custom-scrollbar">
         <div className="mx-auto max-w-5xl">
-          <EmptyState title="Select a backend project">
-            Jobs, artifacts, project provenance, figures, and durable lineage are scoped to a backend project.
+          <EmptyState title="Select a project">
+            Analysis runs, saved results, provenance, figures, and lineage are scoped to a project.
           </EmptyState>
         </div>
       </div>
@@ -659,15 +771,15 @@ export default function ProjectHistory({
           <div>
             <h2 className="flex items-center gap-3 text-2xl font-black tracking-tight text-text">
               <Briefcase size={24} className="text-primary" />
-              Jobs & Artifacts
+              Runs & Results
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-textMuted">
-              Durable project history and controlled checkpoint forks. A fork creates a new private working object while preserving its source object, checkpoint, job, and lineage edge.
+              Review recorded analysis runs, saved results, and branches. Creating a branch preserves its source version and lineage while giving each researcher a private analysis workspace.
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
-              <StatusBadge tone="green">durable metadata</StatusBadge>
-              <StatusBadge tone="amber">no public download</StatusBadge>
-              <StatusBadge tone="blue">private live forks</StatusBadge>
+              <StatusBadge tone="green">analysis history</StatusBadge>
+              <StatusBadge tone="blue">reviewed exports</StatusBadge>
+              <StatusBadge tone="blue">private workspaces</StatusBadge>
             </div>
           </div>
           <button
@@ -684,11 +796,11 @@ export default function ProjectHistory({
           <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-              <div className="mt-1 font-bold text-text">{activeProject?.name || activeProjectId}</div>
+              <div className="mt-1 font-bold text-text">{activeProject?.name || 'Selected project'}</div>
             </div>
             <div>
-              <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Selected object</div>
-              <div className="mt-1 font-mono text-text">{selectedObjectId || 'None'}</div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Selected analysis</div>
+              <div className="mt-1 text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
             </div>
             <div>
               <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Access model</div>
@@ -703,10 +815,10 @@ export default function ProjectHistory({
               <div>
                 <h3 className="flex items-center gap-2 text-lg font-bold text-text">
                   <Archive size={18} className="text-primary" />
-                  Restore private live state
+                  Open a saved version
                 </h3>
                 <p className="mt-1 max-w-3xl text-sm text-textMuted">
-                  A saved checkpoint can be restored only into its owner&apos;s private R session. Other writers can fork it into a new private object; viewers can inspect the durable history only.
+                  A saved version can be opened only in its owner&apos;s private analysis workspace. Other writers can create their own branch from it; viewers can review recorded history only.
                 </p>
               </div>
               {selectedCheckpoint && selectedObjectIsOwnedByUser && (
@@ -716,7 +828,7 @@ export default function ProjectHistory({
                   className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
                 >
                   {activeAttachState?.launching ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
-                  {activeAttachState?.job?.status === 'completed' ? 'Checkpoint attached' : 'Attach saved checkpoint'}
+                  {activeAttachState?.job?.status === 'completed' ? 'Saved version opened' : 'Open saved version'}
                 </button>
               )}
               {selectedCheckpoint && !selectedObjectIsOwnedByUser && canFork && (
@@ -726,21 +838,21 @@ export default function ProjectHistory({
                   className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
                 >
                   {activeForkState?.launching ? <Loader2 size={16} className="animate-spin" /> : <GitBranch size={16} />}
-                  Fork saved checkpoint
+                  Create branch from this version
                 </button>
               )}
             </div>
             {checkpointCandidates.length > 1 && (
-              <p className="mt-3 text-sm text-danger">Multiple eligible checkpoints exist for this object, so no checkpoint was selected.</p>
+              <p className="mt-3 text-sm text-danger">Multiple saved versions are available, so one cannot be selected automatically.</p>
             )}
             {checkpointCandidates.length === 0 && (
-              <p className="mt-3 text-sm text-textMuted">No eligible saved checkpoint exists for this selected object.</p>
+              <p className="mt-3 text-sm text-textMuted">No eligible saved version exists for this selected analysis.</p>
             )}
             {selectedCheckpoint && !selectedObjectIsOwnedByUser && !canFork && (
-              <p className="mt-3 text-sm text-textMuted">Your Viewer role cannot create a private fork from this checkpoint.</p>
+              <p className="mt-3 text-sm text-textMuted">Your Viewer role cannot create a branch from this version.</p>
             )}
             {activeAttachState?.job && ['queued', 'running'].includes(activeAttachState.job.status) && (
-              <p role="status" className="mt-3 inline-flex items-center gap-2 text-sm text-textMuted"><Loader2 size={15} className="animate-spin" /> Checkpoint attachment {activeAttachState.job.status}.</p>
+              <p role="status" className="mt-3 inline-flex items-center gap-2 text-sm text-textMuted"><Loader2 size={15} className="animate-spin" /> Opening saved version: {displayStatus(activeAttachState.job.status)}.</p>
             )}
             {activeAttachState?.error && <p role="alert" className="mt-3 text-sm text-danger">{activeAttachState.error}</p>}
             {activeForkState?.artifactId === selectedCheckpoint?.id && activeForkState?.error && (
@@ -759,43 +871,48 @@ export default function ProjectHistory({
         {historyState.loading ? (
           <div className="flex h-64 flex-col items-center justify-center rounded-lg border border-border bg-surface">
             <Loader2 size={34} className="mb-3 animate-spin text-primary" />
-            <p className="text-sm text-textMuted">Loading project history metadata...</p>
+            <p className="text-sm text-textMuted">Loading analysis history...</p>
           </div>
         ) : (
           <>
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-              <SummaryCard label="Jobs" value={historyState.jobs.length} detail="Durable job records" />
-              <SummaryCard label="Artifacts" value={historyState.artifacts.length} detail="Metadata only" />
-              <SummaryCard label="Provenance" value={historyState.provenance.length} detail="Project-scoped records" />
-              <SummaryCard label="Lineage edges" value={historyState.lineage?.edges?.length || 0} detail="Analysis-object graph" />
+              <SummaryCard label="Runs" value={historyState.jobs.length} detail="Recorded analysis runs" />
+              <SummaryCard label="Results" value={historyState.artifacts.length} detail="Saved results and exports" />
+              <SummaryCard label="Provenance" value={historyState.provenance.length} detail="Project records" />
+              <SummaryCard label="Lineage" value={historyState.lineage?.edges?.length || 0} detail="Saved-analysis relationships" />
             </div>
 
-            <Section title="Durable Jobs" icon={<Clock size={18} className="text-primary" />} subtitle="Backend job records are visible here. General job creation remains outside this UI section.">
+            <Section title="Analysis Runs" icon={<Clock size={18} className="text-primary" />} subtitle="Recorded runs and their status are shown here.">
               <JobList jobs={historyState.jobs} />
             </Section>
 
-            <Section title="Artifacts And Checkpoints" icon={<Archive size={18} className="text-primary" />} subtitle="Only sanitized metadata is shown. Storage paths and keys are not rendered.">
+            <Section title="Saved Results" icon={<Archive size={18} className="text-primary" />} subtitle="Reviewed result tables and Expert R bundles have authenticated, audited downloads. Saved versions are never downloadable.">
               <ArtifactList
                 artifacts={historyState.artifacts}
+                jobs={historyState.jobs}
+                analysisObjects={currentWs?.objects || []}
                 canFork={canFork}
                 forkBusy={forkBusy}
                 forkState={activeForkState}
                 onFork={launchCheckpointFork}
                 onOpenFork={openFork}
+                onDownload={(artifact) => window.electronAPI.downloadProjectArtifact(
+                  activeProjectId, artifact.id
+                )}
               />
             </Section>
 
             <div className="rounded-lg border border-primary/20 bg-primary/5 p-5 text-sm text-textMuted">
               <div className="mb-2 flex items-center gap-2 font-bold text-text">
                 <GitBranch size={17} className="text-primary" />
-                How checkpoint forks support parallel, reproducible work
+                How branches support parallel, reproducible work
               </div>
               <p>
-                The source object and checkpoint remain unchanged. The worker restores that durable checkpoint into a newly allocated analysis object owned by the collaborator and attached only to that collaborator&apos;s private live R key. The child object records its source object and checkpoint artifact, while the lineage edge records the fork job. Both branches can then evolve independently without losing where either object came from.
+                The source analysis and saved version remain unchanged. Creating a branch opens that version in a new analysis owned by the collaborator, within only that collaborator&apos;s private analysis workspace. Both branches can then evolve independently while preserving their shared lineage.
               </p>
             </div>
 
-            <Section title="Lineage" icon={<GitBranch size={18} className="text-primary" />} subtitle="Durable project analysis-object lineage, separate from the legacy live-R session DAG.">
+            <Section title="Lineage" icon={<GitBranch size={18} className="text-primary" />} subtitle="Recorded relationships between saved analyses.">
               <LineageSummary lineage={historyState.lineage} selectedObjectId={selectedObjectId} />
             </Section>
 
@@ -812,7 +929,7 @@ export default function ProjectHistory({
                 <ShieldCheck size={16} className="text-primary" />
                 Boundary note
               </div>
-              Project history visibility does not grant live R object access. Live analysis still uses the caller's private transient R state.
+              Runs &amp; Results visibility does not grant access to another researcher&apos;s private analysis workspace.
             </div>
           </>
         )}

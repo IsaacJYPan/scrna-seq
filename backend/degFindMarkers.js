@@ -148,8 +148,8 @@ function validateDegFindMarkersParams(input) {
 // The server allocates the internal key for a job's full DEG marker table. It is a
 // relative, traversal-free path built only from the server-generated job id. The
 // stable filename makes retry cleanup deterministic; R independently confines it
-// to internal storage. The full table is stored as `local_internal` only;
-// there is NO public download route in this branch.
+// to internal storage. The full table is stored as `local_internal` and is
+// available only through the authenticated, visibility-checked controlled export.
 const _JOB_ID_RE = /^job_[0-9a-f]+$/;
 
 function allocateDegResultStorageKey(projectId, jobId) {

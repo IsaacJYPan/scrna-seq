@@ -118,7 +118,7 @@ describe('owned R child environment isolation', () => {
   });
 
   it('pins the shared-storage probe content to a non-secret stable marker', () => {
-    expect(STORAGE_PROBE_CONTENT).toBe('benchone-shared-storage-v1\n');
+    expect(STORAGE_PROBE_CONTENT).toBe('traceomics-shared-storage-v1\n');
   });
 
   it('passes the controlled Seurat delay only with non-production test diagnostics', () => {

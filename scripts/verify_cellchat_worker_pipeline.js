@@ -57,6 +57,14 @@ async function waitForPlumber(timeoutMs = 90000) {
   return false;
 }
 
+async function readRSessionState(stateKey) {
+  const response = await fetch(`http://127.0.0.1:${PLUMBER_PORT}/__test/session-state`, {
+    headers: { 'X-API-Token': API_TOKEN, 'X-Object-ID': stateKey },
+  });
+  if (!response.ok) throw new Error(`R session-state diagnostic failed (${response.status}).`);
+  return response.json();
+}
+
 function spawnStandaloneWorkerOnce(env) {
   return spawn(process.execPath, [path.join(WORKSPACE, 'worker.js'), '--once'], {
     cwd: WORKSPACE,
@@ -133,6 +141,7 @@ async function main() {
   const db = require('../backend/pgDatabase');
   const storage = require('../backend/storage');
   const { buildRChildEnv } = require('../backend/rRuntime');
+  const { deriveRObjectStateKey } = require('../backend/rStateKeys');
   const { allocateCheckpointStorageKey } = require('../backend/pbmcPipeline');
   const { allocateCellChatInferenceResultStorageKey } = require('../backend/cellChatInference');
 
@@ -224,7 +233,11 @@ async function main() {
 
     plumber = spawn('Rscript', [RUN_R], {
       cwd: WORKSPACE,
-      env: buildRChildEnv(process.env, {
+      env: buildRChildEnv({
+        ...process.env,
+        NODE_ENV: 'test',
+        ENABLE_R_TEST_DIAGNOSTICS: 'true',
+      }, {
         token: API_TOKEN,
         port: PLUMBER_PORT,
         storageRoot,
@@ -297,6 +310,15 @@ async function main() {
       'real R persisted the private CellChat CSV before the response disconnect');
     assert(fs.existsSync(receiptAbsPath) && fs.statSync(receiptAbsPath).size > 0,
       'real R persisted a signed CellChat completion receipt before the response disconnect');
+    const cellChatStateKey = deriveRObjectStateKey(
+      owner.id, `${resultObjectId}-job-${cellChatJob.id}`
+    );
+    const stateAfterDroppedResponse = await readRSessionState(cellChatStateKey);
+    const activeStateKeys = Array.isArray(stateAfterDroppedResponse.active_session_keys)
+      ? stateAfterDroppedResponse.active_session_keys : [];
+    assert(!activeStateKeys.some((key) => /-job-job_[0-9a-f]{24}$/.test(key)),
+      'real R erased the job-scoped CellChat checkpoint before receipt recovery',
+      JSON.stringify(activeStateKeys));
     const indeterminate = await db.getWorkerJob(cellChatJob.id);
     assert(indeterminate.status === 'running'
       && indeterminate.lastWorkerError && indeterminate.lastWorkerError.code === 'R_TIMEOUT_INDETERMINATE',

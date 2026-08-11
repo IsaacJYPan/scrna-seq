@@ -4,6 +4,7 @@ import {
   ChevronDown, RefreshCw, CheckSquare, Square, AlertTriangle,
   Check, Plus, Cpu, BarChart3, Search
 } from 'lucide-react';
+import { publicErrorMessage } from '../publicError';
 
 // Removed API constant
 // ── Helpers ────────────────────────────────────────────────────────
@@ -186,7 +187,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
     setResult(null);
     setError(null);
     const data = await callApi(`/csv-columns?path=${encodeURIComponent(path)}`);
-    if (data.error) { setError(data.error); return; }
+    if (data.error) { setError(publicErrorMessage(data.error)); return; }
     setColumns(data.columns || []);
     setKeyColumn(data.columns?.[0] || '');
     setSelectedCols(data.columns?.slice(1) || []);
@@ -212,7 +213,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
       if (data.error) throw new Error(data.error);
       else { setResult(data); onMetaAdded?.(); }
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e));
     }
     setImporting(false);
   };
@@ -234,7 +235,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
       if (data.error) throw new Error(data.error);
       else { setResult(data); onMetaAdded?.(); }
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e));
     }
     setMappingSubmitting(false);
   };
@@ -266,15 +267,15 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
       {!legacyLiveMutationToolsEnabled && (
         <div className="flex items-start gap-2 text-amber-300 text-xs bg-amber-900/20 border border-amber-700/40 rounded-lg p-3">
           <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
-          CSV metadata import and live subsetting are local-development tools. Production keeps only bounded in-object value mapping here.
+          This import and subsetting option is not available in this deployment. You can still create bounded metadata mappings here.
         </div>
       )}
 
       {mode === 'csv' && (
         <>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Import a CSV/TSV file and join its columns to the Seurat object by cell barcode.
-            The key column must contain barcodes exactly matching those in the object.
+            Import a CSV/TSV file and join its columns to the saved analysis by cell barcode.
+            The key column must contain barcodes exactly matching those in the saved analysis.
           </p>
 
       {/* File picker */}
@@ -287,7 +288,6 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
           <div className="text-sm font-bold text-slate-400 group-hover:text-white transition-colors">
             {csvPath ? csvPath.split(/[/\\]/).pop() : 'Click to select CSV / TSV'}
           </div>
-          {csvPath && <div className="text-[10px] text-slate-400 mt-1 truncate">{csvPath}</div>}
         </button>
       </div>
 
@@ -505,7 +505,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
       if (data.error) throw new Error(data.error);
       onSubsetCreated?.(data, newName);
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e));
       setSubsetting(false);
     }
   };
@@ -520,7 +520,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
   return (
     <div className="space-y-5">
       <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl p-3 text-xs text-amber-400 leading-relaxed">
-        <strong>Standard practice:</strong> subsetting creates a new child object in your workspace.
+        <strong>Standard practice:</strong> subsetting creates a new child analysis in your workspace.
         QC metrics are preserved (per-cell). Re-run from <strong>Normalization</strong> onward on the subset.
         {parentSessionPath && (
           <span className="block mt-1 text-amber-600">The parent object will be saved to disk before subsetting so you can restore it later.</span>
@@ -595,7 +595,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
 
       <div>
         <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
-          New Object Name
+          New analysis name
         </label>
         <input
           type="text"
@@ -623,7 +623,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
         ) : subsetting ? (
           <><Spinner /> Creating subset…</>
         ) : (
-          <><Scissors size={15} /> Create Subset Object ({selected.length} value{selected.length !== 1 ? 's' : ''})</>
+          <><Scissors size={15} /> Create subset analysis ({selected.length} value{selected.length !== 1 ? 's' : ''})</>
         )}
       </button>
     </div>
@@ -661,11 +661,11 @@ export default function Inspect({
     setError(null);
     callApi('/object-info', {}, { useCache: false })
       .then(data => {
-        if (data.error) setError(data.error);
+        if (data.error) setError(publicErrorMessage(data.error));
         else setInfo(data);
         setLoading(false);
       })
-      .catch(e => { setError(e.message); setLoading(false); });
+      .catch(e => { setError(publicErrorMessage(e)); setLoading(false); });
   };
 
   useEffect(() => {
@@ -678,9 +678,9 @@ export default function Inspect({
     return (
       <div className="flex-1 w-full h-full flex flex-col items-center justify-center bg-background">
         <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-        <h4 className="text-text font-bold mb-2">No Active Object</h4>
+        <h4 className="text-text font-bold mb-2">No saved analysis selected</h4>
         <p className="text-sm text-textMuted text-center max-w-sm">
-          Select an object in the Workspace to inspect its contents.
+          Select a saved analysis in the workspace to inspect its contents.
         </p>
       </div>
     );
@@ -693,7 +693,7 @@ export default function Inspect({
           <div>
             <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-[.25em] mb-2">
               <Search size={12} className="text-primary" />
-              Object Inspector
+              Analysis details
             </div>
             <h2 className="text-2xl font-black text-white tracking-tighter flex items-center gap-3">
               {obj.name}

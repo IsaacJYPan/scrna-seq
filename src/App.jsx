@@ -23,9 +23,14 @@ import Collaborators from './pages/Collaborators';
 import Inspect from './pages/Inspect';
 import Diagnostics from './pages/Diagnostics';
 import PipelineManager from './pages/PipelineManager';
+import ExploratoryAnalysis from './pages/ExploratoryAnalysis';
+import AnalysisBranches from './pages/AnalysisBranches';
+import StudyDesign from './pages/StudyDesign';
+import ExpertR from './pages/ExpertR';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
-import { hasAttachedLiveRObject } from './liveRState';
+import { hasAttachedLiveRObject, pipelineProbeAction } from './liveRState';
+import { publicErrorMessage } from './publicError';
 
 import {
   saveProvenance,
@@ -55,14 +60,18 @@ const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'
 // authenticated view has a level-1 heading (pages render their own <h2>). This
 // keeps the screen-reader heading tree rooted instead of starting at h2.
 const TAB_TITLES = {
-  workspace: 'Workbench', 'pipeline-manager': 'Pipeline Manager', team: 'Collaborators',
+  workspace: 'Workbench', 'pipeline-manager': 'Approved workflows', team: 'Collaborators',
+  branches: 'Analysis Branches',
+  'study-design': 'Study Design',
+  'expert-r': 'Advanced analysis',
   inspect: 'Inspect', lineage: 'Lineage', qc: 'Quality Control', normalize: 'Normalization',
   integrate: 'Batch Integration', pca: 'Principal Component Analysis', cluster: 'Clustering',
   umap: 'UMAP Embedding', featureplot: 'Feature Plot', heatmap: 'Marker Heatmap',
   dotplot: 'Dot Plot', geneviewer: 'Gene Expression', deg: 'Differential Expression',
-  history: 'Project History', annotate: 'Cell Annotation', enrichment: 'Pathway Enrichment',
+  explore: 'Exploratory Analysis',
+  history: 'Runs & Results', annotate: 'Cell Annotation', enrichment: 'Pathway Enrichment',
   cellchat: 'CellChat', customscript: 'Custom Script', publication: 'Figure Gallery',
-  validation: 'Validation', diagnostics: 'Diagnostics',
+  validation: 'Validation', diagnostics: 'Technical support',
 };
 
 // Error boundary to prevent full-app crashes from individual page errors
@@ -83,11 +92,8 @@ class ErrorBoundary extends React.Component {
         <div className="h-full flex items-center justify-center p-8 bg-background">
           <div className="text-center max-w-md">
             <div className="text-6xl mb-4">⚠️</div>
-            <h2 className="text-xl font-bold text-text mb-2">Component Error</h2>
-            <p className="text-slate-400 text-sm mb-4">{this.state.error?.message || 'An unexpected error occurred in this module.'}</p>
-            {import.meta.env.DEV && (
-              <pre className="text-xs text-slate-400 bg-black/30 p-3 rounded-lg overflow-auto max-h-32 text-left mb-4">{this.state.error?.stack?.split('\n').slice(0, 5).join('\n')}</pre>
-            )}
+            <h2 className="text-xl font-bold text-text mb-2">Analysis unavailable</h2>
+            <p className="text-slate-400 text-sm mb-4">This analysis could not be displayed. Retry it or return to the workspace.</p>
             <button onClick={() => this.setState({ hasError: false, error: null })} className="btn btn-primary text-sm">Retry</button>
           </div>
         </div>
@@ -150,10 +156,16 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
   legacyLocalImportsEnabled: false,
   legacyLiveMutationToolsEnabled: false,
   serverFigureExportEnabled: false,
+  expertREnabled: false,
+  expertRProfile: null,
+  demoMode: false,
+  datasetUploadsEnabled: false,
+  demoGuestTtlSeconds: null,
 });
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
+  const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
   const [deploymentPolicy, setDeploymentPolicy] = useState(CLOSED_DEPLOYMENT_POLICY);
 
   useEffect(() => {
@@ -161,14 +173,25 @@ export default function App() {
     if (!window.electronAPI?.registrationPolicy) return undefined;
     window.electronAPI.registrationPolicy().then((policy) => {
       if (!active) return;
-      setDeploymentPolicy({
+      setDeploymentPolicy((current) => ({
         registrationEnabled: policy?.registrationEnabled === true,
         legacyLocalImportsEnabled: policy?.legacyLocalImportsEnabled === true,
         legacyLiveMutationToolsEnabled: policy?.legacyLiveMutationToolsEnabled === true,
         serverFigureExportEnabled: policy?.serverFigureExportEnabled === true,
-      });
+        expertREnabled: current.expertREnabled,
+        expertRProfile: current.expertRProfile,
+        demoMode: policy?.demoMode === true,
+        datasetUploadsEnabled: policy?.datasetUploadsEnabled === true,
+        demoGuestTtlSeconds: policy?.demoGuestTtlSeconds || null,
+      }));
     }).catch(() => {
-      if (active) setDeploymentPolicy(CLOSED_DEPLOYMENT_POLICY);
+      if (active) {
+        setDeploymentPolicy((current) => ({
+          ...CLOSED_DEPLOYMENT_POLICY,
+          expertREnabled: current.expertREnabled,
+          expertRProfile: current.expertRProfile,
+        }));
+      }
     });
     return () => { active = false; };
   }, []);
@@ -206,6 +229,35 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [loggedOutNotice, setLoggedOutNotice] = useState('');
   const isLoggedIn = !!user;
+
+  useEffect(() => {
+    let active = true;
+    if (!user?.id || typeof window.electronAPI?.getExpertRCapabilities !== 'function') {
+      setDeploymentPolicy((current) => ({
+        ...current,
+        expertREnabled: false,
+        expertRProfile: null,
+      }));
+      return undefined;
+    }
+    window.electronAPI.getExpertRCapabilities().then((capability) => {
+      if (!active) return;
+      setDeploymentPolicy((current) => ({
+        ...current,
+        expertREnabled: capability?.expertREnabled === true,
+        expertRProfile: capability?.expertRProfile || null,
+      }));
+    }).catch(() => {
+      if (active) {
+        setDeploymentPolicy((current) => ({
+          ...current,
+          expertREnabled: false,
+          expertRProfile: null,
+        }));
+      }
+    });
+    return () => { active = false; };
+  }, [user?.id]);
 
   // Restore auth state from the HttpOnly session cookie (source of truth) on
   // mount, rather than trusting cached local user metadata. The cookie is not
@@ -362,7 +414,7 @@ export default function App() {
       setBackendModelStatus(prev => ({
         ...prev,
         objectsLoading: false,
-        error: err.message || 'Failed to load analysis objects.',
+        error: publicErrorMessage(err, 'Saved analyses are temporarily unavailable.'),
       }));
       return { objects: [], selectedObjectId: null, error: err };
     }
@@ -395,7 +447,7 @@ export default function App() {
       setBackendModelStatus(prev => ({
         ...prev,
         projectsLoading: false,
-        error: err.message || 'Failed to load backend projects.',
+        error: publicErrorMessage(err, 'Projects are temporarily unavailable.'),
       }));
       return { projects: [], selectedProjectId: null, error: err };
     }
@@ -624,8 +676,8 @@ export default function App() {
       const parentId = datasetInfo.id;
       const childId = newObj.id;
       ['qc', 'normalize', 'pca', 'cluster', 'umap', 'deg', 'annotate'].forEach(step => {
-        const parentKey = `benchone_params_${step}_${sanitizedEmail}_${parentId}`;
-        const childKey = `benchone_params_${step}_${sanitizedEmail}_${childId}`;
+        const parentKey = `traceomics_params_${step}_${sanitizedEmail}_${parentId}`;
+        const childKey = `traceomics_params_${step}_${sanitizedEmail}_${childId}`;
         const parentParams = localStorage.getItem(parentKey);
         if (parentParams) localStorage.setItem(childKey, parentParams);
       });
@@ -712,7 +764,7 @@ export default function App() {
     // selected; only cached results may be read until this user's private live
     // object has been attached explicitly.
     if (!hasAttachedLiveRObject(datasetInfo)) {
-      return { error: 'No live R object is attached. Load or attach this object first.' };
+      return { error: 'Open this saved version in your private analysis workspace before continuing.' };
     }
 
     // 2. Fresh Fetch
@@ -776,7 +828,7 @@ export default function App() {
       const msg = String(err?.message || '');
       if (/\bbusy\b|rate limit|too many/i.test(msg)) console.warn('[callApi] transient:', msg);
       else console.error(err);
-      return { error: err.message };
+      return { error: publicErrorMessage(err) };
     }
   }, [markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
 
@@ -814,7 +866,7 @@ export default function App() {
   };
 
   // ── Workspace Persistence ───────────────────────────────────────
-  // Legacy benchone_ws_* localStorage keys are intentionally ignored here.
+  // Legacy traceomics_ws_* localStorage keys are intentionally ignored here.
   // Backend projects and analysis-object rows are the authoritative workspace
   // model; localStorage only caches selected project/object IDs.
   // ────────────────────────────────────────────────────────────────
@@ -934,12 +986,19 @@ export default function App() {
     const objectId = datasetInfo?.id;
     if (!user?.email || !objectId || !sessionCheckDone) return;
     const key = `${user.email}:${objectId}:${rSessionId || 'unknown'}`;
-    if (pipelineProbeKeyRef.current === key) {
-      if (pipelineProbeAttachedRef.current && datasetInfo?.liveState !== 'attached') {
-        patchActiveWorkspace(ws => ({
-          objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
-        }));
-      }
+    const probeAction = pipelineProbeAction({
+      currentKey: pipelineProbeKeyRef.current,
+      nextKey: key,
+      serverAttached: pipelineProbeAttachedRef.current,
+      liveState: datasetInfo?.liveState,
+    });
+    if (probeAction === 'project-attached') {
+      patchActiveWorkspace(ws => ({
+        objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
+      }));
+      return;
+    }
+    if (probeAction === 'skip') {
       return;
     }
     pipelineProbeKeyRef.current = key;
@@ -1067,6 +1126,8 @@ export default function App() {
       objectId: datasetInfo?.id ?? null,
       deploymentPolicy,
       setActiveTab,
+      historyRefreshToken,
+      onExpertRSubmitted: () => setHistoryRefreshToken((token) => token + 1),
       computeStatus,
     };
 
@@ -1099,6 +1160,9 @@ export default function App() {
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
+        <ErrorBoundary key="branches"><TabContent id="branches" activeTab={activeTab}><AnalysisBranches {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="study-design"><TabContent id="study-design" activeTab={activeTab}><StudyDesign {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="expert-r"><TabContent id="expert-r" activeTab={activeTab}><ExpertR {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
@@ -1109,6 +1173,7 @@ export default function App() {
         <ErrorBoundary key="featureplot"><TabContent id="featureplot" activeTab={activeTab}><FeaturePlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="heatmap"><TabContent id="heatmap" activeTab={activeTab}><HeatmapPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="explore"><TabContent id="explore" activeTab={activeTab}><ExploratoryAnalysis key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} onLiveObjectAttached={handleLiveObjectAttached} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
@@ -1150,7 +1215,7 @@ export default function App() {
         deploymentPolicy={deploymentPolicy}
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
-        <h1 className="sr-only">BenchOne Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
+        <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
         {renderContent()}
       </main>
 

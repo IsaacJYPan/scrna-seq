@@ -4,7 +4,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 function normalizeServerUrl(value) {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('Enter the address of your BenchOne server.');
+    throw new Error('Enter the address of your TraceOmics server.');
   }
 
   let parsed;

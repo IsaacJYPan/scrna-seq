@@ -3,6 +3,7 @@ import {
   X, Image, Download, RefreshCw, ChevronDown, ChevronRight,
   Type, Palette, Settings2, Layers, Loader2, CheckCircle2, AlertCircle, Info
 } from 'lucide-react';
+import { publicErrorMessage } from '../publicError';
 
 // Plot types whose R renderer requires explicit features/genes. Mirrors the
 // guards in r-backend/plumber.R build_pub_plot() (FeaturePlot/DotPlot/Heatmap/
@@ -22,6 +23,14 @@ const PALETTES = [
 ];
 
 const LEGEND_POS = ['right', 'bottom', 'none', 'top', 'left'];
+
+function safeFigureFileName(value) {
+  if (typeof value !== 'string') return '';
+  const candidate = value.trim().replace(/[?#].*$/, '');
+  if (!candidate || /[\0\r\n]/.test(candidate)) return '';
+  const fileName = candidate.split(/[\\/]+/).pop();
+  return fileName && fileName !== '.' && fileName !== '..' ? fileName.slice(0, 180) : '';
+}
 
 function CollapsibleSection({ title, icon: Icon, children, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -173,7 +182,7 @@ export default function FigureSavePanel({
       if (data.error) throw new Error(data.error);
       if (data.result?.base64) setPreviewB64(data.result.base64);
     } catch (e) {
-      setPreviewError(e.message);
+      setPreviewError(publicErrorMessage(e, 'Preview could not be rendered. Review the figure settings and try again.'));
     } finally {
       setPreviewLoading(false);
     }
@@ -226,6 +235,7 @@ export default function FigureSavePanel({
       if (data.error) throw new Error(data.error);
 
       const result = data.result;
+      const fileName = safeFigureFileName(result.file_name) || safeFigureFileName(result.file_path);
 
       // Persist to figure gallery via Electron IPC
       const record = {
@@ -235,7 +245,7 @@ export default function FigureSavePanel({
         plotType:     plotType,
         title:        title || plotType,
         params:       exportParams,
-        filePath:     result.file_path || '',
+        filePath:     fileName,
         fileFormat:   format,
         thumbnailB64: result.thumbnail_b64 || previewB64 || '',
       };
@@ -244,10 +254,10 @@ export default function FigureSavePanel({
         await window.electronAPI.saveFigure(record);
       }
 
-      setSaveSuccess(`Saved as ${result.file_name}`);
+      setSaveSuccess(fileName ? `Saved as ${fileName}` : 'Saved to Figure Gallery.');
       if (onSaved) onSaved(record);
     } catch (e) {
-      setSaveError(e.message);
+      setSaveError(publicErrorMessage(e, 'Figure could not be saved. Review the figure settings and try again.'));
     } finally {
       setSaving(false);
     }
@@ -530,8 +540,8 @@ export default function FigureSavePanel({
               </button>
               <p className="text-[10px] text-slate-500 text-center">
                 {serverFigureExportEnabled
-                  ? 'Saves figure metadata and preview to the gallery; no public download route is created'
-                  : 'Server-side file export is a local-development tool. Production previews are not persisted.'}
+                  ? 'Saves figure metadata and a preview to the private gallery.'
+                  : 'Figures remain in this private gallery; file export is not available in this deployment.'}
               </p>
             </div>
           </div>

@@ -4,8 +4,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const HEALTH_PROBE_PREFIX = '.benchone-web-health-';
-const HEALTH_PROBE_CONTENT = 'benchone-web-storage-v1\n';
+const HEALTH_PROBE_PREFIX = '.traceomics-web-health-';
+const HEALTH_PROBE_CONTENT = 'traceomics-web-storage-v1\n';
 
 function codedError(code, message) {
   return Object.assign(new Error(message), { code });

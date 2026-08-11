@@ -6,6 +6,7 @@ import {
   FolderTree, Plus, MoreVertical, ScatterChart, Loader2, RefreshCw, Archive
 } from 'lucide-react';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
+import { publicErrorMessage } from '../publicError';
 
 function isLiveLoadResult(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
@@ -18,6 +19,13 @@ function boundedDemoSetting(value, fallback, minimum, maximum) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+}
+
+function datasetResearchStatus(dataset) {
+  if (dataset?.uploadStatus === 'failed' || dataset?.validationStatus === 'invalid') return 'Needs attention';
+  if (dataset?.uploadStatus === 'uploaded' && dataset?.validationStatus === 'valid') return 'Ready for analysis';
+  if (dataset?.uploadStatus === 'uploaded') return 'Checking data';
+  return 'Preparing data';
 }
 
 // Removed API constant
@@ -91,7 +99,7 @@ function LoadModal({
     sourceType,
     metadata = {},
   }) => {
-    if (!activeProjectId) throw new Error('Select or create a backend project before loading data.');
+    if (!activeProjectId) throw new Error('Select or create a project before loading data.');
     let analysisObject = null;
     try {
       analysisObject = await onCreateAnalysisObjectForLoad({
@@ -126,7 +134,7 @@ function LoadModal({
       });
     } catch (err) {
       if (err?.analysisObject) onLoadFailed?.(err.analysisObject);
-      setError(`PBMC demo could not attach to this private R session: ${err.message}`);
+      setError(publicErrorMessage(err, 'The PBMC demo could not be opened. Please try again.'));
     }
     setLoadingId(null);
   };
@@ -145,7 +153,7 @@ function LoadModal({
         metadata: { minCells, minFeatures },
       });
     } catch (err) {
-      setError(`Request failed: ${err.message}`);
+      setError(publicErrorMessage(err));
     }
     setLoadingId(null);
   };
@@ -240,7 +248,7 @@ function LoadModal({
         },
       });
     } catch (err) {
-      setError(`Request failed: ${err.message}`);
+      setError(publicErrorMessage(err));
     }
     setLoadingId(null);
   };
@@ -259,7 +267,7 @@ function LoadModal({
         options: { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) },
       });
     } catch (err) {
-      setError(`Request failed: ${err.message}`);
+      setError(publicErrorMessage(err));
     }
     setLoadingId(null);
   };
@@ -277,7 +285,7 @@ function LoadModal({
         metadata: {},
       });
     } catch (err) {
-      setError(`Request failed: ${err.message}`);
+      setError(publicErrorMessage(err));
     }
     setLoadingId(null);
   };
@@ -297,8 +305,8 @@ function LoadModal({
     {
       id: 'pipeline-manager',
       icon: <Archive size={22} className="text-blue-400" />,
-      title: 'Durable 10X H5 Pipeline',
-      desc: 'Upload a 10X filtered feature-barcode .h5 dataset and run the queued, checkpointed Seurat pipeline.',
+      title: '10X H5 analysis workflow',
+      desc: 'Upload a 10X filtered feature-barcode .h5 dataset and run the approved Seurat workflow.',
       tag: 'Production',
       tagColor: 'text-blue-400 bg-blue-500/10 border-blue-500/20',
       action: onOpenPipelineManager,
@@ -337,8 +345,8 @@ function LoadModal({
       id: 'rds',
       legacy: true,
       icon: <HardDrive size={22} className="text-violet-400" />,
-      title: 'Seurat RDS Object',
-      desc: 'Load a trusted local Seurat object saved as .rds. Disabled unless ALLOW_TRUSTED_RDS_LOAD=true.',
+      title: 'Saved analysis file (.rds)',
+      desc: 'Load a trusted local saved analysis file. This option is available only in approved local environments.',
       tag: '.rds',
       tagColor: 'text-violet-400 bg-violet-500/10 border-violet-500/20',
       action: loadRds,
@@ -443,7 +451,7 @@ function LoadModal({
                 style={{ gridTemplateColumns: `auto minmax(200px, 2fr) ${'minmax(120px, 1fr) '.repeat(extraMetaCols.length)}auto` }}
               >
                 <span className="w-6 text-center">#</span>
-                <span>Sample Name (editable) / Folder Path</span>
+                <span>Sample name (editable)</span>
                 {extraMetaCols.map((c, i) => (
                   <div key={i} className="flex items-center gap-1 group">
                     <input 
@@ -477,7 +485,7 @@ function LoadModal({
                       className="w-full bg-slate-900 border border-slate-700 text-sm text-white px-3 py-1.5 rounded-lg focus:outline-none focus:border-cyan-500 font-bold mb-1"
                       placeholder={`Sample ${i + 1}`}
                     />
-                    <p className="text-[10px] text-slate-400 truncate pl-1" title={p}>{p}</p>
+                    <p className="text-[10px] text-slate-400 truncate pl-1">Selected local folder</p>
                   </div>
                   {extraMetaCols.map((c, colIdx) => (
                     <input
@@ -536,8 +544,8 @@ function LoadModal({
           {/* Header */}
           <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800">
             <div>
-              <h3 id="dataset-loader-title" className="text-lg font-black text-white tracking-tight">Load / Attach Object</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a DB-backed object and attach private live R state.</p>
+              <h3 id="dataset-loader-title" className="text-lg font-black text-white tracking-tight">Load saved analysis</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Choose a source to create a saved analysis and open a private analysis workspace.</p>
             </div>
             <button onClick={requestClose} disabled={isLoading} aria-label="Close demo loader" className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
               <X size={16} />
@@ -658,17 +666,40 @@ function safeMessage(value) {
     .replace(/\buser-\d+:obj-[A-Za-z0-9_-]+/g, '[redacted state]');
 }
 
+function displayRunStatus(status) {
+  return {
+    queued: 'Waiting for compute',
+    running: 'Running',
+    completed: 'Complete',
+    failed: 'Needs attention',
+    canceled: 'Canceled',
+  }[status] || 'Unknown';
+}
+
+function researcherRunNote(entry) {
+  if (entry?.level === 'error') return 'This analysis needs attention.';
+  const message = String(entry?.message || '');
+  if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
+  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
+  if (entry?.level === 'warn') return 'Analysis warning recorded.';
+  return 'Analysis update recorded.';
+}
+
 function isSupportedTenxH5File(file) {
   return !!file?.name && /\.h5$/i.test(file.name);
+}
+
+function isSupportedClassicVisiumZipFile(file) {
+  return !!file?.name && /\.zip$/i.test(file.name);
 }
 
 function parseApiError(error) {
   const raw = error?.message || String(error || 'Request failed.');
   try {
     const parsed = JSON.parse(raw);
-    return parsed?.error || raw;
+    return publicErrorMessage(parsed?.error || raw);
   } catch {
-    return raw;
+    return publicErrorMessage(raw);
   }
 }
 
@@ -742,33 +773,33 @@ function WorkbenchOverview({
   const isDbBacked = !!selectedObject?.isBackendAnalysisObject || /^ao_/.test(selectedObject?.id || '');
   const liveAttached = selectedObject?.liveState === 'attached';
   const liveStatus = !hasObject
-    ? { label: 'Requires loaded object', tone: 'slate' }
+    ? { label: 'Select an analysis', tone: 'slate' }
     : liveAttached
-      ? { label: 'Live R: attached', tone: 'green' }
-      : { label: 'Live R: not attached', tone: sessionReady && rSessionId ? 'amber' : 'slate' };
+      ? { label: 'Ready in your workspace', tone: 'green' }
+      : { label: 'Open a saved version', tone: sessionReady && rSessionId ? 'amber' : 'slate' };
 
-  let nextAction = 'Select or create a backend project.';
+  let nextAction = 'Select or create a project.';
   let actionLabel = 'Create Project';
   let action = null;
   if (hasProject && !hasObject && hasObjectsInProject) {
-    nextAction = 'Select a DB-backed analysis object from the project list below before opening live-R workflow tabs.';
-    actionLabel = 'Select Object';
+    nextAction = 'Select a saved analysis from the project list below before opening analysis tools.';
+    actionLabel = 'Select analysis';
   } else if (hasProject && !hasObject) {
-    nextAction = 'Load the PBMC demo or use the durable Pipeline Manager upload for this backend project.';
-    actionLabel = 'Load Object';
+    nextAction = 'Load the PBMC demo or use an approved workflow to add a dataset to this project.';
+    actionLabel = 'Load analysis';
     action = () => setShowLoadModal(true);
   } else if (hasProject && hasObject && !liveAttached) {
     if (selectedObject?.source === 'pbmc3k_demo' && typeof onReloadPbmcDemo === 'function') {
-      nextAction = 'This PBMC demo object is selected but not attached to this private R session. Reload the built-in demo to attach it again.';
+      nextAction = 'This PBMC demo is selected but is not open in your private analysis workspace. Reload the built-in demo to open it again.';
       actionLabel = 'Reload PBMC demo';
       action = onReloadPbmcDemo;
     } else {
-      nextAction = 'This DB-backed object is selected but its private live R state is not attached. Open Jobs & Artifacts to attach your saved checkpoint or fork one into your own private object.';
-      actionLabel = 'Open recovery';
+      nextAction = 'This saved analysis is not open in your private analysis workspace. Open Runs & Results to open a saved version or create a branch of your own.';
+      actionLabel = 'Open Runs & Results';
       action = () => setActiveTab('history');
     }
   } else if (hasProject && hasObject && !pipelineState?.qc) {
-    nextAction = 'Run quality control against the attached private live R object.';
+    nextAction = 'Run quality control in your private analysis workspace.';
     actionLabel = 'Open Quality Control';
     action = () => setActiveTab('qc');
   } else if (hasProject && hasObject && !pipelineState?.normalize) {
@@ -780,8 +811,8 @@ function WorkbenchOverview({
     actionLabel = 'Open PCA';
     action = () => setActiveTab('pca');
   } else if (hasProject && hasObject) {
-    nextAction = 'Continue through clustering, UMAP, markers, or read project history.';
-    actionLabel = 'Open Jobs & Artifacts';
+    nextAction = 'Continue through clustering, UMAP, markers, or review Runs & Results.';
+    actionLabel = 'Open Runs & Results';
     action = () => setActiveTab('history');
   }
 
@@ -789,9 +820,9 @@ function WorkbenchOverview({
     <section className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h3 className="text-2xl font-black tracking-tight text-text">Pipeline Workbench</h3>
+          <h3 className="text-2xl font-black tracking-tight text-text">Analysis workspace</h3>
           <p className="mt-2 max-w-3xl text-sm text-textMuted">
-            Current project, object, live-R attachment, and durable history status. Backend metadata is durable; live R state is private and transient.
+            Current project, saved analysis, private analysis workspace, and recorded history status.
           </p>
         </div>
         {action && (
@@ -806,31 +837,31 @@ function WorkbenchOverview({
           <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
             <FolderTree size={14} /> Project
           </div>
-          <div className="truncate text-lg font-bold text-text">{activeProject?.name || 'No backend project selected'}</div>
+          <div className="truncate text-lg font-bold text-text">{activeProject?.name || 'No project selected'}</div>
           <div className="mt-3 flex flex-wrap gap-2">
             {activeProject?.role && <StatusPill label={activeProject.role} tone="blue" />}
-            {hasProject && <StatusPill label="Backend project" tone="green" />}
+            {hasProject && <StatusPill label="Project selected" tone="green" />}
           </div>
         </div>
 
         <div className="card p-4 bg-surface/70">
           <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
-            <Database size={14} /> Object
+            <Database size={14} /> Analysis
           </div>
-          <div className="truncate text-lg font-bold text-text">{selectedObject?.name || 'No analysis object selected'}</div>
-          <div className="mt-1 font-mono text-xs text-textMuted">{selectedObject?.id || `${activeProjectObjects.length} object(s) in project`}</div>
+          <div className="truncate text-lg font-bold text-text">{selectedObject?.name || selectedObject?.displayName || 'No analysis selected'}</div>
+          <div className="mt-1 text-xs text-textMuted">{hasObject ? 'Saved project analysis' : `${activeProjectObjects.length} analyses in project`}</div>
           <div className="mt-3 flex flex-wrap gap-2">
-            {isDbBacked && <StatusPill label="DB-backed object" tone="green" />}
-            {hasObject && <StatusPill label="Durable metadata" tone="blue" />}
+            {isDbBacked && <StatusPill label="Saved analysis" tone="green" />}
+            {hasObject && <StatusPill label="Recorded history" tone="blue" />}
           </div>
         </div>
 
         <div className="card p-4 bg-surface/70">
           <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
-            <Lock size={14} /> Live R State
+            <Lock size={14} /> Private analysis workspace
           </div>
-          <div className="text-lg font-bold text-text">{liveAttached ? 'Attached this session' : 'Private transient state'}</div>
-          <p className="mt-1 text-xs text-textMuted">Project membership does not grant live R object access.</p>
+          <div className="text-lg font-bold text-text">{liveAttached ? 'Ready for this session' : 'Open a saved version'}</div>
+          <p className="mt-1 text-xs text-textMuted">Project membership does not grant access to another researcher&apos;s private workspace.</p>
           <div className="mt-3 flex flex-wrap gap-2">
             <StatusPill label={liveStatus.label} tone={liveStatus.tone} />
           </div>
@@ -850,7 +881,7 @@ function WorkbenchOverview({
       </div>
 
       <p className="px-1 text-xs leading-relaxed text-textMuted">
-        Live analysis follows the selected object in this browser session. Durable jobs, artifacts, and checkpoint forks stay in project history.
+        Your private analysis workspace follows the selected analysis in this browser session. Recorded runs, saved results, and branches stay in Runs &amp; Results.
       </p>
     </section>
   );
@@ -863,7 +894,9 @@ export function SeuratPipelinePanel({
   updateActiveWorkspace,
   onSelectAnalysisObject,
   setActiveTab,
+  datasetUploadsEnabled = true,
 }) {
+  const [workflowMode, setWorkflowMode] = useState('scrna');
   const [datasets, setDatasets] = useState([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState('');
   const [datasetStatus, setDatasetStatus] = useState({ loading: false, uploading: false, error: null });
@@ -874,6 +907,21 @@ export function SeuratPipelinePanel({
   const [jobStatus, setJobStatus] = useState({ launching: false, refreshing: false, error: null });
   const [loadStatus, setLoadStatus] = useState({ launching: false, refreshing: false, error: null });
   const [params, setParams] = useState(() => ({ ...DEFAULT_SEURAT_PIPELINE_PARAMS }));
+
+  const spatialMode = workflowMode === 'spatial';
+  const workflow = spatialMode ? {
+    datasetFileType: 'visium_zip',
+    jobType: 'spatial.seurat.v1',
+    sourceType: 'classic_visium_dataset',
+    formatLabel: 'classic 10x Visium Space Ranger ZIP bundle',
+    shortFormatLabel: 'Visium ZIP',
+  } : {
+    datasetFileType: 'tenx_h5',
+    jobType: 'seurat.pipeline.v1',
+    sourceType: 'tenx_h5_dataset',
+    formatLabel: '10x Genomics filtered feature-barcode matrix HDF5 (.h5)',
+    shortFormatLabel: '10x HDF5',
+  };
 
   const activeDataset = datasets.find(dataset => dataset.id === selectedDatasetId) || null;
   const inputObjects = (currentWs.objects || [])
@@ -894,7 +942,7 @@ export function SeuratPipelinePanel({
   const checkpointAttached = loadJob?.status === 'completed' || resultObject?.liveState === 'attached';
   const loadCompleted = checkpointAttached;
   const loadJobErrorMessage = loadJob?.status === 'failed'
-    ? (typeof loadJob.error === 'string' ? loadJob.error : loadJob.error?.message || 'Checkpoint load failed.')
+    ? publicErrorMessage(loadJob.error, 'Opening this saved version needs attention.')
     : null;
   const canContinueToDeg = Boolean(resultObjectId && checkpointAttached);
 
@@ -908,7 +956,7 @@ export function SeuratPipelinePanel({
     if (!api.listDatasets) return;
     setDatasetStatus(prev => ({ ...prev, loading: true, error: null }));
     try {
-      const rows = await api.listDatasets(activeProjectId, { fileType: 'tenx_h5' });
+      const rows = await api.listDatasets(activeProjectId, { fileType: workflow.datasetFileType });
       const next = Array.isArray(rows) ? rows : [];
       setDatasets(next);
       setSelectedDatasetId(prev => (next.some(dataset => dataset.id === prev) ? prev : (next[0]?.id || '')));
@@ -917,7 +965,7 @@ export function SeuratPipelinePanel({
     } finally {
       setDatasetStatus(prev => ({ ...prev, loading: false }));
     }
-  }, [activeProjectId]);
+  }, [activeProjectId, workflow.datasetFileType]);
 
   React.useEffect(() => {
     loadDatasets();
@@ -943,7 +991,7 @@ export function SeuratPipelinePanel({
     if (inputObject?.id) return inputObject;
     const api = window.electronAPI || {};
     if (!api.createProjectAnalysisObject) {
-      throw new Error('Project analysis-object API is unavailable in this frontend runtime.');
+      throw new Error('Creating a saved analysis is temporarily unavailable.');
     }
     const created = await api.createProjectAnalysisObject(activeProjectId, {
       datasetId: selectedDatasetId,
@@ -951,10 +999,10 @@ export function SeuratPipelinePanel({
       displayName: rawDatasetObjectName(activeDataset),
       metadata: {
         source: 'dataset',
-        sourceType: 'tenx_h5_dataset',
+        sourceType: workflow.sourceType,
         datasetId: selectedDatasetId,
-        fileType: activeDataset?.fileType || 'tenx_h5',
-        supportedWorkflow: 'seurat.pipeline.v1',
+        fileType: activeDataset?.fileType || workflow.datasetFileType,
+        supportedWorkflow: workflow.jobType,
         scientific_output: false,
       },
     });
@@ -1000,25 +1048,30 @@ export function SeuratPipelinePanel({
     const file = event.target.files?.[0] || null;
     event.target.value = '';
     if (!file) return;
-    if (!isSupportedTenxH5File(file)) {
+    const supported = spatialMode
+      ? isSupportedClassicVisiumZipFile(file)
+      : isSupportedTenxH5File(file);
+    if (!supported) {
       setDatasetStatus({
         loading: false,
         uploading: false,
-        error: 'Unsupported for this pipeline: upload a 10x Genomics filtered feature-barcode matrix HDF5 file with a .h5 extension.',
+        error: spatialMode
+          ? 'Unsupported for this pipeline: upload one classic 10x Visium Space Ranger output bundle as a .zip file.'
+          : 'Unsupported for this pipeline: upload a 10x Genomics filtered feature-barcode matrix HDF5 file with a .h5 extension.',
       });
       return;
     }
     const api = window.electronAPI || {};
     if (!api.uploadDataset) {
-      setDatasetStatus(prev => ({ ...prev, error: 'Dataset upload API is unavailable in this frontend runtime.' }));
+      setDatasetStatus(prev => ({ ...prev, error: 'Dataset upload is temporarily unavailable.' }));
       return;
     }
     setDatasetStatus({ loading: false, uploading: true, error: null });
     try {
       const created = await api.uploadDataset(activeProjectId, file, {
-        supportedWorkflow: 'seurat.pipeline.v1',
-        supportedFormat: '10x Genomics filtered feature-barcode matrix HDF5 (.h5)',
-      }, 'tenx_h5');
+        supportedWorkflow: workflow.jobType,
+        supportedFormat: workflow.formatLabel,
+      }, workflow.datasetFileType);
       setDatasets(prev => [created, ...prev.filter(dataset => dataset.id !== created.id)]);
       setSelectedDatasetId(created.id);
     } catch (error) {
@@ -1031,8 +1084,11 @@ export function SeuratPipelinePanel({
   const launchPipeline = async () => {
     if (!activeProjectId || !selectedDatasetId) return;
     const api = window.electronAPI || {};
-    if (!api.createSeuratPipelineJob) {
-      setJobStatus(prev => ({ ...prev, error: 'Seurat pipeline job wrapper is unavailable in this frontend runtime.' }));
+    const createJob = spatialMode
+      ? api.createSpatialSeuratPipelineJob
+      : api.createSeuratPipelineJob;
+    if (!createJob) {
+      setJobStatus(prev => ({ ...prev, error: 'This approved workflow is temporarily unavailable.' }));
       return;
     }
     setJobStatus({ launching: true, refreshing: false, error: null });
@@ -1040,7 +1096,7 @@ export function SeuratPipelinePanel({
     setArtifacts([]);
     try {
       const input = await ensureDatasetInputObject();
-      const created = await api.createSeuratPipelineJob(activeProjectId, {
+      const created = await createJob(activeProjectId, {
         datasetId: selectedDatasetId,
         analysisObjectId: input.id,
         params: scrubEmptyParams(params),
@@ -1083,7 +1139,7 @@ export function SeuratPipelinePanel({
     if (!activeProjectId || !resultObjectId) return;
     const api = window.electronAPI || {};
     if (!api.createProjectJob) {
-      setLoadStatus(prev => ({ ...prev, error: 'Project job API is unavailable in this frontend runtime.' }));
+      setLoadStatus(prev => ({ ...prev, error: 'Opening a saved version is temporarily unavailable.' }));
       return;
     }
     setLoadStatus({ launching: true, refreshing: false, error: null });
@@ -1110,18 +1166,52 @@ export function SeuratPipelinePanel({
 
   const canLaunch = !!activeProjectId && !!selectedDatasetId && !jobStatus.launching;
 
+  const selectWorkflowMode = (nextMode) => {
+    if (nextMode === workflowMode) return;
+    setWorkflowMode(nextMode);
+    setDatasets([]);
+    setSelectedDatasetId('');
+    setJob(null);
+    setLoadJob(null);
+    setLogs([]);
+    setArtifacts([]);
+    setDatasetStatus({ loading: false, uploading: false, error: null });
+    setJobStatus({ launching: false, refreshing: false, error: null });
+    setLoadStatus({ launching: false, refreshing: false, error: null });
+  };
+
   return (
     <section className="rounded-lg border border-border bg-surface/70 p-5" data-testid="seurat-pipeline-panel">
       <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <h3 className="text-xl font-black tracking-tight text-text">Supported Seurat Pipeline</h3>
-            <StatusPill label="seurat.pipeline.v1" tone="blue" />
-            <StatusPill label="10x .h5 only" tone="green" />
+            <h3 className="text-xl font-black tracking-tight text-text">Supported Seurat workflows</h3>
+            <StatusPill label="Approved workflow" tone="blue" />
+            <StatusPill label={workflow.shortFormatLabel} tone="green" />
           </div>
           <p className="max-w-3xl text-sm text-textMuted">
-            This path supports 10x Genomics filtered feature-barcode matrix HDF5 files (`.h5`) uploaded as `tenx_h5`. Other formats are not labeled as supported here.
+            {spatialMode
+              ? 'This path supports classic 10x Visium Space Ranger output bundles containing the filtered matrix plus spatial image and coordinate files. Visium HD and Xenium are not accepted by this workflow.'
+              : 'This path supports 10x Genomics filtered feature-barcode matrix HDF5 files (`.h5`). Other formats are not labeled as supported here.'}
           </p>
+          <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Seurat workflow type">
+            <button
+              type="button"
+              aria-pressed={!spatialMode}
+              onClick={() => selectWorkflowMode('scrna')}
+              className={`btn text-xs ${!spatialMode ? 'btn-primary' : 'btn-secondary'}`}
+            >
+              Single-cell RNA
+            </button>
+            <button
+              type="button"
+              aria-pressed={spatialMode}
+              onClick={() => selectWorkflowMode('spatial')}
+              className={`btn text-xs ${spatialMode ? 'btn-primary' : 'btn-secondary'}`}
+            >
+              Spatial transcriptomics (Visium)
+            </button>
+          </div>
         </div>
         <button onClick={loadDatasets} disabled={!activeProjectId || datasetStatus.loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
           {datasetStatus.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
@@ -1131,7 +1221,7 @@ export function SeuratPipelinePanel({
 
       {!activeProjectId ? (
         <div className="rounded border border-dashed border-border p-5 text-sm text-textMuted">
-          Select or create a backend project before uploading datasets or launching the durable Seurat pipeline.
+          Select or create a project before uploading data or running the Seurat workflow.
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
@@ -1140,20 +1230,24 @@ export function SeuratPipelinePanel({
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h4 className="font-bold text-text">Dataset upload / selection</h4>
-                  <p className="mt-1 text-xs text-textMuted">Supported format: 10x Genomics filtered feature-barcode matrix HDF5 (`.h5`).</p>
+                  <p className="mt-1 text-xs text-textMuted">Supported format: {workflow.formatLabel}.</p>
                 </div>
-                <label className="btn btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
+                {datasetUploadsEnabled ? <label className="btn btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
                   <FileUp size={16} />
-                  {datasetStatus.uploading ? 'Uploading...' : 'Upload 10x .h5'}
+                  {datasetStatus.uploading ? 'Uploading...' : spatialMode ? 'Upload Visium .zip' : 'Upload 10x .h5'}
                   <input
                     data-testid="seurat-pipeline-upload"
                     type="file"
-                    accept=".h5"
+                    accept={spatialMode ? '.zip' : '.h5'}
                     className="sr-only"
                     disabled={datasetStatus.uploading}
                     onChange={uploadDataset}
                   />
-                </label>
+                </label> : (
+                  <span className="rounded border border-border px-3 py-2 text-xs text-textMuted">
+                    Public demo uses curated data; uploads are disabled.
+                  </span>
+                )}
               </div>
               {datasetStatus.error && (
                 <div className="mb-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
@@ -1162,7 +1256,7 @@ export function SeuratPipelinePanel({
               )}
               {datasets.length === 0 ? (
                 <div className="rounded border border-dashed border-border p-4 text-sm text-textMuted">
-                  No `tenx_h5` datasets are recorded for this project yet.
+                  No compatible {workflow.shortFormatLabel} datasets are recorded for this project yet.
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -1176,9 +1270,9 @@ export function SeuratPipelinePanel({
                         className="mt-1"
                       />
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate font-bold text-text">{dataset.originalFilename || dataset.name || dataset.id}</span>
+                        <span className="block truncate font-bold text-text">{dataset.originalFilename || dataset.name || 'Uploaded dataset'}</span>
                         <span className="mt-1 block text-xs text-textMuted">
-                          {dataset.id} / {dataset.fileType || 'tenx_h5'} / {dataset.uploadStatus || 'registered'} / {dataset.validationStatus || 'pending validation'}
+                          {workflow.shortFormatLabel} · {datasetResearchStatus(dataset)}
                         </span>
                       </span>
                     </label>
@@ -1254,7 +1348,7 @@ export function SeuratPipelinePanel({
                 </label>
               </div>
               <div className="mt-3 rounded border border-border bg-surface px-3 py-2 text-xs text-textMuted">
-                Input object: <span className="font-mono text-text">{inputObject?.id || 'will be created from selected dataset'}</span>
+                Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || 'Will be created from the selected dataset'}</span>
               </div>
               <button
                 onClick={launchPipeline}
@@ -1262,7 +1356,7 @@ export function SeuratPipelinePanel({
                 className="btn btn-primary mt-4 inline-flex items-center gap-2 text-sm disabled:opacity-50"
               >
                 {jobStatus.launching ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
-                Launch durable Seurat pipeline
+                {spatialMode ? 'Run spatial Seurat preprocessing' : 'Run Seurat preprocessing'}
               </button>
               {jobStatus.error && (
                 <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
@@ -1275,27 +1369,27 @@ export function SeuratPipelinePanel({
           <div className="space-y-4">
             <div className="rounded border border-border bg-background/40 p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
-                <h4 className="font-bold text-text">Job status</h4>
+                <h4 className="font-bold text-text">Run status</h4>
                 {job?.id && (
                   <button onClick={() => refreshJob(job.id)} disabled={jobStatus.refreshing} className="btn btn-secondary inline-flex items-center gap-2 px-3 py-1.5 text-xs">
                     {jobStatus.refreshing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                    Refresh job
+                    Refresh run
                   </button>
                 )}
               </div>
               {!job ? (
-                <p className="text-sm text-textMuted">No `seurat.pipeline.v1` job has been launched from this panel yet.</p>
+                <p className="text-sm text-textMuted">No {spatialMode ? 'spatial Seurat' : 'Seurat'} preprocessing run has been launched from this panel yet.</p>
               ) : (
                 <div className="space-y-3 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono font-bold text-text">{job.id}</span>
-                    <StatusPill label={job.status || 'unknown'} tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'amber' : 'blue'} />
+                    <span className="font-bold text-text">{spatialMode ? 'Spatial Seurat preprocessing' : 'Seurat preprocessing'}</span>
+                    <StatusPill label={displayRunStatus(job.status)} tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'amber' : 'blue'} />
                   </div>
                   <div className="text-xs text-textMuted">Created: {formatDate(job.createdAt)}</div>
                   <div className="grid grid-cols-1 gap-2 text-xs">
-                    <div>Dataset: <span className="font-mono text-text">{job.datasetId || activeDataset?.id || 'None'}</span></div>
-                    <div>Input object: <span className="font-mono text-text">{job.analysisObjectId || selectedObject?.id || 'None'}</span></div>
-                    <div>Result object: <span className="font-mono text-text">{resultObjectId || 'Pending worker completion'}</span></div>
+                    <div>Dataset: <span className="text-text">{activeDataset?.originalFilename || activeDataset?.displayName || 'Selected dataset'}</span></div>
+                    <div>Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || selectedObject?.displayName || selectedObject?.name || 'Selected analysis'}</span></div>
+                    <div>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Saved analysis is ready' : 'Preparing saved analysis')}</span></div>
                   </div>
                   {job.error?.message && (
                     <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-danger">
@@ -1307,7 +1401,7 @@ export function SeuratPipelinePanel({
             </div>
 
             <div className="rounded border border-border bg-background/40 p-4">
-              <h4 className="mb-3 flex items-center gap-2 font-bold text-text"><Archive size={16} /> Result continuation</h4>
+              <h4 className="mb-3 flex items-center gap-2 font-bold text-text"><Archive size={16} /> Continue this analysis</h4>
               {safeSummary ? (
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   {Object.entries(safeSummary).slice(0, 6).map(([key, value]) => (
@@ -1318,16 +1412,16 @@ export function SeuratPipelinePanel({
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-textMuted">Object inspection summary will appear here if the worker returns public summary metadata.</p>
+                <p className="text-sm text-textMuted">A summary will appear here when the analysis run finishes.</p>
               )}
               <div className="mt-3 space-y-2 text-xs text-textMuted">
-                <p>Result analysis object: <span className="font-mono text-text">{resultObjectId || 'not available yet'}</span></p>
-                <p>Checkpoint: <span className="font-mono text-text">{checkpointArtifact?.id || 'not available yet'}</span></p>
+                <p>Result: <span className="text-text">{resultObject?.displayName || resultObject?.name || (resultObjectId ? 'Saved analysis is ready' : 'Not available yet')}</span></p>
+                <p>Saved version: <span className="text-text">{checkpointArtifact ? 'Available' : 'Not available yet'}</span></p>
                 {resultObjectId && resultObject?.liveState !== 'attached' && (
-                  <p>Live R workflows require checkpoint reattach into your private R state before downstream jobs can use the result object.</p>
+                  <p>Open this saved version in your private analysis workspace before continuing with downstream analysis.</p>
                 )}
                 {loadJob?.id && (
-                  <p>Checkpoint load job: <span className="font-mono text-text">{loadJob.id}</span> / {loadJob.status || 'queued'}</p>
+                  <p>Open saved version: <span className="text-text">{displayRunStatus(loadJob.status)}</span></p>
                 )}
               </div>
               {(loadStatus.error || loadJobErrorMessage) && (
@@ -1347,7 +1441,7 @@ export function SeuratPipelinePanel({
                   className="btn btn-secondary inline-flex items-center gap-2 text-sm disabled:opacity-50"
                 >
                   {loadStatus.launching || loadStatus.refreshing ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
-                  {loadCompleted ? 'Checkpoint attached' : 'Load checkpoint'}
+                  {loadCompleted ? 'Saved version opened' : 'Open saved version'}
                 </button>
                 {loadJob?.id && loadJob.status !== 'completed' && (
                   <button
@@ -1356,7 +1450,7 @@ export function SeuratPipelinePanel({
                     className="btn btn-secondary inline-flex items-center gap-2 text-sm disabled:opacity-50"
                   >
                     {loadStatus.refreshing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-                    Refresh load
+                    Refresh
                   </button>
                 )}
                 <button
@@ -1364,24 +1458,24 @@ export function SeuratPipelinePanel({
                   disabled={!canContinueToDeg}
                   className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
                 >
-                  Continue to durable DEG
+                  Continue to marker analysis
                 </button>
                 <button onClick={() => setActiveTab('history')} className="btn btn-secondary text-sm">
-                  Open Jobs & Artifacts
+                  Open Runs & Results
                 </button>
               </div>
             </div>
 
             <div className="rounded border border-border bg-background/40 p-4">
-              <h4 className="mb-3 font-bold text-text">Logs</h4>
+              <h4 className="mb-3 font-bold text-text">Run notes</h4>
               {logs.length === 0 ? (
-                <p className="text-sm text-textMuted">Worker logs will appear after the job is claimed.</p>
+                <p className="text-sm text-textMuted">Run notes will appear when compute begins.</p>
               ) : (
                 <div className="max-h-44 space-y-2 overflow-y-auto custom-scrollbar">
                   {logs.map((entry, index) => (
                     <div key={`${entry?.ts || index}-${index}`} className="rounded border border-border bg-surface p-2 text-xs">
                       <div className="font-mono text-textMuted">{formatDate(entry?.ts)} / {entry?.level || 'info'}</div>
-                      <div className="mt-1 text-textMuted">{safeMessage(entry?.message)}</div>
+                      <div className="mt-1 text-textMuted">{researcherRunNote(entry)}</div>
                     </div>
                   ))}
                 </div>
@@ -1562,7 +1656,7 @@ export default function Workspace({
       setNewProjectName('');
       setIsCreatingProject(false);
     } catch (err) {
-      alert(err.message || 'Failed to create project.');
+      alert(publicErrorMessage(err, 'The project could not be created. Please try again.'));
     } finally {
       createProjectInFlightRef.current = false;
       setIsSubmittingProject(false);
@@ -1614,7 +1708,7 @@ export default function Workspace({
         displayName: selectedObject.name || 'PBMC_3k_Tutorial',
       });
     } catch (error) {
-      setLoadError(`PBMC demo could not attach to this private R session: ${error.message || 'Request failed.'}`);
+      setLoadError(publicErrorMessage(error, 'The PBMC demo could not be opened. Please try again.'));
     } finally {
       setLoadingId(null);
     }
@@ -1727,17 +1821,17 @@ export default function Workspace({
 
             {backendModelStatus?.error && (
               <div className="mb-4 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-                {backendModelStatus.error}
+                {publicErrorMessage(backendModelStatus.error, 'Project information is temporarily unavailable.')}
               </div>
             )}
 
             <div className="flex gap-2 overflow-x-auto pb-4 border-b border-border/50 custom-scrollbar">
               {backendModelStatus?.projectsLoading ? (
-                <div className="text-sm text-textMuted px-1 py-3">Loading backend projects...</div>
+                <div className="text-sm text-textMuted px-1 py-3">Loading projects...</div>
               ) : currentWs.projects?.length === 0 ? (
                 <div className="w-full rounded border border-dashed border-border p-6 text-center">
-                  <h4 className="text-text font-bold mb-2">No backend projects</h4>
-                  <p className="text-sm text-textMuted mb-4">Create a real backend project before loading analysis objects.</p>
+                  <h4 className="text-text font-bold mb-2">No projects yet</h4>
+                  <p className="text-sm text-textMuted mb-4">Create a project before loading a saved analysis.</p>
                   <button
                     onClick={() => setIsCreatingProject(true)}
                     className="btn btn-primary text-xs px-4 py-2 inline-flex items-center gap-2"
@@ -1778,7 +1872,7 @@ export default function Workspace({
           <div className="pt-6">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold text-text flex items-center gap-3">
-                Objects in Project
+                Saved analyses
                 <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
                   {activeProjectObjects.length}
                 </span>
@@ -1788,7 +1882,7 @@ export default function Workspace({
                 disabled={!!loadingId || !activeProjectId}
                 className="btn btn-primary flex items-center gap-2 px-5 text-sm shadow-lg shadow-primary/20"
               >
-                <FileUp size={16} /> Load Object
+                <FileUp size={16} /> Add analysis
               </button>
             </div>
 
@@ -1796,29 +1890,29 @@ export default function Workspace({
               {!activeProjectId ? (
                 <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
                   <FolderTree size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">Select a backend project</h4>
+                  <h4 className="text-text font-bold mb-2">Select a project</h4>
                   <p className="text-sm text-textMuted mb-6">
-                    Projects are loaded from the backend. Select or create one to list analysis objects.
+                    Select or create a project to list saved analyses.
                   </p>
                 </div>
               ) : backendModelStatus?.objectsLoading ? (
                 <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
                   <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">Loading analysis objects</h4>
-                  <p className="text-sm text-textMuted">Reading DB-backed project object metadata.</p>
+                  <h4 className="text-text font-bold mb-2">Loading saved analyses</h4>
+                  <p className="text-sm text-textMuted">Loading saved analysis details.</p>
                 </div>
               ) : activeProjectObjects.length === 0 ? (
                 <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
                   <Database size={40} className="text-slate-400 mb-4 opacity-50" />
-                  <h4 className="text-text font-bold mb-2">No analysis objects in this project</h4>
+                  <h4 className="text-text font-bold mb-2">No saved analyses in this project</h4>
                   <p className="text-sm text-textMuted mb-6">
-                    Use the durable Pipeline Manager upload or the PBMC demo to create a DB-backed analysis object.
+                    Use an approved workflow or the PBMC demo to create a saved analysis.
                   </p>
                   <button
                     onClick={() => setShowLoadModal(true)}
                     className="btn btn-primary flex items-center gap-2"
                   >
-                    <FileUp size={15} /> Load Object
+                    <FileUp size={15} /> Add analysis
                   </button>
                 </div>
               ) : activeProjectObjects.map(obj => {
@@ -1836,7 +1930,7 @@ export default function Workspace({
                       }
                     }}
                     role="group"
-                    aria-label={`Analysis object ${obj.name}. Press Enter or Space to select.`}
+                    aria-label={`Saved analysis ${obj.name}. Press Enter or Space to select.`}
                     tabIndex={0}
                     onMouseLeave={() => setOpenMenuId(null)}
                     className={`p-5 rounded-xl border transition-colors cursor-pointer group relative flex items-center gap-5 ${
@@ -1894,17 +1988,11 @@ export default function Workspace({
                         <span className="text-[10px] text-slate-400">
                           {new Date(obj.timestamp).toLocaleDateString()}
                         </span>
-                        {obj.source && obj.source !== 'demo' && (
-                          <>
-                            <div className="w-1 h-1 rounded-full bg-slate-700"></div>
-                            <span className="text-[10px] text-slate-400">{obj.source}</span>
-                          </>
-                        )}
                         {obj.isBackendAnalysisObject && (
                           <>
                             <div className="w-1 h-1 rounded-full bg-slate-700"></div>
                             <span className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide text-text bg-primary/10 border-primary/20">
-                              DB-backed
+                              Saved
                             </span>
                           </>
                         )}
@@ -1913,7 +2001,7 @@ export default function Workspace({
                             ? 'text-success bg-success/10 border-success/30'
                             : 'text-amber-400 bg-amber-500/10 border-amber-500/30'
                         }`}>
-                          {obj.liveState === 'attached' ? 'Live R attached' : 'Live R not attached'}
+                          {obj.liveState === 'attached' ? 'Ready in your workspace' : 'Open saved version'}
                         </span>
                       </div>
                     </div>

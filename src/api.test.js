@@ -271,7 +271,7 @@ describe('API Client (electronAPI)', () => {
       expect.stringContaining('/api/r/test-endpoint'),
       expect.objectContaining({
         credentials: 'include',
-        headers: expect.objectContaining({ 'X-BenchOne-CSRF': '1' }),
+        headers: expect.objectContaining({ 'X-TraceOmics-CSRF': '1' }),
       })
     );
   });
@@ -289,10 +289,9 @@ describe('API Client (electronAPI)', () => {
 
     const result = await electronAPI.apiRequest('/test-error');
     
-    // The requirement is that electronAPI returns the parsed error object
-    // { error: "Backend Exception: file not found" } instead of throwing an unhandled exception.
+    // Parsed failures must not expose raw backend exception detail to researchers.
     expect(result).toHaveProperty('error');
-    expect(result.error).toBe('Backend Exception: file not found');
+    expect(result.error).toBe('We could not complete this request. Please review the settings and try again.');
   });
 
   it('should handle 400/500 Error text responses properly', async () => {
@@ -307,7 +306,7 @@ describe('API Client (electronAPI)', () => {
     const result = await electronAPI.apiRequest('/test-error-text');
 
     expect(result).toHaveProperty('error');
-    expect(result.error).toContain('Plain text error message');
+    expect(result.error).toBe('We could not complete this request. Please review the settings and try again.');
   });
 
   it('routes db methods to their expected endpoint path (same-origin default)', async () => {
@@ -337,12 +336,12 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('clears auth and session localStorage so a reload remains logged out', async () => {
-    localStorage.setItem('benchone_auth_token', 'token-123');
-    localStorage.setItem('benchone_auth_user', JSON.stringify({ email: 'user@example.com' }));
-    localStorage.setItem('benchone_auth_extra', 'stale');
-    localStorage.setItem('benchone_session_id', 'session-123');
+    localStorage.setItem('traceomics_auth_token', 'token-123');
+    localStorage.setItem('traceomics_auth_user', JSON.stringify({ email: 'user@example.com' }));
+    localStorage.setItem('traceomics_auth_extra', 'stale');
+    localStorage.setItem('traceomics_session_id', 'session-123');
     localStorage.setItem('client_id', 'client-123');
-    localStorage.setItem('benchone_ws_user@example.com', 'workspace-state');
+    localStorage.setItem('traceomics_ws_user@example.com', 'workspace-state');
 
     expect(electronAPI.getCurrentUser()).toEqual({ email: 'user@example.com' });
 
@@ -354,12 +353,12 @@ describe('API Client (electronAPI)', () => {
 
     await electronAPI.logout();
 
-    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
-    expect(localStorage.getItem('benchone_auth_user')).toBeNull();
-    expect(localStorage.getItem('benchone_auth_extra')).toBeNull();
-    expect(localStorage.getItem('benchone_session_id')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_token')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_user')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_extra')).toBeNull();
+    expect(localStorage.getItem('traceomics_session_id')).toBeNull();
     expect(localStorage.getItem('client_id')).toBeNull();
-    expect(localStorage.getItem('benchone_ws_user@example.com')).toBe('workspace-state');
+    expect(localStorage.getItem('traceomics_ws_user@example.com')).toBe('workspace-state');
 
     vi.resetModules();
     const reloaded = await import('./api');
@@ -412,8 +411,27 @@ describe('API Client (electronAPI)', () => {
     expect(global.fetch.mock.calls[0][1].headers).not.toHaveProperty('Authorization');
   });
 
+  it('loads Expert R availability from the authenticated account capability route', async () => {
+    const capability = {
+      expertREnabled: true,
+      expertRProfile: { id: 'profile-v1', packages: ['Seurat'] },
+    };
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => capability,
+    });
+
+    await expect(electronAPI.getExpertRCapabilities()).resolves.toEqual(capability);
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/expert-r/capabilities',
+      expect.objectContaining({ credentials: 'include' })
+    );
+  });
+
   it('purges a legacy bearer during restore and never sends it', async () => {
-    localStorage.setItem('benchone_auth_token', 'legacy-token');
+    localStorage.setItem('traceomics_auth_token', 'legacy-token');
     const sessionUser = { id: 8, email: 'cookie@example.com', displayName: 'Cookie' };
     global.fetch.mockResolvedValue({
       ok: true,
@@ -432,13 +450,13 @@ describe('API Client (electronAPI)', () => {
         headers: expect.not.objectContaining({ Authorization: expect.anything() })
       })
     );
-    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_token')).toBeNull();
   });
 
   it('clears stale auth keys when the server rejects restore (401)', async () => {
-    localStorage.setItem('benchone_auth_token', 'stale-token');
-    localStorage.setItem('benchone_auth_user', JSON.stringify({ email: 'stale@example.com' }));
-    localStorage.setItem('benchone_auth_extra', 'stale-extra');
+    localStorage.setItem('traceomics_auth_token', 'stale-token');
+    localStorage.setItem('traceomics_auth_user', JSON.stringify({ email: 'stale@example.com' }));
+    localStorage.setItem('traceomics_auth_extra', 'stale-extra');
     global.fetch.mockResolvedValue({
       ok: false,
       status: 401,
@@ -449,20 +467,20 @@ describe('API Client (electronAPI)', () => {
     const result = await electronAPI.restoreSession();
 
     expect(result).toBeNull();
-    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
-    expect(localStorage.getItem('benchone_auth_user')).toBeNull();
-    expect(localStorage.getItem('benchone_auth_extra')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_token')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_user')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_extra')).toBeNull();
   });
 
   it('does not treat cached localStorage auth as truth when session restore cannot reach the backend', async () => {
-    localStorage.setItem('benchone_auth_token', 'stale-token');
-    localStorage.setItem('benchone_auth_user', JSON.stringify({ email: 'offline@example.com' }));
+    localStorage.setItem('traceomics_auth_token', 'stale-token');
+    localStorage.setItem('traceomics_auth_user', JSON.stringify({ email: 'offline@example.com' }));
     global.fetch.mockRejectedValue(new Error('network down'));
 
     const result = await electronAPI.restoreSession();
 
     expect(result).toBeNull();
-    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_token')).toBeNull();
     expect(electronAPI.getCurrentUser()).toEqual({ email: 'offline@example.com' });
   });
 
@@ -476,7 +494,7 @@ describe('API Client (electronAPI)', () => {
     });
 
     expect(await electronAPI.login(user.email, 'correct horse battery staple')).toEqual(user);
-    expect(localStorage.getItem('benchone_auth_token')).toBeNull();
+    expect(localStorage.getItem('traceomics_auth_token')).toBeNull();
     const [, options] = global.fetch.mock.calls[0];
     expect(options.credentials).toBe('include');
     expect(options.headers).not.toHaveProperty('Authorization');
@@ -484,7 +502,7 @@ describe('API Client (electronAPI)', () => {
 
   it('keeps cached user state when logout revocation fails', async () => {
     const user = { id: 10, email: 'retry@example.com', displayName: 'Retry' };
-    localStorage.setItem('benchone_auth_user', JSON.stringify(user));
+    localStorage.setItem('traceomics_auth_user', JSON.stringify(user));
     global.fetch.mockResolvedValue({
       ok: false,
       status: 503,
@@ -499,7 +517,7 @@ describe('API Client (electronAPI)', () => {
 
   it('clears stale local auth when the current cookie already expired', async () => {
     const user = { id: 11, email: 'missing-cookie@example.com', displayName: 'Missing Cookie' };
-    localStorage.setItem('benchone_auth_user', JSON.stringify(user));
+    localStorage.setItem('traceomics_auth_user', JSON.stringify(user));
     global.fetch.mockResolvedValue({
       ok: true,
       status: 200,
@@ -521,9 +539,7 @@ describe('API Client (electronAPI)', () => {
       headers: new Headers({ 'content-type': 'application/json' }),
       json: async () => ({
         supportedTarget: 'R 4.5.x',
-        rscript: { path: 'Rscript', source: 'PATH' },
         runtime: { status: 'ok', rVersion: '4.6.0' },
-        packages: { Seurat: true, CellChat: false }
       }),
     });
 
@@ -533,9 +549,10 @@ describe('API Client (electronAPI)', () => {
     expect(result.version).toBe('R 4.6.0');
     expect(result.version).not.toBe('R 4.5.1');
     expect(result.supportedTarget).toBe('R 4.5.x');
-    expect(result.rscriptPath).toBe('Rscript');
-    expect(result.rscriptSource).toBe('PATH');
-    expect(result.packages).toMatchObject({ Seurat: true, CellChat: false });
+    expect(result.runtimeStatus).toBe('ok');
+    expect(result).not.toHaveProperty('rscriptPath');
+    expect(result).not.toHaveProperty('rscriptSource');
+    expect(result).not.toHaveProperty('packages');
   });
 
   it('reads the public compute-runtime state without exposing worker internals', async () => {
@@ -725,6 +742,30 @@ describe('API Client (electronAPI)', () => {
         minCells: 3,
         minFeatures: 200,
       },
+    });
+  });
+
+  it('creates spatial Seurat jobs with the same fixed parameter allowlist', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_spatial123', jobType: 'spatial.seurat.v1', status: 'queued' }),
+    });
+
+    await electronAPI.createSpatialSeuratPipelineJob('proj_1', {
+      datasetId: 'ds_spatial123',
+      analysisObjectId: 'ao_spatial_input',
+      params: { normalizationMethod: 'SCTransform', clusterResolution: 0.6, storageUri: 'private.rds' },
+    });
+
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'spatial.seurat.v1',
+      datasetId: 'ds_spatial123',
+      analysisObjectId: 'ao_spatial_input',
+      parameters: { normalizationMethod: 'SCTransform', clusterResolution: 0.6 },
     });
   });
 

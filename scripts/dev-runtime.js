@@ -38,7 +38,7 @@ function waitForExit(child, timeoutMs) {
 function requestIpcShutdown(child) {
   if (!child || !child.connected || typeof child.send !== 'function') return false;
   try {
-    child.send({ type: 'benchone:shutdown' }, () => {});
+    child.send({ type: 'traceomics:shutdown' }, () => {});
     return true;
   } catch {
     return false;

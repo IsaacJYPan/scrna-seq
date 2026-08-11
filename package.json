@@ -1,7 +1,7 @@
 {
-  "name": "scrna-seq-workbench",
+  "name": "traceomics",
   "version": "1.0.0",
-  "description": "Web-based scRNA-seq analysis platform: React/Vite frontend, Express API, Postgres, and an R Plumber/Seurat backend",
+  "description": "TraceOmics: collaborative, provenance-first transcriptomic analysis with React, Express, Postgres, R, and Seurat",
   "main": "desktop/main.cjs",
   "engines": {
     "node": ">=22.15.0 <25"
@@ -18,15 +18,18 @@
     "worker": "node --require ./scripts/enable-job-worker.cjs worker.js",
     "worker:once": "node --require ./scripts/enable-job-worker.cjs worker.js --once",
     "platform-developer": "node scripts/manage-platform-developer.js",
+    "expert-r-access": "node scripts/manage-expert-r-access.js",
     "account-admin": "node scripts/account-admin.js",
     "ops:backup": "node scripts/backup-runtime.js",
     "ops:restore": "node scripts/restore-runtime.js",
+    "demo:cleanup": "node scripts/cleanup-demo-guests.js",
     "ops:verify-restore": "node scripts/verify-backup-restore.js",
     "test:unit": "node scripts/run_unit_tests.js",
     "test:integration": "node scripts/run_integration_tests.js",
     "test:tutorial": "node scripts/test_pbmc3k_tutorial.js",
     "test:r-state-proxy": "node scripts/verify_r_state_proxy.js",
     "test:seurat-pipeline": "node scripts/verify_seurat_pipeline.js",
+    "test:spatial-seurat": "Rscript scripts/verify_spatial_seurat_pipeline.R",
     "test:deg-worker-pipeline": "node scripts/verify_deg_worker_pipeline.js",
     "test:pbmc-parent": "Rscript scripts/verify_pbmc_parent_unmutated.R",
     "test:checkpoint-load": "Rscript scripts/verify_checkpoint_load.R",
@@ -44,6 +47,11 @@
     "test:deployment:browser": "npm run build && node scripts/verify-browser-deployment-flow.js",
     "test:deployment:compose": "node scripts/verify-compose-topology.js",
     "test:deployment:compose-runtime": "node scripts/verify-compose-operations-drill.js",
+    "test:private-compute-compose": "node scripts/verify-compose-private-compute.js",
+    "test:native-ui-compose": "node scripts/verify-compose-native-ui.js",
+    "test:expert-r-sandbox": "node scripts/verify-expert-r-sandbox.js",
+    "test:demo-compose": "node scripts/verify-compose-demo.js",
+    "test:demo-browser": "node scripts/verify-public-demo-ui.js",
     "test:frontend": "vitest run src/",
     "test:backend": "npm run test:backend:postgres",
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",
@@ -56,7 +64,6 @@
     "check": "npm run test:backend && npm run test:frontend && npm run lint && npm run build"
   },
   "dependencies": {
-    "@tailwindcss/postcss": "^4.2.2",
     "@xyflow/react": "^12.10.2",
     "cors": "^2.8.6",
     "dagre": "^0.8.5",
@@ -72,8 +79,8 @@
     "uuid": "^14.0.0"
   },
   "build": {
-    "appId": "org.benchone.workbench",
-    "productName": "BenchOne",
+    "appId": "org.traceomics.workbench",
+    "productName": "TraceOmics",
     "icon": "build/icon.svg",
     "asar": true,
     "files": [
@@ -86,6 +93,7 @@
     }
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
     "@axe-core/playwright": "^4.11.3",
     "@eslint/js": "^9.39.4",
     "@testing-library/jest-dom": "^6.9.1",
@@ -103,7 +111,7 @@
     "pixelmatch": "^7.2.0",
     "playwright": "^1.60.0",
     "pngjs": "^7.0.0",
-    "postcss": "^8.5.8",
+    "postcss": "^8.5.26",
     "tailwindcss": "^4.2.2",
     "vite": "^6.2.0",
     "vitest": "^4.1.7",

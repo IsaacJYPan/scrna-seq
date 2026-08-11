@@ -1,5 +1,5 @@
-const PROJECT_SELECTION_PREFIX = 'benchone_selected_project_';
-const OBJECT_SELECTION_PREFIX = 'benchone_selected_analysis_object_';
+const PROJECT_SELECTION_PREFIX = 'traceomics_selected_project_';
+const OBJECT_SELECTION_PREFIX = 'traceomics_selected_analysis_object_';
 
 function stableUserKey(user) {
   const raw = user?.id ?? user?.email ?? 'anonymous';

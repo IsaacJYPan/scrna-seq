@@ -142,7 +142,7 @@ async function runAccountAdmin(env, { email, displayName, password }) {
 function stopWeb(child) {
   if (!child || child.exitCode !== null) return;
   if (process.platform === 'win32' && child.connected) {
-    child.send({ type: 'benchone:shutdown' });
+    child.send({ type: 'traceomics:shutdown' });
   } else {
     child.kill('SIGTERM');
   }
@@ -182,7 +182,7 @@ function sessionCookie(response) {
   const values = typeof response.headers.getSetCookie === 'function'
     ? response.headers.getSetCookie()
     : [response.headers.get('set-cookie') || ''];
-  const value = values.find((entry) => entry.startsWith('__Host-benchone_session='));
+  const value = values.find((entry) => entry.startsWith('__Host-traceomics_session='));
   return value ? value.split(';')[0] : '';
 }
 
@@ -332,9 +332,9 @@ async function main() {
     assert(login.data?.user?.email === email, 'Login did not return the public user projection.');
     assert(login.data?.token === undefined, 'Login exposed a bearer credential to JavaScript.');
     const cookie = sessionCookie(login.response);
-    assert(cookie.startsWith('__Host-benchone_session='), 'Production did not issue a __Host session cookie.');
+    assert(cookie.startsWith('__Host-traceomics_session='), 'Production did not issue a __Host session cookie.');
     const allCookies = login.response.headers.getSetCookie();
-    const hostCookie = allCookies.find((entry) => entry.startsWith('__Host-benchone_session='));
+    const hostCookie = allCookies.find((entry) => entry.startsWith('__Host-traceomics_session='));
     assert(/; Secure/i.test(hostCookie) && /; HttpOnly/i.test(hostCookie) && /; Path=\//i.test(hostCookie),
       'Production session cookie flags are incomplete.');
     assert(!/; Domain=/i.test(hostCookie), '__Host session cookie unexpectedly set Domain.');

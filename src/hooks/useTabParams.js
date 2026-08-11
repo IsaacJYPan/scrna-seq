@@ -11,7 +11,7 @@ import { useState, useEffect, useRef } from 'react';
  */
 export function useTabParams(step, email, objectId, defaults) {
   const storageKey = email && objectId
-    ? `benchone_params_${step}_${email.replace(/[^a-zA-Z0-9]/g, '_')}_${objectId}`
+    ? `traceomics_params_${step}_${email.replace(/[^a-zA-Z0-9]/g, '_')}_${objectId}`
     : null;
 
   // Read saved params once on mount (merged with defaults so new fields always have a value)

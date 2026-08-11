@@ -115,6 +115,9 @@ async function installRoutes(page) {
         serverFigureExportEnabled: true,
       });
     }
+    if (pathname === '/api/expert-r/capabilities' && request.method() === 'GET') {
+      return fulfill(route, 200, { expertREnabled: false, expertRProfile: null });
+    }
     if (pathname === '/api/db/figures' && request.method() === 'GET') {
       return fulfill(route, 200, []);
     }

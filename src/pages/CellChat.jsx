@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
+import { publicErrorMessage } from '../publicError';
 
 const CELLCHAT_JOB_TYPE = 'cellchat.infer.v1';
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
@@ -100,9 +101,9 @@ function parseErrorMessage(error) {
   const raw = error?.message || String(error || 'Request failed.');
   try {
     const parsed = JSON.parse(raw);
-    return parsed?.error || raw;
+    return publicErrorMessage(parsed?.error || raw);
   } catch {
-    return raw;
+    return publicErrorMessage(raw);
   }
 }
 
@@ -294,6 +295,25 @@ function badgeTone(status) {
   return 'amber';
 }
 
+function displayRunStatus(status) {
+  return {
+    queued: 'Waiting for compute',
+    running: 'Running',
+    completed: 'Complete',
+    failed: 'Needs attention',
+    canceled: 'Canceled',
+  }[status] || 'Unknown';
+}
+
+function researcherRunNote(entry) {
+  if (entry?.level === 'error') return 'This analysis needs attention.';
+  const message = String(entry?.message || '');
+  if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
+  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
+  if (entry?.level === 'warn') return 'Analysis warning recorded.';
+  return 'Analysis update recorded.';
+}
+
 function StatusBadge({ children, tone = 'slate' }) {
   const tones = {
     blue: 'bg-primary/10 text-text border-primary/20',
@@ -330,9 +350,7 @@ function Metric({ label, value, detail }) {
 
 function JobLogs({ logs }) {
   const rows = Array.isArray(logs) ? logs.slice(0, 100) : [];
-  if (!rows.length) {
-    return <EmptyNotice title="No job logs yet">Logs appear after the worker starts this job.</EmptyNotice>;
-  }
+  if (!rows.length) return <EmptyNotice title="No run notes yet">Run notes appear after compute begins.</EmptyNotice>;
   return (
     <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-black/20 custom-scrollbar">
       {rows.map((entry, index) => (
@@ -343,7 +361,7 @@ function JobLogs({ logs }) {
             </StatusBadge>
             <span className="font-mono text-textMuted">{formatDate(entry?.ts)}</span>
           </div>
-          <p className="text-textMuted">{redactUnsafeText(entry?.message).slice(0, 500)}</p>
+          <p className="text-textMuted">{researcherRunNote(entry)}</p>
         </div>
       ))}
     </div>
@@ -461,6 +479,10 @@ export default function CellChat({
   const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
+  const selectedAnalysis = (currentWs?.objects || []).find(object => object.id === selectedObjectId)
+    || datasetInfo
+    || null;
+  const selectedAnalysisName = selectedAnalysis?.displayName || selectedAnalysis?.name || 'Selected analysis';
   const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
   const liveObjectAttached = hasAttachedLiveRObject(datasetInfo);
   const canWriteProject = JOB_WRITE_ROLES.has(activeProject?.role);
@@ -513,7 +535,7 @@ export default function CellChat({
     if (!jobId || !activeProjectId) return null;
     const api = window.electronAPI || {};
     if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
-      setError('The project job service is unavailable in this frontend runtime.');
+      setError('This analysis service is temporarily unavailable.');
       return null;
     }
     if (!silent) setRefreshing(true);
@@ -608,17 +630,17 @@ export default function CellChat({
     if (!userEmail) return setError('Sign in before starting CellChat inference.');
     if (!activeProjectId) return setError('Select a project before starting CellChat inference.');
     if (!selectedObjectId || !isDbBackedObject) {
-      return setError('Select a saved analysis object before starting CellChat inference.');
+      return setError('Select a saved analysis before starting CellChat inference.');
     }
     if (!canWriteProject) return setError('Your project role can view results but cannot start analysis jobs.');
     if (!ownsPrivateLiveObject) {
-      return setError('This object belongs to another member. Fork a saved checkpoint into your own private object before starting CellChat inference.');
+      return setError('This analysis belongs to another member. Create a branch from its saved version in your private analysis workspace before starting CellChat inference.');
     }
     if (!sessionReady || !liveObjectAttached) {
-      return setError('Attach or restore this analysis object in R before starting the job.');
+      return setError('Open this saved analysis in your private analysis workspace before starting CellChat inference.');
     }
     if (!computeReady) {
-      return setError('The analysis worker is not ready. Jobs are not queued while compute is unavailable.');
+      return setError('Compute is not available right now. The analysis was not started.');
     }
     if (!safeParams.groupBy || !safeParams.species || !safeParams.databaseCategory || !safeParams.analysisIntent) {
       return setError('Choose a grouping, species, CellChat database category, and the single-context analysis intent.');
@@ -626,7 +648,7 @@ export default function CellChat({
 
     const api = window.electronAPI || {};
     if (!api.createCellChatInferenceJob) {
-      return setError('The fixed CellChat project-job service is unavailable in this frontend runtime.');
+      return setError('CellChat analysis is temporarily unavailable.');
     }
 
     const requestSelectionKey = selectionKeyRef.current;
@@ -663,7 +685,7 @@ export default function CellChat({
     if (!activeProjectId || !job?.id || !canCancelJob) return;
     const api = window.electronAPI || {};
     if (!api.cancelProjectJob) {
-      setError('Job cancellation is unavailable in this frontend runtime.');
+      setError('Canceling this analysis is temporarily unavailable.');
       return;
     }
     const requestSelectionKey = selectionKeyRef.current;
@@ -686,8 +708,8 @@ export default function CellChat({
       <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
-          <h2 className="mb-2 text-xl font-bold text-white">No analysis object selected</h2>
-          <p className="text-sm text-textMuted">Select a saved, clustered analysis object before running CellChat inference.</p>
+          <h2 className="mb-2 text-xl font-bold text-white">No saved analysis selected</h2>
+          <p className="text-sm text-textMuted">Select a saved, clustered analysis before running CellChat inference.</p>
         </div>
       </div>
     );
@@ -700,9 +722,9 @@ export default function CellChat({
           <div>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <h2 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white"><MessageSquare size={24} className="text-primary" /> CellChat communication candidates</h2>
-              <StatusBadge tone="slate">durable job</StatusBadge>
+              <StatusBadge tone="slate">recorded run</StatusBadge>
               <StatusBadge tone="amber">candidate predictions</StatusBadge>
-              <StatusBadge tone="amber">no public download</StatusBadge>
+              <StatusBadge tone="blue">controlled export</StatusBadge>
             </div>
             <p className="max-w-3xl text-sm text-textMuted">
               Uses CellChat&apos;s curated ligand–receptor resource to generate bounded, hypothesis-generating candidate signaling between selected cell groups.
@@ -725,11 +747,11 @@ export default function CellChat({
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || activeProjectId || 'None'}</div>
+            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || 'Selected project'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Analysis object</div>
-            <div className="mt-1 truncate font-mono text-text">{selectedObjectId || 'None'}</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
+            <div className="mt-1 truncate text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Assay</div>
@@ -739,42 +761,42 @@ export default function CellChat({
 
         {error && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger" role="alert">
-            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> CellChat job unavailable</div>
-            <p className="mt-1 text-sm">{redactUnsafeText(error)}</p>
+            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> CellChat analysis unavailable</div>
+            <p className="mt-1 text-sm">{publicErrorMessage(error, 'This analysis needs attention. Review the settings and try again.')}</p>
           </div>
         )}
 
         {!isDbBackedObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Select a saved analysis object with an ID beginning with <span className="font-mono">ao_</span> before starting this job.
+            Select a saved analysis before starting this analysis.
           </div>
         )}
 
         {isDbBackedObject && !canWriteProject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Your project role is read-only. You can inspect saved CellChat summaries, but only an owner, administrator, or analyst can start a new job.
+            Your project role is read-only. You can inspect saved CellChat summaries, but only an owner, administrator, or analyst can start a new analysis.
           </div>
         )}
 
         {isDbBackedObject && canWriteProject && !ownsPrivateLiveObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This object belongs to another member. Use Jobs &amp; Artifacts to fork a saved checkpoint into your own private R object.
-            <button onClick={() => setActiveTab?.('history')} className="btn btn-secondary ml-3 text-xs">Open recovery</button>
+            This analysis belongs to another member. Use Runs &amp; Results to create a branch from its saved version in your own private analysis workspace.
+            <button onClick={() => setActiveTab?.('history')} className="btn btn-secondary ml-3 text-xs">Open Runs &amp; Results</button>
           </div>
         )}
 
         {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This saved object is not attached to the private R session yet. {datasetInfo?.source === 'pbmc3k_demo' ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open recovery to attach a saved checkpoint.'}
+            This saved analysis is not open in your private analysis workspace yet. {datasetInfo?.source === 'pbmc3k_demo' ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open Runs & Results to open its saved version.'}
             <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
-              {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open recovery'}
+              {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open Runs &amp; Results'}
             </button>
           </div>
         )}
 
         {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Compute is not ready, so new jobs are disabled rather than left indefinitely queued. Start or restore the standalone worker, then wait for the Compute ready status in the sidebar.
+            Compute is unavailable, so new analyses are paused until it becomes available. Wait until the sidebar shows Compute available.
           </div>
         )}
 
@@ -846,18 +868,18 @@ export default function CellChat({
             </label>
           </div>
           <p className="mt-3 text-xs text-textMuted">
-            The deployment total is capped at 10,000 cells while the singleton R-service capacity is being measured. The recorded random seed makes any sampling repeatable.
+            This analysis is capped at 10,000 cells for a bounded, reproducible run. The recorded random seed makes any sampling repeatable.
           </p>
         </section>
 
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Job status</h3>
-              <p className="mt-1 text-sm text-textMuted">This deployment runs one analysis job at a time. Queued jobs start when the worker is available.</p>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Run status</h3>
+              <p className="mt-1 text-sm text-textMuted">Compute is allocated when available. When demand is high, a new analysis waits for compute.</p>
             </div>
             <div className="flex items-center gap-2">
-              {job?.status && <StatusBadge tone={badgeTone(job.status)}>{job.status}</StatusBadge>}
+              {job?.status && <StatusBadge tone={badgeTone(job.status)}>{displayRunStatus(job.status)}</StatusBadge>}
               {job?.id && !terminal && canCancelJob && (
                 <button
                   onClick={cancelJob}
@@ -865,21 +887,20 @@ export default function CellChat({
                   className="btn btn-secondary inline-flex items-center gap-1.5 text-xs disabled:opacity-50"
                 >
                   {canceling ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
-                  Cancel job
+                  Cancel run
                 </button>
               )}
             </div>
           </div>
           {!job ? (
-            <EmptyNotice title="No CellChat job started">Choose the required study choices above, then start the durable job.</EmptyNotice>
+            <EmptyNotice title="No CellChat analysis run yet">Choose the required study choices above, then start CellChat inference.</EmptyNotice>
           ) : (
             <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
-                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job ID</div><div className="mt-1 font-mono text-text">{job.id}</div></div>
-                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job type</div><div className="mt-1 font-mono text-text">{job.jobType || CELLCHAT_JOB_TYPE}</div></div>
+              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
+                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
                 <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
               </div>
-              {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{redactUnsafeText(job.error.message)}</div>}
+              {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{publicErrorMessage(job.error, 'This analysis needs attention. Review the settings and try again.')}</div>}
               <JobLogs logs={visibleLogs} />
             </div>
           )}
@@ -889,7 +910,7 @@ export default function CellChat({
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Archive size={18} className="text-primary" /> CellChat summary</h3>
-              <p className="mt-1 text-sm text-textMuted">This page shows a bounded, metadata-only candidate summary. The complete interaction table remains private project storage.</p>
+              <p className="mt-1 text-sm text-textMuted">This page shows a bounded candidate summary for interpretation. The complete interaction table is available through authorized export.</p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}
           </div>
@@ -925,9 +946,9 @@ export default function CellChat({
               </div>
 
               <div className="rounded-lg border border-border bg-surface/60 p-4 text-sm">
-                <h4 className="font-bold text-text">Owner-local group key</h4>
+                <h4 className="font-bold text-text">Group labels in this private analysis workspace</h4>
                 <p className="mt-1 text-textMuted">
-                  Result artifacts retain opaque group identifiers. This key is read only from your currently attached private R object and is not saved in the project artifact. If identities changed after this job ran, rerun the analysis before interpreting the mapping.
+                  Group labels are available only while the owner&apos;s saved analysis is open in their private analysis workspace; they are not saved with the shared result. If identities changed after this analysis ran, rerun it before interpreting the mapping.
                 </p>
                 {ownerGroupKey?.groups?.length ? (
                   <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -943,8 +964,8 @@ export default function CellChat({
                 ) : (
                   <p className="mt-3 text-xs text-textMuted">
                     {ownerGroupKeyUnavailable
-                      ? 'The owner-local key is unavailable. Reattach the source object to your private R session to recover it.'
-                      : 'Loading the owner-local key from the attached private R object…'}
+                      ? 'The group-label mapping is unavailable. Open the source saved analysis in your private analysis workspace to recover it.'
+                      : 'Loading group labels from the attached private analysis workspace…'}
                   </p>
                 )}
               </div>
@@ -965,23 +986,18 @@ export default function CellChat({
               </div>
 
               <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
-                Summary artifact <span className="font-mono text-text">{summaryArtifact.id}</span> is available. The full interaction table is not exposed as a public download.
-                {summary.packageVersions.length > 0 && (
-                  <div className="mt-2 text-xs">
-                    Software versions: {summary.packageVersions.map(entry => `${entry.name} ${entry.value}`).join(' · ')}.
-                  </div>
-                )}
+                A saved summary is available. The full interaction table is available only through its authorized export.
               </div>
             </div>
           ) : job?.status === 'completed' ? (
-            <EmptyNotice title="Job completed without a public summary">Review the sanitized job logs. The private result table is not downloadable from this page.</EmptyNotice>
+            <EmptyNotice title="Analysis completed without a summary">Review the recorded analysis details. If a result completed, its authorized export is available in Runs &amp; Results.</EmptyNotice>
           ) : (
-            <EmptyNotice title="No CellChat summary yet">A bounded summary appears here after the worker finishes successfully.</EmptyNotice>
+            <EmptyNotice title="No CellChat summary yet">A bounded summary appears here after the analysis finishes successfully.</EmptyNotice>
           )}
 
           {resultsArtifact && (
             <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-              Private result artifact <span className="font-mono">{resultsArtifact.id}</span> is recorded for the project. Its storage location is intentionally hidden.
+              A detailed result table is available through the authorized export in Runs &amp; Results.
             </div>
           )}
         </section>

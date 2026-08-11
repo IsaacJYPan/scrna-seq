@@ -1,0 +1,66 @@
+# Public-demo overlay. Always use a distinct Compose project name and distinct
+# environment file so these volumes, database, credentials, and storage can
+# never resolve to a private lab deployment.
+
+services:
+  web:
+    environment:
+      APP_DEPLOYMENT_MODE: demo
+      DEMO_TEMPLATE_PROJECT_ID: ${DEMO_TEMPLATE_PROJECT_ID:?Set curated template project id}
+      DEMO_GUEST_TTL_SECONDS: ${DEMO_GUEST_TTL_SECONDS:-7200}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-7200}
+      EXPERT_R_ENABLED: "false"
+      MAX_UPLOAD_BYTES: "1"
+      MAX_UPLOAD_FILES: "1"
+
+  worker:
+    environment: &demo-worker-environment
+      APP_DEPLOYMENT_MODE: demo
+      DEMO_TEMPLATE_PROJECT_ID: ${DEMO_TEMPLATE_PROJECT_ID:?Set curated template project id}
+      DEMO_GUEST_TTL_SECONDS: ${DEMO_GUEST_TTL_SECONDS:-7200}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-7200}
+      EXPERT_R_ENABLED: "false"
+
+  worker-compute-1:
+    environment: *demo-worker-environment
+
+  worker-compute-2:
+    environment: *demo-worker-environment
+
+  demo-cleanup:
+    image: ${APP_IMAGE:-traceomics:single-host}
+    profiles: [demo-ops]
+    command: ["node", "scripts/cleanup-demo-guests.js"]
+    network_mode: service:namespace-anchor
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1770,uid=${APP_UID:-10001},gid=${APP_GID:-10001}
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      APP_DEPLOYMENT_MODE: demo
+      DEMO_TEMPLATE_PROJECT_ID: ${DEMO_TEMPLATE_PROJECT_ID:?Set curated template project id}
+      DEMO_GUEST_TTL_SECONDS: ${DEMO_GUEST_TTL_SECONDS:-7200}
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB}
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    restart: "no"
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128

@@ -3,22 +3,23 @@ import {
   AlertTriangle, Loader2, RefreshCw, ShieldCheck, Trash2,
   UserPlus, Users,
 } from 'lucide-react';
+import { publicErrorMessage } from '../publicError';
 
 const ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const ROLE_HELP = {
   owner: 'Full project and membership control. Only owners can grant or remove owner access.',
   admin: 'Can manage non-owner members and project resources.',
-  analyst: 'Can create analysis objects, launch jobs, and fork durable checkpoints.',
-  viewer: 'Can read durable project metadata, artifacts, and lineage only.',
+  analyst: 'Can create analyses, run approved workflows, and create branches from saved versions.',
+  viewer: 'Can read shared project metadata, saved results, and lineage only.',
 };
 
 function parseError(error, fallback) {
   if (!error) return fallback;
   try {
     const parsed = JSON.parse(error.message);
-    return parsed.error || fallback;
+    return publicErrorMessage(parsed.error || fallback, fallback);
   } catch {
-    return error.message || fallback;
+    return publicErrorMessage(error.message || fallback, fallback);
   }
 }
 
@@ -98,7 +99,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
       setMemberResult({ projectId, rows: [] });
       setObservedActor({ projectId, role: null });
       setLoading(false);
-      setError('Project member API is unavailable in this frontend runtime.');
+      setError('Project members are temporarily unavailable.');
       return;
     }
     setLoading(true);
@@ -221,8 +222,8 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
       <div className="h-full w-full overflow-y-auto bg-background p-8 custom-scrollbar">
         <div className="mx-auto max-w-5xl rounded-lg border border-dashed border-border p-8 text-center">
           <Users size={30} className="mx-auto mb-3 text-textMuted" />
-          <h2 className="text-xl font-bold text-text">Select a backend project</h2>
-          <p className="mt-2 text-sm text-textMuted">Membership and roles are scoped to a durable backend project.</p>
+          <h2 className="text-xl font-bold text-text">Select a project</h2>
+          <p className="mt-2 text-sm text-textMuted">Membership and roles are scoped to the selected research project.</p>
         </div>
       </div>
     );
@@ -238,7 +239,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
               <div>
                 <h2 className="text-2xl font-black tracking-tight text-text">Collaborators</h2>
                 <p className="mt-1 text-sm text-textMuted">
-                  Manage access to <span className="font-bold text-text">{activeProject?.name || activeProjectId}</span>.
+                  Manage access to <span className="font-bold text-text">{activeProject?.name || 'the selected project'}</span>.
                 </p>
               </div>
             </div>
@@ -258,7 +259,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
             <ShieldCheck size={17} className="text-primary" />
             Collaboration boundary
           </div>
-          Members share durable project metadata, artifacts, checkpoints, and lineage according to role. They never attach to another member&apos;s private live R object. To continue someone else&apos;s work, an analyst creates a durable checkpoint fork with an explicit lineage edge.
+          Members can review project records and authorized results according to role. To continue another researcher&apos;s work, create your own private branch from a saved version.
         </div>
 
         {error && (
@@ -304,7 +305,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
         <section className="space-y-3">
           <div>
             <h3 className="text-lg font-bold text-text">Project members</h3>
-            <p className="mt-1 text-sm text-textMuted">Backend authorization is re-evaluated on every request. UI controls reflect, but do not replace, those checks.</p>
+            <p className="mt-1 text-sm text-textMuted">Access is re-checked for every action. Visible controls do not replace those checks.</p>
           </div>
 
           {loading && members.length === 0 ? (
@@ -345,7 +346,7 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
                         </select>
                         {confirming ? (
                           <div className="flex items-center gap-2">
-                            <button aria-label={`Confirm remove ${member.email} from ${activeProject?.name || activeProjectId}`} onClick={() => removeMember(member)} disabled={interactionBlocked} className="btn border-danger/40 bg-danger/10 text-xs text-danger hover:bg-danger/20">Confirm remove</button>
+                            <button aria-label={`Confirm remove ${member.email} from ${activeProject?.name || 'this project'}`} onClick={() => removeMember(member)} disabled={interactionBlocked} className="btn border-danger/40 bg-danger/10 text-xs text-danger hover:bg-danger/20">Confirm remove</button>
                             <button aria-label={`Keep ${member.email}`} onClick={() => setConfirmRemoveKey(null)} disabled={interactionBlocked} className="btn btn-secondary text-xs">Keep</button>
                           </div>
                         ) : (

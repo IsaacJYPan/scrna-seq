@@ -11,6 +11,8 @@ const database = require('./pgDatabase');
 const storage = require('./storage');
 const rBridge = require('./rWorkerBridge');
 const rRuntime = require('./rRuntime');
+const { expertRSandboxEnabled } = require('./expertR');
+const { createExpertSandboxClient } = require('./expertSandboxClient');
 const { deriveRObjectStateKey } = require('./rStateKeys');
 const {
   createJobWorker,
@@ -20,6 +22,8 @@ const {
 
 const STANDALONE_WORKER_DEFAULTS = Object.freeze({
   concurrency: 1,
+  poolSize: 1,
+  poolSlot: 1,
   minFreeMemoryMb: 1024,
   drainTimeoutMs: 630000,
   startupTimeoutMs: 30000,
@@ -62,6 +66,16 @@ function parseStandaloneWorkerConfig(env = process.env, options = {}) {
     min: 1,
     max: 1,
   });
+  const poolSize = strictInteger(env.JOB_WORKER_POOL_SIZE, 'JOB_WORKER_POOL_SIZE', {
+    defaultValue: STANDALONE_WORKER_DEFAULTS.poolSize,
+    min: 1,
+    max: 8,
+  });
+  const poolSlot = strictInteger(env.JOB_WORKER_POOL_SLOT, 'JOB_WORKER_POOL_SLOT', {
+    defaultValue: STANDALONE_WORKER_DEFAULTS.poolSlot,
+    min: 1,
+    max: poolSize,
+  });
   const minFreeMemoryMb = strictInteger(env.JOB_WORKER_MIN_FREE_MEMORY_MB, 'JOB_WORKER_MIN_FREE_MEMORY_MB', {
     defaultValue: STANDALONE_WORKER_DEFAULTS.minFreeMemoryMb,
     min: 1,
@@ -88,17 +102,21 @@ function parseStandaloneWorkerConfig(env = process.env, options = {}) {
   if (!['127.0.0.1', '::1', '0.0.0.0'].includes(healthHost)) {
     throw new Error('JOB_WORKER_HEALTH_HOST must be 127.0.0.1, ::1, or 0.0.0.0.');
   }
+  const reportReadiness = env.JOB_WORKER_REPORT_READINESS !== 'false';
   return Object.freeze({
     enabled: loop.enabled,
     pollIntervalMs: loop.pollIntervalMs,
     leaseSeconds: loop.leaseSeconds,
     concurrency,
+    poolSize,
+    poolSlot,
     minFreeMemoryMb,
     drainTimeoutMs,
     startupTimeoutMs,
     startupRetryMs: STANDALONE_WORKER_DEFAULTS.startupRetryMs,
     healthHost,
     healthPort,
+    reportReadiness,
     allowedJobTypes: parseAllowedJobTypes(env.JOB_WORKER_ALLOWED_JOB_TYPES, options.handlers),
   });
 }
@@ -226,14 +244,14 @@ function createStandaloneWorkerRuntime(options = {}) {
   }
 
   async function publishRuntimeStatus() {
-    if (typeof db.reportStandaloneWorkerRuntimeState !== 'function') return;
+    if (!runtimeConfig.reportReadiness || typeof db.reportStandaloneWorkerRuntimeState !== 'function') return;
     const status = state.draining
       ? 'draining'
       : state.ready && state.acceptingClaims
         ? 'ready'
         : 'unavailable';
     try {
-      await db.reportStandaloneWorkerRuntimeState(status);
+      await db.reportStandaloneWorkerRuntimeState(status, { slot: runtimeConfig.poolSlot });
     } catch (error) {
       // Status reporting must never weaken the worker's admission and claim
       // gates. A failed heartbeat naturally becomes unavailable after its TTL.
@@ -274,6 +292,7 @@ function createStandaloneWorkerRuntime(options = {}) {
       state.lastReadinessCode = 'READY';
       return {
         ready: true,
+        recoveryBarrierSafe: runtimeConfig.poolSize === 1,
         rRuntimeInstanceHash: rReady && typeof rReady.runtime_session_id === 'string'
           ? crypto.createHash('sha256').update(rReady.runtime_session_id).digest('hex')
           : null,
@@ -336,18 +355,30 @@ function createStandaloneWorkerRuntime(options = {}) {
           code: 'WORKER_TOPOLOGY_LOCK_UNAVAILABLE',
         });
       }
-      topologyLock = await db.acquireStandaloneWorkerLock();
+      topologyLock = await db.acquireStandaloneWorkerLock({
+        slot: runtimeConfig.poolSlot,
+        poolSize: runtimeConfig.poolSize,
+      });
       await waitUntilReady();
       const callR = rBridge.createDefaultRCaller({ baseUrl: rConfig.baseUrl, token: rConfig.token });
+      const runExpertSandbox = expertRSandboxEnabled()
+        ? createExpertSandboxClient({
+          baseUrl: process.env.EXPERT_R_SANDBOX_URL,
+          token: process.env.EXPERT_R_SANDBOX_TOKEN,
+          timeoutMs: Number(process.env.EXPERT_R_CLIENT_TIMEOUT_MS || 780000),
+        }) : undefined;
       worker = createWorker({
         db,
+        workerId: `pool-${runtimeConfig.poolSlot}:${crypto.randomUUID()}`,
         handlers,
         pollIntervalMs: runtimeConfig.pollIntervalMs,
         leaseSeconds: runtimeConfig.leaseSeconds,
         allowedJobTypes: runtimeConfig.allowedJobTypes,
+        maxConcurrentClaims: runtimeConfig.poolSize,
         claimGate: checkDependencies,
         callR,
         deriveRObjectStateKey,
+        runExpertSandbox,
         storageProvider,
         logger,
       });
@@ -357,7 +388,7 @@ function createStandaloneWorkerRuntime(options = {}) {
       startRuntimeStatusHeartbeat();
       if (startOptions.autoStart !== false) worker.start();
       if (typeof logger.info === 'function') {
-        logger.info(`[worker] Standalone worker ready (id=${worker.workerId}, concurrency=1).`);
+        logger.info(`[worker] Worker-pool slot ${runtimeConfig.poolSlot}/${runtimeConfig.poolSize} ready (id=${worker.workerId}, concurrency=1).`);
       }
       return snapshot();
     } catch (error) {

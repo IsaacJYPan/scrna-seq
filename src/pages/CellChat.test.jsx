@@ -191,11 +191,12 @@ describe('CellChat durable worker UI', () => {
     expect(screen.getByText('500 analyzed cells')).toBeInTheDocument();
     expect(screen.getAllByRole('cell', { name: 'Group 1' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('cell', { name: 'Group 2' }).length).toBeGreaterThan(0);
-    expect(screen.getByText(/art_cellchat_summary/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_cellchat_results/i)).toBeInTheDocument();
-    expect(screen.getByText(/r 4\.5\.3/i)).toBeInTheDocument();
+    expect(screen.getByText(/A saved summary is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/full interaction table is available only through its authorized export/i)).toBeInTheDocument();
+    expect(screen.queryByText(/art_cellchat_summary|art_cellchat_results/i)).not.toBeInTheDocument();
 
     const text = container.textContent || '';
+    expect(text).not.toMatch(/r 4\.5\.3/i);
     expect(text).not.toMatch(/vault\/private/i);
     expect(text).not.toMatch(/C:\/private/i);
     expect(text).not.toMatch(/storage_key/i);
@@ -203,6 +204,7 @@ describe('CellChat durable worker UI', () => {
     expect(text).not.toMatch(/user-1:obj/i);
     expect(text).not.toMatch(/Private donor identity/i);
     expect(text).not.toMatch(/Unsafe ligand candidate|Unsafe pathway/i);
+    expect(text).not.toMatch(/art_cellchat_summary|art_cellchat_results|job_cellchat/i);
   });
 
   it('renders a private owner-local group key without persisting labels into the durable summary', async () => {
@@ -228,7 +230,7 @@ describe('CellChat durable worker UI', () => {
     ));
     expect(await screen.findByText('CD4 T cells')).toBeInTheDocument();
     expect(screen.getByText('B cells')).toBeInTheDocument();
-    expect(screen.getByText(/not saved in the project artifact/i)).toBeInTheDocument();
+    expect(screen.getByText(/not saved with the shared result/i)).toBeInTheDocument();
     expect(window.electronAPI.listProjectJobArtifacts.mock.calls[0]).toBeDefined();
   });
 
@@ -264,7 +266,7 @@ describe('CellChat durable worker UI', () => {
     });
 
     expect(screen.getByRole('button', { name: /Start CellChat Inference/i })).toBeDisabled();
-    expect(screen.getByText(/not attached to the private R session/i)).toBeInTheDocument();
+    expect(screen.getByText(/not open in your private analysis workspace/i)).toBeInTheDocument();
   });
 
   it('restores the latest saved CellChat job for the selected object', async () => {

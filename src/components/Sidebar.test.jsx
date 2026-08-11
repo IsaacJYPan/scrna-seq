@@ -87,12 +87,13 @@ describe('Sidebar component', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: /Pipeline Manager, User scoped/i })).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: /Collaborators, Project RBAC/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Approved workflows, Project selection/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Collaborators, Project access/i })).not.toBeDisabled();
     expect(screen.queryByText(/Demo only/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/Default Seurat scRNA-seq Pipeline/i)).toBeInTheDocument();
+    expect(screen.getByText(/Standard scRNA-seq workflow/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Markers \/ DEG/i })).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: /Jobs & Artifacts/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Runs & Results/i })).not.toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Diagnostics/i })).not.toBeInTheDocument();
   });
 
   it('disables the legacy live integration action under the production policy', () => {
@@ -105,7 +106,32 @@ describe('Sidebar component', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: /Integration, Local development only/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Integration, Unavailable in this workspace/i })).toBeDisabled();
+  });
+
+  it('shows one capability-gated advanced-analysis entry when the deployment does not configure it', () => {
+    render(
+      <Sidebar
+        activeTab="workspace"
+        {...baseProps}
+        workspaces={[{
+          id: 'ws-1',
+          name: 'Test WS',
+          type: 'personal',
+          projects: [{ id: 'proj_1', name: 'Project', role: 'owner' }],
+          selectedProjectId: 'proj_1',
+          objects: [{ id: 'ao_abc123' }],
+          selectedObjectIds: ['ao_abc123'],
+        }]}
+        selectedObjects={[{ id: 'ao_abc123' }]}
+        deploymentPolicy={{ expertREnabled: false }}
+      />
+    );
+
+    const advancedAnalysisButtons = screen.getAllByRole('button', { name: /Advanced analysis/i });
+    expect(advancedAnalysisButtons).toHaveLength(1);
+    advancedAnalysisButtons.forEach(button => expect(button).toBeDisabled());
+    expect(advancedAnalysisButtons.every(button => button.getAttribute('aria-label') === 'Advanced analysis, Not configured')).toBe(true);
   });
 
   it('does not require icons for pipeline-generated tabs', () => {
@@ -141,7 +167,7 @@ describe('Sidebar component', () => {
       />
     );
 
-    const workbench = screen.getByRole('button', { name: /Workbench, Backend project/i });
+    const workbench = screen.getByRole('button', { name: /Analysis workspace, Project selected/i });
     expect(workbench).toHaveClass('bg-primary/10');
     expect(workbench).toHaveClass('border-primary/30');
     expect(workbench).toHaveClass('text-text');
