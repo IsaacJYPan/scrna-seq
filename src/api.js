@@ -12,6 +12,7 @@ const ENRICHMENT_GSEA_JOB_TYPE = 'enrichment.gsea.v1';
 const CELLCHAT_INFERENCE_JOB_TYPE = 'cellchat.infer.v1';
 const SEURAT_PIPELINE_JOB_TYPE = 'seurat.pipeline.v1';
 const SPATIAL_SEURAT_PIPELINE_JOB_TYPE = 'spatial.seurat.v1';
+const CHECKPOINT_SAVE_JOB_TYPE = 'checkpoint.save.v1';
 const CHECKPOINT_FORK_JOB_TYPE = 'checkpoint.fork.v1';
 const DEG_FIND_MARKERS_PARAM_KEYS = new Set([
   'groupBy',
@@ -139,6 +140,14 @@ export function buildSpatialSeuratPipelineJobPayload({ datasetId, analysisObject
 export function buildCheckpointForkJobPayload(analysisObjectId) {
   return {
     jobType: CHECKPOINT_FORK_JOB_TYPE,
+    analysisObjectId,
+    parameters: {},
+  };
+}
+
+export function buildCheckpointSaveJobPayload(analysisObjectId) {
+  return {
+    jobType: CHECKPOINT_SAVE_JOB_TYPE,
     analysisObjectId,
     parameters: {},
   };
@@ -662,6 +671,11 @@ export const electronAPI = {
         analysisObjectId: objectId,
         parameters: {},
       }),
+    }),
+  createCheckpointSaveJob: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildCheckpointSaveJobPayload(objectId)),
     }),
   createSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
     req(`/api/projects/${projectId}/jobs`, {

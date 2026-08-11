@@ -88,6 +88,7 @@ const COMPLETION_RECEIPT_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
   'spatial.seurat.v1',
+  'checkpoint.save.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
   'cellchat.infer.v1',
@@ -183,6 +184,9 @@ function deterministicCompletionOutputKey(job) {
   }
   if (job.jobType === 'spatial.seurat.v1') {
     return allocateSpatialSeuratCheckpointStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'checkpoint.save.v1') {
+    return allocateCheckpointStorageKey(job.projectId, job.id);
   }
   if (job.jobType === 'deg.find_markers.v1') {
     return allocateDegResultStorageKey(job.projectId, job.id);
@@ -676,6 +680,117 @@ async function pbmcPipelineHandler(ctx) {
       resultAnalysisObjectId: resultObject.id,
       checkpointArtifactId: checkpointArtifact.id,
       summaryArtifactId: summaryArtifact.id,
+    },
+  };
+}
+
+/**
+ * Persist the owner's current private live object as a new immutable saved
+ * analysis. This operation performs no scientific transformation: it snapshots
+ * exactly the current object, writes to a server-allocated checkpoint key, and
+ * publishes the child object, lineage edge, and two artifacts atomically.
+ */
+async function checkpointSaveHandler(ctx) {
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'checkpoint.save.v1 handler: validating live-object ownership before saving.' });
+
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+  if (!job.projectId || typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Save job is missing its analysis object.');
+  }
+  if (job.parameters && Object.keys(job.parameters).length > 0) {
+    throw codedHandlerError('INVALID_PARAMETERS', 'Save current analysis does not accept parameters.');
+  }
+  if (typeof ctx.getOwnedAnalysisObject !== 'function'
+      || typeof ctx.deriveRObjectStateKey !== 'function'
+      || typeof ctx.completePbmcPipelineResult !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Saved-analysis persistence is not configured.');
+  }
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Saved-analysis persistence is not configured.');
+  }
+
+  const checkpointStorageKey = allocateCheckpointStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, checkpointStorageKey);
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.checkpoint.save.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId },
+      objectContext: { objectId, stateKey },
+      checkpointSave: { checkpointStorageKey },
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (error) {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, error);
+    throw error;
+  }
+
+  const checkpoint = descriptor.checkpoint || {};
+  if (checkpoint.saved !== true || typeof checkpoint.checksumSha256 !== 'string'
+      || checkpoint.checksumSha256 === '') {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Current analysis was not saved.');
+  }
+
+  let completion;
+  try {
+    completion = await ctx.completePbmcPipelineResult({
+      result: {
+        objectType: ownedObject.objectType || 'seurat',
+        displayName: `Saved ${ownedObject.displayName || 'analysis'}`,
+        metadata: {
+          source: 'checkpoint.save.v1',
+          operation: 'r.checkpoint.save.v1',
+          scientific_output: true,
+          checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+          summary: descriptor.summary,
+        },
+      },
+      checkpointArtifact: {
+        artifactType: 'checkpoint',
+        name: 'Saved analysis checkpoint',
+        description: 'Durable internal checkpoint of an explicitly saved private analysis. Not downloadable.',
+        storageKind: 'local_internal',
+        internalStorageKey: checkpointStorageKey,
+        checksumSha256: checkpoint.checksumSha256,
+        sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
+        metadata: { operation: 'r.checkpoint.save.v1', scientific_output: true, downloadable: false },
+      },
+      summaryArtifact: {
+        artifactType: 'checkpoint_save',
+        name: descriptor.name,
+        description: descriptor.description,
+        storageKind: 'metadata_only',
+        metadata: descriptor.metadata,
+      },
+    });
+  } catch (error) {
+    throw publicationIndeterminateError(error);
+  }
+
+  await ctx.log({
+    level: 'info',
+    message: `checkpoint.save.v1 handler: created saved analysis ${completion.resultObject.id} from ${objectId}.`,
+  });
+  return {
+    resultAnalysisObjectId: completion.resultObject.id,
+    result: {
+      ok: true,
+      handled: 'checkpoint.save.v1',
+      operation: 'r.checkpoint.save.v1',
+      resultAnalysisObjectId: completion.resultObject.id,
+      checkpointArtifactId: completion.checkpointArtifact.id,
+      summaryArtifactId: completion.summaryArtifact.id,
     },
   };
 }
@@ -1874,7 +1989,7 @@ async function expertRHandler(ctx) {
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
 // inspection bridge, and allowlisted R/scientific handlers: `pbmc.pipeline.v1`,
-// `seurat.pipeline.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`,
+// `seurat.pipeline.v1`, `checkpoint.save.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`,
 // `deg.find_markers.v1`, `enrichment.gsea.v1`, and `cellchat.infer.v1`. Other analytical job types
 // (normalize/qc_filter/pca/cluster/umap/integrate and cross-condition CellChat)
 // remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
@@ -1887,6 +2002,7 @@ const DEFAULT_HANDLERS = Object.freeze({
   'pbmc.pipeline.v1': pbmcPipelineHandler,
   'seurat.pipeline.v1': seuratPipelineHandler,
   'spatial.seurat.v1': spatialSeuratPipelineHandler,
+  'checkpoint.save.v1': checkpointSaveHandler,
   'checkpoint.load.v1': checkpointLoadHandler,
   'checkpoint.fork.v1': checkpointForkHandler,
   'deg.find_markers.v1': degFindMarkersHandler,
@@ -1912,7 +2028,7 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - callR              R caller used by the bridge; injectable for tests. Defaults to a
  *                        real local-HTTP caller built from rBridgeConfig (used by every
  *                        R-facing handler — r.runtime.check, r.object.inspect,
- *                        pbmc.pipeline.v1, seurat.pipeline.v1, checkpoint.load.v1,
+ *                        pbmc.pipeline.v1, seurat.pipeline.v1, checkpoint.save.v1, checkpoint.load.v1,
  *                        checkpoint.fork.v1, deg.find_markers.v1;
  *                        generic/checkpoint.noop never call R)
  *   - rBridgeConfig      { port, token } for the default R caller (server wires PLUMBER_PORT
@@ -2450,12 +2566,12 @@ function createJobWorker(options = {}) {
       createArtifact: (input) => db.createJobArtifactByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // Durable internal checkpoint artifact (server-set storageKind/key/checksum/size).
       // Distinct from createArtifact, whose generic input deliberately ignores storage
-      // fields; used only by the pbmc.pipeline.v1 handler for local_internal storage.
+      // fields; used by reviewed handlers that publish local_internal storage.
       createCheckpointArtifact: (input) => db.createCheckpointArtifactForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       createCheckpoint: (input) => db.createCheckpointForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
-      // Atomic PBMC completion: result object + job link + lineage edge + checkpoint
-      // artifact + summary artifact in ONE claim-guarded transaction (used only by the
-      // pbmc.pipeline.v1 handler) so an artifact failure can't leave a partial result.
+      // Atomic checkpoint-producing completion: result object + job link + lineage
+      // edge + checkpoint artifact + summary artifact in ONE claim-guarded transaction,
+      // so an artifact failure can't leave a partial result.
       completePbmcPipelineResult: (input) => db.completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeSeuratPipelineResult: (input) => db.completeSeuratPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // Atomic DEG completion: the local_internal marker-table artifact + the metadata-only
@@ -2470,7 +2586,7 @@ function createJobWorker(options = {}) {
       removeDurableObject: (key) => storageProvider.remove(key),
       // R-bridge seam (used by every R-facing handler: r.runtime.check,
       // r.object.inspect, pbmc.pipeline.v1, seurat.pipeline.v1,
-      // checkpoint.load.v1, checkpoint.fork.v1, deg.find_markers.v1).
+      // checkpoint.save.v1, checkpoint.load.v1, checkpoint.fork.v1, deg.find_markers.v1).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
       // reach R by any path other than this server-controlled one.
       //
@@ -2751,6 +2867,7 @@ module.exports = {
   pbmcPipelineHandler,
   seuratPipelineHandler,
   spatialSeuratPipelineHandler,
+  checkpointSaveHandler,
   checkpointLoadHandler,
   checkpointForkHandler,
   degFindMarkersHandler,

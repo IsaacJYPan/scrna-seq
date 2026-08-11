@@ -30,6 +30,7 @@ import ExpertR from './pages/ExpertR';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
 import { hasAttachedLiveRObject, pipelineProbeAction } from './liveRState';
+import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
 import { publicErrorMessage } from './publicError';
 
 import {
@@ -221,6 +222,9 @@ export default function App() {
     clusterDims: 15  // default dims; updated when clustering runs
   });
   const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
+  const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
+  const checkpointSaveRequestRef = React.useRef(0);
+  const checkpointSaveBusy = ['saving', 'opening', 'pending'].includes(checkpointSaveState.phase);
   // Gate that blocks per-page cache hydration until after the R session
   // identity and selected-object attachment probes complete. Without this
   // gate the pages fire onlyIfCached calls with the wrong (new) session ID
@@ -460,6 +464,7 @@ export default function App() {
   }, [refreshProjects, user?.email]);
 
   const handleSelectProject = useCallback(async (projectId) => {
+    checkpointSaveRequestRef.current += 1;
     cacheSelectedProject(localStorage, user, projectId);
     patchActiveWorkspace({
       selectedProjectId: projectId,
@@ -567,6 +572,7 @@ export default function App() {
   }, [unsavedLiveChanges]);
 
   const handleSelectAnalysisObject = useCallback((projectId, objectId) => {
+    checkpointSaveRequestRef.current += 1;
     cacheSelectedAnalysisObject(localStorage, user, projectId, objectId);
     patchActiveWorkspace(ws => ({
       selectedObjectIds: objectId ? [objectId] : [],
@@ -575,6 +581,61 @@ export default function App() {
         : (ws.lastSelectedByProject || {}),
     }));
   }, [patchActiveWorkspace, user]);
+
+  const handleSaveLiveAnalysis = useCallback(async () => {
+    const projectId = datasetInfo?.projectId || currentWs.selectedProjectId;
+    const objectId = datasetInfo?.id;
+    if (!projectId || !objectId || checkpointSaveBusy) return;
+    const requestId = ++checkpointSaveRequestRef.current;
+    setCheckpointSaveState({ phase: 'saving', message: 'Saving the current analysis as an immutable version...', durableSaved: false });
+    try {
+      const saved = await saveAndOpenCurrentAnalysis(
+        window.electronAPI,
+        projectId,
+        objectId,
+        {
+          onPhase: (phase) => {
+            if (checkpointSaveRequestRef.current !== requestId) return;
+            if (phase === 'opening') {
+              setUnsavedLiveChanges(false);
+              setCheckpointSaveState({
+                phase,
+                message: 'Saved. Opening the durable version in your private workspace...',
+                durableSaved: true,
+              });
+            }
+          },
+        }
+      );
+      if (checkpointSaveRequestRef.current !== requestId) return;
+      await refreshAnalysisObjects(projectId);
+      if (checkpointSaveRequestRef.current !== requestId) return;
+      handleSelectAnalysisObject(projectId, saved.resultAnalysisObjectId);
+      handleLiveObjectAttached(projectId, saved.resultAnalysisObjectId);
+      setUnsavedLiveChanges(false);
+      setCheckpointSaveState({
+        phase: 'completed',
+        message: 'Saved and opened as a durable analysis version.',
+        durableSaved: true,
+      });
+    } catch (error) {
+      if (checkpointSaveRequestRef.current !== requestId) return;
+      const durableSaved = error?.durableSaved === true;
+      if (durableSaved) setUnsavedLiveChanges(false);
+      const stillPending = error?.code === 'JOB_POLL_TIMEOUT' && !durableSaved;
+      setCheckpointSaveState({
+        phase: stillPending ? 'pending' : 'error',
+        message: publicErrorMessage(
+          error,
+          durableSaved
+            ? 'The saved version exists, but it could not be opened. Open it from Runs & Results.'
+            : 'The current analysis could not be saved. Review Runs & Results and try again.'
+        ),
+        durableSaved,
+      });
+    }
+  }, [checkpointSaveBusy, currentWs.selectedProjectId, datasetInfo?.id, datasetInfo?.projectId,
+    handleLiveObjectAttached, handleSelectAnalysisObject, refreshAnalysisObjects]);
 
   /**
    * Mark a pipeline step as complete and invalidate downstream steps if re-running.
@@ -711,6 +772,7 @@ export default function App() {
     };
     setPipelineState(initialSubsetPS);
     setUnsavedLiveChanges(true);
+    setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
 
     // The subset object is DB-backed metadata; live R state remains transient.
   }, [activeWsIndex, currentWs, datasetInfo, pipelineState.qcSummary, user]);
@@ -773,6 +835,10 @@ export default function App() {
 
     if (forceOnlyIfCached) return null;
 
+    if (checkpointSaveBusy) {
+      return { error: 'Wait for the current analysis save to finish before changing the live workspace.' };
+    }
+
     // Durable project objects are safe to browse without a live R attachment.
     // Do not let hidden analysis tabs probe R merely because such an object is
     // selected; only cached results may be read until this user's private live
@@ -817,6 +883,7 @@ export default function App() {
           }
           markPipelineStep(step, extraState);
           setUnsavedLiveChanges(true);
+          setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
           // QC: update workspace object cell count to post-filter value
           if (step === 'qc' && data.result?.post_filter_cells) {
             updateActiveWorkspace({
@@ -845,7 +912,7 @@ export default function App() {
       else console.error(err);
       return { error: publicErrorMessage(err) };
     }
-  }, [markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
+  }, [checkpointSaveBusy, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
 
   const openProvenance = async (provId) => {
     const chain = await getProvenanceChain(provId);
@@ -896,7 +963,9 @@ export default function App() {
       return;
     }
     setSessionCheckDone(false);
+    checkpointSaveRequestRef.current += 1;
     setUnsavedLiveChanges(false);
+    setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
     resetPipelineState();
     if (datasetInfo?.id) {
       const objectId = datasetInfo.id;
@@ -1152,11 +1221,20 @@ export default function App() {
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
-        {unsavedLiveChanges && (
-          <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-text" role="status">
-            <span className="font-bold">Unsaved live changes.</span>{' '}
-            Closing this window or restarting compute can discard them. Run an approved workflow to create a durable saved version.
-            <button type="button" className="ml-2 underline" onClick={() => setActiveTab('pipeline-manager')}>Open approved workflows</button>
+        {(unsavedLiveChanges || checkpointSaveState.phase !== 'idle') && (
+          <div className={`shrink-0 border-b px-4 py-2 text-xs text-text ${checkpointSaveState.phase === 'completed' ? 'border-emerald-500/30 bg-emerald-500/10' : checkpointSaveState.phase === 'error' ? 'border-red-500/30 bg-red-500/10' : 'border-amber-500/30 bg-amber-500/10'}`} role="status">
+            {checkpointSaveState.phase === 'idle' ? (
+              <>
+                <span className="font-bold">Unsaved live changes.</span>{' '}
+                Closing this window or restarting compute can discard them.
+              </>
+            ) : <span className="font-medium">{checkpointSaveState.message}</span>}
+            {unsavedLiveChanges && !checkpointSaveBusy && (
+              <button type="button" className="ml-2 font-bold underline" onClick={() => void handleSaveLiveAnalysis()}>Save current analysis</button>
+            )}
+            {(checkpointSaveState.phase === 'error' || checkpointSaveState.phase === 'pending') && (
+              <button type="button" className="ml-2 underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
+            )}
           </div>
         )}
         <div className="min-h-0 flex-1">{renderContent()}</div>

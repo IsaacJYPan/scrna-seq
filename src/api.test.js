@@ -4,6 +4,7 @@ import {
   apiUrl,
   buildCellChatInferenceJobPayload,
   buildCheckpointForkJobPayload,
+  buildCheckpointSaveJobPayload,
   buildDegFindMarkersJobPayload,
   buildEnrichmentGseaJobPayload,
   buildSeuratPipelineJobPayload,
@@ -234,6 +235,16 @@ describe('buildCheckpointForkJobPayload', () => {
   it('pins the allowlisted fork job shape without client-controlled checkpoint fields', () => {
     expect(buildCheckpointForkJobPayload('ao_source123')).toEqual({
       jobType: 'checkpoint.fork.v1',
+      analysisObjectId: 'ao_source123',
+      parameters: {},
+    });
+  });
+});
+
+describe('buildCheckpointSaveJobPayload', () => {
+  it('pins the parameterless save shape without client-controlled checkpoint fields', () => {
+    expect(buildCheckpointSaveJobPayload('ao_source123')).toEqual({
+      jobType: 'checkpoint.save.v1',
       analysisObjectId: 'ao_source123',
       parameters: {},
     });
@@ -786,6 +797,27 @@ describe('API Client (electronAPI)', () => {
     expect(JSON.parse(options.body)).toEqual({
       jobType: 'checkpoint.fork.v1',
       analysisObjectId: 'ao_source123',
+      parameters: {},
+    });
+  });
+
+  it('creates owner-only checkpoint saves through the fixed project job API wrapper', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_save123', jobType: 'checkpoint.save.v1', status: 'queued' }),
+    });
+
+    const result = await electronAPI.createCheckpointSaveJob('proj_1', 'ao_owner123');
+
+    expect(result.id).toBe('job_save123');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({
+      jobType: 'checkpoint.save.v1',
+      analysisObjectId: 'ao_owner123',
       parameters: {},
     });
   });

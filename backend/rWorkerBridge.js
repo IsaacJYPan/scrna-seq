@@ -101,6 +101,7 @@ const COMPLETION_JOB_TO_R_OPERATION = Object.freeze({
   'pbmc.pipeline.v1': 'r.pbmc.pipeline.v1',
   'seurat.pipeline.v1': 'r.seurat.pipeline.v1',
   'spatial.seurat.v1': 'r.spatial.seurat.v1',
+  'checkpoint.save.v1': 'r.checkpoint.save.v1',
   'deg.find_markers.v1': 'r.deg.find_markers.v1',
   'enrichment.gsea.v1': 'r.enrichment.gsea.v1',
   'cellchat.infer.v1': 'r.cellchat.infer.v1',
@@ -232,6 +233,25 @@ const R_BRIDGE_OPERATIONS = Object.freeze({
     readOnly: false,
     // FindAllMarkers over many clusters can run long; explicit but bounded so a hung run can
     // never wedge a worker indefinitely.
+    defaultTimeoutMs: 120000,
+  }),
+  // Snapshot the owner-verified current live object without accepting code,
+  // paths, or transformation parameters. The worker allocates the exact output
+  // key and publishes the immutable child/checkpoint records only after R has
+  // atomically saved the bundle.
+  'r.checkpoint.save.v1': Object.freeze({
+    method: 'POST',
+    path: '/object/checkpoint-save',
+    artifactType: 'checkpoint_save',
+    artifactName: 'Saved analysis summary',
+    artifactDescription:
+      'Sanitized summary of an explicit durable save of the owner\'s current private analysis state. '
+      + 'No expression matrix, cell-level table, storage path, or live-state key is exposed.',
+    touchesAnalysisObject: true,
+    requiresObjectContext: true,
+    carriesCheckpointSave: true,
+    mutating: true,
+    readOnly: false,
     defaultTimeoutMs: 120000,
   }),
   // Idempotent job-scoped hydration for isolated compute runtimes. Unlike the
@@ -1215,6 +1235,9 @@ function buildCompletionReceiptBinding(job, operation, args = {}) {
   if (jobType === 'pbmc.pipeline.v1') {
     outputStorageKey = args.pipeline && args.pipeline.checkpointStorageKey;
     outputKind = 'checkpoints';
+  } else if (jobType === 'checkpoint.save.v1') {
+    outputStorageKey = args.checkpointSave && args.checkpointSave.checkpointStorageKey;
+    outputKind = 'checkpoints';
   } else if (jobType === 'seurat.pipeline.v1') {
     outputStorageKey = args.seuratPipeline && args.seuratPipeline.checkpointStorageKey;
     outputKind = 'checkpoints';
@@ -1302,8 +1325,8 @@ function validateBoundedReceiptValue(value, depth = 0, state = { nodes: 0 }) {
 
 function validateReceiptPayloadSchema(jobType, payload) {
   validateBoundedReceiptValue(payload);
-  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1'].includes(jobType)) {
-    const topKeys = jobType !== 'pbmc.pipeline.v1'
+  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
+    const topKeys = jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1'
       ? ['ok', 'summary', 'checkpoint', 'versions', 'warnings']
       : ['ok', 'summary', 'checkpoint', 'versions'];
     assertExactObjectKeys(payload, topKeys);
@@ -1315,7 +1338,8 @@ function validateReceiptPayloadSchema(jobType, payload) {
     ], ['n_cells', 'n_features']);
     assertExactObjectKeys(payload.checkpoint, ['saved', 'checksum_sha256', 'size_bytes']);
     assertExactObjectKeys(payload.versions, ['seurat_version', 'r_version']);
-    if (jobType !== 'pbmc.pipeline.v1' && !Array.isArray(payload.warnings)) {
+    if ((jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1')
+        && !Array.isArray(payload.warnings)) {
       throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
     }
     return;
@@ -1470,7 +1494,7 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
   validateReceiptPayloadSchema(jobType, receipt.payload);
   const body = receipt.payload;
   const spec = R_BRIDGE_OPERATIONS[rOperation];
-  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1'].includes(jobType)) {
+  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (!checkpoint.saved || !checkpoint.checksumSha256 || checkpoint.sizeBytes === null) {
@@ -1491,7 +1515,7 @@ function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
         ranAt: new Date().toISOString(),
         ...(job.analysisObjectId ? { objectId: job.analysisObjectId } : {}),
         summary,
-        ...(jobType !== 'pbmc.pipeline.v1'
+        ...(jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1'
           ? { warnings: sanitizeNameList(body.warnings, 32, 160) } : {}),
       },
     };
@@ -1884,6 +1908,21 @@ async function runRBridgeOperation(args = {}) {
     request.body = { operation, params: safeParams, storage_key: checkpointStorageKey };
   }
 
+  // Explicit live-state save: the body contains only the fixed operation name
+  // and a server-allocated project checkpoint key. No client parameter or path
+  // is forwarded to R.
+  if (spec.carriesCheckpointSave) {
+    const checkpointStorageKey = args.checkpointSave
+      && args.checkpointSave.checkpointStorageKey;
+    if (typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
+      throw codedError(
+        'R_CHECKPOINT_SAVE_REQUIRED',
+        'A server-allocated checkpoint destination is required.'
+      );
+    }
+    request.body = { operation, storage_key: checkpointStorageKey };
+  }
+
   // 2c. Checkpoint-load op: a SERVER-BUILT body reconstructed from ONLY the server-
   //     SELECTED checkpoint coordinates (the internal storage key + expected integrity).
   //     `args.checkpoint` is supplied by the worker handler AFTER it has verified
@@ -2125,6 +2164,7 @@ async function runRBridgeOperation(args = {}) {
     // Never include the raw body/status text — only a generic, stable message.
     let failCode = 'R_RUNTIME_CHECK_FAILED';
     if (spec.carriesParams) failCode = 'R_PBMC_PIPELINE_FAILED';
+    else if (spec.carriesCheckpointSave) failCode = 'R_CHECKPOINT_SAVE_FAILED';
     else if (spec.carriesCheckpoint) failCode = 'R_CHECKPOINT_LOAD_FAILED';
     else if (spec.carriesDegParams) failCode = 'R_DEG_FIND_MARKERS_FAILED';
     else if (spec.carriesEnrichmentParams) failCode = 'R_ENRICHMENT_GSEA_FAILED';
@@ -2256,6 +2296,35 @@ async function runRBridgeOperation(args = {}) {
         downloadable: false,
         ranAt: new Date().toISOString(),
         // The analysis object id is a normal member-visible resource id — NOT the R state key.
+        objectId: objectContext.objectId,
+        summary,
+      },
+    };
+  }
+
+  if (operation === 'r.checkpoint.save.v1') {
+    const summary = sanitizePipelineSummary(body);
+    const checkpoint = sanitizeCheckpointInfo(body);
+    if (checkpoint.saved === true && !checkpoint.checksumSha256) {
+      throw markRSideEffectsPossible(codedError(
+        'R_RESPONSE_INVALID',
+        'R runtime returned an invalid response.'
+      ));
+    }
+    return {
+      operation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      resultObjectType: 'seurat',
+      parentObjectId: objectContext.objectId,
+      summary,
+      checkpoint,
+      metadata: {
+        operation,
+        kind: 'checkpoint_save',
+        scientific_output: true,
+        savedAt: new Date().toISOString(),
         objectId: objectContext.objectId,
         summary,
       },

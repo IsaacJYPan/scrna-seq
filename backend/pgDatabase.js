@@ -112,6 +112,7 @@ const ALLOWED_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
   'spatial.seurat.v1',
+  'checkpoint.save.v1',
   'checkpoint.load.v1',
   'checkpoint.fork.v1',
   'deg.find_markers.v1',
@@ -125,6 +126,7 @@ const RETRYABLE_DURABLE_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
   'spatial.seurat.v1',
+  'checkpoint.save.v1',
   'checkpoint.load.v1',
   'checkpoint.fork.v1',
   'deg.find_markers.v1',
@@ -162,7 +164,7 @@ const DATASET_UPLOAD_STATUSES = new Set(['pending', 'uploaded', 'failed']);
 const DATASET_VALIDATION_STATUSES = new Set(['pending', 'valid', 'invalid', 'skipped']);
 const ALLOWED_ARTIFACT_TYPES = new Set([
   'checkpoint', 'metrics', 'log', 'figure', 'script_fragment', 'other_metadata',
-  'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_load',
+  'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_save', 'checkpoint_load',
   'checkpoint_fork', 'deg_markers', 'deg_summary', 'result_checkpoint',
   'enrichment_results', 'enrichment_summary',
   'cellchat_results', 'cellchat_summary', 'exploration_summary',
@@ -3187,6 +3189,7 @@ async function createProjectJob(userId, projectId, input = {}) {
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
     'spatial.seurat.v1',
+    'checkpoint.save.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
@@ -3197,6 +3200,7 @@ async function createProjectJob(userId, projectId, input = {}) {
   ]);
   const noDatasetBindingTypes = new Set([
     'pbmc.pipeline.v1',
+    'checkpoint.save.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
@@ -3209,6 +3213,7 @@ async function createProjectJob(userId, projectId, input = {}) {
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
     'spatial.seurat.v1',
+    'checkpoint.save.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
@@ -3284,7 +3289,7 @@ async function createProjectJob(userId, projectId, input = {}) {
     validateSpatialSeuratParams(parameters);
     assertSupportedSpatialSeuratDataset(dataset);
   }
-  if (jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1') {
+  if (jobType === 'checkpoint.save.v1' || jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1') {
     if (!analysisObjectId) {
       throw codedError('INVALID_PARAMETERS', `${jobType} requires a source analysisObjectId.`);
     }
@@ -3330,6 +3335,7 @@ async function createProjectJob(userId, projectId, input = {}) {
     'cellchat.infer.v1',
     'condition.pseudobulk_de.v1',
     'expert.r.v1',
+    'checkpoint.save.v1',
     'checkpoint.load.v1',
   ]);
   if (privateLiveInputJobTypes.has(jobType)
@@ -4543,6 +4549,7 @@ function workerHoldsClaim(row, workerId, claimToken, now) {
 const CLAIMED_OWNED_OBJECT_JOB_TYPES = new Set([
   'r.object.inspect',
   'pbmc.pipeline.v1',
+  'checkpoint.save.v1',
   'checkpoint.load.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
@@ -5184,6 +5191,7 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
     'pbmc.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
     'seurat.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
     'spatial.seurat.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
+    'checkpoint.save.v1': { artifacts: ['checkpoint', 'checkpoint_save'], result: true, edges: 1 },
     'checkpoint.fork.v1': {
       artifacts: ['checkpoint_fork'], result: true, edges: 1, runtimeBoundArtifact: 'checkpoint_fork',
     },
@@ -5834,13 +5842,16 @@ async function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, i
     ? String(result.parentObjectId)
     : (row.analysis_object_id || null);
   let lineageRootId = null;
+  let parentObject = null;
   if (parentObjectId) {
-    const parent = pid ? await getProjectAnalysisObjectRow(parentObjectId, pid)
+    parentObject = pid ? await getProjectAnalysisObjectRow(parentObjectId, pid)
                        : await getAnalysisObjectForUser(parentObjectId, owner);
-    if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
-    lineageRootId = parent.lineageRootId || parent.id;
+    if (!parentObject) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    lineageRootId = parentObject.lineageRootId || parentObject.id;
   }
-  const datasetId = row.dataset_id || null;
+  // Live-object snapshot jobs do not accept a client dataset binding. Preserve
+  // the source object's server-resolved dataset association in the saved child.
+  const datasetId = row.dataset_id || parentObject?.datasetId || null;
   const resultId = generateAnalysisObjectId();
   const checkpointArtifactId = generateJobArtifactId();
   const summaryArtifactId = generateJobArtifactId();

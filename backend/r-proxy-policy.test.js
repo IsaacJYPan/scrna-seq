@@ -38,6 +38,7 @@ const {
 const INTERNAL_ONLY = [
   '/object/pbmc-pipeline',
   '/object/checkpoint-load',
+  '/object/checkpoint-save',
   '/object/deg-find-markers',
   '/object/enrichment-gsea',
   '/object/cellchat-infer',

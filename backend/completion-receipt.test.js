@@ -118,6 +118,48 @@ describe('signed R completion receipts', () => {
     });
   });
 
+  it('recovers checkpoint saves only from the exact owner object and output key', () => {
+    const job = {
+      id: 'job_aaaaaaaaaaaaaaaaaaaaaaaa',
+      jobType: 'checkpoint.save.v1',
+      projectId: 'proj_bbbbbbbbbbbbbbbbbbbbbbbb',
+      analysisObjectId: 'ao_cccccccccccccccccccccccc',
+      datasetId: null,
+    };
+    const outputStorageKey = storage.projectStorageFileKey(
+      job.projectId, 'checkpoints', job.id, 'checkpoint.rds'
+    );
+    const binding = rBridge.buildCompletionReceiptBinding(job, 'r.checkpoint.save.v1', {
+      checkpointSave: { checkpointStorageKey: outputStorageKey },
+    });
+    expect(binding).toMatchObject({
+      job_type: 'checkpoint.save.v1',
+      r_operation: 'r.checkpoint.save.v1',
+      source_analysis_object_id: job.analysisObjectId,
+      source_dataset_id: null,
+      output_storage_key: outputStorageKey,
+    });
+
+    const descriptor = rBridge.descriptorFromCompletionReceipt(
+      job, { ...binding, payload: pipelinePayload() }, { outputStorageKey }
+    );
+    expect(descriptor).toMatchObject({
+      operation: 'r.checkpoint.save.v1',
+      artifactType: 'checkpoint_save',
+      checkpoint: { saved: true, checksumSha256: 'a'.repeat(64), sizeBytes: 123 },
+    });
+    expect(() => rBridge.descriptorFromCompletionReceipt(
+      job,
+      { ...binding, source_analysis_object_id: 'ao_other', payload: pipelinePayload() },
+      { outputStorageKey }
+    )).toThrowError(/invalid/i);
+    expect(() => rBridge.descriptorFromCompletionReceipt(
+      job,
+      { ...binding, output_storage_key: 'projects/proj_other/checkpoints/job_other/checkpoint.rds', payload: pipelinePayload() },
+      { outputStorageKey }
+    )).toThrowError(/invalid/i);
+  });
+
   it('rejects a signed CellChat receipt that tries to republish a raw group label', () => {
     const job = {
       id: 'job_aaaaaaaaaaaaaaaaaaaaaaaa',
