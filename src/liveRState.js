@@ -4,7 +4,6 @@ export function hasAttachedLiveRObject(datasetInfo) {
 
 export function pipelineProbeAction({ currentKey, nextKey, serverAttached, liveState }) {
   if (currentKey !== nextKey) return 'probe';
-  if (serverAttached && liveState !== 'attached') return 'project-attached';
   if (!serverAttached && liveState === 'attached') return 'probe';
   return 'skip';
 }

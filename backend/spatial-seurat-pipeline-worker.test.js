@@ -58,6 +58,7 @@ async function seedSpatialJob() {
     sha256: 'b'.repeat(64),
     fileSizeBytes: 4096,
   });
+  await db.setDatasetValidationResult(project.id, dataset.id, 'valid');
   const inputObject = await db.createProjectAnalysisObject(owner.id, project.id, {
     datasetId: uploaded.id,
     objectType: 'matrix',
@@ -87,6 +88,10 @@ describe('spatial.seurat.v1 contract', () => {
     expect(() => validateSpatialSeuratParams({ arbitrary: true })).toThrow(/Unknown parameter/);
     expect(() => assertSupportedSpatialSeuratDataset({ fileType: 'tenx_h5' }))
       .toThrow(/classic 10x Visium/);
+    expect(() => assertSupportedSpatialSeuratDataset({
+      fileType: 'visium_zip', uploadStatus: 'uploaded', validationStatus: 'pending',
+      projectId: 'proj_abc', internalStorageKey: 'projects/proj_abc/datasets/ds_abc/input.zip',
+    })).toThrow(/validation must pass/i);
   });
 });
 

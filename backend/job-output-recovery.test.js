@@ -276,6 +276,7 @@ async function seedSeuratPipelineJob(user, project, { spatial = false } = {}) {
     sha256: 'b'.repeat(64),
     fileSizeBytes: 123,
   });
+  if (spatial) await db.setDatasetValidationResult(project.id, dataset.id, 'valid');
   const inputObject = await db.createProjectAnalysisObject(user.id, project.id, {
     objectType: 'matrix',
     datasetId: uploaded.id,

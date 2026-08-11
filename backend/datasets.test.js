@@ -181,24 +181,24 @@ describe.skipIf(!CONFIGURED)('datasets API — enum validation', () => {
     expect(res.data.error).toMatch(/file_type/i);
   });
 
-  it('rejects an invalid upload_status (400)', async () => {
+  it('rejects client-controlled upload status (400)', async () => {
     const { alice } = await users();
     const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody({ uploadStatus: 'done' })
     });
     expect(res.status).toBe(400);
-    expect(res.data.error).toMatch(/upload_status/i);
+    expect(res.data.error).toMatch(/uploadStatus.*server-controlled/i);
   });
 
-  it('rejects an invalid validation_status (400)', async () => {
+  it('rejects client-controlled validation status (400)', async () => {
     const { alice } = await users();
     const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
       method: 'POST', token: alice.token, body: validBody({ validationStatus: 'great' })
     });
     expect(res.status).toBe(400);
-    expect(res.data.error).toMatch(/validation_status/i);
+    expect(res.data.error).toMatch(/validationStatus.*server-controlled/i);
   });
 });
 
@@ -262,7 +262,7 @@ describe.skipIf(!CONFIGURED)('datasets API — list filtering', () => {
 
 // ── 22. A pending/failed upload cannot be represented as valid ───────────────
 describe.skipIf(!CONFIGURED)('datasets API — upload/validation status integrity', () => {
-  it('refuses to create a dataset marked valid while upload is not uploaded (400)', async () => {
+  it('refuses all client-supplied upload and validation states (400)', async () => {
     const { alice } = await users();
     const proj = await seedProject(alice.user.id);
     const res = await api(server, `/api/projects/${proj.id}/datasets`, {
@@ -270,7 +270,7 @@ describe.skipIf(!CONFIGURED)('datasets API — upload/validation status integrit
       body: validBody({ uploadStatus: 'pending', validationStatus: 'valid' })
     });
     expect(res.status).toBe(400);
-    expect(res.data.error).toMatch(/valid/i);
+    expect(res.data.error).toMatch(/server-controlled/i);
   });
 
   it('a freshly registered dataset is pending/pending (not valid)', async () => {
@@ -283,11 +283,11 @@ describe.skipIf(!CONFIGURED)('datasets API — upload/validation status integrit
     expect(res.data.validationStatus).not.toBe('valid');
   });
 
-  it('PATCH refuses to set validation_status=valid while upload is failed (400)', async () => {
+  it('PATCH refuses to set validation status (400)', async () => {
     const { alice } = await users();
     const proj = await seedProject(alice.user.id);
     const created = await api(server, `/api/projects/${proj.id}/datasets`, {
-      method: 'POST', token: alice.token, body: validBody({ uploadStatus: 'failed' })
+      method: 'POST', token: alice.token, body: validBody()
     });
     const res = await api(server, `/api/projects/${proj.id}/datasets/${created.data.id}`, {
       method: 'PATCH', token: alice.token, body: { validationStatus: 'valid' }
@@ -295,7 +295,7 @@ describe.skipIf(!CONFIGURED)('datasets API — upload/validation status integrit
     expect(res.status).toBe(400);
   });
 
-  it('PATCH allows valid once upload_status is uploaded', async () => {
+  it('PATCH never lets a project writer assert that validation passed', async () => {
     const { alice } = await users();
     const proj = await seedProject(alice.user.id);
     const created = await api(server, `/api/projects/${proj.id}/datasets`, {
@@ -304,9 +304,25 @@ describe.skipIf(!CONFIGURED)('datasets API — upload/validation status integrit
     const res = await api(server, `/api/projects/${proj.id}/datasets/${created.data.id}`, {
       method: 'PATCH', token: alice.token, body: { uploadStatus: 'uploaded', validationStatus: 'valid' }
     });
-    expect(res.status).toBe(200);
-    expect(res.data.uploadStatus).toBe('uploaded');
-    expect(res.data.validationStatus).toBe('valid');
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/server-controlled/i);
+  });
+
+  it('records a completed validation result only through the internal dataset contract', async () => {
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
+    const dataset = await db.createDatasetForProject(alice.user.id, proj.id, {
+      fileType: 'visium_zip', originalFilename: 'sample.zip',
+    });
+    await expect(db.setDatasetValidationResult(proj.id, dataset.id, 'valid'))
+      .rejects.toThrow(/stored dataset/i);
+    await db.markDatasetUploaded(proj.id, dataset.id, {
+      internalStorageKey: `projects/${proj.id}/datasets/${dataset.id}/sample.zip`,
+      sha256: 'a'.repeat(64), fileSizeBytes: 128,
+    });
+    const validated = await db.setDatasetValidationResult(proj.id, dataset.id, 'valid');
+    expect(validated.validationStatus).toBe('valid');
+    expect(validated.validationErrors).toBeNull();
   });
 
   it('forbids a viewer from updating a dataset (403)', async () => {

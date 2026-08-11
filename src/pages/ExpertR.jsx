@@ -91,7 +91,26 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
   };
 
   if (!deploymentPolicy.expertREnabled || !profile) {
-    return <div className="p-8 text-slate-400"><h2 className="text-xl text-text font-semibold">Expert R Workbench</h2><p className="mt-2">Expert R is not available for this account or deployment.</p></div>;
+    return (
+      <div className="h-full overflow-y-auto bg-background p-8 text-textMuted">
+        <div className="mx-auto max-w-2xl rounded-xl border border-border bg-surface p-6">
+          <h2 className="text-xl font-semibold text-text">Advanced analysis</h2>
+          <p className="mt-3 text-sm">
+            {deploymentPolicy.demoMode
+              ? 'Advanced analysis is intentionally unavailable in the public demo.'
+              : 'Advanced analysis is an optional capability that has not been enabled for this account or deployment.'}
+          </p>
+          <p className="mt-3 text-sm">
+            It requires an approved role and an operator-managed private R sandbox with a curated package profile. Ask a project owner or deployment administrator to review access for this project.
+          </p>
+          {projectId && (
+            <button type="button" className="btn btn-secondary mt-4" onClick={() => setActiveTab?.('team')}>
+              Open project collaborators
+            </button>
+          )}
+        </div>
+      </div>
+    );
   }
   return (
     <div className="h-full overflow-y-auto p-6 bg-background text-text"><form className="max-w-5xl mx-auto space-y-4" onSubmit={submit}>
