@@ -26,13 +26,13 @@ function findRscript() {
       if (cfg.rscriptPath && fs.existsSync(cfg.rscriptPath)) {
         return cfg.rscriptPath;
       }
-    } catch (_) {}
+    } catch {}
   }
 
   for (const candidate of RSCRIPT_CANDIDATES) {
     try {
       if (fs.existsSync(candidate)) return candidate;
-    } catch (_) {}
+    } catch {}
   }
   return 'Rscript';
 }

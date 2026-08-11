@@ -18,7 +18,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
   const [loadingClusters, setLoadingClusters] = useState(false);
 
   // We persist the mappings in the tab params so you don't lose your work if you swap tabs.
-  const [params, setParam] = useTabParams('annotation', userEmail, objectId, {
+  const [params, setParam, setParams] = useTabParams('annotation', userEmail, objectId, {
     mappings: {}
   });
 
@@ -34,38 +34,30 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
         const sorted = (data.values || []).sort((a, b) => Number(a.value) - Number(b.value));
         setClusters(sorted);
         
-        // Initialize mapping default if not already present in params
-        let initMap = { ...params.mappings };
-        let changed = false;
-        sorted.forEach(c => {
-          if (initMap[c.value] === undefined) {
-            initMap[c.value] = `Cluster ${c.value}`;
-            changed = true;
-          }
+        // Fill only missing labels without capturing a stale mapping snapshot.
+        setParams(previous => {
+          const initMap = { ...previous.mappings };
+          let changed = false;
+          sorted.forEach(c => {
+            if (initMap[c.value] === undefined) {
+              initMap[c.value] = `Cluster ${c.value}`;
+              changed = true;
+            }
+          });
+          return changed ? { ...previous, mappings: initMap } : previous;
         });
-        if (changed) {
-          setParam('mappings', initMap);
-        }
       }
     } catch (e) {
       console.warn("Failed to fetch clusters", e);
     }
     setLoadingClusters(false);
-  }, [params.mappings, setParam]);
+  }, [callApi, setParams]);
 
   useEffect(() => {
     if (datasetInfo && pipelineState?.cluster && sessionReady) {
       fetchClusters();
     }
-  }, [datasetInfo, pipelineState?.cluster, sessionReady]); // Intentionally omitting fetchClusters so it runs once when ready
-
-  // When R session changes, we might need to re-fetch if we lost state.
-  useEffect(() => {
-    // Just force a re-fetch of clusters.
-    if (datasetInfo && pipelineState?.cluster && sessionReady) {
-      fetchClusters();
-    }
-  }, [rSessionId]);
+  }, [datasetInfo, pipelineState?.cluster, sessionReady, rSessionId, fetchClusters]);
 
   const handleMappingChange = (clusterId, newText) => {
     setParam('mappings', { ...params.mappings, [clusterId]: newText });

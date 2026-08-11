@@ -33,7 +33,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
     callApi('/genes', {}, { useCache: false })
       .then(d => { if (d.genes) setGeneList(d.genes); })
       .catch(() => {});
-  }, [sessionReady, datasetInfo]);
+  }, [sessionReady, datasetInfo, callApi]);
 
   const handleInputChange = (val) => {
     setGeneInput(val);

@@ -30,10 +30,8 @@ const RSCRIPT_CANDIDATES = [
 ].filter(Boolean);
 
 const TEST_PORT    = Number(process.env.TEST_PORT || 18011);
-const BASE_URL     = `http://127.0.0.1:${TEST_PORT}`;
 const WORKSPACE    = path.resolve(__dirname, '..');
 const RUN_R_SCRIPT = path.join(WORKSPACE, 'r-backend', 'run.R');
-const EXPORTS_DIR  = path.join(WORKSPACE, 'exports');
 const TIMEOUT_MS   = 300_000;   // 5 min per request (some steps are slow)
 const STARTUP_WAIT = 60_000;    // 60 s to let Plumber fully start
 const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
@@ -102,7 +100,7 @@ async function req(method, path, body = null) {
         clearTimeout(timeout);
         try {
           resolve({ status: res.statusCode, body: JSON.parse(data) });
-        } catch (e) {
+        } catch {
           resolve({ status: res.statusCode, body: data });
         }
       });
@@ -141,7 +139,7 @@ async function waitForHealth(maxMs) {
     try {
       const { status } = await req('GET', '/health');
       if (status === 200) return true;
-    } catch (_) { /* not ready yet */ }
+    } catch { /* not ready yet */ }
     await sleep(1000);
   }
   return false;
@@ -161,13 +159,13 @@ function findRscript() {
       if (cfg.rscriptPath && fs.existsSync(cfg.rscriptPath)) {
         return cfg.rscriptPath;
       }
-    } catch (_) { /* ignore */ }
+    } catch { /* ignore */ }
   }
 
   for (const candidate of RSCRIPT_CANDIDATES) {
     try {
       if (fs.existsSync(candidate)) return candidate;
-    } catch (_) { /* path check failed */ }
+    } catch { /* path check failed */ }
   }
   // Fall back – let the shell resolve it
   return 'Rscript';
@@ -227,10 +225,8 @@ async function main() {
     cwd: WORKSPACE,
   });
 
-  let rStdout = '';
-  let rStderr = '';
-  rProc.stdout.on('data', d => { rStdout += d; process.stdout.write(`[R] ${d}`); });
-  rProc.stderr.on('data', d => { rStderr += d; process.stdout.write(`[R:err] ${d}`); });
+  rProc.stdout.on('data', d => { process.stdout.write(`[R] ${d}`); });
+  rProc.stderr.on('data', d => { process.stdout.write(`[R:err] ${d}`); });
   rProc.on('error', e => console.error(`[Plumber spawn error] ${e.message}`));
 
   info(`Waiting up to ${STARTUP_WAIT / 1000}s for Plumber to start on port ${TEST_PORT}...`);
