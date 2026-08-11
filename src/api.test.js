@@ -828,6 +828,23 @@ describe('API Client (electronAPI)', () => {
     });
   });
 
+  it('retries a project job without accepting client input overrides', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 201,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ id: 'job_retry123', retryOfJobId: 'job_failed123', status: 'queued' }),
+    });
+
+    const result = await electronAPI.retryProjectJob('proj_1', 'job_failed123');
+
+    expect(result.id).toBe('job_retry123');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/api/projects/proj_1/jobs/job_failed123/retry');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({});
+  });
+
   it('creates owner-only checkpoint saves through the fixed project job API wrapper', async () => {
     global.fetch.mockResolvedValue({
       ok: true,

@@ -61,6 +61,7 @@ describe.skipIf(!CONFIGURED)('project analysis resources — authentication', ()
       ['POST', '/api/projects/proj_x/jobs'],
       ['GET', '/api/projects/proj_x/jobs/job_abc'],
       ['GET', '/api/projects/proj_x/jobs/job_abc/logs'],
+      ['POST', '/api/projects/proj_x/jobs/job_abc/retry'],
       ['POST', '/api/projects/proj_x/jobs/job_abc/cancel']
     ];
     for (const [method, path] of routes) {
@@ -250,6 +251,18 @@ describe.skipIf(!CONFIGURED)('project analysis resources — server-controlled i
     const res = await createJob(proj.id, alice.token, { jobType: 'normalize', status: 'completed' });
     expect(res.status).toBe(400);
     expect(res.data.error).toMatch(/status is server-managed/i);
+  });
+
+  it('rejects client-provided retry linkage on ordinary job creation (400)', async () => {
+    const { alice } = await users();
+    const proj = await seedProject(alice.user.id);
+    for (const field of ['retryOfJobId', 'retry_of_job_id']) {
+      const res = await createJob(proj.id, alice.token, {
+        jobType: 'normalize', [field]: 'job_deadbeefdeadbeefdeadbeef',
+      });
+      expect(res.status, field).toBe(400);
+      expect(res.data.error).toMatch(/retry linkage is server-managed/i);
+    }
   });
 });
 
@@ -632,6 +645,7 @@ describe.skipIf(!CONFIGURED)('project analysis resources — malformed ids', () 
     for (const bad of ['not-an-id', 'job_NOTHEX', 'job_', 'ao_abc']) {
       expect((await api(server, `/api/projects/${proj.id}/jobs/${bad}`, { token: alice.token })).status, `GET ${bad}`).toBe(400);
       expect((await api(server, `/api/projects/${proj.id}/jobs/${bad}/logs`, { token: alice.token })).status, `logs ${bad}`).toBe(400);
+      expect((await api(server, `/api/projects/${proj.id}/jobs/${bad}/retry`, { method: 'POST', token: alice.token })).status, `retry ${bad}`).toBe(400);
       expect((await api(server, `/api/projects/${proj.id}/jobs/${bad}/cancel`, { method: 'POST', token: alice.token })).status, `cancel ${bad}`).toBe(400);
     }
     expect((await createJob(proj.id, alice.token, { jobType: 'normalize', analysisObjectId: 'bad' })).status).toBe(400);
@@ -710,6 +724,83 @@ describe.skipIf(!CONFIGURED)('project analysis resources — cancel policy', () 
     const jobB = await createJob(projB.id, alice.token);
     expect((await api(server, `/api/projects/${projA.id}/jobs/${jobB.data.id}/cancel`, { method: 'POST', token: alice.token })).status).toBe(404);
     expect((await api(server, `/api/projects/${projA.id}/jobs/job_deadbeefdeadbeefdeadbeef/cancel`, { method: 'POST', token: alice.token })).status).toBe(404);
+  });
+});
+
+describe.skipIf(!CONFIGURED)('project analysis resources — explicit retry policy', () => {
+  async function retryableJob(actor, projectId) {
+    const object = await createAO(projectId, actor.token, { objectType: 'seurat' });
+    const job = await createJob(projectId, actor.token, {
+      jobType: 'pbmc.pipeline.v1',
+      analysisObjectId: object.data.id,
+      parameters: { minFeatures: 250 },
+    });
+    await db.transitionJobStatus(job.data.id, actor.user.id, 'running');
+    await db.transitionJobStatus(job.data.id, actor.user.id, 'failed');
+    return { object: object.data, job: job.data };
+  }
+
+  it('creates one owner-only immutable retry from trusted recorded inputs', async () => {
+    const { alice, bob } = await users();
+    const proj = await seedProject(alice.user.id);
+    await addMember(proj.id, bob.user.email, 'admin');
+    const { job } = await retryableJob(alice, proj.id);
+
+    const forbidden = await api(server, `/api/projects/${proj.id}/jobs/${job.id}/retry`, {
+      method: 'POST', token: bob.token, body: {},
+    });
+    expect(forbidden.status).toBe(403);
+
+    const retried = await api(server, `/api/projects/${proj.id}/jobs/${job.id}/retry`, {
+      method: 'POST', token: alice.token, body: {},
+    });
+    expect(retried.status).toBe(201);
+    expect(retried.data).toMatchObject({
+      ownerUserId: alice.user.id,
+      projectId: proj.id,
+      retryOfJobId: job.id,
+      analysisObjectId: job.analysisObjectId,
+      jobType: 'pbmc.pipeline.v1',
+      status: 'queued',
+      parameters: { minFeatures: 250 },
+    });
+    expect(retried.data.id).not.toBe(job.id);
+
+    const repeated = await api(server, `/api/projects/${proj.id}/jobs/${job.id}/retry`, {
+      method: 'POST', token: alice.token, body: {},
+    });
+    expect(repeated.status).toBe(200);
+    expect(repeated.data.id).toBe(retried.data.id);
+
+    const original = await api(server, `/api/projects/${proj.id}/jobs/${job.id}`, { token: alice.token });
+    expect(original.data.status).toBe('failed');
+    expect(original.data.retryOfJobId).toBeNull();
+  });
+
+  it('rejects payload overrides, non-terminal jobs, unsupported types, and cross-project ids', async () => {
+    const { alice } = await users();
+    const projA = await seedProject(alice.user.id, 'Retry A');
+    const projB = await seedProject(alice.user.id, 'Retry B');
+    const { job } = await retryableJob(alice, projA.id);
+
+    const override = await api(server, `/api/projects/${projA.id}/jobs/${job.id}/retry`, {
+      method: 'POST', token: alice.token, body: { parameters: { minFeatures: 1 } },
+    });
+    expect(override.status).toBe(400);
+
+    const queued = await createJob(projA.id, alice.token, { jobType: 'checkpoint.noop' });
+    expect((await api(server, `/api/projects/${projA.id}/jobs/${queued.data.id}/retry`, {
+      method: 'POST', token: alice.token, body: {},
+    })).status).toBe(409);
+    await db.transitionJobStatus(queued.data.id, alice.user.id, 'running');
+    await db.transitionJobStatus(queued.data.id, alice.user.id, 'failed');
+    expect((await api(server, `/api/projects/${projA.id}/jobs/${queued.data.id}/retry`, {
+      method: 'POST', token: alice.token, body: {},
+    })).status).toBe(409);
+
+    expect((await api(server, `/api/projects/${projB.id}/jobs/${job.id}/retry`, {
+      method: 'POST', token: alice.token, body: {},
+    })).status).toBe(404);
   });
 });
 

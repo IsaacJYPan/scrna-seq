@@ -1759,6 +1759,9 @@ app.post('/api/jobs', async (req, res) => {
   if (body.status !== undefined) {
     return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
   }
+  if (body.retryOfJobId !== undefined || body.retry_of_job_id !== undefined) {
+    return res.status(400).json({ error: 'Job retry linkage is server-managed and must not be provided.' });
+  }
   // Durable datasets are project-scoped and therefore unavailable here. Keep a
   // distinct 400 for malformed ids; well-formed ids resolve as 404 below.
   if (body.datasetId !== undefined && body.datasetId !== null) {
@@ -2411,6 +2414,7 @@ function sendProjectResourceError(res, e, context) {
     case 'FORBIDDEN':
       return res.status(403).json({ error: e.message });
     case 'JOB_NOT_CANCELABLE':
+    case 'JOB_NOT_RETRYABLE':
     case 'BRANCH_NAME_EXISTS':
     case 'BRANCH_ARCHIVED':
     case 'BRANCH_VERSION_CONFLICT':
@@ -3027,6 +3031,9 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   if (body.status !== undefined) {
     return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
   }
+  if (body.retryOfJobId !== undefined || body.retry_of_job_id !== undefined) {
+    return res.status(400).json({ error: 'Job retry linkage is server-managed and must not be provided.' });
+  }
   if (rejectProjectResourceFields(req, res)) return;
 
   if (body.analysisObjectId !== undefined && body.analysisObjectId !== null &&
@@ -3228,6 +3235,29 @@ app.get('/api/projects/:projectId/jobs/:jobId/logs', async (req, res) => {
     res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
+  }
+});
+
+app.post('/api/projects/:projectId/jobs/:jobId/retry', async (req, res) => {
+  if (!isValidJobIdFormat(req.params.jobId)) {
+    return res.status(400).json({ error: 'Malformed job ID.' });
+  }
+  const bodyIsEmptyObject = req.body === undefined || (
+    req.body !== null
+      && typeof req.body === 'object'
+      && !Array.isArray(req.body)
+      && Object.keys(req.body).length === 0
+  );
+  if (!bodyIsEmptyObject) {
+    return res.status(400).json({
+      error: 'Retry uses the recorded run inputs and does not accept request fields.',
+    });
+  }
+  try {
+    const result = await db.retryProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    res.status(result.created ? 201 : 200).json(db.toPublicJob(result.job));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectJobRetry');
   }
 });
 

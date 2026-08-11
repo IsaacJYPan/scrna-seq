@@ -140,6 +140,22 @@ const RETRYABLE_DURABLE_JOB_TYPES = new Set([
   'cellchat.infer.v1',
   'condition.pseudobulk_de.v1',
 ]);
+// A researcher-requested retry is a new immutable run, separate from the
+// worker's bounded recovery attempts above. Only durable workflows whose
+// complete inputs can be reconstructed from trusted job metadata are eligible.
+// Checkpoint actions already expose their own explicit retry controls, and
+// terminal Expert R jobs intentionally no longer retain source code.
+const MANUALLY_RETRYABLE_PROJECT_JOB_TYPES = new Set([
+  'pbmc.pipeline.v1',
+  'seurat.pipeline.v1',
+  'seurat.multisample.v1',
+  'spatial.seurat.v1',
+  'deg.find_markers.v1',
+  'enrichment.gsea.v1',
+  'cellchat.infer.v1',
+  'explore.summarize.v1',
+  'condition.pseudobulk_de.v1',
+]);
 
 // An HTTP timeout does not prove the R operation stopped. Keep the original
 // claim during a short bounded observation window, then grant exactly one
@@ -3024,6 +3040,7 @@ function rowToJob(row) {
     id: row.id,
     ownerUserId: Number(row.owner_user_id),
     projectId: row.project_id,
+    retryOfJobId: row.retry_of_job_id,
     analysisObjectId: row.analysis_object_id,
     resultAnalysisObjectId: row.result_analysis_object_id,
     datasetId: row.dataset_id,
@@ -3182,7 +3199,7 @@ async function getProjectJobRow(jobId, projectId) {
   return rowToJob(rows[0]);
 }
 
-async function createProjectJob(userId, projectId, input = {}) {
+async function createProjectJobInternal(userId, projectId, input = {}, retryOfJobId = null) {
   const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
   const owner = membership.userId;
   const pid = String(projectId);
@@ -3373,14 +3390,64 @@ async function createProjectJob(userId, projectId, input = {}) {
   const id = genId('job');
   const { rows } = await query(
     `INSERT INTO jobs
-       (id, owner_user_id, project_id, analysis_object_id, result_analysis_object_id,
-        dataset_id, job_type, status, parameters_json, max_attempts)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       (id, owner_user_id, project_id, retry_of_job_id, analysis_object_id,
+        result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING *`,
-    [id, Number(owner), pid, analysisObjectId, resultAnalysisObjectId, datasetId,
+    [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
       jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
   );
   return rowToJob(rows[0]);
+}
+
+async function createProjectJob(userId, projectId, input = {}) {
+  if (input.retryOfJobId !== undefined || input.retry_of_job_id !== undefined) {
+    throw codedError('INVALID_PARAMETERS', 'Job retry linkage is server-managed.');
+  }
+  return createProjectJobInternal(userId, projectId, input, null);
+}
+
+async function retryProjectJob(userId, projectId, jobId) {
+  const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  const pid = String(projectId);
+  const source = await getProjectJobRow(jobId, pid);
+  if (!source) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (source.ownerUserId !== membership.userId) {
+    throw codedError('FORBIDDEN', 'Only the run owner can retry this job.');
+  }
+  if (!['failed', 'canceled'].includes(source.status)) {
+    throw codedError('JOB_NOT_RETRYABLE', 'Only failed or canceled jobs can be retried.');
+  }
+  if (!MANUALLY_RETRYABLE_PROJECT_JOB_TYPES.has(source.jobType)) {
+    throw codedError('JOB_NOT_RETRYABLE', 'This run must be restarted from its workflow.');
+  }
+
+  const existing = await query(
+    'SELECT * FROM jobs WHERE project_id = $1 AND retry_of_job_id = $2 LIMIT 1',
+    [pid, source.id]
+  );
+  if (existing.rows[0]) return { job: rowToJob(existing.rows[0]), created: false };
+
+  try {
+    const retryInput = {
+      analysisObjectId: source.analysisObjectId,
+      jobType: source.jobType,
+      parameters: source.parameters,
+    };
+    if (source.datasetId !== null && source.datasetId !== undefined) {
+      retryInput.datasetId = source.datasetId;
+    }
+    const job = await createProjectJobInternal(membership.userId, pid, retryInput, source.id);
+    return { job, created: true };
+  } catch (error) {
+    if (error?.code !== '23505' || error?.constraint !== 'idx_jobs_retry_of_job') throw error;
+    const raced = await query(
+      'SELECT * FROM jobs WHERE project_id = $1 AND retry_of_job_id = $2 LIMIT 1',
+      [pid, source.id]
+    );
+    if (!raced.rows[0]) throw error;
+    return { job: rowToJob(raced.rows[0]), created: false };
+  }
 }
 
 async function listProjectJobs(userId, projectId, filters = {}) {
@@ -7117,6 +7184,7 @@ module.exports = {
   listJobsForUser,
   listPrivateJobsForUser,
   createProjectJob,
+  retryProjectJob,
   listProjectJobs,
   getProjectJob,
   cancelProjectJob,

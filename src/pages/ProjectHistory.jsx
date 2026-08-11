@@ -98,7 +98,7 @@ const JOB_LABELS = {
   'checkpoint.save.v1': 'Save current analysis',
   'seurat.pipeline.v1': 'Standard preprocessing',
   'spatial.seurat.v1': 'Spatial preprocessing',
-  'checkpoint.load.v1': 'Open saved version',
+  'checkpoint.load.v1': 'Restore saved version',
   'checkpoint.fork.v1': 'Create branch from saved version',
   'deg.find_markers.v1': 'Cluster marker analysis',
   'enrichment.gsea.v1': 'Pathway enrichment',
@@ -131,7 +131,7 @@ const PROVENANCE_LABELS = {
   'checkpoint.save.v1': 'Save current analysis',
   'seurat.pipeline.v1': 'Standard preprocessing',
   'spatial.seurat.v1': 'Spatial preprocessing',
-  'checkpoint.load.v1': 'Open saved version',
+  'checkpoint.load.v1': 'Restore saved version',
   'checkpoint.fork.v1': 'Create branch from saved version',
   'deg.find_markers.v1': 'Cluster marker analysis',
   'enrichment.gsea.v1': 'Pathway enrichment',
@@ -201,7 +201,21 @@ function SummaryCard({ label, value, detail }) {
   );
 }
 
-function JobList({ jobs, analysisObjects = [], userId, emptyTitle = 'No analysis runs yet', emptyCopy = 'No recorded analysis runs are associated with this analysis.' }) {
+const MANUALLY_RETRYABLE_JOB_TYPES = new Set([
+  'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1',
+  'deg.find_markers.v1', 'enrichment.gsea.v1', 'cellchat.infer.v1',
+  'explore.summarize.v1', 'condition.pseudobulk_de.v1',
+]);
+
+function JobList({
+  jobs,
+  analysisObjects = [],
+  userId,
+  onRetry,
+  retryState,
+  emptyTitle = 'No analysis runs yet',
+  emptyCopy = 'No recorded analysis runs are associated with this analysis.',
+}) {
   if (!jobs.length) {
     return (
       <EmptyState title={emptyTitle}>
@@ -213,6 +227,10 @@ function JobList({ jobs, analysisObjects = [], userId, emptyTitle = 'No analysis
   const analysisNamesById = new Map(analysisObjects.map((analysis) => [
     analysis.id, analysis.displayName || analysis.name || 'Saved analysis',
   ]));
+  const jobsById = new Map(jobs.map((job) => [job.id, job]));
+  const retryChildrenBySource = new Map(
+    jobs.filter((job) => job.retryOfJobId).map((job) => [job.retryOfJobId, job])
+  );
 
   return (
     <div className="space-y-2">
@@ -220,6 +238,13 @@ function JobList({ jobs, analysisObjects = [], userId, emptyTitle = 'No analysis
         const sourceName = analysisNamesById.get(job.analysisObjectId);
         const resultName = analysisNamesById.get(job.resultAnalysisObjectId);
         const owner = Number(job.ownerUserId) === Number(userId) ? 'You' : 'Project collaborator';
+        const retrySource = jobsById.get(job.retryOfJobId);
+        const retryChild = retryChildrenBySource.get(job.id);
+        const retryEligible = owner === 'You'
+          && ['failed', 'canceled'].includes(job.status)
+          && MANUALLY_RETRYABLE_JOB_TYPES.has(job.jobType);
+        const canRetry = Boolean(onRetry) && retryEligible;
+        const activeRetry = retryState?.sourceJobId === job.id ? retryState : null;
         return (
         <div key={job.id} className="rounded-lg border border-border bg-surface p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -234,14 +259,39 @@ function JobList({ jobs, analysisObjects = [], userId, emptyTitle = 'No analysis
                 <span>Owner: <span className="text-text">{owner}</span></span>
                 <span>Input: <span className="text-text">{sourceName || 'No saved-analysis input'}</span></span>
                 {resultName && <span>Saved result: <span className="text-text">{resultName}</span></span>}
+                {retrySource && <span>Recovery: <span className="text-text">Retry of prior {displayJobLabel(retrySource.jobType).toLowerCase()} run</span></span>}
               </div>
             </div>
             <p className="text-xs text-textMuted">{formatDate(job.createdAt)}</p>
           </div>
-          {(job.status === 'failed' || job.error) && (
+          {(['failed', 'canceled'].includes(job.status) || job.error) && (
             <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
               {formatJobError(job)}
-              <div className="mt-1 text-textMuted">Recovery: review the input and settings, then start a new run from the named input analysis.</div>
+              {retryEligible ? (
+                <div className="mt-1 text-textMuted">
+                  Recovery: review the named input and settings. A retry creates a separate run from the recorded inputs, preserves this record, and repeats current access and input validation.
+                </div>
+              ) : (
+                <div className="mt-1 text-textMuted">
+                  Recovery: return to this workflow, review the named input and settings, then start a new run.
+                </div>
+              )}
+              {canRetry && !retryChild && (
+                <button
+                  onClick={() => onRetry(job)}
+                  disabled={Boolean(activeRetry?.launching)}
+                  className="btn btn-secondary mt-2 inline-flex items-center gap-2 text-xs disabled:opacity-50"
+                >
+                  {activeRetry?.launching ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                  {activeRetry?.launching ? 'Starting retry…' : 'Retry as new run'}
+                </button>
+              )}
+              {retryChild && (
+                <div className="mt-2 text-textMuted">
+                  Separate retry run: <span className="text-text">{displayStatus(retryChild.status)}</span>.
+                </div>
+              )}
+              {activeRetry?.error && <div role="alert" className="mt-2">{activeRetry.error}</div>}
             </div>
           )}
         </div>
@@ -517,6 +567,7 @@ export default function ProjectHistory({
   const historyRequestRef = useRef(0);
   const forkRequestRef = useRef(0);
   const attachRequestRef = useRef(0);
+  const retryRequestRef = useRef(0);
   activeProjectRef.current = activeProjectId;
 
   const [state, setState] = useState(() => emptyHistoryState());
@@ -525,6 +576,7 @@ export default function ProjectHistory({
     : emptyHistoryState(activeProjectId, selectedObjectId, Boolean(activeProjectId));
   const [forkState, setForkState] = useState(null);
   const [attachState, setAttachState] = useState(null);
+  const [retryState, setRetryState] = useState(null);
   const activeForkState = forkState?.projectId === activeProjectId ? forkState : null;
   const activeAttachState = attachState?.projectId === activeProjectId
     && attachState?.objectId === selectedObjectId
@@ -560,11 +612,14 @@ export default function ProjectHistory({
   useEffect(() => {
     forkRequestRef.current += 1;
     attachRequestRef.current += 1;
+    retryRequestRef.current += 1;
     setForkState(null);
     setAttachState(null);
+    setRetryState(null);
     return () => {
       forkRequestRef.current += 1;
       attachRequestRef.current += 1;
+      retryRequestRef.current += 1;
     };
   }, [activeProjectId, selectedObjectId]);
 
@@ -749,7 +804,7 @@ export default function ProjectHistory({
         requestId,
         launching: false,
         job: null,
-        error: formatApiError(error, 'Failed to open saved version.'),
+        error: formatApiError(error, 'Failed to restore saved version.'),
       });
     }
   };
@@ -777,6 +832,33 @@ export default function ProjectHistory({
         error: formatApiError(error, 'Failed to create branch from saved version.'),
       });
       if (typeof refreshProjects === 'function') await refreshProjects();
+    }
+  };
+
+  const launchJobRetry = async job => {
+    const api = window.electronAPI || {};
+    const projectId = activeProjectId;
+    if (!projectId || !job?.id || !api.retryProjectJob || retryState?.launching) return;
+    const requestId = ++retryRequestRef.current;
+    setRetryState({ projectId, sourceJobId: job.id, requestId, launching: true, error: null });
+    try {
+      const retriedJob = await api.retryProjectJob(projectId, job.id);
+      if (activeProjectRef.current !== projectId || retryRequestRef.current !== requestId) return;
+      setRetryState({
+        projectId, sourceJobId: job.id, requestId, launching: false, job: retriedJob, error: null,
+      });
+      await loadHistory();
+    } catch (error) {
+      if (activeProjectRef.current !== projectId || retryRequestRef.current !== requestId) return;
+      const accessLost = isProjectAccessError(error);
+      setRetryState({
+        projectId,
+        sourceJobId: job.id,
+        requestId,
+        launching: false,
+        error: formatApiError(error, 'Retry could not be started. Refresh the project and review this run.'),
+      });
+      if (accessLost && typeof refreshProjects === 'function') await refreshProjects();
     }
   };
 
@@ -853,10 +935,10 @@ export default function ProjectHistory({
               <div>
                 <h3 className="flex items-center gap-2 text-lg font-bold text-text">
                   <Archive size={18} className="text-primary" />
-                  Open a saved version
+                  Restore a saved version
                 </h3>
                 <p className="mt-1 max-w-3xl text-sm text-textMuted">
-                  A saved version can be opened only in its owner&apos;s private analysis workspace. Other writers can create their own branch from it; viewers can review recorded history only.
+                  Restoring replaces the owner&apos;s private live state with this saved version; the saved version and lineage remain unchanged. Other writers can create a new private branch instead. Viewers can review recorded history only.
                 </p>
               </div>
               {selectedCheckpoint && selectedObjectIsOwnedByUser && (
@@ -866,7 +948,7 @@ export default function ProjectHistory({
                   className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
                 >
                   {activeAttachState?.launching ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
-                  {activeAttachState?.job?.status === 'completed' ? 'Saved version opened' : 'Open saved version'}
+                  {activeAttachState?.job?.status === 'completed' ? 'Saved version restored' : 'Restore saved version'}
                 </button>
               )}
               {selectedCheckpoint && !selectedObjectIsOwnedByUser && canFork && (
@@ -890,7 +972,7 @@ export default function ProjectHistory({
               <p className="mt-3 text-sm text-textMuted">Your Viewer role cannot create a branch from this version.</p>
             )}
             {activeAttachState?.job && ['queued', 'running'].includes(activeAttachState.job.status) && (
-              <p role="status" className="mt-3 inline-flex items-center gap-2 text-sm text-textMuted"><Loader2 size={15} className="animate-spin" /> Opening saved version: {displayStatus(activeAttachState.job.status)}.</p>
+              <p role="status" className="mt-3 inline-flex items-center gap-2 text-sm text-textMuted"><Loader2 size={15} className="animate-spin" /> Restoring saved version: {displayStatus(activeAttachState.job.status)}.</p>
             )}
             {activeAttachState?.error && <p role="alert" className="mt-3 text-sm text-danger">{activeAttachState.error}</p>}
             {activeForkState?.artifactId === selectedCheckpoint?.id && activeForkState?.error && (
@@ -921,7 +1003,13 @@ export default function ProjectHistory({
             </div>
 
             <Section title="Selected Analysis Runs" icon={<Clock size={18} className="text-primary" />} subtitle="Only runs whose input or saved result is the selected analysis are shown here.">
-              <JobList jobs={selectedJobs} analysisObjects={currentWs?.objects || []} userId={userId} />
+              <JobList
+                jobs={selectedJobs}
+                analysisObjects={currentWs?.objects || []}
+                userId={userId}
+                onRetry={launchJobRetry}
+                retryState={retryState?.projectId === activeProjectId ? retryState : null}
+              />
             </Section>
 
             <Section title="Selected Analysis Results" icon={<Archive size={18} className="text-primary" />} subtitle="Only saved results associated with the selected analysis are shown here. Reviewed result tables and Expert R bundles have authenticated, audited downloads; saved versions are never downloadable.">

@@ -366,6 +366,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   id                        TEXT PRIMARY KEY,
   owner_user_id             BIGINT NOT NULL REFERENCES users(id),
   project_id                TEXT,
+  retry_of_job_id           TEXT REFERENCES jobs(id),
   analysis_object_id        TEXT REFERENCES analysis_objects(id),
   result_analysis_object_id TEXT REFERENCES analysis_objects(id),
   dataset_id                TEXT,
@@ -389,6 +390,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   priority                  INTEGER NOT NULL DEFAULT 0,
   last_worker_error         TEXT
 );
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_of_job_id TEXT REFERENCES jobs(id);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_analysis_object ON jobs(analysis_object_id);
@@ -403,6 +405,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_project_status ON jobs(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_project_analysis_object ON jobs(project_id, analysis_object_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project_result_object ON jobs(project_id, result_analysis_object_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_retry_of_job
+  ON jobs(retry_of_job_id) WHERE retry_of_job_id IS NOT NULL;
 
 -- Expert R source is needed only while a request can still execute. Once the
 -- job reaches a terminal state, retain the selected profile and source hash for
