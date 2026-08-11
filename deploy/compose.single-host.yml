@@ -402,7 +402,7 @@ services:
       JOB_WORKER_POOL_SIZE: "3"
       JOB_WORKER_POOL_SLOT: "1"
       JOB_WORKER_REPORT_READINESS: "false"
-      JOB_WORKER_ALLOWED_JOB_TYPES: "generic,checkpoint.noop,r.runtime.check,r.object.inspect,checkpoint.load.v1,checkpoint.fork.v1"
+      JOB_WORKER_ALLOWED_JOB_TYPES: "generic,checkpoint.noop,r.runtime.check,r.object.inspect,checkpoint.save.v1,checkpoint.load.v1,checkpoint.fork.v1"
       JOB_WORKER_HEALTH_HOST: 127.0.0.1
       JOB_WORKER_HEALTH_PORT: "3101"
       JOB_WORKER_DRAIN_TIMEOUT_MS: "630000"

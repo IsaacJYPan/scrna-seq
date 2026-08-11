@@ -471,7 +471,7 @@ const RDS_DESERIALIZATION_PROXY_PATHS = new Set(['/load-rds', '/restore-session'
 // dataset from a server-resolved storage key, runs Seurat preprocessing, and saves a
 // checkpoint. It is worker-only for the same durable job/artifact/lineage reasons.
 const R_PROXY_INTERNAL_ONLY_PATHS = new Set([
-  '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers',
+  '/object/pbmc-pipeline', '/object/checkpoint-save', '/object/checkpoint-load', '/object/deg-find-markers',
   '/object/explore-summary',
   '/object/condition-pseudobulk-de',
   '/object/enrichment-gsea', '/object/cellchat-infer', '/object/seurat-pipeline',
@@ -3049,13 +3049,13 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
     'cellchat.infer.v1', 'explore.summarize.v1',
     'condition.pseudobulk_de.v1', 'expert.r.v1',
     'spatial.seurat.v1',
-    'checkpoint.load.v1', 'checkpoint.fork.v1',
+    'checkpoint.save.v1', 'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   const noDatasetBindingTypes = [
     'pbmc.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'cellchat.infer.v1',
     'explore.summarize.v1',
     'condition.pseudobulk_de.v1', 'expert.r.v1',
-    'checkpoint.load.v1', 'checkpoint.fork.v1',
+    'checkpoint.save.v1', 'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   if (serverManagedResultTypes.includes(body.jobType)
       && body.resultAnalysisObjectId !== undefined) {

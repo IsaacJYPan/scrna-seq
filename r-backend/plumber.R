@@ -236,7 +236,7 @@ validate_completion_receipt_binding <- function(body, expected_job_types,
     stop("Completion receipt binding is invalid.")
   }
   output_prefix <- paste0("projects/", binding$project_id, "/")
-  if (identical(binding$job_type, "pbmc.pipeline.v1")) {
+  if (binding$job_type %in% c("pbmc.pipeline.v1", "checkpoint.save.v1")) {
     if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
         !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
         !startsWith(binding$output_storage_key,
@@ -1561,7 +1561,81 @@ function(req, res) {
   })
 }
 
-# ── Internal worker-bridge pipeline: PBMC/Seurat preprocessing on a COPY ──────
+# Internal worker-bridge checkpoint snapshot.
+# Snapshot the current owner/object-keyed live state to a worker-selected durable
+# project checkpoint. Express blocks this endpoint from the public R proxy; the
+# worker supplies the canonical object key, exact storage key, and signed receipt
+# binding. No code, package, function, or path is accepted from the browser.
+#* @post /object/checkpoint-save
+#* @parser json
+function(req, res) {
+  on.exit(try(gc(full = TRUE), silent = TRUE), add = TRUE)
+  if (is.null(global_obj)) {
+    res$status <- 400
+    return(list(error = "No input object loaded."))
+  }
+  body <- req$body
+  storage_key <- if (is.list(body)) body$storage_key else NULL
+  if (!is_scalar_string(storage_key)) {
+    res$status <- 400
+    return(list(error = "Missing checkpoint storage key."))
+  }
+
+  tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, "checkpoint.save.v1", "r.checkpoint.save.v1", storage_key
+    )
+    safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
+    raw_for_bundle <- if (exists("raw_obj") && !is.null(raw_obj)) raw_obj else global_obj
+    atomic_save_rds(list(global = global_obj, raw = raw_for_bundle), safe_path)
+    size_bytes <- as.numeric(file.info(safe_path)$size)
+    checksum <- tryCatch({
+      if (requireNamespace("digest", quietly = TRUE)) {
+        digest::digest(file = safe_path, algo = "sha256")
+      } else if (requireNamespace("openssl", quietly = TRUE)) {
+        as.character(openssl::sha256(file(safe_path)))
+      } else {
+        NA_character_
+      }
+    }, error = function(e) NA_character_)
+    saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
+    if (!saved) stop("Checkpoint integrity could not be computed.")
+
+    reductions <- tryCatch(names(global_obj@reductions), error = function(e) character(0))
+    cluster_counts <- tryCatch({
+      if ("seurat_clusters" %in% colnames(global_obj@meta.data)) {
+        table(global_obj$seurat_clusters)
+      } else integer(0)
+    }, error = function(e) integer(0))
+    response_out <- list(
+      ok = TRUE,
+      summary = list(
+        n_cells = ncol(global_obj),
+        n_features = nrow(global_obj),
+        n_clusters = length(cluster_counts),
+        cluster_sizes = as.list(head(as.integer(cluster_counts), 256L)),
+        reductions = as.list(head(as.character(reductions), 64L))
+      ),
+      checkpoint = list(
+        saved = TRUE,
+        checksum_sha256 = checksum,
+        size_bytes = size_bytes
+      ),
+      versions = list(
+        seurat_version = tryCatch(as.character(utils::packageVersion("Seurat")), error = function(e) NULL),
+        r_version = as.character(getRversion())
+      )
+    )
+    atomic_write_completion_receipt(receipt_binding, response_out)
+    response_out
+  }, error = function(e) {
+    res$status <- 500
+    message(sprintf("[object/checkpoint-save] save error: %s", conditionMessage(e)))
+    list(error = "checkpoint save failed")
+  })
+}
+
+# Internal worker-bridge pipeline: PBMC/Seurat preprocessing on a copy.
 # Internal-only: reached ONLY via the in-process Node worker bridge (the allowlisted
 # `r.pbmc.pipeline.v1` operation calls this R backend directly). The public Express
 # proxy BLOCKS this path (server.js isInternalOnlyRProxyPath → 404 before any R

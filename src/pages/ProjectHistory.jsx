@@ -36,6 +36,7 @@ function formatApiError(error, fallback) {
 function formatJobError(job) {
   const fallback = 'This analysis needs attention. Review the settings and try again.';
   const jobFallbacks = {
+    'checkpoint.save.v1': 'The current live analysis could not be saved. Keep the workspace open and try Save current analysis again.',
     'expert.r.v1': 'The R script stopped with an error. Check input names, columns, and function arguments.',
     'explore.summarize.v1': 'Exploratory analysis could not read the requested data. Open the saved version and verify the selected metadata before trying again.',
     'spatial.seurat.v1': 'Spatial preprocessing could not use this Visium bundle. Review dataset validation and the required Space Ranger files before trying again.',
@@ -94,6 +95,7 @@ function StatusBadge({ children, tone = 'slate' }) {
 
 const JOB_LABELS = {
   'pbmc.pipeline.v1': 'PBMC preprocessing',
+  'checkpoint.save.v1': 'Save current analysis',
   'seurat.pipeline.v1': 'Standard preprocessing',
   'spatial.seurat.v1': 'Spatial preprocessing',
   'checkpoint.load.v1': 'Open saved version',
@@ -108,6 +110,7 @@ const JOB_LABELS = {
 
 const ARTIFACT_LABELS = {
   checkpoint: 'Saved version',
+  checkpoint_save: 'Saved-version summary',
   deg_markers: 'Marker results',
   deg_summary: 'Marker summary',
   enrichment_results: 'Pathway enrichment results',
@@ -125,6 +128,7 @@ const ARTIFACT_LABELS = {
 const PROVENANCE_LABELS = {
   normalize: 'Normalization',
   'pbmc.pipeline.v1': 'PBMC preprocessing',
+  'checkpoint.save.v1': 'Save current analysis',
   'seurat.pipeline.v1': 'Standard preprocessing',
   'spatial.seurat.v1': 'Spatial preprocessing',
   'checkpoint.load.v1': 'Open saved version',

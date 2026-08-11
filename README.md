@@ -59,8 +59,9 @@ At a glance:
   exploratory recipes, replicate-aware `condition.pseudobulk_de.v1` edgeR
   comparisons over explicit biological samples and immutable contrast snapshots,
   and summary artifacts, the narrow 10x HDF5 `seurat.pipeline.v1` flow and
-  classic Space Ranger Visium ZIP `spatial.seurat.v1` flow in Approved workflows
-  with result saved-version reattach, project member/role management, private collaborator checkpoint
+  classic Space Ranger Visium ZIP `spatial.seurat.v1` flow in Approved workflows,
+  explicit saving of modified private live analyses, result saved-version reattach,
+  project member/role management, private collaborator checkpoint
   forks with durable source lineage, a trusted global declarative pipeline
   registry for code-shipped modules, provenance/figures/cache.
 - **Backend implemented with selected UI actions and read-only metadata:** durable jobs,
@@ -87,7 +88,8 @@ At a glance:
 - **Durable local storage:** new dataset, checkpoint, DEG, pathway-enrichment, and
   CellChat candidate-table files use server-owned project keys under `STORAGE_ROOT`.
   Existing private-vault records
-  remain readable. Project writers can fork a member's durable checkpoint into a
+  remain readable. Owners can explicitly snapshot current private live state into
+  a new immutable saved analysis; project writers can fork a member's durable checkpoint into a
   new analysis that they own from Runs & Results, without sharing live R state;
   the fork records its source object, checkpoint, job, and lineage edge.
 - **Not implemented (product):** cross-condition CellChat, cell annotation,
@@ -367,6 +369,11 @@ authenticated server-derived state keys, retains no empty keys, and applies
 deterministic least-recently-used eviction against global/per-user session-count
 and estimated object-byte budgets. Evicted objects must be reattached from their
 durable checkpoint; collaborators never share another user's live R object.
+Compatibility-proxy mutations are explicitly unsaved. The owner may choose
+**Save current analysis**, which queues parameterless `checkpoint.save.v1`, writes
+the exact live object to a server-allocated private checkpoint, creates an immutable
+child with lineage, and then opens that child. The save endpoint is worker-only;
+the browser cannot provide a path, dataset, result ID, R code, or transformation.
 
 Production `/api/r` is an exact reviewed method/path allowlist, not an open
 Plumber catch-all. Every browser R request carries the explicit
