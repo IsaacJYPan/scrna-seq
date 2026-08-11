@@ -88,14 +88,13 @@ export default function BatchIntegration({
     } finally {
       setColsLoading(false);
     }
-  }, [datasetInfo, sessionReady, batchCol, setParam]);
+  }, [callApi, datasetInfo, sessionReady, batchCol, setParam]);
 
   useEffect(() => {
     if (datasetInfo && sessionReady && pipelineState?.normalize) {
       fetchMetaCols();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetInfo?.id, sessionReady, pipelineState?.normalize]);
+  }, [datasetInfo, sessionReady, pipelineState?.normalize, fetchMetaCols]);
 
   // Fetch preview for the selected batch column
   const fetchBatchPreview = useCallback(async (col) => {
@@ -105,7 +104,7 @@ export default function BatchIntegration({
       if (data.error) throw new Error(data.error);
       setBatchPreview(data);
     } catch {}
-  }, [sessionReady]);
+  }, [callApi, sessionReady]);
 
   useEffect(() => {
     if (batchCol) fetchBatchPreview(batchCol);

@@ -32,10 +32,10 @@ const {
   createUser, getUserByEmail,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
-  getJobForUser, getProjectJob, getAnalysisObjectForUser, getProjectAnalysisObject,
-  verifyAnalysisObjectOwner, claimNextJob, reapExpiredJobs, setJobScheduling, cancelProjectJob,
+  getJobForUser, getProjectJob, getProjectAnalysisObject,
+  verifyAnalysisObjectOwner, claimNextJob, cancelProjectJob,
   listProjectArtifacts, listProjectJobArtifacts, getJobArtifactsByJobId,
-  listProjectAnalysisObjectChildren, listProjectAnalysisObjectParents, getProjectAnalysisObjectLineage,
+  listProjectAnalysisObjectChildren, listProjectAnalysisObjectParents,
   isValidJobType, isValidArtifactType, isValidArtifactStorageKind,
   createCheckpointArtifactForJobByWorker, createJobArtifactByWorker, isSafeInternalStorageKey,
   completePbmcPipelineResultByWorker, listAnalysisObjectsForUser,
@@ -44,8 +44,7 @@ const {
 
 const pbmc = require('./pbmcPipeline');
 const {
-  validatePbmcPipelineParams, allocateCheckpointStorageKey,
-  PBMC_PIPELINE_PARAM_SPEC, PBMC_PIPELINE_PARAM_NAMES,
+  validatePbmcPipelineParams, allocateCheckpointStorageKey, PBMC_PIPELINE_PARAM_NAMES,
 } = pbmc;
 
 const bridge = require('./rWorkerBridge');
@@ -542,7 +541,6 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — ownership & project boundary'
 
   it('a job missing its input object fails before R (R_OBJECT_CONTEXT_REQUIRED)', async () => {
     const alice = await createUser('alice@example.com', 'password123', 'Alice');
-    const proj = await seedProject(alice.id);
     // Legacy/owner job with NO analysis object.
     await createJobForUser(alice.id, { jobType: 'pbmc.pipeline.v1' });
     const calls = [];
@@ -729,7 +727,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
   });
 
   it('failure messages/logs are sanitized (no raw R error / path / stack leak)', async () => {
-    const { job, alice, proj } = await seedPipelineJob({});
+    await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'R Error: cannot open /vault/u/secret.rds at line 7' } });
     const res = await drainPipeline(failCaller);
     expect(res.status).toBe('indeterminate');

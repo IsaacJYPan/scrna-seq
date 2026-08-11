@@ -14,7 +14,7 @@ async function req(method, path, body = null) {
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
         try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
-        catch (e) { resolve({ status: res.statusCode, body: data }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
       });
     });
     r.on('error', reject);

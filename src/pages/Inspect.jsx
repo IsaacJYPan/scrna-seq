@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   X, Database, Tag, Layers, Scissors, FileSpreadsheet,
   ChevronDown, RefreshCw, CheckSquare, Square, AlertTriangle,
@@ -178,7 +178,7 @@ function AddMetadataTab({ onMetaAdded, info, callApi, legacyLiveMutationToolsEna
         setLoadingVals(false);
       })
       .catch(() => setLoadingVals(false));
-  }, [sourceCol]);
+  }, [sourceCol, callApi]);
 
   const pickCsv = async () => {
     const path = await window.electronAPI?.openDataFileDialog('csv');
@@ -465,7 +465,7 @@ function SubsetTab({ info, obj, onSubsetCreated, parentSessionPath, workspaceObj
         setLoadingVals(false);
       })
       .catch(() => setLoadingVals(false));
-  }, [column]);
+  }, [column, callApi]);
 
   const toggleValue = (v) => {
     setSelected(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]);
@@ -656,7 +656,7 @@ export default function Inspect({
   const legacyLiveMutationToolsEnabled = deploymentPolicy.legacyLiveMutationToolsEnabled === true;
   const visibleTabs = TABS.filter((tab) => legacyLiveMutationToolsEnabled || tab.id !== 'subset');
 
-  const fetchInfo = () => {
+  const fetchInfo = useCallback(() => {
     setLoading(true);
     setError(null);
     callApi('/object-info', {}, { useCache: false })
@@ -666,13 +666,13 @@ export default function Inspect({
         setLoading(false);
       })
       .catch(e => { setError(publicErrorMessage(e)); setLoading(false); });
-  };
+  }, [callApi]);
 
   useEffect(() => {
     if (globalTab === 'inspect') {
       fetchInfo();
     }
-  }, [obj?.id, globalTab]); // Re-fetch if object changes or tab is opened
+  }, [obj?.id, globalTab, fetchInfo]); // Re-fetch if object changes or tab is opened
 
   if (!obj) {
     return (

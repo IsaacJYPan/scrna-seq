@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 /**
  * Persist tab-level parameters in localStorage, scoped per user + object.
@@ -56,8 +56,9 @@ export function useTabParams(step, email, objectId, defaults) {
   }, [storageKey, params]);
 
   // Convenience updater: setParam('key', value)
-  const setParam = (key, value) =>
+  const setParam = useCallback((key, value) => {
     setParams(prev => ({ ...prev, [key]: value }));
+  }, []);
 
   return [params, setParam, setParams];
 }

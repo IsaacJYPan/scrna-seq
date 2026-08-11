@@ -199,7 +199,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         }
       })();
     }
-  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated, canUse3D]);
+  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated, canUse3D, nComponents]);
 
   // When the user toggles the dimension in the UI, clear the stale result
   // and eagerly try to load the required dimension from the local cache.
@@ -214,7 +214,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         runUMAP(true, nComponents);  // Try to load cached data for this specific dimension
       }
     }
-  }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP]);
+  }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP, setResult]);
 
   // Fetch base64 fallback for large datasets
   useEffect(() => {
@@ -231,7 +231,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       })
       .catch(() => setLoadingBase64(false));
     }
-  }, [result, isHighPerfMode, nComponents]);
+  }, [result, isHighPerfMode, nComponents, callApi]);
 
   const isDark = theme === 'dark';
   const plotText = isDark ? '#94a3b8' : '#475569';

@@ -19,7 +19,7 @@ const {
   createCheckpointForJobByWorker,
   // lineage helpers under test
   createLineageEdge, createLineageEdgesForChild,
-  listLineageParents, listLineageChildren, lineageEdgeWouldCreateCycle,
+  listLineageParents, lineageEdgeWouldCreateCycle,
   listProjectAnalysisObjectParents, listProjectAnalysisObjectChildren,
   getProjectAnalysisObjectLineage,
 } = dbmod;

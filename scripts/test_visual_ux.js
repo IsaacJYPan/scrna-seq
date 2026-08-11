@@ -19,8 +19,7 @@
 'use strict';
 
 const { chromium } = require('playwright');
-const { AxePuppeteer } = require('@axe-core/playwright');
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -202,7 +201,7 @@ async function checkSnapshot(page, name) {
     } else {
       pass(`Snapshot ${name}: within threshold (${(ratio * 100).toFixed(4)}% diff)`);
     }
-  } catch (e) {
+  } catch {
     // pngjs/pixelmatch may not be installed; fall back to buffer comparison
     if (buf.equals(baseline)) {
       pass(`Snapshot ${name}: exact match`);
@@ -271,20 +270,6 @@ function isIgnorableError(msg) {
 }
 
 // ── Performance Timing ─────────────────────────────────────────────────────────
-async function measureLoadTime(page, label) {
-  const timing = await page.evaluate(() => {
-    const nav = performance.getEntriesByType('navigation')[0];
-    return nav ? nav.loadEventEnd - nav.startTime : null;
-  });
-  if (timing !== null) {
-    if (timing > PERFORMANCE_BUDGET_MS) {
-      warn(`${label}: slow load (${timing.toFixed(0)}ms > ${PERFORMANCE_BUDGET_MS}ms budget)`);
-    } else {
-      pass(`${label}: load time ${timing.toFixed(0)}ms (within ${PERFORMANCE_BUDGET_MS}ms budget)`);
-    }
-  }
-}
-
 // ── Accessibility Audit ────────────────────────────────────────────────────────
 async function runA11yAudit(page, context) {
   try {
@@ -1421,7 +1406,7 @@ async function main() {
 }
 
 // ── HTML Report Generator ──────────────────────────────────────────────────────
-function generateHtmlReport({ allResults, failures, warnings, consoleErrors, networkFailures }) {
+function generateHtmlReport({ failures, warnings, consoleErrors }) {
   const timestamp = new Date().toLocaleString();
   const snapshotFiles = fs.existsSync(SNAPSHOTS_DIR) ? fs.readdirSync(SNAPSHOTS_DIR).filter(f => f.endsWith('.png')) : [];
 
