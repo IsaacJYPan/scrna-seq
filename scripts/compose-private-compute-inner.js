@@ -203,6 +203,31 @@ function normalizedRows(rows) {
   }));
 }
 
+async function collectJobStateEvidence(assignments, byId) {
+  const samples = await Promise.all(assignments.map(async ({ jobId, slot }) => {
+    const job = byId.get(jobId);
+    const port = slot === 2 ? 8001 : 8002;
+    const ownKey = deriveRObjectStateKey(job.userId, `${job.objectId}-job-${job.id}`);
+    const state = await rState(port, ownKey);
+    const observed = state.job_session_observation;
+    return {
+      port, slot,
+      observedAt: typeof observed?.observed_at === 'string' ? observed.observed_at : null,
+      observedHasGlobalObject: observed?.has_global_obj === true,
+      observedActiveSessionKeyCount: Number(observed?.active_session_key_count || 0),
+      observedOwnKeyPresent: observed?.own_key_present === true,
+      observedForeignKeyCount: Number(observed?.foreign_key_count || 0),
+    };
+  }));
+  const stateEvidence = Object.fromEntries(samples.map((sample) => [sample.slot, sample]));
+  assert(samples.every(({ observedAt, observedHasGlobalObject, observedActiveSessionKeyCount,
+    observedOwnKeyPresent, observedForeignKeyCount }) => (
+    observedAt && observedHasGlobalObject && observedActiveSessionKeyCount === 1
+      && observedOwnKeyPresent && observedForeignKeyCount === 0
+  )), 'each R lane must record only its own active job state', JSON.stringify(stateEvidence));
+  return stateEvidence;
+}
+
 async function observe() {
   const input = JSON.parse(process.env.ACCEPTANCE_INPUT || '{}');
   assert(Array.isArray(input.jobs) && input.jobs.length === 3, 'three jobs are required');
@@ -227,39 +252,17 @@ async function observe() {
       const slots = running.map((row) => Number(String(row.worker_id || '').match(/^pool-(\d+):/)?.[1]));
       assert(new Set(slots).size === 2 && slots.every((slot) => slot === 2 || slot === 3),
         'overlapping jobs must be claimed by compute slots 2 and 3', JSON.stringify(slots));
-
-      const samples = await Promise.all(running.map(async (row) => {
-        const job = byId.get(row.id);
-        const slot = Number(String(row.worker_id).match(/^pool-(\d+):/)[1]);
-        const port = slot === 2 ? 8001 : 8002;
-        const ownKey = deriveRObjectStateKey(job.userId, `${job.objectId}-job-${job.id}`);
-        const state = await rState(port, ownKey);
-        const observed = state.job_session_observation;
-        return {
-          port, slot,
-          observedAt: typeof observed?.observed_at === 'string' ? observed.observed_at : null,
-          observedHasGlobalObject: observed?.has_global_obj === true,
-          observedActiveSessionKeyCount: Number(observed?.active_session_key_count || 0),
-          observedOwnKeyPresent: observed?.own_key_present === true,
-          observedForeignKeyCount: Number(observed?.foreign_key_count || 0),
-        };
-      }));
-      if (samples.every((sample) => sample.observedAt)) {
-        const stateEvidence = Object.fromEntries(samples.map((sample) => [sample.slot, sample]));
-        assert(samples.every(({ observedHasGlobalObject, observedActiveSessionKeyCount,
-          observedOwnKeyPresent, observedForeignKeyCount }) => (
-          observedHasGlobalObject && observedActiveSessionKeyCount === 1
-          && observedOwnKeyPresent && observedForeignKeyCount === 0
-        )), 'each R lane must record only its own active job state', JSON.stringify(stateEvidence));
-        overlap = {
-          observedAt: new Date().toISOString(),
-          runningJobIds: running.map((row) => row.id),
-          queuedJobId: queued[0].id,
-          slots,
-          runtimeIds,
-          stateEvidence,
-        };
-      }
+      overlap = {
+        observedAt: new Date().toISOString(),
+        runningJobIds: running.map((row) => row.id),
+        queuedJobId: queued[0].id,
+        assignments: running.map((row) => ({
+          jobId: row.id, slot: Number(String(row.worker_id).match(/^pool-(\d+):/)[1]),
+        })),
+        slots,
+        runtimeIds,
+        stateEvidence: null,
+      };
     }
     if (rows.length === 3 && rows.every((row) => row.status === 'completed')) break;
     const terminalFailure = rows.find((row) => ['failed', 'canceled'].includes(row.status));
@@ -269,6 +272,8 @@ async function observe() {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   assert(overlap, 'two running jobs and one queued job were not observed');
+  overlap.stateEvidence = await collectJobStateEvidence(overlap.assignments, byId);
+  delete overlap.assignments;
 
   const { rows } = await db.query(
     `SELECT id, status, worker_id, started_at, completed_at, last_worker_error
@@ -326,6 +331,147 @@ async function observe() {
   });
 }
 
+async function waitForCompletedJobs(jobIds, label, timeoutMs = 8 * 60 * 1000) {
+  const deadline = Date.now() + timeoutMs;
+  let rows = [];
+  while (Date.now() < deadline) {
+    ({ rows } = await db.query(
+      `SELECT id, status, worker_id, started_at, completed_at, last_worker_error,
+              owner_user_id, project_id, analysis_object_id, result_analysis_object_id
+         FROM jobs WHERE id = ANY($1::text[]) ORDER BY created_at, id`, [jobIds]
+    ));
+    if (rows.length === jobIds.length && rows.every((row) => row.status === 'completed')) return rows;
+    const stopped = rows.find((row) => ['failed', 'canceled'].includes(row.status));
+    if (stopped) throw new Error(`${label} job ${stopped.id} stopped: ${stopped.last_worker_error || stopped.status}`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`${label} jobs did not complete: ${JSON.stringify(normalizedRows(rows))}`);
+}
+
+async function sameProjectLaunch() {
+  const input = JSON.parse(process.env.ACCEPTANCE_INPUT || '{}');
+  assert(Array.isArray(input.lanes) && input.lanes.length === 2, 'two seeded lanes are required');
+  const owner = input.lanes[0];
+  const analyst = input.lanes[1];
+  await db.addProjectMember(owner.projectId, analyst.userId, 'analyst');
+
+  const forkJobs = [];
+  for (const userId of [owner.userId, analyst.userId]) {
+    const job = await db.createProjectJob(userId, owner.projectId, {
+      jobType: 'checkpoint.fork.v1', analysisObjectId: owner.objectId, parameters: {},
+    });
+    forkJobs.push(job);
+  }
+  const forkRows = await waitForCompletedJobs(
+    forkJobs.map((job) => job.id), 'same-project checkpoint fork'
+  );
+  assert(forkRows.every((row) => row.analysis_object_id === owner.objectId),
+    'both analysts must fork the same starting checkpoint');
+  assert(forkRows.every((row) => typeof row.result_analysis_object_id === 'string'
+    && row.result_analysis_object_id), 'each checkpoint fork must create a result object');
+
+  const jobs = [];
+  for (const fork of forkRows) {
+    const userId = Number(fork.owner_user_id);
+    const job = await db.createProjectJob(userId, owner.projectId, {
+      jobType: 'deg.find_markers.v1', analysisObjectId: fork.result_analysis_object_id,
+      parameters: { groupBy: 'seurat_clusters', testUse: 'wilcox', onlyPositive: true },
+    });
+    jobs.push({
+      id: job.id,
+      userId,
+      projectId: owner.projectId,
+      objectId: fork.result_analysis_object_id,
+      sourceObjectId: owner.objectId,
+      forkJobId: fork.id,
+    });
+  }
+  output({ jobs, projectId: owner.projectId, sourceObjectId: owner.objectId });
+}
+
+async function sameProjectObserve() {
+  const input = JSON.parse(process.env.ACCEPTANCE_INPUT || '{}');
+  assert(Array.isArray(input.jobs) && input.jobs.length === 2, 'two same-project jobs are required');
+  assert(new Set(input.jobs.map((job) => job.projectId)).size === 1,
+    'same-project jobs must belong to one project');
+  assert(new Set(input.jobs.map((job) => job.sourceObjectId)).size === 1,
+    'same-project jobs must share one starting checkpoint');
+  assert(new Set(input.jobs.map((job) => job.userId)).size === 2,
+    'same-project jobs must be owned by two analysts');
+
+  const ids = input.jobs.map((job) => job.id);
+  const byId = new Map(input.jobs.map((job) => [job.id, job]));
+  let overlap = null;
+  const deadline = Date.now() + 8 * 60 * 1000;
+  let rows = [];
+  while (Date.now() < deadline) {
+    ({ rows } = await db.query(
+      `SELECT id, status, worker_id, started_at, completed_at, last_worker_error
+         FROM jobs WHERE id = ANY($1::text[]) ORDER BY created_at, id`, [ids]
+    ));
+    const running = rows.filter((row) => row.status === 'running');
+    if (!overlap && running.length === 2) {
+      const assignments = running.map((row) => ({
+        jobId: row.id, slot: Number(String(row.worker_id || '').match(/^pool-(\d+):/)?.[1]),
+      }));
+      assert(new Set(assignments.map(({ slot }) => slot)).size === 2
+        && assignments.every(({ slot }) => slot === 2 || slot === 3),
+      'same-project jobs must occupy both isolated compute lanes');
+      overlap = { observedAt: new Date().toISOString(), assignments, stateEvidence: null };
+    }
+    if (rows.length === 2 && rows.every((row) => row.status === 'completed')) break;
+    const stopped = rows.find((row) => ['failed', 'canceled'].includes(row.status));
+    if (stopped) throw new Error(`same-project job ${stopped.id} stopped: ${stopped.last_worker_error || stopped.status}`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  assert(overlap, 'two same-project analyst jobs were not observed running concurrently');
+  overlap.stateEvidence = Object.values(await collectJobStateEvidence(overlap.assignments, byId));
+  delete overlap.assignments;
+  assert(rows.length === 2 && rows.every((row) => row.status === 'completed'),
+    'both same-project analyst jobs must complete', JSON.stringify(normalizedRows(rows)));
+  const latestStart = Math.max(...rows.map((row) => new Date(row.started_at).getTime()));
+  const earliestFinish = Math.min(...rows.map((row) => new Date(row.completed_at).getTime()));
+  assert(latestStart < earliestFinish, 'same-project analyst job timestamps must overlap');
+
+  const { rows: objects } = await db.query(
+    `SELECT id, owner_user_id, project_id, parent_object_id
+       FROM analysis_objects WHERE id = ANY($1::text[])`, [input.jobs.map((job) => job.objectId)]
+  );
+  assert(objects.length === 2 && objects.every((object) => object.project_id === input.projectId
+    && object.parent_object_id === input.sourceObjectId),
+  'forked analysis objects must retain the shared source lineage and project');
+  assert(new Set(objects.map((object) => Number(object.owner_user_id))).size === 2,
+    'forked analysis objects must remain privately owned by the two analysts');
+
+  const { rows: artifacts } = await db.query(
+    `SELECT job_id, project_id, artifact_type, storage_uri, checksum_sha256, size_bytes
+       FROM job_artifacts WHERE job_id = ANY($1::text[]) AND artifact_type = 'deg_markers'
+       ORDER BY job_id`, [ids]
+  );
+  assert(artifacts.length === 2, 'both same-project jobs must publish marker artifacts');
+  assert(new Set(artifacts.map((artifact) => artifact.storage_uri)).size === 2,
+    'same-project outputs must use distinct per-job storage keys');
+  for (const artifact of artifacts) {
+    assert(artifact.project_id === input.projectId
+      && String(artifact.storage_uri).startsWith(`projects/${input.projectId}/artifacts/`),
+    'same-project output must remain under its project artifact prefix');
+    const bytes = fs.readFileSync(`/app/storage-volume/data/${artifact.storage_uri}`);
+    assert(crypto.createHash('sha256').update(bytes).digest('hex') === artifact.checksum_sha256
+      && bytes.length === Number(artifact.size_bytes),
+    'same-project artifact integrity check failed');
+  }
+  const cleanupEvidence = await waitForEmptyComputeState('same-project analyst jobs');
+  output({
+    overlap,
+    jobs: normalizedRows(rows),
+    analystCount: new Set(input.jobs.map((job) => job.userId)).size,
+    sharedSourceVerified: true,
+    privateForkOwnershipVerified: true,
+    distinctOutputKeysVerified: true,
+    cleanupEvidence,
+  });
+}
+
 async function scientificLaunch() {
   const input = JSON.parse(process.env.ACCEPTANCE_INPUT || '{}');
   assert(Array.isArray(input.lanes) && input.lanes.length === 2, 'two seeded lanes are required');
@@ -364,6 +510,12 @@ async function scientificLaunch() {
     ['enrichment', 'enrichment.gsea.v1', {
       targetGroup: '1', species: 'human', minGeneSetSize: 10, maxGeneSetSize: 500,
     }],
+    ['cellchat', 'cellchat.infer.v1', {
+      groupBy: 'seurat_clusters', assay: 'RNA', species: 'human',
+      databaseCategory: 'all', analysisIntent: 'single_context',
+      minCellsPerGroup: 5, maxCellsPerGroup: 200, maxTotalCells: 1000,
+      pValueCutoff: 0.05, topInteractions: 25, topPathways: 15, randomSeed: 4100,
+    }],
   ];
   const jobs = [];
   for (const [kind, jobType, parameters] of specifications) {
@@ -377,7 +529,7 @@ async function scientificLaunch() {
 
 async function scientificObserve() {
   const input = JSON.parse(process.env.ACCEPTANCE_INPUT || '{}');
-  assert(Array.isArray(input.jobs) && input.jobs.length === 5, 'five scientific jobs are required');
+  assert(Array.isArray(input.jobs) && input.jobs.length === 6, 'six scientific jobs are required');
   const ids = input.jobs.map((job) => job.id);
   const deadline = Date.now() + 12 * 60 * 1000;
   let rows = [];
@@ -419,6 +571,7 @@ async function scientificObserve() {
   const privateTypes = [
     ['pseudobulk', 'condition_de_results'],
     ['enrichment', 'enrichment_results'],
+    ['cellchat', 'cellchat_results'],
   ];
   const privateEvidence = [];
   for (const [kind, type] of privateTypes) {
@@ -434,8 +587,10 @@ async function scientificObserve() {
   }
   const pseudobulkSummary = artifactFor('pseudobulk', 'condition_de_summary');
   const enrichmentSummary = artifactFor('enrichment', 'enrichment_summary');
+  const cellchatSummary = artifactFor('cellchat', 'cellchat_summary');
   const pseudobulkMetadata = artifactMetadata(pseudobulkSummary);
   const enrichmentMetadata = artifactMetadata(enrichmentSummary);
+  const cellchatMetadata = artifactMetadata(cellchatSummary);
   assert(pseudobulkSummary && pseudobulkMetadata.summary?.testedCellTypeCount > 0,
     'pseudobulk must test at least one cell type');
   assert(pseudobulkMetadata.summary?.sampleCount === 4,
@@ -444,6 +599,11 @@ async function scientificObserve() {
     'enrichment must record the deployment clusterProfiler version');
   assert(enrichmentMetadata.summary?.packageVersions?.fgsea,
     'enrichment must record the deployment fgsea version');
+  assert(cellchatSummary && cellchatMetadata.summary?.packageVersions?.cellchat,
+    'CellChat must record the deployment package version');
+  assert(cellchatMetadata.summary?.analysisIntent === 'single_context'
+    || cellchatMetadata.summary?.analysis_intent === 'single_context',
+  'CellChat must record its single-context scientific intent');
   const cleanupEvidence = await waitForEmptyComputeState('deployment scientific jobs');
   output({
     jobs: normalizedRows(rows),
@@ -463,7 +623,12 @@ async function collaborationAcceptance() {
   const outsiderPassword = `Outsider-${crypto.randomBytes(18).toString('base64url')}`;
   const viewer = await db.createUser(`collab-viewer-${stamp}@example.com`, viewerPassword, 'Collaboration viewer');
   const outsider = await db.createUser(`collab-outsider-${stamp}@example.com`, outsiderPassword, 'Collaboration outsider');
-  await db.addProjectMemberByEmail(ownerFixture.projectId, analystFixture.email, 'analyst', 'owner');
+  const existingAnalystRole = await db.getProjectRole(ownerFixture.projectId, analystFixture.userId);
+  if (existingAnalystRole === null) {
+    await db.addProjectMemberByEmail(ownerFixture.projectId, analystFixture.email, 'analyst', 'owner');
+  } else {
+    assert(existingAnalystRole === 'analyst', 'the shared-project analyst role changed unexpectedly');
+  }
   await db.addProjectMemberByEmail(ownerFixture.projectId, viewer.email, 'viewer', 'owner');
 
   const sessions = {
@@ -473,15 +638,21 @@ async function collaborationAcceptance() {
     outsider: await login(outsider.email, outsiderPassword),
   };
   const projectPath = `/api/projects/${ownerFixture.projectId}`;
+  const exportTableTypes = [
+    'deg_markers', 'enrichment_results', 'cellchat_results', 'condition_de_results',
+  ];
   const { rows: artifactRows } = await db.query(
-    `SELECT * FROM job_artifacts
-      WHERE project_id = $1 AND created_by_user_id = $2
-        AND artifact_type = 'condition_de_results' AND status = 'available'
-      ORDER BY created_at DESC LIMIT 1`,
-    [ownerFixture.projectId, ownerFixture.userId]
+    `SELECT DISTINCT ON (artifact_type) * FROM job_artifacts
+      WHERE project_id = $1 AND created_by_user_id = $2 AND analysis_object_id = $3
+        AND artifact_type = ANY($4::text[]) AND status = 'available'
+      ORDER BY artifact_type, created_at DESC`,
+    [ownerFixture.projectId, ownerFixture.userId, ownerFixture.objectId, exportTableTypes]
   );
-  const downloadable = artifactRows[0];
-  assert(downloadable, 'the collaboration session requires the real pseudobulk result artifact');
+  const downloadableByType = new Map(artifactRows.map((artifact) => [artifact.artifact_type, artifact]));
+  assert(exportTableTypes.every((type) => downloadableByType.has(type)),
+    'the collaboration session requires every real controlled-export table type',
+    JSON.stringify([...downloadableByType.keys()]));
+  const downloadable = downloadableByType.get('condition_de_results');
   const { rows: checkpointRows } = await db.query(
     `SELECT id FROM job_artifacts WHERE project_id = $1 AND artifact_type = 'checkpoint'
       ORDER BY created_at LIMIT 1`, [ownerFixture.projectId]
@@ -510,20 +681,28 @@ async function collaborationAcceptance() {
   assert(analystPublishedList.data.some((branch) => branch.id === ownerBranch.id),
     'an explicitly published branch was not visible to a project analyst');
 
-  const download = await http(sessions.analyst,
-    `${projectPath}/artifacts/${downloadable.id}/download`, { expected: 200, accept: '*/*' });
-  const downloadedSha = crypto.createHash('sha256').update(download.bytes).digest('hex');
-  assert(downloadedSha === downloadable.checksum_sha256
-      && download.bytes.length === Number(downloadable.size_bytes),
-  'streamed artifact bytes did not match the durable checksum and size');
-  assert(download.headers.get('content-length') === String(downloadable.size_bytes),
-    'download Content-Length did not match the verified artifact size');
-  assert((download.headers.get('content-disposition') || '').startsWith('attachment; filename="condition_de_results-art_'),
-    'download filename was not server-derived from the safe artifact identity');
-  assert(download.headers.get('cache-control') === 'private, no-store',
-    'private artifact downloads must disable caching');
-  assert(!download.headers.get('content-disposition').match(/[\\/]|projects|storage/i),
-    'download headers exposed an internal path');
+  const downloadedTables = [];
+  for (const artifactType of exportTableTypes) {
+    const artifact = downloadableByType.get(artifactType);
+    const download = await http(sessions.analyst,
+      `${projectPath}/artifacts/${artifact.id}/download`, { expected: 200, accept: '*/*' });
+    const downloadedSha = crypto.createHash('sha256').update(download.bytes).digest('hex');
+    assert(downloadedSha === artifact.checksum_sha256
+        && download.bytes.length === Number(artifact.size_bytes),
+    `${artifactType} streamed bytes did not match the durable checksum and size`);
+    assert(download.headers.get('content-length') === String(artifact.size_bytes),
+      `${artifactType} Content-Length did not match the verified artifact size`);
+    assert((download.headers.get('content-disposition') || '')
+      .startsWith(`attachment; filename="${artifactType}-art_`),
+    `${artifactType} filename was not server-derived from the safe artifact identity`);
+    assert(download.headers.get('cache-control') === 'private, no-store',
+      `${artifactType} private download must disable caching`);
+    assert(!download.headers.get('content-disposition').match(/[\\/]|projects|storage/i),
+      `${artifactType} download headers exposed an internal path`);
+    downloadedTables.push({
+      artifactType, id: artifact.id, checksumSha256: downloadedSha, sizeBytes: download.bytes.length,
+    });
+  }
 
   const firstReview = (await http(sessions.owner,
     `${projectPath}/branches/${ownerBranch.id}/reviews`, {
@@ -665,7 +844,7 @@ async function collaborationAcceptance() {
   ]) {
     assert(actions.includes(action), `project audit omitted ${action}`);
   }
-  assert(actions.filter((action) => action === 'artifact.downloaded').length === 1,
+  assert(actions.filter((action) => action === 'artifact.downloaded').length === exportTableTypes.length,
     'denied or integrity-failed downloads must not be recorded as successful downloads');
   assert(!JSON.stringify(auditResponse.data).match(/storage|state.?key|claim|worker|script|token|secret/i),
     'audit events exposed a private field');
@@ -690,9 +869,7 @@ async function collaborationAcceptance() {
     branchConflict: { success: 1, conflict: 1, winningHead: advanced.headAnalysisObjectId },
     staleReviewRejected: true,
     canonicalVersion: currentCanonical.version,
-    downloadedArtifact: {
-      id: downloadable.id, checksumSha256: downloadedSha, sizeBytes: download.bytes.length,
-    },
+    downloadedTables,
     manifest: {
       exportedAnalysisObjectId: manifest.exportedAnalysisObjectId,
       lineageObjects: manifest.lineage.objects.length,
@@ -800,6 +977,8 @@ async function main() {
     }
     else if (action === 'launch') await launch();
     else if (action === 'observe') await observe();
+    else if (action === 'same-project-launch') await sameProjectLaunch();
+    else if (action === 'same-project-observe') await sameProjectObserve();
     else if (action === 'scientific-launch') await scientificLaunch();
     else if (action === 'scientific-observe') await scientificObserve();
     else if (action === 'collaboration-acceptance') await collaborationAcceptance();

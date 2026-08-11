@@ -22,6 +22,7 @@ function secret(bytes) { return crypto.randomBytes(bytes).toString('hex'); }
 
 fs.writeFileSync(envFile, [
   'FRONTEND_ORIGIN=https://127.0.0.1',
+  'APP_DEPLOYMENT_MODE=private',
   `WEB_PORT=${webPort}`,
   'TRUST_PROXY_HOPS=1',
   'COOKIE_SAMESITE=Lax',
@@ -117,11 +118,19 @@ function createCheckpoints(seedResult, { includePca = false } = {}) {
       'ISG15','IFIT1','IFIT2','IFIT3','MX1','OAS1','OAS2','STAT1','IRF7','IFI6',
       'CXCL8','CXCR4','SELL','ITGAM','ITGAX','CD68','CSF1R','SPI1','CEBPA','CEBPB'
     )
+    signaling_symbols <- if (requireNamespace('CellChat', quietly=TRUE)) {
+      unique(CellChat::extractGene(CellChat::CellChatDB.human))
+    } else character()
+    fixture_symbols <- unique(c(human_symbols, signaling_symbols))
     lanes <- fromJSON('${laneJson.replace(/'/g, "\\'")}')
     for (i in seq_len(nrow(lanes))) {
       set.seed(4100 + lanes$index[[i]])
       counts <- matrix(rpois(240 * 400, lambda=1), nrow=240, ncol=400)
-      rownames(counts) <- c(human_symbols, paste0('Gene', seq_len(nrow(counts) - length(human_symbols))))
+      selected_symbols <- head(fixture_symbols, nrow(counts))
+      filler_symbols <- if (length(selected_symbols) < nrow(counts)) {
+        paste0('Gene', seq_len(nrow(counts) - length(selected_symbols)))
+      } else character()
+      rownames(counts) <- c(selected_symbols, filler_symbols)
       colnames(counts) <- paste0('Lane', lanes$index[[i]], '_Cell', seq_len(ncol(counts)))
       groups <- rep(c('0','1'), length.out=ncol(counts))
       samples <- rep(c('C1','C2','T1','T2'), each=100)
@@ -190,13 +199,13 @@ function sanitizeCleanupEvidence(cleanupEvidence) {
   };
 }
 
-function sanitizedPrivateComputeReport(evidence, scientificEvidence, collaborationEvidence) {
+function sanitizedPrivateComputeReport(evidence, sameProjectEvidence, scientificEvidence, collaborationEvidence) {
   const initialRunningIds = new Set(evidence.overlap.runningJobIds);
   const runtimeIds = Object.values(evidence.overlap.runtimeIds || {});
 
   return {
     schema: 'traceomics.private-compute-acceptance',
-    version: 1,
+    version: 2,
     completedAt: new Date().toISOString(),
     topology: {
       isolatedLaneCount: evidence.overlap.slots.length,
@@ -225,6 +234,21 @@ function sanitizedPrivateComputeReport(evidence, scientificEvidence, collaborati
       },
       postBatchState: sanitizeCleanupEvidence(evidence.cleanupEvidence),
     },
+    sameProjectConcurrency: {
+      analystCount: sameProjectEvidence.analystCount,
+      sharedStartingCheckpoint: sameProjectEvidence.sharedSourceVerified === true,
+      privateForkOwnership: sameProjectEvidence.privateForkOwnershipVerified === true,
+      distinctOutputKeys: sameProjectEvidence.distinctOutputKeysVerified === true,
+      jobsCompleted: sameProjectEvidence.jobs.every((job) => job.status === 'completed'),
+      laneState: sameProjectEvidence.overlap.stateEvidence.map((value) => ({
+        activeKeyCount: value.observedActiveSessionKeyCount,
+        ownKeyOnly: value.observedHasGlobalObject === true
+          && value.observedActiveSessionKeyCount === 1
+          && value.observedOwnKeyPresent === true
+          && value.observedForeignKeyCount === 0,
+      })),
+      postBatchState: sanitizeCleanupEvidence(sameProjectEvidence.cleanupEvidence),
+    },
     scientific: {
       completedJobCount: scientificEvidence.jobs.filter((job) => job.status === 'completed').length,
       artifactTypes: scientificEvidence.artifactTypes,
@@ -232,6 +256,7 @@ function sanitizedPrivateComputeReport(evidence, scientificEvidence, collaborati
       privateFilesVerified: scientificEvidence.privateEvidence.map((item) => item.kind),
       replicateAwarePseudobulkVerified: true,
       deploymentEnrichmentPackagesVerified: true,
+      deploymentCellChatPackageVerified: true,
       postBatchState: sanitizeCleanupEvidence(scientificEvidence.cleanupEvidence),
     },
     collaboration: {
@@ -241,7 +266,11 @@ function sanitizedPrivateComputeReport(evidence, scientificEvidence, collaborati
       },
       staleReviewRejected: collaborationEvidence.staleReviewRejected,
       canonicalVersion: collaborationEvidence.canonicalVersion,
-      controlledDownloadChecksumVerified: true,
+      controlledDownloads: collaborationEvidence.downloadedTables.map((table) => ({
+        artifactType: table.artifactType,
+        checksumVerified: true,
+        sizeBytes: table.sizeBytes,
+      })),
       reproducibilityManifest: {
         exportedAnalysisAvailable: Boolean(collaborationEvidence.manifest.exportedAnalysisObjectId),
         lineageObjects: collaborationEvidence.manifest.lineageObjects,
@@ -273,7 +302,7 @@ async function main() {
   let keep = process.env.KEEP_ACCEPTANCE_STACK === 'true';
   try {
     console.log(`[private-compute] project=${project} webPort=${webPort}`);
-    compose(['build', 'web', 'r'], { capture: true });
+    compose(['build', 'web', 'r']);
     console.log('[private-compute] images built');
     compose(['up', '-d', '--wait', '--wait-timeout', '240']);
     const seeded = inner('seed');
@@ -298,14 +327,20 @@ async function main() {
       const evidence = inner('observe', launched);
       console.log('[private-compute] PASS two isolated R lanes overlapped while a third job queued');
       console.log(JSON.stringify(evidence, null, 2));
+      const sameProjectJobs = inner('same-project-launch', seeded);
+      const sameProjectEvidence = inner('same-project-observe', sameProjectJobs);
+      console.log('[private-compute] PASS two analysts forked one shared checkpoint and ran concurrent private jobs in one project');
+      console.log(JSON.stringify(sameProjectEvidence, null, 2));
       const scientificJobs = inner('scientific-launch', seeded);
       const scientificEvidence = inner('scientific-observe', scientificJobs);
-      console.log('[private-compute] PASS exploratory recipes, replicate-aware pseudobulk, and enrichment ran in real deployment R');
+      console.log('[private-compute] PASS exploratory recipes, replicate-aware pseudobulk, enrichment, and CellChat ran in real deployment R');
       console.log(JSON.stringify(scientificEvidence, null, 2));
       const collaborationEvidence = inner('collaboration-acceptance', seeded);
       console.log('[private-compute] PASS integrated multi-user branches, review conflicts, controlled exports, and immutable audit');
       console.log(JSON.stringify(collaborationEvidence, null, 2));
-      const report = sanitizedPrivateComputeReport(evidence, scientificEvidence, collaborationEvidence);
+      const report = sanitizedPrivateComputeReport(
+        evidence, sameProjectEvidence, scientificEvidence, collaborationEvidence
+      );
       const runDirectory = writePrivateComputeReport(report);
       console.log(`[private-compute] retained sanitized evidence at ${runDirectory}`);
     }
