@@ -122,6 +122,7 @@ describe('ProjectHistory', () => {
         status: 'completed',
       })),
       createCheckpointLoadJob: vi.fn(),
+      retryProjectJob: vi.fn(),
       getProjectJob: vi.fn(),
     };
   });
@@ -233,6 +234,48 @@ describe('ProjectHistory', () => {
     expect(screen.getByText(/Other project activity \(1 runs/i)).toBeInTheDocument();
   });
 
+  it('retries an owned failed run as a separate immutable run', async () => {
+    const failed = {
+      id: 'job_failed_retry',
+      jobType: 'pbmc.pipeline.v1',
+      analysisObjectId: 'ao_abc123',
+      ownerUserId: 7,
+      status: 'failed',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      error: { code: 'HANDLER_ERROR', message: 'private failure detail' },
+    };
+    const retry = {
+      id: 'job_retry_child',
+      retryOfJobId: failed.id,
+      jobType: failed.jobType,
+      analysisObjectId: failed.analysisObjectId,
+      ownerUserId: 7,
+      status: 'queued',
+      createdAt: '2026-07-02T00:01:00.000Z',
+    };
+    window.electronAPI.listProjectJobs
+      .mockResolvedValueOnce([failed])
+      .mockResolvedValueOnce([retry, failed]);
+    window.electronAPI.retryProjectJob.mockResolvedValueOnce(retry);
+
+    render(
+      <ProjectHistory
+        currentWs={currentWs}
+        datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }}
+        userId={7}
+      />
+    );
+
+    expect(await screen.findByText(/creates a separate run from the recorded inputs/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /retry as new run/i }));
+    await waitFor(() => {
+      expect(window.electronAPI.retryProjectJob).toHaveBeenCalledWith('proj_1', failed.id);
+      expect(screen.getByText(/Separate retry run:/i)).toHaveTextContent(/Waiting for compute/i);
+    });
+    expect(screen.getByText(/Retry of prior pbmc preprocessing run/i)).toBeInTheDocument();
+    expect(screen.queryByText(/private failure detail/i)).not.toBeInTheDocument();
+  });
+
   it('uses a generic history error when a response contains private runtime details', async () => {
     window.electronAPI.listProjectJobs.mockRejectedValueOnce(new Error(JSON.stringify({
       error: 'Traceback at C:\\private\\history.R from https://worker.internal/api/job_unsafe_2',
@@ -335,7 +378,7 @@ describe('ProjectHistory', () => {
       />
     );
 
-    const attachButton = await screen.findByRole('button', { name: /open saved version/i });
+    const attachButton = await screen.findByRole('button', { name: /restore saved version/i });
     vi.useFakeTimers();
     try {
       await act(async () => {
@@ -343,11 +386,11 @@ describe('ProjectHistory', () => {
         await Promise.resolve();
       });
       expect(window.electronAPI.createCheckpointLoadJob).toHaveBeenCalledWith('proj_1', 'ao_result123');
-      expect(screen.getByRole('status')).toHaveTextContent(/Opening saved version: Waiting for compute/i);
+      expect(screen.getByRole('status')).toHaveTextContent(/Restoring saved version: Waiting for compute/i);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole('status')).toHaveTextContent(/Opening saved version: Waiting for compute/i);
+      expect(screen.getByRole('status')).toHaveTextContent(/Restoring saved version: Waiting for compute/i);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(2);
@@ -356,7 +399,7 @@ describe('ProjectHistory', () => {
       });
       expect(refreshAnalysisObjects).toHaveBeenCalledWith('proj_1');
       expect(onLiveObjectAttached).toHaveBeenCalledWith('proj_1', 'ao_result123');
-      expect(screen.getByRole('button', { name: /saved version opened/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /saved version restored/i })).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
@@ -383,7 +426,7 @@ describe('ProjectHistory', () => {
     );
 
     expect((await screen.findAllByRole('button', { name: /create branch from this version/i })).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('button', { name: /open saved version/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /restore saved version/i })).not.toBeInTheDocument();
     expect(window.electronAPI.createCheckpointLoadJob).not.toHaveBeenCalled();
   });
 

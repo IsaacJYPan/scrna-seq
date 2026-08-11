@@ -661,6 +661,8 @@ export const electronAPI = {
   },
   getProjectJob: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}`),
   getProjectJobLogs: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}/logs`),
+  retryProjectJob: async (projectId, jobId) =>
+    req(`/api/projects/${projectId}/jobs/${jobId}/retry`, { method: 'POST', body: '{}' }),
   cancelProjectJob: async (projectId, jobId) =>
     req(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: 'POST' }),
   createDegFindMarkersJob: async (projectId, objectId, params = {}) =>
