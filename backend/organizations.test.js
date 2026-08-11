@@ -306,6 +306,65 @@ describe.skipIf(!CONFIGURED)('project members API', () => {
     expect(list.data.map(m => m.email).sort()).toEqual(['alice@example.com', 'bob@example.com']);
   });
 
+  it('enforces the complete collaborator-route persona matrix', async () => {
+    const { alice, bob, carol, proj } = await setup();
+    const viewer = await createUserWithToken({ email: 'viewer@example.com', displayName: 'Viewer' });
+    const outsider = await createUserWithToken({ email: 'outsider@example.com', displayName: 'Outsider' });
+    expect((await addMember(alice.token, proj.id, bob.user.email, 'admin')).status).toBe(201);
+    expect((await addMember(alice.token, proj.id, carol.user.email, 'analyst')).status).toBe(201);
+    expect((await addMember(alice.token, proj.id, viewer.user.email, 'viewer')).status).toBe(201);
+
+    const personas = [
+      { name: 'owner', actor: alice, read: 200, manage: 200 },
+      { name: 'admin', actor: bob, read: 200, manage: 200 },
+      { name: 'analyst', actor: carol, read: 200, manage: 403 },
+      { name: 'viewer', actor: viewer, read: 200, manage: 403 },
+      { name: 'non-member', actor: outsider, read: 404, manage: 404 },
+    ];
+
+    for (const persona of personas) {
+      const list = await api(server, `/api/projects/${proj.id}/members`, {
+        token: persona.actor.token,
+      });
+      expect(list.status, `${persona.name} GET members`).toBe(persona.read);
+
+      const addTarget = await createUserWithToken({
+        email: `add-${persona.name}@example.com`,
+        displayName: `Add ${persona.name}`,
+      });
+      const add = await addMember(
+        persona.actor.token, proj.id, addTarget.user.email, 'viewer'
+      );
+      expect(add.status, `${persona.name} POST members`).toBe(
+        persona.manage === 200 ? 201 : persona.manage
+      );
+
+      const patchTarget = await createUserWithToken({
+        email: `patch-${persona.name}@example.com`,
+        displayName: `Patch ${persona.name}`,
+      });
+      await addProjectMemberByEmail(
+        proj.id, patchTarget.user.email, 'viewer', { userId: alice.user.id }
+      );
+      const patch = await patchMemberRole(
+        persona.actor.token, proj.id, patchTarget.user.id, 'analyst'
+      );
+      expect(patch.status, `${persona.name} PATCH member`).toBe(persona.manage);
+
+      const removeTarget = await createUserWithToken({
+        email: `remove-${persona.name}@example.com`,
+        displayName: `Remove ${persona.name}`,
+      });
+      await addProjectMemberByEmail(
+        proj.id, removeTarget.user.email, 'viewer', { userId: alice.user.id }
+      );
+      const remove = await removeMember(
+        persona.actor.token, proj.id, removeTarget.user.id
+      );
+      expect(remove.status, `${persona.name} DELETE member`).toBe(persona.manage);
+    }
+  });
+
   it('lets an admin manage members but an analyst cannot', async () => {
     const { alice, bob, carol, proj } = await setup();
     // bob is admin, carol is analyst
