@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Plot from '../components/Plot';
 import { Palette, AlertTriangle, Sun, Moon, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
+import { publicErrorMessage } from '../publicError';
 
 // Removed API constant
 // Dark mode: faithful magma ramp, starting at a dark purple visible against the navy background
@@ -64,7 +65,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       setGene(target);
       setGeneInput(target);
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e, 'The feature plot could not be prepared. Please try again.'));
     }
     setLoading(false);
   };

@@ -47,7 +47,7 @@ async function main(options = {}) {
   };
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, stop);
   process.on('message', (message) => {
-    if (message && message.type === 'benchone:shutdown') void stop();
+    if (message && message.type === 'traceomics:shutdown') void stop();
   });
   return { runtime, stop };
 }

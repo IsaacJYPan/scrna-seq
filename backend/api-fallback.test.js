@@ -53,7 +53,7 @@ describe.skipIf(!CONFIGURED)('API fallback routing', () => {
 });
 
 describe.skipIf(!CONFIGURED)('runtime diagnostics route', () => {
-  it('reports server-detected Rscript metadata and the R 4.5.x target without hardcoded R 4.5.1', async () => {
+  it('reports a sanitized runtime projection without local executable or package details', async () => {
     const { token } = await createUserWithToken({ email: 'diagnostics@example.com' });
     const originalRscriptPath = process.env.RSCRIPT_PATH;
     const originalRscript = process.env.RSCRIPT;
@@ -68,9 +68,9 @@ describe.skipIf(!CONFIGURED)('runtime diagnostics route', () => {
 
       expect(res.status).toBe(200);
       expect(body.supportedTarget).toBe('R 4.5.x');
-      expect(body.rscript.path).toBe('Rscript');
-      expect(body.rscript.path).not.toMatch(/R-4\.5\.1/i);
       expect(body.runtime).toHaveProperty('status');
+      expect(body).not.toHaveProperty('rscript');
+      expect(body).not.toHaveProperty('packages');
     } finally {
       if (originalRscriptPath === undefined) delete process.env.RSCRIPT_PATH;
       else process.env.RSCRIPT_PATH = originalRscriptPath;

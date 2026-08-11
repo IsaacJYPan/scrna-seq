@@ -17,10 +17,10 @@ services:
         const nonce=String(req.headers['x-storage-probe-nonce']||'').toLowerCase();
         let shared=false;
         if(/^[0-9a-f]{32}$/.test(nonce)){try{
-        const probe=path.join(process.env.STORAGE_ROOT,'.benchone-worker-storage-probe-'+nonce);
+        const probe=path.join(process.env.STORAGE_ROOT,'.traceomics-worker-storage-probe-'+nonce);
         const stat=fs.lstatSync(probe);
         shared=stat.isFile()&&!stat.isSymbolicLink()&&
-        fs.readFileSync(probe,'utf8')==='benchone-shared-storage-v1\n';
+        fs.readFileSync(probe,'utf8')==='traceomics-shared-storage-v1\n';
         }catch{shared=false;}}
         if(!shared)res.statusCode=503;
         res.end(JSON.stringify({status:shared?'ok':'not_ready',storage_shared:shared,

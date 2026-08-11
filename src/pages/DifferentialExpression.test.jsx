@@ -111,7 +111,7 @@ describe('DifferentialExpression durable worker UI', () => {
   it('launches a durable DEG job instead of the legacy live-R endpoint', async () => {
     renderDeg();
 
-    fireEvent.click(screen.getByRole('button', { name: /Launch Durable DEG Job/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Run marker analysis/i }));
 
     await waitFor(() => {
       expect(window.electronAPI.createDegFindMarkersJob).toHaveBeenCalledTimes(1);
@@ -137,19 +137,21 @@ describe('DifferentialExpression durable worker UI', () => {
 
     expect(await screen.findByText('CD3D')).toBeInTheDocument();
     expect(screen.getByText(/summary available/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_summary/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_markers/i)).toBeInTheDocument();
+    expect(screen.getByText(/A saved summary is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/private marker table is available/i)).toBeInTheDocument();
+    expect(screen.queryByText(/art_summary|art_markers/i)).not.toBeInTheDocument();
   });
 
   it('does not render internal storage, state, or raw marker fields from public metadata', async () => {
     const { container } = renderDeg();
 
-    fireEvent.click(screen.getByRole('button', { name: /Launch Durable DEG Job/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Run marker analysis/i }));
     await screen.findByText('CD3D');
 
     const text = container.textContent || '';
     expect(text).not.toMatch(/vault\/private/i);
     expect(text).not.toMatch(/storage_uri/i);
+    expect(text).not.toMatch(/art_summary|art_markers|job_abc123/i);
     expect(text).not.toMatch(/storageKey/i);
     expect(text).not.toMatch(/state_key/i);
     expect(text).not.toMatch(/user-1:obj/i);
@@ -161,8 +163,8 @@ describe('DifferentialExpression durable worker UI', () => {
       objectId: 'legacy-object',
     });
 
-    expect(screen.getByRole('button', { name: /Launch Durable DEG Job/i })).toBeDisabled();
-    expect(screen.getByText(/Select a DB-backed analysis object/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
+    expect(screen.getByText(/Select a saved analysis before running marker analysis/i)).toBeInTheDocument();
   });
 
   it('does not queue DEG when the selected private R object is not attached', () => {
@@ -170,8 +172,8 @@ describe('DifferentialExpression durable worker UI', () => {
       datasetInfo: { id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'unknown' },
     });
 
-    expect(screen.getByRole('button', { name: /Launch Durable DEG Job/i })).toBeDisabled();
-    expect(screen.getByText(/not attached to the private R session/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
+    expect(screen.getByText(/not open in your private analysis workspace/i)).toBeInTheDocument();
     expect(window.electronAPI.createDegFindMarkersJob).not.toHaveBeenCalled();
   });
 });

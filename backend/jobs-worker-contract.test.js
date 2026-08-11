@@ -220,6 +220,50 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
     expect(next.id).not.toBe(live.id);
   });
 
+  it('admits two distinct live claims when the bounded pool size is two', async () => {
+    const jobs = [
+      await newJob(alice, 'generic'),
+      await newJob(alice, 'generic'),
+      await newJob(alice, 'generic'),
+    ];
+    const claims = await Promise.all([
+      claimNextJob('pool-1:worker-A', {
+        now: T0, leaseSeconds: 30, maxConcurrentClaims: 2,
+      }),
+      claimNextJob('pool-2:worker-B', {
+        now: T0, leaseSeconds: 30, maxConcurrentClaims: 2,
+      }),
+    ]);
+
+    expect(claims.every(Boolean)).toBe(true);
+    expect(new Set(claims.map((claim) => claim.id)).size).toBe(2);
+    expect(claims.every((claim) => jobs.some((job) => job.id === claim.id))).toBe(true);
+    await expect(claimNextJob('pool-3:worker-C', {
+      now: T0_PLUS_10, leaseSeconds: 30, maxConcurrentClaims: 2,
+    })).resolves.toBeNull();
+
+    await completeJobByWorker(
+      claims[0].id,
+      claims[0].workerId,
+      claims[0].claimToken,
+      { now: T0_PLUS_10 }
+    );
+    const third = await claimNextJob('pool-1:worker-D', {
+      now: T0_PLUS_20, leaseSeconds: 30, maxConcurrentClaims: 2,
+    });
+    expect(third).not.toBeNull();
+    expect(jobs.map((job) => job.id)).toContain(third.id);
+    expect(claims.map((claim) => claim.id)).not.toContain(third.id);
+  });
+
+  it('rejects invalid bounded-pool claim limits', async () => {
+    await newJob(alice, 'generic');
+    for (const maxConcurrentClaims of [0, 9, 1.5, 'invalid']) {
+      await expect(claimNextJob('pool-invalid', { now: T0, maxConcurrentClaims }))
+        .rejects.toMatchObject({ code: 'INVALID_WORKER_POOL_SIZE' });
+    }
+  });
+
   it('applies a capability filter atomically without consuming an incompatible job', async () => {
     const incompatible = await newJob(alice, 'pca');
     await setJobScheduling(incompatible.id, { createdAt: '2029-12-31 23:59:58' });
@@ -696,6 +740,8 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — claim / lease / heartbeat
     expect(done.completedAt).toBe(T0_PLUS_10);
     expect(done.claimToken).toBeNull();
     expect(done.leaseExpiresAt).toBeNull();
+    expect(done.error).toBeNull();
+    expect(done.lastWorkerError).toBeNull();
     expect(done.logs.some(l => l.message === 'finished')).toBe(true);
     // A second completion is rejected (claim already cleared → not running/held).
     await expect(completeJobByWorker(c.id, 'w1', c.claimToken, { now: T0_PLUS_20 })).rejects.toThrow(/no longer holds/i);

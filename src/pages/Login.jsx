@@ -12,6 +12,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [registrationEnabled, setRegistrationEnabled] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -20,6 +21,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
         if (!active) return;
         const enabled = policy?.registrationEnabled === true;
         setRegistrationEnabled(enabled);
+        setDemoMode(policy?.demoMode === true);
         if (!enabled) setMode('login');
       })
       .catch(() => {
@@ -88,6 +90,18 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
     }
   };
 
+  const startDemo = async () => {
+    setLoading(true);
+    setError('');
+    const result = await auth.startDemoGuest();
+    if (result?.error) {
+      setError(result.error);
+      setLoading(false);
+      return;
+    }
+    onLogin(result);
+  };
+
   const inputBase =
     'w-full rounded-xl border bg-background py-3 pl-11 pr-4 text-sm text-text placeholder:text-textMuted/60 focus:outline-none focus:ring-2 focus:ring-primary/25 transition-colors';
   const tabBase =
@@ -112,7 +126,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 border border-primary/20 mb-4">
             <Microscope size={30} className="text-primary" />
           </div>
-          <h1 className="text-2xl font-bold text-text tracking-tight">BenchOne</h1>
+          <h1 className="text-2xl font-bold text-text tracking-tight">TraceOmics</h1>
           <p className="text-textMuted text-sm mt-1.5">Reproducible Single-Cell Analysis Workbench</p>
         </div>
 
@@ -134,10 +148,24 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
               </button>
           </div>}
 
-          {!registrationEnabled && (
+          {!registrationEnabled && !demoMode && (
             <p className="mb-5 text-center text-xs text-textMuted">
               Accounts are provisioned by your deployment administrator.
             </p>
+          )}
+
+          {demoMode && (
+            <div className="mb-5 rounded-xl border border-primary/25 bg-primary/5 p-4 text-center">
+              <p className="text-xs text-textMuted">Explore a curated, temporary single-cell project. Uploads and Expert R are disabled.</p>
+              <button
+                type="button"
+                onClick={startDemo}
+                disabled={loading}
+                className="btn btn-primary mt-3 w-full"
+              >
+                {loading ? 'Preparing curated workspace…' : 'Start temporary demo'}
+              </button>
+            </div>
           )}
 
           {notice && (

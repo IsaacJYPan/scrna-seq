@@ -88,11 +88,11 @@ function writeEnvironment(file, port, credentials, backupDirectory) {
     `SESSION_EPOCH=${credentials.sessionEpoch}`,
     `R_API_TOKEN=${credentials.rToken}`,
     `POSTGRES_PASSWORD=${credentials.databasePassword}`,
-    'POSTGRES_USER=benchone',
-    'POSTGRES_DB=benchone',
-    'APP_IMAGE=scrna-seq-workbench:ci',
-    'OPS_IMAGE=scrna-seq-operations:ci',
-    'R_IMAGE=scrna-seq-workbench:ci',
+    'POSTGRES_USER=traceomics',
+    'POSTGRES_DB=traceomics',
+    'APP_IMAGE=traceomics:ci',
+    'OPS_IMAGE=traceomics-operations:ci',
+    'R_IMAGE=traceomics:ci',
     'NAMESPACE_IMAGE=alpine:3.21',
     'POSTGRES_IMAGE=postgres:16-alpine',
     `BACKUP_HOST_PATH=${portableBackupRoot}`,
@@ -173,7 +173,7 @@ function printDiagnostics(project, envFile) {
 }
 
 async function main() {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'benchone-compose-drill-'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-compose-drill-'));
   const backupRoot = path.join(tempRoot, 'backups');
   const sourceEnv = path.join(tempRoot, 'source.env');
   const targetEnv = path.join(tempRoot, 'target.env');

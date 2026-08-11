@@ -38,12 +38,15 @@ function runtimeConfig(overrides = {}) {
     pollIntervalMs: 5,
     leaseSeconds: 30,
     concurrency: 1,
+    poolSize: 3,
+    poolSlot: 1,
     minFreeMemoryMb: 1,
     drainTimeoutMs: 1000,
     startupTimeoutMs: 20,
     startupRetryMs: 1,
     healthHost: '127.0.0.1',
     healthPort: 0,
+    reportReadiness: true,
     allowedJobTypes: null,
     ...overrides,
   };
@@ -171,10 +174,10 @@ describe('standalone worker readiness and drain lifecycle', () => {
     const { runtime } = makeRuntime({ db });
 
     await runtime.start();
-    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenCalledWith('ready');
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenCalledWith('ready', { slot: 1 });
 
     await runtime.shutdown();
-    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenLastCalledWith('draining');
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenLastCalledWith('draining', { slot: 1 });
   });
 
   it('fails closed and never constructs a worker when R readiness misses the startup deadline', async () => {

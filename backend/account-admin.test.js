@@ -124,12 +124,22 @@ describe.skipIf(!CONFIGURED)('operator account lifecycle', () => {
     const user = await db.provisionUserByOperator('developer@example.com', 'developer-password', 'Developer');
     const granted = await db.setPipelineRegistryPublisherByEmail(user.email, true);
     const revoked = await db.setPipelineRegistryPublisherByEmail(user.email, false);
+    const expertGranted = await db.setExpertRExecutorByEmail(user.email, true);
+    const expertRevoked = await db.setExpertRExecutorByEmail(user.email, false);
     expect(granted).toEqual(expect.objectContaining({
       canPublishPipelineManifests: true,
       auditEventId: expect.any(String),
     }));
     expect(revoked).toEqual(expect.objectContaining({
       canPublishPipelineManifests: false,
+      auditEventId: expect.any(String),
+    }));
+    expect(expertGranted).toEqual(expect.objectContaining({
+      canExecuteExpertR: true,
+      auditEventId: expect.any(String),
+    }));
+    expect(expertRevoked).toEqual(expect.objectContaining({
+      canExecuteExpertR: false,
       auditEventId: expect.any(String),
     }));
     const audit = await db.query(
@@ -143,8 +153,11 @@ describe.skipIf(!CONFIGURED)('operator account lifecycle', () => {
       'account.provisioned',
       'platform_capability_granted',
       'platform_capability_revoked',
+      'platform_capability_granted',
+      'platform_capability_revoked',
     ]);
     expect(JSON.parse(audit.rows[1].metadata_json)).toEqual({ capability: 'pipeline_registry.publish' });
+    expect(JSON.parse(audit.rows[3].metadata_json)).toEqual({ capability: 'expert_r.execute' });
   });
 
   it('lets a provisioned owner create a project and add another provisioned account', async () => {

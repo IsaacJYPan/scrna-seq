@@ -176,6 +176,7 @@ async function main() {
     }));
     await page.route('**/api/auth/session*', route => fulfill(route, { user, authVia: 'cookie' }));
     await page.route('**/api/pipeline-registry/capabilities*', route => fulfill(route, { canPublishPipelineManifests: false }));
+    await page.route('**/api/expert-r/capabilities*', route => fulfill(route, { expertREnabled: false, expertRProfile: null }));
     await page.route('**/api/organizations**', route => fulfill(route, [organization]));
     await page.route('**/api/db/**', route => fulfill(route, []));
     await page.route('**/session-id*', route => fulfill(route, { sessionId: 'cellchat-browser-session' }));

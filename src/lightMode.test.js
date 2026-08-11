@@ -9,9 +9,9 @@ describe('light-mode-first styling', () => {
   it('keeps light tokens as the default and dark tokens behind data-theme="dark"', () => {
     const css = readFileSync(join(here, 'App.css'), 'utf8');
 
-    expect(css).toMatch(/--color-background:\s*#f6f8fb/);
-    expect(css).toMatch(/--color-surfaceRaised:\s*#f1f5f9/);
-    expect(css).toMatch(/--color-text:\s*#111827/);
+    expect(css).toMatch(/--color-background:\s*#f5f5f7/);
+    expect(css).toMatch(/--color-surfaceRaised:\s*#ffffff/);
+    expect(css).toMatch(/--color-text:\s*#1d1d1f/);
     expect(css).toMatch(/:root\[data-theme="dark"\]/);
     expect(css).toMatch(/:root:not\(\[data-theme="dark"\]\) input/);
     expect(css).toMatch(/:root:not\(\[data-theme="dark"\]\) \.bg-slate-900/);

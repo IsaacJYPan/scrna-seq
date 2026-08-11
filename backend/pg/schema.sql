@@ -25,10 +25,16 @@ CREATE TABLE IF NOT EXISTS users (
   salt          TEXT NOT NULL,
   display_name  TEXT NOT NULL,
   session_version BIGINT NOT NULL DEFAULT 1,
+  is_demo_guest BOOLEAN NOT NULL DEFAULT FALSE,
+  expires_at TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS session_version BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_demo_guest BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_users_demo_expiry
+  ON users(expires_at) WHERE is_demo_guest = TRUE;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
 -- Append-only operator actions that do not have an authenticated browser actor.
@@ -182,6 +188,25 @@ CREATE INDEX IF NOT EXISTS idx_datasets_validation_status ON datasets(validation
 CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
 CREATE INDEX IF NOT EXISTS idx_datasets_sha256 ON datasets(sha256);
 
+-- Creator-private files explicitly imported for Expert R. These are not
+-- datasets or public job artifacts: only the owning approved researcher may
+-- list or select them, and workers resolve storage coordinates server-side.
+CREATE TABLE IF NOT EXISTS expert_r_private_inputs (
+  id                   TEXT PRIMARY KEY,
+  project_id           TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id        BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  original_filename    TEXT NOT NULL,
+  internal_storage_key TEXT NOT NULL UNIQUE,
+  mime_type            TEXT NOT NULL,
+  file_size_bytes      BIGINT NOT NULL,
+  sha256               TEXT NOT NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT expert_r_private_input_size CHECK (file_size_bytes >= 0),
+  CONSTRAINT expert_r_private_input_sha CHECK (sha256 ~ '^[0-9a-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS idx_expert_r_private_inputs_owner
+  ON expert_r_private_inputs(project_id, owner_user_id, created_at DESC);
+
 -- Pipeline definitions and user-project active selection. Trusted platform
 -- definitions use project_id NULL + visibility 'platform'; older project/user
 -- rows remain stored but are quarantined from selection. Manifests are
@@ -245,6 +270,97 @@ CREATE INDEX IF NOT EXISTS idx_ao_project_parent ON analysis_objects(project_id,
 CREATE INDEX IF NOT EXISTS idx_ao_project_lineage_root ON analysis_objects(project_id, lineage_root_id);
 CREATE INDEX IF NOT EXISTS idx_ao_project_owner ON analysis_objects(project_id, owner_user_id);
 
+-- Explicit experimental-design metadata. Nothing is inferred from filenames or
+-- client-provided R state. Spatial identity fields are modeled for future use;
+-- this does not claim spatial compute support.
+CREATE TABLE IF NOT EXISTS study_conditions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_study_conditions_project_name
+  ON study_conditions(project_id, lower(name));
+
+CREATE TABLE IF NOT EXISTS biological_samples (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  dataset_id TEXT REFERENCES datasets(id),
+  condition_id TEXT NOT NULL REFERENCES study_conditions(id),
+  name TEXT NOT NULL,
+  donor_code TEXT,
+  batch TEXT,
+  replicate_label TEXT,
+  modality TEXT NOT NULL DEFAULT 'scrna' CHECK (modality IN ('scrna', 'spatial')),
+  organism TEXT,
+  tissue TEXT,
+  platform TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_biological_samples_project_name
+  ON biological_samples(project_id, lower(name));
+CREATE INDEX IF NOT EXISTS idx_biological_samples_condition ON biological_samples(condition_id);
+CREATE INDEX IF NOT EXISTS idx_biological_samples_dataset ON biological_samples(dataset_id);
+
+CREATE TABLE IF NOT EXISTS analysis_object_sample_bindings (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id),
+  sample_id TEXT NOT NULL REFERENCES biological_samples(id),
+  cell_metadata_column TEXT NOT NULL,
+  cell_metadata_value TEXT NOT NULL,
+  created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (analysis_object_id, sample_id),
+  UNIQUE (analysis_object_id, cell_metadata_column, cell_metadata_value)
+);
+CREATE INDEX IF NOT EXISTS idx_sample_bindings_object ON analysis_object_sample_bindings(analysis_object_id);
+CREATE INDEX IF NOT EXISTS idx_sample_bindings_sample ON analysis_object_sample_bindings(sample_id);
+
+-- A contrast snapshots its eligible sample set at creation so later sample
+-- registration cannot silently change an already-reviewed design.
+CREATE TABLE IF NOT EXISTS condition_contrasts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id),
+  name TEXT NOT NULL,
+  numerator_condition_id TEXT NOT NULL REFERENCES study_conditions(id),
+  denominator_condition_id TEXT NOT NULL REFERENCES study_conditions(id),
+  unit_of_replication TEXT NOT NULL CHECK (unit_of_replication IN ('sample', 'donor')),
+  paired BOOLEAN NOT NULL DEFAULT FALSE,
+  cell_type_column TEXT NOT NULL DEFAULT 'seurat_clusters',
+  blocking_factor TEXT,
+  covariates_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL CHECK (status IN ('valid', 'warning', 'invalid')),
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (numerator_condition_id <> denominator_condition_id)
+);
+ALTER TABLE condition_contrasts
+  ADD COLUMN IF NOT EXISTS cell_type_column TEXT NOT NULL DEFAULT 'seurat_clusters';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_condition_contrasts_project_name
+  ON condition_contrasts(project_id, lower(name));
+CREATE INDEX IF NOT EXISTS idx_condition_contrasts_object ON condition_contrasts(analysis_object_id);
+
+CREATE TABLE IF NOT EXISTS condition_contrast_samples (
+  contrast_id TEXT NOT NULL REFERENCES condition_contrasts(id) ON DELETE CASCADE,
+  sample_id TEXT NOT NULL REFERENCES biological_samples(id),
+  condition_id TEXT NOT NULL REFERENCES study_conditions(id),
+  donor_code TEXT,
+  cell_metadata_column TEXT NOT NULL,
+  cell_metadata_value TEXT NOT NULL,
+  PRIMARY KEY (contrast_id, sample_id)
+);
+ALTER TABLE condition_contrast_samples ADD COLUMN IF NOT EXISTS cell_metadata_column TEXT;
+ALTER TABLE condition_contrast_samples ADD COLUMN IF NOT EXISTS cell_metadata_value TEXT;
+CREATE INDEX IF NOT EXISTS idx_contrast_samples_condition
+  ON condition_contrast_samples(contrast_id, condition_id);
+
 -- ── Jobs (durable, ownership-scoped; state machine + worker coordination) ────
 CREATE TABLE IF NOT EXISTS jobs (
   id                        TEXT PRIMARY KEY,
@@ -288,11 +404,60 @@ CREATE INDEX IF NOT EXISTS idx_jobs_project_analysis_object ON jobs(project_id, 
 CREATE INDEX IF NOT EXISTS idx_jobs_project_result_object ON jobs(project_id, result_analysis_object_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
 
+-- Expert R source is needed only while a request can still execute. Once the
+-- job reaches a terminal state, retain the selected profile and source hash for
+-- provenance but remove the source itself from durable job metadata. Keeping
+-- this invariant in Postgres covers completion, cancellation, failure, lease
+-- exhaustion, and operator/access-revocation paths uniformly.
+CREATE OR REPLACE FUNCTION redact_terminal_expert_r_parameters()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  params JSONB;
+BEGIN
+  IF NEW.job_type = 'expert.r.v1'
+     AND NEW.status IN ('completed', 'failed', 'canceled') THEN
+    BEGIN
+      params := COALESCE(NULLIF(NEW.parameters_json, ''), '{}')::jsonb;
+    EXCEPTION WHEN OTHERS THEN
+      params := '{}'::jsonb;
+    END;
+    NEW.parameters_json := jsonb_strip_nulls(jsonb_build_object(
+      'profileId', params ->> 'profileId',
+      'inputIds', COALESCE(params -> 'inputIds', '[]'::jsonb),
+      'scriptSha256', params ->> 'scriptSha256'
+    ))::text;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_jobs_redact_terminal_expert_r_parameters ON jobs;
+CREATE TRIGGER trg_jobs_redact_terminal_expert_r_parameters
+  BEFORE INSERT OR UPDATE OF status, parameters_json ON jobs
+  FOR EACH ROW EXECUTE FUNCTION redact_terminal_expert_r_parameters();
+
+-- Apply the policy to terminal rows created before this trigger existed.
+UPDATE jobs
+   SET parameters_json = parameters_json
+ WHERE job_type = 'expert.r.v1'
+   AND status IN ('completed', 'failed', 'canceled')
+   AND parameters_json LIKE '%"script"%';
+
 -- Singleton heartbeat published only by the standalone worker. It lets the web
 -- process present a truthful compute state without proxying the worker health
 -- port or exposing worker identity, topology, paths, or R credentials.
 CREATE TABLE IF NOT EXISTS worker_runtime_status (
   singleton   BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  state       TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Per-slot heartbeats for the bounded isolated compute pool. The legacy
+-- singleton row is retained for additive upgrades, but current workers publish
+-- here so one draining slot cannot hide another healthy slot.
+CREATE TABLE IF NOT EXISTS worker_pool_runtime_status (
+  slot        SMALLINT PRIMARY KEY CHECK (slot BETWEEN 1 AND 8),
   state       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -362,3 +527,119 @@ CREATE INDEX IF NOT EXISTS idx_aoe_project_job ON analysis_object_edges(project_
 CREATE UNIQUE INDEX IF NOT EXISTS idx_aoe_unique ON analysis_object_edges(
   parent_analysis_object_id, child_analysis_object_id, COALESCE(job_id, ''), parent_role, edge_type
 );
+
+-- Git-like project work references. Analysis objects and checkpoints remain
+-- immutable; a branch is only a named, optimistic-lock-protected pointer to one
+-- owned object in that immutable lineage. Private branches are visible only to
+-- their owner until explicitly shared for review.
+CREATE TABLE IF NOT EXISTS analysis_branches (
+  id                      TEXT PRIMARY KEY,
+  project_id              TEXT NOT NULL REFERENCES projects(id),
+  owner_user_id           BIGINT NOT NULL REFERENCES users(id),
+  name                    TEXT NOT NULL,
+  description             TEXT NOT NULL DEFAULT '',
+  visibility              TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'project')),
+  status                  TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  base_analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id),
+  head_analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id),
+  version                 INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_by_user_id      BIGINT NOT NULL REFERENCES users(id),
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_branches_project ON analysis_branches(project_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_branches_owner ON analysis_branches(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_branches_head ON analysis_branches(head_analysis_object_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_branches_owner_name
+  ON analysis_branches(project_id, owner_user_id, lower(name));
+
+CREATE TABLE IF NOT EXISTS analysis_branch_events (
+  id                      TEXT PRIMARY KEY,
+  project_id              TEXT NOT NULL REFERENCES projects(id),
+  branch_id               TEXT NOT NULL REFERENCES analysis_branches(id),
+  actor_user_id           BIGINT NOT NULL REFERENCES users(id),
+  event_type              TEXT NOT NULL,
+  from_analysis_object_id TEXT REFERENCES analysis_objects(id),
+  to_analysis_object_id   TEXT REFERENCES analysis_objects(id),
+  metadata_json           TEXT NOT NULL DEFAULT '{}',
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_branch_events_branch ON analysis_branch_events(branch_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_branch_events_project ON analysis_branch_events(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS analysis_branch_reviews (
+  id                      TEXT PRIMARY KEY,
+  project_id              TEXT NOT NULL REFERENCES projects(id),
+  branch_id               TEXT NOT NULL REFERENCES analysis_branches(id),
+  head_analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id),
+  requested_by_user_id    BIGINT NOT NULL REFERENCES users(id),
+  title                   TEXT NOT NULL,
+  summary                 TEXT NOT NULL DEFAULT '',
+  status                  TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'approved', 'changes_requested', 'closed')),
+  decided_by_user_id      BIGINT REFERENCES users(id),
+  decision_note           TEXT,
+  decided_at              TIMESTAMPTZ,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_branch_reviews_project ON analysis_branch_reviews(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_branch_reviews_branch ON analysis_branch_reviews(branch_id, created_at);
+
+CREATE TABLE IF NOT EXISTS analysis_branch_review_comments (
+  id              TEXT PRIMARY KEY,
+  project_id      TEXT NOT NULL REFERENCES projects(id),
+  review_id       TEXT NOT NULL REFERENCES analysis_branch_reviews(id),
+  author_user_id  BIGINT NOT NULL REFERENCES users(id),
+  body            TEXT NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_branch_review_comments
+  ON analysis_branch_review_comments(review_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS project_canonical_analyses (
+  project_id              TEXT PRIMARY KEY REFERENCES projects(id),
+  analysis_object_id      TEXT NOT NULL REFERENCES analysis_objects(id),
+  source_branch_id        TEXT NOT NULL REFERENCES analysis_branches(id),
+  source_review_id        TEXT NOT NULL REFERENCES analysis_branch_reviews(id),
+  promoted_by_user_id     BIGINT NOT NULL REFERENCES users(id),
+  version                 INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  promoted_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_canonical_object ON project_canonical_analyses(analysis_object_id);
+
+-- Append-only, project-scoped security and collaboration audit stream. Public
+-- responses use a bounded projection and never include storage locations,
+-- scripts, request bodies, credentials, or R state identifiers.
+CREATE TABLE IF NOT EXISTS project_audit_events (
+  id              TEXT PRIMARY KEY,
+  project_id      TEXT NOT NULL REFERENCES projects(id),
+  actor_user_id   BIGINT NOT NULL REFERENCES users(id),
+  action          TEXT NOT NULL,
+  target_type     TEXT NOT NULL,
+  target_id       TEXT,
+  details_json    TEXT NOT NULL DEFAULT '{}',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_audit_project_created
+  ON project_audit_events(project_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_project_audit_actor
+  ON project_audit_events(project_id, actor_user_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION reject_project_audit_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'project audit events are append-only' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_project_audit_no_update ON project_audit_events;
+CREATE TRIGGER trg_project_audit_no_update
+  BEFORE UPDATE ON project_audit_events
+  FOR EACH ROW EXECUTE FUNCTION reject_project_audit_mutation();
+DROP TRIGGER IF EXISTS trg_project_audit_no_delete ON project_audit_events;
+CREATE TRIGGER trg_project_audit_no_delete
+  BEFORE DELETE ON project_audit_events
+  FOR EACH ROW EXECUTE FUNCTION reject_project_audit_mutation();

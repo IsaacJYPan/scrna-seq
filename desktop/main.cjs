@@ -44,7 +44,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 720,
     backgroundColor: '#f5f5f7',
-    title: 'BenchOne',
+    title: 'TraceOmics',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -78,7 +78,7 @@ async function openServer(value) {
 function installMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
-      label: 'BenchOne',
+      label: 'TraceOmics',
       submenu: [
         { label: 'Server Connection…', click: () => showSetup() },
         { type: 'separator' },
@@ -102,7 +102,7 @@ app.whenReady().then(async () => {
 
   createWindow();
   installMenu();
-  const configuredUrl = process.env.BENCHONE_DESKTOP_URL || await readSavedServerUrl();
+  const configuredUrl = process.env.TRACEOMICS_DESKTOP_URL || await readSavedServerUrl();
   if (configuredUrl) {
     try {
       await openServer(configuredUrl);

@@ -34,8 +34,18 @@ describe('ProjectHistory', () => {
         claim_token: 'secret-claim-token-snake',
         error: {
           code: 'R_RUNTIME_ERROR',
-          message: 'sanitized job error',
+          message: 'Traceback at C:\\private\\stack.R for https://worker.internal/api/job_unsafe_1',
           stack: 'Error: raw R stack trace text at vault/private/stack.R:42',
+        },
+      }, {
+        id: 'job_expert_safe_1',
+        status: 'failed',
+        jobType: 'expert.r.v1',
+        analysisObjectId: 'ao_abc123',
+        createdAt: '2026-06-30T00:01:00.000Z',
+        error: {
+          code: 'HANDLER_ERROR',
+          message: 'The R script referenced an object or function that is not available.',
         },
       }]),
       listProjectArtifacts: vi.fn(async () => [{
@@ -55,7 +65,7 @@ describe('ProjectHistory', () => {
       }]),
       listProjectProvenance: vi.fn(async () => [{
         id: 'prov_safe_1',
-        operation: 'normalize',
+        operation: 'deg.find_markers.v1',
         analysisObjectId: 'ao_result123',
         jobId: 'job_safe_1',
         createdAt: '2026-06-30T00:02:00.000Z',
@@ -122,20 +132,21 @@ describe('ProjectHistory', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders read-only project history without leaking private storage or live-R state fields', async () => {
+  it('renders researcher-safe history without leaking private runtime details', async () => {
     const { container } = render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
 
-    expect(screen.getByText('Jobs & Artifacts')).toBeInTheDocument();
-    expect(screen.getByText(/durable metadata/i)).toBeInTheDocument();
-    expect(screen.getByText(/no public download/i)).toBeInTheDocument();
-    expect(screen.getByText(/private live forks/i)).toBeInTheDocument();
+    expect(screen.getByText('Runs & Results')).toBeInTheDocument();
+    expect(screen.getAllByText(/analysis history/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/reviewed exports/i)).toBeInTheDocument();
+    expect(screen.getByText(/private workspaces/i)).toBeInTheDocument();
 
-    expect((await screen.findAllByText('job_safe_1')).length).toBeGreaterThan(0);
-    expect(screen.getByText('artifact_safe_1')).toBeInTheDocument();
-    expect(screen.getByText('prov_safe_1')).toBeInTheDocument();
-    expect(screen.getByText('fig_safe_1')).toBeInTheDocument();
+    expect(await screen.findByText('PBMC preprocessing')).toBeInTheDocument();
+    expect(screen.getByText('Saved version')).toBeInTheDocument();
+    expect(screen.getByText('Cluster marker analysis')).toBeInTheDocument();
+    expect(screen.getByText('This analysis needs attention. Review the settings and try again.')).toBeInTheDocument();
+    expect(screen.getByText('The R script referenced an object or function that is not available.')).toBeInTheDocument();
     expect(screen.getByText('UMAP overview')).toBeInTheDocument();
-    expect(screen.getByText(/ao_abc123 -> ao_result123/i)).toBeInTheDocument();
+    expect(screen.getByText(/Source analysis → derived analysis/i)).toBeInTheDocument();
 
     await waitFor(() => {
       expect(window.electronAPI.listProjectJobs).toHaveBeenCalledWith('proj_1');
@@ -165,6 +176,48 @@ describe('ProjectHistory', () => {
     expect(text).not.toMatch(/raw R stack trace text/i);
     expect(text).not.toMatch(/traceback/i);
     expect(text).not.toMatch(/object-hash-secret/i);
+    expect(text).not.toMatch(/job_safe_1|artifact_safe_1|prov_safe_1|fig_safe_1/i);
+    expect(text).not.toMatch(/ao_abc123|ao_result123|pbmc\.pipeline\.v1|deg\.find_markers\.v1|local_internal|\bseurat\b/i);
+    expect(text).not.toMatch(/C:\\private\\stack\.R|worker\.internal|job_unsafe_1/i);
+  });
+
+  it('refreshes Runs & Results when an analysis is submitted elsewhere in the workbench', async () => {
+    const props = { currentWs, datasetInfo: { id: 'ao_abc123', projectId: 'proj_1' } };
+    const { rerender } = render(<ProjectHistory {...props} historyRefreshToken={0} />);
+
+    await waitFor(() => expect(window.electronAPI.listProjectJobs).toHaveBeenCalledTimes(1));
+    rerender(<ProjectHistory {...props} historyRefreshToken={1} />);
+    await waitFor(() => expect(window.electronAPI.listProjectJobs).toHaveBeenCalledTimes(2));
+  });
+
+  it('distinguishes repeated R analysis outputs by their saved analysis and recorded time', async () => {
+    window.electronAPI.listProjectJobs.mockResolvedValueOnce([{
+      id: 'job_r_one', jobType: 'expert.r.v1', analysisObjectId: 'ao_abc123', status: 'completed', createdAt: '2026-06-30T00:00:00.000Z',
+    }, {
+      id: 'job_r_two', jobType: 'expert.r.v1', analysisObjectId: 'ao_abc123', status: 'completed', createdAt: '2026-07-01T00:00:00.000Z',
+    }]);
+    window.electronAPI.listProjectArtifacts.mockResolvedValueOnce([{
+      id: 'artifact_r_one', artifactType: 'expert_r_bundle', status: 'available', storageKind: 'local_internal', jobId: 'job_r_one', createdAt: '2026-06-30T00:01:00.000Z',
+    }, {
+      id: 'artifact_r_two', artifactType: 'expert_r_bundle', status: 'available', storageKind: 'local_internal', jobId: 'job_r_two', createdAt: '2026-07-01T00:01:00.000Z',
+    }]);
+
+    render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
+
+    expect(await screen.findAllByText('R analysis output')).toHaveLength(2);
+    expect(screen.getAllByText('From PBMC 3k')).toHaveLength(2);
+    expect(screen.getAllByText(/Recorded:/)).toHaveLength(2);
+  });
+
+  it('uses a generic history error when a response contains private runtime details', async () => {
+    window.electronAPI.listProjectJobs.mockRejectedValueOnce(new Error(JSON.stringify({
+      error: 'Traceback at C:\\private\\history.R from https://worker.internal/api/job_unsafe_2',
+    })));
+    const { container } = render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
+
+    expect(await screen.findByText('Failed to load Runs & Results.')).toBeInTheDocument();
+    const text = container.textContent || '';
+    expect(text).not.toMatch(/C:\\private\\history\.R|worker\.internal|job_unsafe_2/i);
   });
 
   it('creates a private checkpoint fork and opens the new lineage child', async () => {
@@ -179,24 +232,24 @@ describe('ProjectHistory', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: /fork checkpoint/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /create branch from this version/i }));
     await waitFor(() => {
       expect(window.electronAPI.createCheckpointForkJob).toHaveBeenCalledWith('proj_1', 'ao_result123');
     });
 
-    fireEvent.click(await screen.findByRole('button', { name: /open fork/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /open branch/i }));
     await waitFor(() => {
       expect(onSelectAnalysisObject).toHaveBeenCalledWith('proj_1', 'ao_fork123');
       expect(setActiveTab).toHaveBeenCalledWith('workspace');
     });
-    expect(screen.getByText(/source object and checkpoint remain unchanged/i)).toBeInTheDocument();
+    expect(screen.getByText(/source analysis and saved version remain unchanged/i)).toBeInTheDocument();
   });
 
   it('shows a project-scoped empty state when no project is selected', () => {
     render(<ProjectHistory currentWs={{ ...currentWs, projects: [], selectedProjectId: null }} datasetInfo={null} />);
 
-    expect(screen.getByText(/Select a backend project/i)).toBeInTheDocument();
-    expect(screen.getByText(/scoped to a backend project/i)).toBeInTheDocument();
+    expect(screen.getByText(/Select a project/i)).toBeInTheDocument();
+    expect(screen.getByText(/scoped to a project/i)).toBeInTheDocument();
   });
 
   it('does not load object lineage when no object is selected in the active project', async () => {
@@ -211,7 +264,7 @@ describe('ProjectHistory', () => {
       expect(window.electronAPI.listProjectJobs).toHaveBeenCalledWith('proj_1');
     });
     expect(window.electronAPI.getProjectAnalysisObjectLineage).not.toHaveBeenCalled();
-    expect(screen.getByText(/No selected object/i)).toBeInTheDocument();
+    expect(screen.getByText(/No analysis selected/i)).toBeInTheDocument();
   });
 
   it('keeps checkpoint forks unavailable to project viewers', async () => {
@@ -222,7 +275,7 @@ describe('ProjectHistory', () => {
     render(<ProjectHistory currentWs={viewerWorkspace} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
 
     expect(await screen.findByText(/Writer role required/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /fork checkpoint/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
   });
 
   it('reattaches an owner-owned selected checkpoint only after its durable job completes', async () => {
@@ -258,7 +311,7 @@ describe('ProjectHistory', () => {
       />
     );
 
-    const attachButton = await screen.findByRole('button', { name: /attach saved checkpoint/i });
+    const attachButton = await screen.findByRole('button', { name: /open saved version/i });
     vi.useFakeTimers();
     try {
       await act(async () => {
@@ -266,11 +319,11 @@ describe('ProjectHistory', () => {
         await Promise.resolve();
       });
       expect(window.electronAPI.createCheckpointLoadJob).toHaveBeenCalledWith('proj_1', 'ao_result123');
-      expect(screen.getByRole('status')).toHaveTextContent(/checkpoint attachment queued/i);
+      expect(screen.getByRole('status')).toHaveTextContent(/Opening saved version: Waiting for compute/i);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole('status')).toHaveTextContent(/checkpoint attachment queued/i);
+      expect(screen.getByRole('status')).toHaveTextContent(/Opening saved version: Waiting for compute/i);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(2);
@@ -279,7 +332,7 @@ describe('ProjectHistory', () => {
       });
       expect(refreshAnalysisObjects).toHaveBeenCalledWith('proj_1');
       expect(onLiveObjectAttached).toHaveBeenCalledWith('proj_1', 'ao_result123');
-      expect(screen.getByRole('button', { name: /checkpoint attached/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /saved version opened/i })).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
@@ -305,8 +358,8 @@ describe('ProjectHistory', () => {
       />
     );
 
-    expect(await screen.findByRole('button', { name: /fork saved checkpoint/i })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /attach saved checkpoint/i })).not.toBeInTheDocument();
+    expect((await screen.findAllByRole('button', { name: /create branch from this version/i })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /open saved version/i })).not.toBeInTheDocument();
     expect(window.electronAPI.createCheckpointLoadJob).not.toHaveBeenCalled();
   });
 
@@ -333,18 +386,18 @@ describe('ProjectHistory', () => {
       />
     );
 
-    const forkButton = await screen.findByRole('button', { name: /fork checkpoint/i });
+    const forkButton = await screen.findByRole('button', { name: /create branch from this version/i });
     vi.useFakeTimers();
     try {
       await act(async () => {
         fireEvent.click(forkButton);
         await Promise.resolve();
       });
-      expect(screen.getByRole('status')).toHaveTextContent(/queued/i);
+      expect(screen.getByRole('status')).toHaveTextContent(/Waiting for compute/i);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole('status')).toHaveTextContent(/queued/i);
+      expect(screen.getByRole('status')).toHaveTextContent(/Waiting for compute/i);
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(2);
@@ -352,7 +405,7 @@ describe('ProjectHistory', () => {
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(3);
-      expect(screen.getByRole('button', { name: /open fork/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /open branch/i })).toBeInTheDocument();
       expect(refreshAnalysisObjects).toHaveBeenCalledWith('proj_1');
     } finally {
       vi.useRealTimers();
@@ -372,8 +425,8 @@ describe('ProjectHistory', () => {
     ]);
     render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
 
-    expect((await screen.findAllByText(/server selection is ambiguous/i)).length).toBe(2);
-    expect(screen.queryByRole('button', { name: /fork checkpoint/i })).not.toBeInTheDocument();
+    expect((await screen.findAllByText(/cannot be selected automatically/i)).length).toBe(2);
+    expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
   });
 
   it('ignores delayed history from a previously selected project', async () => {
@@ -405,17 +458,17 @@ describe('ProjectHistory', () => {
 
     rerender(<ProjectHistory currentWs={workspaceB} datasetInfo={null} />);
     await act(async () => {
-      resolveB([{ id: 'job_project_b', status: 'completed', jobType: 'generic' }]);
+      resolveB([{ id: 'job_project_b', status: 'completed', jobType: 'deg.find_markers.v1' }]);
       await jobsB;
     });
-    expect(await screen.findByText('job_project_b')).toBeInTheDocument();
+    expect(await screen.findByText('Cluster marker analysis')).toBeInTheDocument();
 
     await act(async () => {
-      resolveA([{ id: 'job_project_a', status: 'completed', jobType: 'generic' }]);
+      resolveA([{ id: 'job_project_a', status: 'completed', jobType: 'pbmc.pipeline.v1' }]);
       await jobsA;
     });
-    expect(screen.queryByText('job_project_a')).not.toBeInTheDocument();
-    expect(screen.getByText('job_project_b')).toBeInTheDocument();
+    expect(screen.queryByText('PBMC preprocessing')).not.toBeInTheDocument();
+    expect(screen.getByText('Cluster marker analysis')).toBeInTheDocument();
   });
 
   it('hides prior-project history and fork actions while the next project is loading', async () => {
@@ -423,7 +476,7 @@ describe('ProjectHistory', () => {
     const jobsB = new Promise(resolve => { resolveB = resolve; });
     window.electronAPI.listProjectJobs.mockImplementation(projectId => (
       projectId === 'proj_a'
-        ? Promise.resolve([{ id: 'job_project_a', status: 'completed', jobType: 'generic' }])
+        ? Promise.resolve([{ id: 'job_project_a', status: 'completed', jobType: 'pbmc.pipeline.v1' }])
         : jobsB
     ));
     window.electronAPI.listProjectArtifacts.mockImplementation(projectId => Promise.resolve(
@@ -445,20 +498,20 @@ describe('ProjectHistory', () => {
       selectedProjectId: 'proj_b', objects: [], selectedObjectIds: [],
     };
     const { rerender } = render(<ProjectHistory currentWs={workspaceA} datasetInfo={null} />);
-    expect((await screen.findAllByText('job_project_a')).length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: /fork checkpoint/i })).toBeInTheDocument();
+    expect((await screen.findAllByText('PBMC preprocessing')).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /create branch from this version/i })).toBeInTheDocument();
 
     rerender(<ProjectHistory currentWs={workspaceB} datasetInfo={null} />);
 
-    expect(screen.queryAllByText('job_project_a')).toHaveLength(0);
-    expect(screen.queryByRole('button', { name: /fork checkpoint/i })).not.toBeInTheDocument();
+    expect(screen.queryAllByText('PBMC preprocessing')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
     expect(screen.getByText('Project B')).toBeInTheDocument();
 
     await act(async () => {
-      resolveB([{ id: 'job_project_b', status: 'completed', jobType: 'generic' }]);
+      resolveB([{ id: 'job_project_b', status: 'completed', jobType: 'deg.find_markers.v1' }]);
       await jobsB;
     });
-    expect(await screen.findByText('job_project_b')).toBeInTheDocument();
+    expect(await screen.findByText('Cluster marker analysis')).toBeInTheDocument();
   });
 
   it('reconciles project access and stops polling when a fork lookup returns 404', async () => {
@@ -477,7 +530,7 @@ describe('ProjectHistory', () => {
       />
     );
 
-    const forkButton = await screen.findByRole('button', { name: /fork checkpoint/i });
+    const forkButton = await screen.findByRole('button', { name: /create branch from this version/i });
     vi.useFakeTimers();
     try {
       await act(async () => {
@@ -489,7 +542,7 @@ describe('ProjectHistory', () => {
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(1);
       expect(refreshProjects).toHaveBeenCalled();
       expect(screen.getByText(/Project access changed; refresh required/i)).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: /fork checkpoint/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
 
       await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
       expect(window.electronAPI.getProjectJob).toHaveBeenCalledTimes(1);
@@ -516,7 +569,7 @@ describe('ProjectHistory', () => {
 
     expect(await screen.findByText(/Project not found/i)).toBeInTheDocument();
     expect(refreshProjects).toHaveBeenCalled();
-    expect(screen.queryByText('job_safe_1')).not.toBeInTheDocument();
+    expect(screen.queryByText('PBMC preprocessing')).not.toBeInTheDocument();
   });
 
   it('reconciles a claim-time PROJECT_ACCESS_REVOKED cancellation', async () => {
@@ -538,7 +591,7 @@ describe('ProjectHistory', () => {
       />
     );
 
-    const forkButton = await screen.findByRole('button', { name: /fork checkpoint/i });
+    const forkButton = await screen.findByRole('button', { name: /create branch from this version/i });
     vi.useFakeTimers();
     try {
       await act(async () => {
@@ -549,7 +602,8 @@ describe('ProjectHistory', () => {
 
       expect(refreshProjects).toHaveBeenCalled();
       expect(screen.getByText(/Project access changed; refresh required/i)).toBeInTheDocument();
-      expect(screen.getByText(/Project write access was revoked before claim/i)).toBeInTheDocument();
+      expect(screen.getByText(/Creating a branch from the saved version canceled/i)).toBeInTheDocument();
+      expect(screen.queryByText(/Project write access was revoked before claim/i)).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }

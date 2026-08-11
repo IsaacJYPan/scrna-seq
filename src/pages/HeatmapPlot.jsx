@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Plot from '../components/Plot';
 import { Grid3x3, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
+import { publicErrorMessage } from '../publicError';
 
 // Removed API constant
 export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme, deploymentPolicy }) {
@@ -21,7 +22,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
       if (data.error) throw new Error(data.error);
       setHeatmapData(data);
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e, 'The marker heatmap could not be prepared. Please try again.'));
     }
     setLoading(false);
   };

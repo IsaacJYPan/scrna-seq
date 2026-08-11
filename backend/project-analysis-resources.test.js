@@ -436,7 +436,7 @@ describe.skipIf(!CONFIGURED)('project analysis resources — references stay wit
     const dataset = await createDatasetForProject(alice.user.id, proj.id, { fileType: 'seurat_rds' });
 
     const receiptTypes = [
-      'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
+      'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
       'cellchat.infer.v1',
       'checkpoint.load.v1', 'checkpoint.fork.v1',
     ];

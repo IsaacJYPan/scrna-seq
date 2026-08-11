@@ -98,7 +98,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
     } else if (data && data.error) {
       setError(data.error);
     } else if (!data) {
-      setError('R backend error. Check the console for details.');
+      setError('The annotation could not be completed. Check the labels and try again.');
     }
     setRunning(false);
   };
@@ -138,7 +138,7 @@ export default function Annotation({ callApi, datasetInfo, currentProvId, openPr
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            >📝 View Step Script</button>
+            >📝 View recorded analysis</button>
           )}
           <button
             onClick={runAnnotation}

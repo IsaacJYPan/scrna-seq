@@ -102,18 +102,20 @@ function handlerContext(parameterOverrides = {}) {
     resultsArtifact: { id: 'art_results' },
     summaryArtifact: { id: 'art_summary' },
   }));
-  const run = vi.fn(async () => ({
-    artifactType: 'cellchat_summary',
-    name: 'Cell-cell communication summary',
-    description: 'Safe predicted-candidate summary',
-    result: {
-      saved: true,
-      checksumSha256: CHECKSUM,
-      sizeBytes: 4096,
-      nRows: 20,
-    },
-    metadata: { summary: sanitizeCellChatSummary(body()) },
-  }));
+  const run = vi.fn(async (request) => request.operation === 'r.checkpoint.hydrate.v1'
+    ? { loaded: { loaded: true } }
+    : {
+      artifactType: 'cellchat_summary',
+      name: 'Cell-cell communication summary',
+      description: 'Safe predicted-candidate summary',
+      result: {
+        saved: true,
+        checksumSha256: CHECKSUM,
+        sizeBytes: 4096,
+        nRows: 20,
+      },
+      metadata: { summary: sanitizeCellChatSummary(body()) },
+    });
   return {
     ctx: {
       job: job({ parameters: parameters(parameterOverrides) }),
@@ -121,6 +123,10 @@ function handlerContext(parameterOverrides = {}) {
       heartbeat: vi.fn(async () => {}),
       log: vi.fn(async () => {}),
       getOwnedAnalysisObject: vi.fn(async () => ({ id: 'ao_abc123', ownerUserId: 7 })),
+      getHydrationCheckpoint: vi.fn(async () => ({
+        analysisObjectId: 'ao_abc123', checkpointArtifactId: 'art_checkpoint',
+        projectId: 'proj_abc123', storageUri: 'projects/proj_abc123/checkpoints/job_seed/checkpoint.rds',
+      })),
       deriveRObjectStateKey: vi.fn(() => 'user-7:obj-abc123'),
       removeDurableObject: vi.fn(async () => {}),
       runRBridgeOperation: run,
@@ -310,8 +316,13 @@ describe('cellchat.infer.v1 handler boundary', () => {
   it('validates and owns the object before calling R, then atomically publishes private results plus a metadata-only summary', async () => {
     const { ctx, run, completion } = handlerContext();
     const outcome = await cellChatInferenceHandler(ctx);
-    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(2);
     expect(run.mock.calls[0][0]).toMatchObject({
+      operation: 'r.checkpoint.hydrate.v1',
+      objectContext: { objectId: 'ao_abc123', stateKey: 'user-7:obj-abc123' },
+    });
+    expect(ctx.deriveRObjectStateKey).toHaveBeenCalledWith(7, 'ao_abc123-job-job_abc123');
+    expect(run.mock.calls[1][0]).toMatchObject({
       operation: 'r.cellchat.infer.v1',
       objectContext: { objectId: 'ao_abc123', stateKey: 'user-7:obj-abc123' },
     });

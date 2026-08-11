@@ -113,7 +113,7 @@ describe('UMAPView', () => {
 
   it('keeps a renderer without WebGL in the usable 2D mode', async () => {
     supportsWebGLMock.mockReturnValue(false);
-    const paramKey = 'benchone_params_umap_umap_user_example_com_ao_umap123';
+    const paramKey = 'traceomics_params_umap_umap_user_example_com_ao_umap123';
     localStorage.setItem(paramKey, JSON.stringify({ nComponents: 3, nNeighbors: 30, minDist: 0.3 }));
     const callApi = vi.fn(async () => resultPayload());
 
@@ -135,5 +135,16 @@ describe('UMAPView', () => {
 
     expect(screen.getByRole('button', { name: '3D' })).toBeEnabled();
     expect(screen.queryByText(/This renderer supports the 2D view only/i)).not.toBeInTheDocument();
+  });
+
+  it('uses the portable SVG trace for an ordinary-sized 2D UMAP', async () => {
+    render(<UMAPView {...baseProps()} />);
+
+    await waitFor(() => {
+      expect(plotRenderSpy.mock.calls.flatMap(([data]) => data)
+        .some(trace => trace.type === 'scatter' && trace.x?.length === 2)).toBe(true);
+    });
+    expect(plotRenderSpy.mock.calls.flatMap(([data]) => data)
+      .some(trace => trace.type === 'scattergl')).toBe(false);
   });
 });

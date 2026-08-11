@@ -102,9 +102,32 @@ describe('local durable storage provider', () => {
     await expect(provider.inspect(key, stored)).resolves.toEqual(stored);
     expect(readSync).not.toHaveBeenCalled();
     readSync.mockRestore();
+    const opened = await provider.openVerifiedRead(key, stored);
+    const chunks = [];
+    for await (const chunk of opened.handle.createReadStream({ autoClose: true })) chunks.push(chunk);
+    expect(Buffer.concat(chunks)).toEqual(bytes);
     expect(provider.remove(key)).toBe(true);
     expect(fs.existsSync(provider.resolveKey(key))).toBe(false);
     expect(provider.remove(key)).toBe(false);
+  });
+
+  it('copies a verified object without deleting or reopening the source path', async () => {
+    const root = tempDir('storage-root');
+    const staging = tempDir('storage-stage');
+    const provider = storage.createLocalStorageProvider({ root });
+    const sourcePath = path.join(staging, 'source.csv');
+    fs.writeFileSync(sourcePath, 'gene,value\nA,1\n');
+    const sourceKey = storage.projectStorageFileKey('proj_source', 'artifacts', 'job_source', 'result.csv');
+    const destinationKey = storage.projectStorageFileKey('proj_guest', 'artifacts', 'job_guest', 'result.csv');
+    const stored = await provider.putFileFromPath(sourcePath, sourceKey);
+    const copied = await provider.copyVerified(sourceKey, destinationKey, stored);
+    expect(copied).toMatchObject({
+      key: destinationKey,
+      checksumSha256: stored.checksumSha256,
+      sizeBytes: stored.sizeBytes,
+    });
+    expect(fs.readFileSync(provider.resolveKey(sourceKey), 'utf8')).toBe('gene,value\nA,1\n');
+    expect(fs.readFileSync(provider.resolveKey(destinationKey), 'utf8')).toBe('gene,value\nA,1\n');
   });
 
   it('fails closed for missing, changed, duplicate, and non-project objects', async () => {
@@ -123,6 +146,8 @@ describe('local durable storage provider', () => {
     await expect(provider.inspect(key, { ...stored, sizeBytes: stored.sizeBytes + 1 }))
       .rejects.toThrow(/size/);
     await expect(provider.inspect(key, { ...stored, checksumSha256: '0'.repeat(64) }))
+      .rejects.toThrow(/checksum/);
+    await expect(provider.openVerifiedRead(key, { ...stored, checksumSha256: '0'.repeat(64) }))
       .rejects.toThrow(/checksum/);
 
     const duplicate = path.join(staging, 'duplicate.csv');

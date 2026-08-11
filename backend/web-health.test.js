@@ -12,7 +12,7 @@ const {
 const roots = [];
 
 function tempRoot(name) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `benchone-${name}-`));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `traceomics-${name}-`));
   roots.push(root);
   return root;
 }

@@ -104,6 +104,11 @@ describe('shared declarative pipeline manifest contract', () => {
       }));
     expect(executableModules).toEqual([
       {
+        moduleKey: 'exploratoryAnalysis',
+        executable: true,
+        jobType: 'explore.summarize.v1',
+      },
+      {
         moduleKey: 'differentialExpression',
         executable: true,
         jobType: 'deg.find_markers.v1',
@@ -117,6 +122,16 @@ describe('shared declarative pipeline manifest contract', () => {
         moduleKey: 'cellChat',
         executable: true,
         jobType: 'cellchat.infer.v1',
+      },
+      {
+        moduleKey: 'conditionComparison',
+        executable: true,
+        jobType: 'condition.pseudobulk_de.v1',
+      },
+      {
+        moduleKey: 'expertR',
+        executable: true,
+        jobType: 'expert.r.v1',
       },
     ]);
 

@@ -54,6 +54,28 @@ describe.skipIf(!CONFIGURED)('pgDatabase.js tests', () => {
     });
   });
 
+  it('aggregates private compute-pool readiness without exposing slot details', async () => {
+    await reportStandaloneWorkerRuntimeState('ready', { slot: 2 });
+    await reportStandaloneWorkerRuntimeState('unavailable', { slot: 3 });
+
+    const partiallyReady = await getStandaloneWorkerRuntimeStatus();
+    expect(partiallyReady.status).toBe('ready');
+    expect(partiallyReady.updatedAt).toEqual(expect.any(String));
+    expect(Object.keys(partiallyReady).sort()).toEqual(['status', 'updatedAt']);
+
+    await reportStandaloneWorkerRuntimeState('unavailable', { slot: 2 });
+    const unavailable = await getStandaloneWorkerRuntimeStatus();
+    expect(unavailable.status).toBe('unavailable');
+    expect(Object.keys(unavailable).sort()).toEqual(['status', 'updatedAt']);
+  });
+
+  it('rejects invalid worker readiness slots', async () => {
+    for (const slot of [0, 9, 1.5, 'invalid']) {
+      await expect(reportStandaloneWorkerRuntimeState('ready', { slot }))
+        .rejects.toMatchObject({ code: 'INVALID_WORKER_POOL_SLOT' });
+    }
+  });
+
   it('should save and retrieve a provenance record', async () => {
     const record = {
       id: 'prov-1',

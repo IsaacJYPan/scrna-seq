@@ -28,7 +28,13 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   const [dims, setDims] = useState(clusterParams.dims);
   const [base64Image, setBase64Image] = useState(null);
   const [loadingBase64, setLoadingBase64] = useState(false);
-  const isHighPerfMode = datasetInfo?.cells > 50000;
+  const cellCount = Number(datasetInfo?.cells) || 0;
+  // SVG is more portable and produces deterministic publication/acceptance
+  // captures for ordinary datasets. Reserve WebGL for the range where it
+  // materially improves interaction; render a server-side image when a large
+  // dataset is opened in a renderer without dependable WebGL.
+  const useSvg2D = cellCount <= 10000 || !canUse3D;
+  const isHighPerfMode = cellCount > 50000 || (!canUse3D && cellCount > 10000);
   const umapParentIds = React.useMemo(
     () => [pcaProvId, pipelineState?.cluster ? clusterProvId : null].filter(Boolean),
     [pcaProvId, clusterProvId, pipelineState?.cluster]
@@ -145,14 +151,14 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           x: trace.x,
           y: trace.y,
           mode: 'markers',
-          type: 'scattergl',
+          type: useSvg2D ? 'scatter' : 'scattergl',
           name: newName,
           marker: { size: 4, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
           hovertemplate: `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`,
         };
       })
       : [];
-  }, [cachedDims, activeAnnotations]);
+  }, [cachedDims, activeAnnotations, useSvg2D]);
 
   const traces3D = React.useMemo(() => {
     const dataObj = cachedDims[3];
@@ -302,7 +308,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            ><FileText size={15} /> View Step Script</button>
+            ><FileText size={15} /> View recorded analysis</button>
           )}
           <button
             onClick={() => runUMAP()}

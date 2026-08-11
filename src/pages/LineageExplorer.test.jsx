@@ -56,15 +56,15 @@ describe('LineageExplorer', () => {
     vi.restoreAllMocks();
   });
 
-  it('loads the durable project DAG and renders only safe lineage fields', async () => {
+  it('loads recorded lineage and renders only safe researcher-facing fields', async () => {
     const { container } = render(<LineageExplorer currentWs={workspace} datasetInfo={{ id: 'ao_root', projectId: 'proj_1' }} />);
 
     expect(await screen.findByText('Lineage')).toBeInTheDocument();
     expect(await screen.findByText('PBMC root')).toBeInTheDocument();
     expect(screen.getByText('Children')).toBeInTheDocument();
     expect(screen.getByText('Forked PBMC')).toBeInTheDocument();
-    expect(screen.getByText('Checkpoint fork')).toBeInTheDocument();
-    expect(screen.getByText(/Created from a durable checkpoint/i)).toBeInTheDocument();
+    expect(screen.getByText('Branch from saved version')).toBeInTheDocument();
+    expect(screen.getByText(/Created from a saved version/i)).toBeInTheDocument();
     expect(screen.getByText(/Lineage view is bounded/i)).toBeInTheDocument();
     expect(window.electronAPI.getProjectAnalysisObjectLineage).toHaveBeenCalledWith('proj_1', 'ao_root');
 
@@ -72,19 +72,20 @@ describe('LineageExplorer', () => {
     expect(text).not.toMatch(/projects\/private/i);
     expect(text).not.toMatch(/private:state:key/i);
     expect(text).not.toMatch(/secret-claim-token/i);
+    expect(text).not.toMatch(/ao_root|ao_child|seurat/i);
     expect(text).toMatch(/read-only/i);
   });
 
   it('lets a researcher inspect a related object from a keyboard-accessible relationship card', async () => {
     render(<LineageExplorer currentWs={workspace} datasetInfo={{ id: 'ao_root', projectId: 'proj_1' }} />);
 
-    const relatedObject = await screen.findByRole('button', { name: /Forked PBMC.*Checkpoint fork/i });
+    const relatedObject = await screen.findByRole('button', { name: /Forked PBMC.*Branch from saved version/i });
     expect(relatedObject.tagName).toBe('BUTTON');
     fireEvent.click(relatedObject);
 
     expect(await screen.findByText('Parents')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Forked PBMC' })).toBeInTheDocument();
-    expect(screen.getByText('ao_child')).toBeInTheDocument();
+    expect(screen.queryByText('ao_child')).not.toBeInTheDocument();
   });
 
   it('explains an omitted related object without offering a broken selection', async () => {
@@ -110,7 +111,7 @@ describe('LineageExplorer', () => {
   it('does not request lineage until both a project and analysis object are selected', () => {
     render(<LineageExplorer currentWs={{ ...workspace, selectedProjectId: null }} datasetInfo={null} />);
 
-    expect(screen.getByText(/Select a backend project/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Select a project/i })).toBeInTheDocument();
     expect(window.electronAPI.getProjectAnalysisObjectLineage).not.toHaveBeenCalled();
   });
 

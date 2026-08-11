@@ -285,7 +285,7 @@ equivalence_input <- plumber_env$cellchat_inference_prepare_input(
 equivalence_cellchat <- suppressWarnings(CellChat::createCellChat(
   object = equivalence_input$data,
   meta = equivalence_input$metadata,
-  group.by = ".benchone_cellchat_group",
+  group.by = ".traceomics_cellchat_group",
   datatype = "RNA"
 ))
 equivalence_cellchat@DB <- equivalence_database
@@ -389,7 +389,7 @@ alignment_expected <- unname(
 )
 check("CellChat groups remain barcode-aligned without cloning a Seurat subset",
       identical(
-        as.character(alignment_metadata$.benchone_cellchat_group),
+        as.character(alignment_metadata$.traceomics_cellchat_group),
         alignment_expected
       ))
 

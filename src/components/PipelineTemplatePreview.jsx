@@ -3,9 +3,9 @@ import { FileClock, FormInput, TableProperties } from 'lucide-react';
 
 const VIEW_LABELS = Object.freeze({
   summaryMetrics: 'Summary metrics',
-  artifactTable: 'Artifact table',
-  jobLogs: 'Job logs',
-  placeholder: 'Module output',
+  artifactTable: 'Result table',
+  jobLogs: 'Run notes',
+  placeholder: 'Result preview',
 });
 
 function previewValue(parameter) {
@@ -74,23 +74,19 @@ function ParameterControl({ parameter, inputId }) {
     <div className="rounded border border-border bg-surface/40 p-3">
       {control}
       {parameter.description && <p className="mt-1 text-xs text-textMuted">{parameter.description}</p>}
-      <div className="mt-2 font-mono text-[10px] uppercase tracking-wide text-textMuted">{parameter.type} · {parameter.key}</div>
     </div>
   );
 }
 
 function ResultView({ view }) {
   const definition = typeof view === 'string' ? { type: view } : view;
-  const title = definition.title || VIEW_LABELS[definition.type] || definition.type;
+  const title = definition.title || VIEW_LABELS[definition.type] || 'Result preview';
   const Icon = definition.type === 'artifactTable' ? TableProperties : FileClock;
   return (
     <div className="rounded border border-border bg-surface/40 p-3">
       <div className="flex items-center gap-2 text-sm font-bold text-text">
         <Icon size={15} className="text-primary" />
         {title}
-      </div>
-      <div className="mt-2 font-mono text-[10px] uppercase tracking-wide text-textMuted">
-        {definition.type}{definition.artifactType ? ` · ${definition.artifactType}` : ''}
       </div>
     </div>
   );
@@ -105,25 +101,22 @@ export default function PipelineTemplatePreview({ manifest }) {
       <div>
         <h3 id="pipeline-template-preview-heading" className="flex items-center gap-2 text-lg font-bold text-text">
           <FormInput size={18} className="text-primary" />
-          Declared Interface Preview
+          Workflow preview
         </h3>
         <p className="mt-1 max-w-4xl text-sm text-textMuted">
-          These controls and result cards are rendered from allowlisted templates. They are a read-only preview and never submit code or start a job; execution remains owned by the registered application module.
+          These settings and result cards are available in the approved workflow. This is a read-only preview; start the workflow from its analysis step when you are ready.
         </p>
       </div>
 
       {renderedTabs.length === 0 ? (
         <div className="rounded border border-dashed border-border p-4 text-sm text-textMuted">
-          This manifest does not declare any parameter or result-view templates.
+          No settings or result previews are available for this workflow.
         </div>
       ) : (
         <div className="space-y-3">
           {renderedTabs.map((tab, tabIndex) => (
             <details key={tab.id} open={tabIndex === 0} className="rounded-lg border border-border bg-surface/50">
-              <summary className="cursor-pointer px-4 py-3 font-bold text-text">
-                {tab.label}
-                <span className="ml-2 font-mono text-xs font-normal text-textMuted">{tab.moduleKey}</span>
-              </summary>
+              <summary className="cursor-pointer px-4 py-3 font-bold text-text">{tab.label}</summary>
               <div className="grid gap-4 border-t border-border p-4 lg:grid-cols-2">
                 <fieldset disabled className="space-y-3">
                   <legend className="mb-2 text-[10px] font-bold uppercase tracking-widest text-textMuted">Parameters</legend>
@@ -133,14 +126,14 @@ export default function PipelineTemplatePreview({ manifest }) {
                       parameter={parameter}
                       inputId={`pipeline-preview-${manifest.id}-${tab.id}-${parameter.key}`}
                     />
-                  )) : <p className="text-sm text-textMuted">No declared parameters.</p>}
+                  )) : <p className="text-sm text-textMuted">No settings are needed for this step.</p>}
                 </fieldset>
                 <div>
                   <div className="mb-2 text-[10px] font-bold uppercase tracking-widest text-textMuted">Result views</div>
                   <div className="space-y-3">
                     {(tab.resultViews || []).length > 0 ? (tab.resultViews || []).map((view, index) => (
                       <ResultView key={`${typeof view === 'string' ? view : view.type}-${index}`} view={view} />
-                    )) : <p className="text-sm text-textMuted">No declared result views.</p>}
+                    )) : <p className="text-sm text-textMuted">Results will appear in Runs &amp; Results.</p>}
                   </div>
                 </div>
               </div>

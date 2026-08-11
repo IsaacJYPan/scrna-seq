@@ -11,19 +11,19 @@ const NODE_WIDTH = 250;
 const NODE_HEIGHT = 92;
 
 function formatObjectLabel(node) {
-  if (typeof node?.label === 'string' && node.label.trim()) return node.label.trim();
-  if (typeof node?.objectType === 'string' && node.objectType.trim()) return node.objectType.trim();
-  return 'Analysis object';
+  const label = typeof node?.label === 'string' ? node.label.trim() : '';
+  if (label && label !== node?.id && !/^(?:ao|job|artifact|object)[_-]/i.test(label)) return label;
+  return 'Saved analysis';
 }
 
 const RELATIONSHIP_COPY = {
   checkpoint_fork: {
-    label: 'Checkpoint fork',
-    description: 'Created from a durable checkpoint. The source object remains unchanged.',
+    label: 'Branch from saved version',
+    description: 'Created from a saved version. The source analysis remains unchanged.',
   },
   checkpoint: {
-    label: 'Checkpoint result',
-    description: 'Recorded from a durable checkpoint in this analysis path.',
+    label: 'Saved version',
+    description: 'Recorded from a saved version in this analysis history.',
   },
   derived_from: {
     label: 'Derived result',
@@ -31,7 +31,7 @@ const RELATIONSHIP_COPY = {
   },
   branch: {
     label: 'Analysis branch',
-    description: 'Started a separate durable analysis branch from this object.',
+    description: 'Started a separate analysis branch from this saved analysis.',
   },
   integration_input: {
     label: 'Integration input',
@@ -100,11 +100,10 @@ function LineageNode({ data }) {
         <GitBranch size={16} className="mt-0.5 shrink-0 text-primary" aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-bold text-text">{data.label}</p>
-          <p className="mt-1 truncate font-mono text-[10px] text-textMuted">{data.id}</p>
         </div>
       </div>
       <div className="mt-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-textMuted">
-        <span>{data.objectType || 'object'}</span>
+        <span>Saved analysis</span>
         {data.isRoot && <span className="rounded bg-success/10 px-1.5 py-0.5 text-success">root</span>}
       </div>
       <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-primary" />
@@ -149,7 +148,6 @@ function EdgeList({ title, edges, nodeById, onSelect }) {
                     className="w-full rounded-lg border border-border/70 bg-background/60 p-3 text-left transition-colors hover:border-primary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                   >
                     <p className="truncate text-sm font-semibold text-text">{formatObjectLabel(related)}</p>
-                    <p className="mt-1 font-mono text-[10px] text-textMuted">{relatedId}</p>
                     <p className="mt-2 text-xs font-semibold text-primary">{relationship.label}</p>
                     <p className="mt-1 text-xs leading-relaxed text-textMuted">{relationship.description}</p>
                   </button>
@@ -245,7 +243,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
         data: {
           id: node.id,
           label: formatObjectLabel(node),
-          objectType: typeof node.objectType === 'string' ? node.objectType : 'analysis object',
+          objectType: typeof node.objectType === 'string' ? node.objectType : 'saved analysis',
           isRoot: node.id === graph?.rootObjectId,
           selected: node.id === selectedNodeId,
           onSelect: setSelectedNodeId,
@@ -277,8 +275,8 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
       <div className="flex h-full items-center justify-center bg-background p-8">
         <div className="max-w-lg rounded-xl border border-dashed border-border bg-surface p-8 text-center">
           <GitBranch size={38} className="mx-auto text-primary" aria-hidden="true" />
-          <h2 className="mt-4 text-xl font-bold text-text">Select a backend project</h2>
-          <p className="mt-2 text-sm text-textMuted">Lineage is durable project metadata and is unavailable until a backend project is selected.</p>
+          <h2 className="mt-4 text-xl font-bold text-text">Select a project</h2>
+          <p className="mt-2 text-sm text-textMuted">Analysis lineage is available after you select a project.</p>
         </div>
       </div>
     );
@@ -289,8 +287,8 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
       <div className="flex h-full items-center justify-center bg-background p-8">
         <div className="max-w-lg rounded-xl border border-dashed border-border bg-surface p-8 text-center">
           <GitBranch size={38} className="mx-auto text-primary" aria-hidden="true" />
-          <h2 className="mt-4 text-xl font-bold text-text">Select an analysis object</h2>
-          <p className="mt-2 text-sm text-textMuted">Choose a project analysis object in Workbench to view its durable lineage graph.</p>
+          <h2 className="mt-4 text-xl font-bold text-text">Select a saved analysis</h2>
+          <p className="mt-2 text-sm text-textMuted">Choose a saved analysis in the Analysis workspace to view its recorded relationships.</p>
         </div>
       </div>
     );
@@ -301,8 +299,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
       <header className="flex shrink-0 flex-wrap items-start justify-between gap-4 border-b border-border bg-surface/60 px-6 py-5">
         <div>
           <h2 className="flex items-center gap-2 text-2xl font-black tracking-tight text-text"><GitBranch size={24} className="text-primary" /> Lineage</h2>
-          <p className="mt-1 max-w-3xl text-sm text-textMuted">Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.</p>
-          <p className="mt-2 font-mono text-[11px] text-textMuted">Object: {objectId}</p>
+          <p className="mt-1 max-w-3xl text-sm text-textMuted">Recorded relationships for the selected saved analysis. This view is read-only.</p>
           <p className="mt-2 flex items-center gap-1.5 text-xs text-textMuted" aria-live="polite">
             <Clock3 size={13} aria-hidden="true" />
             {isFreshForSelection ? 'Current view loaded. Refresh to check for collaborator changes.' : 'Refresh to check for collaborator changes.'}
@@ -333,7 +330,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
           <section className="relative min-h-[340px] border-b border-border bg-slate-100 dark:bg-slate-950/40 lg:col-span-8 lg:border-b-0 lg:border-r">
             {graphNodes.length === 0 ? (
               <div className="flex h-full min-h-[340px] items-center justify-center p-8 text-center">
-                <div><GitBranch size={38} className="mx-auto text-textMuted" aria-hidden="true" /><p className="mt-3 font-bold text-text">This is a root object</p><p className="mt-1 text-sm text-textMuted">No durable parent or child relationships have been recorded yet.</p></div>
+                <div><GitBranch size={38} className="mx-auto text-textMuted" aria-hidden="true" /><p className="mt-3 font-bold text-text">This is a root analysis</p><p className="mt-1 text-sm text-textMuted">No parent or child relationships have been recorded yet.</p></div>
               </div>
             ) : (
               <ReactFlow
@@ -351,23 +348,21 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
               <div className="space-y-5">
                 <div>
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">Selected object</p>
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">Selected analysis</p>
                     {graph?.rootObjectId && nodeById.has(graph.rootObjectId) && selectedNodeId !== graph.rootObjectId && (
                       <button type="button" onClick={() => setSelectedNodeId(graph.rootObjectId)} className="text-xs font-bold text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">Jump to root</button>
                     )}
                   </div>
                   <h3 className="mt-1 text-xl font-bold text-text">{formatObjectLabel(selectedNode)}</h3>
-                  <p className="mt-2 break-all font-mono text-xs text-textMuted">{selectedNode.id}</p>
-                  <p className="mt-2 text-sm text-textMuted">Type: {selectedNode.objectType || 'analysis object'}</p>
                   <p className="mt-3 text-xs leading-relaxed text-textMuted">Choose a node on the graph or a relationship below to inspect its recorded provenance.</p>
                 </div>
                 <EdgeList title="Parents" edges={selectedParents} nodeById={nodeById} onSelect={setSelectedNodeId} />
                 <EdgeList title="Children" edges={selectedChildren} nodeById={nodeById} onSelect={setSelectedNodeId} />
               </div>
             ) : (
-              <div className="flex h-full min-h-64 flex-col items-center justify-center text-center"><GitBranch size={38} className="text-textMuted" aria-hidden="true" /><p className="mt-3 text-sm text-textMuted">Select an object to inspect its recorded relationships.</p></div>
+              <div className="flex h-full min-h-64 flex-col items-center justify-center text-center"><GitBranch size={38} className="text-textMuted" aria-hidden="true" /><p className="mt-3 text-sm text-textMuted">Select a saved analysis to inspect its recorded relationships.</p></div>
             )}
-            <div className="mt-6 flex gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-textMuted"><ShieldCheck size={16} className="shrink-0 text-primary" />Project lineage visibility does not grant access to another member&apos;s private live R state.</div>
+            <div className="mt-6 flex gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-textMuted"><ShieldCheck size={16} className="shrink-0 text-primary" />Lineage visibility does not grant access to another researcher&apos;s private analysis workspace.</div>
           </aside>
         </div>
         </div>

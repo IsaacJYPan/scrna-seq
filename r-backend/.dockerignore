@@ -3,4 +3,6 @@
 !install-r-packages.sh
 !plumber.R
 !run.R
+!expert-runner.R
+!generate-demo-template.R
 !sample_data.csv

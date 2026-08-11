@@ -1,0 +1,6 @@
+{$PUBLIC_HOST} {
+  encode zstd gzip
+  @operator_only path /livez /readyz /api/auth/signup
+  respond @operator_only 404
+  reverse_proxy namespace-anchor:3000
+}

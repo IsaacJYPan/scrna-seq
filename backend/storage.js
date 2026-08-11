@@ -11,6 +11,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { pipeline } = require('stream/promises');
 const fs = require('fs');
 const path = require('path');
 
@@ -329,6 +330,71 @@ function createLocalStorageProvider(options = {}) {
     }
   }
 
+  // Return the same verified file handle that was opened without following a
+  // final symlink. Callers must close it (or create an auto-closing stream).
+  // This avoids resolving an internal path a second time after verification.
+  async function openVerifiedRead(key, expected = {}) {
+    const absolutePath = resolveKey(key);
+    const { handle, stat } = await openSafeDescendantFile(
+      absolutePath,
+      'Durable storage object is missing.'
+    );
+    try {
+      if (expected.sizeBytes !== undefined && expected.sizeBytes !== null
+          && Number(expected.sizeBytes) !== stat.size) {
+        throw storageError('STORAGE_SIZE_MISMATCH', 'Durable storage object size does not match its record.');
+      }
+      const checksumSha256 = await hashFileHandle(handle);
+      if (expected.checksumSha256
+          && String(expected.checksumSha256).toLowerCase() !== checksumSha256) {
+        throw storageError('STORAGE_CHECKSUM_MISMATCH', 'Durable storage object checksum does not match its record.');
+      }
+      return { handle, stat, checksumSha256 };
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
+  async function copyVerified(sourceKey, destinationKey, expected = {}) {
+    const opened = await openVerifiedRead(sourceKey, expected);
+    const destination = prepareWrite(destinationKey);
+    if (fs.existsSync(destination)) {
+      await opened.handle.close();
+      throw storageError('STORAGE_OBJECT_EXISTS', 'Durable storage object already exists.');
+    }
+    const partial = `${destination}.partial-${crypto.randomBytes(8).toString('hex')}`;
+    try {
+      await pipeline(
+        opened.handle.createReadStream({ autoClose: false }),
+        fs.createWriteStream(partial, { flags: 'wx', mode: 0o600 })
+      );
+      const handle = await fs.promises.open(partial, fs.constants.O_RDWR);
+      let stored;
+      try {
+        const stat = await handle.stat();
+        await handle.sync();
+        stored = {
+          key: destinationKey,
+          sizeBytes: stat.size,
+          checksumSha256: await hashFileHandle(handle),
+        };
+      } finally {
+        await handle.close();
+      }
+      if (stored.sizeBytes !== opened.stat.size
+          || stored.checksumSha256 !== opened.checksumSha256) {
+        throw storageError('STORAGE_CHECKSUM_MISMATCH', 'Durable storage copy failed integrity verification.');
+      }
+      await fs.promises.link(partial, destination);
+      await fs.promises.unlink(partial);
+      return stored;
+    } finally {
+      await opened.handle.close();
+      try { await fs.promises.unlink(partial); } catch { /* best effort */ }
+    }
+  }
+
   async function readCompletionReceipt(key) {
     if (!isProjectStorageKey(key, { kind: 'artifacts' })
         || !String(key).endsWith(`/${COMPLETION_RECEIPT_FILE_NAME}`)) {
@@ -429,6 +495,8 @@ function createLocalStorageProvider(options = {}) {
     prepareWrite,
     putFileFromPath,
     inspect,
+    openVerifiedRead,
+    copyVerified,
     readCompletionReceipt,
     remove,
   });

@@ -8,8 +8,6 @@ import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 export default function Sidebar({
   activeTab,
   setActiveTab,
-  apiStatus,
-  computeStatus = { status: 'unknown' },
   workspaces = [],
   activeWsIndex = 0,
   selectedObjects = [],
@@ -44,14 +42,20 @@ export default function Sidebar({
   const currentWorkspace = workspaces[activeWsIndex];
   const hasData = selectedObjects.length > 0;
   const hasProject = !!currentWorkspace?.selectedProjectId || (currentWorkspace?.projects || []).length > 0;
-  const backendConnected = typeof apiStatus === 'string' && /connected/i.test(apiStatus) && !/disconnected/i.test(apiStatus);
-  const computeLabel = computeStatus?.status === 'ready'
-    ? 'Compute ready'
-    : computeStatus?.status === 'unavailable'
-      ? 'Compute unavailable'
-      : 'Compute status unknown';
-
-  const pipelineSections = buildPipelineSidebarSections(activePipeline, pipelineState);
+  // Advanced analysis is a project-scoped, capability-gated workbench. Keep its
+  // single entry in the Project section rather than duplicating it in a selected
+  // workflow's generated navigation.
+  const pipelineSections = buildPipelineSidebarSections(activePipeline, pipelineState)
+    .map((section) => ({
+      ...section,
+      items: section.items.filter((item) => item.id !== 'expert-r'),
+    }))
+    .filter((section) => section.items.length > 0);
+  const researcherLabel = (value) => {
+    if (value === 'Expert R') return 'Advanced analysis';
+    if (/seurat/i.test(String(value || ''))) return 'Standard scRNA-seq workflow';
+    return value;
+  };
 
   const NavButton = ({ item, disabled = false }) => {
     const Icon = item.icon;
@@ -65,19 +69,19 @@ export default function Sidebar({
           collapseAfterMobileNavigation();
         }}
         disabled={isDisabled}
-        title={item.status || item.label}
-        aria-label={item.status ? `${item.label}, ${item.status}` : item.label}
+        title={item.status || researcherLabel(item.label)}
+        aria-label={item.status ? `${researcherLabel(item.label)}, ${item.status}` : researcherLabel(item.label)}
         className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] font-medium transition-colors group
           ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}
           ${isActive
-            ? 'border-primary/20 bg-primary/10 text-text'
+            ? 'border-primary/30 bg-primary/10 text-text'
             : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'
           }
         `}
       >
         {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />}
         <span className="min-w-0 flex-1 text-left">
-          <span className="block truncate">{item.label}</span>
+          <span className="block truncate">{researcherLabel(item.label)}</span>
           {item.status && (
             <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200">
               <Lock size={10} />
@@ -107,7 +111,7 @@ export default function Sidebar({
   return (
     <div className="flex h-full flex-shrink-0 z-20 relative w-[72px] lg:w-auto">
       <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0 border-r border-border">
-        <div className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center shadow-sm mb-1" title="BenchOne">
+        <div className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center shadow-sm mb-1" title="TraceOmics">
           <Microscope size={22} className="text-on-accent" />
         </div>
 
@@ -156,19 +160,22 @@ export default function Sidebar({
           className="h-12 w-full flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"
           onClick={() => setIsCollapsed(true)}
         >
-          <span className="text-[15px] font-semibold text-text truncate flex-1 leading-none">{currentWorkspace?.name || 'BenchOne'}</span>
+          <span className="text-[15px] font-semibold text-text truncate flex-1 leading-none">{currentWorkspace?.name || 'TraceOmics'}</span>
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </button>
 
         <div className="flex-1 overflow-y-auto px-2 py-4 space-y-5 custom-scrollbar">
           <div className="space-y-[2px]">
             <SectionLabel>Project</SectionLabel>
-            <NavButton item={{ id: 'workspace', label: 'Workbench', icon: Database, status: hasProject ? 'Backend project' : 'Select project' }} />
-            <NavButton item={{ id: 'pipeline-manager', label: 'Pipeline Manager', icon: LayoutPanelTop, status: hasProject ? 'User scoped' : 'Select project' }} disabled={!hasProject} />
-            <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project RBAC' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'workspace', label: 'Analysis workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
+            <NavButton item={{ id: 'pipeline-manager', label: 'Approved workflows', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Not configured' }} disabled={!hasProject || !deploymentPolicy.expertREnabled} />
+            <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
-              <SectionLabel>Data / Object</SectionLabel>
-              <NavButton item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Provenance DAG' : 'Requires loaded object' }} disabled={!hasData} />
+              <SectionLabel>Data & analysis</SectionLabel>
+              <NavButton item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Analysis lineage' : 'Requires a saved analysis' }} disabled={!hasData} />
               <NavButton item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
               <NavButton item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
             </div>
@@ -176,18 +183,23 @@ export default function Sidebar({
 
           {pipelineSections.map(section => (
             <div key={section.id} className="space-y-[2px]">
-              <SectionLabel>{section.label}</SectionLabel>
+              <SectionLabel>{researcherLabel(section.label)}</SectionLabel>
               {section.items.map(item => {
                 const blockedLegacyMutation = deploymentPolicy.legacyLiveMutationToolsEnabled !== true
                   && item.id === 'integrate';
+                const blockedExpertR = deploymentPolicy.expertREnabled !== true
+                  && item.id === 'expert-r';
                 const visibleItem = blockedLegacyMutation
-                  ? { ...item, status: 'Local development only' }
-                  : item;
+                  ? { ...item, status: 'Unavailable in this workspace' }
+                  : blockedExpertR
+                    ? { ...item, status: 'Not configured' }
+                    : item;
                 return (
                   <NavButton
                     key={item.id}
                     item={visibleItem}
                     disabled={blockedLegacyMutation
+                      || blockedExpertR
                       || (item.requiresObject && !hasData)
                       || (item.requiresProject && !hasProject)}
                   />
@@ -197,22 +209,6 @@ export default function Sidebar({
           ))}
         </div>
 
-        <button
-          type="button"
-          className="h-14 w-full text-left bg-black/[0.02] dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-black/5 transition-colors"
-          onClick={() => setActiveTab('diagnostics')}
-          aria-label={`Open Diagnostics & Environment. ${backendConnected ? 'R service connected' : 'R service offline'}: ${computeLabel}.`}
-          title="Open Diagnostics & Environment"
-        >
-          <div className="flex flex-col justify-center min-w-0 pr-2 pb-0.5 flex-1">
-            <div className="flex items-center gap-1.5 mb-[2px]">
-              <div className={`w-2.5 h-2.5 rounded-full border border-black dark:border-white shadow-sm ${backendConnected ? 'bg-success' : 'animate-pulse bg-danger'}`} />
-              <span className="text-[13px] font-bold text-text truncate leading-none mt-1">{backendConnected ? 'R service connected' : 'R service offline'}</span>
-            </div>
-            <span className="text-[11px] text-slate-400 truncate leading-none">{computeLabel}</span>
-          </div>
-          <Wrench size={16} className="text-slate-400" />
-        </button>
       </aside>
     </div>
   );

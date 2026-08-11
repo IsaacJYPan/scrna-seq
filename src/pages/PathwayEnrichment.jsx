@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
+import { publicErrorMessage } from '../publicError';
 
 const ENRICHMENT_JOB_TYPE = 'enrichment.gsea.v1';
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
@@ -76,9 +77,9 @@ function parseErrorMessage(error) {
   const raw = error?.message || String(error || 'Request failed.');
   try {
     const parsed = JSON.parse(raw);
-    return parsed?.error || raw;
+    return publicErrorMessage(parsed?.error || raw);
   } catch {
-    return raw;
+    return publicErrorMessage(raw);
   }
 }
 
@@ -121,6 +122,25 @@ function badgeTone(status) {
   return 'amber';
 }
 
+function displayRunStatus(status) {
+  return {
+    queued: 'Waiting for compute',
+    running: 'Running',
+    completed: 'Complete',
+    failed: 'Needs attention',
+    canceled: 'Canceled',
+  }[status] || 'Unknown';
+}
+
+function researcherRunNote(entry) {
+  if (entry?.level === 'error') return 'This analysis needs attention.';
+  const message = String(entry?.message || '');
+  if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
+  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
+  if (entry?.level === 'warn') return 'Analysis warning recorded.';
+  return 'Analysis update recorded.';
+}
+
 function StatusBadge({ children, tone = 'slate' }) {
   const tones = {
     blue: 'bg-primary/10 text-text border-primary/20',
@@ -157,9 +177,7 @@ function Metric({ label, value, detail }) {
 
 function JobLogs({ logs }) {
   const rows = Array.isArray(logs) ? logs : [];
-  if (!rows.length) {
-    return <EmptyNotice title="No job logs yet">Logs appear after the worker starts this job.</EmptyNotice>;
-  }
+  if (!rows.length) return <EmptyNotice title="No run notes yet">Run notes appear after compute begins.</EmptyNotice>;
   return (
     <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-black/20 custom-scrollbar">
       {rows.map((entry, index) => (
@@ -170,7 +188,7 @@ function JobLogs({ logs }) {
             </StatusBadge>
             <span className="font-mono text-textMuted">{formatDate(entry?.ts)}</span>
           </div>
-          <p className="text-textMuted">{redactUnsafeText(entry?.message)}</p>
+          <p className="text-textMuted">{researcherRunNote(entry)}</p>
         </div>
       ))}
     </div>
@@ -244,6 +262,10 @@ export default function PathwayEnrichment({
   const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
+  const selectedAnalysis = (currentWs?.objects || []).find(object => object.id === selectedObjectId)
+    || datasetInfo
+    || null;
+  const selectedAnalysisName = selectedAnalysis?.displayName || selectedAnalysis?.name || 'Selected analysis';
   const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
   const liveObjectAttached = hasAttachedLiveRObject(datasetInfo);
   const canWriteProject = JOB_WRITE_ROLES.has(activeProject?.role);
@@ -298,7 +320,7 @@ export default function PathwayEnrichment({
     if (!jobId || !activeProjectId) return null;
     const api = window.electronAPI || {};
     if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
-      setError('The project job service is unavailable in this frontend runtime.');
+      setError('This analysis service is temporarily unavailable.');
       return null;
     }
     if (!silent) setRefreshing(true);
@@ -393,17 +415,17 @@ export default function PathwayEnrichment({
     if (!userEmail) return setError('Sign in before starting pathway enrichment.');
     if (!activeProjectId) return setError('Select a project before starting pathway enrichment.');
     if (!selectedObjectId || !isDbBackedObject) {
-      return setError('Select a saved analysis object before starting pathway enrichment.');
+      return setError('Select a saved analysis before starting pathway enrichment.');
     }
     if (!canWriteProject) return setError('Your project role can view results but cannot start analysis jobs.');
     if (!ownsPrivateLiveObject) {
-      return setError('This object belongs to another member. Fork a saved checkpoint into your own private object before starting pathway enrichment.');
+      return setError('This analysis belongs to another member. Create a branch from its saved version in your private analysis workspace before starting pathway enrichment.');
     }
     if (!sessionReady || !liveObjectAttached) {
-      return setError('Attach or restore this analysis object in R before starting the job.');
+      return setError('Open this saved analysis in your private analysis workspace before starting pathway enrichment.');
     }
     if (!computeReady) {
-      return setError('The analysis worker is not ready. Jobs are not queued while compute is unavailable.');
+      return setError('Compute is not available right now. The analysis was not started.');
     }
     if (!safeParams.species) return setError('Choose whether the data are human or mouse.');
     if (!targetGroupIsValid) {
@@ -415,7 +437,7 @@ export default function PathwayEnrichment({
 
     const api = window.electronAPI || {};
     if (!api.createEnrichmentGseaJob && !api.createProjectJob) {
-      return setError('The project job service is unavailable in this frontend runtime.');
+      return setError('Pathway enrichment is temporarily unavailable.');
     }
 
     const requestSelectionKey = selectionKeyRef.current;
@@ -463,7 +485,7 @@ export default function PathwayEnrichment({
     if (!activeProjectId || !job?.id || !canCancelJob) return;
     const api = window.electronAPI || {};
     if (!api.cancelProjectJob) {
-      setError('Job cancellation is unavailable in this frontend runtime.');
+      setError('Canceling this analysis is temporarily unavailable.');
       return;
     }
     const requestSelectionKey = selectionKeyRef.current;
@@ -486,8 +508,8 @@ export default function PathwayEnrichment({
       <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
-          <h2 className="mb-2 text-xl font-bold text-white">No analysis object selected</h2>
-          <p className="text-sm text-textMuted">Select a saved, clustered analysis object before running pathway enrichment.</p>
+          <h2 className="mb-2 text-xl font-bold text-white">No saved analysis selected</h2>
+          <p className="text-sm text-textMuted">Select a saved, clustered analysis before running pathway enrichment.</p>
         </div>
       </div>
     );
@@ -500,8 +522,8 @@ export default function PathwayEnrichment({
           <div>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <h2 className="text-2xl font-bold tracking-tight text-white">Pathway Enrichment</h2>
-              <StatusBadge tone="slate">durable job</StatusBadge>
-              <StatusBadge tone="amber">no public download</StatusBadge>
+              <StatusBadge tone="slate">recorded run</StatusBadge>
+              <StatusBadge tone="blue">controlled export</StatusBadge>
             </div>
             <p className="max-w-3xl text-sm text-textMuted">
               Ranks genes from one cluster versus all remaining cells, then tests which Gene Ontology biological processes are concentrated near the top or bottom of that ranked list.
@@ -524,11 +546,11 @@ export default function PathwayEnrichment({
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || activeProjectId || 'None'}</div>
+            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || 'Selected project'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Analysis object</div>
-            <div className="mt-1 truncate font-mono text-text">{selectedObjectId || 'None'}</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
+            <div className="mt-1 truncate text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Gene sets</div>
@@ -538,42 +560,42 @@ export default function PathwayEnrichment({
 
         {error && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">
-            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Pathway job unavailable</div>
-            <p className="mt-1 text-sm">{redactUnsafeText(error)}</p>
+            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Pathway analysis unavailable</div>
+            <p className="mt-1 text-sm">{publicErrorMessage(error, 'This analysis needs attention. Review the settings and try again.')}</p>
           </div>
         )}
 
         {!isDbBackedObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Select a saved analysis object with an ID beginning with <span className="font-mono">ao_</span> before starting this job.
+            Select a saved analysis before starting pathway enrichment.
           </div>
         )}
 
         {isDbBackedObject && !canWriteProject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Your project role is read-only. You can inspect saved pathway results, but only an owner, administrator, or analyst can start a new job.
+            Your project role is read-only. You can inspect saved pathway results, but only an owner, administrator, or analyst can start a new analysis.
           </div>
         )}
 
         {isDbBackedObject && canWriteProject && !ownsPrivateLiveObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This object belongs to another member. Use Jobs &amp; Artifacts to fork a saved checkpoint into your own private R object.
-            <button onClick={() => setActiveTab?.('history')} className="btn btn-secondary ml-3 text-xs">Open recovery</button>
+            This analysis belongs to another member. Use Runs &amp; Results to create a branch from its saved version in your own private analysis workspace.
+            <button onClick={() => setActiveTab?.('history')} className="btn btn-secondary ml-3 text-xs">Open Runs &amp; Results</button>
           </div>
         )}
 
         {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This saved object is not attached to the private R session yet. {datasetInfo?.source === 'pbmc3k_demo' ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open recovery to attach a saved checkpoint.'}
+            This saved analysis is not open in your private analysis workspace yet. {datasetInfo?.source === 'pbmc3k_demo' ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open Runs & Results to open its saved version.'}
             <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
-              {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open recovery'}
+              {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open Runs &amp; Results'}
             </button>
           </div>
         )}
 
         {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Compute is not ready, so new jobs are disabled rather than left indefinitely queued. Start or restore the standalone worker, then wait for the Compute ready status in the sidebar.
+            Compute is unavailable, so new analyses are paused until it becomes available. Wait until the sidebar shows Compute available.
           </div>
         )}
 
@@ -657,11 +679,11 @@ export default function PathwayEnrichment({
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Job status</h3>
-              <p className="mt-1 text-sm text-textMuted">This deployment runs one analysis job at a time. Queued jobs start when the worker is available.</p>
+              <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Clock size={18} className="text-primary" /> Run status</h3>
+              <p className="mt-1 text-sm text-textMuted">Compute is allocated when available. When demand is high, a new analysis waits for compute.</p>
             </div>
             <div className="flex items-center gap-2">
-              {job?.status && <StatusBadge tone={badgeTone(job.status)}>{job.status}</StatusBadge>}
+              {job?.status && <StatusBadge tone={badgeTone(job.status)}>{displayRunStatus(job.status)}</StatusBadge>}
               {job?.id && !terminal && canCancelJob && (
                 <button
                   onClick={cancelJob}
@@ -669,21 +691,20 @@ export default function PathwayEnrichment({
                   className="btn btn-secondary inline-flex items-center gap-1.5 text-xs disabled:opacity-50"
                 >
                   {canceling ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
-                  Cancel job
+                  Cancel run
                 </button>
               )}
             </div>
           </div>
           {!job ? (
-            <EmptyNotice title="No pathway job started">Choose the settings above, select the correct species, then start the durable job.</EmptyNotice>
+            <EmptyNotice title="No pathway analysis run yet">Choose the settings above, select the correct species, then start pathway enrichment.</EmptyNotice>
           ) : (
             <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
-                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job ID</div><div className="mt-1 font-mono text-text">{job.id}</div></div>
-                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job type</div><div className="mt-1 font-mono text-text">{job.jobType || ENRICHMENT_JOB_TYPE}</div></div>
+              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
+                <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Outcome</div><div className="mt-1 text-text">{displayRunStatus(job.status)}</div></div>
                 <div><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Last refreshed</div><div className="mt-1 text-text">{formatDate(lastRefreshedAt)}</div></div>
               </div>
-              {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{redactUnsafeText(job.error.message)}</div>}
+              {job.error?.message && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{publicErrorMessage(job.error, 'This analysis needs attention. Review the settings and try again.')}</div>}
               <JobLogs logs={visibleLogs} />
             </div>
           )}
@@ -693,7 +714,7 @@ export default function PathwayEnrichment({
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Archive size={18} className="text-primary" /> Pathway summary</h3>
-              <p className="mt-1 text-sm text-textMuted">This page shows a small, safe summary. The complete result table stays in private project storage.</p>
+              <p className="mt-1 text-sm text-textMuted">This page shows a small, safe scientific summary. The complete result table remains a controlled result.</p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}
           </div>
@@ -725,7 +746,7 @@ export default function PathwayEnrichment({
               </div>
 
               <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
-                Summary artifact <span className="font-mono text-text">{summaryArtifact.id}</span> is available. The result table is not exposed as a public download.
+                A saved summary is available. The result table is available only through its authorized export.
                 {summary.packageVersions?.r && summary.packageVersions?.seurat && (
                   <div className="mt-2 text-xs">
                     Saved with R {summary.packageVersions.r} and Seurat {summary.packageVersions.seurat}; the complete analysis-package versions are stored with this result.
@@ -734,14 +755,14 @@ export default function PathwayEnrichment({
               </div>
             </div>
           ) : job?.status === 'completed' ? (
-            <EmptyNotice title="Job completed without a public summary">Review the job logs. The private result table is not downloadable from this page.</EmptyNotice>
+            <EmptyNotice title="Pathway analysis completed without a summary">Review the run notes. If the private result table completed, its authorized export is available in Runs &amp; Results.</EmptyNotice>
           ) : (
-            <EmptyNotice title="No pathway summary yet">A summary appears here after the worker finishes successfully.</EmptyNotice>
+            <EmptyNotice title="No pathway summary yet">A summary appears here after pathway enrichment completes successfully.</EmptyNotice>
           )}
 
           {resultsArtifact && (
             <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-              Private result artifact <span className="font-mono">{resultsArtifact.id}</span> is recorded for the project. Its storage location is intentionally hidden.
+              A private result table is available through the authorized, audited export in Runs &amp; Results.
             </div>
           )}
         </section>
