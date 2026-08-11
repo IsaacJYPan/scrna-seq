@@ -35,6 +35,7 @@ const {
 } = require('./backend/rStateKeys');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
+const { validateMultiSampleSeuratParams } = require('./backend/multiSampleSeuratPipeline');
 const { validateSpatialSeuratParams } = require('./backend/spatialPipeline');
 const { validateEnrichmentGseaParams } = require('./backend/enrichmentGsea');
 const { validateCellChatInferenceParams } = require('./backend/cellChatInference');
@@ -3045,7 +3046,7 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   // contact. Reject incompatible client references synchronously so they cannot
   // manufacture partial-output/recovery states after dispatch.
   const serverManagedResultTypes = [
-    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
+    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
     'cellchat.infer.v1', 'explore.summarize.v1',
     'condition.pseudobulk_de.v1', 'expert.r.v1',
     'spatial.seurat.v1',
@@ -3086,6 +3087,20 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
     }
     if (body.datasetId === undefined || body.datasetId === null) {
       return res.status(400).json({ error: 'seurat.pipeline.v1 requires datasetId.' });
+    }
+  }
+  if (body.jobType === 'seurat.multisample.v1') {
+    let validated;
+    try {
+      validated = validateMultiSampleSeuratParams(body.parameters);
+    } catch (e) {
+      return res.status(400).json({ error: e.message || 'Invalid seurat.multisample.v1 parameters.' });
+    }
+    if (body.datasetId === undefined || body.datasetId === null) {
+      return res.status(400).json({ error: 'seurat.multisample.v1 requires a primary datasetId.' });
+    }
+    if (validated.samples[0].datasetId !== body.datasetId) {
+      return res.status(400).json({ error: 'Primary datasetId must match the first multi-sample input.' });
     }
   }
   if (body.jobType === 'spatial.seurat.v1') {
@@ -3135,7 +3150,7 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
       return res.status(403).json({ error: 'Expert R is disabled in the public demo.' });
     }
     const heavyTypes = [
-      'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1',
+      'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'deg.find_markers.v1',
       'enrichment.gsea.v1', 'cellchat.infer.v1', 'explore.summarize.v1',
       'condition.pseudobulk_de.v1',
       'spatial.seurat.v1',

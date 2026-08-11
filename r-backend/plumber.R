@@ -243,7 +243,7 @@ validate_completion_receipt_binding <- function(body, expected_job_types,
                     paste0(output_prefix, "checkpoints/", binding$job_id, "/"))) {
       stop("Completion receipt binding is invalid.")
     }
-  } else if (binding$job_type %in% c("seurat.pipeline.v1", "spatial.seurat.v1")) {
+  } else if (binding$job_type %in% c("seurat.pipeline.v1", "seurat.multisample.v1", "spatial.seurat.v1")) {
     if (is.null(binding$source_analysis_object_id) || is.null(binding$source_dataset_id) ||
         !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
         !startsWith(binding$output_storage_key,
@@ -1828,15 +1828,61 @@ function(req, res) {
 
   dataset_storage_key <- body$dataset_storage_key
   dataset_type <- body$dataset_file_type
+  dataset_inputs <- body$dataset_inputs
+  multi_sample <- !is.null(dataset_inputs)
   storage_key <- body$storage_key
-  if (is.null(dataset_storage_key) || !is.character(dataset_storage_key) || nchar(dataset_storage_key) == 0 ||
-      is.null(storage_key) || !is.character(storage_key) || nchar(storage_key) == 0) {
+  if (is.null(storage_key) || !is.character(storage_key) || length(storage_key) != 1 || nchar(storage_key) == 0) {
     res$status <- 400
     return(list(error = "Missing storage key."))
   }
-  if (is.null(dataset_type) || !identical(as.character(dataset_type)[1], "tenx_h5")) {
-    res$status <- 400
-    return(list(error = "Unsupported dataset type."))
+  if (multi_sample) {
+    # jsonlite may simplify an array of equally-shaped objects into a data.frame.
+    # Normalize it back to a list of row objects before applying the strict input
+    # contract so both ordinary dispatch and receipt recovery use the same shape.
+    if (is.data.frame(dataset_inputs)) {
+      input_frame <- dataset_inputs
+      dataset_inputs <- lapply(seq_len(nrow(input_frame)), function(row_index) {
+        lapply(input_frame, function(column) {
+          value <- if (is.list(column)) column[[row_index]] else column[row_index]
+          if (length(value) == 0 || is.null(value) || all(is.na(value))) NULL else value[[1]]
+        })
+      })
+    }
+    if (!is.list(dataset_inputs) || length(dataset_inputs) < 2 || length(dataset_inputs) > 48) {
+      res$status <- 400
+      return(list(error = "Invalid multi-sample inputs."))
+    }
+    valid_input <- vapply(dataset_inputs, function(input) {
+      is.list(input) && is_scalar_string(input$storage_key) &&
+        identical(as.character(input$file_type)[1], "tenx_h5") &&
+        is_scalar_string(input$sample_name) && is_scalar_string(input$condition_name)
+    }, logical(1))
+    scalar_text_or_empty <- function(value) {
+      if (!is_scalar_string(value)) return("")
+      trimws(as.character(value)[1])
+    }
+    sample_names <- vapply(dataset_inputs, function(input) scalar_text_or_empty(input$sample_name), character(1))
+    condition_names <- vapply(dataset_inputs, function(input) scalar_text_or_empty(input$condition_name), character(1))
+    safe_label <- function(value) {
+      nchar(value) >= 1 && nchar(value) <= 80 && grepl("^[A-Za-z0-9][A-Za-z0-9 ._-]*$", value)
+    }
+    if (!all(valid_input) || anyDuplicated(tolower(sample_names)) ||
+        !all(vapply(sample_names, safe_label, logical(1))) ||
+        !all(vapply(condition_names, safe_label, logical(1))) ||
+        length(unique(tolower(condition_names))) < 2) {
+      res$status <- 400
+      return(list(error = "Invalid multi-sample inputs."))
+    }
+  } else {
+    if (is.null(dataset_storage_key) || !is.character(dataset_storage_key) ||
+        length(dataset_storage_key) != 1 || nchar(dataset_storage_key) == 0) {
+      res$status <- 400
+      return(list(error = "Missing storage key."))
+    }
+    if (is.null(dataset_type) || !identical(as.character(dataset_type)[1], "tenx_h5")) {
+      res$status <- 400
+      return(list(error = "Unsupported dataset type."))
+    }
   }
 
   min_cells <- as_int(p$minCells, 3, 0, 10000)
@@ -1860,25 +1906,55 @@ function(req, res) {
 
   tryCatch({
     receipt_binding <- validate_completion_receipt_binding(
-      body, "seurat.pipeline.v1", "r.seurat.pipeline.v1", storage_key
+      body,
+      if (multi_sample) "seurat.multisample.v1" else "seurat.pipeline.v1",
+      if (multi_sample) "r.seurat.multisample.v1" else "r.seurat.pipeline.v1",
+      storage_key
     )
     # Read10X_h5 needs hdf5r (a Seurat *Suggests*, not a hard dependency). Fail with a
     # clear, actionable message if it is missing rather than a cryptic downstream error.
     if (!requireNamespace("hdf5r", quietly = TRUE)) {
       stop("R package 'hdf5r' is not installed; cannot read 10x HDF5 (tenx_h5). Install 'hdf5r' on the R backend.")
     }
-    dataset_path <- resolve_internal_storage_key(dataset_storage_key)
-    if (!file.exists(dataset_path)) stop("Dataset file not found.")
-    mat <- Read10X_h5(filename = dataset_path)
-    if (is.list(mat)) {
-      if ("Gene Expression" %in% names(mat)) {
-        mat <- mat[["Gene Expression"]]
-      } else {
-        mat <- mat[[1]]
+    read_gene_expression <- function(input_key) {
+      dataset_path <- resolve_internal_storage_key(input_key)
+      if (!file.exists(dataset_path)) stop("Dataset file not found.")
+      mat <- Read10X_h5(filename = dataset_path)
+      if (is.list(mat)) {
+        if ("Gene Expression" %in% names(mat)) mat <- mat[["Gene Expression"]] else mat <- mat[[1]]
       }
+      mat
     }
 
-    obj <- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
+    if (multi_sample) {
+      sample_objects <- lapply(seq_along(dataset_inputs), function(index) {
+        input <- dataset_inputs[[index]]
+        sample_name <- sample_names[[index]]
+        sample_obj <- CreateSeuratObject(
+          counts = read_gene_expression(input$storage_key),
+          project = sample_name,
+          min.cells = min_cells,
+          min.features = min_features
+        )
+        sample_obj$sample_id <- sample_name
+        sample_obj$condition <- condition_names[[index]]
+        sample_obj$donor_code <- if (is_scalar_string(input$donor_code)) as.character(input$donor_code)[1] else NA_character_
+        sample_obj$batch <- if (is_scalar_string(input$batch)) as.character(input$batch)[1] else NA_character_
+        sample_obj
+      })
+      obj <- merge(
+        x = sample_objects[[1]],
+        y = sample_objects[-1],
+        add.cell.ids = sprintf("sample%02d", seq_along(sample_objects)),
+        merge.data = FALSE
+      )
+    } else {
+      obj <- CreateSeuratObject(
+        counts = read_gene_expression(dataset_storage_key),
+        min.cells = min_cells,
+        min.features = min_features
+      )
+    }
     raw_obj <- obj
     warnings <- c()
     pre_filter_cells <- ncol(obj)
@@ -1940,23 +2016,33 @@ function(req, res) {
     saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
     cluster_counts <- table(obj$seurat_clusters)
 
+    summary_out <- list(
+      n_cells = ncol(obj),
+      n_features = nrow(obj),
+      pre_filter_cells = pre_filter_cells,
+      post_filter_cells = post_filter_cells,
+      percent_mt_available = mt_ok,
+      n_variable_features = length(VariableFeatures(obj)),
+      n_pcs = npcs,
+      n_clusters = length(cluster_counts),
+      cluster_sizes = as.list(as.integer(cluster_counts)),
+      reductions = as.list(names(obj@reductions)),
+      normalization_method = norm_method,
+      resolution = cluster_res,
+      used_seed = used_seed
+    )
+    if (multi_sample) {
+      condition_counts <- table(condition_names)
+      summary_out$n_samples <- length(dataset_inputs)
+      summary_out$conditions <- as.list(names(condition_counts))
+      summary_out$samples_per_condition <- lapply(seq_along(condition_counts), function(index) {
+        list(condition = names(condition_counts)[[index]], n = as.integer(condition_counts[[index]]))
+      })
+    }
+
     response_out <- list(
       ok = TRUE,
-      summary = list(
-        n_cells = ncol(obj),
-        n_features = nrow(obj),
-        pre_filter_cells = pre_filter_cells,
-        post_filter_cells = post_filter_cells,
-        percent_mt_available = mt_ok,
-        n_variable_features = length(VariableFeatures(obj)),
-        n_pcs = npcs,
-        n_clusters = length(cluster_counts),
-        cluster_sizes = as.list(as.integer(cluster_counts)),
-        reductions = as.list(names(obj@reductions)),
-        normalization_method = norm_method,
-        resolution = cluster_res,
-        used_seed = used_seed
-      ),
+      summary = summary_out,
       warnings = as.list(warnings),
       checkpoint = list(
         saved = saved,

@@ -86,6 +86,7 @@ describe('PipelineManager', () => {
       uploadDataset: vi.fn(),
       createProjectAnalysisObject: vi.fn(),
       createSeuratPipelineJob: vi.fn(),
+      createMultiSampleSeuratPipelineJob: vi.fn(),
       createSpatialSeuratPipelineJob: vi.fn(),
       createProjectJob: vi.fn(),
       getProjectJob: vi.fn(),
@@ -619,5 +620,101 @@ describe('PipelineManager', () => {
     fireEvent.click(screen.getByRole('button', { name: /Continue to marker analysis/i }));
     expect(onSelectAnalysisObject).toHaveBeenCalledWith('proj_1', 'ao_result123');
     expect(setActiveTab).toHaveBeenCalledWith('deg');
+  });
+
+  it('uploads multiple durable sample files and launches a condition-aware Seurat preparation job', async () => {
+    let uploadIndex = 0;
+    window.electronAPI.uploadDataset = vi.fn(async (_projectId, file) => {
+      uploadIndex += 1;
+      return {
+        id: `ds_multi${uploadIndex}`,
+        fileType: 'tenx_h5',
+        originalFilename: file.name,
+        uploadStatus: 'uploaded',
+        validationStatus: 'valid',
+      };
+    });
+    window.electronAPI.createProjectAnalysisObject = vi.fn(async (_projectId, payload) => ({
+      id: 'ao_multi_input',
+      projectId: 'proj_1',
+      datasetId: payload.datasetId,
+      objectType: 'matrix',
+      displayName: 'Primary multi-sample input',
+      metadata: payload.metadata,
+    }));
+    window.electronAPI.createMultiSampleSeuratPipelineJob = vi.fn(async (_projectId, payload) => ({
+      id: 'job_multi',
+      status: 'queued',
+      jobType: 'seurat.multisample.v1',
+      datasetId: payload.samples[0].datasetId,
+      analysisObjectId: payload.analysisObjectId,
+      parameters: payload,
+      createdAt: '2026-08-11T00:00:00.000Z',
+    }));
+    window.electronAPI.getProjectJob = vi.fn(async () => ({
+      id: 'job_multi',
+      status: 'queued',
+      jobType: 'seurat.multisample.v1',
+      datasetId: 'ds_multi1',
+      analysisObjectId: 'ao_multi_input',
+      createdAt: '2026-08-11T00:00:00.000Z',
+    }));
+    window.electronAPI.getProjectJobLogs = vi.fn(async () => ({ logs: [] }));
+    window.electronAPI.listProjectJobArtifacts = vi.fn(async () => []);
+
+    renderPipelineManager({
+      currentWs: { ...currentWs, objects: [], selectedObjectIds: [] },
+      datasetInfo: null,
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Multiple conditions' }));
+    const files = [
+      new File(['h5'], 'control_1.h5'),
+      new File(['h5'], 'control_2.h5'),
+      new File(['h5'], 'treated_1.h5'),
+      new File(['h5'], 'treated_2.h5'),
+    ];
+    fireEvent.change(screen.getByTestId('seurat-pipeline-upload'), { target: { files } });
+
+    expect(await screen.findByText('control_1.h5')).toBeInTheDocument();
+    expect(await screen.findByText('treated_2.h5')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Condition for control_1.h5'), { target: { value: 'control' } });
+    fireEvent.change(screen.getByLabelText('Condition for control_2.h5'), { target: { value: 'control' } });
+    fireEvent.change(screen.getByLabelText('Condition for treated_1.h5'), { target: { value: 'treated' } });
+    fireEvent.change(screen.getByLabelText('Condition for treated_2.h5'), { target: { value: 'treated' } });
+
+    expect(screen.getByText(/minimum replication gate/i)).toBeInTheDocument();
+    const launch = screen.getByRole('button', { name: /Prepare multi-condition analysis/i });
+    fireEvent.change(screen.getByLabelText('Donor code for control_1.h5'), { target: { value: 'donor/1' } });
+    expect(launch).toBeDisabled();
+    expect(screen.getByText(/Labels must be 1-80 characters/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Donor code for control_1.h5'), { target: { value: 'donor_1' } });
+    expect(launch).toBeEnabled();
+    fireEvent.click(launch);
+
+    await waitFor(() => {
+      expect(window.electronAPI.createProjectAnalysisObject).toHaveBeenCalledWith(
+        'proj_1',
+        expect.objectContaining({
+          datasetId: 'ds_multi1',
+          metadata: expect.objectContaining({
+            sourceType: 'tenx_h5_multisample_dataset',
+            supportedWorkflow: 'seurat.multisample.v1',
+          }),
+        })
+      );
+      expect(window.electronAPI.createMultiSampleSeuratPipelineJob).toHaveBeenCalledWith(
+        'proj_1',
+        expect.objectContaining({
+          analysisObjectId: 'ao_multi_input',
+          samples: [
+            expect.objectContaining({ datasetId: 'ds_multi1', sampleName: 'control_1', conditionName: 'control' }),
+            expect.objectContaining({ datasetId: 'ds_multi2', sampleName: 'control_2', conditionName: 'control' }),
+            expect.objectContaining({ datasetId: 'ds_multi3', sampleName: 'treated_1', conditionName: 'treated' }),
+            expect.objectContaining({ datasetId: 'ds_multi4', sampleName: 'treated_2', conditionName: 'treated' }),
+          ],
+        })
+      );
+    });
   });
 });

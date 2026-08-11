@@ -27,6 +27,10 @@ const {
   assertSupportedSeuratPipelineDataset,
 } = require('./seuratPipeline');
 const {
+  validateMultiSampleSeuratParams,
+  assertSupportedMultiSampleDatasets,
+} = require('./multiSampleSeuratPipeline');
+const {
   validateSpatialSeuratParams,
   assertSupportedSpatialSeuratDataset,
 } = require('./spatialPipeline');
@@ -111,6 +115,7 @@ const ALLOWED_JOB_TYPES = new Set([
   'r.object.inspect',
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
+  'seurat.multisample.v1',
   'spatial.seurat.v1',
   'checkpoint.save.v1',
   'checkpoint.load.v1',
@@ -125,6 +130,7 @@ const ALLOWED_JOB_TYPES = new Set([
 const RETRYABLE_DURABLE_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
+  'seurat.multisample.v1',
   'spatial.seurat.v1',
   'checkpoint.save.v1',
   'checkpoint.load.v1',
@@ -2966,7 +2972,7 @@ async function createJob(ownerUserId, input = {}) {
     throw codedError('INVALID_JOB_TYPE',
       `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
   }
-  if (jobType === 'seurat.pipeline.v1' || jobType === 'spatial.seurat.v1') {
+  if (['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)) {
     throw codedError('INVALID_JOB_TYPE',
       `${jobType} jobs must be created through a project-scoped dataset.`);
   }
@@ -3188,6 +3194,7 @@ async function createProjectJob(userId, projectId, input = {}) {
   const serverManagedResultTypes = new Set([
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
+    'seurat.multisample.v1',
     'spatial.seurat.v1',
     'checkpoint.save.v1',
     'deg.find_markers.v1',
@@ -3212,6 +3219,7 @@ async function createProjectJob(userId, projectId, input = {}) {
   const requiresAnalysisObjectTypes = new Set([
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
+    'seurat.multisample.v1',
     'spatial.seurat.v1',
     'checkpoint.save.v1',
     'deg.find_markers.v1',
@@ -3277,6 +3285,26 @@ async function createProjectJob(userId, projectId, input = {}) {
     }
     validateSeuratPipelineParams(parameters);
     assertSupportedSeuratPipelineDataset(dataset);
+  }
+  if (jobType === 'seurat.multisample.v1') {
+    if (!datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.multisample.v1 requires a primary datasetId.');
+    }
+    if (!analysisObjectId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.multisample.v1 requires an input analysisObjectId for lineage.');
+    }
+    if (analysisObject.datasetId !== datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.multisample.v1 input analysisObjectId must reference the primary datasetId.');
+    }
+    const validated = validateMultiSampleSeuratParams(parameters);
+    if (validated.samples[0].datasetId !== datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'Primary datasetId must match the first multi-sample input.');
+    }
+    const datasets = await Promise.all(
+      validated.samples.map(sample => getDatasetRow(sample.datasetId, pid))
+    );
+    assertSupportedMultiSampleDatasets(datasets, validated.samples);
+    storedParameters = { samples: validated.samples, ...validated.params };
   }
   if (jobType === 'spatial.seurat.v1') {
     if (!datasetId) throw codedError('INVALID_PARAMETERS', 'spatial.seurat.v1 requires datasetId.');
@@ -4620,6 +4648,28 @@ async function getSeuratPipelineInputsForJobByWorker(jobId, workerId, claimToken
   return { dataset, inputObject };
 }
 
+async function getMultiSampleSeuratPipelineInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'seurat.multisample.v1'
+  );
+  if (!row.project_id || !row.dataset_id || !row.analysis_object_id) {
+    throw codedError('INVALID_JOB_CONTEXT', 'Multi-sample Seurat pipeline job inputs are incomplete.');
+  }
+  const validated = validateMultiSampleSeuratParams(parseJson(row.parameters_json, {}));
+  if (validated.samples[0].datasetId !== row.dataset_id) {
+    throw codedError('INVALID_PARAMETERS', 'Primary datasetId must match the first multi-sample input.');
+  }
+  const [datasets, inputObject] = await Promise.all([
+    Promise.all(validated.samples.map(sample => getDatasetRow(sample.datasetId, row.project_id))),
+    getProjectAnalysisObjectRow(row.analysis_object_id, row.project_id),
+  ]);
+  assertSupportedMultiSampleDatasets(datasets, validated.samples);
+  if (!inputObject || inputObject.datasetId !== row.dataset_id) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  return { datasets, inputObject, validated };
+}
+
 async function getSpatialPipelineInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
   const row = await requireClaimedJobRowByWorker(
     jobId, workerId, claimToken, opts, 'spatial.seurat.v1'
@@ -5190,6 +5240,7 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
   const recoverySpecs = {
     'pbmc.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
     'seurat.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
+    'seurat.multisample.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
     'spatial.seurat.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
     'checkpoint.save.v1': { artifacts: ['checkpoint', 'checkpoint_save'], result: true, edges: 1 },
     'checkpoint.fork.v1': {
@@ -7086,6 +7137,7 @@ module.exports = {
   setJobScheduling,
   getOwnedAnalysisObjectForJobByWorker,
   getSeuratPipelineInputsForJobByWorker,
+  getMultiSampleSeuratPipelineInputsForJobByWorker,
   getSpatialPipelineInputsForJobByWorker,
   getLoadableCheckpointForJobByWorker,
   getHydrationCheckpointForJobByWorker,
