@@ -1,32 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
-import Workspace from './pages/Workspace';
-import QualityControl from './pages/QualityControl';
-import Normalization from './pages/Normalization';
-import PCA from './pages/PCA';
-import Clustering from './pages/Clustering';
-import UMAPView from './pages/UMAPView';
-import FeaturePlot from './pages/FeaturePlot';
-import HeatmapPlot from './pages/HeatmapPlot';
-import DotPlot from './pages/DotPlot';
-import GeneViewer from './pages/GeneViewer';
-import DifferentialExpression from './pages/DifferentialExpression';
-import PathwayEnrichment from './pages/PathwayEnrichment';
-import CellChat from './pages/CellChat';
-import Publication from './pages/Publication';
-import Validation from './pages/Validation';
-import LineageExplorer from './pages/LineageExplorer';
-import ProjectHistory from './pages/ProjectHistory';
-import BatchIntegration from './pages/BatchIntegration';
-import Collaborators from './pages/Collaborators';
-import Inspect from './pages/Inspect';
-import Diagnostics from './pages/Diagnostics';
-import PipelineManager from './pages/PipelineManager';
-import ExploratoryAnalysis from './pages/ExploratoryAnalysis';
-import AnalysisBranches from './pages/AnalysisBranches';
-import StudyDesign from './pages/StudyDesign';
-import ExpertR from './pages/ExpertR';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
 import { hasAttachedLiveRObject, pipelineProbeAction } from './liveRState';
@@ -53,6 +27,33 @@ import {
   mapBackendAnalysisObject,
   persistAnalysisObjectSummary,
 } from './backendWorkspaceModel';
+
+const Workspace = React.lazy(() => import('./pages/Workspace'));
+const QualityControl = React.lazy(() => import('./pages/QualityControl'));
+const Normalization = React.lazy(() => import('./pages/Normalization'));
+const PCA = React.lazy(() => import('./pages/PCA'));
+const Clustering = React.lazy(() => import('./pages/Clustering'));
+const UMAPView = React.lazy(() => import('./pages/UMAPView'));
+const FeaturePlot = React.lazy(() => import('./pages/FeaturePlot'));
+const HeatmapPlot = React.lazy(() => import('./pages/HeatmapPlot'));
+const DotPlot = React.lazy(() => import('./pages/DotPlot'));
+const GeneViewer = React.lazy(() => import('./pages/GeneViewer'));
+const DifferentialExpression = React.lazy(() => import('./pages/DifferentialExpression'));
+const PathwayEnrichment = React.lazy(() => import('./pages/PathwayEnrichment'));
+const CellChat = React.lazy(() => import('./pages/CellChat'));
+const Publication = React.lazy(() => import('./pages/Publication'));
+const Validation = React.lazy(() => import('./pages/Validation'));
+const LineageExplorer = React.lazy(() => import('./pages/LineageExplorer'));
+const ProjectHistory = React.lazy(() => import('./pages/ProjectHistory'));
+const BatchIntegration = React.lazy(() => import('./pages/BatchIntegration'));
+const Collaborators = React.lazy(() => import('./pages/Collaborators'));
+const Inspect = React.lazy(() => import('./pages/Inspect'));
+const Diagnostics = React.lazy(() => import('./pages/Diagnostics'));
+const PipelineManager = React.lazy(() => import('./pages/PipelineManager'));
+const ExploratoryAnalysis = React.lazy(() => import('./pages/ExploratoryAnalysis'));
+const AnalysisBranches = React.lazy(() => import('./pages/AnalysisBranches'));
+const StudyDesign = React.lazy(() => import('./pages/StudyDesign'));
+const ExpertR = React.lazy(() => import('./pages/ExpertR'));
 
 // Pipeline step ordering — used for downstream invalidation
 const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'];
@@ -147,7 +148,15 @@ const TabContent = ({ id, activeTab, children }) => {
   }, [activeTab, id]);
   return (
     <div className={`absolute inset-0 ${activeTab === id ? 'block' : 'hidden'}`}>
-      {hasBeenActive ? children : null}
+      {hasBeenActive ? (
+        <React.Suspense fallback={(
+          <div role="status" className="flex h-full items-center justify-center text-sm text-textMuted">
+            Opening workspace…
+          </div>
+        )}>
+          {children}
+        </React.Suspense>
+      ) : null}
     </div>
   );
 };

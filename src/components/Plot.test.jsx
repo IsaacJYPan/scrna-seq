@@ -1,7 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('react-plotly.js', () => ({ default: () => null }));
-
 import { isWebGLFailure, preparePlotData, supportsWebGL } from './Plot';
 
 describe('Plot SVG fallback', () => {
