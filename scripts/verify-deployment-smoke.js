@@ -239,6 +239,7 @@ async function main() {
     const commonEnv = {
       ...process.env,
       NODE_ENV: 'production',
+      APP_DEPLOYMENT_MODE: 'private',
       DATABASE_URL: databaseUrl,
       SESSION_SECRET,
       SESSION_EPOCH,
