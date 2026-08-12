@@ -81,6 +81,7 @@ function writeEnvironment(file, port, credentials, backupDirectory) {
   const portableBackupRoot = backupDirectory.replace(/\\/g, '/');
   fs.writeFileSync(file, [
     'FRONTEND_ORIGIN=https://compose-smoke.example.test',
+    'APP_DEPLOYMENT_MODE=private',
     `WEB_PORT=${port}`,
     'TRUST_PROXY_HOPS=1',
     'COOKIE_SAMESITE=Lax',
@@ -315,4 +316,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { cleanupContainerOwnedBackup, main };
+module.exports = { cleanupContainerOwnedBackup, main, writeEnvironment };
