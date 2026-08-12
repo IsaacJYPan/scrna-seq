@@ -1009,7 +1009,7 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — invariants preserved', ()
     expect(Object.keys(created).sort()).toEqual([
       'analysisObjectId', 'canceledAt', 'completedAt', 'createdAt', 'datasetId',
       'error', 'id', 'jobType', 'logs', 'ownerUserId', 'parameters', 'projectId',
-      'resultAnalysisObjectId', 'startedAt', 'status', 'updatedAt'
+      'resultAnalysisObjectId', 'retryOfJobId', 'startedAt', 'status', 'updatedAt'
     ]);
     // Claiming does not add worker keys to the public read shape.
     await claimNextJob('w1', { now: T0, leaseSeconds: 30 });

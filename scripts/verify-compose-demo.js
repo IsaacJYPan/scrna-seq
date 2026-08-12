@@ -22,6 +22,7 @@ function secret(bytes) { return crypto.randomBytes(bytes).toString('hex'); }
 function environment(templateProjectId) {
   return [
     'FRONTEND_ORIGIN=https://demo.accept.invalid',
+    'APP_DEPLOYMENT_MODE=demo',
     `WEB_PORT=${webPort}`,
     'TRUST_PROXY_HOPS=1',
     'COOKIE_SAMESITE=Lax',

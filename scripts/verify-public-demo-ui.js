@@ -110,18 +110,18 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
     const page = await context.newPage();
     observePage(page, diagnostics);
 
-    await page.goto(acceptedOrigin, { waitUntil: 'networkidle', timeout: 60_000 });
+    await page.goto(acceptedOrigin, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     const start = page.getByRole('button', { name: 'Start temporary demo', exact: true });
     await start.waitFor({ state: 'visible', timeout: 30_000 });
     assert(await page.getByText(/uploads and Expert R are disabled/i).count() > 0,
       'The public demo policy notice was not visible before guest creation.');
     await start.click();
 
-    await page.getByRole('heading', { name: 'Pipeline Workbench', exact: true })
+    await page.getByRole('heading', { name: /^TraceOmics Workbench/ })
       .waitFor({ state: 'visible', timeout: 60_000 });
     await page.getByText('Curated single-cell demo', { exact: true }).first()
       .waitFor({ state: 'visible', timeout: 30_000 });
-    const expertRButtons = page.getByRole('button', { name: /^Expert R, Not configured$/i });
+    const expertRButtons = page.getByRole('button', { name: /^Advanced analysis, Access required$/i });
     await expertRButtons.first().waitFor({ state: 'visible', timeout: 30_000 });
     const expertRCount = await expertRButtons.count();
     assert(expertRCount > 0, 'The public demo did not expose its disabled Expert R capability state.');
@@ -130,12 +130,10 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
         'Every Expert R entry must remain disabled in the public demo.');
     }
 
-    const recovery = page.getByRole('button', { name: 'Open recovery', exact: true });
-    await recovery.waitFor({ state: 'visible', timeout: 30_000 });
-    await recovery.click();
+    await openSidebarPage(page, 'Runs & Results');
     await page.getByRole('heading', { name: 'Runs & Results', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
-    const attach = page.getByRole('button', { name: 'Open saved version', exact: true });
+    const attach = page.getByRole('button', { name: 'Restore saved version', exact: true });
     await attach.waitFor({ state: 'visible', timeout: 30_000 });
     await attach.click();
     const checkpointJob = await waitFor(async () => page.evaluate(async () => {
@@ -181,8 +179,18 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
     await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
     await page.getByRole('button', { name: 'Run recipe', exact: true }).click();
-    await page.locator('span.font-mono').filter({ hasText: /^completed$/ })
-      .waitFor({ state: 'visible', timeout: 180_000 });
+    const explorationJob = await waitFor(async () => page.evaluate(async () => {
+      const projects = await window.electronAPI.listProjects();
+      const project = Array.isArray(projects) ? projects[0] : null;
+      if (!project?.id) return null;
+      const jobs = await window.electronAPI.listProjectJobs(project.id, {
+        jobType: 'explore.summarize.v1',
+      });
+      const latest = Array.isArray(jobs) ? jobs[0] : null;
+      return latest && ['completed', 'failed', 'canceled'].includes(latest.status) ? latest : null;
+    }), 180_000, 'The public demo exploratory job did not reach a terminal state.');
+    assert(explorationJob.status === 'completed',
+      `The public demo exploratory job ${explorationJob.status}: ${explorationJob.error?.message || 'unknown error'}`);
     await page.getByText('Cells', { exact: true }).first().waitFor({ state: 'visible', timeout: 30_000 });
     await page.locator('.js-plotly-plot').filter({ visible: true }).first()
       .waitFor({ state: 'visible', timeout: 30_000 });

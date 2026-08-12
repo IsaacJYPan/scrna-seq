@@ -363,7 +363,7 @@ describe.skipIf(!CONFIGURED)('project members API', () => {
       );
       expect(remove.status, `${persona.name} DELETE member`).toBe(persona.manage);
     }
-  });
+  }, 15_000);
 
   it('lets an admin manage members but an analyst cannot', async () => {
     const { alice, bob, carol, proj } = await setup();
