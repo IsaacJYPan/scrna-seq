@@ -134,6 +134,20 @@ explicitly published. Do not grant the capability unless that export authority i
 acceptable. Packages come only from the pinned image; runtime installation is
 unsupported.
 
+Before release, run both Expert R acceptance layers against operator-controlled
+local Docker and Postgres:
+
+```bash
+npm run test:expert-r-sandbox
+DATABASE_URL=postgres://... npm run test:expert-r-browser
+```
+
+The first command probes the containment and resource boundary directly. The
+second drives the production frontend through authenticated import, a durable
+worker claim, the real sandbox, creator-private result publication, an exact
+checksum-verified browser download, terminal source erasure, and a path-free
+failed-script explanation. Both commands create and remove disposable resources.
+
 Set `EXPERT_R_MIN_FREE_BYTES` for the shared host's operating reserve;
 the shipped example uses 1 GiB as a minimum, not a sizing recommendation. A run
 is rejected before compute unless both the broker work filesystem and durable
