@@ -60,6 +60,7 @@ describe('UMAPView', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -94,6 +95,27 @@ describe('UMAPView', () => {
     render(<UMAPView {...baseProps({ callApi })} />);
     await waitFor(() => expect(callApi).toHaveBeenCalled());
     expect(screen.queryByRole('button', { name: /Save Figure/i })).not.toBeInTheDocument();
+  });
+
+  it('retries short shared-compute contention and then renders the result', async () => {
+    const callApi = vi.fn(async (_endpoint, _payload, context) => {
+      if (context?.onlyIfCached) return {};
+      const explicitCalls = callApi.mock.calls.filter(([, , callContext]) => !callContext?.onlyIfCached).length;
+      return explicitCalls === 1
+        ? { error: 'Analysis compute is busy. Wait a moment and try again.' }
+        : resultPayload();
+    });
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await waitFor(() => expect(callApi).toHaveBeenCalledTimes(1));
+
+    const run = screen.getByRole('button', { name: /Run 2D UMAP/i });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+    await waitFor(() => {
+      const explicitCalls = callApi.mock.calls.filter(([, , context]) => !context?.onlyIfCached);
+      expect(explicitCalls).toHaveLength(2);
+    }, { timeout: 2_000 });
+    expect(await screen.findByRole('button', { name: /Re-compute UMAP/i })).toBeInTheDocument();
   });
 
   it('does not invent provenance parents when an attached session has no local history', async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  consumeSavedObjectSelection,
   hasAttachedLiveRObject,
   PIPELINE_PROBE_MAX_RETRIES,
   pipelineProbeAction,
@@ -64,5 +65,22 @@ describe('reconcileRestoredSession', () => {
     const restored = { id: 8, email: 'restored@example.org' };
     expect(reconcileRestoredSession(null, restored)).toBe(restored);
     expect(reconcileRestoredSession(null, null)).toBeNull();
+  });
+});
+
+describe('consumeSavedObjectSelection', () => {
+  it('preserves save confirmation only for the exact child selected by the save workflow', () => {
+    expect(consumeSavedObjectSelection('ao_saved', 'ao_saved')).toEqual({
+      preserve: true,
+      nextExpectedObjectId: null,
+    });
+    expect(consumeSavedObjectSelection('ao_saved', 'ao_other')).toEqual({
+      preserve: false,
+      nextExpectedObjectId: 'ao_saved',
+    });
+    expect(consumeSavedObjectSelection(null, 'ao_saved')).toEqual({
+      preserve: false,
+      nextExpectedObjectId: null,
+    });
   });
 });

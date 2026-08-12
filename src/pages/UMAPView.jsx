@@ -4,6 +4,7 @@ import Plot, { supportsWebGL } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import FigureSavePanel from '../components/FigureSavePanel';
+import { isTransientComputeBusy } from '../publicError';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
@@ -109,7 +110,13 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
     };
 
-    const data = await runStep(isInitial, ep, ipc);
+    let data = null;
+    const attempts = isInitial ? 1 : 3;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      data = await runStep(isInitial, ep, ipc);
+      if (!isTransientComputeBusy(data?.error) || attempt + 1 >= attempts) break;
+      await new Promise(resolve => window.setTimeout(resolve, 500 * (attempt + 1)));
+    }
 
     if (data?.result) {
       setCachedDims(prev => ({ ...prev, [nc]: data }));

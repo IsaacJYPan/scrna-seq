@@ -20,6 +20,12 @@ suppressPackageStartupMessages({
 
 args <- commandArgs(trailingOnly = FALSE)
 file_arg <- grep("^--file=", args, value = TRUE)
+trailing_args <- commandArgs(trailingOnly = TRUE)
+fixture_output_arg <- grep("^--fixture-output=", trailing_args, value = TRUE)
+if (length(fixture_output_arg) > 1L) stop("Only one --fixture-output path may be supplied.")
+fixture_output <- if (length(fixture_output_arg) == 1L) {
+  sub("^--fixture-output=", "", fixture_output_arg)
+} else ""
 script_dir <- if (length(file_arg) == 1L) {
   dirname(normalizePath(sub("^--file=", "", file_arg)))
 } else normalizePath("scripts")
@@ -92,6 +98,14 @@ utils::zip(zip_path, c(
   "sample/outs/spatial/tissue_lowres_image.png"
 ), flags = "-q")
 setwd(prior_wd)
+
+if (nzchar(fixture_output)) {
+  fixture_output <- normalizePath(fixture_output, winslash = "/", mustWork = FALSE)
+  dir.create(dirname(fixture_output), recursive = TRUE, showWarnings = FALSE)
+  if (!file.copy(zip_path, fixture_output, overwrite = TRUE)) {
+    stop("Could not write the requested spatial browser fixture.")
+  }
+}
 
 extracted <- extract_bundle(zip_path)
 on.exit(unlink(extracted$root, recursive = TRUE, force = TRUE), add = TRUE)
