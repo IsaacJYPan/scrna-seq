@@ -935,7 +935,14 @@ async function nativeObserve() {
     if (rows.length === 2 && rows.every(row => row.status === 'completed')) break;
     await new Promise(resolve => setTimeout(resolve, 300));
   }
-  assert(overlap, 'two native Electron DEG jobs were not observed running concurrently');
+  assert(overlap, 'two native Electron DEG jobs were not observed running concurrently', JSON.stringify({
+    jobs: rows.map(row => ({
+      status: row.status,
+      poolSlot: Number(String(row.worker_id || '').match(/^pool-(\d+):/)?.[1]) || null,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+    })),
+  }));
   assert(rows.length === 2 && rows.every(row => row.status === 'completed'),
     'both native Electron DEG jobs must complete', JSON.stringify(normalizedRows(rows)));
   const latestStart = Math.max(...rows.map(row => new Date(row.started_at).getTime()));

@@ -261,8 +261,6 @@ export default function DifferentialExpression({
       && selectedObjectId
       && isDbBackedObject
       && canWriteProject
-      && sessionReady
-      && liveObjectAttached
       && ownsPrivateLiveObject
       && !loading
   );
@@ -383,11 +381,6 @@ export default function DifferentialExpression({
       setError('This analysis belongs to another member. Create a branch from its saved version in your private analysis workspace before running marker analysis.');
       return;
     }
-    if (!sessionReady || !liveObjectAttached) {
-      setError('Open this saved analysis in your private analysis workspace before running marker analysis.');
-      return;
-    }
-
     const api = window.electronAPI || {};
     if (!api.createDegFindMarkersJob && !api.createProjectJob) {
       setError('Marker analysis is temporarily unavailable.');
@@ -416,7 +409,7 @@ export default function DifferentialExpression({
       if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
     }
     return undefined;
-  }, [activeProjectId, canWriteProject, isDbBackedObject, liveObjectAttached, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, sessionReady, userEmail]);
+  }, [activeProjectId, canWriteProject, isDbBackedObject, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, userEmail]);
 
   const cancelDegJob = useCallback(async () => {
     if (!activeProjectId || !job?.id || !canCancelJob) return;
@@ -529,14 +522,14 @@ export default function DifferentialExpression({
 
         {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            This saved analysis is not open in your private analysis workspace yet. {datasetInfo?.source === 'pbmc3k_demo' ? 'Return to the workspace to reload the built-in PBMC demo.' : 'Open Runs & Results to open its saved version.'}
+            Interactive plots are not available until this saved analysis is open in your private workspace. Marker analysis can still run from its private saved checkpoint.
             <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
               {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open Runs & Results'}
             </button>
           </div>
         )}
 
-        {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
+        {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && !computeReady && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
             Compute is temporarily unavailable. You can submit this analysis now; it will wait in the durable queue until compute is available.
           </div>
@@ -550,7 +543,9 @@ export default function DifferentialExpression({
                 This marker analysis uses approved settings. The statistical test is fixed to Wilcoxon in v1.
               </p>
             </div>
-            {pipelineState?.cluster ? (
+            {!sessionReady || !liveObjectAttached ? (
+              <StatusBadge tone="blue">saved checkpoint</StatusBadge>
+            ) : pipelineState?.cluster ? (
               <StatusBadge tone="green">cluster groups ready</StatusBadge>
             ) : (
               <StatusBadge tone="amber">cluster groups required</StatusBadge>

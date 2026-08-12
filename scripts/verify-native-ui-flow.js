@@ -284,8 +284,13 @@ async function attachCheckpoint(page, lane, runDirectory, label) {
     // projected the private attachment into App state. Reloading causes the
     // authoritative pipeline-state probe to rebuild that projection.
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await waitFor(async () => page.getByRole('button', { name: /^UMAP(?:,|$)/i }).isEnabled(), 60_000,
-      `UMAP navigation did not become available after checkpoint attachment for ${label}.`);
+    await openSidebarPage(page, 'Markers / DEG');
+    await page.getByRole('heading', { name: 'Markers / Differential Expression', exact: true })
+      .waitFor({ timeout: 30_000 });
+    await page.getByText('cluster groups ready', { exact: true }).waitFor({ state: 'visible', timeout: 60_000 });
+    await waitFor(async () => (
+      page.getByText(/This saved analysis is not open in your private analysis workspace yet/i).isHidden()
+    ), 60_000, `Private checkpoint attachment was not projected after reload for ${label}.`);
   } catch (error) {
     const diagnosticPath = path.join(runDirectory, `${label}-attach-failure.json`);
     const screenshotPath = path.join(runDirectory, `${label}-attach-failure.png`);
@@ -402,12 +407,33 @@ async function runCellChat(page, lane, runDirectory) {
   };
 }
 
-async function prepareDegLaunch(page, lane) {
+async function prepareDegLaunch(page, lane, runDirectory) {
   await openSidebarPage(page, 'Markers / DEG');
   await page.getByRole('heading', { name: 'Markers / Differential Expression', exact: true })
     .waitFor({ timeout: 30_000 });
   const launch = page.getByRole('button', { name: 'Run marker analysis', exact: true });
-  await waitFor(async () => launch.isEnabled(), 60_000, `DEG launch did not enable for lane ${lane.index}.`);
+  try {
+    await waitFor(async () => launch.isEnabled(), 60_000, `DEG launch did not enable for lane ${lane.index}.`);
+  } catch (error) {
+    const messages = {
+      savedAnalysisMissing: await page.getByText(/Select a saved analysis before running marker analysis/i).isVisible().catch(() => false),
+      readOnly: await page.getByText(/Your project role is read-only/i).isVisible().catch(() => false),
+      foreignOwner: await page.getByText(/This analysis belongs to another member/i).isVisible().catch(() => false),
+      privateWorkspaceNotReady: await page.getByText(/This saved analysis is not open in your private analysis workspace yet/i).isVisible().catch(() => false),
+      computeUnavailable: await page.getByText(/Compute is temporarily unavailable/i).isVisible().catch(() => false),
+      clusterGroupsReady: await page.getByText('cluster groups ready', { exact: true }).isVisible().catch(() => false),
+      launchDisabled: await launch.isDisabled().catch(() => true),
+    };
+    const evidenceBase = `electron-lane-${lane.index}-deg-launch-failure`;
+    await page.screenshot({ path: path.join(runDirectory, `${evidenceBase}.png`), fullPage: false })
+      .catch(() => undefined);
+    await fs.promises.writeFile(
+      path.join(runDirectory, `${evidenceBase}.json`),
+      `${JSON.stringify({ lane: lane.index, messages }, null, 2)}\n`,
+      'utf8'
+    );
+    throw error;
+  }
   return launch;
 }
 
@@ -435,23 +461,33 @@ async function waitForDegResult(page, lane, jobId) {
   if (job.status !== 'completed') {
     throw new Error(`DEG job ${job.status} for lane ${lane.index}: ${job.error?.code || 'unknown'} ${job.error?.message || ''}`);
   }
-  const completed = page.getByText('Durable DEG completed', { exact: true });
+  const completed = page.getByText('Marker analysis complete', { exact: true });
   if (!await completed.isVisible().catch(() => false)) {
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await openSidebarPage(page, 'Markers / DEG');
-    await page.getByRole('heading', { name: 'Markers / Differential Expression', exact: true })
-      .waitFor({ state: 'visible', timeout: 30_000 });
+    const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+    await refresh.waitFor({ state: 'visible', timeout: 30_000 });
+    await refresh.click();
   }
   await completed.waitFor({ state: 'visible', timeout: 60_000 });
 }
 
 async function closeElectronApp(app) {
+  let child = null;
+  try { child = app.process(); } catch { /* app may already be closed */ }
   const closeAttempt = app.close().then(() => true).catch(() => false);
   await Promise.race([closeAttempt, delay(10_000)]);
-  let child = null;
-  try { child = app.process(); } catch { return; }
   if (child && child.exitCode === null) {
-    try { process.kill(child.pid, 'SIGKILL'); } catch { /* process may have exited */ }
+    if (process.platform === 'win32') {
+      await new Promise(resolve => {
+        const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+          windowsHide: true,
+          stdio: 'ignore',
+        });
+        killer.once('error', resolve);
+        killer.once('exit', resolve);
+      });
+    } else {
+      try { process.kill(child.pid, 'SIGKILL'); } catch { /* process may have exited */ }
+    }
   }
   if (child && child.exitCode === null) {
     await Promise.race([
@@ -459,6 +495,20 @@ async function closeElectronApp(app) {
       delay(5_000),
     ]);
   }
+}
+
+async function removeTemporaryProfileRoot(tempRoot) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
+    try {
+      await fs.promises.rm(tempRoot, { recursive: true, force: true, maxRetries: 2, retryDelay: 250 });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 20) await delay(500);
+    }
+  }
+  throw lastError || new Error('Temporary Electron profile cleanup failed.');
 }
 
 function runPowerShellCapture({ windowHandle, outputDirectory, frameCount, frameIntervalMs }) {
@@ -620,6 +670,8 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
   let browserContext = null;
   const electronApps = [];
   let primaryError = null;
+  let cleanupError = null;
+  let acceptanceResult = null;
   try {
     browser = await chromium.launch({ headless: true });
     browserContext = await browser.newContext({
@@ -668,7 +720,7 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
     await showUmap(lanes[0].page);
     const nativeUmap = await recordNativeUmap(lanes[0].electronApp, lanes[0].page, runDirectory);
 
-    const launchButtons = await Promise.all(lanes.map(lane => prepareDegLaunch(lane.page, lane)));
+    const launchButtons = await Promise.all(lanes.map(lane => prepareDegLaunch(lane.page, lane, runDirectory)));
     await Promise.all(launchButtons.map(button => button.click()));
     const launched = await Promise.all(lanes.map(lane => findLaunchedDegJob(lane.page, lane)));
     const jobs = launched.map((job, index) => ({
@@ -722,24 +774,21 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
       },
     };
     fs.writeFileSync(path.join(runDirectory, 'acceptance.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-    return { runDirectory, manifest };
+    acceptanceResult = { runDirectory, manifest };
   } catch (error) {
     primaryError = error;
     fs.writeFileSync(path.join(runDirectory, 'native-ui-failure.json'), `${JSON.stringify({
       capturedAt: new Date().toISOString(),
       error: error && error.message ? error.message : 'Native UI acceptance failed.',
     }, null, 2)}\n`);
-    throw error;
   } finally {
     if (browserContext) await browserContext.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
     for (const app of electronApps.reverse()) await closeElectronApp(app);
     try {
-      fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    } catch (cleanupError) {
-      if (!primaryError) {
-        console.warn(`[native-ui] Temporary profile cleanup failed (${cleanupError.code || 'UNKNOWN'}).`);
-      }
+      await removeTemporaryProfileRoot(tempRoot);
+    } catch (error) {
+      cleanupError = error;
     }
     for (const lane of lanes) {
       delete lane.electronApp;
@@ -747,6 +796,9 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
       delete lane.password;
     }
   }
+  if (primaryError) throw primaryError;
+  if (cleanupError) throw cleanupError;
+  return acceptanceResult;
 }
 
 module.exports = { runNativeUiAcceptance };

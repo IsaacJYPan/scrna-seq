@@ -178,13 +178,32 @@ describe('DifferentialExpression durable worker UI', () => {
     expect(screen.getByText(/Select a saved analysis before running marker analysis/i)).toBeInTheDocument();
   });
 
-  it('does not queue DEG when the selected private R object is not attached', () => {
+  it('queues checkpoint-backed DEG when the interactive private R object is not attached', async () => {
     renderDeg({
       datasetInfo: { id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'unknown' },
+      sessionReady: false,
+    });
+
+    const launch = screen.getByRole('button', { name: /Run marker analysis/i });
+    expect(launch).toBeEnabled();
+    expect(screen.getByText(/can still run from its private saved checkpoint/i)).toBeInTheDocument();
+    expect(screen.getByText('saved checkpoint', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText('cluster groups required', { exact: true })).not.toBeInTheDocument();
+    fireEvent.click(launch);
+    await waitFor(() => expect(window.electronAPI.createDegFindMarkersJob).toHaveBeenCalledTimes(1));
+  });
+
+  it('does not queue checkpoint-backed DEG for another member\'s analysis object', () => {
+    renderDeg({
+      datasetInfo: {
+        id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'unknown', ownerUserId: 42,
+      },
+      userId: 7,
+      sessionReady: false,
     });
 
     expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
-    expect(screen.getByText(/not open in your private analysis workspace/i)).toBeInTheDocument();
+    expect(screen.getByText(/belongs to another member/i)).toBeInTheDocument();
     expect(window.electronAPI.createDegFindMarkersJob).not.toHaveBeenCalled();
   });
 });

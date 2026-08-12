@@ -11,13 +11,13 @@ services:
     environment:
       NODE_ENV: test
       ENABLE_R_TEST_DIAGNOSTICS: "true"
-      R_TEST_DEG_DELAY_MS: "30000"
+      R_TEST_DEG_DELAY_MS: "60000"
 
   r-compute-2:
     environment:
       NODE_ENV: test
       ENABLE_R_TEST_DIAGNOSTICS: "true"
-      R_TEST_DEG_DELAY_MS: "30000"
+      R_TEST_DEG_DELAY_MS: "60000"
 
   worker:
     environment:

@@ -3,7 +3,13 @@ import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
-import { hasAttachedLiveRObject, pipelineProbeAction } from './liveRState';
+import {
+  hasAttachedLiveRObject,
+  PIPELINE_PROBE_MAX_RETRIES,
+  pipelineProbeAction,
+  pipelineProbeRetryDelay,
+  reconcileRestoredSession,
+} from './liveRState';
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
 import { publicErrorMessage } from './publicError';
 
@@ -284,11 +290,7 @@ export default function App() {
     if (!window.electronAPI?.restoreSession) return undefined;
     window.electronAPI.restoreSession().then((restored) => {
       if (cancelled) return;
-      if (restored && restored.email) {
-        setUser((prev) => (prev && prev.email === restored.email ? prev : restored));
-      } else if (restored === null) {
-        setUser(null);
-      }
+      setUser((currentUser) => reconcileRestoredSession(currentUser, restored));
     }).catch(() => { /* transient failure: keep current state */ });
     return () => { cancelled = true; };
   }, []);
@@ -999,6 +1001,7 @@ export default function App() {
   const pipelineProbeKeyRef = React.useRef(null);
   const pipelineProbeAttachedRef = React.useRef(false);
   const pipelineProbeAttemptsRef = React.useRef(0);
+  const pipelineProbeAttemptsKeyRef = React.useRef(null);
   const pipelineProbeRetryTimeoutRef = React.useRef(null);
   const [pipelineProbeRetry, setPipelineProbeRetry] = useState(0);
   useEffect(() => {
@@ -1014,6 +1017,10 @@ export default function App() {
     if (probeAction === 'skip') {
       return;
     }
+    if (pipelineProbeAttemptsKeyRef.current !== key) {
+      pipelineProbeAttemptsKeyRef.current = key;
+      pipelineProbeAttemptsRef.current = 0;
+    }
     if (pipelineProbeKeyRef.current !== key) pipelineProbeAttachedRef.current = false;
     pipelineProbeKeyRef.current = key;
 
@@ -1028,9 +1035,10 @@ export default function App() {
       // from the backend detaches the object.
       if (state?.error) {
         pipelineProbeKeyRef.current = null;
-        if (pipelineProbeAttemptsRef.current < 3) {
+        if (pipelineProbeAttemptsRef.current < PIPELINE_PROBE_MAX_RETRIES) {
           pipelineProbeAttemptsRef.current += 1;
-          pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
+          const delay = pipelineProbeRetryDelay(pipelineProbeAttemptsRef.current, Math.random() * 250);
+          pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), delay);
         }
         return;
       }
@@ -1061,9 +1069,10 @@ export default function App() {
       }));
     }).catch(() => {
       pipelineProbeKeyRef.current = null;
-      if (pipelineProbeAttemptsRef.current < 3) {
+      if (pipelineProbeAttemptsRef.current < PIPELINE_PROBE_MAX_RETRIES) {
         pipelineProbeAttemptsRef.current += 1;
-        pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
+        const delay = pipelineProbeRetryDelay(pipelineProbeAttemptsRef.current, Math.random() * 250);
+        pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), delay);
       }
     });
     // Clear a pending retry if the effect re-runs (dataset/session change) or the
