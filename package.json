@@ -51,6 +51,7 @@
     "test:private-compute-compose": "node scripts/verify-compose-private-compute.js",
     "test:native-ui-compose": "node scripts/verify-compose-native-ui.js",
     "test:expert-r-sandbox": "node scripts/verify-expert-r-sandbox.js",
+    "test:expert-r-browser": "npm run build && node scripts/verify-expert-r-browser-flow.js",
     "test:demo-compose": "node scripts/verify-compose-demo.js",
     "test:demo-browser": "node scripts/verify-public-demo-ui.js",
     "test:frontend": "vitest run src/",

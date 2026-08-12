@@ -522,12 +522,14 @@ npm run test:spatial-seurat
 npm run test:private-compute-compose
 npm run test:native-ui-compose
 npm run test:expert-r-sandbox
+npm run test:expert-r-browser
 npm run test:demo-compose
 ```
 
-The last four commands create randomized disposable Docker resources to prove
+The last five commands create randomized disposable Docker resources to prove
 the isolated two-lane compute topology, a real browser plus two native Electron
-profiles, the digest-pinned Expert R containment boundary, and the distinct
+profiles, the digest-pinned Expert R containment boundary and owner browser
+workflow, and the distinct
 website-demo lifecycle including a real Chromium scientific workflow. The native
 run records only exact Electron window handles
 and retains its inspected screenshots/video under
