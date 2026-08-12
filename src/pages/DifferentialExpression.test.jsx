@@ -142,6 +142,17 @@ describe('DifferentialExpression durable worker UI', () => {
     expect(screen.queryByText(/art_summary|art_markers/i)).not.toBeInTheDocument();
   });
 
+  it('allows a durable DEG job to queue while compute is temporarily unavailable', async () => {
+    renderDeg({ computeStatus: { status: 'unavailable' } });
+
+    const launch = screen.getByRole('button', { name: /Run marker analysis/i });
+    expect(launch).toBeEnabled();
+    expect(screen.getByText(/wait in the durable queue/i)).toBeInTheDocument();
+    fireEvent.click(launch);
+
+    await waitFor(() => expect(window.electronAPI.createDegFindMarkersJob).toHaveBeenCalledTimes(1));
+  });
+
   it('does not render internal storage, state, or raw marker fields from public metadata', async () => {
     const { container } = renderDeg();
 

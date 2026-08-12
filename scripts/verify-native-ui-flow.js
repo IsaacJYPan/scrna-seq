@@ -55,6 +55,16 @@ function sanitizeBrowserPipeline(result) {
   };
 }
 
+function sanitizeBrowserCellChat(result) {
+  return {
+    completed: result?.status === 'completed',
+    summaryAvailable: result?.summaryAvailable === true,
+    controlledResultAvailable: result?.controlledResultAvailable === true,
+    singleContextConfirmed: result?.singleContextConfirmed === true,
+    candidateDisclaimerVisible: result?.candidateDisclaimerVisible === true,
+  };
+}
+
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
@@ -92,6 +102,24 @@ function observePage(page, label, diagnostics) {
   });
   page.on('requestfailed', request => {
     diagnostics.requestFailures.push(`[${label}] ${request.method()} ${request.url()} ${request.failure()?.errorText || 'failed'}`);
+  });
+  page.on('dialog', dialog => {
+    const description = `[${label}] ${dialog.type()}: ${dialog.message()}`;
+    if (dialog.type() === 'beforeunload') {
+      diagnostics.beforeUnloadDialogs.push(description);
+      void dialog.accept().catch(error => {
+        if (!/No dialog is showing/i.test(error.message)) {
+          diagnostics.pageErrors.push(`[${label}] beforeunload handling failed: ${error.message}`);
+        }
+      });
+      return;
+    }
+    diagnostics.unexpectedDialogs.push(description);
+    void dialog.dismiss().catch(error => {
+      if (!/No dialog is showing/i.test(error.message)) {
+        diagnostics.pageErrors.push(`[${label}] unexpected dialog handling failed: ${error.message}`);
+      }
+    });
   });
 }
 
@@ -171,10 +199,16 @@ async function runSeuratPipeline(page, lane, pipelineInputPath, runDirectory) {
     if (loadJob.status !== 'completed') {
       throw new Error(`Pipeline checkpoint load ${loadJob.status}: ${loadJob.error?.code || 'unknown'} ${loadJob.error?.message || ''}`);
     }
-    const refreshLoad = panel.getByRole('button', { name: 'Refresh', exact: true });
-    if (await refreshLoad.count()) await refreshLoad.click();
     const attached = panel.getByRole('button', { name: 'Saved version opened', exact: true });
-    await attached.waitFor({ state: 'visible', timeout: 60_000 });
+    try {
+      await attached.waitFor({ state: 'visible', timeout: 60_000 });
+    } catch {
+      const refreshLoad = panel.getByRole('button', { name: 'Refresh', exact: true });
+      await waitFor(() => refreshLoad.isEnabled(), 30_000,
+        'Checkpoint load refresh did not stabilize after durable completion.');
+      await refreshLoad.click();
+      await attached.waitFor({ state: 'visible', timeout: 60_000 });
+    }
     const continueToDeg = panel.getByRole('button', { name: 'Continue to marker analysis', exact: true });
     await waitFor(() => continueToDeg.isEnabled(), 30_000,
       'The attached Seurat pipeline result did not enable downstream analysis.');
@@ -238,7 +272,19 @@ async function attachCheckpoint(page, lane, runDirectory, label) {
     if (job.status !== 'completed') {
       throw new Error(`Checkpoint attach ${job.status} for ${label}: ${job.error?.code || 'unknown'} ${job.error?.message || ''}`);
     }
-    await waitFor(async () => page.getByRole('button', { name: /^UMAP(?:,|$)/i }).isEnabled(), 30_000,
+    await waitFor(async () => {
+      const state = await page.evaluate(objectId => (
+        window.electronAPI.apiRequest('/pipeline-state', {
+          headers: { 'X-Object-ID': objectId },
+        })
+      ), lane.objectId);
+      return state?.exists === true && state?.has_pca === true;
+    }, 60_000, `Private checkpoint state was not available after attachment for ${label}.`);
+    // The durable job may complete before ProjectHistory's polling callback has
+    // projected the private attachment into App state. Reloading causes the
+    // authoritative pipeline-state probe to rebuild that projection.
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await waitFor(async () => page.getByRole('button', { name: /^UMAP(?:,|$)/i }).isEnabled(), 60_000,
       `UMAP navigation did not become available after checkpoint attachment for ${label}.`);
   } catch (error) {
     const diagnosticPath = path.join(runDirectory, `${label}-attach-failure.json`);
@@ -276,23 +322,96 @@ async function showUmap(page) {
   }
 }
 
-async function runOverview(page) {
+async function runOverview(page, lane) {
   await openSidebarPage(page, 'Exploratory Analysis');
   await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor({ timeout: 30_000 });
   await page.getByRole('button', { name: 'Run recipe', exact: true }).click();
-  await page.locator('span.font-mono').filter({ hasText: /^completed$/ }).waitFor({ timeout: 180_000 });
-  await page.getByText('Cells', { exact: true }).first().waitFor({ timeout: 30_000 });
+  const job = await waitFor(async () => {
+    const jobs = await page.evaluate(({ projectId, objectId }) => (
+      window.electronAPI.listProjectJobs(projectId, {
+        jobType: 'explore.summarize.v1', analysisObjectId: objectId,
+      })
+    ), { projectId: lane.projectId, objectId: lane.objectId });
+    const latest = Array.isArray(jobs) ? jobs[0] : null;
+    return latest && ['completed', 'failed', 'canceled'].includes(latest.status) ? latest : null;
+  }, 10 * 60_000, 'The browser-launched exploratory analysis did not reach a terminal state.');
+  if (job.status !== 'completed') {
+    throw new Error(`Exploratory browser analysis ${job.status}: ${job.error?.code || 'unknown'} ${job.error?.message || ''}`);
+  }
+  await page.getByText('Cells', { exact: true }).first().waitFor({ timeout: 60_000 });
   await page.locator('.js-plotly-plot').filter({ visible: true }).first()
     .waitFor({ state: 'visible', timeout: 30_000 });
 }
 
-async function launchDeg(page, lane) {
+async function runCellChat(page, lane, runDirectory) {
+  await openSidebarPage(page, 'CellChat');
+  await page.getByRole('heading', { name: 'CellChat communication candidates', exact: true })
+    .waitFor({ state: 'visible', timeout: 30_000 });
+
+  const launch = page.getByRole('button', { name: 'Start CellChat Inference', exact: true });
+  assert(await launch.isDisabled(), 'CellChat launch was enabled before the required scientific choices were explicit.');
+  await page.getByRole('combobox', { name: /Group labels \(required\)/i }).selectOption('seurat_clusters');
+  await page.getByRole('combobox', { name: /Species \(required\)/i }).selectOption('human');
+  await page.getByRole('combobox', { name: /Database category \(required\)/i }).selectOption('secreted_signaling');
+  await page.getByRole('combobox', { name: /Analysis intent \(required\)/i }).selectOption('single_context');
+  await waitFor(() => launch.isEnabled(), 30_000,
+    'CellChat launch did not enable after every required scientific choice was confirmed.');
+  await launch.click();
+
+  const job = await waitFor(async () => {
+    const jobs = await page.evaluate(({ projectId, objectId }) => (
+      window.electronAPI.listProjectJobs(projectId, {
+        jobType: 'cellchat.infer.v1', analysisObjectId: objectId,
+      })
+    ), { projectId: lane.projectId, objectId: lane.objectId });
+    const latest = Array.isArray(jobs) ? jobs[0] : null;
+    return latest && ['completed', 'failed', 'canceled'].includes(latest.status) ? latest : null;
+  }, 10 * 60_000, 'The browser-launched CellChat analysis did not reach a terminal state.');
+  if (job.status !== 'completed') {
+    throw new Error(`CellChat browser analysis ${job.status}: ${job.error?.code || 'unknown'} ${job.error?.message || ''}`);
+  }
+
+  const artifacts = await page.evaluate(({ projectId, jobId }) => (
+    window.electronAPI.listProjectJobArtifacts(projectId, jobId)
+  ), { projectId: lane.projectId, jobId: job.id });
+  const summary = (Array.isArray(artifacts) ? artifacts : [])
+    .find(artifact => artifact.artifactType === 'cellchat_summary');
+  const controlledResult = (Array.isArray(artifacts) ? artifacts : [])
+    .find(artifact => artifact.artifactType === 'cellchat_results');
+  assert(summary, 'The real browser CellChat run did not publish its bounded summary artifact.');
+  assert(controlledResult, 'The real browser CellChat run did not publish its controlled result table.');
+  assert(summary.metadata?.summary?.analysisIntent === 'single_context',
+    'The real browser CellChat summary did not preserve the explicit single-context intent.');
+
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  if (await refresh.count()) await refresh.click();
+  await page.getByText('summary available', { exact: true }).waitFor({ state: 'visible', timeout: 60_000 });
+  await page.getByText(/CellChat produces candidate predictions/i).waitFor({ state: 'visible', timeout: 30_000 });
+  const bodyText = await page.locator('body').innerText();
+  assertResearcherRunSurface(bodyText, [job.id, lane.objectId], 'CellChat');
+  assert(!/storage[_ -]?(?:key|uri)|state[_ -]?key|claimed by worker/i.test(bodyText),
+    'The real browser CellChat surface exposed internal storage or worker details.');
+  await page.screenshot({ path: path.join(runDirectory, 'browser-real-cellchat.png'), fullPage: false });
+
+  return {
+    status: job.status,
+    summaryAvailable: true,
+    controlledResultAvailable: true,
+    singleContextConfirmed: true,
+    candidateDisclaimerVisible: true,
+  };
+}
+
+async function prepareDegLaunch(page, lane) {
   await openSidebarPage(page, 'Markers / DEG');
   await page.getByRole('heading', { name: 'Markers / Differential Expression', exact: true })
     .waitFor({ timeout: 30_000 });
   const launch = page.getByRole('button', { name: 'Run marker analysis', exact: true });
-  await waitFor(async () => launch.isEnabled(), 30_000, `DEG launch did not enable for lane ${lane.index}.`);
-  await launch.click();
+  await waitFor(async () => launch.isEnabled(), 60_000, `DEG launch did not enable for lane ${lane.index}.`);
+  return launch;
+}
+
+async function findLaunchedDegJob(page, lane) {
   return waitFor(async () => {
     const jobs = await page.evaluate(({ projectId, objectId }) => (
       window.electronAPI.listProjectJobs(projectId, {
@@ -303,13 +422,43 @@ async function launchDeg(page, lane) {
   }, 30_000, `DEG job was not visible for lane ${lane.index}.`);
 }
 
-async function waitForDegResult(page) {
+async function waitForDegResult(page, lane, jobId) {
+  const job = await waitFor(async () => {
+    const jobs = await page.evaluate(({ projectId, objectId }) => (
+      window.electronAPI.listProjectJobs(projectId, {
+        jobType: 'deg.find_markers.v1', analysisObjectId: objectId,
+      })
+    ), { projectId: lane.projectId, objectId: lane.objectId });
+    const current = Array.isArray(jobs) ? jobs.find(item => item.id === jobId) : null;
+    return current && ['completed', 'failed', 'canceled'].includes(current.status) ? current : null;
+  }, 180_000, `DEG job did not reach a terminal state for lane ${lane.index}.`);
+  if (job.status !== 'completed') {
+    throw new Error(`DEG job ${job.status} for lane ${lane.index}: ${job.error?.code || 'unknown'} ${job.error?.message || ''}`);
+  }
   const completed = page.getByText('Durable DEG completed', { exact: true });
-  if (!await completed.count()) {
-    const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
-    if (await refresh.count()) await refresh.click();
+  if (!await completed.isVisible().catch(() => false)) {
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await openSidebarPage(page, 'Markers / DEG');
+    await page.getByRole('heading', { name: 'Markers / Differential Expression', exact: true })
+      .waitFor({ state: 'visible', timeout: 30_000 });
   }
   await completed.waitFor({ state: 'visible', timeout: 60_000 });
+}
+
+async function closeElectronApp(app) {
+  const closeAttempt = app.close().then(() => true).catch(() => false);
+  await Promise.race([closeAttempt, delay(10_000)]);
+  let child = null;
+  try { child = app.process(); } catch { return; }
+  if (child && child.exitCode === null) {
+    try { process.kill(child.pid, 'SIGKILL'); } catch { /* process may have exited */ }
+  }
+  if (child && child.exitCode === null) {
+    await Promise.race([
+      new Promise(resolve => child.once('exit', resolve)),
+      delay(5_000),
+    ]);
+  }
 }
 
 function runPowerShellCapture({ windowHandle, outputDirectory, frameCount, frameIntervalMs }) {
@@ -446,7 +595,12 @@ function assertCleanDiagnostics(diagnostics) {
   assert(unexpectedRateLimits.length === 0, `Unexpected UI rate limits: ${unexpectedRateLimits.join(' | ')}`);
   assert(consoleErrors.length === 0, `UI console errors: ${consoleErrors.join(' | ')}`);
   assert(requestFailures.length === 0, `UI request failures: ${requestFailures.join(' | ')}`);
-  return { expectedPipelineProbe429: expectedRateLimits.length };
+  assert(diagnostics.unexpectedDialogs.length === 0,
+    `Unexpected UI dialogs: ${diagnostics.unexpectedDialogs.join(' | ')}`);
+  return {
+    expectedPipelineProbe429: expectedRateLimits.length,
+    expectedBeforeUnloadDialogs: diagnostics.beforeUnloadDialogs.length,
+  };
 }
 
 async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observeConcurrent }) {
@@ -460,10 +614,12 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-native-ui-'));
   const diagnostics = {
     pageErrors: [], consoleErrors: [], serverErrors: [], rateLimits: [], requestFailures: [],
+    beforeUnloadDialogs: [], unexpectedDialogs: [],
   };
   let browser = null;
   let browserContext = null;
   const electronApps = [];
+  let primaryError = null;
   try {
     browser = await chromium.launch({ headless: true });
     browserContext = await browser.newContext({
@@ -472,7 +628,7 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
     });
     const browserPage = await browserContext.newPage();
     observePage(browserPage, 'browser-owner', diagnostics);
-    await browserPage.goto(origin, { waitUntil: 'networkidle' });
+    await browserPage.goto(origin, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     await login(browserPage, lanes[0]);
     assert(await browserPage.getByText(lanes[1].projectName, { exact: true }).count() === 0,
       'Browser owner saw another private project.');
@@ -483,8 +639,9 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
     lanes[0].objectId = browserSeuratPipeline.resultAnalysisObjectId;
     await showUmap(browserPage);
     await browserPage.screenshot({ path: path.join(runDirectory, 'browser-real-umap.png'), fullPage: false });
-    await runOverview(browserPage);
+    await runOverview(browserPage, lanes[0]);
     await browserPage.screenshot({ path: path.join(runDirectory, 'browser-real-exploration.png'), fullPage: false });
+    const browserCellChat = await runCellChat(browserPage, lanes[0], runDirectory);
     await browserContext.close();
     browserContext = null;
     await browser.close();
@@ -511,8 +668,9 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
     await showUmap(lanes[0].page);
     const nativeUmap = await recordNativeUmap(lanes[0].electronApp, lanes[0].page, runDirectory);
 
-    await Promise.all(lanes.map(lane => openSidebarPage(lane.page, 'Markers / DEG')));
-    const launched = await Promise.all(lanes.map(lane => launchDeg(lane.page, lane)));
+    const launchButtons = await Promise.all(lanes.map(lane => prepareDegLaunch(lane.page, lane)));
+    await Promise.all(launchButtons.map(button => button.click()));
+    const launched = await Promise.all(lanes.map(lane => findLaunchedDegJob(lane.page, lane)));
     const jobs = launched.map((job, index) => ({
       id: job.id,
       userId: lanes[index].userId,
@@ -524,7 +682,9 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
     const overlap = nativeObservation?.overlap;
     assert(overlap && Array.isArray(overlap.slots),
       'Native concurrent-observation callback returned no isolation evidence.');
-    await Promise.all(lanes.map(lane => waitForDegResult(lane.page)));
+    await Promise.all(lanes.map((lane, index) => waitForDegResult(
+      lane.page, lane, jobs[index].id
+    )));
     await Promise.all(lanes.map(async (lane, index) => {
       assertResearcherRunSurface(await lane.page.locator('body').innerText(),
         [jobs[index].id, lane.objectId], `Electron lane ${lane.index} DEG`);
@@ -541,9 +701,11 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
       completedAt: new Date().toISOString(),
       browser: {
         seuratPipeline: sanitizeBrowserPipeline(browserSeuratPipeline),
+        cellChat: sanitizeBrowserCellChat(browserCellChat),
         realPipeline: 'browser-real-seurat-pipeline.png',
         realUmap: 'browser-real-umap.png',
         realExploration: 'browser-real-exploration.png',
+        realCellChat: 'browser-real-cellchat.png',
         videoFormat: 'Playwright WebM',
       },
       electron: {
@@ -556,15 +718,29 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
       diagnostics: {
         pageErrors: 0, consoleErrors: 0, serverErrors: 0, requestFailures: 0,
         expectedPipelineProbe429: diagnosticSummary.expectedPipelineProbe429,
+        expectedBeforeUnloadDialogs: diagnosticSummary.expectedBeforeUnloadDialogs,
       },
     };
     fs.writeFileSync(path.join(runDirectory, 'acceptance.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     return { runDirectory, manifest };
+  } catch (error) {
+    primaryError = error;
+    fs.writeFileSync(path.join(runDirectory, 'native-ui-failure.json'), `${JSON.stringify({
+      capturedAt: new Date().toISOString(),
+      error: error && error.message ? error.message : 'Native UI acceptance failed.',
+    }, null, 2)}\n`);
+    throw error;
   } finally {
     if (browserContext) await browserContext.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
-    for (const app of electronApps.reverse()) await app.close().catch(() => {});
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    for (const app of electronApps.reverse()) await closeElectronApp(app);
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch (cleanupError) {
+      if (!primaryError) {
+        console.warn(`[native-ui] Temporary profile cleanup failed (${cleanupError.code || 'UNKNOWN'}).`);
+      }
+    }
     for (const lane of lanes) {
       delete lane.electronApp;
       delete lane.page;

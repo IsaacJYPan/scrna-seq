@@ -287,7 +287,6 @@ export default function PathwayEnrichment({
       && sessionReady
       && liveObjectAttached
       && ownsPrivateLiveObject
-      && computeReady
       && targetGroupIsValid
       && safeParams.species
       && geneSetSizesAreValid
@@ -424,9 +423,6 @@ export default function PathwayEnrichment({
     if (!sessionReady || !liveObjectAttached) {
       return setError('Open this saved analysis in your private analysis workspace before starting pathway enrichment.');
     }
-    if (!computeReady) {
-      return setError('Compute is not available right now. The analysis was not started.');
-    }
     if (!safeParams.species) return setError('Choose whether the data are human or mouse.');
     if (!targetGroupIsValid) {
       return setError('Enter a valid cluster or identity label using letters, numbers, spaces, or . _ + ( ) -.');
@@ -472,7 +468,6 @@ export default function PathwayEnrichment({
     isDbBackedObject,
     liveObjectAttached,
     ownsPrivateLiveObject,
-    computeReady,
     refreshJobState,
     safeParams,
     selectedObjectId,
@@ -595,7 +590,7 @@ export default function PathwayEnrichment({
 
         {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Compute is unavailable, so new analyses are paused until it becomes available. Wait until the sidebar shows Compute available.
+            Compute is temporarily unavailable. You can submit this analysis now; it will wait in the durable queue until compute is available.
           </div>
         )}
 

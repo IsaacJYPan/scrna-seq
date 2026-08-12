@@ -317,7 +317,7 @@ async function main() {
         pipelineInputPath,
         observeConcurrent: jobs => inner('native-observe', { jobs }),
       });
-      console.log('[private-compute-ui] PASS real browser Seurat pipeline/UMAP/exploration and two isolated native Electron DEG workflows');
+      console.log('[private-compute-ui] PASS real browser Seurat pipeline/UMAP/exploration/CellChat and two isolated native Electron DEG workflows');
       console.log(JSON.stringify({
         artifactDirectory: result.runDirectory,
         overlap: result.manifest.overlap,
