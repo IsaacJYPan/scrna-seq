@@ -7,6 +7,11 @@ export function reconcileRestoredSession(currentUser, restoredUser) {
   return restoredUser?.email ? restoredUser : null;
 }
 
+export function consumeSavedObjectSelection(expectedObjectId, selectedObjectId) {
+  const preserve = Boolean(expectedObjectId && selectedObjectId && expectedObjectId === selectedObjectId);
+  return { preserve, nextExpectedObjectId: preserve ? null : expectedObjectId };
+}
+
 export function pipelineProbeAction({ currentKey, nextKey, serverAttached, liveState }) {
   if (currentKey !== nextKey) return 'probe';
   if (!serverAttached && liveState === 'attached') return 'probe';

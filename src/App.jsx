@@ -4,6 +4,7 @@ import Login from './pages/Login';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
 import {
+  consumeSavedObjectSelection,
   hasAttachedLiveRObject,
   PIPELINE_PROBE_MAX_RETRIES,
   pipelineProbeAction,
@@ -239,6 +240,7 @@ export default function App() {
   const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
   const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
   const checkpointSaveRequestRef = React.useRef(0);
+  const checkpointSaveOpenedObjectRef = React.useRef(null);
   const checkpointSaveBusy = ['saving', 'opening', 'pending'].includes(checkpointSaveState.phase);
   // Gate that blocks per-page cache hydration until after the R session
   // identity and selected-object attachment probes complete. Without this
@@ -621,6 +623,7 @@ export default function App() {
       if (checkpointSaveRequestRef.current !== requestId) return;
       await refreshAnalysisObjects(projectId);
       if (checkpointSaveRequestRef.current !== requestId) return;
+      checkpointSaveOpenedObjectRef.current = saved.resultAnalysisObjectId;
       handleSelectAnalysisObject(projectId, saved.resultAnalysisObjectId);
       handleLiveObjectAttached(projectId, saved.resultAnalysisObjectId);
       setUnsavedLiveChanges(false);
@@ -974,9 +977,16 @@ export default function App() {
       return;
     }
     setSessionCheckDone(false);
-    checkpointSaveRequestRef.current += 1;
-    setUnsavedLiveChanges(false);
-    setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
+    const savedSelection = consumeSavedObjectSelection(
+      checkpointSaveOpenedObjectRef.current,
+      datasetInfo?.id
+    );
+    checkpointSaveOpenedObjectRef.current = savedSelection.nextExpectedObjectId;
+    if (!savedSelection.preserve) {
+      checkpointSaveRequestRef.current += 1;
+      setUnsavedLiveChanges(false);
+      setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
+    }
     resetPipelineState();
     if (datasetInfo?.id) {
       const objectId = datasetInfo.id;

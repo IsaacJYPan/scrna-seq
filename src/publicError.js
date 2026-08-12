@@ -31,6 +31,13 @@ export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
 
   if (EXPERT_R_OWNER_MESSAGES.has(message)) return message;
 
+  if (/^(?:R service|Analysis compute) is busy\b/i.test(message)) {
+    return 'Analysis compute is busy. Wait a moment and try again.';
+  }
+  if (/^R request rate limit exceeded\b/i.test(message)) {
+    return 'Too many analysis requests were started. Wait a moment and try again.';
+  }
+
   if (/^no (?:cells|features|samples|biological samples)\b/i.test(message)) return message;
   if (/^(?:select|choose|enter|provide|add|set)\b/i.test(message)) return message;
   if (/^(?:at least|exactly) \d+\b/i.test(message)) return message;
@@ -39,6 +46,10 @@ export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
   if (/\b(?:not found|no longer available|missing)\b/i.test(message)) return 'The requested saved analysis is no longer available.';
 
   return fallback;
+}
+
+export function isTransientComputeBusy(value) {
+  return publicErrorMessage(value) === 'Analysis compute is busy. Wait a moment and try again.';
 }
 
 export { DEFAULT_PUBLIC_ERROR };

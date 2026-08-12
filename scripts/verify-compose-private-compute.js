@@ -173,6 +173,22 @@ function createNativePipelineInput() {
   return destination;
 }
 
+function createNativeSpatialInput() {
+  const destination = path.join(tempRoot, 'synthetic-classic-visium.zip');
+  const generated = spawnSync('Rscript', [
+    path.join(root, 'scripts', 'verify_spatial_seurat_pipeline.R'),
+    `--fixture-output=${destination}`,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (generated.status !== 0 || !fs.existsSync(destination)) {
+    throw new Error(`Native spatial browser fixture creation failed: ${generated.stderr || generated.stdout || generated.status}`);
+  }
+  return destination;
+}
+
 function emptyStateCounts(cleanupEvidence) {
   return Object.fromEntries(Object.entries(cleanupEvidence || {}).map(([slot, value]) => [
     slot,
@@ -309,15 +325,17 @@ async function main() {
     createCheckpoints(seeded, { includePca: nativeUiAcceptance });
     if (nativeUiAcceptance) {
       const pipelineInputPath = createNativePipelineInput();
+      const spatialInputPath = createNativeSpatialInput();
       inner('register-checkpoints', seeded);
       const { runNativeUiAcceptance } = require('./verify-native-ui-flow');
       const result = await runNativeUiAcceptance({
         origin: `http://127.0.0.1:${webPort}`,
         lanes: seeded.lanes,
         pipelineInputPath,
+        spatialInputPath,
         observeConcurrent: jobs => inner('native-observe', { jobs }),
       });
-      console.log('[private-compute-ui] PASS real browser Seurat pipeline/UMAP/exploration/CellChat and two isolated native Electron DEG workflows');
+      console.log('[private-compute-ui] PASS real browser Seurat/spatial/checkpoint-save/UMAP/exploration/CellChat and two isolated native Electron DEG workflows');
       console.log(JSON.stringify({
         artifactDirectory: result.runDirectory,
         overlap: result.manifest.overlap,

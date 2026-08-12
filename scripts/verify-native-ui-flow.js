@@ -65,6 +65,16 @@ function sanitizeBrowserCellChat(result) {
   };
 }
 
+function sanitizeBrowserSpatial(result) {
+  return {
+    completed: true,
+    normalBridgeCompletion: result.normalBridgeCompletion === true,
+    checkpointOpened: Boolean(result.checkpointLoadJobId),
+    immutableSaveCompleted: Boolean(result.checkpointSaveJobId),
+    immutableSaveOpened: Boolean(result.savedResultAnalysisObjectId),
+  };
+}
+
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
@@ -131,6 +141,26 @@ async function login(page, lane) {
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 30_000 });
   await page.getByText(`Private fixture ${lane.index}`, { exact: true }).first()
     .waitFor({ state: 'visible', timeout: 30_000 });
+}
+
+async function selectLaneAnalysis(page, lane) {
+  await page.evaluate(({ userId, projectId, objectId }) => {
+    const safe = value => String(value).replace(/[^A-Za-z0-9_-]/g, '_');
+    localStorage.setItem(`traceomics_selected_project_${safe(userId)}`, projectId);
+    localStorage.setItem(
+      `traceomics_selected_analysis_object_${safe(userId)}_${safe(projectId)}`,
+      objectId
+    );
+  }, { userId: lane.userId, projectId: lane.projectId, objectId: lane.objectId });
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 30_000 });
+  const selected = await page.evaluate(({ userId, projectId }) => {
+    const safe = value => String(value).replace(/[^A-Za-z0-9_-]/g, '_');
+    return localStorage.getItem(
+      `traceomics_selected_analysis_object_${safe(userId)}_${safe(projectId)}`
+    );
+  }, { userId: lane.userId, projectId: lane.projectId });
+  assert(selected === lane.objectId, `Lane ${lane.index} did not retain its selected analysis preference.`);
 }
 
 async function openSidebarPage(page, label) {
@@ -232,6 +262,136 @@ async function runSeuratPipeline(page, lane, pipelineInputPath, runDirectory) {
   }
 }
 
+async function runSpatialSeuratPipeline(page, lane, spatialInputPath, runDirectory) {
+  assert(fs.existsSync(spatialInputPath), 'The native browser spatial input fixture is missing.');
+  let pipelineJob = null;
+  let loadJob = null;
+  try {
+    await openSidebarPage(page, 'Approved workflows');
+    await page.getByRole('heading', { name: 'Approved workflows', exact: true })
+      .waitFor({ state: 'visible', timeout: 30_000 });
+    const panel = page.getByTestId('seurat-pipeline-panel');
+    await panel.getByRole('button', { name: 'Spatial transcriptomics (Visium)', exact: true }).click();
+    await panel.getByText(/classic 10x Visium Space Ranger output bundles/i)
+      .waitFor({ state: 'visible', timeout: 30_000 });
+    await page.getByTestId('seurat-pipeline-upload').setInputFiles(spatialInputPath);
+    await panel.getByText(path.basename(spatialInputPath), { exact: true })
+      .waitFor({ state: 'visible', timeout: 120_000 });
+    const launch = panel.getByRole('button', { name: 'Run spatial Seurat preprocessing', exact: true });
+    await waitFor(() => launch.isEnabled(), 60_000,
+      'Spatial Seurat launch did not enable after server-side Visium validation.');
+    await launch.click();
+    pipelineJob = await waitFor(async () => {
+      const jobs = await page.evaluate(projectId => (
+        window.electronAPI.listProjectJobs(projectId, { jobType: 'spatial.seurat.v1' })
+      ), lane.projectId);
+      const latest = Array.isArray(jobs) ? jobs[0] : null;
+      return latest && ['completed', 'failed', 'canceled'].includes(latest.status) ? latest : null;
+    }, 10 * 60_000, 'The browser-launched spatial Seurat pipeline did not reach a terminal state.');
+    if (pipelineJob.status !== 'completed' || !pipelineJob.resultAnalysisObjectId) {
+      throw new Error(`Spatial Seurat pipeline ${pipelineJob.status}: ${pipelineJob.error?.code || 'unknown'} ${pipelineJob.error?.message || ''}`);
+    }
+    const logsResponse = await page.evaluate(({ projectId, jobId }) => (
+      window.electronAPI.getProjectJobLogs(projectId, jobId)
+    ), { projectId: lane.projectId, jobId: pipelineJob.id });
+    const logText = JSON.stringify(Array.isArray(logsResponse?.logs) ? logsResponse.logs : []);
+    assert(!/R_TIMEOUT|R bridge failed|outcome is indeterminate|receipt recovery/i.test(logText),
+      'The real spatial pipeline completed only after an R timeout/recovery path.');
+    await panel.getByRole('button', { name: 'Refresh run', exact: true }).click();
+    await panel.getByText('Spatial Seurat preprocessing', { exact: true }).waitFor({ timeout: 60_000 });
+    assertResearcherRunSurface(await panel.innerText(), [pipelineJob.id, pipelineJob.resultAnalysisObjectId],
+      'Spatial Seurat pipeline');
+    await page.screenshot({
+      path: path.join(runDirectory, 'browser-real-spatial-seurat-pipeline.png'), fullPage: false,
+    });
+
+    const load = panel.getByRole('button', { name: 'Open saved version', exact: true });
+    await waitFor(() => load.isEnabled(), 30_000, 'Spatial checkpoint did not become attachable.');
+    await load.click();
+    loadJob = await waitFor(async () => {
+      const jobs = await page.evaluate(({ projectId, objectId }) => (
+        window.electronAPI.listProjectJobs(projectId, {
+          jobType: 'checkpoint.load.v1', analysisObjectId: objectId,
+        })
+      ), { projectId: lane.projectId, objectId: pipelineJob.resultAnalysisObjectId });
+      const latest = Array.isArray(jobs) ? jobs[0] : null;
+      return latest && ['completed', 'failed', 'canceled'].includes(latest.status) ? latest : null;
+    }, 180_000, 'The browser-launched spatial checkpoint load did not reach a terminal state.');
+    if (loadJob.status !== 'completed') {
+      throw new Error(`Spatial checkpoint load ${loadJob.status}: ${loadJob.error?.code || 'unknown'} ${loadJob.error?.message || ''}`);
+    }
+    const attached = panel.getByRole('button', { name: 'Saved version opened', exact: true });
+    if (!await attached.isVisible().catch(() => false)) {
+      const refreshLoad = panel.getByRole('button', { name: 'Refresh', exact: true });
+      await waitFor(() => refreshLoad.isEnabled(), 30_000,
+        'Spatial checkpoint load refresh did not stabilize after durable completion.');
+      await refreshLoad.click();
+    }
+    await attached.waitFor({ state: 'visible', timeout: 60_000 });
+    const continueToDeg = panel.getByRole('button', { name: 'Continue to marker analysis', exact: true });
+    await waitFor(() => continueToDeg.isEnabled(), 30_000,
+      'The attached spatial result did not enable downstream analysis.');
+    await continueToDeg.click();
+    await page.getByRole('heading', { name: 'Markers / Differential Expression', exact: true })
+      .waitFor({ state: 'visible', timeout: 30_000 });
+    return {
+      pipelineJobId: pipelineJob.id,
+      resultAnalysisObjectId: pipelineJob.resultAnalysisObjectId,
+      checkpointLoadJobId: loadJob.id,
+      normalBridgeCompletion: true,
+    };
+  } catch (error) {
+    await page.screenshot({
+      path: path.join(runDirectory, 'browser-spatial-pipeline-failure.png'), fullPage: false,
+    }).catch(() => {});
+    fs.writeFileSync(path.join(runDirectory, 'browser-spatial-pipeline-failure.json'), `${JSON.stringify({
+      capturedAt: new Date().toISOString(), error: error.message, pipelineJob, loadJob,
+    }, null, 2)}\n`);
+    throw error;
+  }
+}
+
+async function saveCurrentAnalysis(page, lane, sourceObjectId) {
+  await openSidebarPage(page, 'UMAP');
+  await page.getByRole('heading', { name: 'UMAP Embedding', exact: true }).waitFor({ timeout: 30_000 });
+  const recompute = page.getByRole('button', { name: 'Re-compute UMAP', exact: true });
+  await recompute.waitFor({ state: 'visible', timeout: 60_000 });
+  await recompute.click();
+  const save = page.getByRole('button', { name: 'Save current analysis', exact: true });
+  await save.waitFor({ state: 'visible', timeout: 180_000 });
+  await save.click();
+  const saveJob = await waitFor(async () => {
+    const jobs = await page.evaluate(({ projectId, objectId }) => (
+      window.electronAPI.listProjectJobs(projectId, {
+        jobType: 'checkpoint.save.v1', analysisObjectId: objectId,
+      })
+    ), { projectId: lane.projectId, objectId: sourceObjectId });
+    const latest = Array.isArray(jobs) ? jobs[0] : null;
+    return latest && ['completed', 'failed', 'canceled'].includes(latest.status) ? latest : null;
+  }, 180_000, 'The browser-launched checkpoint save did not reach a terminal state.');
+  if (saveJob.status !== 'completed' || !saveJob.resultAnalysisObjectId) {
+    throw new Error(`Checkpoint save ${saveJob.status}: ${saveJob.error?.code || 'unknown'} ${saveJob.error?.message || ''}`);
+  }
+  await page.getByText('Saved and opened as a durable analysis version.', { exact: true })
+    .waitFor({ state: 'visible', timeout: 180_000 });
+  const loadJob = await waitFor(async () => {
+    const jobs = await page.evaluate(({ projectId, objectId }) => (
+      window.electronAPI.listProjectJobs(projectId, {
+        jobType: 'checkpoint.load.v1', analysisObjectId: objectId,
+      })
+    ), { projectId: lane.projectId, objectId: saveJob.resultAnalysisObjectId });
+    const latest = Array.isArray(jobs) ? jobs[0] : null;
+    return latest && ['completed', 'failed', 'canceled'].includes(latest.status) ? latest : null;
+  }, 180_000, 'The saved immutable analysis was not opened in the private workspace.');
+  assert(loadJob.status === 'completed',
+    `Saved immutable analysis load ${loadJob.status}: ${loadJob.error?.code || 'unknown'} ${loadJob.error?.message || ''}`);
+  return {
+    checkpointSaveJobId: saveJob.id,
+    savedResultAnalysisObjectId: saveJob.resultAnalysisObjectId,
+    savedCheckpointLoadJobId: loadJob.id,
+  };
+}
+
 async function attachCheckpoint(page, lane, runDirectory, label) {
   let job = null;
   try {
@@ -322,8 +482,19 @@ async function showUmap(page) {
     await waitFor(hasVisiblePlotData, 5_000, 'No hydrated UMAP plot data was available.');
   } catch {
     const run = page.getByRole('button', { name: /Run 2D UMAP|Re-compute UMAP/ }).first();
-    await run.click();
-    await waitFor(hasVisiblePlotData, 180_000, 'UMAP did not render nonempty plot data.');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await run.click();
+      try {
+        await waitFor(hasVisiblePlotData, 60_000, 'UMAP did not render nonempty plot data.');
+        return;
+      } catch (error) {
+        const transient = await page.getByText(
+          'Analysis compute is busy. Wait a moment and try again.', { exact: true }
+        ).isVisible().catch(() => false);
+        if (!transient || attempt === 2) throw error;
+        await delay(1_500);
+      }
+    }
   }
 }
 
@@ -653,11 +824,13 @@ function assertCleanDiagnostics(diagnostics) {
   };
 }
 
-async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observeConcurrent }) {
+async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, spatialInputPath, observeConcurrent }) {
   assert(process.platform === 'win32', 'Native Electron window recording currently requires Windows.');
   assert(Array.isArray(lanes) && lanes.length === 2, 'Two private UI lanes are required.');
   assert(typeof pipelineInputPath === 'string' && pipelineInputPath,
     'A real 10x HDF5 input is required for native browser acceptance.');
+  assert(typeof spatialInputPath === 'string' && spatialInputPath,
+    'A real classic Visium ZIP input is required for native browser acceptance.');
   assert(typeof observeConcurrent === 'function', 'Concurrent-observation callback is required.');
   const runDirectory = path.join(root, 'playwright', 'report', 'release-acceptance', `native-ui-${timestampSegment()}`);
   fs.mkdirSync(runDirectory, { recursive: true });
@@ -694,6 +867,14 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
     await runOverview(browserPage, lanes[0]);
     await browserPage.screenshot({ path: path.join(runDirectory, 'browser-real-exploration.png'), fullPage: false });
     const browserCellChat = await runCellChat(browserPage, lanes[0], runDirectory);
+    const browserSpatialPipeline = await runSpatialSeuratPipeline(
+      browserPage, lanes[0], spatialInputPath, runDirectory
+    );
+    await showUmap(browserPage);
+    await browserPage.screenshot({ path: path.join(runDirectory, 'browser-real-spatial-umap.png'), fullPage: false });
+    const spatialSave = await saveCurrentAnalysis(
+      browserPage, lanes[0], browserSpatialPipeline.resultAnalysisObjectId
+    );
     await browserContext.close();
     browserContext = null;
     await browser.close();
@@ -708,6 +889,7 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
       observePage(page, `electron-${lane.index}`, diagnostics);
       await page.waitForLoadState('domcontentloaded');
       await login(page, lane);
+      await selectLaneAnalysis(page, lane);
       assert(await page.getByText(lanes.find(other => other.index !== lane.index).projectName, { exact: true }).count() === 0,
         `Electron lane ${lane.index} saw another private project.`);
       lane.electronApp = app;
@@ -754,10 +936,13 @@ async function runNativeUiAcceptance({ origin, lanes, pipelineInputPath, observe
       browser: {
         seuratPipeline: sanitizeBrowserPipeline(browserSeuratPipeline),
         cellChat: sanitizeBrowserCellChat(browserCellChat),
+        spatialPipeline: sanitizeBrowserSpatial({ ...browserSpatialPipeline, ...spatialSave }),
         realPipeline: 'browser-real-seurat-pipeline.png',
         realUmap: 'browser-real-umap.png',
         realExploration: 'browser-real-exploration.png',
         realCellChat: 'browser-real-cellchat.png',
+        realSpatialPipeline: 'browser-real-spatial-seurat-pipeline.png',
+        realSpatialUmap: 'browser-real-spatial-umap.png',
         videoFormat: 'Playwright WebM',
       },
       electron: {
