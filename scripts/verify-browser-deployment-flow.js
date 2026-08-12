@@ -235,19 +235,20 @@ async function main() {
     };
     const projectName = `Browser Project ${suffix}`;
 
-    await page.goto(origin, { waitUntil: 'networkidle' });
+    await page.goto(origin, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
     await signUp(page, second);
     await page.getByRole('button', { name: 'Log out' }).click();
     await page.getByRole('button', { name: /Open Workbench/ }).waitFor({ state: 'visible' });
 
     await signUp(page, owner);
-    await page.getByText('No backend projects', { exact: true }).waitFor({ state: 'visible' });
+    await page.getByText('No projects yet', { exact: true }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: 'Create Project', exact: true }).click();
     await page.getByPlaceholder('Project Name').fill(projectName);
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
 
-    await page.getByRole('button', { name: /Collaborators, Project RBAC/ }).click();
+    await page.getByRole('button', { name: /^Collaborators/ }).click();
     await page.getByRole('heading', { name: 'Collaborators', exact: true }).waitFor({ state: 'visible' });
     await page.getByLabel('Account email').fill(second.email);
     await page.locator('form').filter({ hasText: 'Add existing user' }).locator('select').selectOption('viewer');
@@ -274,10 +275,11 @@ async function main() {
     analystPage.on('response', (response) => {
       if (response.status() >= 500) serverErrors.push(`[analyst] ${response.status()} ${response.url()}`);
     });
-    await analystPage.goto(origin, { waitUntil: 'networkidle' });
+    await analystPage.goto(origin, { waitUntil: 'domcontentloaded' });
+    await analystPage.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
     await logIn(analystPage, second);
     await analystPage.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
-    await analystPage.getByRole('button', { name: /Collaborators, Project RBAC/ }).click();
+    await analystPage.getByRole('button', { name: /^Collaborators/ }).click();
     await analystPage.getByText('Your role: analyst', { exact: true }).waitFor({ state: 'visible' });
     assert(await analystPage.getByLabel('Account email').count() === 0,
       'Analyst unexpectedly received membership-management controls in a separate browser session.');
@@ -288,12 +290,12 @@ async function main() {
     await page.getByRole('button', { name: `Remove ${second.email}` }).click();
     await page.getByRole('button', { name: `Confirm remove ${second.email} from ${projectName}` })
       .click();
-    await analystPage.reload({ waitUntil: 'networkidle' });
-    await analystPage.getByText('No backend projects', { exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+    await analystPage.reload({ waitUntil: 'domcontentloaded' });
+    await analystPage.getByText('No projects yet', { exact: true }).waitFor({ state: 'visible', timeout: 15000 });
     assert(await analystPage.getByText(projectName, { exact: true }).count() === 0,
       'Removed analyst retained project visibility after a real browser refresh.');
 
-    await page.reload({ waitUntil: 'networkidle' });
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible' });
     assert(await page.getByText(projectName, { exact: true }).count() > 0,
       'Cookie restore did not reload the durable project.');
