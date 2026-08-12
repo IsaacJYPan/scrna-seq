@@ -279,7 +279,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
               <h3 className="font-bold text-text">Create a private branch</h3>
               <input className="input w-full" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. alternate QC strategy" maxLength={80} />
               <textarea className="input w-full min-h-20" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What are you testing?" maxLength={1000} />
-              <select className="input w-full" value={baseObjectId} onChange={(event) => setBaseObjectId(event.target.value)}>
+              <select aria-label="Branch source saved analysis" className="input w-full" value={baseObjectId} onChange={(event) => setBaseObjectId(event.target.value)}>
                 <option value="">Select an owned saved analysis</option>
                 {objects.map((object) => <option key={object.id} value={object.id}>{savedAnalysisLabel(object)}</option>)}
               </select>
