@@ -158,9 +158,14 @@ async function checkSnapshot(page, name) {
   const file = path.join(SNAPSHOTS_DIR, `${name}.png`);
   const buf = await page.screenshot({ fullPage: false });
 
-  if (UPDATE_MODE || !fs.existsSync(file)) {
+  if (UPDATE_MODE) {
     fs.writeFileSync(file, buf);
     info(`Snapshot saved: ${name}.png`);
+    return;
+  }
+
+  if (!fs.existsSync(file)) {
+    fail(`Snapshot ${name}: reviewed baseline is missing`, 'run npm run test:visual:update after deliberate visual review');
     return;
   }
 
@@ -516,7 +521,7 @@ async function main() {
   // network audits flag. Mock it to return the same user the init script seeds into
   // localStorage so the app stays logged in. logout is a best-effort POST that is
   // never triggered here, but is mocked too for completeness.
-  const visualAuthUser = { id: 'visual-user', email: 'researcher@lab.edu', displayName: 'Visual Tester' };
+  const visualAuthUser = { id: 1, email: 'researcher@lab.edu', displayName: 'Visual Tester' };
   await page.route('**/api/auth/policy*', async route => {
     await route.fulfill({
       status: 200,
@@ -563,7 +568,26 @@ async function main() {
       status: 200,
       contentType: 'application/json',
       headers: corsHeaders,
-      body: JSON.stringify({ expertREnabled: false, expertRProfile: null })
+      body: JSON.stringify({
+        expertREnabled: true,
+        expertRProfile: {
+          id: 'expert-r-visual-v1',
+          packages: ['Seurat', 'dplyr', 'ggplot2', 'readr'],
+        },
+      })
+    });
+  });
+  await page.route('**/api/expert-r/projects/*/inputs*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify([{
+        id: 'input_visual_1',
+        originalFilename: 'sample-annotations.csv',
+        sizeBytes: 18432,
+        createdAt: '2026-01-03T12:00:00.000Z',
+      }])
     });
   });
 
@@ -645,6 +669,47 @@ async function main() {
   // enabled instead of reverting to a disabled/empty state).
   let demoObjectExists = false;
 
+  const visualConditions = [
+    { id: 'condition_control', name: 'Control' },
+    { id: 'condition_treated', name: 'Treated' },
+  ];
+  const visualSamples = [
+    { id: 'sample_control_1', name: 'Control donor 1', conditionId: 'condition_control', conditionName: 'Control', donorCode: 'D01', batch: 'A', modality: 'scrna' },
+    { id: 'sample_control_2', name: 'Control donor 2', conditionId: 'condition_control', conditionName: 'Control', donorCode: 'D02', batch: 'B', modality: 'scrna' },
+    { id: 'sample_treated_1', name: 'Treated donor 1', conditionId: 'condition_treated', conditionName: 'Treated', donorCode: 'D03', batch: 'A', modality: 'scrna' },
+    { id: 'sample_treated_2', name: 'Treated donor 2', conditionId: 'condition_treated', conditionName: 'Treated', donorCode: 'D04', batch: 'B', modality: 'scrna' },
+  ];
+  const visualBindings = visualSamples.map((sample, index) => ({
+    id: `binding_visual_${index + 1}`,
+    analysisObjectId: 'ao_visualmock0001',
+    sampleId: sample.id,
+    sampleName: sample.name,
+    cellMetadataColumn: 'orig.ident',
+    cellMetadataValue: `sample_${index + 1}`,
+  }));
+  const visualContrasts = [{
+    id: 'contrast_visual_1',
+    analysisObjectId: 'ao_visualmock0001',
+    name: 'Treated vs control',
+    numeratorConditionName: 'Treated',
+    denominatorConditionName: 'Control',
+    unitOfReplication: 'sample',
+    cellTypeColumn: 'seurat_clusters',
+    status: 'valid',
+    validation: { issues: [], warnings: [] },
+  }];
+  const visualBranches = [{
+    id: 'branch_visual_private',
+    ownerUserId: 1,
+    name: 'alternate normalization',
+    description: 'Compare a conservative normalization strategy before project review.',
+    visibility: 'private',
+    status: 'active',
+    baseAnalysisObjectId: 'ao_visualmock0001',
+    headAnalysisObjectId: 'ao_visualmock0001',
+    version: 1,
+  }];
+
   await page.route('**/api/organizations**', async route => {
     const isPost = route.request().method() === 'POST';
     await route.fulfill({
@@ -675,6 +740,30 @@ async function main() {
         selectionUnavailable: false,
         updatedAt: null
       };
+    } else if (path.endsWith('/conditions')) {
+      body = visualConditions;
+    } else if (path.endsWith('/samples')) {
+      body = visualSamples;
+    } else if (/\/analysis-objects\/[^/]+\/sample-bindings$/.test(path)) {
+      body = visualBindings;
+    } else if (path.endsWith('/contrasts')) {
+      body = visualContrasts;
+    } else if (path.endsWith('/branches')) {
+      body = demoObjectExists ? visualBranches : [];
+    } else if (path.endsWith('/reviews')) {
+      body = [];
+    } else if (/\/reviews\/[^/]+\/comments$/.test(path)) {
+      body = [];
+    } else if (path.endsWith('/canonical-analysis')) {
+      body = null;
+    } else if (path.endsWith('/audit-events')) {
+      body = demoObjectExists ? [{
+        id: 'audit_visual_1',
+        action: 'branch.created',
+        targetType: 'branch',
+        targetId: 'branch_visual_private',
+        createdAt: '2026-01-03T12:00:00.000Z',
+      }] : [];
     } else if (/\/analysis-objects\/[^/]+\/lineage$/.test(path)) {
       body = {
         projectId: visualProject.id,
@@ -1125,6 +1214,9 @@ async function main() {
   // ── Test 5: Per-Tab Rendering ──────────────────────────────────────────────
   const allTabs = [
     { id: 'pipeline-manager', label: 'Approved workflows',   requiresData: false },
+    { id: 'branches',      label: 'Analysis Branches',        requiresData: true  },
+    { id: 'study-design',  label: 'Study Design',             requiresData: true  },
+    { id: 'expert-r',      label: 'Advanced analysis',        requiresData: true  },
     { id: 'inspect',      label: 'Inspect',                  requiresData: true  },
     { id: 'qc',           label: 'Quality Control',           requiresData: true  },
     { id: 'normalize',    label: 'Normalize',                 requiresData: true  },
@@ -1136,6 +1228,7 @@ async function main() {
     { id: 'heatmap',      label: 'Heatmap',                   requiresData: true  },
     { id: 'dotplot',      label: 'Dot Plot',                  requiresData: true  },
     { id: 'geneviewer',   label: 'Gene Expression',           requiresData: true  },
+    { id: 'explore',      label: 'Exploratory Analysis',      requiresData: true  },
     { id: 'deg',          label: 'Markers / DEG',             requiresData: true  },
     { id: 'annotate',     label: 'Cell Annotation',           requiresData: false, expectedHidden: true  },
     { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true },
@@ -1197,6 +1290,34 @@ async function main() {
             trustedDefinitionCount === 1 && await trustedDefinition.isVisible());
           assert('Approved workflows: non-developer publication controls hidden',
             await page.getByRole('heading', { name: 'Publish Trusted Pipeline Manifest', exact: true }).count() === 0);
+        }
+
+        if (tab.id === 'branches') {
+          assert('Analysis Branches: private branch workflow is visible',
+            await page.getByText('Create a private branch', { exact: true }).count() === 1);
+          assert('Analysis Branches: review sharing is explicit',
+            await page.getByRole('button', { name: 'Share for review', exact: true }).count() === 1);
+        }
+
+        if (tab.id === 'study-design') {
+          assert('Study Design: multi-condition contrast is visible',
+            await page.getByText('Treated vs control', { exact: true }).count() === 1);
+          assert('Study Design: biological replication is represented',
+            await page.getByText('4 registered samples', { exact: true }).count() === 1);
+        }
+
+        if (tab.id === 'expert-r') {
+          assert('Advanced analysis: approved Expert R workbench is visible',
+            await page.getByRole('heading', { name: 'Expert R Workbench', exact: true }).count() === 1);
+          assert('Advanced analysis: controlled private input is visible',
+            await page.getByText('sample-annotations.csv', { exact: true }).count() === 1);
+        }
+
+        if (tab.id === 'explore') {
+          assert('Exploratory Analysis: guided recipe controls are visible',
+            await page.getByRole('button', { name: 'Run recipe', exact: true }).count() === 1);
+          assert('Exploratory Analysis: aggregate-only privacy boundary is visible',
+            await page.getByText('Private analysis workspace · aggregate-only result', { exact: true }).count() === 1);
         }
 
         if (tab.id === 'lineage') {

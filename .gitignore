@@ -57,7 +57,7 @@ exports/
 
 # Playwright test artifacts — screenshots, reports (regeneratable)
 playwright/report/
-playwright/snapshots/
+# Reviewed visual regression baselines under playwright/snapshots are versioned.
 playwright-report/
 test-results/
 
