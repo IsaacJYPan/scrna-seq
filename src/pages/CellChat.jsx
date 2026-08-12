@@ -501,7 +501,6 @@ export default function CellChat({
       && sessionReady
       && liveObjectAttached
       && ownsPrivateLiveObject
-      && computeReady
       && safeParams.groupBy
       && safeParams.species
       && safeParams.databaseCategory
@@ -639,9 +638,6 @@ export default function CellChat({
     if (!sessionReady || !liveObjectAttached) {
       return setError('Open this saved analysis in your private analysis workspace before starting CellChat inference.');
     }
-    if (!computeReady) {
-      return setError('Compute is not available right now. The analysis was not started.');
-    }
     if (!safeParams.groupBy || !safeParams.species || !safeParams.databaseCategory || !safeParams.analysisIntent) {
       return setError('Choose a grouping, species, CellChat database category, and the single-context analysis intent.');
     }
@@ -673,7 +669,6 @@ export default function CellChat({
     isDbBackedObject,
     liveObjectAttached,
     ownsPrivateLiveObject,
-    computeReady,
     refreshJobState,
     safeParams,
     selectedObjectId,
@@ -796,7 +791,7 @@ export default function CellChat({
 
         {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Compute is unavailable, so new analyses are paused until it becomes available. Wait until the sidebar shows Compute available.
+            Compute is temporarily unavailable. You can submit this analysis now; it will wait in the durable queue until compute is available.
           </div>
         )}
 

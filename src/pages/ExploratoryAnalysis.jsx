@@ -63,7 +63,6 @@ export default function ExploratoryAnalysis({
   objectId,
   userEmail,
   userId,
-  computeStatus,
   theme = 'light',
 }) {
   const [recipe, setRecipe] = useState('overview');
@@ -80,7 +79,6 @@ export default function ExploratoryAnalysis({
   const project = (currentWs?.projects || []).find(item => item.id === projectId);
   const ownsObject = !datasetInfo?.ownerUserId || Number(datasetInfo.ownerUserId) === Number(userId);
   const canWrite = WRITE_ROLES.has(project?.role);
-  const computeReady = !computeStatus?.status || computeStatus.status === 'ready';
   const summaryArtifact = artifacts.find(item => item.artifactType === 'exploration_summary');
   const summary = summaryArtifact?.metadata?.summary || null;
 
@@ -120,7 +118,6 @@ export default function ExploratoryAnalysis({
     if (!userEmail || !projectId || !analysisObjectId) return setError('Select a saved analysis first.');
     if (!canWrite) return setError('Your project role cannot start analyses.');
     if (!ownsObject) return setError('Create a branch from this saved version in your private analysis workspace before exploring it.');
-    if (!computeReady) return setError('Compute is currently unavailable.');
     if (recipe === 'feature_by_group' && params.features.length === 0) return setError('Enter at least one feature.');
     if (recipe === 'metadata_distribution' && !params.metadataField) return setError('Enter a metadata field.');
     const api = window.electronAPI || {};
@@ -172,7 +169,7 @@ export default function ExploratoryAnalysis({
             <input className="input mt-1 w-full" value={metadataField} onChange={event => setMetadataField(event.target.value)} />
           </label>}
           <div className="flex items-end">
-            <button className="btn btn-primary flex items-center gap-2" onClick={launch} disabled={busy || !computeReady}>
+            <button className="btn btn-primary flex items-center gap-2" onClick={launch} disabled={busy}>
               {busy ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />} Run recipe
             </button>
           </div>

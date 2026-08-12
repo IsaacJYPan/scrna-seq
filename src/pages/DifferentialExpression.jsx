@@ -264,7 +264,6 @@ export default function DifferentialExpression({
       && sessionReady
       && liveObjectAttached
       && ownsPrivateLiveObject
-      && computeReady
       && !loading
   );
 
@@ -388,10 +387,6 @@ export default function DifferentialExpression({
       setError('Open this saved analysis in your private analysis workspace before running marker analysis.');
       return;
     }
-    if (!computeReady) {
-      setError('Compute is not available right now. The analysis was not started.');
-      return;
-    }
 
     const api = window.electronAPI || {};
     if (!api.createDegFindMarkersJob && !api.createProjectJob) {
@@ -421,7 +416,7 @@ export default function DifferentialExpression({
       if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
     }
     return undefined;
-  }, [activeProjectId, canWriteProject, computeReady, isDbBackedObject, liveObjectAttached, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, sessionReady, userEmail]);
+  }, [activeProjectId, canWriteProject, isDbBackedObject, liveObjectAttached, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, sessionReady, userEmail]);
 
   const cancelDegJob = useCallback(async () => {
     if (!activeProjectId || !job?.id || !canCancelJob) return;
@@ -543,7 +538,7 @@ export default function DifferentialExpression({
 
         {isDbBackedObject && canWriteProject && sessionReady && liveObjectAttached && ownsPrivateLiveObject && !computeReady && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Compute is unavailable, so new analyses are paused until it becomes available. Wait until the sidebar shows Compute available.
+            Compute is temporarily unavailable. You can submit this analysis now; it will wait in the durable queue until compute is available.
           </div>
         )}
 

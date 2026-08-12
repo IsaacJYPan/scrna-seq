@@ -497,7 +497,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
       rBridge: fakeBridge,
       callR: () => {},
       handlers,
-      leaseSeconds: 10, // exact accepted floor; renewal must fire at 5000ms
+      leaseSeconds: 10, // exact accepted floor; renewal must fire every third-lease window
       now: () => T0,
       logger: silentLogger(),
     });
@@ -507,8 +507,8 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     await vi.advanceTimersByTimeAsync(0);
     const beforeRenewals = spy._calls.heartbeat; // 1 pre-handler heartbeat
     // Two renewal windows fire while the call is still pending.
-    await vi.advanceTimersByTimeAsync(5000);
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(3333);
+    await vi.advanceTimersByTimeAsync(3333);
     expect(spy._calls.heartbeat).toBeGreaterThanOrEqual(beforeRenewals + 2);
 
     releaseBridge();
@@ -561,8 +561,8 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     await vi.advanceTimersByTimeAsync(0);
     expect(inspectionStarted).toBe(true);
     const beforeRenewals = heartbeatCalls;
-    await vi.advanceTimersByTimeAsync(5000);
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(3333);
+    await vi.advanceTimersByTimeAsync(3333);
     expect(heartbeatCalls).toBeGreaterThanOrEqual(beforeRenewals + 2);
 
     releaseInspection();
@@ -606,8 +606,8 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
     });
     const run = w.runOnce();
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(15000); // transient failure
-    await vi.advanceTimersByTimeAsync(15000); // successful later renewal
+    await vi.advanceTimersByTimeAsync(10000); // transient failure
+    await vi.advanceTimersByTimeAsync(10000); // successful later renewal
     expect(heartbeatCalls).toBeGreaterThanOrEqual(3); // pre-handler + two timer attempts
     releaseBridge();
     await expect(run).resolves.toMatchObject({ status: 'completed' });
@@ -664,7 +664,7 @@ describe.skipIf(!CONFIGURED)('job worker — lease renewal during a long R bridg
 
     const run = worker.runOnce();
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(3333);
     expect(events).toEqual(['renewal-started']);
     rejectBridge();
     await vi.advanceTimersByTimeAsync(0);

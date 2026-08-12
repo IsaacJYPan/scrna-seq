@@ -2174,7 +2174,12 @@ function createJobWorker(options = {}) {
   // committed-output inspection and hashing, handler validation, R I/O, durable
   // publication, and the final status update.
   function startClaimRenewal(jobId, claimToken) {
-    const renewEveryMs = Math.max(5000, Math.floor((leaseSeconds * 1000) / 2));
+    // Renew at one third of the lease. Half-lease cadence leaves only one useful
+    // retry window when a container is briefly CPU-starved or Postgres has a
+    // transient delay; a delayed first timer can then cross the expiry boundary
+    // even though the handler is still making legitimate progress. One-third
+    // cadence preserves two renewal opportunities without creating a tight loop.
+    const renewEveryMs = Math.max(1000, Math.floor((leaseSeconds * 1000) / 3));
     let stopped = false;
     let renewalInFlight = null;
     let renewTimer = null;
