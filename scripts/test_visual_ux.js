@@ -165,7 +165,20 @@ async function checkReducedMotion(page, locator, name) {
 // ── Screenshot Snapshot Check ──────────────────────────────────────────────────
 async function checkSnapshot(page, name) {
   const file = path.join(SNAPSHOTS_DIR, `${name}.png`);
-  const buf = await page.screenshot({ fullPage: false });
+  // Snapshot only a stable resting frame. Carets blink independently of the
+  // application, while Plotly controls and loading indicators use CSS
+  // transitions/animations whose sampled frame can vary with runner load.
+  // Playwright fast-forwards finite animations and hides the caret without
+  // changing the reviewed layout or relaxing the pixel-difference threshold.
+  await page.evaluate(async () => {
+    if (document.fonts?.ready) await document.fonts.ready;
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  const buf = await page.screenshot({
+    fullPage: false,
+    animations: 'disabled',
+    caret: 'hide',
+  });
 
   if (UPDATE_MODE) {
     fs.writeFileSync(file, buf);
