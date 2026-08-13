@@ -239,6 +239,32 @@ describe('cellchat.infer.v1 bridge contract', () => {
     expect(descriptor.summary.retainedPathwayCount).toBe(7);
   });
 
+  it('preserves an allowlisted R 400 reason code without exposing the raw response', async () => {
+    await expect(runRBridgeOperation({
+      job: job(),
+      operation: 'r.cellchat.infer.v1',
+      objectContext: { objectId: 'ao_abc123', stateKey: 'user-7:obj-abc123' },
+      cellChat: {
+        params: parameters(),
+        resultStorageKey: 'projects/proj_abc123/artifacts/job_abc123/cellchat-inference.csv',
+      },
+      markRDispatchStarted: async () => {},
+      callR: async () => ({
+        status: 400,
+        body: {
+          error: 'private runtime detail at C:\\private\\cellchat.R',
+          code: 'CELLCHAT_MIN_GROUP_CELLS',
+        },
+      }),
+      logger: { info() {}, warn() {}, error() {} },
+    })).rejects.toMatchObject({
+      code: 'R_CELLCHAT_INFERENCE_FAILED',
+      rStatus: 400,
+      rCode: 'CELLCHAT_MIN_GROUP_CELLS',
+      message: 'R cell-communication inference run failed.',
+    });
+  });
+
   it('drops unapproved fields and caps every public preview list', () => {
     const interactions = Array.from({ length: 130 }, (_, index) => ({
       source: 'Group 1',

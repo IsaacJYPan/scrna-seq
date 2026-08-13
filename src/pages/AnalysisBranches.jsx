@@ -147,6 +147,10 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
     reviews.filter((review) => review.status === 'approved')
       .map((review) => [review.branchId, review])
   );
+  const objectById = new Map(objects.map((object) => [object.id, object]));
+  const finalObject = finalProjectAnalysis
+    ? objectById.get(finalProjectAnalysis.analysisObjectId)
+    : null;
 
   if (!projectId) {
     return <div className="h-full grid place-items-center text-textMuted">Select a project to manage analysis branches.</div>;
@@ -158,7 +162,7 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-2xl font-black text-text flex items-center gap-2"><GitBranch size={24} /> Analysis Branches</h2>
-            <p className="text-sm text-textMuted mt-1">Develop alternate saved versions, share them for review, and select a final project analysis.</p>
+            <p className="text-sm text-textMuted mt-1">Your private branches and project-shared branches appear here with their saved-analysis head and review state.</p>
           </div>
           <button className="btn btn-secondary text-sm" onClick={refresh} disabled={loading || !!busy}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
@@ -175,7 +179,8 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-text">
                   <ShieldCheck size={18} className="text-success" />
                   <span className="font-semibold">Final project analysis selected</span>
-                  <span className="text-textMuted">saved version {finalProjectAnalysis.version}</span>
+                  <span className="text-textMuted">Project selection revision {finalProjectAnalysis.version}</span>
+                  {finalObject && <span className="text-textMuted">· {savedAnalysisLabel(finalObject)}</span>}
                 </div>
               ) : <p className="mt-2 text-sm text-textMuted">No final project analysis has been selected yet.</p>}
             </div>
@@ -188,12 +193,18 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
               const owned = branch.ownerUserId === Number(userId);
               const branchReviews = reviews.filter((review) => review.branchId === branch.id);
               const approved = approvedByBranch.get(branch.id);
+              const sourceObject = objectById.get(branch.baseAnalysisObjectId);
+              const headObject = objectById.get(branch.headAnalysisObjectId);
+              const latestReview = branchReviews[0];
               return (
                 <article key={branch.id} className="rounded-xl border border-border bg-surface p-4 space-y-3">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <div className="font-bold text-text">{branch.name}</div>
-                      <div className="text-xs text-textMuted mt-1">Saved version · v{branch.version}</div>
+                      <div className="text-xs text-textMuted mt-1">Branch revision {branch.version} · Owner: {owned ? 'You' : 'Project collaborator'}</div>
+                      <div className="text-xs text-textMuted mt-1">Source: {sourceObject ? savedAnalysisLabel(sourceObject) : 'Saved analysis unavailable'}</div>
+                      <div className="text-xs text-textMuted mt-1">Current saved analysis: {headObject ? savedAnalysisLabel(headObject) : 'Saved analysis unavailable'}</div>
+                      <div className="text-xs text-textMuted mt-1">Review: {latestReview ? reviewStatusLabel(latestReview.status) : 'Not requested'}</div>
                     </div>
                     <span className={`text-[11px] rounded-full border px-2 py-1 ${branch.visibility === 'private' ? 'border-amber-500/30 text-amber-700 dark:text-amber-300' : 'border-success/30 text-success'}`}>
                       {branch.visibility === 'private' ? 'Private draft' : 'Shared with project'}

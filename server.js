@@ -2422,7 +2422,9 @@ function sendProjectResourceError(res, e, context) {
     case 'REVIEW_NOT_OPEN':
     case 'REVIEW_NOT_APPROVED':
     case 'EXPERIMENTAL_DESIGN_CONFLICT':
-      return res.status(409).json({ error: e.message });
+    case 'METADATA_VALUE_ALREADY_BOUND':
+    case 'SAMPLE_ALREADY_BOUND':
+      return res.status(409).json({ error: e.message, code: e.code });
     case 'INVALID_OBJECT_TYPE':
     case 'INVALID_METADATA':
     case 'INVALID_JOB_TYPE':

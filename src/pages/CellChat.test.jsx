@@ -25,6 +25,9 @@ function renderPage(overrides = {}) {
       userEmail="owner@example.com"
       objectId="ao_abc123"
       sessionReady
+      callApi={vi.fn(async (path) => path.includes('preflight=true')
+        ? { ready: true }
+        : { error: 'Owner group key unavailable.' })}
       {...overrides}
     />
   );
@@ -208,13 +211,13 @@ describe('CellChat durable worker UI', () => {
   });
 
   it('renders a private owner-local group key without persisting labels into the durable summary', async () => {
-    const callApi = vi.fn(async () => ({
-      group_by: 'seurat_clusters',
-      groups: [
-        { group: 'Group 1', label: 'CD4 T cells', input_cells: 600 },
-        { group: 'Group 2', label: 'B cells', input_cells: 600 },
-      ],
-    }));
+    const callApi = vi.fn(async (path) => path.includes('preflight=true') ? { ready: true } : ({
+        group_by: 'seurat_clusters',
+        groups: [
+          { group: 'Group 1', label: 'CD4 T cells', input_cells: 600 },
+          { group: 'Group 2', label: 'B cells', input_cells: 600 },
+        ],
+      }));
     renderPage({ callApi });
     const launchButton = screen.getByRole('button', { name: /Start CellChat Inference/i });
     fireEvent.change(screen.getByRole('combobox', { name: /Group labels/i }), { target: { value: 'seurat_clusters' } });
@@ -232,6 +235,19 @@ describe('CellChat durable worker UI', () => {
     expect(screen.getByText('B cells')).toBeInTheDocument();
     expect(screen.getByText(/not saved with the shared result/i)).toBeInTheDocument();
     expect(window.electronAPI.listProjectJobArtifacts.mock.calls[0]).toBeDefined();
+  });
+
+  it('shows a specific preflight remediation and does not queue an invalid run', async () => {
+    const callApi = vi.fn(async () => ({ ready: false, code: 'CELLCHAT_MIN_GROUP_CELLS' }));
+    renderPage({ callApi });
+    fireEvent.change(screen.getByRole('combobox', { name: /Group labels/i }), { target: { value: 'seurat_clusters' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Species/i }), { target: { value: 'human' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Database category/i }), { target: { value: 'all' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Analysis intent/i }), { target: { value: 'single_context' } });
+    fireEvent.click(screen.getByRole('button', { name: /Start CellChat Inference/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/At least two groups must meet the minimum cell threshold/i);
+    expect(window.electronAPI.createCellChatInferenceJob).not.toHaveBeenCalled();
   });
 
   it('states that CellChat results are candidate predictions, not causal or condition comparisons', () => {

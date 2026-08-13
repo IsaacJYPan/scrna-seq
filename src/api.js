@@ -292,8 +292,13 @@ async function req(endpoint, options = {}) {
   const res = await fetch(apiUrl(endpoint), options);
   if (!res.ok) {
     const text = await res.text();
-    const error = new Error(text || res.statusText);
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+    const error = new Error(
+      body && typeof body.error === 'string' ? body.error : (text || res.statusText)
+    );
     error.status = res.status;
+    if (body && typeof body.code === 'string') error.code = body.code;
     throw error;
   }
   return res.json();

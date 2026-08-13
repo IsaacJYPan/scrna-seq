@@ -42,7 +42,9 @@ function formatJobError(job) {
     'spatial.seurat.v1': 'Spatial preprocessing could not use this Visium bundle. Review dataset validation and the required Space Ranger files before trying again.',
     'condition.pseudobulk_de.v1': 'Condition comparison could not use the registered design. Review sample bindings, replication, and the selected contrast before trying again.',
   };
-  if (job?.jobType === 'expert.r.v1') return publicErrorMessage(job.error, jobFallbacks[job.jobType]);
+  if (job?.jobType === 'expert.r.v1' || job?.jobType === 'cellchat.infer.v1') {
+    return publicErrorMessage(job.error, jobFallbacks[job.jobType] || fallback);
+  }
   return formatApiError(job?.error, jobFallbacks[job?.jobType] || fallback);
 }
 

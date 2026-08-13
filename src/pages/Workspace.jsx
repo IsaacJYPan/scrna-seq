@@ -2000,8 +2000,8 @@ export default function Workspace({
               </div>
               <div className="grid grid-cols-4 gap-4">
                 {[
-                  { label: 'Cells (Primary)',    value: displayObject.cells?.toLocaleString() || '0',        info: 'Total unique barcodes after filtering.', icon: Database },
-                  { label: 'Features (Primary)', value: displayObject.features?.toLocaleString() || '0',     info: 'Number of genes measured per cell.', icon: LayoutGrid },
+                  { label: 'Cells (Primary)',    value: displayObject.cells?.toLocaleString() || 'Unavailable', info: 'Total unique barcodes after filtering.', icon: Database },
+                  { label: 'Features (Primary)', value: displayObject.features?.toLocaleString() || 'Unavailable', info: 'Number of genes measured per cell.', icon: LayoutGrid },
                   { label: 'Density',            value: (displayObject.density || '0.00') + '%',              info: 'Percentage of non-zero entries in the sparse matrix. Typical: 1–5%.', icon: ScatterChart },
                   { label: 'Branch',             value: currentWs.activeBranch.toUpperCase(),                 info: 'Current analytical provenance branch.', icon: FolderTree },
                 ].map((stat, i) => (
@@ -2221,7 +2221,9 @@ export default function Workspace({
                       </div>
                       <div className="flex items-center gap-3 mt-0.5 flex-wrap">
                         <span className="text-[10px] text-primary font-bold uppercase">
-                          {obj.cells?.toLocaleString()} cells × {obj.features?.toLocaleString()} features
+                          {Number.isFinite(obj.cells) && Number.isFinite(obj.features)
+                            ? `${obj.cells.toLocaleString()} cells × ${obj.features.toLocaleString()} features`
+                            : 'Dimensions unavailable'}
                         </span>
                         <div className="w-1 h-1 rounded-full bg-slate-700"></div>
                         <span className="text-[10px] text-slate-400">

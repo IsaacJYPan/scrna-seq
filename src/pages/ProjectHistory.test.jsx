@@ -47,6 +47,16 @@ describe('ProjectHistory', () => {
           code: 'HANDLER_ERROR',
           message: 'The R script referenced an object or function that is not available.',
         },
+      }, {
+        id: 'job_cellchat_safe_1',
+        status: 'failed',
+        jobType: 'cellchat.infer.v1',
+        analysisObjectId: 'ao_abc123',
+        createdAt: '2026-06-30T00:01:30.000Z',
+        error: {
+          code: 'CELLCHAT_MIN_GROUP_CELLS',
+          message: 'At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.',
+        },
       }]),
       listProjectArtifacts: vi.fn(async () => [{
         id: 'artifact_safe_1',
@@ -146,6 +156,7 @@ describe('ProjectHistory', () => {
     expect(screen.getByText('Cluster marker analysis')).toBeInTheDocument();
     expect(screen.getByText('This analysis needs attention. Review the settings and try again.')).toBeInTheDocument();
     expect(screen.getByText('The R script referenced an object or function that is not available.')).toBeInTheDocument();
+    expect(screen.getByText('At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.')).toBeInTheDocument();
     expect(screen.getByText('UMAP overview')).toBeInTheDocument();
     expect(screen.getByText(/Source analysis → derived analysis/i)).toBeInTheDocument();
 

@@ -347,6 +347,26 @@ describe('API Client (electronAPI)', () => {
     expect(result.error).toBe('We could not complete this request. Please review the settings and try again.');
   });
 
+  it('preserves structured domain error codes for scientific remediation', async () => {
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 409,
+      statusText: 'Conflict',
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({
+        error: 'This metadata value is already mapped to a biological sample.',
+        code: 'METADATA_VALUE_ALREADY_BOUND',
+      }),
+    });
+
+    await expect(electronAPI.createStudyCondition('proj_1', { name: 'treated' }))
+      .rejects.toMatchObject({
+        message: 'This metadata value is already mapped to a biological sample.',
+        code: 'METADATA_VALUE_ALREADY_BOUND',
+        status: 409,
+      });
+  });
+
   it('routes db methods to their expected endpoint path (same-origin default)', async () => {
     global.fetch.mockResolvedValue({
       ok: true,
@@ -369,7 +389,7 @@ describe('API Client (electronAPI)', () => {
 
     await expect(electronAPI.getProjectJob('proj_1', 'job_1')).rejects.toMatchObject({
       status: 404,
-      message: JSON.stringify({ error: 'Project job not found.' }),
+      message: 'Project job not found.',
     });
   });
 

@@ -5,6 +5,7 @@ import StudyDesign from './StudyDesign';
 
 const workspace = {
   selectedProjectId: 'proj_private_1',
+  projects: [{ id: 'proj_private_1', role: 'analyst' }],
   objects: [{ id: 'ao_private_1', projectId: 'proj_private_1', displayName: 'PBMC cohort' }],
 };
 
@@ -58,5 +59,57 @@ describe('StudyDesign', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Study-design operation failed. Review the settings and try again.');
     expect(container.textContent || '').not.toMatch(/C:\\private\\study-design\.R|worker\.internal|job_unsafe_study/i);
+  });
+
+  it('makes study-design mutation controls read-only for viewers without sending a request', async () => {
+    window.electronAPI.createStudyCondition = vi.fn();
+    render(
+      <StudyDesign
+        currentWs={{ ...workspace, projects: [{ id: 'proj_private_1', role: 'viewer' }] }}
+        datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }}
+      />
+    );
+
+    expect(await screen.findByText(/Study design is read-only/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Condition name')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add condition' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Add condition' }));
+    expect(window.electronAPI.createStudyCondition).not.toHaveBeenCalled();
+  });
+
+  it('explains why one metadata group cannot be mapped to multiple samples', async () => {
+    window.electronAPI.listAnalysisObjectSampleBindings.mockResolvedValueOnce([{
+      id: 'binding_1', sampleName: 'Sample 1', cellMetadataColumn: 'orig.ident', cellMetadataValue: 'SeuratProject',
+    }]);
+    window.electronAPI.bindSampleToAnalysisObject = vi.fn(async () => {
+      throw Object.assign(new Error('This metadata value is already mapped.'), { code: 'METADATA_VALUE_ALREADY_BOUND' });
+    });
+    window.electronAPI.listBiologicalSamples.mockResolvedValue([{
+      id: 'sample_2', name: 'Sample 2', conditionName: 'treated',
+    }]);
+    render(<StudyDesign currentWs={workspace} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />);
+
+    fireEvent.change(await screen.findByLabelText('Bound sample'), { target: { value: 'sample_2' } });
+    fireEvent.change(screen.getByLabelText('Metadata value'), { target: { value: 'SeuratProject' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Bind sample' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/One metadata value cannot represent multiple independent samples/i);
+  });
+
+  it('warns before condition inference when the attached object has one orig.ident group', async () => {
+    const callApi = vi.fn(async () => ({ n_unique: 1 }));
+    render(
+      <StudyDesign
+        currentWs={workspace}
+        datasetInfo={{
+          id: 'ao_private_1', projectId: 'proj_private_1', liveState: 'attached', ownerUserId: 7,
+        }}
+        userId={7}
+        callApi={callApi}
+      />
+    );
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/contains one orig.ident group/i);
+    expect(callApi).toHaveBeenCalledWith('/meta-values?column=orig.ident');
   });
 });
