@@ -36,8 +36,12 @@ function qcUnavailableMessage(rawError, { datasetInfo, sessionReady } = {}) {
   return publicErrorMessage(message, 'QC distribution data is unavailable for the selected analysis.');
 }
 
-export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, objectId, sessionReady }) {
+export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, userId, objectId, sessionReady, currentWs }) {
   const [activePlot, setActivePlot] = useState('mt');
+  const projectId = datasetInfo?.projectId || currentWs?.selectedProjectId || null;
+  const projectRole = currentWs?.projects?.find((project) => project.id === projectId)?.role;
+  const ownsObject = !datasetInfo?.ownerUserId || Number(datasetInfo.ownerUserId) === Number(userId);
+  const canMutate = ['owner', 'admin', 'analyst'].includes(projectRole) && ownsObject;
 
 
 
@@ -137,6 +141,12 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
     rSessionId
   });
   const handleFiltering = () => {
+    if (!canMutate) {
+      setError(projectRole === 'viewer'
+        ? 'This is a read-only project view. Your role can inspect recorded QC results but cannot change filtering.'
+        : 'Create or open your private saved-analysis copy before changing QC filters.');
+      return;
+    }
     if (validationError) {
       setError(validationError);
       return;
@@ -346,7 +356,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           )}
           <button
             onClick={handleFiltering}
-            disabled={filtering || !distributions || Boolean(validationError)}
+            disabled={!canMutate || filtering || !distributions || Boolean(validationError)}
             className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-text border border-success hover:bg-success/30' : 'btn-primary'} flex items-center justify-center gap-2`}
           >
             {filtering && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
@@ -356,6 +366,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           </button>
         </div>
       </div>
+
+      {!canMutate && (
+        <div role="note" className="card p-4 mb-6 border-primary/30 bg-primary/5 text-sm text-textMuted">
+          {projectRole === 'viewer'
+            ? 'Read-only project view: recorded QC results remain available, but filtering controls are disabled.'
+            : 'QC filtering is disabled until this analysis is opened as your private saved-analysis copy.'}
+        </div>
+      )}
 
       {error && (
         <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger flex items-center gap-3">
@@ -453,7 +471,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       )}
 
       {/* Manual Threshold Controls */}
-      <div className="card p-6 mb-8 border-l-4 border-l-primary relative overflow-hidden">
+      <fieldset disabled={!canMutate} className="card p-6 mb-8 border-l-4 border-l-primary relative overflow-hidden disabled:opacity-60">
         {(result || pipelineState?.qc) && (
           <div className="absolute top-0 right-0 px-3 py-1 bg-success/10 text-success text-[9px] font-black uppercase tracking-tighter rounded-bl-lg border-b border-l border-success/20">
             Active Filter Applied
@@ -533,7 +551,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             </div>
           </div>
         </details>
-      </div>
+      </fieldset>
 
       {/* Tabbed Plot Viewer */}
       <div className="card overflow-hidden">

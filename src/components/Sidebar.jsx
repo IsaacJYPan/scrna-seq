@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2, ChevronDown, ChevronLeft, Database, GitBranch, LayoutPanelTop,
-  Lock, LogOut, Menu, Microscope, Moon, Sun, Users, Wrench,
+  Info, LogOut, Menu, Microscope, Moon, Sun, Users, Wrench,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 
@@ -80,15 +80,8 @@ export default function Sidebar({
         `}
       >
         {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />}
-        <span className="min-w-0 flex-1 text-left">
-          <span className="block truncate">{researcherLabel(item.label)}</span>
-          {item.status && (
-            <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200">
-              <Lock size={10} />
-              {item.status}
-            </span>
-          )}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-left">{researcherLabel(item.label)}</span>
+        {item.status && <Info size={13} className="flex-shrink-0 text-textMuted" aria-hidden="true" />}
         {item.id === 'publication' && figuresCount > 0 && (
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">
             {figuresCount}
@@ -171,7 +164,7 @@ export default function Sidebar({
             <NavButton item={{ id: 'pipeline-manager', label: 'Approved workflows', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
             <NavButton item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
             <NavButton item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
-            <NavButton item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Access required' }} disabled={!hasProject || deploymentPolicy.expertREnabled !== true} />
+            <NavButton item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Not enabled for this deployment' }} disabled={!hasProject || deploymentPolicy.expertREnabled !== true} />
             <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
               <SectionLabel>Data & analysis</SectionLabel>

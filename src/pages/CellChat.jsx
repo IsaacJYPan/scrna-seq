@@ -844,7 +844,7 @@ export default function CellChat({
         )}
 
         <section className="rounded-lg border border-border bg-surface/50 p-5">
-          <h3 className="text-lg font-bold text-text">Analysis settings</h3>
+          <h3 className="text-lg font-bold text-text">New run settings</h3>
           <p className="mt-1 max-w-4xl text-sm text-textMuted">
             Select every biological choice deliberately. This workflow is limited to one biological context; it does not perform a treated-versus-control or other between-condition comparison.
           </p>

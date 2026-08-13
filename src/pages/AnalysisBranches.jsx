@@ -49,13 +49,17 @@ function activityLabel(action) {
   return labels[action] || 'Recorded project update';
 }
 
-export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
+export default function AnalysisBranches({ currentWs, datasetInfo, userId, setActiveTab }) {
   const projectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const project = currentWs?.projects?.find((item) => item.id === projectId) || null;
   const canReview = project?.role === 'owner' || project?.role === 'admin';
   const objects = useMemo(
     () => (currentWs?.objects || []).filter((object) => object.projectId === projectId),
     [currentWs?.objects, projectId]
+  );
+  const ownedObjects = useMemo(
+    () => objects.filter((object) => Number(object.ownerUserId) === Number(userId)),
+    [objects, userId]
   );
   const [branches, setBranches] = useState([]);
   const [reviews, setReviews] = useState([]);
@@ -109,7 +113,10 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
   }, [projectId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => { setBaseObjectId(datasetInfo?.id || ''); }, [datasetInfo?.id]);
+  useEffect(() => {
+    const selectedIsOwned = ownedObjects.some((object) => object.id === datasetInfo?.id);
+    setBaseObjectId(selectedIsOwned ? datasetInfo.id : (ownedObjects[0]?.id || ''));
+  }, [datasetInfo?.id, ownedObjects]);
 
   const mutate = async (key, action) => {
     setBusy(key);
@@ -292,9 +299,19 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId }) {
               <textarea className="input w-full min-h-20" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What are you testing?" maxLength={1000} />
               <select aria-label="Branch source saved analysis" className="input w-full" value={baseObjectId} onChange={(event) => setBaseObjectId(event.target.value)}>
                 <option value="">Select an owned saved analysis</option>
-                {objects.map((object) => <option key={object.id} value={object.id} title={savedAnalysisLabel(object)}>{savedAnalysisLabel(object)}</option>)}
+                {ownedObjects.map((object) => <option key={object.id} value={object.id} title={savedAnalysisLabel(object)}>{savedAnalysisLabel(object)}</option>)}
               </select>
               <button className="btn btn-primary w-full" disabled={!name.trim() || !baseObjectId || !!busy}>{busy === 'create' ? 'Creating…' : 'Create private branch'}</button>
+              {objects.length > ownedObjects.length && (
+                <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs text-textMuted">
+                  To continue from a collaborator&apos;s saved analysis, first create your private checkpoint copy in Runs &amp; Results.
+                  {setActiveTab && (
+                    <button type="button" className="mt-2 block font-semibold text-primary hover:underline" onClick={() => setActiveTab('history')}>
+                      Open Runs &amp; Results
+                    </button>
+                  )}
+                </div>
+              )}
             </form>
 
             {canReview && reviews.some((review) => review.status === 'open') && (
