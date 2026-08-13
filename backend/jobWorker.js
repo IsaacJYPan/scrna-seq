@@ -64,6 +64,7 @@ const {
   assertSupportedSpatialSeuratDataset,
 } = require('./spatialPipeline');
 const { validateExploratoryAnalysisParams } = require('./exploratoryAnalysis');
+const { derivedAnalysisDisplayName } = require('./analysisDisplayName');
 const {
   validateConditionComparisonParams,
   allocateConditionComparisonResultStorageKey,
@@ -112,6 +113,7 @@ const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   CELLCHAT_NORMALIZED_DATA_REQUIRED: 'CellChat requires normalized RNA data. Run normalization and try again.',
   CELLCHAT_DATABASE_OVERLAP_LOW: 'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
   CELLCHAT_INPUT_INVALID: 'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
+  ENRICHMENT_PACKAGES_UNAVAILABLE: 'Pathway enrichment is unavailable in the current compute profile. Ask an operator to install the approved enrichment package profile.',
 });
 
 /** Coded handler error carrying a stable, SAFE message. Handlers throw these for
@@ -761,16 +763,29 @@ async function checkpointSaveHandler(ctx) {
 
   let completion;
   try {
+    const inheritedSummary = ownedObject.metadata?.summary && typeof ownedObject.metadata.summary === 'object'
+      ? ownedObject.metadata.summary
+      : {};
+    const savedSummary = {
+      ...descriptor.summary,
+      cells: descriptor.summary?.nCells,
+      features: descriptor.summary?.nFeatures,
+      ...(Number.isFinite(inheritedSummary.density) ? { density: inheritedSummary.density } : {}),
+    };
     completion = await ctx.completePbmcPipelineResult({
       result: {
         objectType: ownedObject.objectType || 'seurat',
-        displayName: `Saved ${ownedObject.displayName || 'analysis'}`,
+        displayName: derivedAnalysisDisplayName(
+          ownedObject.displayName || 'Analysis',
+          'saved',
+          job.createdAt
+        ),
         metadata: {
           source: 'checkpoint.save.v1',
           operation: 'r.checkpoint.save.v1',
           scientific_output: true,
           checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
-          summary: descriptor.summary,
+          summary: savedSummary,
         },
       },
       checkpointArtifact: {
@@ -1538,6 +1553,12 @@ async function enrichmentGseaHandler(ctx) {
       || typeof ctx.deriveRObjectStateKey !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
+  if (ctx.runtimeCapabilities?.pathwayEnrichment === false) {
+    throw codedHandlerError(
+      'ENRICHMENT_PACKAGES_UNAVAILABLE',
+      SAFE_HANDLER_DOMAIN_MESSAGES.ENRICHMENT_PACKAGES_UNAVAILABLE
+    );
+  }
   const ownedObject = await ctx.getOwnedAnalysisObject();
   if (!ownedObject || ownedObject.id !== objectId) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
@@ -2303,6 +2324,7 @@ function createJobWorker(options = {}) {
       const makeClaimContext = (overrides = {}) => ({
         job,
         workerId,
+        runtimeCapabilities: claimAdmission?.capabilities || {},
         heartbeat: () => db.heartbeatJob(
           jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())
         ),

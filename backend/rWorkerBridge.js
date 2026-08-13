@@ -544,6 +544,8 @@ function sanitizePipelineSummary(body) {
 
   const reductions = sanitizeNameList(s.reductions);
   if (reductions.length) out.reductions = reductions;
+  const assays = sanitizeNameList(s.assays);
+  if (assays.length) out.assays = assays;
 
   // Cluster sizes: a bounded list of non-negative counts (never per-cell data).
   if (Array.isArray(s.cluster_sizes)) {
@@ -1369,6 +1371,7 @@ function validateReceiptPayloadSchema(jobType, payload) {
       'n_cells', 'n_features', 'pre_filter_cells', 'post_filter_cells',
       'percent_mt_available', 'n_variable_features', 'n_pcs', 'n_clusters',
       'cluster_sizes', 'reductions', 'normalization_method', 'resolution', 'used_seed',
+      'assays',
       'n_samples', 'conditions', 'samples_per_condition',
     ], ['n_cells', 'n_features']);
     assertExactObjectKeys(payload.checkpoint, ['saved', 'checksum_sha256', 'size_bytes']);

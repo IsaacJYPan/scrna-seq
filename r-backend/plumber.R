@@ -1087,10 +1087,17 @@ function(req, res) {
     }
   }
   if (!shared) res$status <- 503
+  enrichment_packages <- c(
+    "clusterProfiler", "fgsea", "AnnotationDbi", "org.Hs.eg.db", "org.Mm.eg.db", "GO.db"
+  )
   list(
     status = if (shared) "ok" else "not_ready",
     storage_shared = shared,
-    runtime_session_id = if (shared) r_runtime_instance_id else NULL
+    runtime_session_id = if (shared) r_runtime_instance_id else NULL,
+    capabilities = list(
+      pathway_enrichment = all(vapply(enrichment_packages, requireNamespace, logical(1), quietly = TRUE)),
+      cellchat = all(vapply(c("CellChat", "NMF"), requireNamespace, logical(1), quietly = TRUE))
+    )
   )
 }
 
@@ -1602,6 +1609,7 @@ function(req, res) {
     if (!saved) stop("Checkpoint integrity could not be computed.")
 
     reductions <- tryCatch(names(global_obj@reductions), error = function(e) character(0))
+    assays <- tryCatch(Assays(global_obj), error = function(e) character(0))
     cluster_counts <- tryCatch({
       if ("seurat_clusters" %in% colnames(global_obj@meta.data)) {
         table(global_obj$seurat_clusters)
@@ -1614,6 +1622,7 @@ function(req, res) {
         n_features = nrow(global_obj),
         n_clusters = length(cluster_counts),
         cluster_sizes = as.list(head(as.integer(cluster_counts), 256L)),
+        assays = as.list(head(as.character(assays), 64L)),
         reductions = as.list(head(as.character(reductions), 64L))
       ),
       checkpoint = list(

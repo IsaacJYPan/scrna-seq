@@ -51,22 +51,38 @@ describe.skipIf(!CONFIGURED)('pgDatabase.js tests', () => {
     await expect(getStandaloneWorkerRuntimeStatus()).resolves.toEqual({
       status: 'unknown',
       updatedAt: null,
+      capabilities: {},
     });
   });
 
   it('aggregates private compute-pool readiness without exposing slot details', async () => {
-    await reportStandaloneWorkerRuntimeState('ready', { slot: 2 });
+    await reportStandaloneWorkerRuntimeState('ready', { slot: 2, capabilities: { pathwayEnrichment: true } });
     await reportStandaloneWorkerRuntimeState('unavailable', { slot: 3 });
 
     const partiallyReady = await getStandaloneWorkerRuntimeStatus();
     expect(partiallyReady.status).toBe('ready');
     expect(partiallyReady.updatedAt).toEqual(expect.any(String));
-    expect(Object.keys(partiallyReady).sort()).toEqual(['status', 'updatedAt']);
+    expect(partiallyReady.capabilities).toEqual({
+      pathwayEnrichment: true,
+      cellChat: false,
+    });
+    expect(Object.keys(partiallyReady).sort()).toEqual(['capabilities', 'status', 'updatedAt']);
+
+    await reportStandaloneWorkerRuntimeState('ready', {
+      slot: 3,
+      capabilities: { pathwayEnrichment: false, cellChat: true },
+    });
+    const mixedCapabilities = await getStandaloneWorkerRuntimeStatus();
+    expect(mixedCapabilities.capabilities).toEqual({
+      pathwayEnrichment: false,
+      cellChat: false,
+    });
 
     await reportStandaloneWorkerRuntimeState('unavailable', { slot: 2 });
+    await reportStandaloneWorkerRuntimeState('unavailable', { slot: 3 });
     const unavailable = await getStandaloneWorkerRuntimeStatus();
     expect(unavailable.status).toBe('unavailable');
-    expect(Object.keys(unavailable).sort()).toEqual(['status', 'updatedAt']);
+    expect(Object.keys(unavailable).sort()).toEqual(['capabilities', 'status', 'updatedAt']);
   });
 
   it('rejects invalid worker readiness slots', async () => {

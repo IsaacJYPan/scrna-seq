@@ -220,6 +220,7 @@ function createStandaloneWorkerRuntime(options = {}) {
     acceptingClaims: false,
     draining: false,
     lastReadinessCode: 'STARTING',
+    capabilities: {},
   };
   let worker = null;
   let healthServer = null;
@@ -251,7 +252,10 @@ function createStandaloneWorkerRuntime(options = {}) {
         ? 'ready'
         : 'unavailable';
     try {
-      await db.reportStandaloneWorkerRuntimeState(status, { slot: runtimeConfig.poolSlot });
+      await db.reportStandaloneWorkerRuntimeState(status, {
+        slot: runtimeConfig.poolSlot,
+        capabilities: state.capabilities,
+      });
     } catch (error) {
       // Status reporting must never weaken the worker's admission and claim
       // gates. A failed heartbeat naturally becomes unavailable after its TTL.
@@ -288,6 +292,9 @@ function createStandaloneWorkerRuntime(options = {}) {
       }
       if (typeof db.checkHealth === 'function') await db.checkHealth();
       const rReady = await probeR(rConfig, { storageProbeNonce: storageProbe && storageProbe.nonce });
+      state.capabilities = rReady && rReady.capabilities && typeof rReady.capabilities === 'object'
+        ? rReady.capabilities
+        : {};
       state.ready = true;
       state.lastReadinessCode = 'READY';
       return {
@@ -296,6 +303,7 @@ function createStandaloneWorkerRuntime(options = {}) {
         rRuntimeInstanceHash: rReady && typeof rReady.runtime_session_id === 'string'
           ? crypto.createHash('sha256').update(rReady.runtime_session_id).digest('hex')
           : null,
+        capabilities: state.capabilities,
       };
     } catch (error) {
       state.ready = false;

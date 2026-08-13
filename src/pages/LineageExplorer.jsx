@@ -6,13 +6,16 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
+import { formatAnalysisObjectDisplayName } from '../backendWorkspaceModel';
 
 const NODE_WIDTH = 250;
 const NODE_HEIGHT = 92;
 
 function formatObjectLabel(node) {
   const label = typeof node?.label === 'string' ? node.label.trim() : '';
-  if (label && label !== node?.id && !/^(?:ao|job|artifact|object)[_-]/i.test(label)) return label;
+  if (label && label !== node?.id && !/^(?:ao|job|artifact|object)[_-]/i.test(label)) {
+    return formatAnalysisObjectDisplayName(label, node?.createdAt);
+  }
   return 'Saved analysis';
 }
 
@@ -104,6 +107,7 @@ function LineageNode({ data }) {
       </div>
       <div className="mt-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-textMuted">
         <span>Saved analysis</span>
+        <span className="normal-case tracking-normal" title={data.id}>{String(data.id).slice(-8)}</span>
         {data.isRoot && <span className="rounded bg-success/10 px-1.5 py-0.5 text-success">root</span>}
       </div>
       <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-primary" />

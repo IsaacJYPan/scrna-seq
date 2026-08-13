@@ -206,4 +206,14 @@ describe('DifferentialExpression durable worker UI', () => {
     expect(screen.getByText(/belongs to another member/i)).toBeInTheDocument();
     expect(window.electronAPI.createDegFindMarkersJob).not.toHaveBeenCalled();
   });
+
+  it('shows the exact saved checkpoint and blocks launch while live changes are unsaved', () => {
+    const save = vi.fn();
+    renderDeg({ unsavedLiveChanges: true, onSaveCurrentAnalysis: save });
+
+    expect(screen.getByText(/Saved checkpoint used by this run:/i).parentElement).toHaveTextContent('PBMC 3k');
+    expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /Save current analysis/i }));
+    expect(save).toHaveBeenCalledOnce();
+  });
 });

@@ -9,6 +9,7 @@ import {
   createProjectWithBackend,
   loadBackendProjectState,
   loadProjectAnalysisObjectState,
+  mapBackendAnalysisObject,
   persistAnalysisObjectSummary,
   selectedObjectStorageKey,
   selectedProjectStorageKey,
@@ -265,5 +266,23 @@ describe('backend workspace model', () => {
       features: 13714,
       density: 2.59,
     }));
+  });
+
+  it('maps server-generated checkpoint summaries and normalizes legacy generated names', () => {
+    const mapped = mapBackendAnalysisObject({
+      id: 'ao_saved', projectId: 'proj_1', objectType: 'seurat',
+      displayName: 'Saved Fork of Saved PBMC_3k_Tutorial',
+      createdAt: '2026-08-13T04:04:08.000Z',
+      metadata: { summary: { nCells: 2643, nFeatures: 13714, assays: ['RNA'], reductions: ['pca', 'umap'] } },
+    });
+
+    expect(mapped).toMatchObject({
+      name: 'PBMC_3k_Tutorial · Saved 2026-08-13 04:04Z',
+      cells: 2643,
+      features: 13714,
+      assays: ['RNA'],
+      reductions: ['pca', 'umap'],
+    });
+    expect(mapped.density).toBeUndefined();
   });
 });

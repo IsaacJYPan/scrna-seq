@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { derivedAnalysisDisplayName } = require('./analysisDisplayName');
 
 const config = require('./config');
 const storage = require('./storage');
@@ -211,6 +212,7 @@ const WORKER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const DEFAULT_LEASE_SECONDS = 120;
 const MAX_NAME_LENGTH = 200;
 const MAX_DESCRIPTION_LENGTH = 2000;
+const ALLOWED_ANALYSIS_SUMMARY_FIELDS = ['cells', 'features', 'density'];
 const PIPELINE_DEFINITION_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const PIPELINE_SELECTION_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const PIPELINE_REGISTRY_PUBLISH_CAPABILITY = 'pipeline_registry.publish';
@@ -221,17 +223,25 @@ const PROVENANCE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const PROVENANCE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const FIGURE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const FIGURE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
-const ALLOWED_ANALYSIS_SUMMARY_FIELDS = ['cells', 'features', 'density'];
-
 function inheritedAnalysisSummary(metadata) {
   const summary = {};
   const candidate = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
     ? metadata.summary
     : null;
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return summary;
-  for (const field of ALLOWED_ANALYSIS_SUMMARY_FIELDS) {
-    const value = candidate[field];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) summary[field] = value;
+  const cells = candidate.cells ?? candidate.nCells ?? candidate.n_cells;
+  const features = candidate.features ?? candidate.nFeatures ?? candidate.n_features;
+  if (typeof cells === 'number' && Number.isFinite(cells) && cells >= 0) summary.cells = cells;
+  if (typeof features === 'number' && Number.isFinite(features) && features >= 0) summary.features = features;
+  if (typeof candidate.density === 'number' && Number.isFinite(candidate.density) && candidate.density >= 0) {
+    summary.density = candidate.density;
+  }
+  for (const field of ['assays', 'reductions']) {
+    if (!Array.isArray(candidate[field])) continue;
+    const values = candidate[field]
+      .filter(value => typeof value === 'string' && /^[A-Za-z0-9_.+-]{1,64}$/.test(value))
+      .slice(0, 64);
+    if (values.length) summary[field] = values;
   }
   return summary;
 }
@@ -504,12 +514,20 @@ async function reportStandaloneWorkerRuntimeState(state, options = {}) {
   if (!Number.isInteger(slot) || slot < 1 || slot > 8) {
     throw codedError('INVALID_WORKER_POOL_SLOT', 'Worker pool slot is invalid.');
   }
+  const requestedCapabilities = options.capabilities && typeof options.capabilities === 'object'
+    ? options.capabilities
+    : {};
+  const capabilities = {};
+  for (const key of ['pathwayEnrichment', 'cellChat']) {
+    if (typeof requestedCapabilities[key] === 'boolean') capabilities[key] = requestedCapabilities[key];
+  }
   const { rows } = await query(
-    `INSERT INTO worker_pool_runtime_status (slot, state, updated_at)
-     VALUES ($1, $2, now())
-     ON CONFLICT (slot) DO UPDATE SET state = EXCLUDED.state, updated_at = now()
-     RETURNING slot, state, updated_at`,
-    [slot, normalized]
+    `INSERT INTO worker_pool_runtime_status (slot, state, capabilities_json, updated_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (slot) DO UPDATE SET state = EXCLUDED.state,
+       capabilities_json = EXCLUDED.capabilities_json, updated_at = now()
+     RETURNING slot, state, capabilities_json, updated_at`,
+    [slot, normalized, JSON.stringify(capabilities)]
   );
   return {
     slot: Number(rows[0]?.slot || slot),
@@ -524,9 +542,9 @@ async function getStandaloneWorkerRuntimeStatus(options = {}) {
     : DEFAULT_WORKER_RUNTIME_STALE_AFTER_MS;
   const now = options.now === undefined ? new Date() : normalizeTimestamp(options.now);
   const { rows } = await query(
-    'SELECT slot, state, updated_at FROM worker_pool_runtime_status ORDER BY slot'
+    'SELECT slot, state, capabilities_json, updated_at FROM worker_pool_runtime_status ORDER BY slot'
   );
-  if (rows.length === 0) return { status: 'unknown', updatedAt: null };
+  if (rows.length === 0) return { status: 'unknown', updatedAt: null, capabilities: {} };
   const freshRows = rows.filter((row) => {
     const updatedAt = row.updated_at instanceof Date ? row.updated_at : new Date(row.updated_at);
     return !Number.isNaN(updatedAt.getTime()) && now.getTime() - updatedAt.getTime() <= staleAfterMs;
@@ -535,9 +553,24 @@ async function getStandaloneWorkerRuntimeStatus(options = {}) {
     !current || new Date(row.updated_at).getTime() > new Date(current.updated_at).getTime()
       ? row : current
   ), null);
+  const readyRows = freshRows.filter((row) => row.state === 'ready');
+  const capabilities = {};
+  for (const key of ['pathwayEnrichment', 'cellChat']) {
+    if (readyRows.length) {
+      // Any ready lane may claim the next job, so advertise a feature only when
+      // every claim-capable lane explicitly reports it. Missing data from an
+      // older worker therefore fails closed during rolling upgrades.
+      capabilities[key] = readyRows.every((row) => (
+        row.capabilities_json
+        && typeof row.capabilities_json === 'object'
+        && row.capabilities_json[key] === true
+      ));
+    }
+  }
   return {
     status: freshRows.some((row) => row.state === 'ready') ? 'ready' : 'unavailable',
     updatedAt: toCanonicalTs(latest.updated_at),
+    capabilities,
   };
 }
 
@@ -6952,7 +6985,11 @@ async function completeCheckpointForkByWorker(jobId, workerId, claimToken, input
         sourceObject.id,
         sourceObject.lineageRootId || sourceObject.id,
         sourceObject.objectType,
-        `Fork of ${sourceObject.displayName || sourceObject.id}`,
+        derivedAnalysisDisplayName(
+          sourceObject.displayName || sourceObject.id,
+          'branch',
+          row.created_at || now
+        ),
         JSON.stringify(resultMetadata),
       ]
     );

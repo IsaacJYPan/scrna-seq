@@ -52,16 +52,42 @@ export function mapBackendProject(project) {
 
 function firstNumber(...values) {
   for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
     const n = Number(value);
     if (Number.isFinite(n)) return n;
   }
   return undefined;
 }
 
+function generatedVersionSuffix(createdAt, kind) {
+  const date = new Date(createdAt || '');
+  if (Number.isNaN(date.getTime())) return '';
+  return ` · ${kind} ${date.toISOString().slice(0, 16).replace('T', ' ')}Z`;
+}
+
+export function formatAnalysisObjectDisplayName(value, createdAt) {
+  let name = typeof value === 'string' ? value.trim() : '';
+  if (!name) return 'Analysis Object';
+  if (/\s+·\s+(?:Saved|Branch)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}Z$/i.test(name)) return name;
+
+  const kind = /^Fork of\s+/i.test(name) ? 'Branch' : (/^Saved\s+/i.test(name) ? 'Saved' : '');
+  if (!kind) return name;
+  let previous;
+  do {
+    previous = name;
+    name = name.replace(/^(?:Saved\s+|Fork of\s+)/i, '').trim();
+  } while (name && name !== previous);
+  return `${name || 'Analysis'}${generatedVersionSuffix(createdAt, kind)}`;
+}
+
 export function mapBackendAnalysisObject(object, liveResult = {}) {
   const metadata = object.metadata && typeof object.metadata === 'object' ? object.metadata : {};
   const summary = metadata.summary && typeof metadata.summary === 'object' ? metadata.summary : {};
-  const cells = firstNumber(liveResult.cells, liveResult.n_cells, metadata.cells, metadata.n_cells, summary.cells, summary.n_cells);
+  const cells = firstNumber(
+    liveResult.cells, liveResult.n_cells, liveResult.nCells,
+    metadata.cells, metadata.n_cells, metadata.nCells,
+    summary.cells, summary.n_cells, summary.nCells
+  );
   const features = firstNumber(
     liveResult.features,
     liveResult.genes,
@@ -71,7 +97,8 @@ export function mapBackendAnalysisObject(object, liveResult = {}) {
     metadata.n_features,
     summary.features,
     summary.genes,
-    summary.n_features
+    summary.n_features,
+    summary.nFeatures
   );
   const density = firstNumber(liveResult.density, metadata.density, summary.density);
 
@@ -84,7 +111,10 @@ export function mapBackendAnalysisObject(object, liveResult = {}) {
     ownerUserId: Number.isInteger(Number(object.ownerUserId)) && Number(object.ownerUserId) > 0
       ? Number(object.ownerUserId)
       : null,
-    name: object.displayName || metadata.displayName || metadata.name || 'Analysis Object',
+    name: formatAnalysisObjectDisplayName(
+      object.displayName || metadata.displayName || metadata.name || 'Analysis Object',
+      object.createdAt
+    ),
     objectType: object.objectType,
     cells,
     features,
@@ -94,6 +124,8 @@ export function mapBackendAnalysisObject(object, liveResult = {}) {
     parentObjId: object.parentObjectId || null,
     lineageRootId: object.lineageRootId || null,
     metadata,
+    assays: Array.isArray(summary.assays) ? summary.assays : [],
+    reductions: Array.isArray(summary.reductions) ? summary.reductions : [],
     isBackendAnalysisObject: true,
     // Project metadata is durable and shared; it cannot establish whether this
     // browser user's private R key is currently attached. Only a live response

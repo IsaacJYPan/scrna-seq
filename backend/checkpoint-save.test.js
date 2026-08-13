@@ -30,6 +30,7 @@ function savedBody() {
       n_clusters: 9,
       cluster_sizes: [300],
       reductions: ['pca', 'umap'],
+      assays: ['RNA'],
     },
     checkpoint: { saved: true, checksum_sha256: 'a'.repeat(64), size_bytes: 1234 },
     versions: { seurat_version: '5.3.1', r_version: '4.5.3' },
@@ -74,7 +75,7 @@ describe('checkpoint.save.v1 bridge boundary', () => {
       operation: 'r.checkpoint.save.v1',
       artifactType: 'checkpoint_save',
       checkpoint: { saved: true, checksumSha256: 'a'.repeat(64), sizeBytes: 1234 },
-      summary: { nCells: 2700, nFeatures: 13714 },
+      summary: { nCells: 2700, nFeatures: 13714, assays: ['RNA'] },
     });
   });
 
@@ -135,7 +136,7 @@ describe('checkpointSaveHandler', () => {
       checkpointSave: { checkpointStorageKey: ctx.checkpointStorageKey },
     }));
     expect(ctx.completePbmcPipelineResult).toHaveBeenCalledWith(expect.objectContaining({
-      result: expect.objectContaining({ objectType: 'seurat', displayName: 'Saved PBMC work' }),
+      result: expect.objectContaining({ objectType: 'seurat', displayName: expect.stringMatching(/^PBMC work · Saved /) }),
       checkpointArtifact: expect.objectContaining({
         artifactType: 'checkpoint', internalStorageKey: ctx.checkpointStorageKey,
       }),
@@ -232,7 +233,11 @@ describe.skipIf(!CONFIGURED)('checkpoint.save.v1 database and worker contract', 
       parentObjectId: source.id,
       objectType: 'seurat',
     });
-    expect(saved.displayName).toBe('Saved Live work');
+    expect(saved.displayName).toMatch(/^Live work · Saved /);
+    expect(saved.metadata.summary).toMatchObject({
+      cells: 2700, features: 13714, nCells: 2700, nFeatures: 13714,
+      assays: ['RNA'], reductions: ['pca', 'umap'],
+    });
 
     const children = await db.listProjectAnalysisObjectChildren(owner.id, project.id, source.id);
     expect(children).toHaveLength(1);

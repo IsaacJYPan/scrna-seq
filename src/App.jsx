@@ -1176,6 +1176,9 @@ export default function App() {
       historyRefreshToken,
       onExpertRSubmitted: () => setHistoryRefreshToken((token) => token + 1),
       computeStatus,
+      unsavedLiveChanges,
+      onSaveCurrentAnalysis: handleSaveLiveAnalysis,
+      checkpointSaveBusy,
     };
 
     return (

@@ -301,4 +301,15 @@ describe('CellChat durable worker UI', () => {
     ));
     expect(await screen.findByText('IL7–IL7R')).toBeInTheDocument();
   });
+
+  it('requires saving live clustering changes before a durable CellChat run', () => {
+    const save = vi.fn();
+    renderPage({ unsavedLiveChanges: true, onSaveCurrentAnalysis: save });
+
+    expect(screen.getByRole('button', { name: /Start CellChat Inference/i })).toBeDisabled();
+    expect(screen.getByText(/Unsaved live steps will not be included/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Save current analysis/i }));
+    expect(save).toHaveBeenCalledOnce();
+    expect(window.electronAPI.createCellChatInferenceJob).not.toHaveBeenCalled();
+  });
 });

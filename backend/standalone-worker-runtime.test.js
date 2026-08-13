@@ -104,7 +104,10 @@ function makeRuntime(overrides = {}) {
     db,
     storageProvider: { root, remove() {} },
     availableMemoryBytes: overrides.availableMemoryBytes || (() => 8 * 1024 * 1024 * 1024),
-    probeRReadiness: overrides.probeRReadiness || (async () => ({ status: 'ok', storage_shared: true })),
+    probeRReadiness: overrides.probeRReadiness || (async () => ({
+      status: 'ok', storage_shared: true,
+      capabilities: { pathwayEnrichment: true, cellChat: true },
+    })),
     createJobWorker: overrides.createJobWorker || (() => worker),
     logger: silentLogger(),
   });
@@ -174,10 +177,16 @@ describe('standalone worker readiness and drain lifecycle', () => {
     const { runtime } = makeRuntime({ db });
 
     await runtime.start();
-    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenCalledWith('ready', { slot: 1 });
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenCalledWith('ready', {
+      slot: 1,
+      capabilities: { pathwayEnrichment: true, cellChat: true },
+    });
 
     await runtime.shutdown();
-    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenLastCalledWith('draining', { slot: 1 });
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenLastCalledWith('draining', {
+      slot: 1,
+      capabilities: { pathwayEnrichment: true, cellChat: true },
+    });
   });
 
   it('fails closed and never constructs a worker when R readiness misses the startup deadline', async () => {

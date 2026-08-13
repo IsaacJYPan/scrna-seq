@@ -621,6 +621,7 @@ describe('API Client (electronAPI)', () => {
       json: async () => ({
         status: 'ready',
         updatedAt: '2026-08-01T00:00:00.000Z',
+        capabilities: { pathwayEnrichment: false, cellChat: true, privatePackage: true },
         workerId: 'private-worker-id',
         stateKey: 'private-r-state-key',
       }),
@@ -629,6 +630,7 @@ describe('API Client (electronAPI)', () => {
     await expect(electronAPI.getComputeRuntimeStatus()).resolves.toEqual({
       status: 'ready',
       updatedAt: '2026-08-01T00:00:00.000Z',
+      capabilities: { pathwayEnrichment: false, cellChat: true },
     });
     expect(global.fetch).toHaveBeenCalledWith('/api/runtime/compute-status', expect.any(Object));
   });
@@ -644,6 +646,7 @@ describe('API Client (electronAPI)', () => {
     await expect(electronAPI.getComputeRuntimeStatus()).resolves.toEqual({
       status: 'unknown',
       updatedAt: null,
+      capabilities: {},
     });
   });
 

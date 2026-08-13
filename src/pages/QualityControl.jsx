@@ -431,7 +431,9 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 </div>
                 <div className="p-4 bg-black/20 rounded text-center border border-border/5">
                   <div className="text-[10px] text-textMuted uppercase mb-1 font-bold font-bold">Genes/Features</div>
-                  <div className="text-text font-bold">{distributions?.n_features?.toLocaleString() || '—'}</div>
+                  <div className="text-text font-bold" title={Number.isFinite(distributions?.n_features) ? 'Features measured in the current object.' : 'Feature count was not recorded in this saved summary.'}>
+                    {Number.isFinite(distributions?.n_features) ? distributions.n_features.toLocaleString() : 'Unavailable'}
+                  </div>
                 </div>
               </>
             )}
