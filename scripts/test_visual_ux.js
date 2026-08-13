@@ -27,6 +27,7 @@ const fs = require('fs');
 const VITE_PORT     = Number(process.env.VISUAL_VITE_PORT || 5173);
 const VITE_URL      = `http://localhost:${VITE_PORT}`;
 const WORKSPACE     = path.resolve(__dirname, '..');
+const VITE_CLI      = path.join(WORKSPACE, 'node_modules', 'vite', 'bin', 'vite.js');
 const SNAPSHOTS_DIR = path.join(WORKSPACE, 'playwright', 'snapshots');
 const REPORT_DIR    = path.join(WORKSPACE, 'playwright', 'report');
 const UPDATE_MODE   = process.argv.includes('--update-snapshots');
@@ -310,10 +311,9 @@ let viteProc = null;
 
 async function startVite() {
   info(`Starting Vite dev server on port ${VITE_PORT}...`);
-  viteProc = spawn('npx', ['vite', '--port', String(VITE_PORT), '--strictPort'], {
+  viteProc = spawn(process.execPath, [VITE_CLI, '--port', String(VITE_PORT), '--strictPort'], {
     cwd: WORKSPACE,
     stdio: ['pipe', 'pipe', 'pipe'],
-    shell: true,
   });
 
   let ready = false;
