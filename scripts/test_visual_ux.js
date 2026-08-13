@@ -28,7 +28,15 @@ const VITE_PORT     = Number(process.env.VISUAL_VITE_PORT || 5173);
 const VITE_URL      = `http://localhost:${VITE_PORT}`;
 const WORKSPACE     = path.resolve(__dirname, '..');
 const VITE_CLI      = path.join(WORKSPACE, 'node_modules', 'vite', 'bin', 'vite.js');
-const SNAPSHOTS_DIR = path.join(WORKSPACE, 'playwright', 'snapshots');
+const SNAPSHOT_PLATFORM = String(process.env.VISUAL_SNAPSHOT_PLATFORM || process.platform)
+  .toLowerCase().replace(/[^a-z0-9_-]/g, '');
+const SNAPSHOTS_ROOT = path.join(WORKSPACE, 'playwright', 'snapshots');
+// Browser text rasterization differs materially between Windows and Linux.
+// Keep the reviewed legacy Windows goldens in the root and use a dedicated
+// Linux set in CI instead of weakening the pixel-difference threshold.
+const SNAPSHOTS_DIR = SNAPSHOT_PLATFORM === 'linux'
+  ? path.join(SNAPSHOTS_ROOT, 'linux')
+  : SNAPSHOTS_ROOT;
 const REPORT_DIR    = path.join(WORKSPACE, 'playwright', 'report');
 const UPDATE_MODE   = process.argv.includes('--update-snapshots');
 const VITE_STARTUP_WAIT_MS = 30_000;
