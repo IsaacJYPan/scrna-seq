@@ -281,6 +281,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
               </div>
               <div className="w-full h-[480px]">
                 <Plot 
+                  preferSvg={viewMode === 'feature'}
                   data={viewMode === 'violin' ? formatViolinData(geneData) : formatFeaturePlot(geneData, theme)}
                   layout={{
                     autosize: true,

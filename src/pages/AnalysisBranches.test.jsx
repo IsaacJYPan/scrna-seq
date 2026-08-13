@@ -6,7 +6,7 @@ import AnalysisBranches from './AnalysisBranches';
 const workspace = {
   selectedProjectId: 'proj_1',
   projects: [{ id: 'proj_1', name: 'Atlas', role: 'owner' }],
-  objects: [{ id: 'ao_abc123', projectId: 'proj_1', displayName: 'PBMC checkpoint' }],
+  objects: [{ id: 'ao_abc123', projectId: 'proj_1', ownerUserId: 1, displayName: 'PBMC checkpoint' }],
 };
 
 describe('AnalysisBranches', () => {
@@ -52,6 +52,25 @@ describe('AnalysisBranches', () => {
         baseAnalysisObjectId: 'ao_abc123',
       })
     ));
+  });
+
+  it('does not offer a collaborator-owned checkpoint as a direct branch source', async () => {
+    const setActiveTab = vi.fn();
+    const sharedWorkspace = {
+      ...workspace,
+      projects: [{ id: 'proj_1', name: 'Atlas', role: 'analyst' }],
+      objects: [
+        workspace.objects[0],
+        { id: 'ao_shared456', projectId: 'proj_1', ownerUserId: 2, displayName: 'PI checkpoint' },
+      ],
+    };
+    render(<AnalysisBranches currentWs={sharedWorkspace} datasetInfo={sharedWorkspace.objects[1]} userId={1} setActiveTab={setActiveTab} />);
+
+    const source = await screen.findByRole('combobox', { name: /Branch source saved analysis/i });
+    expect(source).toHaveValue('ao_abc123');
+    expect(screen.queryByRole('option', { name: 'PI checkpoint' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Open Runs & Results/i }));
+    expect(setActiveTab).toHaveBeenCalledWith('history');
   });
 
   it('replaces a hostile branch error with researcher-safe recovery text', async () => {

@@ -1308,7 +1308,9 @@ app.get('/api/auth/policy', (req, res) => {
   res.json({
     registrationEnabled: config.registrationEnabled(),
     legacyLocalImportsEnabled: legacyUiEnabled,
-    legacyLiveMutationToolsEnabled: legacyUiEnabled,
+    // Live mutation tools write into the source object's in-memory R state.
+    // Keep them unavailable until they create a durable child checkpoint.
+    legacyLiveMutationToolsEnabled: false,
     serverFigureExportEnabled: legacyUiEnabled,
     // Expert R entitlement is authenticated account data. The public policy
     // fails closed so login/demo surfaces cannot disclose or enable it.

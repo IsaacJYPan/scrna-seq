@@ -79,6 +79,7 @@ function handlerContext(parameters = {}) {
   return {
     ctx: {
       job: job(parameters),
+      runtimeCapabilities: { pathwayEnrichment: true },
       workerId: 'worker_abc',
       heartbeat: vi.fn(async () => {}),
       log: vi.fn(async () => {}),
@@ -240,6 +241,15 @@ describe('enrichment.gsea.v1 handler boundary', () => {
   it('fails immediately when the compute runtime lacks enrichment packages', async () => {
     const { ctx, run } = handlerContext();
     ctx.runtimeCapabilities = { pathwayEnrichment: false };
+    await expect(enrichmentGseaHandler(ctx)).rejects.toMatchObject({
+      code: 'ENRICHMENT_PACKAGES_UNAVAILABLE',
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the worker capability report is missing', async () => {
+    const { ctx, run } = handlerContext();
+    ctx.runtimeCapabilities = {};
     await expect(enrichmentGseaHandler(ctx)).rejects.toMatchObject({
       code: 'ENRICHMENT_PACKAGES_UNAVAILABLE',
     });

@@ -25,6 +25,7 @@ function renderPage(overrides = {}) {
       userEmail="owner@example.com"
       objectId="ao_abc123"
       sessionReady
+      computeStatus={{ status: 'ready', capabilities: { pathwayEnrichment: true } }}
       callApi={vi.fn(async () => ({ values: [{ value: '0', count: 100 }] }))}
       {...overrides}
     />
@@ -262,5 +263,12 @@ describe('PathwayEnrichment durable worker UI', () => {
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(/not installed in this compute profile/i);
+  });
+
+  it('fails closed while the worker capability report is unknown', () => {
+    renderPage({ computeStatus: { status: 'ready', capabilities: {} } });
+
+    expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/readiness has not been confirmed/i);
   });
 });
