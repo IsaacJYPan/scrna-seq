@@ -262,6 +262,13 @@ async function probeWorkerRReadiness(runtime, options = {}) {
       code: 'R_RUNTIME_INSTANCE_MISSING',
     });
   }
+  const capabilities = body.capabilities && typeof body.capabilities === 'object'
+    ? body.capabilities
+    : {};
+  body.capabilities = {
+    pathwayEnrichment: capabilities.pathway_enrichment === true,
+    cellChat: capabilities.cellchat === true,
+  };
   return body;
 }
 

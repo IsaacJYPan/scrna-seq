@@ -230,6 +230,9 @@ export default function DifferentialExpression({
   sessionReady,
   setActiveTab,
   computeStatus,
+  unsavedLiveChanges = false,
+  onSaveCurrentAnalysis,
+  checkpointSaveBusy = false,
 }) {
   const [params, setParam] = useTabParams('deg', userEmail, objectId, DEFAULT_PARAMS);
   const [job, setJob] = useState(null);
@@ -262,6 +265,7 @@ export default function DifferentialExpression({
       && isDbBackedObject
       && canWriteProject
       && ownsPrivateLiveObject
+      && !unsavedLiveChanges
       && !loading
   );
 
@@ -381,6 +385,10 @@ export default function DifferentialExpression({
       setError('This analysis belongs to another member. Create a branch from its saved version in your private analysis workspace before running marker analysis.');
       return;
     }
+    if (unsavedLiveChanges) {
+      setError('Save the current analysis before starting this durable run. Unsaved live steps are not included in saved-checkpoint jobs.');
+      return;
+    }
     const api = window.electronAPI || {};
     if (!api.createDegFindMarkersJob && !api.createProjectJob) {
       setError('Marker analysis is temporarily unavailable.');
@@ -409,7 +417,7 @@ export default function DifferentialExpression({
       if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
     }
     return undefined;
-  }, [activeProjectId, canWriteProject, isDbBackedObject, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, userEmail]);
+  }, [activeProjectId, canWriteProject, isDbBackedObject, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, unsavedLiveChanges, userEmail]);
 
   const cancelDegJob = useCallback(async () => {
     if (!activeProjectId || !job?.id || !canCancelJob) return;
@@ -486,13 +494,25 @@ export default function DifferentialExpression({
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
-            <div className="mt-1 truncate text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
+            <div className="mt-1 truncate text-text" title={selectedAnalysisName}>{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Private analysis workspace</div>
             <div className="mt-1 text-sm text-text">Available only to the analysis owner</div>
           </div>
         </div>
+
+        {isDbBackedObject && ownsPrivateLiveObject && (
+          <div className={`rounded-lg border p-4 text-sm ${unsavedLiveChanges ? 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200' : 'border-primary/20 bg-primary/5 text-textMuted'}`}>
+            <p><span className="font-bold text-text">Saved checkpoint used by this run:</span> {selectedAnalysisName}</p>
+            {unsavedLiveChanges && (
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <p>Unsaved live steps will not be included. Save the current analysis before launching.</p>
+                {typeof onSaveCurrentAnalysis === 'function' && <button type="button" className="btn btn-secondary text-xs" onClick={onSaveCurrentAnalysis} disabled={checkpointSaveBusy}>{checkpointSaveBusy ? 'Saving…' : 'Save current analysis'}</button>}
+              </div>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">

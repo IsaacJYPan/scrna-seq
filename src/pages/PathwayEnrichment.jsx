@@ -247,6 +247,9 @@ export default function PathwayEnrichment({
   sessionReady,
   setActiveTab,
   computeStatus,
+  unsavedLiveChanges = false,
+  onSaveCurrentAnalysis,
+  checkpointSaveBusy = false,
 }) {
   const [params, setParam] = useTabParams('enrichment', userEmail, objectId, DEFAULT_PARAMS);
   const [job, setJob] = useState(null);
@@ -258,6 +261,7 @@ export default function PathwayEnrichment({
   const [error, setError] = useState(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
   const [targetGroups, setTargetGroups] = useState([]);
+  const [targetGroupsLoading, setTargetGroupsLoading] = useState(false);
 
   const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
@@ -272,11 +276,14 @@ export default function PathwayEnrichment({
   const ownsPrivateLiveObject = !datasetInfo?.ownerUserId
     || Number(datasetInfo.ownerUserId) === Number(userId);
   const computeReady = !computeStatus?.status || computeStatus.status === 'ready';
+  const enrichmentAvailable = computeStatus?.capabilities?.pathwayEnrichment !== false;
   // The API also limits analysts to cancelling only their own jobs. Until the
   // job projection carries an explicit capability, expose cancellation only to
   // roles that can cancel every project job rather than offering a dead action.
   const canCancelJob = activeProject?.role === 'owner' || activeProject?.role === 'admin';
   const targetGroupIsValid = isSafeTargetGroup(params.targetGroup);
+  const targetGroupIsAvailable = params.groupBy !== 'seurat_clusters'
+    || targetGroups.includes(String(params.targetGroup || '').trim());
   const safeParams = useMemo(() => buildEnrichmentParams(params), [params]);
   const geneSetSizesAreValid = safeParams.minGeneSetSize < safeParams.maxGeneSetSize;
   const canLaunch = Boolean(
@@ -287,7 +294,10 @@ export default function PathwayEnrichment({
       && sessionReady
       && liveObjectAttached
       && ownsPrivateLiveObject
+      && !unsavedLiveChanges
+      && enrichmentAvailable
       && targetGroupIsValid
+      && targetGroupIsAvailable
       && safeParams.species
       && geneSetSizesAreValid
       && !loading
@@ -384,10 +394,12 @@ export default function PathwayEnrichment({
   useEffect(() => {
     let canceled = false;
     setTargetGroups([]);
+    setTargetGroupsLoading(false);
     if (!callApi || !sessionReady || !liveObjectAttached
         || !datasetInfo || params.groupBy !== 'seurat_clusters') {
       return () => { canceled = true; };
     }
+    setTargetGroupsLoading(true);
     callApi('/meta-values?column=seurat_clusters')
       .then(response => {
         if (canceled || response?.error || !Array.isArray(response?.values)) return;
@@ -399,7 +411,8 @@ export default function PathwayEnrichment({
       })
       .catch(() => {
         if (!canceled) setTargetGroups([]);
-      });
+      })
+      .finally(() => { if (!canceled) setTargetGroupsLoading(false); });
     return () => { canceled = true; };
   }, [callApi, datasetInfo, liveObjectAttached, params.groupBy, rSessionId, sessionReady]);
 
@@ -423,9 +436,18 @@ export default function PathwayEnrichment({
     if (!sessionReady || !liveObjectAttached) {
       return setError('Open this saved analysis in your private analysis workspace before starting pathway enrichment.');
     }
+    if (!enrichmentAvailable) {
+      return setError('Pathway enrichment is unavailable in the current compute profile. Ask an operator to install the approved enrichment package profile.');
+    }
+    if (unsavedLiveChanges) {
+      return setError('Save the current analysis before starting this durable run. Unsaved clustering or other live steps are not included.');
+    }
     if (!safeParams.species) return setError('Choose whether the data are human or mouse.');
     if (!targetGroupIsValid) {
       return setError('Enter a valid cluster or identity label using letters, numbers, spaces, or . _ + ( ) -.');
+    }
+    if (!targetGroupIsAvailable) {
+      return setError('Choose a cluster available in the saved checkpoint.');
     }
     if (!geneSetSizesAreValid) {
       return setError('The smallest gene set must be smaller than the largest gene set.');
@@ -465,6 +487,7 @@ export default function PathwayEnrichment({
     activeProjectId,
     canWriteProject,
     geneSetSizesAreValid,
+    enrichmentAvailable,
     isDbBackedObject,
     liveObjectAttached,
     ownsPrivateLiveObject,
@@ -473,6 +496,8 @@ export default function PathwayEnrichment({
     selectedObjectId,
     sessionReady,
     targetGroupIsValid,
+    targetGroupIsAvailable,
+    unsavedLiveChanges,
     userEmail,
   ]);
 
@@ -545,13 +570,25 @@ export default function PathwayEnrichment({
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
-            <div className="mt-1 truncate text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
+            <div className="mt-1 truncate text-text" title={selectedAnalysisName}>{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Gene sets</div>
             <div className="mt-1 text-sm text-text">GO Biological Process (fixed in v1)</div>
           </div>
         </div>
+
+        {isDbBackedObject && ownsPrivateLiveObject && (
+          <div className={`rounded-lg border p-4 text-sm ${unsavedLiveChanges ? 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200' : 'border-primary/20 bg-primary/5 text-textMuted'}`}>
+            <p><span className="font-bold text-text">Saved checkpoint used by this run:</span> {selectedAnalysisName}</p>
+            {unsavedLiveChanges && (
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <p>Unsaved live steps will not be included. Save the current analysis before launching.</p>
+                {typeof onSaveCurrentAnalysis === 'function' && <button type="button" className="btn btn-secondary text-xs" onClick={onSaveCurrentAnalysis} disabled={checkpointSaveBusy}>{checkpointSaveBusy ? 'Saving…' : 'Save current analysis'}</button>}
+              </div>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">
@@ -594,6 +631,13 @@ export default function PathwayEnrichment({
           </div>
         )}
 
+        {isDbBackedObject && computeStatus?.capabilities?.pathwayEnrichment === false && (
+          <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger" role="alert">
+            <p className="font-bold">Pathway enrichment is not installed in this compute profile.</p>
+            <p className="mt-1">Ask an operator to add the approved enrichment package profile. Runs are disabled until the worker reports those dependencies ready.</p>
+          </div>
+        )}
+
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <h3 className="text-lg font-bold text-text">Analysis settings</h3>
           <p className="mt-1 text-sm text-textMuted">Choose the cluster to compare with all other cells. Species is required because human and mouse gene identifiers use different reference databases.</p>
@@ -614,18 +658,16 @@ export default function PathwayEnrichment({
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Target cluster or group</span>
-              <input
-                value={params.targetGroup}
-                onChange={event => setParam('targetGroup', event.target.value)}
-                maxLength={80}
-                list={targetGroups.length ? 'pathway-target-groups' : undefined}
-                placeholder="For example: 0 or CD8 T cells"
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white"
-              />
-              {targetGroups.length > 0 && (
-                <datalist id="pathway-target-groups">
-                  {targetGroups.map(group => <option value={group} key={group} />)}
-                </datalist>
+              {params.groupBy === 'seurat_clusters' ? (
+                <select value={params.targetGroup} onChange={event => setParam('targetGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" disabled={targetGroupsLoading || targetGroups.length === 0}>
+                  <option value="">{targetGroupsLoading ? 'Loading clusters…' : targetGroups.length ? 'Choose cluster' : 'No clusters available'}</option>
+                  {targetGroups.map(group => <option value={group} key={group}>{group}</option>)}
+                </select>
+              ) : (
+                <input value={params.targetGroup} onChange={event => setParam('targetGroup', event.target.value)} maxLength={80} placeholder="For example: 0 or CD8 T cells" className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              )}
+              {params.groupBy === 'seurat_clusters' && !targetGroupsLoading && targetGroups.length === 0 && (
+                <span className="mt-1.5 block text-xs text-amber-900 dark:text-amber-200">No clusters are available in the open saved checkpoint. Save a clustered analysis or choose Current identities.</span>
               )}
             </label>
             <label className="block">

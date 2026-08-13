@@ -236,4 +236,13 @@ describe('enrichment.gsea.v1 handler boundary', () => {
     await expect(enrichmentGseaHandler(ctx)).rejects.toMatchObject({ code: 'R_OBJECT_NOT_FOUND' });
     expect(run).not.toHaveBeenCalled();
   });
+
+  it('fails immediately when the compute runtime lacks enrichment packages', async () => {
+    const { ctx, run } = handlerContext();
+    ctx.runtimeCapabilities = { pathwayEnrichment: false };
+    await expect(enrichmentGseaHandler(ctx)).rejects.toMatchObject({
+      code: 'ENRICHMENT_PACKAGES_UNAVAILABLE',
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
 });

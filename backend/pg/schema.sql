@@ -463,8 +463,11 @@ CREATE TABLE IF NOT EXISTS worker_runtime_status (
 CREATE TABLE IF NOT EXISTS worker_pool_runtime_status (
   slot        SMALLINT PRIMARY KEY CHECK (slot BETWEEN 1 AND 8),
   state       TEXT NOT NULL,
+  capabilities_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE worker_pool_runtime_status
+  ADD COLUMN IF NOT EXISTS capabilities_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 -- ── Job artifacts / checkpoints (metadata-first; server-owned) ───────────────
 CREATE TABLE IF NOT EXISTS job_artifacts (

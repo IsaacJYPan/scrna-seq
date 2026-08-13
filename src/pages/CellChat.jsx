@@ -477,6 +477,9 @@ export default function CellChat({
   sessionReady,
   setActiveTab,
   computeStatus,
+  unsavedLiveChanges = false,
+  onSaveCurrentAnalysis,
+  checkpointSaveBusy = false,
 }) {
   const [params, setParam] = useTabParams('cellchat', userEmail, objectId, DEFAULT_PARAMS);
   const [job, setJob] = useState(null);
@@ -515,6 +518,7 @@ export default function CellChat({
       && sessionReady
       && liveObjectAttached
       && ownsPrivateLiveObject
+      && !unsavedLiveChanges
       && safeParams.groupBy
       && safeParams.species
       && safeParams.databaseCategory
@@ -652,6 +656,9 @@ export default function CellChat({
     if (!sessionReady || !liveObjectAttached) {
       return setError('Open this saved analysis in your private analysis workspace before starting CellChat inference.');
     }
+    if (unsavedLiveChanges) {
+      return setError('Save the current analysis before starting this durable run. Unsaved clustering or other live steps are not included.');
+    }
     if (!safeParams.groupBy || !safeParams.species || !safeParams.databaseCategory || !safeParams.analysisIntent) {
       return setError('Choose a grouping, species, CellChat database category, and the single-context analysis intent.');
     }
@@ -701,6 +708,7 @@ export default function CellChat({
     safeParams,
     selectedObjectId,
     sessionReady,
+    unsavedLiveChanges,
     userEmail,
   ]);
 
@@ -774,13 +782,25 @@ export default function CellChat({
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
-            <div className="mt-1 truncate text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
+            <div className="mt-1 truncate text-text" title={selectedAnalysisName}>{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Assay</div>
             <div className="mt-1 text-sm text-text">RNA (fixed in v1)</div>
           </div>
         </div>
+
+        {isDbBackedObject && ownsPrivateLiveObject && (
+          <div className={`rounded-lg border p-4 text-sm ${unsavedLiveChanges ? 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200' : 'border-primary/20 bg-primary/5 text-textMuted'}`}>
+            <p><span className="font-bold text-text">Saved checkpoint used by this run:</span> {selectedAnalysisName}</p>
+            {unsavedLiveChanges && (
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <p>Unsaved live steps will not be included. Save the current analysis before launching.</p>
+                {typeof onSaveCurrentAnalysis === 'function' && <button type="button" className="btn btn-secondary text-xs" onClick={onSaveCurrentAnalysis} disabled={checkpointSaveBusy}>{checkpointSaveBusy ? 'Saving…' : 'Save current analysis'}</button>}
+              </div>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger" role="alert">
@@ -833,7 +853,7 @@ export default function CellChat({
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Group labels (required)</span>
               <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
                 <option value="">Choose grouping</option>
-                {GROUP_BY_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                {GROUP_BY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
@@ -844,21 +864,21 @@ export default function CellChat({
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Species (required)</span>
               <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
                 <option value="">Choose species</option>
-                {SPECIES_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                {SPECIES_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Database category (required)</span>
               <select value={params.databaseCategory} onChange={event => setParam('databaseCategory', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
                 <option value="">Choose database category</option>
-                {DATABASE_CATEGORY_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                {DATABASE_CATEGORY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Analysis intent (required)</span>
               <select value={params.analysisIntent} onChange={event => setParam('analysisIntent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
                 <option value="">Confirm analysis scope</option>
-                {ANALYSIS_INTENT_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                {ANALYSIS_INTENT_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">

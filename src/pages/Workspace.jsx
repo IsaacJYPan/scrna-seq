@@ -2000,9 +2000,9 @@ export default function Workspace({
               </div>
               <div className="grid grid-cols-4 gap-4">
                 {[
-                  { label: 'Cells (Primary)',    value: displayObject.cells?.toLocaleString() || 'Unavailable', info: 'Total unique barcodes after filtering.', icon: Database },
-                  { label: 'Features (Primary)', value: displayObject.features?.toLocaleString() || 'Unavailable', info: 'Number of genes measured per cell.', icon: LayoutGrid },
-                  { label: 'Density',            value: (displayObject.density || '0.00') + '%',              info: 'Percentage of non-zero entries in the sparse matrix. Typical: 1–5%.', icon: ScatterChart },
+                  { label: 'Cells (Primary)',    value: Number.isFinite(displayObject.cells) ? displayObject.cells.toLocaleString() : 'Unavailable', info: 'Total unique barcodes after filtering.', icon: Database },
+                  { label: 'Features (Primary)', value: Number.isFinite(displayObject.features) ? displayObject.features.toLocaleString() : 'Unavailable', info: 'Number of genes measured per cell.', icon: LayoutGrid },
+                  { label: 'Density',            value: Number.isFinite(displayObject.density) ? `${displayObject.density}%` : 'Unavailable', info: 'Percentage of non-zero entries in the sparse matrix. This value is unavailable when it was not recorded with an older saved version.', icon: ScatterChart },
                   { label: 'Branch',             value: currentWs.activeBranch.toUpperCase(),                 info: 'Current analytical provenance branch.', icon: FolderTree },
                 ].map((stat, i) => (
                   <div key={i} className="card p-6 bg-surface/50 border-border/50 relative flex flex-col justify-center items-center min-h-[130px]">

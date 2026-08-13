@@ -352,6 +352,14 @@ async function getComputeRuntimeStatus() {
   return {
     status,
     updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : null,
+    capabilities: data?.capabilities && typeof data.capabilities === 'object'
+      ? {
+        pathwayEnrichment: typeof data.capabilities.pathwayEnrichment === 'boolean'
+          ? data.capabilities.pathwayEnrichment : undefined,
+        cellChat: typeof data.capabilities.cellChat === 'boolean'
+          ? data.capabilities.cellChat : undefined,
+      }
+      : {},
   };
 }
 
