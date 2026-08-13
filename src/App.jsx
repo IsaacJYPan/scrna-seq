@@ -13,6 +13,7 @@ import {
 } from './liveRState';
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
 import { publicErrorMessage } from './publicError';
+import { buildProjectProvenancePayload } from './projectProvenance';
 
 import {
   saveProvenance,
@@ -873,6 +874,19 @@ export default function App() {
       if (data.provenance) {
         data.provenance.parentIds = parentIds;
         await saveProvenance(data);
+        const projectId = datasetInfo?.projectId;
+        const projectRole = (currentWs?.projects || []).find((project) => project.id === projectId)?.role;
+        if (projectId && datasetInfo?.id && ['owner', 'admin', 'analyst'].includes(projectRole)
+            && typeof window.electronAPI?.createProjectProvenance === 'function') {
+          const projectPayload = buildProjectProvenancePayload(data.provenance, datasetInfo.id);
+          try {
+            await window.electronAPI.createProjectProvenance(projectId, projectPayload);
+          } catch {
+            // The scientific operation has already completed in R. Project-level
+            // provenance persistence is best-effort here so a transient history
+            // write failure cannot cause the user to repeat a mutating operation.
+          }
+        }
 
         setProvenanceRecords(prev => {
           if (prev.some(p => p.id === data.provenance.id)) return prev;

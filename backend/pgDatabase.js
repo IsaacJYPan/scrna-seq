@@ -223,6 +223,19 @@ const FIGURE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const FIGURE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const ALLOWED_ANALYSIS_SUMMARY_FIELDS = ['cells', 'features', 'density'];
 
+function inheritedAnalysisSummary(metadata) {
+  const summary = {};
+  const candidate = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? metadata.summary
+    : null;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return summary;
+  for (const field of ALLOWED_ANALYSIS_SUMMARY_FIELDS) {
+    const value = candidate[field];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) summary[field] = value;
+  }
+  return summary;
+}
+
 function validateJobTransition(fromStatus, toStatus) {
   if (!JOB_STATUSES.has(fromStatus) || !JOB_STATUSES.has(toStatus)) return false;
   return JOB_TRANSITIONS[fromStatus].has(toStatus);
@@ -6910,11 +6923,13 @@ async function completeCheckpointForkByWorker(jobId, workerId, claimToken, input
   }
   const loaded = input.loaded === undefined ? {} : input.loaded;
   assertPlainObject(loaded, 'INVALID_METADATA', 'loaded summary must be a plain JSON object.');
+  const sourceSummary = inheritedAnalysisSummary(sourceObject.metadata);
   const resultMetadata = {
     source: 'checkpoint.fork.v1',
     sourceAnalysisObjectId: sourceObject.id,
     sourceCheckpointArtifactId: checkpoint.checkpointArtifactId,
     scientific_output: true,
+    ...(Object.keys(sourceSummary).length > 0 ? { summary: sourceSummary } : {}),
   };
   const artifactId = generateJobArtifactId();
   const p = await connect();
@@ -7247,6 +7262,7 @@ module.exports = {
   getLoadableCheckpointForAnalysisObject,
   getForkableCheckpointForAnalysisObject,
   completeCheckpointForkByWorker,
+  inheritedAnalysisSummary,
   rowToJobArtifact,
   toPublicJobArtifact,
   // lineage

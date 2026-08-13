@@ -3311,9 +3311,9 @@ cellchat_inference_safe_string <- function(value, max_chars = 160L) {
   substr(trimws(clean), 1L, max_chars)
 }
 
-cellchat_inference_input_error <- function(message) {
+cellchat_inference_input_error <- function(message, code = "CELLCHAT_INPUT_INVALID") {
   stop(structure(
-    list(message = message, call = NULL),
+    list(message = message, call = NULL, code = code),
     class = c("cellchat_inference_input_error", "error", "condition")
   ))
 }
@@ -3514,11 +3514,11 @@ cellchat_inference_signaling_features <- function(input_obj, assay, database) {
     !is.na(database_features) & nzchar(database_features)
   ]
   if (is.null(available_features) || length(available_features) == 0L) {
-    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.")
+    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.", "CELLCHAT_NORMALIZED_DATA_REQUIRED")
   }
   selected <- database_features[database_features %in% available_features]
   if (length(selected) < 5L) {
-    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.")
+    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.", "CELLCHAT_DATABASE_OVERLAP_LOW")
   }
   if (length(selected) > CELLCHAT_INFERENCE_MAX_SIGNALING_FEATURES) {
     cellchat_inference_input_error("The selected CellChat database exceeds the supported signaling-feature capacity.")
@@ -3566,12 +3566,12 @@ cellchat_inference_prepare_input <- function(input_obj, assay, selected_cells,
     layer <- Seurat::GetAssayData(input_obj, assay = assay, layer = "data")
     layer[signaling_features, selected_cells, drop = FALSE]
   }, error = function(e) {
-    cellchat_inference_input_error("Normalized RNA data is required for cell communication inference.")
+    cellchat_inference_input_error("Normalized RNA data is required for cell communication inference.", "CELLCHAT_NORMALIZED_DATA_REQUIRED")
   })
   if (is.null(data_input) || nrow(data_input) < 5L ||
       ncol(data_input) != length(selected_cells) ||
       !identical(colnames(data_input), rownames(metadata))) {
-    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.")
+    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.", "CELLCHAT_NORMALIZED_DATA_REQUIRED")
   }
   list(data = data_input, metadata = metadata, admission = admission)
 }
@@ -4078,13 +4078,16 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
     !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
   ]
   if (length(missing_packages) > 0L) {
-    stop("CellChat runtime dependencies are unavailable.")
+    cellchat_inference_input_error(
+      "CellChat runtime dependencies are unavailable.",
+      "CELLCHAT_PACKAGES_UNAVAILABLE"
+    )
   }
   if (!inherits(input_obj, "Seurat")) {
     cellchat_inference_input_error("Loaded object is not a Seurat object.")
   }
   if (!(p$assay %in% Assays(input_obj))) {
-    cellchat_inference_input_error("The RNA assay is required for cell communication inference.")
+    cellchat_inference_input_error("The RNA assay is required for cell communication inference.", "CELLCHAT_ASSAY_UNAVAILABLE")
   }
   input_cells <- colnames(input_obj)
   if (length(input_cells) < 1L) {
@@ -4093,7 +4096,7 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
 
   group_values <- if (identical(p$group_by, "seurat_clusters")) {
     if (!("seurat_clusters" %in% colnames(input_obj@meta.data))) {
-      cellchat_inference_input_error("Clustering results are required for cell communication inference.")
+      cellchat_inference_input_error("Clustering results are required for cell communication inference.", "CELLCHAT_GROUPING_UNAVAILABLE")
     }
     as.character(input_obj@meta.data$seurat_clusters)
   } else {
@@ -4108,10 +4111,10 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
   # CellChat's pairwise graph grows quadratically in group count. Reject rather than
   # silently dropping groups, and keep every returned summary array safely bounded.
   if (length(all_groups) > 32L) {
-    cellchat_inference_input_error("CellChat v1 supports at most 32 populated groups per run.")
+    cellchat_inference_input_error("CellChat v1 supports at most 32 populated groups per run.", "CELLCHAT_GROUP_COUNT_INVALID")
   }
   if (length(all_groups) < 2L) {
-    cellchat_inference_input_error("At least two populated groups are required for cell communication inference.")
+    cellchat_inference_input_error("At least two populated groups are required for cell communication inference.", "CELLCHAT_GROUP_COUNT_INVALID")
   }
   input_counts <- vapply(all_groups, function(group) {
     as.integer(sum(grouped & group_values == group))
@@ -4121,7 +4124,7 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
   eligible_indices <- unname(which(input_counts >= p$min_cells_per_group))
   excluded_indices <- unname(which(input_counts < p$min_cells_per_group))
   if (length(eligible_indices) < 2L) {
-    cellchat_inference_input_error("At least two groups must meet the minimum cell count.")
+    cellchat_inference_input_error("At least two groups must meet the minimum cell count.", "CELLCHAT_MIN_GROUP_CELLS")
   }
 
   per_group_cap <- min(
@@ -4203,7 +4206,7 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
   cellchat@DB <- cellchat_database
   cellchat <- with_cellchat_warnings(CellChat::subsetData(cellchat))
   if (is.null(cellchat@data.signaling) || nrow(cellchat@data.signaling) < 5L) {
-    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.")
+    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.", "CELLCHAT_DATABASE_OVERLAP_LOW")
   }
   cellchat <- with_cellchat_warnings(CellChat::identifyOverExpressedGenes(
     cellchat,
@@ -4424,7 +4427,10 @@ function(req, res) {
   }, error = function(e) {
     if (inherits(e, "cellchat_inference_input_error")) {
       res$status <- 400
-      return(list(error = "Invalid cell communication input."))
+      return(list(
+        error = "Invalid cell communication input.",
+        code = cellchat_inference_safe_string(e$code, 64L)
+      ))
     }
     res$status <- 500
     message(sprintf("[object/cellchat-infer] CellChat error: %s", conditionMessage(e)))
@@ -4643,7 +4649,7 @@ function(req, res) {
 
 #* Get the owner-local key for opaque CellChat result groups
 #* @get /cellchat-group-map
-function(res, group_by = "") {
+function(res, group_by = "", preflight = "false", min_cells_per_group = "10") {
   if (is.null(global_obj)) {
     res$status <- 400
     return(list(error = "No input object loaded."))
@@ -4660,6 +4666,33 @@ function(res, group_by = "") {
   if (inherits(mapping, "error")) {
     res$status <- 400
     return(list(error = "CellChat group mapping is unavailable."))
+  }
+  if (identical(tolower(as.character(preflight)), "true")) {
+    missing_packages <- c("CellChat", "NMF")[
+      !vapply(c("CellChat", "NMF"), requireNamespace, logical(1), quietly = TRUE)
+    ]
+    if (length(missing_packages) > 0L) {
+      return(list(ready = FALSE, code = "CELLCHAT_PACKAGES_UNAVAILABLE"))
+    }
+    if (!("RNA" %in% Assays(global_obj))) {
+      return(list(ready = FALSE, code = "CELLCHAT_ASSAY_UNAVAILABLE"))
+    }
+    minimum <- suppressWarnings(as.integer(min_cells_per_group))
+    if (length(minimum) != 1L || is.na(minimum) || minimum < 5L || minimum > 200L) {
+      return(list(ready = FALSE, code = "CELLCHAT_INPUT_INVALID"))
+    }
+    eligible <- vapply(mapping$groups, function(group) group$input_cells >= minimum, logical(1))
+    if (sum(eligible) < 2L) {
+      return(list(ready = FALSE, code = "CELLCHAT_MIN_GROUP_CELLS"))
+    }
+    normalized <- tryCatch(
+      GetAssayData(global_obj, assay = "RNA", layer = "data"),
+      error = function(e) NULL
+    )
+    if (is.null(normalized) || nrow(normalized) < 1L || ncol(normalized) != ncol(global_obj)) {
+      return(list(ready = FALSE, code = "CELLCHAT_NORMALIZED_DATA_REQUIRED"))
+    }
+    return(list(ready = TRUE, group_count = length(mapping$groups)))
   }
   mapping
 }

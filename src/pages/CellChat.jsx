@@ -107,6 +107,20 @@ function parseErrorMessage(error) {
   }
 }
 
+function cellChatReasonMessage(code) {
+  const messages = {
+    CELLCHAT_PACKAGES_UNAVAILABLE: 'CellChat is unavailable in the current analysis runtime. Ask an operator to enable the required package profile.',
+    CELLCHAT_GROUPING_UNAVAILABLE: 'CellChat needs valid clustering or identity labels. Run clustering or choose current identities and try again.',
+    CELLCHAT_GROUP_COUNT_INVALID: 'CellChat needs between two and 32 populated groups. Review the selected grouping and try again.',
+    CELLCHAT_MIN_GROUP_CELLS: 'At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.',
+    CELLCHAT_ASSAY_UNAVAILABLE: 'CellChat requires an RNA assay in the saved analysis.',
+    CELLCHAT_NORMALIZED_DATA_REQUIRED: 'CellChat requires normalized RNA data. Run normalization and try again.',
+    CELLCHAT_DATABASE_OVERLAP_LOW: 'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
+    CELLCHAT_INPUT_INVALID: 'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
+  };
+  return messages[code] || null;
+}
+
 function redactUnsafeText(value) {
   return String(value || '')
     .replace(/[A-Za-z]:[\\/][^\s'")]+/g, '[redacted path]')
@@ -646,12 +660,25 @@ export default function CellChat({
     if (!api.createCellChatInferenceJob) {
       return setError('CellChat analysis is temporarily unavailable.');
     }
+    if (typeof callApi !== 'function') {
+      return setError('CellChat validation is temporarily unavailable.');
+    }
 
     const requestSelectionKey = selectionKeyRef.current;
     setLoading(true);
     setLogs([]);
     setArtifacts([]);
     try {
+      const preflight = await callApi(
+        `/cellchat-group-map?group_by=${encodeURIComponent(safeParams.groupBy)}&preflight=true&min_cells_per_group=${encodeURIComponent(safeParams.minCellsPerGroup)}`,
+        {},
+        { useCache: false }
+      );
+      if (preflight?.ready !== true) {
+        throw Object.assign(new Error(cellChatReasonMessage(preflight?.code) || 'CellChat could not validate this saved analysis.'), {
+          code: preflight?.code,
+        });
+      }
       const created = await api.createCellChatInferenceJob(activeProjectId, selectedObjectId, safeParams);
       if (selectionKeyRef.current !== requestSelectionKey) return undefined;
       setJob(created);
@@ -665,6 +692,7 @@ export default function CellChat({
     return undefined;
   }, [
     activeProjectId,
+    callApi,
     canWriteProject,
     isDbBackedObject,
     liveObjectAttached,

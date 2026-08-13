@@ -245,7 +245,16 @@ async function bindSample(userId, projectId, analysisObjectId, input = {}) {
     );
     return bindingFromRow(rows[0]);
   } catch (error) {
-    if (error.code === '23505') throw codedError('EXPERIMENTAL_DESIGN_CONFLICT', 'This sample or metadata value is already bound to the analysis object.');
+    if (error.code === '23505') {
+      const constraint = String(error.constraint || '');
+      if (constraint.includes('cell_met')) {
+        throw codedError('METADATA_VALUE_ALREADY_BOUND', 'This metadata value is already mapped to a biological sample.');
+      }
+      if (constraint.includes('sample_id')) {
+        throw codedError('SAMPLE_ALREADY_BOUND', 'This biological sample is already mapped to the analysis object.');
+      }
+      throw codedError('EXPERIMENTAL_DESIGN_CONFLICT', 'This sample or metadata value is already bound to the analysis object.');
+    }
     throw error;
   }
 }

@@ -104,6 +104,14 @@ const COMPLETION_RECEIPT_JOB_TYPES = new Set([
 ]);
 const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   ANALYSIS_OBJECT_NOT_FOUND: 'Analysis object not found.',
+  CELLCHAT_PACKAGES_UNAVAILABLE: 'CellChat is unavailable in the current analysis runtime. Ask an operator to enable the required package profile.',
+  CELLCHAT_GROUPING_UNAVAILABLE: 'CellChat needs valid clustering or identity labels. Run clustering or choose current identities and try again.',
+  CELLCHAT_GROUP_COUNT_INVALID: 'CellChat needs between two and 32 populated groups. Review the selected grouping and try again.',
+  CELLCHAT_MIN_GROUP_CELLS: 'At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.',
+  CELLCHAT_ASSAY_UNAVAILABLE: 'CellChat requires an RNA assay in the saved analysis.',
+  CELLCHAT_NORMALIZED_DATA_REQUIRED: 'CellChat requires normalized RNA data. Run normalization and try again.',
+  CELLCHAT_DATABASE_OVERLAP_LOW: 'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
+  CELLCHAT_INPUT_INVALID: 'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
 });
 
 /** Coded handler error carrying a stable, SAFE message. Handlers throw these for
@@ -2869,8 +2877,13 @@ function createJobWorker(options = {}) {
     }
     // Record a sanitized message only — never a stack/path. Handlers are responsible
     // for not embedding secrets in their error messages.
-    const domainMessage = handlerErr && typeof handlerErr.code === 'string'
-      ? SAFE_HANDLER_DOMAIN_MESSAGES[handlerErr.code]
+    const stableDomainCode = handlerErr?.code === 'R_CELLCHAT_INFERENCE_FAILED'
+      && typeof handlerErr?.rCode === 'string'
+      && SAFE_HANDLER_DOMAIN_MESSAGES[handlerErr.rCode]
+      ? handlerErr.rCode
+      : handlerErr?.code;
+    const domainMessage = typeof stableDomainCode === 'string'
+      ? SAFE_HANDLER_DOMAIN_MESSAGES[stableDomainCode]
       : null;
     const message = domainMessage || (handlerErr && handlerErr.publicSafeHandlerError === true
       ? String(handlerErr.message || 'Handler failed.').slice(0, 240)
@@ -2879,11 +2892,11 @@ function createJobWorker(options = {}) {
     log.error(`[worker ${workerId}] handler error for ${jobId}: ${diagnosticCode}`);
     const opts = withNow({ log: { level: 'error', message: 'Handler failed.' } }, nowTs);
     try {
-      await db.failJobByWorker(jobId, workerId, claimToken, { code: 'HANDLER_ERROR', message }, opts);
+      await db.failJobByWorker(jobId, workerId, claimToken, { code: domainMessage ? stableDomainCode : 'HANDLER_ERROR', message }, opts);
     } catch (err) {
       return asClaimLoss(err, 'fail-handler', jobId, jobType, reaped);
     }
-    return { status: 'failed', jobId, jobType, error: { code: 'HANDLER_ERROR', message }, reaped };
+    return { status: 'failed', jobId, jobType, error: { code: domainMessage ? stableDomainCode : 'HANDLER_ERROR', message }, reaped };
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────

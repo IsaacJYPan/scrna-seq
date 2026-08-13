@@ -10,6 +10,16 @@ const EXPERT_R_OWNER_MESSAGES = new Set([
   'The R script stopped with an error. Check input names, columns, and function arguments.',
   'Expert R storage capacity is temporarily unavailable. Try again later.',
 ]);
+const CELLCHAT_OWNER_MESSAGES = new Set([
+  'CellChat is unavailable in the current analysis runtime. Ask an operator to enable the required package profile.',
+  'CellChat needs valid clustering or identity labels. Run clustering or choose current identities and try again.',
+  'CellChat needs between two and 32 populated groups. Review the selected grouping and try again.',
+  'At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.',
+  'CellChat requires an RNA assay in the saved analysis.',
+  'CellChat requires normalized RNA data. Run normalization and try again.',
+  'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
+  'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
+]);
 
 function unpackError(value) {
   const raw = String(value?.message || value || '').trim();
@@ -30,6 +40,7 @@ export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
   if (!message || message.length > 240 || UNSAFE_ERROR_DETAIL.test(message)) return fallback;
 
   if (EXPERT_R_OWNER_MESSAGES.has(message)) return message;
+  if (CELLCHAT_OWNER_MESSAGES.has(message)) return message;
 
   if (/^(?:R service|Analysis compute) is busy\b/i.test(message)) {
     return 'Analysis compute is busy. Wait a moment and try again.';
