@@ -491,7 +491,8 @@ describe.skipIf(!CONFIGURED)('lineage routes — authorization & exposure', () =
     // Graph nodes carry only public-safe object labels.
     const node = lin.data.nodes.find(n => n.id === child.id);
     expect(node.objectType).toBe('seurat');
-    expect(Object.keys(node).sort()).toEqual(['id', 'label', 'lineageRootId', 'objectType']);
+    expect(Number.isFinite(Date.parse(node.createdAt))).toBe(true);
+    expect(Object.keys(node).sort()).toEqual(['createdAt', 'id', 'label', 'lineageRootId', 'objectType']);
   });
 
   it('the graph read is deterministic and bounded (truncated flag present)', async () => {
