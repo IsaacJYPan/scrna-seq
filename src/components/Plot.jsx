@@ -86,12 +86,12 @@ export function isWebGLFailure(error) {
  * scattergl and heatmapgl traces. It preserves WebGL where it works and also
  * downgrades after an initialization error or a lost WebGL context.
  */
-export default function Plot({ data = [], onError, onWebGlContextLost, ...props }) {
+export default function Plot({ data = [], preferSvg = false, onError, onWebGlContextLost, ...props }) {
   const [webglAvailable, setWebglAvailable] = React.useState(() => supportsWebGL());
   const hasConvertibleTrace = hasSvgFallbackTrace(data);
   const plotData = React.useMemo(
-    () => preparePlotData(data, webglAvailable),
-    [data, webglAvailable]
+    () => preparePlotData(data, webglAvailable && !preferSvg),
+    [data, preferSvg, webglAvailable]
   );
 
   const fallBackToSvg = React.useCallback(() => {

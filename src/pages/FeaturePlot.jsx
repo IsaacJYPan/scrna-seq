@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Plot from '../components/Plot';
-import { Palette, Sun, Moon, ImageDown } from 'lucide-react';
+import { AlertTriangle, Palette, Sun, Moon, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 import { publicErrorMessage } from '../publicError';
 import UmapPrerequisiteNotice, { hasUmapResult } from '../components/UmapPrerequisiteNotice';
@@ -209,6 +209,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       <div className="flex-1 p-6 overflow-hidden">
         {plotData ? (
           <Plot
+            preferSvg
             data={trace}
             layout={layout}
             config={{ responsive: true, displayModeBar: true, displaylogo: false }}

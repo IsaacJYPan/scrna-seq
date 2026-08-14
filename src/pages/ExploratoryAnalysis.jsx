@@ -79,6 +79,7 @@ export default function ExploratoryAnalysis({
   const project = (currentWs?.projects || []).find(item => item.id === projectId);
   const ownsObject = !datasetInfo?.ownerUserId || Number(datasetInfo.ownerUserId) === Number(userId);
   const canWrite = WRITE_ROLES.has(project?.role);
+  const canLaunch = canWrite && ownsObject;
   const summaryArtifact = artifacts.find(item => item.artifactType === 'exploration_summary');
   const summary = summaryArtifact?.metadata?.summary || null;
 
@@ -146,7 +147,14 @@ export default function ExploratoryAnalysis({
           </p>
         </div>
 
-        <div className="grid gap-4 rounded-xl border border-border bg-surface p-4 md:grid-cols-3">
+        {!canLaunch && (
+          <div role="note" className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-sm text-textMuted">
+            {canWrite
+              ? 'Create a private checkpoint copy before starting exploratory analysis from a collaborator’s saved version.'
+              : 'This is a read-only project view. Your role can inspect recorded results but cannot start a new analysis.'}
+          </div>
+        )}
+        <fieldset disabled={!canLaunch || busy} className="grid gap-4 rounded-xl border border-border bg-surface p-4 md:grid-cols-3 disabled:opacity-60">
           <label className="text-sm font-medium">Recipe
             <select className="input mt-1 w-full" value={recipe} onChange={event => setRecipe(event.target.value)}>
               <option value="overview">Dataset overview</option>
@@ -169,11 +177,11 @@ export default function ExploratoryAnalysis({
             <input className="input mt-1 w-full" value={metadataField} onChange={event => setMetadataField(event.target.value)} />
           </label>}
           <div className="flex items-end">
-            <button className="btn btn-primary flex items-center gap-2" onClick={launch} disabled={busy}>
+            <button type="button" className="btn btn-primary flex items-center gap-2" onClick={launch} disabled={busy || !canLaunch}>
               {busy ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />} Run recipe
             </button>
           </div>
-        </div>
+        </fieldset>
 
         <div className="flex items-center gap-3 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
           <ShieldCheck size={18} className="text-success" />

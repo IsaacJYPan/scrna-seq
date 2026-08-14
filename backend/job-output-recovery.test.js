@@ -908,7 +908,13 @@ describe.skipIf(!CONFIGURED)('durable output crash-window recovery', () => {
       db,
       workerId: `worker-receipt-${emailLabel}`,
       now: () => now,
-      claimGate: async () => ({ ready: true, rRuntimeInstanceHash: runtimeInstanceHash }),
+      claimGate: async () => ({
+        ready: true,
+        rRuntimeInstanceHash: runtimeInstanceHash,
+        // Receipt recovery exercises a worker that reached the scientific R
+        // operation. Enrichment now requires that capability to be explicit.
+        capabilities: { pathwayEnrichment: true },
+      }),
       callR,
       deriveRObjectStateKey,
       storageProvider: provider,
