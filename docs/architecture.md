@@ -796,6 +796,11 @@ The app runtime is Postgres-only.
   CI installs the exact CellChat 2.1.2 source pin and runs the same inference
   smoke in the production R image. The focused CellChat browser flow remains a
   mocked-transport UI contract check rather than end-to-end deployment evidence.
-- CI runs on `pull_request` and `workflow_dispatch` only. The security-critical
-  suites are additionally named explicitly in the workflow so their regression
-  coverage is auditable.
+- CI runs on `pull_request` and `workflow_dispatch` only. A locally reproducible
+  `check:ci-preflight` gate runs the dependency audit, lint, Compose policy
+  validation, frontend suite, complete real-Postgres backend suite, development
+  supervisor contract, and production build before either expensive release-
+  certification job can start. Draft pull requests skip expensive certification,
+  and a newer push cancels the superseded run. Security-critical scientific,
+  deployment, browser, and production-R-image checks remain explicitly named in
+  the gated certification jobs so their coverage is auditable.

@@ -64,7 +64,8 @@
     "test:visual:update": "node scripts/test_visual_ux.js --update-snapshots",
     "test": "npm run test:backend && npm run test:frontend && npm run test:unit && npm run test:integration && npm run test:tutorial && npm run test:r-state-proxy",
     "lint": "eslint .",
-    "check": "npm run test:backend && npm run test:frontend && npm run lint && npm run build"
+    "check": "npm run test:backend && npm run test:frontend && npm run lint && npm run build",
+    "check:ci-preflight": "node scripts/require-test-database.js && npm audit --audit-level=high && npm run lint && npm run test:deployment:compose && npm run test:frontend && npm run test:backend && npx vitest run scripts/dev-runtime.test.js --environment node --fileParallelism=false && npm run build"
   },
   "dependencies": {
     "@xyflow/react": "^12.10.2",
