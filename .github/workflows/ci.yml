@@ -224,8 +224,9 @@ jobs:
         run: npm run test:cellchat-worker-pipeline
 
       - name: Run Visual/UX Tests
-        # Mocked frontend visual smoke test; it checks UI rendering/layout.
-        run: npm run test:visual
+        # Generated screenshots stay outside version control. CI checks the
+        # browser flows, accessibility, layout, console, and network behavior.
+        run: npm run test:visual:smoke
 
       - name: Run CellChat Playwright browser flow
         # Real React browser flow with a mocked project/job transport. It proves

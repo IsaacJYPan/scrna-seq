@@ -59,6 +59,7 @@
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",
     "init:postgres": "node scripts/init-postgres.js",
     "test:visual": "node scripts/test_visual_ux.js",
+    "test:visual:smoke": "node scripts/test_visual_ux.js --no-snapshots",
     "test:visual:db-flow": "node scripts/test_db_backed_object_flow.js",
     "test:visual:update": "node scripts/test_visual_ux.js --update-snapshots",
     "test": "npm run test:backend && npm run test:frontend && npm run test:unit && npm run test:integration && npm run test:tutorial && npm run test:r-state-proxy",

@@ -41,8 +41,12 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Local assistant/tool settings
+# Local development-tool context
 .claude/
+/.codex/
+/.agents/
+/.cursor/
+/.windsurf/
 /AGENTS.md
 /WORKFLOW.md
 
@@ -70,7 +74,7 @@ exports/
 
 # Playwright test artifacts — screenshots, reports (regeneratable)
 playwright/report/
-# Reviewed visual regression baselines under playwright/snapshots are versioned.
+playwright/snapshots/
 playwright-report/
 test-results/
 

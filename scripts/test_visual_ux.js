@@ -39,6 +39,10 @@ const SNAPSHOTS_DIR = SNAPSHOT_PLATFORM === 'linux'
   : SNAPSHOTS_ROOT;
 const REPORT_DIR    = path.join(WORKSPACE, 'playwright', 'report');
 const UPDATE_MODE   = process.argv.includes('--update-snapshots');
+const NO_SNAPSHOT_MODE = process.argv.includes('--no-snapshots');
+const MODE_NAME = NO_SNAPSHOT_MODE
+  ? 'BROWSER SMOKE (NO SNAPSHOTS)'
+  : (UPDATE_MODE ? 'BASELINE UPDATE' : 'REGRESSION CHECK');
 const VITE_STARTUP_WAIT_MS = 30_000;
 const PAGE_SETTLE_MS       = 2_500;
 const DIFF_THRESHOLD       = 0.001;  // 0.1% pixel ratio
@@ -164,6 +168,7 @@ async function checkReducedMotion(page, locator, name) {
 
 // ── Screenshot Snapshot Check ──────────────────────────────────────────────────
 async function checkSnapshot(page, name) {
+  if (NO_SNAPSHOT_MODE) return;
   const file = path.join(SNAPSHOTS_DIR, `${name}.png`);
   // Snapshot only a stable resting frame. Carets blink independently of the
   // application, while Plotly controls and loading indicators use CSS
@@ -382,7 +387,7 @@ async function main() {
   console.log('='.repeat(60));
   console.log('  scRNA-seq Dashboard  —  Visual & UI/UX Test Suite');
   console.log('='.repeat(60));
-  console.log(`  Mode      : ${UPDATE_MODE ? '🔄 UPDATE BASELINES' : '🔍 COMPARE AGAINST BASELINES'}`);
+  console.log(`  Mode      : ${MODE_NAME}`);
   console.log(`  Snapshots : ${SNAPSHOTS_DIR}`);
   console.log(`  Report    : ${REPORT_DIR}`);
   console.log(`  Timestamp : ${new Date().toISOString()}\n`);
@@ -1526,7 +1531,7 @@ async function main() {
   console.log(`  Passed: ${PASS}`);
   console.log(`  Failed: ${FAIL}`);
   console.log(`  Warned: ${WARN}`);
-  console.log(`  Mode  : ${UPDATE_MODE ? 'BASELINE UPDATE' : 'REGRESSION CHECK'}`);
+  console.log(`  Mode  : ${MODE_NAME}`);
   console.log('');
 
   if (failures.length > 0) {
@@ -1601,7 +1606,7 @@ function generateHtmlReport({ failures, warnings, consoleErrors }) {
 </head>
 <body>
   <h1>📊 scRNA-seq Dashboard — Visual/UX Test Report</h1>
-  <div class="meta">Generated: ${timestamp} | Mode: ${UPDATE_MODE ? 'Baseline Update' : 'Regression Check'}</div>
+  <div class="meta">Generated: ${timestamp} | Mode: ${MODE_NAME}</div>
 
   <div class="stat-bar">
     <div class="stat"><div class="stat-num pass">${PASS}</div><div class="stat-label">Passed</div></div>
