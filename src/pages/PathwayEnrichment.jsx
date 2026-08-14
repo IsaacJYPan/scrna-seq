@@ -276,7 +276,9 @@ export default function PathwayEnrichment({
   const ownsPrivateLiveObject = !datasetInfo?.ownerUserId
     || Number(datasetInfo.ownerUserId) === Number(userId);
   const computeReady = !computeStatus?.status || computeStatus.status === 'ready';
-  const enrichmentAvailable = computeStatus?.capabilities?.pathwayEnrichment !== false;
+  // A missing or stale worker capability report must not be treated as proof
+  // that the approved enrichment package profile is installed.
+  const enrichmentAvailable = computeStatus?.capabilities?.pathwayEnrichment === true;
   // The API also limits analysts to cancelling only their own jobs. Until the
   // job projection carries an explicit capability, expose cancellation only to
   // roles that can cancel every project job rather than offering a dead action.
@@ -631,15 +633,17 @@ export default function PathwayEnrichment({
           </div>
         )}
 
-        {isDbBackedObject && computeStatus?.capabilities?.pathwayEnrichment === false && (
+        {isDbBackedObject && !enrichmentAvailable && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger" role="alert">
-            <p className="font-bold">Pathway enrichment is not installed in this compute profile.</p>
-            <p className="mt-1">Ask an operator to add the approved enrichment package profile. Runs are disabled until the worker reports those dependencies ready.</p>
+            <p className="font-bold">Pathway enrichment readiness has not been confirmed.</p>
+            <p className="mt-1">{computeStatus?.capabilities?.pathwayEnrichment === false
+              ? 'The approved enrichment packages are not installed in this compute profile. Ask an operator to update the worker.'
+              : 'Wait for a healthy worker capability report or ask an operator to check the compute service.'} Runs remain disabled until the worker reports the dependencies ready.</p>
           </div>
         )}
 
         <section className="rounded-lg border border-border bg-surface/50 p-5">
-          <h3 className="text-lg font-bold text-text">Analysis settings</h3>
+          <h3 className="text-lg font-bold text-text">New run settings</h3>
           <p className="mt-1 text-sm text-textMuted">Choose the cluster to compare with all other cells. Species is required because human and mouse gene identifiers use different reference databases.</p>
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">

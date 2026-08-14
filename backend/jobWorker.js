@@ -1553,7 +1553,7 @@ async function enrichmentGseaHandler(ctx) {
       || typeof ctx.deriveRObjectStateKey !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-  if (ctx.runtimeCapabilities?.pathwayEnrichment === false) {
+  if (ctx.runtimeCapabilities?.pathwayEnrichment !== true) {
     throw codedHandlerError(
       'ENRICHMENT_PACKAGES_UNAVAILABLE',
       SAFE_HANDLER_DOMAIN_MESSAGES.ENRICHMENT_PACKAGES_UNAVAILABLE
