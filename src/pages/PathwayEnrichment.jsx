@@ -682,6 +682,11 @@ export default function PathwayEnrichment({
                 <option value="mouse">Mouse</option>
               </select>
             </label>
+          </div>
+          <details className="mt-4 rounded-lg border border-border bg-background/30 p-4">
+            <summary className="cursor-pointer text-sm font-bold text-text">Advanced options</summary>
+            <p className="mt-2 text-xs text-textMuted">Gene-set bounds, significance cutoff, display count, sampling limit, and reproducibility seed.</p>
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Smallest gene set</span>
               <input type="number" min="10" max="200" value={params.minGeneSetSize} onChange={event => setParam('minGeneSetSize', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
@@ -706,7 +711,8 @@ export default function PathwayEnrichment({
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
               <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
             </label>
-          </div>
+            </div>
+          </details>
           {!geneSetSizesAreValid && (
             <p role="alert" className="mt-3 text-sm text-danger">
               The smallest gene set must be smaller than the largest gene set.

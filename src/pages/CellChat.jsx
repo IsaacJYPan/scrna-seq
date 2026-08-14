@@ -881,6 +881,11 @@ export default function CellChat({
                 {ANALYSIS_INTENT_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
+          </div>
+          <details className="mt-4 rounded-lg border border-border bg-background/30 p-4">
+            <summary className="cursor-pointer text-sm font-bold text-text">Advanced options</summary>
+            <p className="mt-2 text-xs text-textMuted">Sampling bounds, display limits, statistical cutoff, and reproducibility seed.</p>
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Minimum cells per group</span>
               <input type="number" min="5" max="200" value={params.minCellsPerGroup} onChange={event => setParam('minCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
@@ -909,7 +914,8 @@ export default function CellChat({
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
               <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
             </label>
-          </div>
+            </div>
+          </details>
           <p className="mt-3 text-xs text-textMuted">
             This analysis is capped at 10,000 cells for a bounded, reproducible run. The recorded random seed makes any sampling repeatable.
           </p>
@@ -967,6 +973,7 @@ export default function CellChat({
                 <Metric label="Retained interactions" value={formatNumber(summary.retainedInteractionCount, 0)} detail={`${formatNumber(summary.retainedPathwayCount, 0)} signaling pathways`} />
               </div>
 
+              <h4 className="text-sm font-bold text-text">Recorded run settings</h4>
               <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Grouping</div><div className="mt-1 font-bold text-text">{formatGroupBy(summary.groupBy || resolvedParams.groupBy)}</div></div>
                 <div className="rounded border border-border bg-surface/60 p-3"><div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Species / assay</div><div className="mt-1 font-bold text-text">{summary.species || resolvedParams.species || 'Not recorded'} / {summary.assay || resolvedParams.assay || 'RNA'}</div></div>

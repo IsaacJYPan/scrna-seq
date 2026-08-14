@@ -67,6 +67,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
 
   useEffect(() => {
+    if (datasetInfo && !canMutate) {
+      // Detailed distributions come from the owner's private live R object.
+      // Project viewers may inspect persisted summary metrics only.
+      setDistributions(null);
+      setLoadingDist(false);
+      setError(null);
+      return;
+    }
     if (datasetInfo && !sessionReady) {
       setDistributions(null);
       setError(qcUnavailableMessage(null, { datasetInfo, sessionReady }));
@@ -370,7 +378,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       {!canMutate && (
         <div role="note" className="card p-4 mb-6 border-primary/30 bg-primary/5 text-sm text-textMuted">
           {projectRole === 'viewer'
-            ? 'Read-only project view: recorded QC results remain available, but filtering controls are disabled.'
+            ? 'Read-only project view: saved QC summary metrics remain available when recorded. Detailed distributions and plots stay private to the analysis owner.'
             : 'QC filtering is disabled until this analysis is opened as your private saved-analysis copy.'}
         </div>
       )}
@@ -585,7 +593,9 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             </div>
           ) : !distributions ? (
             <div className="flex items-center justify-center h-[420px] text-slate-400 text-sm">
-              {qcUnavailableMessage(error, { datasetInfo, sessionReady })}
+              {!canMutate
+                ? 'Detailed QC distributions are private to the analysis owner.'
+                : qcUnavailableMessage(error, { datasetInfo, sessionReady })}
             </div>
           ) : activePlot === 'stats' ? (
             <div>
@@ -705,6 +715,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 </div>
                 <div className="h-[500px] bg-black/10 border border-border/50 rounded-xl relative">
                   <Plot
+                    preferSvg
                     data={currentPlot.data}
                     layout={currentPlot.layout}
                     config={{ displayModeBar: false, responsive: true }}

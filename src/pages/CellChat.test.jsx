@@ -300,6 +300,8 @@ describe('CellChat durable worker UI', () => {
       { jobType: 'cellchat.infer.v1', analysisObjectId: 'ao_abc123' }
     ));
     expect(await screen.findByText('IL7–IL7R')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Recorded run settings/i })).toBeInTheDocument();
+    expect(screen.getByText('Advanced options')).toBeInTheDocument();
   });
 
   it('requires saving live clustering changes before a durable CellChat run', () => {

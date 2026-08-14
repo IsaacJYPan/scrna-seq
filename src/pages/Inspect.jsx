@@ -733,6 +733,13 @@ export default function Inspect({
           ))}
         </div>
 
+        {!legacyLiveMutationToolsEnabled && (
+          <div className="mx-6 mt-4 flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-900/20 p-3 text-xs text-amber-300">
+            <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+            <span>Subsetting is disabled in this deployment. Create a private checkpoint copy from Runs &amp; Results before continuing with a separate analysis.</span>
+          </div>
+        )}
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
           <div className="max-w-4xl mx-auto">

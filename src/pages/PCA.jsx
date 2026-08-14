@@ -194,6 +194,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
               <h3 className="font-semibold text-text mb-4">Elbow Plot — Variance per PC</h3>
               <div className="h-[400px]">
                 <Plot
+                  preferSvg
                   data={elbowData}
                   layout={elbowLayout}
                   config={{ displayModeBar: false, responsive: true }}
