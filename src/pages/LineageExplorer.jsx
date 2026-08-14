@@ -19,6 +19,14 @@ function formatObjectLabel(node) {
   return 'Saved analysis';
 }
 
+function compactRecordedDate(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+  }).format(date);
+}
+
 const RELATIONSHIP_COPY = {
   checkpoint_fork: {
     label: 'Branch from saved version',
@@ -107,7 +115,9 @@ function LineageNode({ data }) {
       </div>
       <div className="mt-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-textMuted">
         <span>Saved analysis</span>
-        <span className="normal-case tracking-normal" title={data.id}>{String(data.id).slice(-8)}</span>
+        <span className="normal-case tracking-normal" title={`Recorded analysis ID: ${data.id}`}>
+          {data.recordedDate || `ID …${String(data.id).slice(-6)}`}
+        </span>
         {data.isRoot && <span className="rounded bg-success/10 px-1.5 py-0.5 text-success">root</span>}
       </div>
       <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-primary" />
@@ -260,6 +270,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
           id: node.id,
           label: formatObjectLabel(node),
           objectType: typeof node.objectType === 'string' ? node.objectType : 'saved analysis',
+          recordedDate: compactRecordedDate(node.createdAt),
           isRoot: node.id === graph?.rootObjectId,
           selected: node.id === selectedNodeId,
           onSelect: setSelectedNodeId,

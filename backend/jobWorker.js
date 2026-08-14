@@ -2646,6 +2646,9 @@ function createJobWorker(options = {}) {
     if (!adoptedCompletionReceipt) ctx = {
       job,
       workerId,
+      // Preserve the claim gate's explicit worker capability report when the
+      // normal execution context is rebuilt after recovery checks.
+      runtimeCapabilities: claimAdmission?.capabilities || {},
       heartbeat: () => db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())),
       log: (entry) => safeWorkerLog(jobId, claimToken, entry, resolveNowTs()),
       // Durable, claim-guarded metadata writers for handlers that record output.

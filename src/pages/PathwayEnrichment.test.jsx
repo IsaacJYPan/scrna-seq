@@ -174,6 +174,7 @@ describe('PathwayEnrichment durable worker UI', () => {
   it('explains that enrichment is descriptive and is not proof of pathway activity', () => {
     renderPage();
 
+    expect(screen.getByText('Advanced options')).toBeInTheDocument();
     expect(screen.getByText(/does not prove that the pathway is active/i)).toBeInTheDocument();
     expect(screen.getByText(/sample-aware study design/i)).toBeInTheDocument();
     expect(screen.getByText(/human and mouse gene identifiers use different reference databases/i)).toBeInTheDocument();

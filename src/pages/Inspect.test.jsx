@@ -35,6 +35,7 @@ describe('Inspect deployment policy', () => {
 
     await waitFor(() => expect(callApi).toHaveBeenCalledWith('/object-info', {}, { useCache: false }));
     expect(screen.queryByRole('button', { name: 'Subset' })).not.toBeInTheDocument();
+    expect(screen.getByText(/Subsetting is disabled in this deployment/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Metadata' }));
     expect(await screen.findByRole('button', { name: 'Map from Column' })).toBeInTheDocument();

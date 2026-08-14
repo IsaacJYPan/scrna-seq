@@ -79,5 +79,8 @@ describe('QualityControl', () => {
     expect(await screen.findByText(/Read-only project view/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Apply QC Filters/i })).toBeDisabled();
     expect(screen.getByLabelText('Max MT %')).toBeDisabled();
+    expect(screen.getByText(/Detailed distributions and plots stay private/i)).toBeInTheDocument();
+    expect(screen.queryByText(/QC distribution data is unavailable/i)).not.toBeInTheDocument();
+    expect(callApi).not.toHaveBeenCalled();
   });
 });

@@ -4636,6 +4636,7 @@ async function getProjectAnalysisObjectLineage(userId, projectId, objectId) {
       label: object.displayName || null,
       objectType: object.objectType,
       lineageRootId: object.lineageRootId,
+      createdAt: object.createdAt,
     } : null;
   });
   const visibleNodeIds = new Set(graph.nodes.map((node) => node.id));
