@@ -297,8 +297,12 @@ async function main() {
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible' });
-    assert(await page.getByText(projectName, { exact: true }).count() > 0,
-      'Cookie restore did not reload the durable project.');
+    // Session restoration and the project-list request are separate browser
+    // effects. The authenticated shell can render before durable projects have
+    // arrived, particularly on a constrained CI runner, so wait for the state
+    // this check actually proves instead of sampling the DOM immediately.
+    await page.getByText(projectName, { exact: true }).first()
+      .waitFor({ state: 'visible', timeout: 15000 });
     assert(await page.evaluate(() => localStorage.getItem('traceomics_auth_token')) === null,
       'Browser stored a bearer credential in localStorage.');
     const ownerCookie = (await context.cookies()).find((cookie) => cookie.name === 'traceomics_session');
