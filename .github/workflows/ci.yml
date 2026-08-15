@@ -68,8 +68,50 @@ jobs:
         # contract, and the production build before costly certification starts.
         run: npm run check:ci-preflight
 
-  test:
+  browser-preflight:
+    name: Browser release preflight
     needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scrna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Chromium for preflight
+        run: npx playwright install --with-deps chromium
+
+      - name: Run local-equivalent browser preflight
+        # These fast browser contracts previously ran after the R/scientific
+        # suite. Gate expensive work on them instead.
+        run: npm run check:browser-preflight
+
+  test:
+    needs: browser-preflight
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -235,22 +277,9 @@ jobs:
         # browser flows, accessibility, layout, console, and network behavior.
         run: npm run test:visual:smoke
 
-      - name: Run CellChat Playwright browser flow
-        # Real React browser flow with a mocked project/job transport. It proves
-        # explicit scope selection, durable job creation, owner-local group-key
-        # rendering, and sanitized summary display; real CellChat R execution is
-        # covered by the dedicated R smoke above.
-        run: npm run test:cellchat-browser
-
-      - name: Run real Chromium deployment flow
-        # No request interception: browser -> built React app -> actual Express
-        # -> Postgres/private fake R. Covers signup/login/logout, durable project
-        # reload, collaborators RBAC UI, cookies, console, 5xx, and network audit.
-        run: npm run test:deployment:browser
-
   r-image-smoke:
     name: Build and boot production R image
-    needs: preflight
+    needs: browser-preflight
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 60

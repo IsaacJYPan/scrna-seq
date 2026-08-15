@@ -799,8 +799,10 @@ The app runtime is Postgres-only.
 - CI runs on `pull_request` and `workflow_dispatch` only. A locally reproducible
   `check:ci-preflight` gate runs the dependency audit, lint, Compose policy
   validation, frontend suite, complete real-Postgres backend suite, development
-  supervisor contract, and production build before either expensive release-
-  certification job can start. Draft pull requests skip expensive certification,
-  and a newer push cancels the superseded run. Security-critical scientific,
-  deployment, browser, and production-R-image checks remain explicitly named in
-  the gated certification jobs so their coverage is auditable.
+  supervisor contract, and production build. A second locally reproducible
+  `check:browser-preflight` gate then runs the focused CellChat browser contract
+  and real Chromium deployment flow. Both must pass before either expensive
+  release-certification job can start. Draft pull requests skip expensive
+  certification, and a newer push cancels the superseded run. Security-critical
+  scientific, deployment, browser, and production-R-image checks remain
+  explicitly named in the gated jobs so their coverage is auditable.
