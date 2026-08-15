@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 /**
  * Persist tab-level parameters in localStorage, scoped per user + object.
@@ -11,7 +11,7 @@ import { useState, useEffect, useRef } from 'react';
  */
 export function useTabParams(step, email, objectId, defaults) {
   const storageKey = email && objectId
-    ? `benchone_params_${step}_${email.replace(/[^a-zA-Z0-9]/g, '_')}_${objectId}`
+    ? `traceomics_params_${step}_${email.replace(/[^a-zA-Z0-9]/g, '_')}_${objectId}`
     : null;
 
   // Read saved params once on mount (merged with defaults so new fields always have a value)
@@ -56,8 +56,9 @@ export function useTabParams(step, email, objectId, defaults) {
   }, [storageKey, params]);
 
   // Convenience updater: setParam('key', value)
-  const setParam = (key, value) =>
+  const setParam = useCallback((key, value) => {
     setParams(prev => ({ ...prev, [key]: value }));
+  }, []);
 
   return [params, setParam, setParams];
 }

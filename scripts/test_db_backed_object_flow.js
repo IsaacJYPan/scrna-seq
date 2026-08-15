@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 
 const WORKSPACE = path.resolve(__dirname, '..');
+const VITE_CLI = path.join(WORKSPACE, 'node_modules', 'vite', 'bin', 'vite.js');
 const VITE_PORT = Number(process.env.DB_FLOW_VITE_PORT || 5174);
 const FRONTEND_URL = `http://127.0.0.1:${VITE_PORT}`;
 const REPORT_DIR = path.join(WORKSPACE, 'playwright', 'report');
@@ -32,10 +33,6 @@ function fail(message) {
   throw new Error(message);
 }
 
-function npmCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
 async function waitForServer(url, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -51,11 +48,10 @@ async function waitForServer(url, timeoutMs = 30_000) {
 }
 
 function startVite() {
-  const child = spawn(npmCommand(), ['run', 'vite', '--', '--host', '127.0.0.1', '--port', String(VITE_PORT), '--strictPort'], {
+  const child = spawn(process.execPath, [VITE_CLI, '--host', '127.0.0.1', '--port', String(VITE_PORT), '--strictPort'], {
     cwd: WORKSPACE,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, BROWSER: 'none' },
-    shell: process.platform === 'win32',
   });
   child.stdout.on('data', chunk => process.stdout.write(chunk));
   child.stderr.on('data', chunk => process.stderr.write(chunk));
@@ -114,6 +110,9 @@ async function installRoutes(page) {
         legacyLiveMutationToolsEnabled: true,
         serverFigureExportEnabled: true,
       });
+    }
+    if (pathname === '/api/expert-r/capabilities' && request.method() === 'GET') {
+      return fulfill(route, 200, { expertREnabled: false, expertRProfile: null });
     }
     if (pathname === '/api/db/figures' && request.method() === 'GET') {
       return fulfill(route, 200, []);
@@ -306,13 +305,13 @@ async function main() {
     await page.locator('input[type="password"]').fill('correct-horse-42');
     await page.getByRole('button', { name: /Create Account/i }).click();
 
-    await page.getByText('No backend projects').waitFor({ timeout: 15_000 });
+    await page.getByText('No projects yet').waitFor({ timeout: 15_000 });
     await page.getByRole('button', { name: /Create Project/i }).click();
     await page.getByPlaceholder('Project Name').fill('DB Flow Project');
     await page.getByRole('button', { name: /^Save$/ }).click();
     await page.getByText('DB Flow Project').first().waitFor({ timeout: 10_000 });
 
-    await page.getByRole('button', { name: /Load Object/i }).first().click();
+    await page.getByRole('button', { name: /Add analysis/i }).first().click();
     await page.getByRole('button', { name: /PBMC 3k Demo Dataset/i }).click();
     await page.locator('text=PBMC_3k_Tutorial').first().waitFor({ timeout: 10_000 });
 
@@ -324,8 +323,8 @@ async function main() {
     await page.reload({ waitUntil: 'networkidle' });
     await page.getByText('DB Flow Project').first().waitFor({ timeout: 10_000 });
     await page.locator('text=PBMC_3k_Tutorial').first().waitFor({ timeout: 10_000 });
-    await page.getByRole('button', { name: /Lineage, Provenance DAG/i }).click();
-    await page.getByText('Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.')
+    await page.getByRole('button', { name: /^Lineage/i }).click();
+    await page.getByText('Recorded relationships for the selected saved analysis. This view is read-only.')
       .waitFor({ timeout: 10_000 });
     await page.screenshot({ path: SCREENSHOT, fullPage: false });
 

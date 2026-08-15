@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import Plot from 'react-plotly.js';
-import { Palette, AlertTriangle, Sun, Moon, ImageDown } from 'lucide-react';
+import Plot from '../components/Plot';
+import { AlertTriangle, Palette, Sun, Moon, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
+import { publicErrorMessage } from '../publicError';
+import UmapPrerequisiteNotice, { hasUmapResult } from '../components/UmapPrerequisiteNotice';
 
 // Removed API constant
 // Dark mode: faithful magma ramp, starting at a dark purple visible against the navy background
@@ -32,7 +34,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
     callApi('/genes', {}, { useCache: false })
       .then(d => { if (d.genes) setGeneList(d.genes); })
       .catch(() => {});
-  }, [sessionReady, datasetInfo]);
+  }, [sessionReady, datasetInfo, callApi]);
 
   const handleInputChange = (val) => {
     setGeneInput(val);
@@ -64,12 +66,12 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       setGene(target);
       setGeneInput(target);
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e, 'The feature plot could not be prepared. Please try again.'));
     }
     setLoading(false);
   };
 
-  const hasUmap = pipelineState?.umap;
+  const hasUmap = hasUmapResult(pipelineState);
 
   if (!datasetInfo) {
     return (
@@ -84,15 +86,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
   }
 
   if (!hasUmap) {
-    return (
-      <div className="h-full flex items-center justify-center bg-background">
-        <div className="text-center max-w-sm">
-          <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
-          <h2 className="text-xl font-bold text-text mb-2">UMAP Required</h2>
-          <p className="text-textMuted">Run the UMAP step in Core Preprocessing before generating feature plots.</p>
-        </div>
-      </div>
-    );
+    return <UmapPrerequisiteNotice />;
   }
 
   const colorscale = lightMode ? LIGHT_COLORSCALE : DARK_COLORSCALE;
@@ -215,6 +209,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       <div className="flex-1 p-6 overflow-hidden">
         {plotData ? (
           <Plot
+            preferSvg
             data={trace}
             layout={layout}
             config={{ responsive: true, displayModeBar: true, displaylogo: false }}

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Search, BarChart3, Play, Layers, ChevronDown, ChevronRight, ImageDown } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import FigureSavePanel from '../components/FigureSavePanel';
+import UmapPrerequisiteNotice, { hasUmapResult } from '../components/UmapPrerequisiteNotice';
 
 const GENE_CATEGORIES = {
   'T-Cell': ['CD3E','CD3D','CD3G','CD4','CD8A','CD8B','IL7R','CCR7','TCF7','LEF1','CD2','CD27','CD28','ICOS','CTLA4','PDCD1','IL2RA','IFNG','TNF','GZMA','GZMB','GZMK','PRF1'],
@@ -67,7 +68,7 @@ function formatFeaturePlot(data, theme) {
   }];
 }
 
-export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, theme, deploymentPolicy }) {
+export default function GeneViewer({ datasetInfo, pipelineState, userEmail, objectId, callApi, theme, deploymentPolicy }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeGene, setActiveGene] = useState(null);
@@ -140,6 +141,7 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, 
   const isDark = theme === 'dark';
   const plotText = isDark ? '#94a3b8' : '#475569';
   const plotGrid = isDark ? '#334155' : '#d8e0ea';
+  const hasUmap = hasUmapResult(pipelineState);
 
   return (
     <div className="h-full w-full flex flex-col md:flex-row bg-background overflow-hidden">
@@ -264,6 +266,10 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, 
               <p className="text-sm text-slate-400 mt-2">Browse categories on the left or search by symbol.</p>
             </div>
           </div>
+        ) : viewMode === 'feature' && !hasUmap ? (
+          <div className="flex-1 rounded-lg border border-border bg-surface/40">
+            <UmapPrerequisiteNotice compact />
+          </div>
         ) : (
           <div className="flex-1">
             <div className="card p-6 bg-slate-800/40">
@@ -275,6 +281,7 @@ export default function GeneViewer({ datasetInfo, userEmail, objectId, callApi, 
               </div>
               <div className="w-full h-[480px]">
                 <Plot 
+                  preferSvg={viewMode === 'feature'}
                   data={viewMode === 'violin' ? formatViolinData(geneData) : formatFeaturePlot(geneData, theme)}
                   layout={{
                     autosize: true,

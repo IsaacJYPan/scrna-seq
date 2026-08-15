@@ -67,20 +67,27 @@ function handlerContext(parameters = {}) {
     resultsArtifact: { id: 'art_results' },
     summaryArtifact: { id: 'art_summary' },
   }));
-  const run = vi.fn(async () => ({
-    artifactType: 'enrichment_summary',
-    name: 'Ranked pathway-enrichment summary',
-    description: 'Safe summary',
-    result: { saved: true, checksumSha256: CHECKSUM, sizeBytes: 4096, nRows: 10 },
-    metadata: { summary: sanitizeEnrichmentSummary(body()) },
-  }));
+  const run = vi.fn(async (request) => request.operation === 'r.checkpoint.hydrate.v1'
+    ? { loaded: { loaded: true } }
+    : {
+      artifactType: 'enrichment_summary',
+      name: 'Ranked pathway-enrichment summary',
+      description: 'Safe summary',
+      result: { saved: true, checksumSha256: CHECKSUM, sizeBytes: 4096, nRows: 10 },
+      metadata: { summary: sanitizeEnrichmentSummary(body()) },
+    });
   return {
     ctx: {
       job: job(parameters),
+      runtimeCapabilities: { pathwayEnrichment: true },
       workerId: 'worker_abc',
       heartbeat: vi.fn(async () => {}),
       log: vi.fn(async () => {}),
       getOwnedAnalysisObject: vi.fn(async () => ({ id: 'ao_abc123', ownerUserId: 7 })),
+      getHydrationCheckpoint: vi.fn(async () => ({
+        analysisObjectId: 'ao_abc123', checkpointArtifactId: 'art_checkpoint',
+        projectId: 'proj_abc123', storageUri: 'projects/proj_abc123/checkpoints/job_seed/checkpoint.rds',
+      })),
       deriveRObjectStateKey: vi.fn(() => 'user-7:obj-abc123'),
       removeDurableObject: vi.fn(async () => {}),
       runRBridgeOperation: run,
@@ -197,8 +204,13 @@ describe('enrichment.gsea.v1 handler boundary', () => {
   it('validates and owns the object before calling R, then publishes both artifacts', async () => {
     const { ctx, run, completion } = handlerContext();
     const outcome = await enrichmentGseaHandler(ctx);
-    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(2);
     expect(run.mock.calls[0][0]).toMatchObject({
+      operation: 'r.checkpoint.hydrate.v1',
+      objectContext: { objectId: 'ao_abc123', stateKey: 'user-7:obj-abc123' },
+    });
+    expect(ctx.deriveRObjectStateKey).toHaveBeenCalledWith(7, 'ao_abc123-job-job_abc123');
+    expect(run.mock.calls[1][0]).toMatchObject({
       operation: 'r.enrichment.gsea.v1',
       objectContext: { objectId: 'ao_abc123', stateKey: 'user-7:obj-abc123' },
     });
@@ -223,6 +235,24 @@ describe('enrichment.gsea.v1 handler boundary', () => {
     const { ctx, run } = handlerContext();
     ctx.getOwnedAnalysisObject = vi.fn(async () => null);
     await expect(enrichmentGseaHandler(ctx)).rejects.toMatchObject({ code: 'R_OBJECT_NOT_FOUND' });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('fails immediately when the compute runtime lacks enrichment packages', async () => {
+    const { ctx, run } = handlerContext();
+    ctx.runtimeCapabilities = { pathwayEnrichment: false };
+    await expect(enrichmentGseaHandler(ctx)).rejects.toMatchObject({
+      code: 'ENRICHMENT_PACKAGES_UNAVAILABLE',
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the worker capability report is missing', async () => {
+    const { ctx, run } = handlerContext();
+    ctx.runtimeCapabilities = {};
+    await expect(enrichmentGseaHandler(ctx)).rejects.toMatchObject({
+      code: 'ENRICHMENT_PACKAGES_UNAVAILABLE',
+    });
     expect(run).not.toHaveBeenCalled();
   });
 });

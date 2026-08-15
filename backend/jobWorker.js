@@ -53,6 +53,29 @@ const {
   allocateSeuratCheckpointStorageKey,
   assertSupportedSeuratPipelineDataset,
 } = require('./seuratPipeline');
+const {
+  validateMultiSampleSeuratParams,
+  allocateMultiSampleSeuratCheckpointStorageKey,
+  assertSupportedMultiSampleDatasets,
+} = require('./multiSampleSeuratPipeline');
+const {
+  validateSpatialSeuratParams,
+  allocateSpatialSeuratCheckpointStorageKey,
+  assertSupportedSpatialSeuratDataset,
+} = require('./spatialPipeline');
+const { validateExploratoryAnalysisParams } = require('./exploratoryAnalysis');
+const { derivedAnalysisDisplayName } = require('./analysisDisplayName');
+const {
+  validateConditionComparisonParams,
+  allocateConditionComparisonResultStorageKey,
+} = require('./conditionComparison');
+const {
+  validateExpertRParams,
+  allocateExpertRBundleStorageKey,
+  MAX_EXPERT_R_OUTPUT_BYTES,
+  MAX_EXPERT_R_BUNDLE_BYTES,
+  EXPERT_R_RESOURCE_POLICY_VERSION,
+} = require('./expertR');
 
 /** Stable, header-safe worker id (`worker_` + hex). One per worker instance. */
 function generateWorkerId() {
@@ -70,14 +93,27 @@ const R_TIMEOUT_RECOVERY_GRACE_SECONDS = 300;
 const COMPLETION_RECEIPT_JOB_TYPES = new Set([
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
+  'seurat.multisample.v1',
+  'spatial.seurat.v1',
+  'checkpoint.save.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
   'cellchat.infer.v1',
+  'condition.pseudobulk_de.v1',
   'checkpoint.load.v1',
   'checkpoint.fork.v1',
 ]);
 const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   ANALYSIS_OBJECT_NOT_FOUND: 'Analysis object not found.',
+  CELLCHAT_PACKAGES_UNAVAILABLE: 'CellChat is unavailable in the current analysis runtime. Ask an operator to enable the required package profile.',
+  CELLCHAT_GROUPING_UNAVAILABLE: 'CellChat needs valid clustering or identity labels. Run clustering or choose current identities and try again.',
+  CELLCHAT_GROUP_COUNT_INVALID: 'CellChat needs between two and 32 populated groups. Review the selected grouping and try again.',
+  CELLCHAT_MIN_GROUP_CELLS: 'At least two groups must meet the minimum cell threshold. Lower the threshold or revise the grouping.',
+  CELLCHAT_ASSAY_UNAVAILABLE: 'CellChat requires an RNA assay in the saved analysis.',
+  CELLCHAT_NORMALIZED_DATA_REQUIRED: 'CellChat requires normalized RNA data. Run normalization and try again.',
+  CELLCHAT_DATABASE_OVERLAP_LOW: 'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
+  CELLCHAT_INPUT_INVALID: 'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
+  ENRICHMENT_PACKAGES_UNAVAILABLE: 'Pathway enrichment is unavailable in the current compute profile. Ask an operator to install the approved enrichment package profile.',
 });
 
 /** Coded handler error carrying a stable, SAFE message. Handlers throw these for
@@ -162,6 +198,15 @@ function deterministicCompletionOutputKey(job) {
   if (job.jobType === 'seurat.pipeline.v1') {
     return allocateSeuratCheckpointStorageKey(job.projectId, job.id);
   }
+  if (job.jobType === 'seurat.multisample.v1') {
+    return allocateMultiSampleSeuratCheckpointStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'spatial.seurat.v1') {
+    return allocateSpatialSeuratCheckpointStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'checkpoint.save.v1') {
+    return allocateCheckpointStorageKey(job.projectId, job.id);
+  }
   if (job.jobType === 'deg.find_markers.v1') {
     return allocateDegResultStorageKey(job.projectId, job.id);
   }
@@ -170,6 +215,9 @@ function deterministicCompletionOutputKey(job) {
   }
   if (job.jobType === 'cellchat.infer.v1') {
     return allocateCellChatInferenceResultStorageKey(job.projectId, job.id);
+  }
+  if (job.jobType === 'condition.pseudobulk_de.v1') {
+    return allocateConditionComparisonResultStorageKey(job.projectId, job.id);
   }
   return null;
 }
@@ -655,11 +703,138 @@ async function pbmcPipelineHandler(ctx) {
   };
 }
 
-async function seuratPipelineHandler(ctx) {
+/**
+ * Persist the owner's current private live object as a new immutable saved
+ * analysis. This operation performs no scientific transformation: it snapshots
+ * exactly the current object, writes to a server-allocated checkpoint key, and
+ * publishes the child object, lineage edge, and two artifacts atomically.
+ */
+async function checkpointSaveHandler(ctx) {
   await ctx.heartbeat();
-  await ctx.log({ level: 'info', message: 'seurat.pipeline.v1 handler: resolving dataset + parameters before any R contact.' });
+  await ctx.log({ level: 'info', message: 'checkpoint.save.v1 handler: validating live-object ownership before saving.' });
 
   const job = ctx.job;
+  const objectId = job.analysisObjectId;
+  if (!job.projectId || typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Save job is missing its analysis object.');
+  }
+  if (job.parameters && Object.keys(job.parameters).length > 0) {
+    throw codedHandlerError('INVALID_PARAMETERS', 'Save current analysis does not accept parameters.');
+  }
+  if (typeof ctx.getOwnedAnalysisObject !== 'function'
+      || typeof ctx.deriveRObjectStateKey !== 'function'
+      || typeof ctx.completePbmcPipelineResult !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Saved-analysis persistence is not configured.');
+  }
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  if (typeof stateKey !== 'string' || stateKey === '') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'Saved-analysis persistence is not configured.');
+  }
+
+  const checkpointStorageKey = allocateCheckpointStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, checkpointStorageKey);
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.checkpoint.save.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId },
+      objectContext: { objectId, stateKey },
+      checkpointSave: { checkpointStorageKey },
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (error) {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, error);
+    throw error;
+  }
+
+  const checkpoint = descriptor.checkpoint || {};
+  if (checkpoint.saved !== true || typeof checkpoint.checksumSha256 !== 'string'
+      || checkpoint.checksumSha256 === '') {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Current analysis was not saved.');
+  }
+
+  let completion;
+  try {
+    const inheritedSummary = ownedObject.metadata?.summary && typeof ownedObject.metadata.summary === 'object'
+      ? ownedObject.metadata.summary
+      : {};
+    const savedSummary = {
+      ...descriptor.summary,
+      cells: descriptor.summary?.nCells,
+      features: descriptor.summary?.nFeatures,
+      ...(Number.isFinite(inheritedSummary.density) ? { density: inheritedSummary.density } : {}),
+    };
+    completion = await ctx.completePbmcPipelineResult({
+      result: {
+        objectType: ownedObject.objectType || 'seurat',
+        displayName: derivedAnalysisDisplayName(
+          ownedObject.displayName || 'Analysis',
+          'saved',
+          job.createdAt
+        ),
+        metadata: {
+          source: 'checkpoint.save.v1',
+          operation: 'r.checkpoint.save.v1',
+          scientific_output: true,
+          checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+          summary: savedSummary,
+        },
+      },
+      checkpointArtifact: {
+        artifactType: 'checkpoint',
+        name: 'Saved analysis checkpoint',
+        description: 'Durable internal checkpoint of an explicitly saved private analysis. Not downloadable.',
+        storageKind: 'local_internal',
+        internalStorageKey: checkpointStorageKey,
+        checksumSha256: checkpoint.checksumSha256,
+        sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
+        metadata: { operation: 'r.checkpoint.save.v1', scientific_output: true, downloadable: false },
+      },
+      summaryArtifact: {
+        artifactType: 'checkpoint_save',
+        name: descriptor.name,
+        description: descriptor.description,
+        storageKind: 'metadata_only',
+        metadata: descriptor.metadata,
+      },
+    });
+  } catch (error) {
+    throw publicationIndeterminateError(error);
+  }
+
+  await ctx.log({
+    level: 'info',
+    message: `checkpoint.save.v1 handler: created saved analysis ${completion.resultObject.id} from ${objectId}.`,
+  });
+  return {
+    resultAnalysisObjectId: completion.resultObject.id,
+    result: {
+      ok: true,
+      handled: 'checkpoint.save.v1',
+      operation: 'r.checkpoint.save.v1',
+      resultAnalysisObjectId: completion.resultObject.id,
+      checkpointArtifactId: completion.checkpointArtifact.id,
+      summaryArtifactId: completion.summaryArtifact.id,
+    },
+  };
+}
+
+async function seuratPipelineHandler(ctx) {
+  await ctx.heartbeat();
+
+  const job = ctx.job;
+  const multiSample = job.jobType === 'seurat.multisample.v1';
+  const handlerName = multiSample ? 'seurat.multisample.v1' : 'seurat.pipeline.v1';
+  const operation = multiSample ? 'r.seurat.multisample.v1' : 'r.seurat.pipeline.v1';
+  await ctx.log({ level: 'info', message: `${handlerName} handler: resolving dataset inputs + parameters before any R contact.` });
   const datasetId = job.datasetId;
   const objectId = job.analysisObjectId;
   if (typeof job.projectId !== 'string' || job.projectId === '') {
@@ -671,16 +846,25 @@ async function seuratPipelineHandler(ctx) {
   if (typeof objectId !== 'string' || objectId === '') {
     throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Seurat pipeline job is missing its raw dataset analysis object.');
   }
-  if (typeof ctx.getSeuratPipelineInputs !== 'function') {
+  const inputResolver = multiSample ? ctx.getMultiSampleSeuratPipelineInputs : ctx.getSeuratPipelineInputs;
+  if (typeof inputResolver !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
 
-  const resolvedInputs = await ctx.getSeuratPipelineInputs();
-  const dataset = resolvedInputs && resolvedInputs.dataset;
+  const resolvedInputs = await inputResolver();
+  const datasets = multiSample
+    ? (resolvedInputs && resolvedInputs.datasets)
+    : [resolvedInputs && resolvedInputs.dataset];
+  const dataset = datasets && datasets[0];
   const inputObject = resolvedInputs && resolvedInputs.inputObject;
   if (!dataset || dataset.id !== datasetId) throw codedHandlerError('DATASET_NOT_FOUND', 'Dataset not found.');
   try {
-    assertSupportedSeuratPipelineDataset(dataset);
+    if (multiSample) {
+      const validated = resolvedInputs && resolvedInputs.validated;
+      assertSupportedMultiSampleDatasets(datasets, validated && validated.samples);
+    } else {
+      assertSupportedSeuratPipelineDataset(dataset);
+    }
   } catch (err) {
     throw codedHandlerError(err.code || 'DATASET_NOT_READY', err.message || 'Dataset is not ready for analysis.');
   }
@@ -691,22 +875,39 @@ async function seuratPipelineHandler(ctx) {
     throw codedHandlerError('INVALID_PARAMETERS', 'Seurat pipeline input object must reference the same dataset as the job.');
   }
 
-  const { params, defaultsApplied } = validateSeuratPipelineParams(job.parameters);
-  const checkpointStorageKey = allocateSeuratCheckpointStorageKey(job.projectId, job.id);
+  const validated = multiSample
+    ? validateMultiSampleSeuratParams(job.parameters)
+    : validateSeuratPipelineParams(job.parameters);
+  const { params, defaultsApplied } = validated;
+  const samples = multiSample ? validated.samples : [];
+  const checkpointStorageKey = multiSample
+    ? allocateMultiSampleSeuratCheckpointStorageKey(job.projectId, job.id)
+    : allocateSeuratCheckpointStorageKey(job.projectId, job.id);
   await removeRetryOrphanOutput(ctx, checkpointStorageKey);
 
   let descriptor;
   try {
     descriptor = await ctx.runRBridgeOperation({
       job,
-      operation: 'r.seurat.pipeline.v1',
+      operation,
       actor: { userId: job.ownerUserId, projectId: job.projectId },
-      seuratPipeline: {
+      ...(multiSample ? { multiSampleSeuratPipeline: {
+        params,
+        inputs: samples.map((sample, index) => ({
+          datasetStorageKey: datasets[index].internalStorageKey,
+          datasetFileType: datasets[index].fileType,
+          sampleName: sample.sampleName,
+          conditionName: sample.conditionName,
+          donorCode: sample.donorCode,
+          batch: sample.batch,
+        })),
+        checkpointStorageKey,
+      } } : { seuratPipeline: {
         params,
         datasetStorageKey: dataset.internalStorageKey,
         datasetFileType: dataset.fileType,
         checkpointStorageKey,
-      },
+      } }),
       input: job.parameters,
       claimContext: { workerId: ctx.workerId },
       logger: ctx.logger,
@@ -717,7 +918,7 @@ async function seuratPipelineHandler(ctx) {
     const rCode = typeof (err && err.rCode) === 'string' && err.rCode ? err.rCode : null;
     await ctx.log({
       level: 'error',
-      message: `seurat.pipeline.v1 handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
+      message: `${handlerName} handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
     });
     await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, err);
     throw err;
@@ -732,57 +933,69 @@ async function seuratPipelineHandler(ctx) {
   let completion;
   try {
     completion = await ctx.completeSeuratPipelineResult({
-    source: {
-      displayName: 'Dataset input',
-      metadata: {
-        source: 'dataset',
-        datasetId,
-        fileType: dataset.fileType,
-        scientific_output: false,
+      source: {
+        displayName: multiSample ? 'Multi-sample dataset input' : 'Dataset input',
+        metadata: {
+          source: 'dataset',
+          datasetId,
+          ...(multiSample ? { datasetIds: samples.map(sample => sample.datasetId) } : {}),
+          fileType: dataset.fileType,
+          scientific_output: false,
+        },
       },
-    },
-    result: {
-      objectType: descriptor.resultObjectType || 'seurat',
-      displayName: 'Seurat pipeline result',
-      metadata: {
-        source: 'seurat.pipeline.v1',
-        operation: 'r.seurat.pipeline.v1',
-        scientific_output: true,
-        datasetId,
-        checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
-        resolvedParams: params,
-        defaultsApplied,
-        summary: descriptor.summary,
-        warnings: descriptor.metadata && descriptor.metadata.warnings ? descriptor.metadata.warnings : [],
+      result: {
+        objectType: descriptor.resultObjectType || 'seurat',
+        displayName: multiSample ? 'Multi-condition Seurat result' : 'Seurat pipeline result',
+        metadata: {
+          source: handlerName,
+          operation,
+          scientific_output: true,
+          datasetId,
+          ...(multiSample ? {
+            datasetIds: samples.map(sample => sample.datasetId),
+            sampleDesign: samples,
+            sampleMetadataColumn: 'sample_id',
+            conditionMetadataColumn: 'condition',
+          } : {}),
+          checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+          resolvedParams: params,
+          defaultsApplied,
+          summary: descriptor.summary,
+          warnings: descriptor.metadata && descriptor.metadata.warnings ? descriptor.metadata.warnings : [],
+        },
       },
-    },
-    checkpointArtifact: {
-      artifactType: 'checkpoint',
-      name: 'Seurat pipeline checkpoint',
-      description: 'Durable internal checkpoint of the Seurat pipeline result object. No public download in this branch.',
-      storageKind: 'local_internal',
-      internalStorageKey: checkpointStorageKey,
-      checksumSha256: checkpoint.checksumSha256,
-      sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
-      metadata: {
-        operation: 'r.seurat.pipeline.v1',
-        scientific_output: true,
-        downloadable: false,
-        datasetId,
+      checkpointArtifact: {
+        artifactType: 'checkpoint',
+        name: 'Seurat pipeline checkpoint',
+        description: 'Durable internal checkpoint of the Seurat pipeline result object. No public download in this branch.',
+        storageKind: 'local_internal',
+        internalStorageKey: checkpointStorageKey,
+        checksumSha256: checkpoint.checksumSha256,
+        sizeBytes: checkpoint.sizeBytes != null ? checkpoint.sizeBytes : 0,
+        metadata: {
+          operation,
+          scientific_output: true,
+          downloadable: false,
+          datasetId,
+          ...(multiSample ? { datasetIds: samples.map(sample => sample.datasetId) } : {}),
+        },
       },
-    },
-    summaryArtifact: {
-      artifactType: descriptor.artifactType,
-      name: descriptor.name,
-      description: descriptor.description,
-      storageKind: 'metadata_only',
-      metadata: {
-        ...descriptor.metadata,
-        datasetId,
-        resolvedParams: params,
-        defaultsApplied,
+      summaryArtifact: {
+        artifactType: descriptor.artifactType,
+        name: descriptor.name,
+        description: descriptor.description,
+        storageKind: 'metadata_only',
+        metadata: {
+          ...descriptor.metadata,
+          datasetId,
+          ...(multiSample ? {
+            datasetIds: samples.map(sample => sample.datasetId),
+            sampleDesign: samples,
+          } : {}),
+          resolvedParams: params,
+          defaultsApplied,
+        },
       },
-    },
     });
   } catch (err) {
     throw publicationIndeterminateError(err);
@@ -792,14 +1005,14 @@ async function seuratPipelineHandler(ctx) {
   const checkpointArtifact = completion.checkpointArtifact;
   const summaryArtifact = completion.summaryArtifact;
 
-  await ctx.log({ level: 'info', message: `seurat.pipeline.v1 handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id}.` });
+  await ctx.log({ level: 'info', message: `${handlerName} handler: result object ${resultObject.id} created with checkpoint ${checkpointArtifact.id} + summary ${summaryArtifact.id}.` });
 
   return {
     resultAnalysisObjectId: resultObject.id,
     result: {
       ok: true,
-      handled: 'seurat.pipeline.v1',
-      operation: 'r.seurat.pipeline.v1',
+      handled: handlerName,
+      operation,
       resultAnalysisObjectId: resultObject.id,
       checkpointArtifactId: checkpointArtifact.id,
       summaryArtifactId: summaryArtifact.id,
@@ -934,6 +1147,126 @@ async function checkpointLoadHandler(ctx) {
   };
 }
 
+async function spatialSeuratPipelineHandler(ctx) {
+  await ctx.heartbeat();
+  await ctx.log({ level: 'info', message: 'spatial.seurat.v1 handler: resolving a Visium dataset before R contact.' });
+  const job = ctx.job;
+  if (!job.projectId || !job.datasetId || !job.analysisObjectId
+      || typeof ctx.getSpatialPipelineInputs !== 'function') {
+    throw codedHandlerError('INVALID_JOB_CONTEXT', 'Spatial pipeline inputs are incomplete.');
+  }
+  const resolved = await ctx.getSpatialPipelineInputs();
+  const dataset = resolved?.dataset;
+  const inputObject = resolved?.inputObject;
+  if (!dataset || dataset.id !== job.datasetId) {
+    throw codedHandlerError('DATASET_NOT_FOUND', 'Spatial dataset not found.');
+  }
+  try {
+    assertSupportedSpatialSeuratDataset(dataset);
+  } catch (error) {
+    throw codedHandlerError(error.code || 'DATASET_NOT_READY', error.message || 'Spatial dataset is not ready.');
+  }
+  if (!inputObject || inputObject.id !== job.analysisObjectId
+      || inputObject.datasetId !== dataset.id) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const { params, defaultsApplied } = validateSpatialSeuratParams(job.parameters);
+  const checkpointStorageKey = allocateSpatialSeuratCheckpointStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, checkpointStorageKey);
+
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.spatial.seurat.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId },
+      spatialPipeline: {
+        params,
+        datasetStorageKey: dataset.internalStorageKey,
+        datasetFileType: dataset.fileType,
+        checkpointStorageKey,
+      },
+      claimContext: { workerId: ctx.workerId },
+      logger: ctx.logger,
+      callR: ctx.callR,
+    });
+  } catch (error) {
+    const status = Number.isInteger(error?.rStatus) ? error.rStatus : null;
+    const rCode = typeof error?.rCode === 'string' ? error.rCode : null;
+    await ctx.log({
+      level: 'error',
+      message: `spatial.seurat.v1 handler: R bridge failed${status ? ` (status=${status})` : ''}${rCode ? ` (${rCode})` : ''}.`,
+    });
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, error);
+    throw error;
+  }
+  const checkpoint = descriptor.checkpoint || {};
+  if (checkpoint.saved !== true || !checkpoint.checksumSha256
+      || !Number.isSafeInteger(checkpoint.sizeBytes) || checkpoint.sizeBytes < 0) {
+    await discardUnrecordedProjectOutput(ctx, checkpointStorageKey);
+    throw codedHandlerError('CHECKPOINT_SAVE_FAILED', 'Spatial pipeline did not produce a durable checkpoint.');
+  }
+  let completion;
+  try {
+    completion = await ctx.completeSeuratPipelineResult({
+      source: {
+        displayName: 'Visium dataset input',
+        metadata: {
+          source: 'dataset', datasetId: dataset.id, fileType: dataset.fileType,
+          modality: 'spatial', scientific_output: false,
+        },
+      },
+      result: {
+        objectType: 'seurat',
+        displayName: 'Spatial Seurat pipeline result',
+        metadata: {
+          source: 'spatial.seurat.v1', operation: 'r.spatial.seurat.v1',
+          modality: 'spatial', platform: '10x_visium', scientific_output: true,
+          datasetId: dataset.id,
+          checkpoint: { available: true, storage_kind: 'local_internal', downloadable: false },
+          resolvedParams: params, defaultsApplied,
+          summary: descriptor.summary,
+          warnings: descriptor.metadata?.warnings || [],
+        },
+      },
+      checkpointArtifact: {
+        artifactType: 'checkpoint', name: 'Spatial Seurat checkpoint',
+        description: 'Durable internal checkpoint containing the Seurat spatial assay and image coordinates.',
+        storageKind: 'local_internal', internalStorageKey: checkpointStorageKey,
+        checksumSha256: checkpoint.checksumSha256, sizeBytes: checkpoint.sizeBytes,
+        metadata: {
+          operation: 'r.spatial.seurat.v1', modality: 'spatial',
+          platform: '10x_visium', scientific_output: true, downloadable: false,
+          datasetId: dataset.id,
+        },
+      },
+      summaryArtifact: {
+        artifactType: descriptor.artifactType, name: descriptor.name,
+        description: descriptor.description, storageKind: 'metadata_only',
+        metadata: {
+          ...descriptor.metadata, datasetId: dataset.id, modality: 'spatial',
+          platform: '10x_visium', resolvedParams: params, defaultsApplied,
+        },
+      },
+    });
+  } catch (error) {
+    throw publicationIndeterminateError(error);
+  }
+  await ctx.log({
+    level: 'info',
+    message: `spatial.seurat.v1 handler: result object ${completion.resultObject.id} and checkpoint ${completion.checkpointArtifact.id} created.`,
+  });
+  return {
+    resultAnalysisObjectId: completion.resultObject.id,
+    result: {
+      ok: true, handled: 'spatial.seurat.v1', operation: 'r.spatial.seurat.v1',
+      resultAnalysisObjectId: completion.resultObject.id,
+      checkpointArtifactId: completion.checkpointArtifact.id,
+      summaryArtifactId: completion.summaryArtifact.id,
+    },
+  };
+}
+
 /**
  * Fork a project checkpoint into a new object owned by the job creator. The
  * source object is never attached to the creator's live key and is never changed.
@@ -1013,7 +1346,7 @@ async function checkpointForkHandler(ctx) {
  * OUTPUT-producing analysis, NOT a mutating checkpoint transformation: it creates NO new
  * analysis object and NO lineage edge, and does not mutate the live object (any temporary
  * identity change is restored R-side). It writes (1) an internal full marker-table artifact
- * (local_internal; no public download) and (2) a metadata-only DEG summary artifact.
+ * (local_internal; controlled authenticated export only) and (2) a metadata-only DEG summary artifact.
  *
  * SAME OWNERSHIP BOUNDARY as r.object.inspect / pbmc.pipeline.v1 / checkpoint.load.v1
  * (project membership ≠ live R access): the input object id comes from the TRUSTED job row;
@@ -1036,6 +1369,37 @@ async function checkpointForkHandler(ctx) {
  * DEG_RESULT_EXISTS guard make two workers unable to duplicate them. Bridge errors arrive
  * pre-sanitized (no raw R error/stack/internal URL/state key).
  */
+async function hydrateIsolatedAnalysisObject(ctx, objectId) {
+  const stateKey = ctx.deriveRObjectStateKey(ctx.job.ownerUserId, `${objectId}-job-${ctx.job.id}`);
+  // A verified completion receipt proves the downstream scientific operation
+  // already finished against this exact job/object binding. Recovery publishes
+  // that immutable output through the handler's normal atomic DB path and must
+  // never contact R or rebuild transient state a second time.
+  if (ctx.recoveringCompletionReceipt === true) return stateKey;
+  if (typeof ctx.getHydrationCheckpoint !== 'function') {
+    throw codedHandlerError('NO_CHECKPOINT_ARTIFACT', 'This analysis requires a durable checkpoint.');
+  }
+  const checkpoint = await ctx.getHydrationCheckpoint();
+  if (!checkpoint || checkpoint.analysisObjectId !== objectId
+      || typeof checkpoint.checkpointArtifactId !== 'string') {
+    throw codedHandlerError('NO_CHECKPOINT_ARTIFACT', 'This analysis requires a durable checkpoint.');
+  }
+  const hydrated = await ctx.runRBridgeOperation({
+    job: ctx.job,
+    operation: 'r.checkpoint.hydrate.v1',
+    actor: { userId: ctx.job.ownerUserId, projectId: ctx.job.projectId || null },
+    objectContext: { objectId, stateKey },
+    checkpoint,
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+  if (!hydrated || !hydrated.loaded || hydrated.loaded.loaded !== true) {
+    throw codedHandlerError('R_CHECKPOINT_LOAD_FAILED', 'Private compute could not hydrate the checkpoint.');
+  }
+  return stateKey;
+}
+
 async function degFindMarkersHandler(ctx) {
   await ctx.heartbeat();
   await ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: validating ownership + parameters before any R contact.' });
@@ -1059,24 +1423,21 @@ async function degFindMarkersHandler(ctx) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
 
-  // 3. Derive the input object's R state key (X-Object-ID) SERVER-SIDE. Never client-
-  //    provided; identical to what /api/r/* would send for this owner+object.
-  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  // 3. Validate and resolve parameters before checkpoint hydration or scientific R contact.
+  const { params, defaultsApplied } = validateDegFindMarkersParams(job.parameters);
+
+  // 4. Derive a job-scoped R state key server-side and hydrate the exact trusted checkpoint.
+  const stateKey = await hydrateIsolatedAnalysisObject(ctx, objectId);
   if (typeof stateKey !== 'string' || stateKey === '') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
-
-  // 4. Validate + resolve parameters against the fixed allowlist BEFORE any R contact.
-  //    Throws a coded, SAFE-message error (INVALID_PARAMETER / UNKNOWN_PARAMETER / …)
-  //    that fails the job terminally without contacting R.
-  const { params, defaultsApplied } = validateDegFindMarkersParams(job.parameters);
 
   // 5. Server-allocate the internal result storage key (no client input; relative,
   //    traversal-free; the R backend confines it to project storage). Never logged/exposed.
   const resultStorageKey = allocateDegResultStorageKey(job.projectId, job.id);
   await removeRetryOrphanOutput(ctx, resultStorageKey);
 
-  await ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: parameters valid; running allowlisted DEG over the existing live object (no new object/edge, object not mutated).' });
+  await ctx.log({ level: 'info', message: 'deg.find_markers.v1 handler: parameters valid; running allowlisted DEG over private checkpoint-backed job state (no new object/edge).' });
 
   // 6. Run the allowlisted DEG bridge op. Object context + params body are all server-
   //    derived; the bridge ignores raw job input for routing/storage key.
@@ -1116,7 +1477,7 @@ async function degFindMarkersHandler(ctx) {
     markersArtifact: {
       artifactType: 'deg_markers',
       name: 'DEG marker table',
-      description: 'Durable internal full DEG marker table. No public download in this branch.',
+      description: 'Durable internal full DEG marker table. Controlled authenticated export only.',
       storageKind: 'local_internal',
       mimeType: 'text/csv',
       internalStorageKey: resultStorageKey,
@@ -1192,16 +1553,22 @@ async function enrichmentGseaHandler(ctx) {
       || typeof ctx.deriveRObjectStateKey !== 'function') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
+  if (ctx.runtimeCapabilities?.pathwayEnrichment !== true) {
+    throw codedHandlerError(
+      'ENRICHMENT_PACKAGES_UNAVAILABLE',
+      SAFE_HANDLER_DOMAIN_MESSAGES.ENRICHMENT_PACKAGES_UNAVAILABLE
+    );
+  }
   const ownedObject = await ctx.getOwnedAnalysisObject();
   if (!ownedObject || ownedObject.id !== objectId) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
-  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  const { params, defaultsApplied } = validateEnrichmentGseaParams(job.parameters);
+  const stateKey = await hydrateIsolatedAnalysisObject(ctx, objectId);
   if (typeof stateKey !== 'string' || stateKey === '') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
 
-  const { params, defaultsApplied } = validateEnrichmentGseaParams(job.parameters);
   const resultStorageKey = allocateEnrichmentGseaResultStorageKey(job.projectId, job.id);
   await removeRetryOrphanOutput(ctx, resultStorageKey);
   await ctx.log({
@@ -1324,12 +1691,12 @@ async function cellChatInferenceHandler(ctx) {
   if (!ownedObject || ownedObject.id !== objectId) {
     throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
-  const stateKey = ctx.deriveRObjectStateKey(job.ownerUserId, objectId);
+  const { params, defaultsApplied } = validateCellChatInferenceParams(job.parameters);
+  const stateKey = await hydrateIsolatedAnalysisObject(ctx, objectId);
   if (typeof stateKey !== 'string' || stateKey === '') {
     throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
   }
 
-  const { params, defaultsApplied } = validateCellChatInferenceParams(job.parameters);
   const resultStorageKey = allocateCellChatInferenceResultStorageKey(job.projectId, job.id);
   await removeRetryOrphanOutput(ctx, resultStorageKey);
   await ctx.log({
@@ -1423,11 +1790,285 @@ async function cellChatInferenceHandler(ctx) {
   };
 }
 
+async function exploratoryAnalysisHandler(ctx) {
+  await ctx.heartbeat();
+  await ctx.log({
+    level: 'info',
+    message: 'explore.summarize.v1 handler: validating a reviewed aggregate recipe and hydrating a private checkpoint.',
+  });
+  const job = ctx.job;
+  const objectId = job.analysisObjectId;
+  if (typeof objectId !== 'string' || objectId === '') {
+    throw codedHandlerError('R_OBJECT_CONTEXT_REQUIRED', 'Exploratory analysis is missing its input object.');
+  }
+  if (typeof ctx.getOwnedAnalysisObject !== 'function'
+      || typeof ctx.deriveRObjectStateKey !== 'function') {
+    throw codedHandlerError('R_BRIDGE_MISCONFIGURED', 'R bridge is not configured.');
+  }
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== objectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const { params } = validateExploratoryAnalysisParams(job.parameters);
+  const stateKey = await hydrateIsolatedAnalysisObject(ctx, objectId);
+  const descriptor = await ctx.runRBridgeOperation({
+    job,
+    operation: 'r.explore.summarize.v1',
+    actor: { userId: job.ownerUserId, projectId: job.projectId || null },
+    objectContext: { objectId, stateKey },
+    exploration: { params },
+    claimContext: { workerId: ctx.workerId },
+    logger: ctx.logger,
+    callR: ctx.callR,
+  });
+  const artifact = await ctx.createArtifact({
+    artifactType: 'exploration_summary',
+    name: descriptor.name,
+    description: descriptor.description,
+    storageKind: 'metadata_only',
+    metadata: {
+      ...descriptor.metadata,
+      resolvedParams: params,
+      downloadable: false,
+    },
+  });
+  await ctx.log({
+    level: 'info',
+    message: `explore.summarize.v1 handler: recorded aggregate summary ${artifact.id}.`,
+  });
+  return {
+    result: {
+      ok: true,
+      handled: 'explore.summarize.v1',
+      summaryArtifactId: artifact.id,
+    },
+  };
+}
+
+async function conditionComparisonHandler(ctx) {
+  await ctx.heartbeat();
+  const job = ctx.job;
+  if (!job.analysisObjectId || typeof ctx.getConditionComparisonInputs !== 'function') {
+    throw codedHandlerError('INVALID_CONTRAST', 'Condition-comparison context is incomplete.');
+  }
+  const { params } = validateConditionComparisonParams(job.parameters);
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== job.analysisObjectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  // Resolve the contrast snapshot before hydration. Invalid designs cannot make
+  // contact with R and all sample mappings come from trusted project rows.
+  const design = await ctx.getConditionComparisonInputs();
+  if (!design || design.analysisObjectId !== job.analysisObjectId
+      || design.contrast.id !== params.contrastId) {
+    throw codedHandlerError('INVALID_CONTRAST', 'Condition contrast is invalid.');
+  }
+  const stateKey = await hydrateIsolatedAnalysisObject(ctx, job.analysisObjectId);
+  const resultStorageKey = allocateConditionComparisonResultStorageKey(job.projectId, job.id);
+  await removeRetryOrphanOutput(ctx, resultStorageKey);
+  await ctx.log({
+    level: 'info',
+    message: 'condition.pseudobulk_de.v1 handler: running replicate-aware edgeR pseudobulk over a private checkpoint.',
+  });
+  let descriptor;
+  try {
+    descriptor = await ctx.runRBridgeOperation({
+      job,
+      operation: 'r.condition.pseudobulk_de.v1',
+      actor: { userId: job.ownerUserId, projectId: job.projectId },
+      objectContext: { objectId: job.analysisObjectId, stateKey },
+      conditionComparison: { design, resultStorageKey },
+      claimContext: { workerId: ctx.workerId }, logger: ctx.logger, callR: ctx.callR,
+    });
+  } catch (error) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey, error);
+    throw error;
+  }
+  const result = descriptor.result || {};
+  if (result.saved !== true || !result.checksumSha256
+      || !Number.isInteger(result.nRows) || result.nRows < 0 || result.nRows > 500000) {
+    await discardUnrecordedProjectOutput(ctx, resultStorageKey);
+    throw codedHandlerError('CONDITION_COMPARISON_WRITE_FAILED', 'Condition comparison did not produce a durable result.');
+  }
+  let completion;
+  try {
+    completion = await ctx.completeConditionComparisonResult({
+      resultsArtifact: {
+        artifactType: 'condition_de_results', name: 'Pseudobulk condition DE table',
+        description: 'Private replicate-aware edgeR pseudobulk differential-expression table.',
+        storageKind: 'local_internal', mimeType: 'text/csv', internalStorageKey: resultStorageKey,
+        checksumSha256: result.checksumSha256, sizeBytes: result.sizeBytes,
+        metadata: { operation: 'r.condition.pseudobulk_de.v1', contrastId: params.contrastId, nRows: result.nRows },
+      },
+      summaryArtifact: {
+        artifactType: 'condition_de_summary', name: descriptor.name,
+        description: descriptor.description, storageKind: 'metadata_only',
+        metadata: { ...descriptor.metadata, contrastId: params.contrastId, downloadable: false },
+      },
+    });
+  } catch (error) { throw publicationIndeterminateError(error); }
+  return {
+    result: {
+      ok: true, handled: 'condition.pseudobulk_de.v1',
+      resultsArtifactId: completion.resultsArtifact.id,
+      summaryArtifactId: completion.summaryArtifact.id,
+    },
+  };
+}
+
+async function expertRHandler(ctx) {
+  await ctx.heartbeat();
+  const job = ctx.job;
+  const { params, scriptSha256 } = validateExpertRParams(job.parameters, { allowStoredHash: true });
+  const ownedObject = await ctx.getOwnedAnalysisObject();
+  if (!ownedObject || ownedObject.id !== job.analysisObjectId) {
+    throw codedHandlerError('R_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  if (typeof ctx.runExpertSandbox !== 'function') {
+    throw codedHandlerError('EXPERT_R_UNAVAILABLE', 'Expert R sandbox is unavailable.');
+  }
+  const checkpoint = await ctx.getHydrationCheckpoint();
+  if (!checkpoint || checkpoint.analysisObjectId !== job.analysisObjectId
+      || typeof checkpoint.internalStorageKey !== 'string'
+      || typeof checkpoint.checkpointArtifactId !== 'string'
+      || !/^[0-9a-f]{64}$/.test(String(checkpoint.checksumSha256 || ''))
+      || !Number.isSafeInteger(checkpoint.sizeBytes) || checkpoint.sizeBytes < 0) {
+    throw codedHandlerError('NO_CHECKPOINT_ARTIFACT', 'Expert R requires a durable checkpoint.');
+  }
+  if (typeof ctx.getExpertRPrivateInputs !== 'function') {
+    throw codedHandlerError('EXPERT_R_UNAVAILABLE', 'Expert R private inputs are unavailable.');
+  }
+  const privateInputs = await ctx.getExpertRPrivateInputs();
+  const privateInputProvenance = privateInputs.map((input) => ({
+    id: input.id,
+    sizeBytes: input.sizeBytes,
+    checksumSha256: input.checksumSha256,
+  }));
+  const outputStorageKey = allocateExpertRBundleStorageKey(job.projectId, job.id);
+  const sandbox = await ctx.runExpertSandbox({
+    jobId: job.id, projectId: job.projectId, profileId: params.profileId,
+    script: params.script, checkpointStorageKey: checkpoint.internalStorageKey,
+    checkpointChecksumSha256: checkpoint.checksumSha256,
+    checkpointSizeBytes: checkpoint.sizeBytes,
+    privateInputs: privateInputs.map((input) => ({
+      id: input.id,
+      originalFilename: input.originalFilename,
+      internalStorageKey: input.internalStorageKey,
+      sizeBytes: input.sizeBytes,
+      checksumSha256: input.checksumSha256,
+    })),
+    outputStorageKey,
+  });
+  const outputFiles = Array.isArray(sandbox?.files) ? sandbox.files : [];
+  const validFiles = outputFiles.length === sandbox?.nFiles && outputFiles.every((file) => (
+    file && typeof file.name === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/.test(file.name)
+    && !file.name.split('/').some((part) => part === '.' || part === '..' || part === '')
+    && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes >= 0
+    && /^[0-9a-f]{64}$/.test(String(file.checksumSha256 || ''))
+  ));
+  const validSandbox = sandbox && sandbox.saved === true
+      && /^[0-9a-f]{64}$/.test(String(sandbox.checksumSha256 || ''))
+      && Number.isSafeInteger(sandbox.sizeBytes) && sandbox.sizeBytes >= 0
+      && sandbox.sizeBytes <= MAX_EXPERT_R_BUNDLE_BYTES
+      && Number.isInteger(sandbox.nFiles) && sandbox.nFiles >= 0 && sandbox.nFiles <= 50
+      && Number.isSafeInteger(sandbox.outputBytes) && sandbox.outputBytes >= 0
+      && sandbox.outputBytes <= MAX_EXPERT_R_OUTPUT_BYTES
+      && outputFiles.reduce((total, file) => total + (Number(file?.sizeBytes) || 0), 0) === sandbox.outputBytes
+      && validFiles
+      && sandbox.profileId === params.profileId
+      && sandbox.scriptSha256 === scriptSha256
+      && sandbox.checkpointChecksumSha256 === checkpoint.checksumSha256
+      && JSON.stringify(sandbox.privateInputs || []) === JSON.stringify(privateInputProvenance)
+      && /^sha256:[0-9a-f]{64}$/.test(String(sandbox.sandboxImageDigest || ''))
+      && sandbox.resourcePolicyVersion === EXPERT_R_RESOURCE_POLICY_VERSION;
+  if (!validSandbox) {
+    if (typeof ctx.removeDurableObject === 'function') {
+      try { await ctx.removeDurableObject(outputStorageKey); } catch { /* validation error wins */ }
+    }
+    throw codedHandlerError('EXPERT_R_RESULT_INVALID', 'Expert R sandbox output is invalid.');
+  }
+  const files = outputFiles.map((file) => ({
+    name: file.name,
+    sizeBytes: file.sizeBytes,
+    checksumSha256: file.checksumSha256,
+  }));
+  const provenance = {
+    packageProfileId: params.profileId,
+    sandboxImageDigest: sandbox.sandboxImageDigest,
+    resourcePolicyVersion: sandbox.resourcePolicyVersion,
+    scriptSha256,
+    input: {
+      analysisObjectId: job.analysisObjectId,
+      checkpointArtifactId: checkpoint.checkpointArtifactId,
+      checkpointChecksumSha256: checkpoint.checksumSha256,
+      checkpointSizeBytes: checkpoint.sizeBytes,
+      privateInputs: privateInputProvenance,
+    },
+  };
+  let completion;
+  try {
+    completion = await ctx.completeExpertRResult({
+      result: {
+        objectType: 'generic',
+        displayName: 'Expert R result',
+        metadata: {
+          analysisKind: 'expert_r',
+          ...provenance,
+          outputBundleChecksumSha256: sandbox.checksumSha256,
+          nFiles: sandbox.nFiles,
+        },
+      },
+      bundleArtifact: {
+        artifactType: 'expert_r_bundle', name: 'Expert R output bundle',
+        description: 'Private outputs from an ephemeral no-network Expert R sandbox.',
+        storageKind: 'local_internal', mimeType: 'application/gzip',
+        internalStorageKey: outputStorageKey, checksumSha256: sandbox.checksumSha256,
+        sizeBytes: sandbox.sizeBytes, metadata: {
+          nFiles: sandbox.nFiles, outputBytes: sandbox.outputBytes,
+          ...provenance, files,
+        },
+      },
+      summaryArtifact: {
+        artifactType: 'expert_r_summary', name: 'Expert R execution summary',
+        description: 'Bounded manifest for isolated Expert R outputs.', storageKind: 'metadata_only',
+        metadata: {
+          ...provenance,
+          outputBundleChecksumSha256: sandbox.checksumSha256,
+          outputBundleSizeBytes: sandbox.sizeBytes,
+          nFiles: sandbox.nFiles,
+          files,
+          downloadable: false,
+        },
+      },
+    });
+  } catch (error) {
+    // Definite pre-commit failures leave an orphaned bundle and are safe to
+    // remove. A lost COMMIT acknowledgement is different: the database may
+    // already reference this exact object, so preserve it for operator repair.
+    if (error?.completionMayHaveCommitted !== true
+        && typeof ctx.removeDurableObject === 'function') {
+      try { await ctx.removeDurableObject(outputStorageKey); } catch { /* original publication error wins */ }
+    }
+    throw error;
+  }
+  return {
+    resultAnalysisObjectId: completion.resultObject.id,
+    result: {
+      ok: true,
+      handled: 'expert.r.v1',
+      resultAnalysisObjectId: completion.resultObject.id,
+      bundleArtifactId: completion.bundleArtifact.id,
+      summaryArtifactId: completion.summaryArtifact.id,
+    },
+  };
+}
+
 // Default registry: `generic` (a pure noop), the test-safe `checkpoint.noop`
 // placeholder that exercises the artifact/checkpoint metadata wiring, the minimal
 // `r.runtime.check` worker-to-R bridge, the read-only `r.object.inspect` object
 // inspection bridge, and allowlisted R/scientific handlers: `pbmc.pipeline.v1`,
-// `seurat.pipeline.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`,
+// `seurat.pipeline.v1`, `checkpoint.save.v1`, `checkpoint.load.v1`, `checkpoint.fork.v1`,
 // `deg.find_markers.v1`, `enrichment.gsea.v1`, and `cellchat.infer.v1`. Other analytical job types
 // (normalize/qc_filter/pca/cluster/umap/integrate and cross-condition CellChat)
 // remain deliberately UNREGISTERED so the worker fails them (UNSUPPORTED_JOB_TYPE)
@@ -1439,11 +2080,17 @@ const DEFAULT_HANDLERS = Object.freeze({
   'r.object.inspect': rObjectInspectHandler,
   'pbmc.pipeline.v1': pbmcPipelineHandler,
   'seurat.pipeline.v1': seuratPipelineHandler,
+  'seurat.multisample.v1': seuratPipelineHandler,
+  'spatial.seurat.v1': spatialSeuratPipelineHandler,
+  'checkpoint.save.v1': checkpointSaveHandler,
   'checkpoint.load.v1': checkpointLoadHandler,
   'checkpoint.fork.v1': checkpointForkHandler,
   'deg.find_markers.v1': degFindMarkersHandler,
   'enrichment.gsea.v1': enrichmentGseaHandler,
   'cellchat.infer.v1': cellChatInferenceHandler,
+  'explore.summarize.v1': exploratoryAnalysisHandler,
+  'condition.pseudobulk_de.v1': conditionComparisonHandler,
+  'expert.r.v1': expertRHandler,
 });
 
 /**
@@ -1461,7 +2108,7 @@ const DEFAULT_HANDLERS = Object.freeze({
  *   - callR              R caller used by the bridge; injectable for tests. Defaults to a
  *                        real local-HTTP caller built from rBridgeConfig (used by every
  *                        R-facing handler — r.runtime.check, r.object.inspect,
- *                        pbmc.pipeline.v1, seurat.pipeline.v1, checkpoint.load.v1,
+ *                        pbmc.pipeline.v1, seurat.pipeline.v1, checkpoint.save.v1, checkpoint.load.v1,
  *                        checkpoint.fork.v1, deg.find_markers.v1;
  *                        generic/checkpoint.noop never call R)
  *   - rBridgeConfig      { port, token } for the default R caller (server wires PLUMBER_PORT
@@ -1479,6 +2126,7 @@ function createJobWorker(options = {}) {
     leaseSeconds = JOB_WORKER_DEFAULTS.leaseSeconds,
     handlers = DEFAULT_HANDLERS,
     allowedJobTypes,
+    maxConcurrentClaims = 1,
     claimGate,
     rBridge = rWorkerBridge,
     callR,
@@ -1488,6 +2136,7 @@ function createJobWorker(options = {}) {
     // deriveRStateKey so the client never controls the key. Tests inject a deriver
     // (the real server one or a deterministic fake).
     deriveRObjectStateKey,
+    runExpertSandbox,
     storageProvider = storage.createLocalStorageProvider(),
     logger = console,
     now,
@@ -1554,7 +2203,12 @@ function createJobWorker(options = {}) {
   // committed-output inspection and hashing, handler validation, R I/O, durable
   // publication, and the final status update.
   function startClaimRenewal(jobId, claimToken) {
-    const renewEveryMs = Math.max(5000, Math.floor((leaseSeconds * 1000) / 2));
+    // Renew at one third of the lease. Half-lease cadence leaves only one useful
+    // retry window when a container is briefly CPU-starved or Postgres has a
+    // transient delay; a delayed first timer can then cross the expiry boundary
+    // even though the handler is still making legitimate progress. One-third
+    // cadence preserves two renewal opportunities without creating a tight loop.
+    const renewEveryMs = Math.max(1000, Math.floor((leaseSeconds * 1000) / 3));
     let stopped = false;
     let renewalInFlight = null;
     let renewTimer = null;
@@ -1636,7 +2290,11 @@ function createJobWorker(options = {}) {
     // 2. Claim one eligible queued job (single-winner; null if none available).
     let job;
     try {
-      job = await db.claimNextJob(workerId, withNow({ leaseSeconds, allowedJobTypes }, nowTs));
+      job = await db.claimNextJob(workerId, withNow({
+        leaseSeconds,
+        allowedJobTypes,
+        maxConcurrentClaims,
+      }, nowTs));
     } catch (err) {
       log.error(`[worker ${workerId}] claim failed: ${safeDiagnosticCode(err)}`);
       return { status: 'error', phase: 'claim', reaped };
@@ -1666,6 +2324,7 @@ function createJobWorker(options = {}) {
       const makeClaimContext = (overrides = {}) => ({
         job,
         workerId,
+        runtimeCapabilities: claimAdmission?.capabilities || {},
         heartbeat: () => db.heartbeatJob(
           jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())
         ),
@@ -1694,6 +2353,12 @@ function createJobWorker(options = {}) {
         completeCellChatInferenceResult: (input) => db.completeCellChatInferenceResultByWorker(
           jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
         ),
+        completeConditionComparisonResult: (input) => db.completeConditionComparisonResultByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
+        completeExpertRResult: (input) => db.completeExpertRResultByWorker(
+          jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
+        ),
         completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(
           jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
         ),
@@ -1707,7 +2372,8 @@ function createJobWorker(options = {}) {
               )
               : undefined,
           });
-          if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)) receiptBackedRCompleted = true;
+          if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)
+              && bridgeArgs.operation !== 'r.checkpoint.hydrate.v1') receiptBackedRCompleted = true;
           return descriptor;
         },
         callR: resolvedCallR,
@@ -1717,9 +2383,24 @@ function createJobWorker(options = {}) {
         getSeuratPipelineInputs: () => db.getSeuratPipelineInputsForJobByWorker(
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
         ),
+        getMultiSampleSeuratPipelineInputs: () => db.getMultiSampleSeuratPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        getSpatialPipelineInputs: () => db.getSpatialPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        getConditionComparisonInputs: () => db.getConditionComparisonInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
         deriveRObjectStateKey: typeof deriveRObjectStateKey === 'function'
           ? deriveRObjectStateKey : undefined,
         getLoadableCheckpoint: () => db.getLoadableCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        getHydrationCheckpoint: () => db.getHydrationCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+        getExpertRPrivateInputs: () => db.getExpertRPrivateInputsForJobByWorker(
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
         ),
         getForkableCheckpoint: () => db.getForkableCheckpointForJobByWorker(
@@ -1727,6 +2408,7 @@ function createJobWorker(options = {}) {
         ),
         allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
         logger: log,
+        runExpertSandbox: typeof runExpertSandbox === 'function' ? runExpertSandbox : undefined,
         recoveringCompletionReceipt: false,
         ...overrides,
       });
@@ -1901,6 +2583,7 @@ function createJobWorker(options = {}) {
     if (!adoptedCompletionReceipt && recoveryOnlyMarker) {
       const hasSingletonRExecutionBarrier = claimAdmission
         && claimAdmission.ready === true
+        && claimAdmission.recoveryBarrierSafe === true
         && typeof claimAdmission.rRuntimeInstanceHash === 'string'
         && claimAdmission.rRuntimeInstanceHash !== '';
       if (hasSingletonRExecutionBarrier) {
@@ -1963,6 +2646,9 @@ function createJobWorker(options = {}) {
     if (!adoptedCompletionReceipt) ctx = {
       job,
       workerId,
+      // Preserve the claim gate's explicit worker capability report when the
+      // normal execution context is rebuilt after recovery checks.
+      runtimeCapabilities: claimAdmission?.capabilities || {},
       heartbeat: () => db.heartbeatJob(jobId, workerId, claimToken, withNow({ leaseSeconds }, resolveNowTs())),
       log: (entry) => safeWorkerLog(jobId, claimToken, entry, resolveNowTs()),
       // Durable, claim-guarded metadata writers for handlers that record output.
@@ -1972,12 +2658,12 @@ function createJobWorker(options = {}) {
       createArtifact: (input) => db.createJobArtifactByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // Durable internal checkpoint artifact (server-set storageKind/key/checksum/size).
       // Distinct from createArtifact, whose generic input deliberately ignores storage
-      // fields; used only by the pbmc.pipeline.v1 handler for local_internal storage.
+      // fields; used by reviewed handlers that publish local_internal storage.
       createCheckpointArtifact: (input) => db.createCheckpointArtifactForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       createCheckpoint: (input) => db.createCheckpointForJobByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
-      // Atomic PBMC completion: result object + job link + lineage edge + checkpoint
-      // artifact + summary artifact in ONE claim-guarded transaction (used only by the
-      // pbmc.pipeline.v1 handler) so an artifact failure can't leave a partial result.
+      // Atomic checkpoint-producing completion: result object + job link + lineage
+      // edge + checkpoint artifact + summary artifact in ONE claim-guarded transaction,
+      // so an artifact failure can't leave a partial result.
       completePbmcPipelineResult: (input) => db.completePbmcPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeSeuratPipelineResult: (input) => db.completeSeuratPipelineResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       // Atomic DEG completion: the local_internal marker-table artifact + the metadata-only
@@ -1986,11 +2672,13 @@ function createJobWorker(options = {}) {
       completeDegFindMarkersResult: (input) => db.completeDegFindMarkersResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeEnrichmentGseaResult: (input) => db.completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeCellChatInferenceResult: (input) => db.completeCellChatInferenceResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      completeConditionComparisonResult: (input) => db.completeConditionComparisonResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
+      completeExpertRResult: (input) => db.completeExpertRResultByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       completeCheckpointFork: (input) => db.completeCheckpointForkByWorker(jobId, workerId, claimToken, input, withNow({}, resolveNowTs())),
       removeDurableObject: (key) => storageProvider.remove(key),
       // R-bridge seam (used by every R-facing handler: r.runtime.check,
       // r.object.inspect, pbmc.pipeline.v1, seurat.pipeline.v1,
-      // checkpoint.load.v1, checkpoint.fork.v1, deg.find_markers.v1).
+      // checkpoint.save.v1, checkpoint.load.v1, checkpoint.fork.v1, deg.find_markers.v1).
       // The bridge is a pure function; the resolved R caller is injected so it cannot
       // reach R by any path other than this server-controlled one.
       //
@@ -2013,7 +2701,8 @@ function createJobWorker(options = {}) {
             )
             : undefined,
         });
-        if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)) receiptBackedRCompleted = true;
+        if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)
+            && bridgeArgs.operation !== 'r.checkpoint.hydrate.v1') receiptBackedRCompleted = true;
         return descriptor;
       },
       callR: resolvedCallR,
@@ -2030,11 +2719,31 @@ function createJobWorker(options = {}) {
         db.getSeuratPipelineInputsForJobByWorker(
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
         ),
+      getMultiSampleSeuratPipelineInputs: () =>
+        db.getMultiSampleSeuratPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+      getSpatialPipelineInputs: () =>
+        db.getSpatialPipelineInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+      getConditionComparisonInputs: () =>
+        db.getConditionComparisonInputsForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
       deriveRObjectStateKey: typeof deriveRObjectStateKey === 'function' ? deriveRObjectStateKey : undefined,
       // Server-selected checkpoint resolvers keep internal storage keys private
       // while binding selection to this job's valid claim and trusted source id.
       getLoadableCheckpoint: () =>
         db.getLoadableCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+      getHydrationCheckpoint: () =>
+        db.getHydrationCheckpointForJobByWorker(
+          jobId, workerId, claimToken, withNow({}, resolveNowTs())
+        ),
+      getExpertRPrivateInputs: () =>
+        db.getExpertRPrivateInputsForJobByWorker(
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
         ),
       getForkableCheckpoint: () =>
@@ -2043,6 +2752,7 @@ function createJobWorker(options = {}) {
         ),
       allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
       logger: log,
+      runExpertSandbox: typeof runExpertSandbox === 'function' ? runExpertSandbox : undefined,
     };
 
     let outcome;
@@ -2192,8 +2902,13 @@ function createJobWorker(options = {}) {
     }
     // Record a sanitized message only — never a stack/path. Handlers are responsible
     // for not embedding secrets in their error messages.
-    const domainMessage = handlerErr && typeof handlerErr.code === 'string'
-      ? SAFE_HANDLER_DOMAIN_MESSAGES[handlerErr.code]
+    const stableDomainCode = handlerErr?.code === 'R_CELLCHAT_INFERENCE_FAILED'
+      && typeof handlerErr?.rCode === 'string'
+      && SAFE_HANDLER_DOMAIN_MESSAGES[handlerErr.rCode]
+      ? handlerErr.rCode
+      : handlerErr?.code;
+    const domainMessage = typeof stableDomainCode === 'string'
+      ? SAFE_HANDLER_DOMAIN_MESSAGES[stableDomainCode]
       : null;
     const message = domainMessage || (handlerErr && handlerErr.publicSafeHandlerError === true
       ? String(handlerErr.message || 'Handler failed.').slice(0, 240)
@@ -2202,11 +2917,11 @@ function createJobWorker(options = {}) {
     log.error(`[worker ${workerId}] handler error for ${jobId}: ${diagnosticCode}`);
     const opts = withNow({ log: { level: 'error', message: 'Handler failed.' } }, nowTs);
     try {
-      await db.failJobByWorker(jobId, workerId, claimToken, { code: 'HANDLER_ERROR', message }, opts);
+      await db.failJobByWorker(jobId, workerId, claimToken, { code: domainMessage ? stableDomainCode : 'HANDLER_ERROR', message }, opts);
     } catch (err) {
       return asClaimLoss(err, 'fail-handler', jobId, jobType, reaped);
     }
-    return { status: 'failed', jobId, jobType, error: { code: 'HANDLER_ERROR', message }, reaped };
+    return { status: 'failed', jobId, jobType, error: { code: domainMessage ? stableDomainCode : 'HANDLER_ERROR', message }, reaped };
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
@@ -2252,11 +2967,16 @@ module.exports = {
   rObjectInspectHandler,
   pbmcPipelineHandler,
   seuratPipelineHandler,
+  spatialSeuratPipelineHandler,
+  checkpointSaveHandler,
   checkpointLoadHandler,
   checkpointForkHandler,
   degFindMarkersHandler,
   enrichmentGseaHandler,
   cellChatInferenceHandler,
+  exploratoryAnalysisHandler,
+  conditionComparisonHandler,
+  expertRHandler,
   DEFAULT_HANDLERS,
   UNSUPPORTED_JOB_TYPE,
   JOB_WORKER_DEFAULTS,

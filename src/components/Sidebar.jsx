@@ -1,18 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2, ChevronDown, ChevronLeft, Database, GitBranch, LayoutPanelTop,
-  Lock, LogOut, Menu, Microscope, Moon, Sun, Users, Wrench,
+  Info, LogOut, Menu, Microscope, Moon, Sun, Users, Wrench,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 
 export default function Sidebar({
   activeTab,
   setActiveTab,
-  apiStatus,
   workspaces = [],
-  setWorkspaces,
   activeWsIndex = 0,
-  setActiveWsIndex,
   selectedObjects = [],
   user,
   onLogout,
@@ -42,32 +39,22 @@ export default function Sidebar({
     }
   };
 
-  const personalWs = workspaces.filter(ws => ws.type === 'personal');
-  const sharedWs = workspaces.filter(ws => ws.type === 'shared');
   const currentWorkspace = workspaces[activeWsIndex];
   const hasData = selectedObjects.length > 0;
   const hasProject = !!currentWorkspace?.selectedProjectId || (currentWorkspace?.projects || []).length > 0;
-  const backendConnected = typeof apiStatus === 'string' && /connected/i.test(apiStatus) && !/disconnected/i.test(apiStatus);
-
-  const pipelineSections = buildPipelineSidebarSections(activePipeline, pipelineState);
-
-  const handleAddWorkspace = () => {
-    if (!setWorkspaces || !setActiveWsIndex) return;
-    const newWs = {
-      id: `ws-${Date.now()}`,
-      name: `New Workspace ${workspaces.length}`,
-      projects: [],
-      objects: [],
-      selectedProjectId: null,
-      selectedObjectIds: [],
-      activeBranch: 'main',
-      branches: { main: null },
-      collaborators: [],
-      type: 'personal',
-      dataVersion: 0,
-    };
-    setWorkspaces([...workspaces, newWs]);
-    setActiveWsIndex(workspaces.length);
+  // Advanced analysis is a project-scoped, capability-gated workbench. Keep its
+  // single entry in the Project section rather than duplicating it in a selected
+  // workflow's generated navigation.
+  const pipelineSections = buildPipelineSidebarSections(activePipeline, pipelineState)
+    .map((section) => ({
+      ...section,
+      items: section.items.filter((item) => item.id !== 'expert-r'),
+    }))
+    .filter((section) => section.items.length > 0);
+  const researcherLabel = (value) => {
+    if (value === 'Expert R') return 'Advanced analysis';
+    if (/seurat/i.test(String(value || ''))) return 'Standard scRNA-seq workflow';
+    return value;
   };
 
   const NavButton = ({ item, disabled = false }) => {
@@ -82,26 +69,19 @@ export default function Sidebar({
           collapseAfterMobileNavigation();
         }}
         disabled={isDisabled}
-        title={item.status || item.label}
-        aria-label={item.status ? `${item.label}, ${item.status}` : item.label}
-        className={`w-full flex items-center gap-3 px-3 py-[7px] rounded border text-[15px] font-medium transition-colors group
+        title={item.status || researcherLabel(item.label)}
+        aria-label={item.status ? `${researcherLabel(item.label)}, ${item.status}` : researcherLabel(item.label)}
+        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] font-medium transition-colors group
           ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}
           ${isActive
-            ? 'border-primary/30 bg-primary/10 text-text dark:border-slate-600 dark:bg-slate-700'
-            : 'border-transparent text-textMuted hover:bg-black/5 dark:hover:bg-slate-700 hover:text-text'
+            ? 'border-primary/30 bg-primary/10 text-text'
+            : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'
           }
         `}
       >
         {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />}
-        <span className="min-w-0 flex-1 text-left">
-          <span className="block truncate">{item.label}</span>
-          {item.status && (
-            <span className="mt-0.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200">
-              <Lock size={10} />
-              {item.status}
-            </span>
-          )}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-left">{researcherLabel(item.label)}</span>
+        {item.status && <Info size={13} className="flex-shrink-0 text-textMuted" aria-hidden="true" />}
         {item.id === 'publication' && figuresCount > 0 && (
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">
             {figuresCount}
@@ -114,38 +94,17 @@ export default function Sidebar({
 
   const SectionLabel = ({ children }) => (
     <div className="px-2 mb-1">
-      <h3 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+      <h3 className="text-[11px] font-semibold text-textMuted flex items-center gap-1.5">
         <ChevronDown size={12} className="opacity-70" />
         {children}
       </h3>
     </div>
   );
 
-  const WorkspaceButton = ({ ws, demo = false }) => {
-    const i = workspaces.indexOf(ws);
-    const isActive = activeWsIndex === i;
-    const initials = ws.name.substring(0, 2).toUpperCase();
-    return (
-      <div key={ws.id} className="relative group w-full flex justify-center">
-        <div className={`absolute left-0 w-[4px] bg-white rounded-r-lg transition-all duration-300 ${isActive ? 'h-10 top-1' : 'h-0 top-6 group-hover:h-5 group-hover:top-3.5'}`} />
-        <button
-          onClick={() => { setActiveWsIndex?.(i); setIsCollapsed(false); }}
-          aria-label={demo ? `Switch to demo workspace ${ws.name}` : `Switch to ${ws.name}`}
-          title={demo ? `${ws.name} demo shell, not project RBAC` : ws.name}
-          className={`w-12 h-12 flex items-center justify-center text-[15px] font-black transition-all duration-200 relative group-hover:rounded-[16px] group-hover:bg-primary group-hover:text-white
-            ${isActive ? 'rounded-[16px] bg-primary text-white shadow-lg' : 'rounded-[24px] bg-black/5 dark:bg-slate-800 text-text'}
-          `}
-        >
-          {initials}
-        </button>
-      </div>
-    );
-  };
-
   return (
-    <div className="flex h-full flex-shrink-0 z-20 shadow-2xl relative w-[72px] lg:w-auto">
-      <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0">
-        <div className="w-12 h-12 rounded-[24px] bg-primary flex items-center justify-center shadow-lg shadow-black/50 mb-1 hover:rounded-[16px] transition-all duration-200 cursor-pointer" title="BenchOne">
+    <div className="flex h-full flex-shrink-0 z-20 relative w-[72px] lg:w-auto">
+      <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0 border-r border-border">
+        <div className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center shadow-sm mb-1" title="TraceOmics">
           <Microscope size={22} className="text-on-accent" />
         </div>
 
@@ -163,29 +122,13 @@ export default function Sidebar({
 
         <div className="w-8 h-0.5 bg-black/10 dark:bg-slate-800 rounded-full my-1" />
 
-        <div className="flex-1 w-full overflow-y-auto no-scrollbar flex flex-col items-center gap-2">
-          {personalWs.map(ws => <WorkspaceButton key={ws.id} ws={ws} />)}
-
-          {sharedWs.length > 0 && <div className="w-8 h-0.5 bg-black/10 dark:bg-slate-800 rounded-full my-1" />}
-          {sharedWs.map(ws => <WorkspaceButton key={ws.id} ws={ws} demo />)}
-
-          <div className="relative group w-full flex justify-center mt-2">
-            <button
-              onClick={handleAddWorkspace}
-              aria-label="Create new local workspace"
-              className="w-12 h-12 rounded-[24px] bg-black/5 dark:bg-slate-800 flex items-center justify-center text-success hover:bg-success hover:text-on-accent hover:rounded-[16px] transition-all duration-200 shadow-sm"
-              title="Create local workspace shell"
-            >
-              <span className="text-3xl font-light mb-1">+</span>
-            </button>
-          </div>
-        </div>
+        <div className="flex-1" />
 
         {user && (
           <div className="mt-auto mb-2 w-full flex flex-col items-center gap-2 group relative">
             <button
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-slate-700 hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-white"
+              className="w-11 h-11 rounded-xl bg-transparent hover:bg-black/5 transition-colors duration-150 flex items-center justify-center text-textMuted hover:text-text"
               onClick={() => setTheme?.(theme === 'dark' ? 'light' : 'dark')}
               title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
             >
@@ -193,7 +136,7 @@ export default function Sidebar({
             </button>
             <button
               aria-label="Log out"
-              className="w-12 h-12 rounded-[24px] bg-transparent hover:bg-danger hover:rounded-[16px] transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-on-accent"
+              className="w-11 h-11 rounded-xl bg-transparent hover:bg-danger hover:text-on-accent transition-colors duration-150 flex items-center justify-center text-textMuted"
               onClick={onLogout}
               title="Log Out"
             >
@@ -203,26 +146,29 @@ export default function Sidebar({
         )}
       </nav>
 
-      <aside className={`bg-surface flex flex-col h-full select-none transition-all duration-300 overflow-hidden ${isCollapsed ? 'w-0 opacity-0 pointer-events-none' : 'absolute left-[72px] top-0 z-40 w-[calc(100vw-72px)] max-w-60 opacity-100 shadow-2xl lg:static lg:left-auto lg:top-auto lg:z-auto lg:w-60 lg:max-w-none'}`}>
+      <aside className={`bg-surface flex flex-col h-full select-none transition-[width,opacity] duration-200 overflow-hidden ${isCollapsed ? 'w-0 opacity-0 pointer-events-none' : 'absolute left-[72px] top-0 z-40 w-[calc(100vw-72px)] max-w-60 opacity-100 shadow-xl lg:static lg:left-auto lg:top-auto lg:z-auto lg:w-60 lg:max-w-none'}`}>
         <button
           type="button"
           aria-label="Collapse sidebar"
-          className="h-12 w-full flex items-center px-4 shadow-sm border-b border-border hover:bg-slate-700 transition-colors cursor-pointer group text-left"
+          className="h-12 w-full flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"
           onClick={() => setIsCollapsed(true)}
         >
-          <span className="text-[15px] font-black text-slate-100 truncate flex-1 leading-none">{currentWorkspace?.name || 'BenchOne'}</span>
+          <span className="text-[15px] font-semibold text-text truncate flex-1 leading-none">{currentWorkspace?.name || 'TraceOmics'}</span>
           <ChevronLeft size={18} className="text-slate-400 group-hover:text-text" />
         </button>
 
         <div className="flex-1 overflow-y-auto px-2 py-4 space-y-5 custom-scrollbar">
           <div className="space-y-[2px]">
             <SectionLabel>Project</SectionLabel>
-            <NavButton item={{ id: 'workspace', label: 'Workbench', icon: Database, status: hasProject ? 'Backend project' : 'Select project' }} />
-            <NavButton item={{ id: 'pipeline-manager', label: 'Pipeline Manager', icon: LayoutPanelTop, status: hasProject ? 'User scoped' : 'Select project' }} disabled={!hasProject} />
-            <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project RBAC' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'workspace', label: 'Analysis workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
+            <NavButton item={{ id: 'pipeline-manager', label: 'Approved workflows', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Not enabled for this deployment' }} disabled={!hasProject || deploymentPolicy.expertREnabled !== true} />
+            <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
-              <SectionLabel>Data / Object</SectionLabel>
-              <NavButton item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Provenance DAG' : 'Requires loaded object' }} disabled={!hasData} />
+              <SectionLabel>Data & analysis</SectionLabel>
+              <NavButton item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Analysis lineage' : 'Requires a saved analysis' }} disabled={!hasData} />
               <NavButton item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
               <NavButton item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
             </div>
@@ -230,18 +176,23 @@ export default function Sidebar({
 
           {pipelineSections.map(section => (
             <div key={section.id} className="space-y-[2px]">
-              <SectionLabel>{section.label}</SectionLabel>
+              <SectionLabel>{researcherLabel(section.label)}</SectionLabel>
               {section.items.map(item => {
                 const blockedLegacyMutation = deploymentPolicy.legacyLiveMutationToolsEnabled !== true
                   && item.id === 'integrate';
+                const blockedExpertR = deploymentPolicy.expertREnabled !== true
+                  && item.id === 'expert-r';
                 const visibleItem = blockedLegacyMutation
-                  ? { ...item, status: 'Local development only' }
-                  : item;
+                  ? { ...item, status: 'Unavailable in this workspace' }
+                  : blockedExpertR
+                    ? { ...item, status: 'Not configured' }
+                    : item;
                 return (
                   <NavButton
                     key={item.id}
                     item={visibleItem}
                     disabled={blockedLegacyMutation
+                      || blockedExpertR
                       || (item.requiresObject && !hasData)
                       || (item.requiresProject && !hasProject)}
                   />
@@ -251,22 +202,6 @@ export default function Sidebar({
           ))}
         </div>
 
-        <button
-          type="button"
-          className="h-14 w-full text-left bg-black/5 dark:bg-[black] mt-auto flex items-center px-4 gap-3 select-none shrink-0 cursor-pointer hover:bg-slate-800 transition-colors"
-          onClick={() => setActiveTab('diagnostics')}
-          aria-label={`Open Diagnostics & Environment. ${backendConnected ? 'Backend connected' : 'Backend offline'}: ${apiStatus || 'Connection lost'}`}
-          title="Open Diagnostics & Environment"
-        >
-          <div className="flex flex-col justify-center min-w-0 pr-2 pb-0.5 flex-1">
-            <div className="flex items-center gap-1.5 mb-[2px]">
-              <div className={`w-2.5 h-2.5 rounded-full border border-black dark:border-white shadow-sm ${backendConnected ? 'bg-success' : 'animate-pulse bg-danger'}`} />
-              <span className="text-[13px] font-bold text-text truncate leading-none mt-1">{backendConnected ? 'Backend connected' : 'Backend offline'}</span>
-            </div>
-            <span className="text-[11px] text-slate-400 truncate leading-none">{apiStatus || 'Connection lost'}</span>
-          </div>
-          <Wrench size={16} className="text-slate-400" />
-        </button>
       </aside>
     </div>
   );

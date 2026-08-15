@@ -1,31 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
-import Workspace from './pages/Workspace';
-import QualityControl from './pages/QualityControl';
-import Normalization from './pages/Normalization';
-import PCA from './pages/PCA';
-import Clustering from './pages/Clustering';
-import UMAPView from './pages/UMAPView';
-import FeaturePlot from './pages/FeaturePlot';
-import HeatmapPlot from './pages/HeatmapPlot';
-import DotPlot from './pages/DotPlot';
-import GeneViewer from './pages/GeneViewer';
-import DifferentialExpression from './pages/DifferentialExpression';
-import PathwayEnrichment from './pages/PathwayEnrichment';
-import CellChat from './pages/CellChat';
-import Publication from './pages/Publication';
-import Validation from './pages/Validation';
-import LineageExplorer from './pages/LineageExplorer';
-import ProjectHistory from './pages/ProjectHistory';
-import BatchIntegration from './pages/BatchIntegration';
-import Collaborators from './pages/Collaborators';
-import Inspect from './pages/Inspect';
-import Diagnostics from './pages/Diagnostics';
-import PipelineManager from './pages/PipelineManager';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
-import { hasAttachedLiveRObject } from './liveRState';
+import {
+  consumeSavedObjectSelection,
+  hasAttachedLiveRObject,
+  PIPELINE_PROBE_MAX_RETRIES,
+  pipelineProbeAction,
+  pipelineProbeRetryDelay,
+  reconcileRestoredSession,
+} from './liveRState';
+import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
+import { publicErrorMessage } from './publicError';
+import { buildProjectProvenancePayload } from './projectProvenance';
 
 import {
   saveProvenance,
@@ -48,6 +36,33 @@ import {
   persistAnalysisObjectSummary,
 } from './backendWorkspaceModel';
 
+const Workspace = React.lazy(() => import('./pages/Workspace'));
+const QualityControl = React.lazy(() => import('./pages/QualityControl'));
+const Normalization = React.lazy(() => import('./pages/Normalization'));
+const PCA = React.lazy(() => import('./pages/PCA'));
+const Clustering = React.lazy(() => import('./pages/Clustering'));
+const UMAPView = React.lazy(() => import('./pages/UMAPView'));
+const FeaturePlot = React.lazy(() => import('./pages/FeaturePlot'));
+const HeatmapPlot = React.lazy(() => import('./pages/HeatmapPlot'));
+const DotPlot = React.lazy(() => import('./pages/DotPlot'));
+const GeneViewer = React.lazy(() => import('./pages/GeneViewer'));
+const DifferentialExpression = React.lazy(() => import('./pages/DifferentialExpression'));
+const PathwayEnrichment = React.lazy(() => import('./pages/PathwayEnrichment'));
+const CellChat = React.lazy(() => import('./pages/CellChat'));
+const Publication = React.lazy(() => import('./pages/Publication'));
+const Validation = React.lazy(() => import('./pages/Validation'));
+const LineageExplorer = React.lazy(() => import('./pages/LineageExplorer'));
+const ProjectHistory = React.lazy(() => import('./pages/ProjectHistory'));
+const BatchIntegration = React.lazy(() => import('./pages/BatchIntegration'));
+const Collaborators = React.lazy(() => import('./pages/Collaborators'));
+const Inspect = React.lazy(() => import('./pages/Inspect'));
+const Diagnostics = React.lazy(() => import('./pages/Diagnostics'));
+const PipelineManager = React.lazy(() => import('./pages/PipelineManager'));
+const ExploratoryAnalysis = React.lazy(() => import('./pages/ExploratoryAnalysis'));
+const AnalysisBranches = React.lazy(() => import('./pages/AnalysisBranches'));
+const StudyDesign = React.lazy(() => import('./pages/StudyDesign'));
+const ExpertR = React.lazy(() => import('./pages/ExpertR'));
+
 // Pipeline step ordering — used for downstream invalidation
 const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'];
 
@@ -55,14 +70,18 @@ const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'
 // authenticated view has a level-1 heading (pages render their own <h2>). This
 // keeps the screen-reader heading tree rooted instead of starting at h2.
 const TAB_TITLES = {
-  workspace: 'Workbench', 'pipeline-manager': 'Pipeline Manager', team: 'Collaborators',
+  workspace: 'Workbench', 'pipeline-manager': 'Approved workflows', team: 'Collaborators',
+  branches: 'Analysis Branches',
+  'study-design': 'Study Design',
+  'expert-r': 'Advanced analysis',
   inspect: 'Inspect', lineage: 'Lineage', qc: 'Quality Control', normalize: 'Normalization',
   integrate: 'Batch Integration', pca: 'Principal Component Analysis', cluster: 'Clustering',
   umap: 'UMAP Embedding', featureplot: 'Feature Plot', heatmap: 'Marker Heatmap',
   dotplot: 'Dot Plot', geneviewer: 'Gene Expression', deg: 'Differential Expression',
-  history: 'Project History', annotate: 'Cell Annotation', enrichment: 'Pathway Enrichment',
+  explore: 'Exploratory Analysis',
+  history: 'Runs & Results', annotate: 'Cell Annotation', enrichment: 'Pathway Enrichment',
   cellchat: 'CellChat', customscript: 'Custom Script', publication: 'Figure Gallery',
-  validation: 'Validation', diagnostics: 'Diagnostics',
+  validation: 'Validation', diagnostics: 'Technical support',
 };
 
 // Error boundary to prevent full-app crashes from individual page errors
@@ -83,11 +102,8 @@ class ErrorBoundary extends React.Component {
         <div className="h-full flex items-center justify-center p-8 bg-background">
           <div className="text-center max-w-md">
             <div className="text-6xl mb-4">⚠️</div>
-            <h2 className="text-xl font-bold text-text mb-2">Component Error</h2>
-            <p className="text-slate-400 text-sm mb-4">{this.state.error?.message || 'An unexpected error occurred in this module.'}</p>
-            {import.meta.env.DEV && (
-              <pre className="text-xs text-slate-400 bg-black/30 p-3 rounded-lg overflow-auto max-h-32 text-left mb-4">{this.state.error?.stack?.split('\n').slice(0, 5).join('\n')}</pre>
-            )}
+            <h2 className="text-xl font-bold text-text mb-2">Analysis unavailable</h2>
+            <p className="text-slate-400 text-sm mb-4">This analysis could not be displayed. Retry it or return to the workspace.</p>
             <button onClick={() => this.setState({ hasError: false, error: null })} className="btn btn-primary text-sm">Retry</button>
           </div>
         </div>
@@ -140,7 +156,15 @@ const TabContent = ({ id, activeTab, children }) => {
   }, [activeTab, id]);
   return (
     <div className={`absolute inset-0 ${activeTab === id ? 'block' : 'hidden'}`}>
-      {hasBeenActive ? children : null}
+      {hasBeenActive ? (
+        <React.Suspense fallback={(
+          <div role="status" className="flex h-full items-center justify-center text-sm text-textMuted">
+            Opening workspace…
+          </div>
+        )}>
+          {children}
+        </React.Suspense>
+      ) : null}
     </div>
   );
 };
@@ -150,10 +174,16 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
   legacyLocalImportsEnabled: false,
   legacyLiveMutationToolsEnabled: false,
   serverFigureExportEnabled: false,
+  expertREnabled: false,
+  expertRProfile: null,
+  demoMode: false,
+  datasetUploadsEnabled: false,
+  demoGuestTtlSeconds: null,
 });
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
+  const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
   const [deploymentPolicy, setDeploymentPolicy] = useState(CLOSED_DEPLOYMENT_POLICY);
 
   useEffect(() => {
@@ -161,14 +191,25 @@ export default function App() {
     if (!window.electronAPI?.registrationPolicy) return undefined;
     window.electronAPI.registrationPolicy().then((policy) => {
       if (!active) return;
-      setDeploymentPolicy({
+      setDeploymentPolicy((current) => ({
         registrationEnabled: policy?.registrationEnabled === true,
         legacyLocalImportsEnabled: policy?.legacyLocalImportsEnabled === true,
         legacyLiveMutationToolsEnabled: policy?.legacyLiveMutationToolsEnabled === true,
         serverFigureExportEnabled: policy?.serverFigureExportEnabled === true,
-      });
+        expertREnabled: current.expertREnabled,
+        expertRProfile: current.expertRProfile,
+        demoMode: policy?.demoMode === true,
+        datasetUploadsEnabled: policy?.datasetUploadsEnabled === true,
+        demoGuestTtlSeconds: policy?.demoGuestTtlSeconds || null,
+      }));
     }).catch(() => {
-      if (active) setDeploymentPolicy(CLOSED_DEPLOYMENT_POLICY);
+      if (active) {
+        setDeploymentPolicy((current) => ({
+          ...CLOSED_DEPLOYMENT_POLICY,
+          expertREnabled: current.expertREnabled,
+          expertRProfile: current.expertRProfile,
+        }));
+      }
     });
     return () => { active = false; };
   }, []);
@@ -197,8 +238,13 @@ export default function App() {
     clusterCount: 0,
     clusterDims: 15  // default dims; updated when clustering runs
   });
+  const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
+  const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
+  const checkpointSaveRequestRef = React.useRef(0);
+  const checkpointSaveOpenedObjectRef = React.useRef(null);
+  const checkpointSaveBusy = ['saving', 'opening', 'pending'].includes(checkpointSaveState.phase);
   // Gate that blocks per-page cache hydration until after the R session
-  // restore attempt completes (success or no saved session). Without this
+  // identity and selected-object attachment probes complete. Without this
   // gate the pages fire onlyIfCached calls with the wrong (new) session ID
   // and always miss the SQLite cache.
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
@@ -206,6 +252,35 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [loggedOutNotice, setLoggedOutNotice] = useState('');
   const isLoggedIn = !!user;
+
+  useEffect(() => {
+    let active = true;
+    if (!user?.id || typeof window.electronAPI?.getExpertRCapabilities !== 'function') {
+      setDeploymentPolicy((current) => ({
+        ...current,
+        expertREnabled: false,
+        expertRProfile: null,
+      }));
+      return undefined;
+    }
+    window.electronAPI.getExpertRCapabilities().then((capability) => {
+      if (!active) return;
+      setDeploymentPolicy((current) => ({
+        ...current,
+        expertREnabled: capability?.expertREnabled === true,
+        expertRProfile: capability?.expertRProfile || null,
+      }));
+    }).catch(() => {
+      if (active) {
+        setDeploymentPolicy((current) => ({
+          ...current,
+          expertREnabled: false,
+          expertRProfile: null,
+        }));
+      }
+    });
+    return () => { active = false; };
+  }, [user?.id]);
 
   // Restore auth state from the HttpOnly session cookie (source of truth) on
   // mount, rather than trusting cached local user metadata. The cookie is not
@@ -218,11 +293,7 @@ export default function App() {
     if (!window.electronAPI?.restoreSession) return undefined;
     window.electronAPI.restoreSession().then((restored) => {
       if (cancelled) return;
-      if (restored && restored.email) {
-        setUser((prev) => (prev && prev.email === restored.email ? prev : restored));
-      } else if (restored === null) {
-        setUser(null);
-      }
+      setUser((currentUser) => reconcileRestoredSession(currentUser, restored));
     }).catch(() => { /* transient failure: keep current state */ });
     return () => { cancelled = true; };
   }, []);
@@ -268,6 +339,7 @@ export default function App() {
   });
 
   const [apiStatus, setApiStatus] = useState('Checking backend');
+  const [computeStatus, setComputeStatus] = useState({ status: 'unknown', updatedAt: null });
   const [provenanceRecords, setProvenanceRecords] = useState([]);
   const [drawerProvId, setDrawerProvId] = useState(null);
   const [drawerChain, setDrawerChain] = useState(null);
@@ -291,6 +363,28 @@ export default function App() {
     window.electronAPI.apiRequest('/health')
       .then(data => setApiStatus(data?.error ? 'Backend disconnected' : (data?.mode || 'R/Seurat runtime connected')))
       .catch(() => setApiStatus('Backend disconnected'));
+  }, [user?.email]);
+
+  useEffect(() => {
+    if (!user?.email || typeof window.electronAPI?.getComputeRuntimeStatus !== 'function') {
+      setComputeStatus({ status: 'unknown', updatedAt: null });
+      return undefined;
+    }
+    let active = true;
+    const refreshComputeStatus = async () => {
+      try {
+        const next = await window.electronAPI.getComputeRuntimeStatus();
+        if (active) setComputeStatus(next);
+      } catch {
+        if (active) setComputeStatus({ status: 'unknown', updatedAt: null });
+      }
+    };
+    void refreshComputeStatus();
+    const intervalId = window.setInterval(refreshComputeStatus, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
   }, [user?.email]);
 
   const updateActiveWorkspace = useCallback((updates) => {
@@ -339,7 +433,7 @@ export default function App() {
       setBackendModelStatus(prev => ({
         ...prev,
         objectsLoading: false,
-        error: err.message || 'Failed to load analysis objects.',
+        error: publicErrorMessage(err, 'Saved analyses are temporarily unavailable.'),
       }));
       return { objects: [], selectedObjectId: null, error: err };
     }
@@ -372,7 +466,7 @@ export default function App() {
       setBackendModelStatus(prev => ({
         ...prev,
         projectsLoading: false,
-        error: err.message || 'Failed to load backend projects.',
+        error: publicErrorMessage(err, 'Projects are temporarily unavailable.'),
       }));
       return { projects: [], selectedProjectId: null, error: err };
     }
@@ -384,6 +478,7 @@ export default function App() {
   }, [refreshProjects, user?.email]);
 
   const handleSelectProject = useCallback(async (projectId) => {
+    checkpointSaveRequestRef.current += 1;
     cacheSelectedProject(localStorage, user, projectId);
     patchActiveWorkspace({
       selectedProjectId: projectId,
@@ -442,7 +537,56 @@ export default function App() {
     }));
   }, [patchActiveWorkspace, user]);
 
+  // A DB-backed object must be created before R can accept its server-verified
+  // private key. If the live load fails, keep that durable record visible and
+  // selected so the owner gets a concrete recovery action instead of an
+  // unexplained object appearing after the next sign-in.
+  const handleAnalysisObjectLoadFailed = useCallback((projectId, analysisObject) => {
+    if (!projectId || !analysisObject?.id) return;
+    const objectCard = mapBackendAnalysisObject(analysisObject);
+    cacheSelectedProject(localStorage, user, projectId);
+    cacheSelectedAnalysisObject(localStorage, user, projectId, analysisObject.id);
+    patchActiveWorkspace(ws => ({
+      selectedProjectId: projectId,
+      objects: [
+        objectCard,
+        ...ws.objects.filter(obj => obj.id !== analysisObject.id),
+      ],
+      selectedObjectIds: [analysisObject.id],
+      lastSelectedByProject: {
+        ...(ws.lastSelectedByProject || {}),
+        [projectId]: analysisObject.id,
+      },
+    }));
+  }, [patchActiveWorkspace, user]);
+
+  // This is a UI projection of a just-completed server-authorized restore/fork
+  // job. It never grants access to another member's live R state; the worker
+  // has already verified the requesting owner and selected the checkpoint.
+  const handleLiveObjectAttached = useCallback((projectId, objectId) => {
+    if (!projectId || !objectId) return;
+    setUnsavedLiveChanges(false);
+    patchActiveWorkspace(ws => ({
+      objects: ws.objects.map(object => (
+        object.projectId === projectId && object.id === objectId
+          ? { ...object, liveState: 'attached' }
+          : object
+      )),
+    }));
+  }, [patchActiveWorkspace]);
+
+  useEffect(() => {
+    if (!unsavedLiveChanges) return undefined;
+    const warnBeforeClose = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeClose);
+    return () => window.removeEventListener('beforeunload', warnBeforeClose);
+  }, [unsavedLiveChanges]);
+
   const handleSelectAnalysisObject = useCallback((projectId, objectId) => {
+    checkpointSaveRequestRef.current += 1;
     cacheSelectedAnalysisObject(localStorage, user, projectId, objectId);
     patchActiveWorkspace(ws => ({
       selectedObjectIds: objectId ? [objectId] : [],
@@ -451,6 +595,62 @@ export default function App() {
         : (ws.lastSelectedByProject || {}),
     }));
   }, [patchActiveWorkspace, user]);
+
+  const handleSaveLiveAnalysis = useCallback(async () => {
+    const projectId = datasetInfo?.projectId || currentWs.selectedProjectId;
+    const objectId = datasetInfo?.id;
+    if (!projectId || !objectId || checkpointSaveBusy) return;
+    const requestId = ++checkpointSaveRequestRef.current;
+    setCheckpointSaveState({ phase: 'saving', message: 'Saving the current analysis as an immutable version...', durableSaved: false });
+    try {
+      const saved = await saveAndOpenCurrentAnalysis(
+        window.electronAPI,
+        projectId,
+        objectId,
+        {
+          onPhase: (phase) => {
+            if (checkpointSaveRequestRef.current !== requestId) return;
+            if (phase === 'opening') {
+              setUnsavedLiveChanges(false);
+              setCheckpointSaveState({
+                phase,
+                message: 'Saved. Opening the durable version in your private workspace...',
+                durableSaved: true,
+              });
+            }
+          },
+        }
+      );
+      if (checkpointSaveRequestRef.current !== requestId) return;
+      await refreshAnalysisObjects(projectId);
+      if (checkpointSaveRequestRef.current !== requestId) return;
+      checkpointSaveOpenedObjectRef.current = saved.resultAnalysisObjectId;
+      handleSelectAnalysisObject(projectId, saved.resultAnalysisObjectId);
+      handleLiveObjectAttached(projectId, saved.resultAnalysisObjectId);
+      setUnsavedLiveChanges(false);
+      setCheckpointSaveState({
+        phase: 'completed',
+        message: 'Saved and opened as a durable analysis version.',
+        durableSaved: true,
+      });
+    } catch (error) {
+      if (checkpointSaveRequestRef.current !== requestId) return;
+      const durableSaved = error?.durableSaved === true;
+      if (durableSaved) setUnsavedLiveChanges(false);
+      const stillPending = error?.code === 'JOB_POLL_TIMEOUT' && !durableSaved;
+      setCheckpointSaveState({
+        phase: stillPending ? 'pending' : 'error',
+        message: publicErrorMessage(
+          error,
+          durableSaved
+            ? 'The saved version exists, but it could not be opened. Open it from Runs & Results.'
+            : 'The current analysis could not be saved. Review Runs & Results and try again.'
+        ),
+        durableSaved,
+      });
+    }
+  }, [checkpointSaveBusy, currentWs.selectedProjectId, datasetInfo?.id, datasetInfo?.projectId,
+    handleLiveObjectAttached, handleSelectAnalysisObject, refreshAnalysisObjects]);
 
   /**
    * Mark a pipeline step as complete and invalidate downstream steps if re-running.
@@ -564,8 +764,8 @@ export default function App() {
       const parentId = datasetInfo.id;
       const childId = newObj.id;
       ['qc', 'normalize', 'pca', 'cluster', 'umap', 'deg', 'annotate'].forEach(step => {
-        const parentKey = `benchone_params_${step}_${sanitizedEmail}_${parentId}`;
-        const childKey = `benchone_params_${step}_${sanitizedEmail}_${childId}`;
+        const parentKey = `traceomics_params_${step}_${sanitizedEmail}_${parentId}`;
+        const childKey = `traceomics_params_${step}_${sanitizedEmail}_${childId}`;
         const parentParams = localStorage.getItem(parentKey);
         if (parentParams) localStorage.setItem(childKey, parentParams);
       });
@@ -586,6 +786,8 @@ export default function App() {
       clusterDims: 15,
     };
     setPipelineState(initialSubsetPS);
+    setUnsavedLiveChanges(true);
+    setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
 
     // The subset object is DB-backed metadata; live R state remains transient.
   }, [activeWsIndex, currentWs, datasetInfo, pipelineState.qcSummary, user]);
@@ -619,8 +821,9 @@ export default function App() {
       if (cached) {
         const prov = await (window.electronAPI?.getProvenance?.(cached.provenanceId));
         if (prov) {
-          // [PATCH] Update pipeline state even for cached results
-          if (step) {
+          // Cached provenance can render a prior result, but it cannot prove
+          // that the selected object exists in the current private R process.
+          if (step && hasAttachedLiveRObject(datasetInfo)) {
             const extraState = {};
             if (step === 'cluster') {
               if (cached.result?.n_clusters) extraState.clusterCount = cached.result.n_clusters;
@@ -647,12 +850,16 @@ export default function App() {
 
     if (forceOnlyIfCached) return null;
 
+    if (checkpointSaveBusy) {
+      return { error: 'Wait for the current analysis save to finish before changing the live workspace.' };
+    }
+
     // Durable project objects are safe to browse without a live R attachment.
     // Do not let hidden analysis tabs probe R merely because such an object is
     // selected; only cached results may be read until this user's private live
     // object has been attached explicitly.
     if (!hasAttachedLiveRObject(datasetInfo)) {
-      return { error: 'No live R object is attached. Load or attach this object first.' };
+      return { error: 'Open this saved version in your private analysis workspace before continuing.' };
     }
 
     // 2. Fresh Fetch
@@ -667,6 +874,19 @@ export default function App() {
       if (data.provenance) {
         data.provenance.parentIds = parentIds;
         await saveProvenance(data);
+        const projectId = datasetInfo?.projectId;
+        const projectRole = (currentWs?.projects || []).find((project) => project.id === projectId)?.role;
+        if (projectId && datasetInfo?.id && ['owner', 'admin', 'analyst'].includes(projectRole)
+            && typeof window.electronAPI?.createProjectProvenance === 'function') {
+          const projectPayload = buildProjectProvenancePayload(data.provenance, datasetInfo.id);
+          try {
+            await window.electronAPI.createProjectProvenance(projectId, projectPayload);
+          } catch {
+            // The scientific operation has already completed in R. Project-level
+            // provenance persistence is best-effort here so a transient history
+            // write failure cannot cause the user to repeat a mutating operation.
+          }
+        }
 
         setProvenanceRecords(prev => {
           if (prev.some(p => p.id === data.provenance.id)) return prev;
@@ -690,6 +910,8 @@ export default function App() {
             extraState.qcSummary = data.result;
           }
           markPipelineStep(step, extraState);
+          setUnsavedLiveChanges(true);
+          setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
           // QC: update workspace object cell count to post-filter value
           if (step === 'qc' && data.result?.post_filter_cells) {
             updateActiveWorkspace({
@@ -716,9 +938,9 @@ export default function App() {
       const msg = String(err?.message || '');
       if (/\bbusy\b|rate limit|too many/i.test(msg)) console.warn('[callApi] transient:', msg);
       else console.error(err);
-      return { error: err.message };
+      return { error: publicErrorMessage(err) };
     }
-  }, [markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
+  }, [checkpointSaveBusy, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
 
   const openProvenance = async (provId) => {
     const chain = await getProvenanceChain(provId);
@@ -754,97 +976,14 @@ export default function App() {
   };
 
   // ── Workspace Persistence ───────────────────────────────────────
-  // Legacy benchone_ws_* localStorage keys are intentionally ignored here.
+  // Legacy traceomics_ws_* localStorage keys are intentionally ignored here.
   // Backend projects and analysis-object rows are the authoritative workspace
   // model; localStorage only caches selected project/object IDs.
   // ────────────────────────────────────────────────────────────────
 
   // ── R Session / Pipeline Persistence ─────────────────────────────
-  // Live R state is private and transient. The UI probes the server for the
-  // current process session ID only; it does not restore objects from
-  // client-selected paths or localStorage session metadata.
-  const getSessionPath = () => null;
-  const currentlyRestoredObjectRef = React.useRef(null);
-
-  // Track the currently restored object ID (avoid re-firing if React re-renders)
-
-  // 0. Keep sessionPathRef in sync so callApi can always find the save path
-  useEffect(() => {
-    return undefined;
-  }); // runs every render — cheap, keeps ref always fresh
-
-
-
-  // 1. Auto-restore on login + active object available
-  useEffect(() => {
-    if (!user?.email || !datasetInfo?.id) {
-      // No object yet — nothing to restore, unblock hydration immediately
-      setSessionCheckDone(true);
-      return;
-    }
-    if (currentlyRestoredObjectRef.current === datasetInfo.id) return;
-    currentlyRestoredObjectRef.current = datasetInfo.id;
-
-    // Block hydration until this async restore resolves
-    setSessionCheckDone(false);
-
-    const path = getSessionPath(user.email, datasetInfo.id);
-    if (!path) { setSessionCheckDone(true); return; }
- 
-    console.log('[Vault] Checking for stored object:', path);
-    window.electronAPI.apiRequest('/session-id')
-      .then(d => {
-        if (!d.exists) {
-          console.log('[Vault] No stored object found — initializing fresh state.');
-          return window.electronAPI.apiRequest('/session-id').then(data => {
-            if (data.sessionId) setRSessionId(data.sessionId);
-            resetPipelineState();
-          });
-        }
-        console.log('[Vault] Found stored object, restoring state…');
-        return window.electronAPI.apiRequest('/session-id')
-          .then(d2 => {
-            if (d2?.success) {
-              const reductionsStr = Array.isArray(d2.reductions) 
-                ? d2.reductions.join(', ') 
-                : (d2.reductions ? String(d2.reductions) : 'none');
-              console.log('[Vault] ✅ Restored:', d2.cells, 'cells, reductions:', reductionsStr);
-              if (d2.session_id) {
-                console.log('[Vault] Linking to provenance cache:', d2.session_id);
-                setRSessionId(d2.session_id);
-              } else {
-                console.warn('[Vault] Metadata missing session_id — fetching fresh ID.');
-                return window.electronAPI.apiRequest('/session-id').then(data => {
-                  if (data.sessionId) setRSessionId(data.sessionId);
-                });
-              }
-            } else if (d2?.error) {
-              console.warn('[Vault] Object restore failed:', d2.error);
-              return window.electronAPI.apiRequest('/session-id').then(data => {
-                if (data.sessionId) setRSessionId(data.sessionId);
-                resetPipelineState();
-              });
-            } else {
-              console.warn('[Vault] Unexpected restore response, unblocking with fresh ID.');
-              return window.electronAPI.apiRequest('/session-id').then(data => {
-                if (data.sessionId) setRSessionId(data.sessionId);
-              });
-            }
-          });
-      })
-      .catch(e => {
-        console.warn('[Vault] Restore check failed:', e);
-        return window.electronAPI.apiRequest('/session-id').then(data => {
-          if (data.sessionId) setRSessionId(data.sessionId);
-          resetPipelineState();
-        }).catch(() => resetPipelineState());
-      })
-      .finally(() => {
-        console.log('[Vault] Ready.');
-        setSessionCheckDone(true);
-      });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.email, datasetInfo?.id]);
+  // Live R state is private and transient. A selected database object is never
+  // treated as attached until the current R process confirms it.
 
   useEffect(() => {
     if (!user?.email) {
@@ -852,10 +991,28 @@ export default function App() {
       return;
     }
     setSessionCheckDone(false);
+    const savedSelection = consumeSavedObjectSelection(
+      checkpointSaveOpenedObjectRef.current,
+      datasetInfo?.id
+    );
+    checkpointSaveOpenedObjectRef.current = savedSelection.nextExpectedObjectId;
+    if (!savedSelection.preserve) {
+      checkpointSaveRequestRef.current += 1;
+      setUnsavedLiveChanges(false);
+      setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
+    }
+    resetPipelineState();
+    if (datasetInfo?.id) {
+      const objectId = datasetInfo.id;
+      patchActiveWorkspace(ws => ({
+        objects: ws.objects.map(object => object.id === objectId
+          ? { ...object, liveState: 'unknown' }
+          : object),
+      }));
+    }
     window.electronAPI.apiRequest('/session-id')
       .then(data => {
         if (data?.sessionId) setRSessionId(data.sessionId);
-        if (!datasetInfo?.id) resetPipelineState();
       })
       .catch(e => {
         console.warn('[Session] R session probe failed:', e);
@@ -863,25 +1020,32 @@ export default function App() {
         resetPipelineState();
       })
       .finally(() => setSessionCheckDone(true));
-  }, [user?.email, datasetInfo?.id, resetPipelineState]);
+  }, [user?.email, datasetInfo?.id, resetPipelineState, patchActiveWorkspace]);
 
   const pipelineProbeKeyRef = React.useRef(null);
   const pipelineProbeAttachedRef = React.useRef(false);
   const pipelineProbeAttemptsRef = React.useRef(0);
+  const pipelineProbeAttemptsKeyRef = React.useRef(null);
   const pipelineProbeRetryTimeoutRef = React.useRef(null);
   const [pipelineProbeRetry, setPipelineProbeRetry] = useState(0);
   useEffect(() => {
     const objectId = datasetInfo?.id;
     if (!user?.email || !objectId || !sessionCheckDone) return;
     const key = `${user.email}:${objectId}:${rSessionId || 'unknown'}`;
-    if (pipelineProbeKeyRef.current === key) {
-      if (pipelineProbeAttachedRef.current && datasetInfo?.liveState !== 'attached') {
-        patchActiveWorkspace(ws => ({
-          objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
-        }));
-      }
+    const probeAction = pipelineProbeAction({
+      currentKey: pipelineProbeKeyRef.current,
+      nextKey: key,
+      serverAttached: pipelineProbeAttachedRef.current,
+      liveState: datasetInfo?.liveState,
+    });
+    if (probeAction === 'skip') {
       return;
     }
+    if (pipelineProbeAttemptsKeyRef.current !== key) {
+      pipelineProbeAttemptsKeyRef.current = key;
+      pipelineProbeAttemptsRef.current = 0;
+    }
+    if (pipelineProbeKeyRef.current !== key) pipelineProbeAttachedRef.current = false;
     pipelineProbeKeyRef.current = key;
 
     window.electronAPI.apiRequest('/pipeline-state', {
@@ -895,9 +1059,10 @@ export default function App() {
       // from the backend detaches the object.
       if (state?.error) {
         pipelineProbeKeyRef.current = null;
-        if (pipelineProbeAttemptsRef.current < 3) {
+        if (pipelineProbeAttemptsRef.current < PIPELINE_PROBE_MAX_RETRIES) {
           pipelineProbeAttemptsRef.current += 1;
-          pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
+          const delay = pipelineProbeRetryDelay(pipelineProbeAttemptsRef.current, Math.random() * 250);
+          pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), delay);
         }
         return;
       }
@@ -928,9 +1093,10 @@ export default function App() {
       }));
     }).catch(() => {
       pipelineProbeKeyRef.current = null;
-      if (pipelineProbeAttemptsRef.current < 3) {
+      if (pipelineProbeAttemptsRef.current < PIPELINE_PROBE_MAX_RETRIES) {
         pipelineProbeAttemptsRef.current += 1;
-        pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), 750);
+        const delay = pipelineProbeRetryDelay(pipelineProbeAttemptsRef.current, Math.random() * 250);
+        pipelineProbeRetryTimeoutRef.current = window.setTimeout(() => setPipelineProbeRetry(value => value + 1), delay);
       }
     });
     // Clear a pending retry if the effect re-runs (dataset/session change) or the
@@ -946,69 +1112,14 @@ export default function App() {
 
 
 
-  // 3. Recalculate pipeline state when active node (currentProvId) changes
-  useEffect(() => {
-    if (datasetInfo?.liveState !== 'attached') {
-      resetPipelineState();
-      return;
-    }
-    if (!currentProvId || provenanceRecords.length === 0) {
-      return;
-    }
-    
-    const computeState = (nodeId) => {
-      const state = {
-        qc: false,
-        normalize: false,
-        integrate: false,
-        pca: false,
-        cluster: false,
-        annotate: false,
-        umap: false,
-        clusterCount: 0,
-        clusterDims: 15
-      };
-      const visited = new Set();
-      const queue = [nodeId];
-      
-      while (queue.length > 0) {
-        const currentId = queue.shift();
-        if (visited.has(currentId)) continue;
-        visited.add(currentId);
-        
-        const r = provenanceRecords.find(x => x.id === currentId);
-        if (r) {
-          const op = Array.isArray(r.operation) ? r.operation[0] : r.operation;
-          if (op === 'quality-control' || op === 'qc') {
-            state.qc = true;
-            if (r.result) state.qcSummary = r.result;
-            else if (r.parameters?.summary) state.qcSummary = r.parameters.summary;
-          }
-          if (op === 'normalize') state.normalize = true;
-          if (op === 'integrate') state.integrate = true;
-          if (op === 'pca') state.pca = true;
-          if (op === 'cluster') {
-            state.cluster = true;
-            if (r.result?.n_clusters) state.clusterCount = r.result.n_clusters;
-            else if (r.parameters?.n_clusters) state.clusterCount = r.parameters.n_clusters;
-            
-            if (r.result?.dims_used) state.clusterDims = r.result.dims_used;
-            else if (r.parameters?.dims) state.clusterDims = r.parameters.dims;
-          }
-          if (op === 'umap') state.umap = true;
-          if (op === 'annotate') state.annotate = true;
-          
-          if (r.parentIds) {
-            r.parentIds.forEach(pId => queue.push(pId));
-          }
-        }
-      }
-      return state;
-    };
-    
-    const nextState = computeState(currentProvId);
-    setPipelineState(nextState);
-  }, [currentProvId, provenanceRecords, datasetInfo?.liveState, resetPipelineState]);
+  // Pipeline availability belongs to the server-verified private R session, not
+  // the browser's provenance cache. Provenance can be incomplete for sessions
+  // created by older releases or after a local cache reset; treating a partial
+  // history as authoritative used to turn a completed PCA/cluster into a false
+  // "PCA Required" gate immediately after a downstream action. The pipeline
+  // probe above and successful current-session actions are the only sources
+  // allowed to change these live-state controls. Provenance remains available
+  // for history, script viewing, and parent links without changing R state.
   // ────────────────────────────────────────────────────────────────
 
   if (!isLoggedIn) return (
@@ -1061,6 +1172,13 @@ export default function App() {
       userId: user?.id ?? null,
       objectId: datasetInfo?.id ?? null,
       deploymentPolicy,
+      setActiveTab,
+      historyRefreshToken,
+      onExpertRSubmitted: () => setHistoryRefreshToken((token) => token + 1),
+      computeStatus,
+      unsavedLiveChanges,
+      onSaveCurrentAnalysis: handleSaveLiveAnalysis,
+      checkpointSaveBusy,
     };
 
     return (
@@ -1079,6 +1197,7 @@ export default function App() {
             onCreateProject={handleCreateProject}
             onCreateAnalysisObjectForLoad={handleCreateAnalysisObjectForLoad}
             onAnalysisObjectLoaded={handleAnalysisObjectLoaded}
+            onAnalysisObjectLoadFailed={handleAnalysisObjectLoadFailed}
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
@@ -1091,6 +1210,9 @@ export default function App() {
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
         </TabContent></ErrorBoundary>
+        <ErrorBoundary key="branches"><TabContent id="branches" activeTab={activeTab}><AnalysisBranches {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="study-design"><TabContent id="study-design" activeTab={activeTab}><StudyDesign {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="expert-r"><TabContent id="expert-r" activeTab={activeTab}><ExpertR {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
@@ -1101,15 +1223,16 @@ export default function App() {
         <ErrorBoundary key="featureplot"><TabContent id="featureplot" activeTab={activeTab}><FeaturePlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="heatmap"><TabContent id="heatmap" activeTab={activeTab}><HeatmapPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="explore"><TabContent id="explore" activeTab={activeTab}><ExploratoryAnalysis key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} onLiveObjectAttached={handleLiveObjectAttached} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.annotate} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="customscript"><TabContent id="customscript" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.customscript} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="team"><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="diagnostics"><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
@@ -1123,6 +1246,7 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         apiStatus={apiStatus}
+        computeStatus={computeStatus}
         records={provenanceRecords.length}
         currentProvId={currentProvId}
         openProvenance={openProvenance}
@@ -1141,8 +1265,24 @@ export default function App() {
         deploymentPolicy={deploymentPolicy}
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
-        <h1 className="sr-only">BenchOne Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
-        {renderContent()}
+        <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
+        {(unsavedLiveChanges || checkpointSaveState.phase !== 'idle') && (
+          <div className={`shrink-0 border-b px-4 py-2 text-xs text-text ${checkpointSaveState.phase === 'completed' ? 'border-emerald-500/30 bg-emerald-500/10' : checkpointSaveState.phase === 'error' ? 'border-red-500/30 bg-red-500/10' : 'border-amber-500/30 bg-amber-500/10'}`} role="status">
+            {checkpointSaveState.phase === 'idle' ? (
+              <>
+                <span className="font-bold">Unsaved live changes.</span>{' '}
+                Closing this window or restarting compute can discard them.
+              </>
+            ) : <span className="font-medium">{checkpointSaveState.message}</span>}
+            {unsavedLiveChanges && !checkpointSaveBusy && (
+              <button type="button" className="ml-2 font-bold underline" onClick={() => void handleSaveLiveAnalysis()}>Save current analysis</button>
+            )}
+            {(checkpointSaveState.phase === 'error' || checkpointSaveState.phase === 'pending') && (
+              <button type="button" className="ml-2 underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
+            )}
+          </div>
+        )}
+        <div className="min-h-0 flex-1">{renderContent()}</div>
       </main>
 
       <ProvenanceDrawer

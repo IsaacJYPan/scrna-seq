@@ -25,11 +25,14 @@ const KEYS = [
   'R_PROXY_MAX_CONCURRENT', 'PGSSLMODE', 'PG_POOL_MAX',
   'PG_CONNECT_TIMEOUT_MS', 'PG_IDLE_TIMEOUT_MS', 'PORT', 'WEB_HOST',
   'TRUST_PROXY_HOPS', 'WEB_SHUTDOWN_TIMEOUT_MS', 'WEB_DRAIN_DELAY_MS'
+  , 'APP_DEPLOYMENT_MODE', 'DEMO_GUEST_TTL_SECONDS', 'DEMO_TEMPLATE_PROJECT_ID',
+  'EXPERT_R_ENABLED', 'EXPERT_R_SANDBOX_URL', 'EXPERT_R_SANDBOX_TOKEN'
 ];
 
 function setValidProduction(overrides = {}) {
   Object.assign(process.env, {
     NODE_ENV: 'production',
+    APP_DEPLOYMENT_MODE: 'private',
     SESSION_SECRET: VALID_SESSION_SECRET,
     SESSION_EPOCH: VALID_SESSION_EPOCH,
     DATABASE_URL: 'postgres://u:p@localhost:5432/db',
@@ -84,6 +87,12 @@ describe('cookie + origin boundaries', () => {
     process.env.NODE_ENV = 'production';
     expect(config.registrationEnabled()).toBe(false);
     expect(config.summary().registrationMode).toBe('operator-only');
+  });
+  it('disables ordinary registration in demo mode outside production too', () => {
+    process.env.NODE_ENV = 'development';
+    process.env.APP_DEPLOYMENT_MODE = 'demo';
+    expect(config.demoMode()).toBe(true);
+    expect(config.registrationEnabled()).toBe(false);
   });
   it('defaults cookies to non-secure in dev and secure in production', () => {
     expect(config.cookieSecure()).toBe(false);
@@ -321,6 +330,39 @@ describe('production validation gate', () => {
     delete process.env.SESSION_SECRET;
     delete process.env.FRONTEND_ORIGIN;
     expect(config.validateProductionConfig({ role: 'worker' })).toEqual([]);
+  });
+
+  it('requires a bounded, Expert-R-free curated public demo configuration', () => {
+    setValidProduction({
+      APP_DEPLOYMENT_MODE: 'demo',
+      DEMO_TEMPLATE_PROJECT_ID: 'proj_curated123',
+      DEMO_GUEST_TTL_SECONDS: '7200',
+      SESSION_TTL_SECONDS: '7200',
+      EXPERT_R_ENABLED: 'false',
+    });
+    expect(config.validateProductionConfig()).toEqual([]);
+    process.env.EXPERT_R_ENABLED = 'true';
+    process.env.EXPERT_R_SANDBOX_URL = 'http://127.0.0.1:8090';
+    process.env.EXPERT_R_SANDBOX_TOKEN = 'a'.repeat(64);
+    expect(config.validateProductionConfig().join(' ')).toMatch(/must be false in public demo/i);
+    process.env.EXPERT_R_ENABLED = 'false';
+    process.env.DEMO_TEMPLATE_PROJECT_ID = '';
+    expect(config.validateProductionConfig().join(' ')).toMatch(/DEMO_TEMPLATE_PROJECT_ID/);
+  });
+
+  it('fails closed for unknown deployment modes and non-loopback Expert R brokers', () => {
+    setValidProduction({ APP_DEPLOYMENT_MODE: 'unexpected' });
+    expect(config.validateProductionConfig().join(' ')).toMatch(/APP_DEPLOYMENT_MODE/);
+
+    setValidProduction({
+      EXPERT_R_ENABLED: 'true',
+      EXPERT_R_SANDBOX_URL: 'http://broker.example:8090',
+      EXPERT_R_SANDBOX_TOKEN: 'a'.repeat(64),
+    });
+    expect(config.validateProductionConfig().join(' ')).toMatch(/internal loopback/);
+
+    process.env.EXPERT_R_SANDBOX_URL = 'http://127.0.0.1:8090';
+    expect(config.validateProductionConfig()).toEqual([]);
   });
 });
 

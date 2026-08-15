@@ -98,6 +98,7 @@ describe.skipIf(!CONFIGURED)('jobs API', () => {
     for (const jobType of [
       'pbmc.pipeline.v1',
       'seurat.pipeline.v1',
+      'spatial.seurat.v1',
       'checkpoint.load.v1',
       'checkpoint.fork.v1',
       'deg.find_markers.v1',

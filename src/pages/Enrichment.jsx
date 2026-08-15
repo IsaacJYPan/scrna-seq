@@ -6,7 +6,7 @@
 // See the "Implemented vs UI-wired" table in README.md.
 import React, { useState, useCallback, useEffect } from 'react';
 import { Microscope, Activity, ChevronRight, AlertTriangle, RefreshCw, BarChart2, Zap } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 
 const DB_OPTIONS = [
@@ -56,7 +56,7 @@ export default function Enrichment({ callApi, datasetInfo, clusterProvId, openPr
     } else if (data && data.error && !isInitial) {
       setError(data.error);
     } else if (!data && !isInitial) {
-      setError('R backend error. Check the R console for details.');
+      setError('Pathway analysis could not be completed. Check the settings and try again.');
     }
 
     setComputing(false);
@@ -189,7 +189,7 @@ export default function Enrichment({ callApi, datasetInfo, clusterProvId, openPr
               <button
                 className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
                 onClick={() => openProvenance(result.provenance.id)}
-              >📝 View Script</button>
+              >📝 View recorded analysis</button>
               <button
                 onClick={() => { setResult(null); setHasHydrated(false); }}
                 className="btn btn-ghost border border-slate-700 text-slate-400 hover:text-white text-sm flex items-center gap-2"

@@ -1,5 +1,6 @@
 // src/api.js
 // Replaces the window.electronAPI object with standard fetch calls to our Express server.
+import { publicErrorMessage } from './publicError';
 
 // API base URL is configured via Vite env (VITE_API_BASE_URL).
 // When unset, fall back to same-origin relative requests (empty base),
@@ -10,6 +11,9 @@ const DEG_FIND_MARKERS_JOB_TYPE = 'deg.find_markers.v1';
 const ENRICHMENT_GSEA_JOB_TYPE = 'enrichment.gsea.v1';
 const CELLCHAT_INFERENCE_JOB_TYPE = 'cellchat.infer.v1';
 const SEURAT_PIPELINE_JOB_TYPE = 'seurat.pipeline.v1';
+const MULTI_SAMPLE_SEURAT_PIPELINE_JOB_TYPE = 'seurat.multisample.v1';
+const SPATIAL_SEURAT_PIPELINE_JOB_TYPE = 'spatial.seurat.v1';
+const CHECKPOINT_SAVE_JOB_TYPE = 'checkpoint.save.v1';
 const CHECKPOINT_FORK_JOB_TYPE = 'checkpoint.fork.v1';
 const DEG_FIND_MARKERS_PARAM_KEYS = new Set([
   'groupBy',
@@ -127,9 +131,47 @@ export function buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, par
   };
 }
 
+export function buildSpatialSeuratPipelineJobPayload({ datasetId, analysisObjectId, params = {} } = {}) {
+  return {
+    ...buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params }),
+    jobType: SPATIAL_SEURAT_PIPELINE_JOB_TYPE,
+  };
+}
+
+export function buildMultiSampleSeuratPipelineJobPayload({ samples = [], analysisObjectId, params = {} } = {}) {
+  const primaryDatasetId = Array.isArray(samples) ? samples[0]?.datasetId : null;
+  const base = buildSeuratPipelineJobPayload({
+    datasetId: primaryDatasetId,
+    analysisObjectId,
+    params,
+  });
+  return {
+    ...base,
+    jobType: MULTI_SAMPLE_SEURAT_PIPELINE_JOB_TYPE,
+    parameters: {
+      ...base.parameters,
+      samples: Array.isArray(samples) ? samples.map(sample => ({
+        datasetId: sample?.datasetId,
+        sampleName: sample?.sampleName,
+        conditionName: sample?.conditionName,
+        donorCode: sample?.donorCode || null,
+        batch: sample?.batch || null,
+      })) : [],
+    },
+  };
+}
+
 export function buildCheckpointForkJobPayload(analysisObjectId) {
   return {
     jobType: CHECKPOINT_FORK_JOB_TYPE,
+    analysisObjectId,
+    parameters: {},
+  };
+}
+
+export function buildCheckpointSaveJobPayload(analysisObjectId) {
+  return {
+    jobType: CHECKPOINT_SAVE_JOB_TYPE,
     analysisObjectId,
     parameters: {},
   };
@@ -140,9 +182,9 @@ localStorage.setItem('client_id', CLIENT_ID);
 // The HttpOnly session cookie set by the backend is the only authentication
 // credential. This key remains exported solely so migration cleanup and tests
 // can remove bearer credentials left by pre-cookie releases.
-export const AUTH_TOKEN_KEY = 'benchone_auth_token';
-export const AUTH_USER_KEY = 'benchone_auth_user';
-const AUTH_SESSION_KEY_PREFIXES = ['benchone_auth_', 'benchone_session'];
+export const AUTH_TOKEN_KEY = 'traceomics_auth_token';
+export const AUTH_USER_KEY = 'traceomics_auth_user';
+const AUTH_SESSION_KEY_PREFIXES = ['traceomics_auth_', 'traceomics_session'];
 const SESSION_STORAGE_KEYS = ['client_id'];
 
 // Purge bearer credentials left by pre-cookie-only releases. The key remains
@@ -237,12 +279,7 @@ async function pickAndUploadDirectory() {
 }
 
 function formatRequestError(error) {
-  try {
-    const parsed = JSON.parse(error.message);
-    return parsed?.error || error.message;
-  } catch {
-    return error.message;
-  }
+  return publicErrorMessage(error);
 }
 
 async function req(endpoint, options = {}) {
@@ -255,11 +292,42 @@ async function req(endpoint, options = {}) {
   const res = await fetch(apiUrl(endpoint), options);
   if (!res.ok) {
     const text = await res.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+    const error = new Error(
+      body && typeof body.error === 'string' ? body.error : (text || res.statusText)
+    );
+    error.status = res.status;
+    if (body && typeof body.code === 'string') error.code = body.code;
+    throw error;
+  }
+  return res.json();
+}
+
+async function downloadResponse(endpoint, fallbackFilename) {
+  const res = await fetch(apiUrl(endpoint), {
+    credentials: 'include',
+    headers: { 'X-Client-ID': CLIENT_ID },
+  });
+  if (!res.ok) {
+    const text = await res.text();
     const error = new Error(text || res.statusText);
     error.status = res.status;
     throw error;
   }
-  return res.json();
+  const disposition = res.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="([^"\r\n]+)"/i)?.[1] || fallbackFilename;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+  return { filename, sizeBytes: blob.size };
 }
 
 function formatRVersion(version) {
@@ -271,14 +339,27 @@ function formatRVersion(version) {
 
 async function checkRuntimeDiagnostics() {
   const data = await req('/api/runtime/diagnostics');
-  const packages = data.packages || data.runtime?.packages || {};
   return {
     version: formatRVersion(data.runtime?.rVersion || data.runtime?.version || data.rVersion),
     supportedTarget: data.supportedTarget || 'R 4.5.x',
-    rscriptPath: data.rscript?.path || data.rscriptPath || 'Unknown',
-    rscriptSource: data.rscript?.source || 'unknown',
     runtimeStatus: data.runtime?.status || 'unknown',
-    packages
+  };
+}
+
+async function getComputeRuntimeStatus() {
+  const data = await req('/api/runtime/compute-status');
+  const status = ['ready', 'unavailable', 'unknown'].includes(data?.status) ? data.status : 'unknown';
+  return {
+    status,
+    updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : null,
+    capabilities: data?.capabilities && typeof data.capabilities === 'object'
+      ? {
+        pathwayEnrichment: typeof data.capabilities.pathwayEnrichment === 'boolean'
+          ? data.capabilities.pathwayEnrichment : undefined,
+        cellChat: typeof data.capabilities.cellChat === 'boolean'
+          ? data.capabilities.cellChat : undefined,
+      }
+      : {},
   };
 }
 
@@ -288,7 +369,7 @@ export const electronAPI = {
     try {
       options.headers = options.headers || {};
       options.headers['X-Client-ID'] = CLIENT_ID;
-      options.headers['X-BenchOne-CSRF'] = '1';
+      options.headers['X-TraceOmics-CSRF'] = '1';
       options.credentials = options.credentials || 'include';
 
       const res = await fetch(apiUrl(`/api/r${endpoint}`), options);
@@ -301,13 +382,13 @@ export const electronAPI = {
       }
       
       if (!res.ok) {
-        if (typeof data === 'object' && data.error) return data;
-        return { error: typeof data === 'string' ? data : res.statusText };
+        if (typeof data === 'object' && data.error) return { ...data, error: publicErrorMessage(data.error) };
+        return { error: publicErrorMessage(typeof data === 'string' ? data : res.statusText) };
       }
       
       return data;
     } catch (e) {
-      return { error: e.message };
+      return { error: publicErrorMessage(e) };
     }
   },
 
@@ -365,6 +446,14 @@ export const electronAPI = {
       // Network/backend unavailable: keep local cache untouched, but do not use
       // it as auth truth. The app stays logged out until the backend confirms.
       return null;
+    }
+  },
+  startDemoGuest: async () => {
+    try {
+      const data = await req('/api/auth/demo-guest', { method: 'POST' });
+      return persistAuthResponse(data);
+    } catch (error) {
+      return { error: formatRequestError(error) };
     }
   },
   logout: async () => {
@@ -458,6 +547,18 @@ export const electronAPI = {
   updateDataset: async (projectId, datasetId, payload) => req(`/api/projects/${projectId}/datasets/${datasetId}`, { method: 'PATCH', body: JSON.stringify(payload || {}) }),
   listProjectPipelineDefinitions: async (projectId) => req(`/api/projects/${projectId}/pipeline-definitions`),
   getPipelineRegistryCapabilities: async () => req('/api/pipeline-registry/capabilities'),
+  getExpertRCapabilities: async () => req('/api/expert-r/capabilities'),
+  listExpertRInputs: async (projectId) => req(`/api/expert-r/projects/${projectId}/inputs`),
+  uploadExpertRInput: async (projectId, file) => {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const res = await fetch(apiUrl(`/api/expert-r/projects/${projectId}/inputs`), {
+      method: 'POST', body: form, credentials: 'include',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  },
   publishPipelineRegistryDefinition: async (manifest) =>
     req('/api/pipeline-registry/definitions', { method: 'POST', body: JSON.stringify({ manifest }) }),
   getProjectPipelineSelection: async (projectId) => req(`/api/projects/${projectId}/pipeline-selection`),
@@ -504,6 +605,65 @@ export const electronAPI = {
     req(`/api/projects/${projectId}/analysis-objects/${objectId}/children`),
   getProjectAnalysisObjectLineage: async (projectId, objectId) =>
     req(`/api/projects/${projectId}/analysis-objects/${objectId}/lineage`),
+  // Explicit study design. Contrast validation is server-derived from the
+  // samples bound to the selected immutable analysis object.
+  createStudyCondition: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/conditions`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listStudyConditions: async (projectId) => req(`/api/projects/${projectId}/conditions`),
+  createBiologicalSample: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/samples`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listBiologicalSamples: async (projectId) => req(`/api/projects/${projectId}/samples`),
+  bindSampleToAnalysisObject: async (projectId, objectId, payload) =>
+    req(`/api/projects/${projectId}/analysis-objects/${objectId}/sample-bindings`, {
+      method: 'POST', body: JSON.stringify(payload || {}),
+    }),
+  listAnalysisObjectSampleBindings: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/analysis-objects/${objectId}/sample-bindings`),
+  createConditionContrast: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/contrasts`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listConditionContrasts: async (projectId) => req(`/api/projects/${projectId}/contrasts`),
+  // Git-like analysis refs. Checkpoint/result objects remain immutable; these
+  // APIs move only optimistic branch pointers and review/canonical metadata.
+  createAnalysisBranch: async (projectId, payload) =>
+    req(`/api/projects/${projectId}/branches`, { method: 'POST', body: JSON.stringify(payload || {}) }),
+  listAnalysisBranches: async (projectId) => req(`/api/projects/${projectId}/branches`),
+  advanceAnalysisBranch: async (projectId, branchId, headAnalysisObjectId, expectedVersion) =>
+    req(`/api/projects/${projectId}/branches/${branchId}/head`, {
+      method: 'PATCH', body: JSON.stringify({ headAnalysisObjectId, expectedVersion }),
+    }),
+  publishAnalysisBranch: async (projectId, branchId) =>
+    req(`/api/projects/${projectId}/branches/${branchId}/publish`, { method: 'POST', body: '{}' }),
+  listAnalysisBranchEvents: async (projectId, branchId) =>
+    req(`/api/projects/${projectId}/branches/${branchId}/events`),
+  requestAnalysisBranchReview: async (projectId, branchId, payload) =>
+    req(`/api/projects/${projectId}/branches/${branchId}/reviews`, {
+      method: 'POST', body: JSON.stringify(payload || {}),
+    }),
+  listAnalysisBranchReviews: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, value]) => value != null && value !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/reviews${qs ? `?${qs}` : ''}`);
+  },
+  listAnalysisBranchReviewComments: async (projectId, reviewId) =>
+    req(`/api/projects/${projectId}/reviews/${reviewId}/comments`),
+  addAnalysisBranchReviewComment: async (projectId, reviewId, body) =>
+    req(`/api/projects/${projectId}/reviews/${reviewId}/comments`, {
+      method: 'POST', body: JSON.stringify({ body }),
+    }),
+  decideAnalysisBranchReview: async (projectId, reviewId, status, note = '') =>
+    req(`/api/projects/${projectId}/reviews/${reviewId}/decision`, {
+      method: 'PATCH', body: JSON.stringify({ status, note }),
+    }),
+  promoteAnalysisBranch: async (projectId, branchId, reviewId) =>
+    req(`/api/projects/${projectId}/branches/${branchId}/promote`, {
+      method: 'POST', body: JSON.stringify({ reviewId }),
+    }),
+  getCanonicalAnalysis: async (projectId) => req(`/api/projects/${projectId}/canonical-analysis`),
+  compareAnalysisBranches: async (projectId, leftBranchId, rightBranchId) => {
+    const qs = new URLSearchParams({ leftBranchId, rightBranchId }).toString();
+    return req(`/api/projects/${projectId}/branch-comparison?${qs}`);
+  },
   createProjectJob: async (projectId, payload) =>
     req(`/api/projects/${projectId}/jobs`, { method: 'POST', body: JSON.stringify(payload || {}) }),
   listProjectJobs: async (projectId, filters = {}) => {
@@ -514,6 +674,8 @@ export const electronAPI = {
   },
   getProjectJob: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}`),
   getProjectJobLogs: async (projectId, jobId) => req(`/api/projects/${projectId}/jobs/${jobId}/logs`),
+  retryProjectJob: async (projectId, jobId) =>
+    req(`/api/projects/${projectId}/jobs/${jobId}/retry`, { method: 'POST', body: '{}' }),
   cancelProjectJob: async (projectId, jobId) =>
     req(`/api/projects/${projectId}/jobs/${jobId}/cancel`, { method: 'POST' }),
   createDegFindMarkersJob: async (projectId, objectId, params = {}) =>
@@ -531,10 +693,43 @@ export const electronAPI = {
       method: 'POST',
       body: JSON.stringify(buildCellChatInferenceJobPayload(objectId, params)),
     }),
+  createExploratoryAnalysisJob: async (projectId, objectId, params = {}) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        jobType: 'explore.summarize.v1',
+        analysisObjectId: objectId,
+        parameters: params,
+      }),
+    }),
+  createCheckpointLoadJob: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        jobType: 'checkpoint.load.v1',
+        analysisObjectId: objectId,
+        parameters: {},
+      }),
+    }),
+  createCheckpointSaveJob: async (projectId, objectId) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildCheckpointSaveJobPayload(objectId)),
+    }),
   createSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
     req(`/api/projects/${projectId}/jobs`, {
       method: 'POST',
       body: JSON.stringify(buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params })),
+    }),
+  createMultiSampleSeuratPipelineJob: async (projectId, { samples = [], analysisObjectId, params = {} } = {}) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildMultiSampleSeuratPipelineJobPayload({ samples, analysisObjectId, params })),
+    }),
+  createSpatialSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
+    req(`/api/projects/${projectId}/jobs`, {
+      method: 'POST',
+      body: JSON.stringify(buildSpatialSeuratPipelineJobPayload({ datasetId, analysisObjectId, params })),
     }),
   createCheckpointForkJob: async (projectId, analysisObjectId) =>
     req(`/api/projects/${projectId}/jobs`, {
@@ -583,6 +778,25 @@ export const electronAPI = {
     ).toString();
     return req(`/api/projects/${projectId}/jobs/${jobId}/artifacts${qs ? `?${qs}` : ''}`);
   },
+  downloadProjectArtifact: async (projectId, artifactId) => downloadResponse(
+    `/api/projects/${projectId}/artifacts/${artifactId}/download`,
+    `artifact-${artifactId}`
+  ),
+  downloadReproducibilityManifest: async (projectId, { branchId, analysisObjectId } = {}) => {
+    const qs = new URLSearchParams();
+    if (branchId) qs.set('branchId', branchId);
+    else if (analysisObjectId) qs.set('analysisObjectId', analysisObjectId);
+    return downloadResponse(
+      `/api/projects/${projectId}/reproducibility-manifest?${qs.toString()}`,
+      'reproducibility-manifest.json'
+    );
+  },
+  listProjectAuditEvents: async (projectId, filters = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters).filter(([, value]) => value != null && value !== '')
+    ).toString();
+    return req(`/api/projects/${projectId}/audit-events${qs ? `?${qs}` : ''}`);
+  },
 
   listProjectMembers: async (id) => req(`/api/projects/${id}/members`),
   addProjectMember: async (id, email, role) => req(`/api/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
@@ -609,6 +823,7 @@ export const electronAPI = {
   setTheme: (_theme) => { /* No-op in browser, handled by CSS */ },
 
   // Diagnostics
+  getComputeRuntimeStatus,
   getRScriptPath: async () => {
     try {
       const result = await checkRuntimeDiagnostics();

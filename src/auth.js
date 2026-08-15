@@ -5,7 +5,7 @@
 
 // --- localStorage fallback for dev (vite-only, no Electron) ---
 function localStorageAuth() {
-  const USERS_KEY = '__benchone_users__';
+  const USERS_KEY = '__traceomics_users__';
   const getUsers = () => JSON.parse(localStorage.getItem(USERS_KEY) || '[]');
   const saveUsers = (users) => localStorage.setItem(USERS_KEY, JSON.stringify(users));
 
@@ -61,6 +61,12 @@ const auth = {
       return window.electronAPI.signup(email, password, displayName);
     }
     return fallbackAuth.signup(email, password, displayName);
+  },
+  async startDemoGuest() {
+    if (typeof window !== 'undefined' && window.electronAPI?.startDemoGuest) {
+      return window.electronAPI.startDemoGuest();
+    }
+    return { error: 'The public demo is unavailable.' };
   },
   async login(email, password) {
     if (typeof window !== 'undefined' && window.electronAPI?.login) {

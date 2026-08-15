@@ -156,7 +156,7 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — inventory & scope', () => {
 
   it('registers checkpoint.load.v1 alongside the existing handlers (existing handlers unchanged)', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'checkpoint.save.v1', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.multisample.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1']);
     expect(DEFAULT_HANDLERS['checkpoint.load.v1']).toBe(checkpointLoadHandler);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(worker.pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(worker.rObjectInspectHandler);
@@ -179,11 +179,11 @@ describe.skipIf(!CONFIGURED)('checkpoint.load.v1 — inventory & scope', () => {
     expect(spec.readOnly).toBe(false);
   });
 
-  it('the bridge op/target sets stay exact/closed (adds only the checkpoint-load op/target)', async () => {
+  it('the bridge op/target sets stay exact/closed', async () => {
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
+      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.hydrate.v1', 'r.checkpoint.load.v1', 'r.checkpoint.save.v1', 'r.condition.pseudobulk_de.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.explore.summarize.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.multisample.v1', 'r.seurat.pipeline.v1', 'r.spatial.seurat.v1']);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/checkpoint-save', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
   });
 
   it('keeps legacy enrichment and CellChat aliases unregistered while allowing only the reviewed durable CellChat type', async () => {

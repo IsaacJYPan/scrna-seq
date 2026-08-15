@@ -8,8 +8,8 @@ const path = require('path');
 
 const DEFAULT_R_PORT = 8000;
 const MIN_EXTERNAL_TOKEN_LENGTH = 32;
-const STORAGE_PROBE_PREFIX = '.benchone-worker-storage-probe-';
-const STORAGE_PROBE_CONTENT = 'benchone-shared-storage-v1\n';
+const STORAGE_PROBE_PREFIX = '.traceomics-worker-storage-probe-';
+const STORAGE_PROBE_CONTENT = 'traceomics-shared-storage-v1\n';
 
 function trimmed(value) {
   return value === undefined || value === null ? '' : String(value).trim();
@@ -262,6 +262,13 @@ async function probeWorkerRReadiness(runtime, options = {}) {
       code: 'R_RUNTIME_INSTANCE_MISSING',
     });
   }
+  const capabilities = body.capabilities && typeof body.capabilities === 'object'
+    ? body.capabilities
+    : {};
+  body.capabilities = {
+    pathwayEnrichment: capabilities.pathway_enrichment === true,
+    cellChat: capabilities.cellchat === true,
+  };
   return body;
 }
 

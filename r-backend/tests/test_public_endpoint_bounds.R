@@ -10,6 +10,36 @@ script_dir <- if (length(file_arg) == 1) {
 plumber_file <- file.path(script_dir, "..", "plumber.R")
 source(plumber_file, local = globalenv())
 
+# The classic Visium extractor must preserve a Space Ranger directory layout
+# while extracting only the matrix and allowlisted spatial files.
+visium_fixture_root <- tempfile("traceomics-visium-fixture-")
+dir.create(file.path(visium_fixture_root, "outs", "spatial"), recursive = TRUE)
+writeBin(as.raw(c(0x01, 0x02)), file.path(visium_fixture_root, "outs", "filtered_feature_bc_matrix.h5"))
+writeLines("barcode,in_tissue,array_row,array_col,pxl_row_in_fullres,pxl_col_in_fullres",
+           file.path(visium_fixture_root, "outs", "spatial", "tissue_positions.csv"))
+writeLines('{"tissue_lowres_scalef":1}',
+           file.path(visium_fixture_root, "outs", "spatial", "scalefactors_json.json"))
+writeBin(as.raw(c(0x89, 0x50, 0x4e, 0x47)),
+         file.path(visium_fixture_root, "outs", "spatial", "tissue_lowres_image.png"))
+visium_zip <- tempfile(fileext = ".zip")
+prior_wd <- getwd()
+setwd(visium_fixture_root)
+utils::zip(visium_zip, c(
+  "outs/filtered_feature_bc_matrix.h5",
+  "outs/spatial/tissue_positions.csv",
+  "outs/spatial/scalefactors_json.json",
+  "outs/spatial/tissue_lowres_image.png"
+), flags = "-q")
+setwd(prior_wd)
+visium_extracted <- extract_classic_visium_bundle(visium_zip)
+stopifnot(
+  identical(basename(visium_extracted$data_dir), "outs"),
+  file.exists(file.path(visium_extracted$data_dir, "filtered_feature_bc_matrix.h5")),
+  file.exists(file.path(visium_extracted$data_dir, "spatial", "tissue_positions.csv")),
+  !file.exists(file.path(visium_extracted$data_dir, "spatial", "tissue_hires_image.png"))
+)
+unlink(c(visium_extracted$root, visium_fixture_root, visium_zip), recursive = TRUE, force = TRUE)
+
 # The private live-state cache authenticates before key handling, accepts only
 # canonical server-derived keys, and has deterministic count/byte admission.
 session_env_names <- c(
@@ -74,10 +104,64 @@ stopifnot(inherits(
 if (length(ls(envir = active_sessions, all.names = TRUE)) > 0) {
   rm(list = ls(envir = active_sessions, all.names = TRUE), envir = active_sessions)
 }
+
 for (name in session_env_names) {
   value <- saved_session_env[[name]]
   if (is.na(value)) Sys.unsetenv(name) else do.call(Sys.setenv, setNames(list(value), name))
 }
+
+# Job-scoped compute hydration must be erased after the scientific route, while
+# canonical interactive state remains cached. The helper also disables the
+# postroute persistence hook so released globals cannot be written back.
+job_state_key <- paste0(
+  "user-1:obj-ao_", strrep("a", 24), "-job-job_", strrep("b", 24)
+)
+canonical_state_key <- paste0("user-1:obj-ao_", strrep("c", 24))
+release_req <- new.env(parent = emptyenv())
+release_req$traceomics_session_persist <- TRUE
+global_obj <- list(private = 1L)
+raw_obj <- list(private = 2L)
+store_active_session(job_state_key, global_obj, raw_obj)
+stopifnot(identical(job_scoped_active_session_key(job_state_key), job_state_key))
+stopifnot(isTRUE(release_job_scoped_active_session(release_req, job_state_key)))
+stopifnot(!exists(job_state_key, envir = active_sessions, inherits = FALSE))
+stopifnot(is.null(global_obj), is.null(raw_obj))
+stopifnot(identical(release_req$traceomics_session_persist, FALSE))
+
+# Deterministic checkpoint forks use a 64-hex analysis-object id. Their heavy
+# jobs must receive the same erase-on-route-exit treatment as ordinary 24-hex
+# objects; otherwise a reusable compute process retains the forked expression state.
+fork_job_state_key <- paste0(
+  "user-2:obj-ao_", strrep("d", 64), "-job-job_", strrep("e", 24)
+)
+fork_release_req <- new.env(parent = emptyenv())
+fork_release_req$traceomics_session_persist <- TRUE
+global_obj <- list(private_fork = 1L)
+raw_obj <- list(private_fork = 2L)
+store_active_session(fork_job_state_key, global_obj, raw_obj)
+stopifnot(identical(job_scoped_active_session_key(fork_job_state_key), fork_job_state_key))
+stopifnot(isTRUE(release_job_scoped_active_session(fork_release_req, fork_job_state_key)))
+stopifnot(!exists(fork_job_state_key, envir = active_sessions, inherits = FALSE))
+stopifnot(is.null(global_obj), is.null(raw_obj))
+stopifnot(identical(fork_release_req$traceomics_session_persist, FALSE))
+
+unsupported_length_key <- paste0(
+  "user-2:obj-ao_", strrep("f", 32), "-job-job_", strrep("a", 24)
+)
+stopifnot(is.null(job_scoped_active_session_key(unsupported_length_key)))
+
+canonical_req <- new.env(parent = emptyenv())
+canonical_req$traceomics_session_persist <- TRUE
+global_obj <- list(interactive = 1L)
+raw_obj <- NULL
+store_active_session(canonical_state_key, global_obj, raw_obj)
+stopifnot(is.null(job_scoped_active_session_key(canonical_state_key)))
+stopifnot(identical(release_job_scoped_active_session(canonical_req, canonical_state_key), FALSE))
+stopifnot(exists(canonical_state_key, envir = active_sessions, inherits = FALSE))
+stopifnot(identical(canonical_req$traceomics_session_persist, TRUE))
+rm(list = canonical_state_key, envir = active_sessions)
+global_obj <- NULL
+raw_obj <- NULL
 
 expect_error <- function(expr, pattern) {
   error <- tryCatch({
@@ -503,7 +587,7 @@ expect_bad_request(
 )
 
 # Render errors after opening a device must close it and unlink the temp image.
-forced_render_path <- file.path(tempdir(), "benchone-public-render-cleanup.png")
+forced_render_path <- file.path(tempdir(), "traceomics-public-render-cleanup.png")
 if (file.exists(forced_render_path)) unlink(forced_render_path)
 had_tempfile <- exists("tempfile", envir = globalenv(), inherits = FALSE)
 if (had_tempfile) original_tempfile <- get("tempfile", envir = globalenv())

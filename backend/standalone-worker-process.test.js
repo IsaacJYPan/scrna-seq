@@ -15,6 +15,44 @@ let rServer;
 let rAddress;
 let storageRoot;
 const liveChildren = new Set();
+const extraRServers = new Set();
+
+function startIsolatedFakeR(onHealth) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.headers['x-api-token'] !== R_TOKEN) {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      if (req.url === '/internal/worker-readiness') {
+        const nonce = String(req.headers['x-storage-probe-nonce'] || '');
+        const probePath = path.join(storageRoot, `${STORAGE_PROBE_PREFIX}${nonce}`);
+        const storageShared = /^[0-9a-f]{32}$/.test(nonce)
+          && fs.existsSync(probePath)
+          && fs.readFileSync(probePath, 'utf8') === STORAGE_PROBE_CONTENT;
+        if (!storageShared) res.statusCode = 503;
+        res.end(JSON.stringify({
+          status: storageShared ? 'ok' : 'not_ready',
+          storage_shared: storageShared,
+          runtime_session_id: storageShared ? `isolated-r-${server.address().port}` : null,
+        }));
+        return;
+      }
+      if (req.url === '/health') {
+        onHealth(res);
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'not found' }));
+    });
+    server.listen(0, '127.0.0.1', () => {
+      extraRServers.add(server);
+      resolve({ server, url: `http://127.0.0.1:${server.address().port}` });
+    });
+  });
+}
 
 function startFakeR() {
   return new Promise((resolve) => {
@@ -86,7 +124,7 @@ function runProcess(args, options = {}) {
     child.stderr.on('data', (chunk) => stderr.push(chunk));
     const timeout = setTimeout(() => {
       child.kill('SIGTERM');
-      reject(new Error('child process timed out'));
+      reject(new Error(`child process timed out\nstdout: ${Buffer.concat(stdout).toString('utf8')}\nstderr: ${Buffer.concat(stderr).toString('utf8')}`));
     }, options.timeoutMs || 20000);
     child.on('error', (error) => {
       clearTimeout(timeout);
@@ -110,12 +148,12 @@ function runWorkerOnce(extraEnv = {}) {
   });
 }
 
-function startLockHolder() {
+function startLockHolder({ slot = 1, poolSize = 1 } = {}) {
   return new Promise((resolve, reject) => {
     const script = [
       "const db=require('./backend/pgDatabase');",
       'let lock;',
-      "db.acquireStandaloneWorkerLock().then((owned)=>{lock=owned;console.log('LOCK_READY');",
+      `db.acquireStandaloneWorkerLock({slot:${slot},poolSize:${poolSize}}).then((owned)=>{lock=owned;console.log('LOCK_READY');`,
       "process.on('message',async(m)=>{if(m&&m.type==='stop'){await lock.release();await db.close();process.exit(0);}});",
       "}).catch((e)=>{console.error(e&&e.code||'LOCK_FAILED');process.exit(2);});",
     ].join('');
@@ -188,12 +226,81 @@ afterEach(async () => {
 
 afterAll(async () => {
   if (!CONFIGURED) return;
+  for (const server of [...extraRServers]) {
+    await new Promise((resolve) => server.close(resolve));
+    extraRServers.delete(server);
+  }
   if (rServer) await new Promise((resolve) => rServer.close(resolve));
   await db.close();
   if (storageRoot) fs.rmSync(storageRoot, { recursive: true, force: true });
 });
 
 describe.skipIf(!CONFIGURED)('standalone worker OS-process coordination', () => {
+  it('allows distinct bounded-pool slots while refusing a duplicate slot owner', async () => {
+    const slotOne = await startLockHolder({ slot: 1, poolSize: 2 });
+    const slotTwo = await startLockHolder({ slot: 2, poolSize: 2 });
+
+    const duplicateScript = [
+      "const db=require('./backend/pgDatabase');",
+      'db.acquireStandaloneWorkerLock({slot:2,poolSize:2})',
+      ".then(async(lock)=>{await lock.release();await db.close();process.exit(0);})",
+      ".catch(async(error)=>{console.error(error&&error.code||'LOCK_FAILED');await db.close();process.exit(2);});",
+    ].join('');
+    const duplicate = await runProcess(['-e', duplicateScript], { env: workerEnv() });
+    expect(duplicate.code).toBe(2);
+    expect(duplicate.stderr).toContain('WORKER_TOPOLOGY_LOCKED');
+
+    await slotTwo.stop();
+    await slotOne.stop();
+  }, 30000);
+
+  it('runs two R jobs concurrently in distinct worker slots routed to distinct R services', async () => {
+    const pendingHealth = [];
+    let maxOverlap = 0;
+    const onHealth = (response) => {
+      const fallback = setTimeout(() => {
+        const index = pendingHealth.findIndex((entry) => entry.response === response);
+        if (index >= 0) pendingHealth.splice(index, 1);
+        if (!response.writableEnded) response.end(JSON.stringify({ status: 'ok' }));
+      }, 5000);
+      pendingHealth.push({ response, fallback });
+      maxOverlap = Math.max(maxOverlap, pendingHealth.length);
+      if (pendingHealth.length === 2) {
+        for (const entry of pendingHealth.splice(0)) {
+          clearTimeout(entry.fallback);
+          entry.response.end(JSON.stringify({ status: 'ok' }));
+        }
+      }
+    };
+    const laneOne = await startIsolatedFakeR(onHealth);
+    const laneTwo = await startIsolatedFakeR(onHealth);
+    try {
+      const user = await db.createUser('process-pool@example.com', 'password123', 'Process Pool');
+      const first = await db.createJobForUser(user.id, { jobType: 'r.runtime.check' });
+      const second = await db.createJobForUser(user.id, { jobType: 'r.runtime.check' });
+
+      const results = await Promise.all([
+        runWorkerOnce({
+          JOB_WORKER_POOL_SIZE: '2', JOB_WORKER_POOL_SLOT: '1', R_BACKEND_URL: laneOne.url,
+        }),
+        runWorkerOnce({
+          JOB_WORKER_POOL_SIZE: '2', JOB_WORKER_POOL_SLOT: '2', R_BACKEND_URL: laneTwo.url,
+        }),
+      ]);
+
+      expect(results.every((result) => result.code === 0), JSON.stringify(results, null, 2)).toBe(true);
+      expect(maxOverlap).toBe(2);
+      expect((await db.getJobForUser(first.id, user.id)).status).toBe('completed');
+      expect((await db.getJobForUser(second.id, user.id)).status).toBe('completed');
+      expect((await db.getWorkerJob(first.id)).workerId).not.toBe((await db.getWorkerJob(second.id)).workerId);
+    } finally {
+      await Promise.all([laneOne.server, laneTwo.server].map((server) => new Promise((resolve) => {
+        server.close(resolve);
+        extraRServers.delete(server);
+      })));
+    }
+  }, 30000);
+
   it('refuses a second standalone process while the global worker slot is held', async () => {
     const user = await db.createUser('process-one@example.com', 'password123', 'Process One');
     const job = await db.createJobForUser(user.id, { jobType: 'generic' });
@@ -236,7 +343,7 @@ describe.skipIf(!CONFIGURED)('standalone worker OS-process coordination', () => 
     const script = [
       "const db=require('./backend/pgDatabase');",
       "db.acquireStandaloneWorkerLock()",
-      ".then(()=>db.claimNextJob('worker_crashed_process',{leaseSeconds:1,now:'2030-01-01 00:00:00'}))",
+      ".then(()=>db.claimNextJob('pool-1:worker_crashed_process',{leaseSeconds:1,now:'2030-01-01 00:00:00'}))",
       ".then((job)=>{process.stdout.write(job.claimToken);process.exit(job?0:2)})",
       ".catch(()=>process.exit(3));",
     ].join('');
@@ -255,9 +362,9 @@ describe.skipIf(!CONFIGURED)('standalone worker OS-process coordination', () => 
     const after = await db.getWorkerJob(job.id);
     expect(after.status).toBe('completed');
     expect(after.attempts).toBe(2);
-    await expect(db.heartbeatJob(job.id, 'worker_crashed_process', staleToken))
+    await expect(db.heartbeatJob(job.id, 'pool-1:worker_crashed_process', staleToken))
       .rejects.toMatchObject({ code: 'CLAIM_LOST' });
-    await expect(db.completeJobByWorker(job.id, 'worker_crashed_process', staleToken))
+    await expect(db.completeJobByWorker(job.id, 'pool-1:worker_crashed_process', staleToken))
       .rejects.toMatchObject({ code: 'CLAIM_LOST' });
   }, 30000);
 });

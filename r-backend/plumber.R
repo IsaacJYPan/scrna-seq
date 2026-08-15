@@ -179,7 +179,7 @@ COMPLETION_RECEIPT_VERSION <- 1L
 COMPLETION_RECEIPT_MAX_BYTES <- 128L * 1024L
 COMPLETION_RECEIPT_SIGNED_MAX_BYTES <- 96L * 1024L
 COMPLETION_RECEIPT_FILE_NAME <- "completion-receipt.json"
-COMPLETION_RECEIPT_HMAC_DOMAIN <- "BENCHONE_R_COMPLETION_RECEIPT_V1:"
+COMPLETION_RECEIPT_HMAC_DOMAIN <- "TRACEOMICS_R_COMPLETION_RECEIPT_V1:"
 COMPLETION_RECEIPT_ALGORITHM <- "hmac-sha256"
 COMPLETION_RECEIPT_BINDING_KEYS <- c(
   "version", "job_id", "job_type", "r_operation", "project_id",
@@ -236,14 +236,14 @@ validate_completion_receipt_binding <- function(body, expected_job_types,
     stop("Completion receipt binding is invalid.")
   }
   output_prefix <- paste0("projects/", binding$project_id, "/")
-  if (identical(binding$job_type, "pbmc.pipeline.v1")) {
+  if (binding$job_type %in% c("pbmc.pipeline.v1", "checkpoint.save.v1")) {
     if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
         !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
         !startsWith(binding$output_storage_key,
                     paste0(output_prefix, "checkpoints/", binding$job_id, "/"))) {
       stop("Completion receipt binding is invalid.")
     }
-  } else if (identical(binding$job_type, "seurat.pipeline.v1")) {
+  } else if (binding$job_type %in% c("seurat.pipeline.v1", "seurat.multisample.v1", "spatial.seurat.v1")) {
     if (is.null(binding$source_analysis_object_id) || is.null(binding$source_dataset_id) ||
         !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
         !startsWith(binding$output_storage_key,
@@ -265,6 +265,13 @@ validate_completion_receipt_binding <- function(body, expected_job_types,
       stop("Completion receipt binding is invalid.")
     }
   } else if (identical(binding$job_type, "cellchat.infer.v1")) {
+    if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
+        !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
+        !startsWith(binding$output_storage_key,
+                    paste0(output_prefix, "artifacts/", binding$job_id, "/"))) {
+      stop("Completion receipt binding is invalid.")
+    }
+  } else if (identical(binding$job_type, "condition.pseudobulk_de.v1")) {
     if (is.null(binding$source_analysis_object_id) || !is.null(binding$source_dataset_id) ||
         !is.null(binding$source_checkpoint_artifact_id) || !is.null(binding$target_analysis_object_id) ||
         !startsWith(binding$output_storage_key,
@@ -398,6 +405,11 @@ validate_absolute_path <- function(user_path) {
 # ── Session Management ──────────────────────────────────────────────
 active_sessions <- new.env(parent = emptyenv())
 active_session_clock <- 0
+# Test-only records captured inside a job-scoped R request. A synchronous
+# Plumber process cannot serve the external diagnostic endpoint while a long
+# scientific handler is running, so post-request inspection alone would only
+# see normal cleanup rather than the active job state.
+test_job_session_observations <- new.env(parent = emptyenv())
 
 session_limit_number <- function(name, default_value) {
   raw <- Sys.getenv(name, unset = "")
@@ -564,6 +576,49 @@ load_active_session <- function(sid) {
   entry
 }
 
+# Heavy compute hydrates a durable checkpoint under an exact job-scoped key.
+# That object may exist only for the lifetime of the following scientific route;
+# retaining it after the route returns would let a later user's job share an R
+# process containing the prior user's expression state. Canonical interactive
+# keys deliberately do not match this shape and remain session-cached.
+job_scoped_active_session_key <- function(value) {
+  sid <- tryCatch(validate_internal_state_key(value), error = function(error) NULL)
+  if (is.null(sid) ||
+      !grepl("^user-[0-9]+:obj-ao_([0-9a-f]{24}|[0-9a-f]{64})-job-job_[0-9a-f]{24}$", sid)) {
+    return(NULL)
+  }
+  sid
+}
+
+release_job_scoped_active_session <- function(req, sid) {
+  sid <- job_scoped_active_session_key(sid)
+  if (is.null(sid)) return(invisible(FALSE))
+  # The postroute hook must not re-save the just-released globals.
+  req$traceomics_session_persist <- FALSE
+  global_obj <<- NULL
+  raw_obj <<- NULL
+  if (exists(sid, envir = active_sessions, inherits = FALSE)) {
+    rm(list = sid, envir = active_sessions)
+  }
+  invisible(TRUE)
+}
+
+record_test_job_session_observation <- function(sid) {
+  diagnostics_enabled <- identical(Sys.getenv("ENABLE_R_TEST_DIAGNOSTICS"), "true") &&
+    !identical(Sys.getenv("NODE_ENV"), "production")
+  sid <- job_scoped_active_session_key(sid)
+  if (!diagnostics_enabled || is.null(sid)) return(invisible(FALSE))
+  active_keys <- ls(envir = active_sessions, all.names = TRUE)
+  test_job_session_observations[[sid]] <<- list(
+    observed_at = as.character(Sys.time()),
+    has_global_obj = !is.null(global_obj),
+    active_session_key_count = as.integer(length(active_keys)),
+    own_key_present = sid %in% active_keys,
+    foreign_key_count = as.integer(sum(active_keys != sid))
+  )
+  invisible(TRUE)
+}
+
 request_has_valid_api_token <- function(req) {
   expected_token <- Sys.getenv("API_TOKEN")
   provided_token <- req$HTTP_X_API_TOKEN
@@ -577,16 +632,16 @@ authenticate_internal_request <- function(req, res) {
     res$status <- 403
     return(FALSE)
   }
-  req$benchone_authenticated <- TRUE
+  req$traceomics_authenticated <- TRUE
   TRUE
 }
 
 #* @plumber
 function(pr) {
   pr %>% pr_hook("postroute", function(req, res) {
-    if (!isTRUE(req$benchone_authenticated) ||
-        !isTRUE(req$benchone_session_loaded) ||
-        !isTRUE(req$benchone_session_persist)) return(invisible(NULL))
+    if (!isTRUE(req$traceomics_authenticated) ||
+        !isTRUE(req$traceomics_session_loaded) ||
+        !isTRUE(req$traceomics_session_persist)) return(invisible(NULL))
     sid <- validate_internal_state_key(req$HTTP_X_OBJECT_ID)
     # Save only through the global/per-user count and byte budget.
     store_active_session(sid, global_obj, raw_obj)
@@ -596,8 +651,8 @@ function(pr) {
 
 #* @filter session_loader
 function(req, res) {
-  req$benchone_session_loaded <- FALSE
-  req$benchone_session_persist <- FALSE
+  req$traceomics_session_loaded <- FALSE
+  req$traceomics_session_persist <- FALSE
   # Authenticate before even reading an attacker-selected session key. This is
   # deliberately duplicated with the auth filter so filter declaration order
   # cannot make OPTIONS or a rejected request allocate cache entries.
@@ -616,7 +671,7 @@ function(req, res) {
   if (is.null(sid)) {
     global_obj <<- NULL
     raw_obj <<- NULL
-    req$benchone_session_loaded <- TRUE
+    req$traceomics_session_loaded <- TRUE
     return(plumber::forward())
   }
 
@@ -628,8 +683,8 @@ function(req, res) {
     global_obj <<- NULL
     raw_obj <<- NULL
   }
-  req$benchone_session_loaded <- TRUE
-  req$benchone_session_persist <- TRUE
+  req$traceomics_session_loaded <- TRUE
+  req$traceomics_session_persist <- TRUE
   plumber::forward()
 }
 
@@ -1019,10 +1074,10 @@ function(req, res) {
   } else {
     ""
   }
-  expected <- "benchone-shared-storage-v1"
+  expected <- "traceomics-shared-storage-v1"
   shared <- FALSE
   if (grepl("^[0-9a-f]{32}$", nonce)) {
-    probe_path <- file.path(storage_root_path(), paste0(".benchone-worker-storage-probe-", nonce))
+    probe_path <- file.path(storage_root_path(), paste0(".traceomics-worker-storage-probe-", nonce))
     if (file.exists(probe_path) && !dir.exists(probe_path)) {
       link_target <- Sys.readlink(probe_path)
       if (length(link_target) == 1 && nchar(link_target) == 0) {
@@ -1032,10 +1087,17 @@ function(req, res) {
     }
   }
   if (!shared) res$status <- 503
+  enrichment_packages <- c(
+    "clusterProfiler", "fgsea", "AnnotationDbi", "org.Hs.eg.db", "org.Mm.eg.db", "GO.db"
+  )
   list(
     status = if (shared) "ok" else "not_ready",
     storage_shared = shared,
-    runtime_session_id = if (shared) r_runtime_instance_id else NULL
+    runtime_session_id = if (shared) r_runtime_instance_id else NULL,
+    capabilities = list(
+      pathway_enrichment = all(vapply(enrichment_packages, requireNamespace, logical(1), quietly = TRUE)),
+      cellchat = all(vapply(c("CellChat", "NMF"), requireNamespace, logical(1), quietly = TRUE))
+    )
   )
 }
 
@@ -1058,6 +1120,9 @@ function(req, res) {
 
   sid <- req$HTTP_X_OBJECT_ID
   if (is.null(sid) || nchar(sid) == 0) sid <- "DEFAULT"
+  job_observation <- if (exists(sid, envir = test_job_session_observations, inherits = FALSE)) {
+    test_job_session_observations[[sid]]
+  } else NULL
 
   list(
     x_object_id = sid,
@@ -1065,7 +1130,8 @@ function(req, res) {
     n_cells = if (!is.null(global_obj)) ncol(global_obj) else NULL,
     n_features = if (!is.null(global_obj)) nrow(global_obj) else NULL,
     reductions = if (!is.null(global_obj)) names(global_obj@reductions) else list(),
-    active_session_keys = as.list(ls(envir = active_sessions, all.names = TRUE))
+    active_session_keys = as.list(ls(envir = active_sessions, all.names = TRUE)),
+    job_session_observation = job_observation
   )
 }
 
@@ -1116,24 +1182,30 @@ function(res, min_cells = 3, min_features = 200) {
   min_features <- as.integer(min_features)
 
   tryCatch({
+    # This built-in tutorial dataset is part of the server deployment, not a
+    # browser-supplied path. Resolve it from the configured analysis root so
+    # Docker and a locally launched R process agree regardless of their cwd.
+    data_path <- file.path(
+      Sys.getenv("ANALYSIS_ROOT", unset = getwd()),
+      "data", "pbmc3k", "filtered_gene_bc_matrices", "hg19"
+    )
     script <- paste0(
       "library(Seurat)\n",
       "# 1. Read 10X sparse matrix\n",
-      "mat <- Read10X(data.dir = 'data/pbmc3k/filtered_gene_bc_matrices/hg19')\n",
+      "mat <- Read10X(data.dir = '<server built-in PBMC tutorial dataset>')\n",
       "# 2. Initialize Seurat object\n",
       "obj <- CreateSeuratObject(counts = mat, min.cells = ", min_cells, ", min.features = ", min_features, ")\n"
     )
 
-    # Actual R execution
-    data_path <- '../data/pbmc3k/filtered_gene_bc_matrices/hg19'
-    
     if (!dir.exists(data_path)) {
-       stop(paste("Data directory not found at:", normalizePath(data_path, mustWork = FALSE)))
+       stop("The built-in PBMC tutorial data is unavailable.")
     }
     
     mat <- Read10X(data.dir = data_path)
-    global_obj <<- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
-    raw_obj <<- global_obj
+    # Build the full response before mutating the private session. The postroute
+    # persistence hook runs for error responses too, so assigning `global_obj`
+    # early would make a failed load look attached to the browser.
+    loaded_obj <- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
 
     # Calculate real density
     nnz <- length(mat@x)
@@ -1141,19 +1213,27 @@ function(res, min_cells = 3, min_features = 200) {
     density_val <- (nnz / total_elements) * 100
     sparsity_val <- 100 - density_val
 
-    make_provenance(
-      result = list(
-        message = "Matrix successfully loaded into Seurat.",
-        cells = ncol(global_obj),
-        features = nrow(global_obj),
-        genes = nrow(global_obj),
-        sparsity = round(sparsity_val, 2),
-        density = round(density_val, 2)
-      ),
+    result <- list(
+      message = "Matrix successfully loaded into Seurat.",
+      cells = ncol(loaded_obj),
+      features = nrow(loaded_obj),
+      genes = nrow(loaded_obj),
+      sparsity = round(sparsity_val, 2),
+      density = round(density_val, 2)
+    )
+
+    response <- make_provenance(
+      result = result,
       script_text = script,
       operation = "load",
       parameters = list(file = "pbmc3k", engine = "Seurat")
     )
+
+    # Commit the new object only after all response/provenance work above has
+    # succeeded. Each request remains scoped to its server-derived private key.
+    global_obj <<- loaded_obj
+    raw_obj <<- loaded_obj
+    response
   }, error = function(e) { res$status <- 500; list(error = paste("R Error:", e$message))
   })
 }
@@ -1488,7 +1568,83 @@ function(req, res) {
   })
 }
 
-# ── Internal worker-bridge pipeline: PBMC/Seurat preprocessing on a COPY ──────
+# Internal worker-bridge checkpoint snapshot.
+# Snapshot the current owner/object-keyed live state to a worker-selected durable
+# project checkpoint. Express blocks this endpoint from the public R proxy; the
+# worker supplies the canonical object key, exact storage key, and signed receipt
+# binding. No code, package, function, or path is accepted from the browser.
+#* @post /object/checkpoint-save
+#* @parser json
+function(req, res) {
+  on.exit(try(gc(full = TRUE), silent = TRUE), add = TRUE)
+  if (is.null(global_obj)) {
+    res$status <- 400
+    return(list(error = "No input object loaded."))
+  }
+  body <- req$body
+  storage_key <- if (is.list(body)) body$storage_key else NULL
+  if (!is_scalar_string(storage_key)) {
+    res$status <- 400
+    return(list(error = "Missing checkpoint storage key."))
+  }
+
+  tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, "checkpoint.save.v1", "r.checkpoint.save.v1", storage_key
+    )
+    safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
+    raw_for_bundle <- if (exists("raw_obj") && !is.null(raw_obj)) raw_obj else global_obj
+    atomic_save_rds(list(global = global_obj, raw = raw_for_bundle), safe_path)
+    size_bytes <- as.numeric(file.info(safe_path)$size)
+    checksum <- tryCatch({
+      if (requireNamespace("digest", quietly = TRUE)) {
+        digest::digest(file = safe_path, algo = "sha256")
+      } else if (requireNamespace("openssl", quietly = TRUE)) {
+        as.character(openssl::sha256(file(safe_path)))
+      } else {
+        NA_character_
+      }
+    }, error = function(e) NA_character_)
+    saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
+    if (!saved) stop("Checkpoint integrity could not be computed.")
+
+    reductions <- tryCatch(names(global_obj@reductions), error = function(e) character(0))
+    assays <- tryCatch(Assays(global_obj), error = function(e) character(0))
+    cluster_counts <- tryCatch({
+      if ("seurat_clusters" %in% colnames(global_obj@meta.data)) {
+        table(global_obj$seurat_clusters)
+      } else integer(0)
+    }, error = function(e) integer(0))
+    response_out <- list(
+      ok = TRUE,
+      summary = list(
+        n_cells = ncol(global_obj),
+        n_features = nrow(global_obj),
+        n_clusters = length(cluster_counts),
+        cluster_sizes = as.list(head(as.integer(cluster_counts), 256L)),
+        assays = as.list(head(as.character(assays), 64L)),
+        reductions = as.list(head(as.character(reductions), 64L))
+      ),
+      checkpoint = list(
+        saved = TRUE,
+        checksum_sha256 = checksum,
+        size_bytes = size_bytes
+      ),
+      versions = list(
+        seurat_version = tryCatch(as.character(utils::packageVersion("Seurat")), error = function(e) NULL),
+        r_version = as.character(getRversion())
+      )
+    )
+    atomic_write_completion_receipt(receipt_binding, response_out)
+    response_out
+  }, error = function(e) {
+    res$status <- 500
+    message(sprintf("[object/checkpoint-save] save error: %s", conditionMessage(e)))
+    list(error = "checkpoint save failed")
+  })
+}
+
+# Internal worker-bridge pipeline: PBMC/Seurat preprocessing on a copy.
 # Internal-only: reached ONLY via the in-process Node worker bridge (the allowlisted
 # `r.pbmc.pipeline.v1` operation calls this R backend directly). The public Express
 # proxy BLOCKS this path (server.js isInternalOnlyRProxyPath → 404 before any R
@@ -1681,15 +1837,61 @@ function(req, res) {
 
   dataset_storage_key <- body$dataset_storage_key
   dataset_type <- body$dataset_file_type
+  dataset_inputs <- body$dataset_inputs
+  multi_sample <- !is.null(dataset_inputs)
   storage_key <- body$storage_key
-  if (is.null(dataset_storage_key) || !is.character(dataset_storage_key) || nchar(dataset_storage_key) == 0 ||
-      is.null(storage_key) || !is.character(storage_key) || nchar(storage_key) == 0) {
+  if (is.null(storage_key) || !is.character(storage_key) || length(storage_key) != 1 || nchar(storage_key) == 0) {
     res$status <- 400
     return(list(error = "Missing storage key."))
   }
-  if (is.null(dataset_type) || !identical(as.character(dataset_type)[1], "tenx_h5")) {
-    res$status <- 400
-    return(list(error = "Unsupported dataset type."))
+  if (multi_sample) {
+    # jsonlite may simplify an array of equally-shaped objects into a data.frame.
+    # Normalize it back to a list of row objects before applying the strict input
+    # contract so both ordinary dispatch and receipt recovery use the same shape.
+    if (is.data.frame(dataset_inputs)) {
+      input_frame <- dataset_inputs
+      dataset_inputs <- lapply(seq_len(nrow(input_frame)), function(row_index) {
+        lapply(input_frame, function(column) {
+          value <- if (is.list(column)) column[[row_index]] else column[row_index]
+          if (length(value) == 0 || is.null(value) || all(is.na(value))) NULL else value[[1]]
+        })
+      })
+    }
+    if (!is.list(dataset_inputs) || length(dataset_inputs) < 2 || length(dataset_inputs) > 48) {
+      res$status <- 400
+      return(list(error = "Invalid multi-sample inputs."))
+    }
+    valid_input <- vapply(dataset_inputs, function(input) {
+      is.list(input) && is_scalar_string(input$storage_key) &&
+        identical(as.character(input$file_type)[1], "tenx_h5") &&
+        is_scalar_string(input$sample_name) && is_scalar_string(input$condition_name)
+    }, logical(1))
+    scalar_text_or_empty <- function(value) {
+      if (!is_scalar_string(value)) return("")
+      trimws(as.character(value)[1])
+    }
+    sample_names <- vapply(dataset_inputs, function(input) scalar_text_or_empty(input$sample_name), character(1))
+    condition_names <- vapply(dataset_inputs, function(input) scalar_text_or_empty(input$condition_name), character(1))
+    safe_label <- function(value) {
+      nchar(value) >= 1 && nchar(value) <= 80 && grepl("^[A-Za-z0-9][A-Za-z0-9 ._-]*$", value)
+    }
+    if (!all(valid_input) || anyDuplicated(tolower(sample_names)) ||
+        !all(vapply(sample_names, safe_label, logical(1))) ||
+        !all(vapply(condition_names, safe_label, logical(1))) ||
+        length(unique(tolower(condition_names))) < 2) {
+      res$status <- 400
+      return(list(error = "Invalid multi-sample inputs."))
+    }
+  } else {
+    if (is.null(dataset_storage_key) || !is.character(dataset_storage_key) ||
+        length(dataset_storage_key) != 1 || nchar(dataset_storage_key) == 0) {
+      res$status <- 400
+      return(list(error = "Missing storage key."))
+    }
+    if (is.null(dataset_type) || !identical(as.character(dataset_type)[1], "tenx_h5")) {
+      res$status <- 400
+      return(list(error = "Unsupported dataset type."))
+    }
   }
 
   min_cells <- as_int(p$minCells, 3, 0, 10000)
@@ -1713,25 +1915,55 @@ function(req, res) {
 
   tryCatch({
     receipt_binding <- validate_completion_receipt_binding(
-      body, "seurat.pipeline.v1", "r.seurat.pipeline.v1", storage_key
+      body,
+      if (multi_sample) "seurat.multisample.v1" else "seurat.pipeline.v1",
+      if (multi_sample) "r.seurat.multisample.v1" else "r.seurat.pipeline.v1",
+      storage_key
     )
     # Read10X_h5 needs hdf5r (a Seurat *Suggests*, not a hard dependency). Fail with a
     # clear, actionable message if it is missing rather than a cryptic downstream error.
     if (!requireNamespace("hdf5r", quietly = TRUE)) {
       stop("R package 'hdf5r' is not installed; cannot read 10x HDF5 (tenx_h5). Install 'hdf5r' on the R backend.")
     }
-    dataset_path <- resolve_internal_storage_key(dataset_storage_key)
-    if (!file.exists(dataset_path)) stop("Dataset file not found.")
-    mat <- Read10X_h5(filename = dataset_path)
-    if (is.list(mat)) {
-      if ("Gene Expression" %in% names(mat)) {
-        mat <- mat[["Gene Expression"]]
-      } else {
-        mat <- mat[[1]]
+    read_gene_expression <- function(input_key) {
+      dataset_path <- resolve_internal_storage_key(input_key)
+      if (!file.exists(dataset_path)) stop("Dataset file not found.")
+      mat <- Read10X_h5(filename = dataset_path)
+      if (is.list(mat)) {
+        if ("Gene Expression" %in% names(mat)) mat <- mat[["Gene Expression"]] else mat <- mat[[1]]
       }
+      mat
     }
 
-    obj <- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
+    if (multi_sample) {
+      sample_objects <- lapply(seq_along(dataset_inputs), function(index) {
+        input <- dataset_inputs[[index]]
+        sample_name <- sample_names[[index]]
+        sample_obj <- CreateSeuratObject(
+          counts = read_gene_expression(input$storage_key),
+          project = sample_name,
+          min.cells = min_cells,
+          min.features = min_features
+        )
+        sample_obj$sample_id <- sample_name
+        sample_obj$condition <- condition_names[[index]]
+        sample_obj$donor_code <- if (is_scalar_string(input$donor_code)) as.character(input$donor_code)[1] else NA_character_
+        sample_obj$batch <- if (is_scalar_string(input$batch)) as.character(input$batch)[1] else NA_character_
+        sample_obj
+      })
+      obj <- merge(
+        x = sample_objects[[1]],
+        y = sample_objects[-1],
+        add.cell.ids = sprintf("sample%02d", seq_along(sample_objects)),
+        merge.data = FALSE
+      )
+    } else {
+      obj <- CreateSeuratObject(
+        counts = read_gene_expression(dataset_storage_key),
+        min.cells = min_cells,
+        min.features = min_features
+      )
+    }
     raw_obj <- obj
     warnings <- c()
     pre_filter_cells <- ncol(obj)
@@ -1793,23 +2025,33 @@ function(req, res) {
     saved <- isTRUE(file.exists(safe_path)) && !is.na(checksum)
     cluster_counts <- table(obj$seurat_clusters)
 
+    summary_out <- list(
+      n_cells = ncol(obj),
+      n_features = nrow(obj),
+      pre_filter_cells = pre_filter_cells,
+      post_filter_cells = post_filter_cells,
+      percent_mt_available = mt_ok,
+      n_variable_features = length(VariableFeatures(obj)),
+      n_pcs = npcs,
+      n_clusters = length(cluster_counts),
+      cluster_sizes = as.list(as.integer(cluster_counts)),
+      reductions = as.list(names(obj@reductions)),
+      normalization_method = norm_method,
+      resolution = cluster_res,
+      used_seed = used_seed
+    )
+    if (multi_sample) {
+      condition_counts <- table(condition_names)
+      summary_out$n_samples <- length(dataset_inputs)
+      summary_out$conditions <- as.list(names(condition_counts))
+      summary_out$samples_per_condition <- lapply(seq_along(condition_counts), function(index) {
+        list(condition = names(condition_counts)[[index]], n = as.integer(condition_counts[[index]]))
+      })
+    }
+
     response_out <- list(
       ok = TRUE,
-      summary = list(
-        n_cells = ncol(obj),
-        n_features = nrow(obj),
-        pre_filter_cells = pre_filter_cells,
-        post_filter_cells = post_filter_cells,
-        percent_mt_available = mt_ok,
-        n_variable_features = length(VariableFeatures(obj)),
-        n_pcs = npcs,
-        n_clusters = length(cluster_counts),
-        cluster_sizes = as.list(as.integer(cluster_counts)),
-        reductions = as.list(names(obj@reductions)),
-        normalization_method = norm_method,
-        resolution = cluster_res,
-        used_seed = used_seed
-      ),
+      summary = summary_out,
       warnings = as.list(warnings),
       checkpoint = list(
         saved = saved,
@@ -1834,6 +2076,206 @@ function(req, res) {
   })
 }
 
+# Extract only the classic Visium inputs used by Load10X_Spatial. Archive names
+# are validated before extraction, uncompressed bytes are bounded, duplicate
+# entries are rejected, and each extracted entry is checked for links before the
+# next entry can use it as a parent.
+extract_classic_visium_bundle <- function(zip_path) {
+  listing <- utils::unzip(zip_path, list = TRUE)
+  if (!is.data.frame(listing) || !all(c("Name", "Length") %in% names(listing)) ||
+      nrow(listing) < 4 || nrow(listing) > 500) stop("Visium archive inventory is invalid.")
+  names_in_zip <- as.character(listing$Name)
+  sizes <- suppressWarnings(as.numeric(listing$Length))
+  invalid_name <- is.na(names_in_zip) | nchar(names_in_zip, type = "bytes") < 1 |
+    nchar(names_in_zip, type = "bytes") > 240 |
+    grepl("\\\\", names_in_zip) | grepl("^/|^[A-Za-z]:", names_in_zip) |
+    vapply(strsplit(sub("/$", "", names_in_zip), "/", fixed = TRUE), function(parts) {
+      any(parts %in% c("", ".", ".."))
+    }, logical(1))
+  if (any(invalid_name) || any(is.na(sizes)) || any(sizes < 0) || anyDuplicated(names_in_zip)) {
+    stop("Visium archive inventory is invalid.")
+  }
+  matrix_entries <- names_in_zip[basename(names_in_zip) == "filtered_feature_bc_matrix.h5"]
+  if (length(matrix_entries) != 1L) stop("Visium archive must contain one filtered feature matrix.")
+  matrix_entry <- matrix_entries[[1]]
+  data_prefix <- dirname(matrix_entry)
+  if (identical(data_prefix, ".")) data_prefix <- ""
+  spatial_prefix <- if (nzchar(data_prefix)) paste0(data_prefix, "/spatial/") else "spatial/"
+  allowed_spatial <- c(
+    "tissue_positions.csv", "tissue_positions_list.csv", "scalefactors_json.json",
+    "tissue_lowres_image.png", "tissue_hires_image.png"
+  )
+  spatial_entries <- names_in_zip[startsWith(names_in_zip, spatial_prefix) &
+    basename(names_in_zip) %in% allowed_spatial]
+  selected <- unique(c(matrix_entry, spatial_entries))
+  selected_sizes <- sizes[match(selected, names_in_zip)]
+  selected_basenames <- basename(selected)
+  if (!any(selected_basenames %in% c("tissue_positions.csv", "tissue_positions_list.csv")) ||
+      !"scalefactors_json.json" %in% selected_basenames ||
+      !"tissue_lowres_image.png" %in% selected_basenames ||
+      sum(selected_sizes) > 1024^3) {
+    stop("Visium archive is missing required spatial files or exceeds limits.")
+  }
+  extraction_root <- tempfile("traceomics-visium-")
+  dir.create(extraction_root, mode = "0700")
+  cleanup_failed_extraction <- TRUE
+  on.exit({
+    if (cleanup_failed_extraction) unlink(extraction_root, recursive = TRUE, force = TRUE)
+  }, add = TRUE)
+  for (entry in selected) {
+    entry_parts <- strsplit(entry, "/", fixed = TRUE)[[1]]
+    destination <- do.call(file.path, as.list(c(extraction_root, entry_parts)))
+    parent <- dirname(destination)
+    dir.create(parent, recursive = TRUE, showWarnings = FALSE, mode = "0700")
+    cursor <- extraction_root
+    parent_parts <- if (length(entry_parts) > 1L) head(entry_parts, -1L) else character()
+    for (part in parent_parts) {
+      cursor <- file.path(cursor, part)
+      if (nzchar(Sys.readlink(cursor))) stop("Visium archive contains an unsafe link.")
+    }
+    utils::unzip(zip_path, files = entry, exdir = extraction_root, overwrite = FALSE)
+    if (!file.exists(destination) || dir.exists(destination) || nzchar(Sys.readlink(destination))) {
+      stop("Visium archive contains an unsafe entry.")
+    }
+  }
+  data_dir <- if (nzchar(data_prefix)) file.path(extraction_root, data_prefix) else extraction_root
+  cleanup_failed_extraction <- FALSE
+  list(root = extraction_root, data_dir = data_dir)
+}
+
+# Classic 10x Visium Space Ranger bundle -> Seurat spatial checkpoint.
+#* @post /object/spatial-seurat-pipeline
+#* @parser json
+function(req, res) {
+  on.exit(try(gc(full = TRUE), silent = TRUE), add = TRUE)
+  body <- req$body
+  if (is.null(body) || is.null(body$params) ||
+      !identical(as.character(body$dataset_file_type)[1], "visium_zip")) {
+    res$status <- 400
+    return(list(error = "Missing spatial pipeline parameters."))
+  }
+  p <- body$params
+  dataset_storage_key <- body$dataset_storage_key
+  storage_key <- body$storage_key
+  if (!is_scalar_string(dataset_storage_key) || !is_scalar_string(storage_key)) {
+    res$status <- 400
+    return(list(error = "Missing storage key."))
+  }
+  as_int <- function(v, d, lo, hi) {
+    x <- suppressWarnings(as.integer(v)); if (length(x) != 1 || is.na(x)) return(d)
+    max(lo, min(hi, x))
+  }
+  as_num <- function(v, d, lo, hi) {
+    x <- suppressWarnings(as.numeric(v)); if (length(x) != 1 || is.na(x)) return(d)
+    max(lo, min(hi, x))
+  }
+  tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, "spatial.seurat.v1", "r.spatial.seurat.v1", storage_key
+    )
+    zip_path <- resolve_internal_storage_key(dataset_storage_key)
+    if (!file.exists(zip_path)) stop("Spatial dataset file not found.")
+    extracted <- extract_classic_visium_bundle(zip_path)
+    on.exit(unlink(extracted$root, recursive = TRUE, force = TRUE), add = TRUE)
+    obj <- Load10X_Spatial(
+      data.dir = extracted$data_dir,
+      filename = "filtered_feature_bc_matrix.h5",
+      assay = "Spatial",
+      slice = "slice1",
+      filter.matrix = TRUE
+    )
+    if (!inherits(obj, "Seurat") || ncol(obj) < 3 || length(Images(obj)) < 1) {
+      stop("Visium bundle did not produce a spatial Seurat object.")
+    }
+    min_cells <- as_int(p$minCells, 3, 0, 10000)
+    min_features <- as_int(p$minFeatures, 200, 0, 100000)
+    spatial_counts <- LayerData(obj, assay = "Spatial", layer = "counts")
+    keep_features <- Matrix::rowSums(spatial_counts > 0) >= min_cells
+    keep_spots <- obj$nFeature_Spatial >= min_features
+    if (sum(keep_features) < 2 || sum(keep_spots) < 3) {
+      stop("Initial feature filtering would leave insufficient spatial data.")
+    }
+    obj <- subset(obj, features = rownames(obj)[keep_features], cells = colnames(obj)[keep_spots])
+    raw_obj <- obj
+    warnings <- c()
+    pre_filter_cells <- ncol(obj)
+    mt_ok <- TRUE
+    tryCatch({
+      obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^[Mm][Tt]-")
+    }, error = function(e) {
+      mt_ok <<- FALSE; warnings <<- c(warnings, "percent.mt could not be computed")
+      obj[["percent.mt"]] <<- 0
+    })
+    apply_qc <- isTRUE(p$applyQcFilter)
+    if (apply_qc) {
+      min_features_filter <- as_int(p$minFeaturesFilter, 200, 0, 100000)
+      max_features_filter <- as_int(p$maxFeaturesFilter, 2500, 1, 1000000)
+      max_percent_mt <- as_num(p$maxPercentMt, 5, 0, 100)
+      keep <- obj$nFeature_Spatial >= min_features_filter &
+        obj$nFeature_Spatial <= max_features_filter & obj$percent.mt <= max_percent_mt
+      if (sum(keep) < 3) stop("QC filtering would leave fewer than 3 spots.")
+      obj <- subset(obj, cells = colnames(obj)[keep])
+    }
+    post_filter_cells <- ncol(obj)
+    norm_method <- if (!is.null(p$normalizationMethod)) as.character(p$normalizationMethod)[1] else "LogNormalize"
+    if (!norm_method %in% c("LogNormalize", "SCTransform")) norm_method <- "LogNormalize"
+    nfeatures <- as_int(p$variableFeatures, 2000, 50, 10000)
+    used_seed <- if (is.null(p$seed) || is.na(suppressWarnings(as.integer(p$seed)))) sample.int(100000, 1) else as.integer(p$seed)
+    set.seed(used_seed)
+    if (identical(norm_method, "SCTransform")) {
+      obj <- SCTransform(obj, assay = "Spatial", verbose = FALSE)
+    } else {
+      obj <- NormalizeData(obj, assay = "Spatial", normalization.method = "LogNormalize",
+                           scale.factor = as_num(p$scaleFactor, 10000, 1, 1e7), verbose = FALSE)
+      obj <- FindVariableFeatures(obj, assay = "Spatial", selection.method = "vst",
+                                  nfeatures = nfeatures, verbose = FALSE)
+      obj <- ScaleData(obj, assay = "Spatial", features = VariableFeatures(obj), verbose = FALSE)
+    }
+    npcs <- min(as_int(p$pcaDims, 50, 2, 100), ncol(obj) - 1, nrow(obj) - 1, 100, na.rm = TRUE)
+    if (is.na(npcs) || npcs < 2) stop("Insufficient spots/features for PCA.")
+    obj <- RunPCA(obj, npcs = npcs, seed.use = used_seed, verbose = FALSE)
+    avail_dims <- ncol(Embeddings(obj, "pca"))
+    cdims <- min(as_int(p$clusterDims, 15, 2, 100), avail_dims)
+    cluster_res <- as_num(p$clusterResolution, 0.8, 0.01, 10)
+    obj <- FindNeighbors(obj, reduction = "pca", dims = seq_len(cdims), verbose = FALSE)
+    obj <- FindClusters(obj, resolution = cluster_res, random.seed = used_seed, verbose = FALSE)
+    udims <- min(as_int(p$umapDims, 15, 2, 100), avail_dims)
+    neighbors <- min(as_int(p$umapNeighbors, 30, 2, 200), ncol(obj) - 1)
+    obj <- RunUMAP(obj, reduction = "pca", dims = seq_len(udims),
+                   n.components = as_int(p$umapComponents, 2, 2, 3), n.neighbors = neighbors,
+                   min.dist = as_num(p$umapMinDist, 0.3, 0, 1), seed.use = used_seed,
+                   verbose = FALSE)
+    safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
+    atomic_save_rds(list(global = obj, raw = raw_obj), safe_path)
+    size_bytes <- as.numeric(file.info(safe_path)$size)
+    checksum <- digest::digest(file = safe_path, algo = "sha256")
+    cluster_counts <- table(obj$seurat_clusters)
+    response_out <- list(
+      ok = TRUE,
+      summary = list(
+        n_cells = ncol(obj), n_features = nrow(obj),
+        pre_filter_cells = pre_filter_cells, post_filter_cells = post_filter_cells,
+        percent_mt_available = mt_ok, n_variable_features = length(VariableFeatures(obj)),
+        n_pcs = npcs, n_clusters = length(cluster_counts),
+        cluster_sizes = as.list(as.integer(cluster_counts)),
+        reductions = as.list(names(obj@reductions)), normalization_method = norm_method,
+        resolution = cluster_res, used_seed = used_seed
+      ),
+      warnings = as.list(warnings),
+      checkpoint = list(saved = TRUE, checksum_sha256 = checksum, size_bytes = size_bytes),
+      versions = list(seurat_version = as.character(utils::packageVersion("Seurat")),
+                      r_version = as.character(getRversion()))
+    )
+    atomic_write_completion_receipt(receipt_binding, response_out)
+    response_out
+  }, error = function(e) {
+    res$status <- 500
+    code <- classify_seurat_pipeline_error(e)
+    message(sprintf("[object/spatial-seurat-pipeline] pipeline error: %s", conditionMessage(e)))
+    list(error = "spatial seurat pipeline failed", code = code)
+  })
+}
+
 #* Read-only completion flags for restoring the pipeline UI after a browser restart
 #* @get /pipeline-state
 function(req, res) {
@@ -1853,7 +2295,7 @@ function(req, res) {
     has_pca <- "pca" %in% names(global_obj@reductions)
     has_clusters <- "seurat_clusters" %in% colnames(global_obj@meta.data)
     has_umap <- "umap" %in% names(global_obj@reductions)
-    qc_marker <- tryCatch(isTRUE(global_obj@misc$benchone_pipeline$qc), error = function(e) FALSE)
+    qc_marker <- tryCatch(isTRUE(global_obj@misc$traceomics_pipeline$qc), error = function(e) FALSE)
     pca_dims <- if (has_pca) tryCatch(ncol(Embeddings(global_obj, "pca")), error = function(e) 15) else 15
     list(
       exists = TRUE,
@@ -1902,7 +2344,8 @@ function(req, res) {
   expected_size <- if (!is.null(body$expected_size_bytes)) suppressWarnings(as.numeric(body$expected_size_bytes)[1]) else NULL
 
   tryCatch({
-    receipt_binding <- validate_completion_receipt_binding(
+    hydration_only <- identical(body$operation, "r.checkpoint.hydrate.v1")
+    receipt_binding <- if (hydration_only) NULL else validate_completion_receipt_binding(
       body, c("checkpoint.load.v1", "checkpoint.fork.v1"),
       "r.checkpoint.load.v1", NULL
     )
@@ -1999,7 +2442,7 @@ function(req, res) {
     tryCatch(
       {
         store_active_session(sid, global_obj, raw_obj)
-        atomic_write_completion_receipt(receipt_binding, summary_out)
+        if (!hydration_only) atomic_write_completion_receipt(receipt_binding, summary_out)
       },
       error = function(receipt_error) {
         global_obj <<- prior_global
@@ -2040,9 +2483,112 @@ function(req, res) {
 # typed Seurat arguments validated against a fixed allowlist and the storage key is server-
 # allocated. The response is a sanitized, bounded summary (no matrices/cells/embeddings);
 # the Node bridge sanitizes it again.
+# Internal bounded exploratory-analysis recipes. This is not an eval/script
+# endpoint: it returns aggregate-only summaries from three reviewed recipes.
+#* @post /object/explore-summary
+#* @parser json
+function(req, res) {
+  job_state_key <- job_scoped_active_session_key(req$HTTP_X_OBJECT_ID)
+  if (!is.null(job_state_key)) {
+    on.exit(release_job_scoped_active_session(req, job_state_key), add = TRUE)
+  }
+  body <- req$body
+  params <- if (is.list(body)) body$params else NULL
+  recipe <- if (is.list(params)) as.character(params$recipe)[1] else "overview"
+  max_groups <- if (is.list(params)) suppressWarnings(as.integer(params$maxGroups)[1]) else 24L
+  histogram_bins <- if (is.list(params)) suppressWarnings(as.integer(params$histogramBins)[1]) else 24L
+  if (!(recipe %in% c("overview", "feature_by_group", "metadata_distribution")) ||
+      is.na(max_groups) || max_groups < 2L || max_groups > 32L ||
+      is.na(histogram_bins) || histogram_bins < 8L || histogram_bins > 50L) {
+    res$status <- 400
+    return(list(error = "invalid exploratory-analysis parameters"))
+  }
+  rows_list <- function(frame) {
+    if (!is.data.frame(frame) || nrow(frame) == 0) return(list())
+    lapply(seq_len(nrow(frame)), function(index) as.list(frame[index, , drop = FALSE]))
+  }
+  histogram_panel <- function(values, title, field) {
+    values <- as.numeric(values)
+    values <- values[is.finite(values)]
+    if (length(values) == 0) return(NULL)
+    breaks <- unique(pretty(range(values), n = histogram_bins))
+    if (length(breaks) < 2) breaks <- c(values[1] - 0.5, values[1] + 0.5)
+    h <- hist(values, breaks = breaks, plot = FALSE, include.lowest = TRUE)
+    list(type = "histogram", title = title, field = field,
+         rows = rows_list(data.frame(start = head(h$breaks, -1),
+           end = tail(h$breaks, -1), count = as.numeric(h$counts), check.names = FALSE)))
+  }
+  tryCatch({
+    if (!inherits(global_obj, "Seurat")) stop("Seurat object required")
+    meta <- global_obj@meta.data
+    panels <- list()
+    if (identical(recipe, "overview")) {
+      for (field in intersect(c("nCount_RNA", "nFeature_RNA", "percent.mt"), colnames(meta))) {
+        if (is.numeric(meta[[field]]) || is.integer(meta[[field]])) {
+          panels[[length(panels) + 1L]] <- histogram_panel(meta[[field]], paste(field, "distribution"), field)
+        }
+      }
+      groups <- if ("seurat_clusters" %in% colnames(meta)) as.character(meta$seurat_clusters) else as.character(Idents(global_obj))
+      group_counts <- head(sort(table(groups), decreasing = TRUE), max_groups)
+      if (length(group_counts) > 0) panels[[length(panels) + 1L]] <- list(
+        type = "bar", title = "Cells by group", field = "seurat_clusters",
+        rows = lapply(seq_along(group_counts), function(index) list(
+          label = names(group_counts)[index], count = as.numeric(group_counts[index]))))
+    } else if (identical(recipe, "metadata_distribution")) {
+      field <- as.character(params$metadataField)[1]
+      if (is.na(field) || !grepl("^[A-Za-z0-9_.:-]{1,128}$", field) || !(field %in% colnames(meta))) stop("metadata field unavailable")
+      values <- meta[[field]]
+      if (is.numeric(values) || is.integer(values)) panels[[1]] <- histogram_panel(values, paste(field, "distribution"), field)
+      else {
+        counts <- head(sort(table(as.character(values), useNA = "no"), decreasing = TRUE), max_groups)
+        panels[[1]] <- list(type = "bar", title = paste(field, "counts"), field = field,
+          rows = lapply(seq_along(counts), function(index) list(
+            label = names(counts)[index], count = as.numeric(counts[index]))))
+      }
+    } else {
+      features <- unique(as.character(unlist(params$features, use.names = FALSE)))
+      features <- intersect(features[grepl("^[A-Za-z0-9_.:-]{1,128}$", features)], rownames(global_obj))
+      if (length(features) < 1L || length(features) > 12L) stop("features unavailable")
+      group_by <- as.character(params$groupBy)[1]
+      groups <- if (identical(group_by, "ident")) as.character(Idents(global_obj)) else {
+        if (!("seurat_clusters" %in% colnames(meta))) stop("cluster groups unavailable")
+        as.character(meta$seurat_clusters)
+      }
+      keep_groups <- names(head(sort(table(groups), decreasing = TRUE), max_groups))
+      keep <- which(groups %in% keep_groups)
+      if (length(keep) > 20000L) {
+        keep <- keep[unique(as.integer(round(seq(1, length(keep), length.out = 20000L))))]
+      }
+      fetched <- FetchData(global_obj, vars = features, cells = colnames(global_obj)[keep])
+      fetched$.group <- groups[keep]
+      output_rows <- list()
+      for (feature in features) for (group in keep_groups) {
+        values <- as.numeric(fetched[fetched$.group == group, feature])
+        values <- values[is.finite(values)]
+        if (length(values) > 0) output_rows[[length(output_rows) + 1L]] <- list(
+          feature = feature, group = group, average = mean(values), pct_detected = mean(values > 0) * 100)
+      }
+      panels[[1]] <- list(type = "feature_group", title = "Feature expression by group", rows = output_rows)
+    }
+    panels <- Filter(Negate(is.null), panels)
+    if (length(panels) == 0) stop("no exploratory summary available")
+    list(recipe = recipe, n_cells = ncol(global_obj), n_features = nrow(global_obj),
+         metadata_fields = as.list(head(colnames(meta), 128L)), panels = panels)
+  }, error = function(e) {
+    res$status <- 400
+    message(sprintf("[object/explore-summary] analysis error: %s", conditionMessage(e)))
+    list(error = "exploratory analysis failed")
+  })
+}
+
 #* @post /object/deg-find-markers
 #* @parser json
 function(req, res) {
+  job_state_key <- job_scoped_active_session_key(req$HTTP_X_OBJECT_ID)
+  if (!is.null(job_state_key)) {
+    on.exit(release_job_scoped_active_session(req, job_state_key), add = TRUE)
+    record_test_job_session_observation(job_state_key)
+  }
   if (is.null(global_obj)) {
     res$status <- 400
     return(list(error = "No input object loaded."))
@@ -2668,6 +3214,10 @@ run_enrichment_gsea_analysis <- function(input_obj, p) {
 #* @post /object/enrichment-gsea
 #* @parser json
 function(req, res) {
+  job_state_key <- job_scoped_active_session_key(req$HTTP_X_OBJECT_ID)
+  if (!is.null(job_state_key)) {
+    on.exit(release_job_scoped_active_session(req, job_state_key), add = TRUE)
+  }
   if (is.null(global_obj)) {
     res$status <- 400
     return(list(error = "No input object loaded."))
@@ -2770,9 +3320,9 @@ cellchat_inference_safe_string <- function(value, max_chars = 160L) {
   substr(trimws(clean), 1L, max_chars)
 }
 
-cellchat_inference_input_error <- function(message) {
+cellchat_inference_input_error <- function(message, code = "CELLCHAT_INPUT_INVALID") {
   stop(structure(
-    list(message = message, call = NULL),
+    list(message = message, call = NULL, code = code),
     class = c("cellchat_inference_input_error", "error", "condition")
   ))
 }
@@ -2957,7 +3507,7 @@ cellchat_inference_group_metadata <- function(selected_cells, group_values,
     cellchat_inference_input_error("The requested grouping could not be prepared safely.")
   }
   data.frame(
-    .benchone_cellchat_group = factor(selected_internal_groups, levels = internal_levels),
+    .traceomics_cellchat_group = factor(selected_internal_groups, levels = internal_levels),
     row.names = selected_cells,
     stringsAsFactors = FALSE
   )
@@ -2973,11 +3523,11 @@ cellchat_inference_signaling_features <- function(input_obj, assay, database) {
     !is.na(database_features) & nzchar(database_features)
   ]
   if (is.null(available_features) || length(available_features) == 0L) {
-    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.")
+    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.", "CELLCHAT_NORMALIZED_DATA_REQUIRED")
   }
   selected <- database_features[database_features %in% available_features]
   if (length(selected) < 5L) {
-    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.")
+    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.", "CELLCHAT_DATABASE_OVERLAP_LOW")
   }
   if (length(selected) > CELLCHAT_INFERENCE_MAX_SIGNALING_FEATURES) {
     cellchat_inference_input_error("The selected CellChat database exceeds the supported signaling-feature capacity.")
@@ -3025,12 +3575,12 @@ cellchat_inference_prepare_input <- function(input_obj, assay, selected_cells,
     layer <- Seurat::GetAssayData(input_obj, assay = assay, layer = "data")
     layer[signaling_features, selected_cells, drop = FALSE]
   }, error = function(e) {
-    cellchat_inference_input_error("Normalized RNA data is required for cell communication inference.")
+    cellchat_inference_input_error("Normalized RNA data is required for cell communication inference.", "CELLCHAT_NORMALIZED_DATA_REQUIRED")
   })
   if (is.null(data_input) || nrow(data_input) < 5L ||
       ncol(data_input) != length(selected_cells) ||
       !identical(colnames(data_input), rownames(metadata))) {
-    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.")
+    cellchat_inference_input_error("The normalized RNA assay is not suitable for cell communication inference.", "CELLCHAT_NORMALIZED_DATA_REQUIRED")
   }
   list(data = data_input, metadata = metadata, admission = admission)
 }
@@ -3537,13 +4087,16 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
     !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
   ]
   if (length(missing_packages) > 0L) {
-    stop("CellChat runtime dependencies are unavailable.")
+    cellchat_inference_input_error(
+      "CellChat runtime dependencies are unavailable.",
+      "CELLCHAT_PACKAGES_UNAVAILABLE"
+    )
   }
   if (!inherits(input_obj, "Seurat")) {
     cellchat_inference_input_error("Loaded object is not a Seurat object.")
   }
   if (!(p$assay %in% Assays(input_obj))) {
-    cellchat_inference_input_error("The RNA assay is required for cell communication inference.")
+    cellchat_inference_input_error("The RNA assay is required for cell communication inference.", "CELLCHAT_ASSAY_UNAVAILABLE")
   }
   input_cells <- colnames(input_obj)
   if (length(input_cells) < 1L) {
@@ -3552,7 +4105,7 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
 
   group_values <- if (identical(p$group_by, "seurat_clusters")) {
     if (!("seurat_clusters" %in% colnames(input_obj@meta.data))) {
-      cellchat_inference_input_error("Clustering results are required for cell communication inference.")
+      cellchat_inference_input_error("Clustering results are required for cell communication inference.", "CELLCHAT_GROUPING_UNAVAILABLE")
     }
     as.character(input_obj@meta.data$seurat_clusters)
   } else {
@@ -3567,10 +4120,10 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
   # CellChat's pairwise graph grows quadratically in group count. Reject rather than
   # silently dropping groups, and keep every returned summary array safely bounded.
   if (length(all_groups) > 32L) {
-    cellchat_inference_input_error("CellChat v1 supports at most 32 populated groups per run.")
+    cellchat_inference_input_error("CellChat v1 supports at most 32 populated groups per run.", "CELLCHAT_GROUP_COUNT_INVALID")
   }
   if (length(all_groups) < 2L) {
-    cellchat_inference_input_error("At least two populated groups are required for cell communication inference.")
+    cellchat_inference_input_error("At least two populated groups are required for cell communication inference.", "CELLCHAT_GROUP_COUNT_INVALID")
   }
   input_counts <- vapply(all_groups, function(group) {
     as.integer(sum(grouped & group_values == group))
@@ -3580,7 +4133,7 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
   eligible_indices <- unname(which(input_counts >= p$min_cells_per_group))
   excluded_indices <- unname(which(input_counts < p$min_cells_per_group))
   if (length(eligible_indices) < 2L) {
-    cellchat_inference_input_error("At least two groups must meet the minimum cell count.")
+    cellchat_inference_input_error("At least two groups must meet the minimum cell count.", "CELLCHAT_MIN_GROUP_CELLS")
   }
 
   per_group_cap <- min(
@@ -3656,13 +4209,13 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
   cellchat <- with_cellchat_warnings(CellChat::createCellChat(
     object = data_input,
     meta = prepared_input$metadata,
-    group.by = ".benchone_cellchat_group",
+    group.by = ".traceomics_cellchat_group",
     datatype = "RNA"
   ))
   cellchat@DB <- cellchat_database
   cellchat <- with_cellchat_warnings(CellChat::subsetData(cellchat))
   if (is.null(cellchat@data.signaling) || nrow(cellchat@data.signaling) < 5L) {
-    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.")
+    cellchat_inference_input_error("Too few signaling genes overlap the selected CellChat database.", "CELLCHAT_DATABASE_OVERLAP_LOW")
   }
   cellchat <- with_cellchat_warnings(CellChat::identifyOverExpressedGenes(
     cellchat,
@@ -3819,6 +4372,10 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
 #* @post /object/cellchat-infer
 #* @parser json
 function(req, res) {
+  job_state_key <- job_scoped_active_session_key(req$HTTP_X_OBJECT_ID)
+  if (!is.null(job_state_key)) {
+    on.exit(release_job_scoped_active_session(req, job_state_key), add = TRUE)
+  }
   if (is.null(global_obj)) {
     res$status <- 400
     return(list(error = "No input object loaded."))
@@ -3879,7 +4436,10 @@ function(req, res) {
   }, error = function(e) {
     if (inherits(e, "cellchat_inference_input_error")) {
       res$status <- 400
-      return(list(error = "Invalid cell communication input."))
+      return(list(
+        error = "Invalid cell communication input.",
+        code = cellchat_inference_safe_string(e$code, 64L)
+      ))
     }
     res$status <- 500
     message(sprintf("[object/cellchat-infer] CellChat error: %s", conditionMessage(e)))
@@ -3887,9 +4447,218 @@ function(req, res) {
   })
 }
 
+# -- Internal worker-bridge: replicate-aware condition pseudobulk DE ----------------
+normalize_condition_pseudobulk_design <- function(value) {
+  samples_value <- if (is.list(value)) value$samples else NULL
+  if (is.data.frame(samples_value)) {
+    samples_value <- lapply(seq_len(nrow(samples_value)), function(index) {
+      as.list(samples_value[index, , drop = FALSE])
+    })
+  }
+  if (!is.list(value) || !is_scalar_string(value$unit_of_replication) ||
+      !(value$unit_of_replication %in% c("sample", "donor")) ||
+      !is.logical(value$paired) || length(value$paired) != 1L || is.na(value$paired) ||
+      !is_scalar_string(value$cell_type_column) ||
+      !grepl("^[A-Za-z][A-Za-z0-9_.-]{0,63}$", value$cell_type_column) ||
+      !is.list(samples_value) || length(samples_value) < 4L || length(samples_value) > 1000L) {
+    stop("Invalid condition design.")
+  }
+  required <- c("sample_id", "condition", "donor_code", "unit_id",
+                "cell_metadata_column", "cell_metadata_value")
+  samples <- lapply(samples_value, function(sample) {
+    if (!is.list(sample) || !setequal(names(sample), required) ||
+        !is_scalar_string(sample$sample_id) ||
+        !is_scalar_string(sample$condition) || !(sample$condition %in% c("numerator", "denominator")) ||
+        !is_scalar_string(sample$unit_id) ||
+        !is_scalar_string(sample$cell_metadata_column) ||
+        !grepl("^[A-Za-z][A-Za-z0-9_.-]{0,63}$", sample$cell_metadata_column) ||
+        !is_scalar_string(sample$cell_metadata_value) ||
+        nchar(sample$cell_metadata_value, type = "bytes") > 200L) stop("Invalid condition sample map.")
+    if (!is.null(sample$donor_code) && !is_scalar_string(sample$donor_code)) {
+      stop("Invalid donor code.")
+    }
+    sample
+  })
+  if (anyDuplicated(vapply(samples, `[[`, character(1), "sample_id"))) {
+    stop("Duplicate condition sample.")
+  }
+  list(
+    unit_of_replication = value$unit_of_replication,
+    paired = isTRUE(value$paired),
+    cell_type_column = value$cell_type_column,
+    samples = samples
+  )
+}
+
+run_condition_pseudobulk_de <- function(input_obj, design) {
+  if (!requireNamespace("edgeR", quietly = TRUE) || !requireNamespace("limma", quietly = TRUE)) {
+    stop("Controlled pseudobulk packages are unavailable.")
+  }
+  metadata <- input_obj[[]]
+  required_columns <- unique(c(
+    design$cell_type_column,
+    vapply(design$samples, `[[`, character(1), "cell_metadata_column")
+  ))
+  if (any(!required_columns %in% colnames(metadata))) stop("Required sample or cell-type metadata is absent.")
+
+  assigned_sample <- rep(NA_character_, nrow(metadata))
+  names(assigned_sample) <- rownames(metadata)
+  for (sample in design$samples) {
+    matched <- !is.na(metadata[[sample$cell_metadata_column]]) &
+      as.character(metadata[[sample$cell_metadata_column]]) == sample$cell_metadata_value
+    if (any(matched & !is.na(assigned_sample))) stop("A cell maps to more than one biological sample.")
+    assigned_sample[matched] <- sample$sample_id
+  }
+  if (!any(!is.na(assigned_sample))) stop("No cells match the registered biological samples.")
+  sample_lookup <- setNames(design$samples, vapply(design$samples, `[[`, character(1), "sample_id"))
+  cell_type <- as.character(metadata[[design$cell_type_column]])
+  valid <- !is.na(assigned_sample) & !is.na(cell_type) & nzchar(cell_type)
+  if (!any(valid)) stop("No mapped cells have a usable cell-type label.")
+  cell_types <- sort(unique(cell_type[valid]))
+  if (length(cell_types) > 128L) stop("Cell-type cardinality exceeds the supported limit.")
+
+  assay <- Seurat::DefaultAssay(input_obj)
+  counts <- Seurat::GetAssayData(input_obj, assay = assay, layer = "counts")
+  if (nrow(counts) > 100000L || ncol(counts) > 1000000L) stop("Pseudobulk input exceeds supported dimensions.")
+  result_parts <- list()
+  skipped <- character()
+  tested_genes <- character()
+
+  for (label in cell_types) {
+    cells <- names(assigned_sample)[valid & cell_type == label]
+    sample_ids <- assigned_sample[cells]
+    unit_keys <- vapply(sample_ids, function(sample_id) {
+      sample <- sample_lookup[[sample_id]]
+      paste(sample$condition, sample$unit_id, sep = "::")
+    }, character(1))
+    unit_counts <- table(unit_keys)
+    kept_units <- names(unit_counts)[unit_counts >= 20L]
+    keep_cell <- unit_keys %in% kept_units
+    cells <- cells[keep_cell]
+    unit_keys <- unit_keys[keep_cell]
+    unit_condition <- sub("::.*$", "", kept_units)
+    if (sum(unit_condition == "numerator") < 2L || sum(unit_condition == "denominator") < 2L) {
+      skipped <- c(skipped, label)
+      next
+    }
+    membership <- Matrix::sparse.model.matrix(~ 0 + factor(unit_keys, levels = kept_units))
+    colnames(membership) <- kept_units
+    pseudobulk <- counts[, cells, drop = FALSE] %*% membership
+    condition <- factor(unit_condition, levels = c("denominator", "numerator"))
+    if (design$paired) {
+      donor <- factor(sub("^[^:]+::", "", kept_units))
+      model <- stats::model.matrix(~ donor + condition)
+    } else {
+      model <- stats::model.matrix(~ condition)
+    }
+    if (qr(model)$rank < ncol(model)) {
+      skipped <- c(skipped, label)
+      next
+    }
+    y <- edgeR::DGEList(counts = pseudobulk)
+    keep_gene <- edgeR::filterByExpr(y, design = model, min.count = 10)
+    if (sum(keep_gene) < 2L) {
+      skipped <- c(skipped, label)
+      next
+    }
+    y <- edgeR::calcNormFactors(y[keep_gene, , keep.lib.sizes = FALSE])
+    y <- edgeR::estimateDisp(y, model, robust = TRUE)
+    fit <- edgeR::glmQLFit(y, model, robust = TRUE)
+    coefficient <- which(colnames(model) == "conditionnumerator")
+    if (length(coefficient) != 1L) stop("Condition coefficient is unavailable.")
+    table_out <- edgeR::topTags(edgeR::glmQLFTest(fit, coef = coefficient), n = Inf, sort.by = "PValue")$table
+    table_out$gene <- rownames(table_out)
+    table_out$cell_type <- label
+    table_out <- data.frame(
+      cell_type = table_out$cell_type, gene = table_out$gene,
+      log_fc = table_out$logFC, log_cpm = table_out$logCPM,
+      f_statistic = table_out$F, p_value = table_out$PValue, fdr = table_out$FDR,
+      stringsAsFactors = FALSE
+    )
+    result_parts[[length(result_parts) + 1L]] <- table_out
+    tested_genes <- union(tested_genes, table_out$gene)
+  }
+  result_table <- if (length(result_parts)) do.call(rbind, result_parts) else data.frame(
+    cell_type = character(), gene = character(), log_fc = numeric(), log_cpm = numeric(),
+    f_statistic = numeric(), p_value = numeric(), fdr = numeric(), stringsAsFactors = FALSE
+  )
+  if (nrow(result_table) > 500000L) stop("Pseudobulk result exceeds the supported row limit.")
+  significant <- result_table[is.finite(result_table$fdr) & result_table$fdr <= 0.05, , drop = FALSE]
+  top <- head(result_table[order(result_table$fdr, result_table$p_value, na.last = TRUE), , drop = FALSE], 50L)
+  top_results <- lapply(seq_len(nrow(top)), function(index) list(
+    cell_type = as.character(top$cell_type[[index]]), gene = as.character(top$gene[[index]]),
+    log_fc = as.numeric(top$log_fc[[index]]), p_value = as.numeric(top$p_value[[index]]),
+    fdr = as.numeric(top$fdr[[index]])
+  ))
+  list(
+    table = result_table,
+    summary = list(
+      method = "edgeR quasi-likelihood pseudobulk",
+      cell_type_column = design$cell_type_column,
+      unit_of_replication = design$unit_of_replication,
+      paired = design$paired,
+      sample_count = as.integer(length(design$samples)),
+      tested_cell_type_count = as.integer(length(result_parts)),
+      tested_gene_count = as.integer(length(tested_genes)),
+      significant_result_count = as.integer(nrow(significant)),
+      skipped_cell_types = as.list(head(skipped, 128L)),
+      top_results = top_results,
+      package_versions = list(
+        r = as.character(getRversion()),
+        seurat = as.character(utils::packageVersion("Seurat")),
+        edger = as.character(utils::packageVersion("edgeR")),
+        limma = as.character(utils::packageVersion("limma"))
+      ),
+      warnings = if (length(skipped)) list("Cell types without sufficient per-unit cells or replication were skipped.") else list()
+    )
+  )
+}
+
+#* @post /object/condition-pseudobulk-de
+#* @parser json
+function(req, res) {
+  job_state_key <- job_scoped_active_session_key(req$HTTP_X_OBJECT_ID)
+  if (!is.null(job_state_key)) {
+    on.exit(release_job_scoped_active_session(req, job_state_key), add = TRUE)
+  }
+  if (is.null(global_obj) || !inherits(global_obj, "Seurat")) {
+    res$status <- 400L
+    return(list(error = "A loaded Seurat object is required."))
+  }
+  body <- req$body
+  storage_key <- if (is.list(body)) body$storage_key else NULL
+  design <- tryCatch(normalize_condition_pseudobulk_design(body$design), error = identity)
+  if (inherits(design, "error") || !is_scalar_string(storage_key)) {
+    res$status <- 400L
+    return(list(error = "Invalid condition-comparison input."))
+  }
+  tryCatch({
+    receipt_binding <- validate_completion_receipt_binding(
+      body, "condition.pseudobulk_de.v1", "r.condition.pseudobulk_de.v1", storage_key
+    )
+    analysis <- run_condition_pseudobulk_de(global_obj, design)
+    safe_path <- resolve_internal_storage_key(storage_key, for_write = TRUE)
+    atomic_write_csv(analysis$table, safe_path)
+    size_bytes <- as.numeric(file.info(safe_path)$size)
+    checksum <- digest::digest(file = safe_path, algo = "sha256")
+    if (!file.exists(safe_path) || is.na(checksum)) stop("Unable to verify pseudobulk output.")
+    response_out <- list(
+      ok = TRUE, summary = analysis$summary,
+      result = list(saved = TRUE, checksum_sha256 = checksum,
+                    size_bytes = size_bytes, n_rows = nrow(analysis$table))
+    )
+    atomic_write_completion_receipt(receipt_binding, response_out)
+    response_out
+  }, error = function(error) {
+    res$status <- 500L
+    message(sprintf("[object/condition-pseudobulk-de] failed: %s", conditionMessage(error)))
+    list(error = "condition pseudobulk comparison failed")
+  })
+}
+
 #* Get the owner-local key for opaque CellChat result groups
 #* @get /cellchat-group-map
-function(res, group_by = "") {
+function(res, group_by = "", preflight = "false", min_cells_per_group = "10") {
   if (is.null(global_obj)) {
     res$status <- 400
     return(list(error = "No input object loaded."))
@@ -3906,6 +4675,33 @@ function(res, group_by = "") {
   if (inherits(mapping, "error")) {
     res$status <- 400
     return(list(error = "CellChat group mapping is unavailable."))
+  }
+  if (identical(tolower(as.character(preflight)), "true")) {
+    missing_packages <- c("CellChat", "NMF")[
+      !vapply(c("CellChat", "NMF"), requireNamespace, logical(1), quietly = TRUE)
+    ]
+    if (length(missing_packages) > 0L) {
+      return(list(ready = FALSE, code = "CELLCHAT_PACKAGES_UNAVAILABLE"))
+    }
+    if (!("RNA" %in% Assays(global_obj))) {
+      return(list(ready = FALSE, code = "CELLCHAT_ASSAY_UNAVAILABLE"))
+    }
+    minimum <- suppressWarnings(as.integer(min_cells_per_group))
+    if (length(minimum) != 1L || is.na(minimum) || minimum < 5L || minimum > 200L) {
+      return(list(ready = FALSE, code = "CELLCHAT_INPUT_INVALID"))
+    }
+    eligible <- vapply(mapping$groups, function(group) group$input_cells >= minimum, logical(1))
+    if (sum(eligible) < 2L) {
+      return(list(ready = FALSE, code = "CELLCHAT_MIN_GROUP_CELLS"))
+    }
+    normalized <- tryCatch(
+      GetAssayData(global_obj, assay = "RNA", layer = "data"),
+      error = function(e) NULL
+    )
+    if (is.null(normalized) || nrow(normalized) < 1L || ncol(normalized) != ncol(global_obj)) {
+      return(list(ready = FALSE, code = "CELLCHAT_NORMALIZED_DATA_REQUIRED"))
+    }
+    return(list(ready = TRUE, group_count = length(mapping$groups)))
   }
   mapping
 }
@@ -4280,8 +5076,8 @@ function(res, req) {
     if (ncol(temp_obj) == 0) {
       stop("No cells passed the selected QC thresholds. Please loosen your filters.")
     }
-    if (is.null(temp_obj@misc$benchone_pipeline)) temp_obj@misc$benchone_pipeline <- list()
-    temp_obj@misc$benchone_pipeline$qc <- TRUE
+    if (is.null(temp_obj@misc$traceomics_pipeline)) temp_obj@misc$traceomics_pipeline <- list()
+    temp_obj@misc$traceomics_pipeline$qc <- TRUE
     global_obj <<- temp_obj
   }, error = function(e) {
     stop("QC Filter Error: Likely no cells matched these thresholds. (", e$message, ")")

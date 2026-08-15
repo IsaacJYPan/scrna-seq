@@ -41,8 +41,12 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Local assistant/tool settings
+# Local development-tool context
 .claude/
+/.codex/
+/.agents/
+/.cursor/
+/.windsurf/
 /AGENTS.md
 /WORKFLOW.md
 

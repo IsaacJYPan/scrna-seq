@@ -96,6 +96,7 @@ describe('seurat.pipeline.v1 inventory and validation', () => {
     expect(isValidJobType('seurat.pipeline.v1')).toBe(true);
     expect(DEFAULT_HANDLERS['seurat.pipeline.v1']).toBe(seuratPipelineHandler);
     expect(R_BRIDGE_OPERATIONS['r.seurat.pipeline.v1'].path).toBe('/object/seurat-pipeline');
+    expect(R_BRIDGE_OPERATIONS['r.seurat.pipeline.v1'].defaultTimeoutMs).toBe(600000);
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort()).toContain('POST /object/seurat-pipeline');
   });
 

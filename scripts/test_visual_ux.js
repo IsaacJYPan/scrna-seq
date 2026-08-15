@@ -19,18 +19,30 @@
 'use strict';
 
 const { chromium } = require('playwright');
-const { AxePuppeteer } = require('@axe-core/playwright');
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
 // ── Configuration ──────────────────────────────────────────────────────────────
-const VITE_PORT     = 5173;
+const VITE_PORT     = Number(process.env.VISUAL_VITE_PORT || 5173);
 const VITE_URL      = `http://localhost:${VITE_PORT}`;
 const WORKSPACE     = path.resolve(__dirname, '..');
-const SNAPSHOTS_DIR = path.join(WORKSPACE, 'playwright', 'snapshots');
+const VITE_CLI      = path.join(WORKSPACE, 'node_modules', 'vite', 'bin', 'vite.js');
+const SNAPSHOT_PLATFORM = String(process.env.VISUAL_SNAPSHOT_PLATFORM || process.platform)
+  .toLowerCase().replace(/[^a-z0-9_-]/g, '');
+const SNAPSHOTS_ROOT = path.join(WORKSPACE, 'playwright', 'snapshots');
+// Browser text rasterization differs materially between Windows and Linux.
+// Keep the reviewed legacy Windows goldens in the root and use a dedicated
+// Linux set in CI instead of weakening the pixel-difference threshold.
+const SNAPSHOTS_DIR = SNAPSHOT_PLATFORM === 'linux'
+  ? path.join(SNAPSHOTS_ROOT, 'linux')
+  : SNAPSHOTS_ROOT;
 const REPORT_DIR    = path.join(WORKSPACE, 'playwright', 'report');
 const UPDATE_MODE   = process.argv.includes('--update-snapshots');
+const NO_SNAPSHOT_MODE = process.argv.includes('--no-snapshots');
+const MODE_NAME = NO_SNAPSHOT_MODE
+  ? 'BROWSER SMOKE (NO SNAPSHOTS)'
+  : (UPDATE_MODE ? 'BASELINE UPDATE' : 'REGRESSION CHECK');
 const VITE_STARTUP_WAIT_MS = 30_000;
 const PAGE_SETTLE_MS       = 2_500;
 const DIFF_THRESHOLD       = 0.001;  // 0.1% pixel ratio
@@ -116,14 +128,71 @@ async function checkPrimaryButtonHover(page, name) {
   );
 }
 
+// Visual state checks deliberately use the rendered screen rather than DOM
+// semantics alone. A hover should not make surrounding controls jump, and the
+// focused/hovered appearances are captured alongside the resting screenshot.
+async function checkCalmInteractiveStates(page, locator, name) {
+  if (await locator.count() === 0) {
+    warn(`Interactive state ${name} is present for visual review`);
+    return;
+  }
+
+  const before = await locator.boundingBox();
+  await locator.hover();
+  await sleep(220);
+  const after = await locator.boundingBox();
+  const shifted = !before || !after || [
+    Math.abs(before.x - after.x), Math.abs(before.y - after.y),
+    Math.abs(before.width - after.width), Math.abs(before.height - after.height),
+  ].some(value => value > 0.5);
+  assert(`Interactive state ${name} does not shift layout on hover`, !shifted);
+  await checkSnapshot(page, `state_hover_${name}`);
+
+  await locator.focus();
+  await sleep(100);
+  const isFocused = await locator.evaluate(element => document.activeElement === element);
+  assert(`Interactive state ${name} can receive keyboard focus`, isFocused);
+  await checkSnapshot(page, `state_focus_${name}`);
+}
+
+async function checkReducedMotion(page, locator, name) {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const transition = await locator.evaluate(element => window.getComputedStyle(element).transitionDuration);
+  const longestDurationMs = Math.max(...transition.split(',').map(value => {
+    const duration = Number.parseFloat(value);
+    return value.trim().endsWith('ms') ? duration : duration * 1000;
+  }));
+  assert(`Reduced motion removes prolonged ${name} animation`, longestDurationMs <= 1, `transition duration is ${transition}`);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+}
+
 // ── Screenshot Snapshot Check ──────────────────────────────────────────────────
 async function checkSnapshot(page, name) {
+  if (NO_SNAPSHOT_MODE) return;
   const file = path.join(SNAPSHOTS_DIR, `${name}.png`);
-  const buf = await page.screenshot({ fullPage: false });
+  // Snapshot only a stable resting frame. Carets blink independently of the
+  // application, while Plotly controls and loading indicators use CSS
+  // transitions/animations whose sampled frame can vary with runner load.
+  // Playwright fast-forwards finite animations and hides the caret without
+  // changing the reviewed layout or relaxing the pixel-difference threshold.
+  await page.evaluate(async () => {
+    if (document.fonts?.ready) await document.fonts.ready;
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  const buf = await page.screenshot({
+    fullPage: false,
+    animations: 'disabled',
+    caret: 'hide',
+  });
 
-  if (UPDATE_MODE || !fs.existsSync(file)) {
+  if (UPDATE_MODE) {
     fs.writeFileSync(file, buf);
     info(`Snapshot saved: ${name}.png`);
+    return;
+  }
+
+  if (!fs.existsSync(file)) {
+    fail(`Snapshot ${name}: reviewed baseline is missing`, 'run npm run test:visual:update after deliberate visual review');
     return;
   }
 
@@ -164,7 +233,7 @@ async function checkSnapshot(page, name) {
     } else {
       pass(`Snapshot ${name}: within threshold (${(ratio * 100).toFixed(4)}% diff)`);
     }
-  } catch (e) {
+  } catch {
     // pngjs/pixelmatch may not be installed; fall back to buffer comparison
     if (buf.equals(baseline)) {
       pass(`Snapshot ${name}: exact match`);
@@ -181,6 +250,12 @@ async function checkOverflow(page, context) {
     document.querySelectorAll('*').forEach(el => {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
+      // SVG text nodes do not participate in CSS box overflow. Plotly uses
+      // them for tick labels, where clientWidth is frequently zero or rounded
+      // below scrollWidth even though the containing HTML plot is clipped.
+      // Keep checking the HTML plot container, which is the meaningful layout
+      // boundary for a user-visible horizontal overflow.
+      if (el instanceof SVGElement) return;
       const style = window.getComputedStyle(el);
       const isVisuallyHidden =
         el.classList.contains('sr-only') ||
@@ -227,20 +302,6 @@ function isIgnorableError(msg) {
 }
 
 // ── Performance Timing ─────────────────────────────────────────────────────────
-async function measureLoadTime(page, label) {
-  const timing = await page.evaluate(() => {
-    const nav = performance.getEntriesByType('navigation')[0];
-    return nav ? nav.loadEventEnd - nav.startTime : null;
-  });
-  if (timing !== null) {
-    if (timing > PERFORMANCE_BUDGET_MS) {
-      warn(`${label}: slow load (${timing.toFixed(0)}ms > ${PERFORMANCE_BUDGET_MS}ms budget)`);
-    } else {
-      pass(`${label}: load time ${timing.toFixed(0)}ms (within ${PERFORMANCE_BUDGET_MS}ms budget)`);
-    }
-  }
-}
-
 // ── Accessibility Audit ────────────────────────────────────────────────────────
 async function runA11yAudit(page, context) {
   try {
@@ -276,10 +337,9 @@ let viteProc = null;
 
 async function startVite() {
   info(`Starting Vite dev server on port ${VITE_PORT}...`);
-  viteProc = spawn('npx', ['vite', '--port', String(VITE_PORT), '--strictPort'], {
+  viteProc = spawn(process.execPath, [VITE_CLI, '--port', String(VITE_PORT), '--strictPort'], {
     cwd: WORKSPACE,
     stdio: ['pipe', 'pipe', 'pipe'],
-    shell: true,
   });
 
   let ready = false;
@@ -327,7 +387,7 @@ async function main() {
   console.log('='.repeat(60));
   console.log('  scRNA-seq Dashboard  —  Visual & UI/UX Test Suite');
   console.log('='.repeat(60));
-  console.log(`  Mode      : ${UPDATE_MODE ? '🔄 UPDATE BASELINES' : '🔍 COMPARE AGAINST BASELINES'}`);
+  console.log(`  Mode      : ${MODE_NAME}`);
   console.log(`  Snapshots : ${SNAPSHOTS_DIR}`);
   console.log(`  Report    : ${REPORT_DIR}`);
   console.log(`  Timestamp : ${new Date().toISOString()}\n`);
@@ -343,17 +403,29 @@ async function main() {
   
   // Mock Electron API
   await context.addInitScript(() => {
-    localStorage.setItem('benchone_auth_token', 'visual-test-token');
-    localStorage.setItem('benchone_auth_user', JSON.stringify({
+    localStorage.setItem('traceomics_auth_token', 'visual-test-token');
+    localStorage.setItem('traceomics_auth_user', JSON.stringify({
       id: 'visual-user',
       email: 'researcher@lab.edu',
       displayName: 'Visual Tester'
     }));
     window.mockFigures = [];
+    // Provenance can be absent after a local cache reset even when the attached
+    // R session has completed preprocessing. The visual UMAP flow deliberately
+    // starts without historical records so it catches any attempt to replace
+    // server-verified pipeline availability with a partial browser-side graph.
+    window.mockProvenance = [];
     window.electronAPI = {
       getFigures: async () => window.mockFigures,
       saveFigure: async (fig) => { window.mockFigures.push(fig); return { success: true }; },
       deleteFigure: async (id) => { window.mockFigures = window.mockFigures.filter(f => f.id !== id); return { success: true }; },
+      getAllProvenance: async () => window.mockProvenance,
+      getProvenance: async (id) => window.mockProvenance.find(record => record.id === id) || null,
+      saveProvenance: async (envelope) => {
+        const record = { ...(envelope?.provenance || {}), result: envelope?.result };
+        window.mockProvenance = [record, ...window.mockProvenance.filter(existing => existing.id !== record.id)];
+        return record.id;
+      },
       setTheme: () => {}
     };
   });
@@ -420,12 +492,51 @@ async function main() {
     });
   });
 
-  await page.route('**/api/db/**', async route => {
+  await page.route('**/api/runtime/compute-status*', async route => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       headers: corsHeaders,
-      body: JSON.stringify([])
+      body: JSON.stringify({ status: 'ready', updatedAt: '2026-08-01T00:00:00.000Z' })
+    });
+  });
+
+  // The browser API replaces the injected Electron bridge during app startup, so
+  // retain saved figures in this route mock rather than relying on window state.
+  // This models the small GET/POST gallery contract used by the save-figure flow.
+  const visualFigures = [];
+  await page.route('**/api/db/**', async route => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    let status = 200;
+    let body = [];
+
+    if (pathname === '/api/db/figures') {
+      if (request.method() === 'POST') {
+        let record = {};
+        try {
+          record = request.postDataJSON() || {};
+        } catch {
+          // A malformed request is not expected from the client under test, but
+          // keep the mock response JSON-shaped so the smoke can report the flow.
+        }
+        const figure = {
+          ...record,
+          createdAt: '2026-08-01T00:00:00.000Z',
+        };
+        visualFigures.push(figure);
+        status = 201;
+        body = figure;
+      } else if (request.method() === 'GET') {
+        body = visualFigures;
+      }
+    }
+
+    await route.fulfill({
+      status,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify(body)
     });
   });
 
@@ -436,7 +547,7 @@ async function main() {
   // network audits flag. Mock it to return the same user the init script seeds into
   // localStorage so the app stays logged in. logout is a best-effort POST that is
   // never triggered here, but is mocked too for completeness.
-  const visualAuthUser = { id: 'visual-user', email: 'researcher@lab.edu', displayName: 'Visual Tester' };
+  const visualAuthUser = { id: 1, email: 'researcher@lab.edu', displayName: 'Visual Tester' };
   await page.route('**/api/auth/policy*', async route => {
     await route.fulfill({
       status: 200,
@@ -478,6 +589,33 @@ async function main() {
       body: JSON.stringify({ canPublishPipelineManifests: false })
     });
   });
+  await page.route('**/api/expert-r/capabilities*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify({
+        expertREnabled: true,
+        expertRProfile: {
+          id: 'expert-r-visual-v1',
+          packages: ['Seurat', 'dplyr', 'ggplot2', 'readr'],
+        },
+      })
+    });
+  });
+  await page.route('**/api/expert-r/projects/*/inputs*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: corsHeaders,
+      body: JSON.stringify([{
+        id: 'input_visual_1',
+        originalFilename: 'sample-annotations.csv',
+        sizeBytes: 18432,
+        createdAt: '2026-01-03T12:00:00.000Z',
+      }])
+    });
+  });
 
   // ── DB-backed project / analysis-object model (mocked; no backend in CI) ─────
   // The app loads the backend project model on startup and during the PBMC demo
@@ -512,7 +650,7 @@ async function main() {
       visualPipelineTab('heatmap', 'Heatmap', 'heatmap'),
       visualPipelineTab('dotplot', 'Dot Plot', 'dotPlot'),
       visualPipelineTab('deg', 'Markers / DEG', 'differentialExpression'),
-      visualPipelineTab('history', 'Jobs & Artifacts', 'projectHistory')
+      visualPipelineTab('history', 'Runs & Results', 'projectHistory')
     ]
   };
   const visualDefaultPipelineDefinition = {
@@ -557,6 +695,47 @@ async function main() {
   // enabled instead of reverting to a disabled/empty state).
   let demoObjectExists = false;
 
+  const visualConditions = [
+    { id: 'condition_control', name: 'Control' },
+    { id: 'condition_treated', name: 'Treated' },
+  ];
+  const visualSamples = [
+    { id: 'sample_control_1', name: 'Control donor 1', conditionId: 'condition_control', conditionName: 'Control', donorCode: 'D01', batch: 'A', modality: 'scrna' },
+    { id: 'sample_control_2', name: 'Control donor 2', conditionId: 'condition_control', conditionName: 'Control', donorCode: 'D02', batch: 'B', modality: 'scrna' },
+    { id: 'sample_treated_1', name: 'Treated donor 1', conditionId: 'condition_treated', conditionName: 'Treated', donorCode: 'D03', batch: 'A', modality: 'scrna' },
+    { id: 'sample_treated_2', name: 'Treated donor 2', conditionId: 'condition_treated', conditionName: 'Treated', donorCode: 'D04', batch: 'B', modality: 'scrna' },
+  ];
+  const visualBindings = visualSamples.map((sample, index) => ({
+    id: `binding_visual_${index + 1}`,
+    analysisObjectId: 'ao_visualmock0001',
+    sampleId: sample.id,
+    sampleName: sample.name,
+    cellMetadataColumn: 'orig.ident',
+    cellMetadataValue: `sample_${index + 1}`,
+  }));
+  const visualContrasts = [{
+    id: 'contrast_visual_1',
+    analysisObjectId: 'ao_visualmock0001',
+    name: 'Treated vs control',
+    numeratorConditionName: 'Treated',
+    denominatorConditionName: 'Control',
+    unitOfReplication: 'sample',
+    cellTypeColumn: 'seurat_clusters',
+    status: 'valid',
+    validation: { issues: [], warnings: [] },
+  }];
+  const visualBranches = [{
+    id: 'branch_visual_private',
+    ownerUserId: 1,
+    name: 'alternate normalization',
+    description: 'Compare a conservative normalization strategy before project review.',
+    visibility: 'private',
+    status: 'active',
+    baseAnalysisObjectId: 'ao_visualmock0001',
+    headAnalysisObjectId: 'ao_visualmock0001',
+    version: 1,
+  }];
+
   await page.route('**/api/organizations**', async route => {
     const isPost = route.request().method() === 'POST';
     await route.fulfill({
@@ -587,13 +766,53 @@ async function main() {
         selectionUnavailable: false,
         updatedAt: null
       };
+    } else if (path.endsWith('/conditions')) {
+      body = visualConditions;
+    } else if (path.endsWith('/samples')) {
+      body = visualSamples;
+    } else if (/\/analysis-objects\/[^/]+\/sample-bindings$/.test(path)) {
+      body = visualBindings;
+    } else if (path.endsWith('/contrasts')) {
+      body = visualContrasts;
+    } else if (path.endsWith('/branches')) {
+      body = demoObjectExists ? visualBranches : [];
+    } else if (path.endsWith('/reviews')) {
+      body = [];
+    } else if (/\/reviews\/[^/]+\/comments$/.test(path)) {
+      body = [];
+    } else if (path.endsWith('/canonical-analysis')) {
+      body = null;
+    } else if (path.endsWith('/audit-events')) {
+      body = demoObjectExists ? [{
+        id: 'audit_visual_1',
+        action: 'branch.created',
+        targetType: 'branch',
+        targetId: 'branch_visual_private',
+        createdAt: '2026-01-03T12:00:00.000Z',
+      }] : [];
     } else if (/\/analysis-objects\/[^/]+\/lineage$/.test(path)) {
       body = {
         projectId: visualProject.id,
         objectId: 'ao_visualmock0001',
         rootObjectId: 'ao_visualmock0001',
-        nodes: demoObjectExists ? [visualAnalysisObject()] : [],
-        edges: [],
+        nodes: demoObjectExists ? [
+          visualAnalysisObject(),
+          visualAnalysisObject({
+            id: 'ao_visualfork0002',
+            parentObjectId: 'ao_visualmock0001',
+            lineageRootId: 'ao_visualmock0001',
+            displayName: 'Forked PBMC branch',
+            createdAt: '2026-01-02 00:00:00',
+          }),
+        ] : [],
+        edges: demoObjectExists ? [{
+          id: 'aoe_visualfork0001',
+          parentAnalysisObjectId: 'ao_visualmock0001',
+          childAnalysisObjectId: 'ao_visualfork0002',
+          jobId: 'job_visual_fork_1',
+          edgeType: 'checkpoint_fork',
+          parentRole: 'input',
+        }] : [],
         truncated: false
       };
     } else if (/\/artifacts$/.test(path)) {
@@ -679,7 +898,7 @@ async function main() {
         pca_dims: 15,
         has_clusters: true,
         n_clusters: 8,
-        has_umap: true
+        has_umap: false
       })
     });
   });
@@ -699,9 +918,17 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        cells: 2700,
-        features: 32738,
-        result: true
+        provenance: {
+          operation: 'load'
+        },
+        result: {
+          message: 'Matrix successfully loaded into Seurat.',
+          cells: 2700,
+          features: 32738,
+          genes: 32738,
+          sparsity: 97.41,
+          density: 2.59
+        }
       })
     });
   });
@@ -712,8 +939,14 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        data: [{ "UMAP_1": 1, "UMAP_2": 2, "Cell": "cell1" }, { "UMAP_1": 2, "UMAP_2": 3, "Cell": "cell2" }],
-        metadata: { "ident": ["A", "B"] }
+        provenance: { id: 'prov_visual_umap' },
+        result: {
+          n_components: 2,
+          trace_data: [
+            { name: 'Cluster 0', x: [1, 2], y: [2, 4] },
+            { name: 'Cluster 1', x: [3, 4], y: [1, 3] }
+          ]
+        }
       })
     });
   });
@@ -812,9 +1045,9 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
-        width: 800,
-        height: 600
+        result: {
+          base64: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        }
       })
     });
   });
@@ -825,9 +1058,12 @@ async function main() {
       contentType: 'application/json',
       headers: corsHeaders,
       body: JSON.stringify({
-        id: "fig_" + Date.now(),
-        path: "mock_path.png",
-        success: true
+        provenance: { id: 'prov_visual_export' },
+        result: {
+          message: 'Successfully exported UMAP to visual-umap.png',
+          file_name: 'visual-umap.png',
+          thumbnail_b64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+        }
       })
     });
   });
@@ -851,7 +1087,9 @@ async function main() {
   await checkOverflow(page, `Workspace ${initialTheme}`);
   await runA11yAudit(page, `Workspace ${initialTheme}`);
   await checkPrimaryButtonHover(page, 'New Project');
-  await checkPrimaryButtonHover(page, 'Load Object');
+  await checkPrimaryButtonHover(page, 'Add analysis');
+  await checkCalmInteractiveStates(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new_project');
+  await checkReducedMotion(page, page.getByRole('button', { name: 'New Project', exact: true }).first(), 'new project button');
 
   // ── Test 1b: Theme toggle to opposite mode ────────────────────────────────
   section(`STEP 3: Theme toggle (${initialTheme} → ${oppositeTheme})`);
@@ -869,7 +1107,7 @@ async function main() {
     await checkOverflow(page, `Workspace ${activeTheme}`);
     await runA11yAudit(page, `Workspace ${activeTheme}`);
     await checkPrimaryButtonHover(page, 'New Project');
-    await checkPrimaryButtonHover(page, 'Load Object');
+    await checkPrimaryButtonHover(page, 'Add analysis');
     // Toggle back to the default theme before continuing tab checks.
     const restoreTitle = initialTheme === 'dark' ? 'Dark Mode' : 'Light Mode';
     const restoreBtn = page.locator(`nav button[title*="${restoreTitle}"]`).first();
@@ -913,14 +1151,14 @@ async function main() {
     warn('QC button not found — skipping gate check');
   }
 
-  // ── Test 4: Load Object Modal ──────────────────────────────────────────────
-  section('STEP 6: Load Object modal flow');
+  // ── Test 4: Add analysis modal ────────────────────────────────────────────
+  section('STEP 6: Add analysis modal flow');
   let dataLoaded = false;
   try {
-    // Keep this selector exact. A broad "Load" match can accidentally choose
+    // Keep this selector exact. A broad "Add" match can accidentally choose
     // unrelated disabled navigation (for example Lineage's "requires loaded
     // object" status) before the actual workspace action.
-    const loadBtn = page.getByRole('button', { name: 'Load Object', exact: true }).first();
+    const loadBtn = page.getByRole('button', { name: 'Add analysis', exact: true }).first();
     if (await loadBtn.count() > 0) {
       await loadBtn.click();
       await sleep(1000);
@@ -934,19 +1172,19 @@ async function main() {
         try {
           await page.waitForSelector('text=PBMC_3k_Tutorial', { timeout: 90000 });
           dataLoaded = true;
-          pass('Load Object modal: PBMC3k demo dataset loaded successfully');
+          pass('Add analysis modal: PBMC3k demo dataset loaded successfully');
 
           await sleep(1500);
 
           // Inject mock PCA pipeline state so UMAP tab is accessible
           await page.evaluate(() => {
             try {
-              const wsRaw = localStorage.getItem('benchone_ws_researcher@lab.edu');
+              const wsRaw = localStorage.getItem('traceomics_ws_researcher@lab.edu');
               if (wsRaw) {
                 const workspaces = JSON.parse(wsRaw);
                 if (workspaces && workspaces.length > 0 && workspaces[0].objects && workspaces[0].objects.length > 0) {
                   const objId = workspaces[0].objects[0].id;
-                  const psKey = `benchone_ps_researcher@lab.edu_${objId}`;
+                  const psKey = `traceomics_ps_researcher@lab.edu_${objId}`;
                   const currentPs = JSON.parse(localStorage.getItem(psKey) || '{}');
                   currentPs.qc = true;
                   currentPs.normalize = true;
@@ -965,7 +1203,7 @@ async function main() {
 
           // DEBUG STATE
           await page.evaluate(() => {
-            console.log('[DEBUG] LocalStorage after reload:', localStorage.getItem('benchone_ws_researcher@lab.edu'));
+            console.log('[DEBUG] LocalStorage after reload:', localStorage.getItem('traceomics_ws_researcher@lab.edu'));
           });
 
           await checkSnapshot(page, 'workspace_data_loaded');
@@ -990,10 +1228,10 @@ async function main() {
         await sleep(500);
       }
     } else {
-      warn('Load Object button not found — skipping modal test');
+      warn('Add analysis button not found — skipping modal test');
     }
   } catch (e) {
-    warn('Load Object flow error', e.message);
+    warn('Add analysis flow error', e.message);
     // Safety dismiss
     await page.keyboard.press('Escape').catch(() => {});
     await sleep(300);
@@ -1001,7 +1239,10 @@ async function main() {
 
   // ── Test 5: Per-Tab Rendering ──────────────────────────────────────────────
   const allTabs = [
-    { id: 'pipeline-manager', label: 'Pipeline Manager',     requiresData: false },
+    { id: 'pipeline-manager', label: 'Approved workflows',   requiresData: false },
+    { id: 'branches',      label: 'Analysis Branches',        requiresData: true  },
+    { id: 'study-design',  label: 'Study Design',             requiresData: true  },
+    { id: 'expert-r',      label: 'Advanced analysis',        requiresData: true  },
     { id: 'inspect',      label: 'Inspect',                  requiresData: true  },
     { id: 'qc',           label: 'Quality Control',           requiresData: true  },
     { id: 'normalize',    label: 'Normalize',                 requiresData: true  },
@@ -1013,19 +1254,28 @@ async function main() {
     { id: 'heatmap',      label: 'Heatmap',                   requiresData: true  },
     { id: 'dotplot',      label: 'Dot Plot',                  requiresData: true  },
     { id: 'geneviewer',   label: 'Gene Expression',           requiresData: true  },
+    { id: 'explore',      label: 'Exploratory Analysis',      requiresData: true  },
     { id: 'deg',          label: 'Markers / DEG',             requiresData: true  },
-    { id: 'annotate',     label: 'Cell Annotation',           requiresData: true, expectedDisabled: true  },
-    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true, expectedDisabled: false },
-    { id: 'cellchat',     label: 'CellChat',                  requiresData: true, expectedDisabled: false },
-    { id: 'customscript', label: 'Custom Script',             requiresData: true, expectedDisabled: true  },
-    { id: 'history',      label: 'Jobs & Artifacts',          requiresData: false },
+    { id: 'annotate',     label: 'Cell Annotation',           requiresData: false, expectedHidden: true  },
+    { id: 'enrichment',   label: 'Pathway Enrichment',        requiresData: true },
+    { id: 'cellchat',     label: 'CellChat',                  requiresData: true },
+    { id: 'customscript', label: 'Custom Script',             requiresData: false, expectedHidden: true  },
+    { id: 'history',      label: 'Runs & Results',            requiresData: false },
     { id: 'publication',  label: 'Figure Gallery',            requiresData: true  },
     { id: 'validation',   label: 'Validation',                requiresData: true  },
     { id: 'lineage',      label: 'Lineage',                   requiresData: true },
-    { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, clickVia: 'engine-status' },
+    { id: 'diagnostics',  label: 'Diagnostics',               requiresData: false, expectedHidden: true },
   ];
 
   for (const tab of allTabs) {
+    if (tab.expectedHidden) {
+      section(`TAB: ${tab.label}`);
+      const hiddenControl = page.locator(`aside button:has-text("${tab.label}")`).first();
+      assert(`${tab.label}: intentionally not exposed in the sidebar`, await hiddenControl.count() === 0);
+      allResults.push({ tab: tab.label, hidden: true, consoleErrorsAtTime: consoleErrors.length });
+      continue;
+    }
+
     if (tab.requiresData && !dataLoaded) {
       warn(`Tab "${tab.label}": skipped (requires data — R backend may be offline)`);
       continue;
@@ -1034,23 +1284,19 @@ async function main() {
     section(`TAB: ${tab.label}`);
 
     try {
-      if (tab.clickVia === 'engine-status') {
-        // Diagnostics is opened via Engine Status block
-        const engineBlock = page.locator('aside div:has-text("Backend connected"), aside div:has-text("Backend offline"), aside div:has-text("R/Seurat runtime connected")').first();
-        if (await engineBlock.count() > 0) {
-          await engineBlock.click();
+      if (tab.clickVia === 'runtime-status') {
+        // Diagnostics is opened through the accessible runtime-status button.
+        const runtimeStatusButton = page.getByRole('button', { name: /open diagnostics & environment/i }).first();
+        if (await runtimeStatusButton.count() > 0) {
+          await runtimeStatusButton.click();
         } else {
-          warn(`${tab.label}: engine status block not found`);
+          fail(`${tab.label}: runtime-status control not found`);
           continue;
         }
       } else {
         const btn = page.locator(`aside button:has-text("${tab.label}")`).first();
         if (await btn.count() === 0) {
           warn(`${tab.label}: sidebar button not found`);
-          continue;
-        }
-        if (tab.expectedDisabled) {
-          assert(`${tab.label}: marked disabled / not integrated`, await btn.isDisabled());
           continue;
         }
         await btn.click();
@@ -1066,17 +1312,47 @@ async function main() {
         if (tab.id === 'pipeline-manager') {
           const trustedDefinition = page.getByText('Visual Inspection View', { exact: true });
           const trustedDefinitionCount = await trustedDefinition.count();
-          assert('Pipeline Manager: trusted registry definition visible after navigation',
+          assert('Approved workflows: trusted registry definition visible after navigation',
             trustedDefinitionCount === 1 && await trustedDefinition.isVisible());
-          assert('Pipeline Manager: non-developer publication controls hidden',
+          assert('Approved workflows: non-developer publication controls hidden',
             await page.getByRole('heading', { name: 'Publish Trusted Pipeline Manifest', exact: true }).count() === 0);
+        }
+
+        if (tab.id === 'branches') {
+          assert('Analysis Branches: private branch workflow is visible',
+            await page.getByText('Create a private branch', { exact: true }).count() === 1);
+          assert('Analysis Branches: review sharing is explicit',
+            await page.getByRole('button', { name: 'Share for review', exact: true }).count() === 1);
+        }
+
+        if (tab.id === 'study-design') {
+          assert('Study Design: multi-condition contrast is visible',
+            await page.getByText('Treated vs control', { exact: true }).count() === 1);
+          assert('Study Design: biological replication is represented',
+            await page.getByText('4 registered samples', { exact: true }).count() === 1);
+        }
+
+        if (tab.id === 'expert-r') {
+          assert('Advanced analysis: approved Expert R workbench is visible',
+            await page.getByRole('heading', { name: 'Expert R Workbench', exact: true }).count() === 1);
+          assert('Advanced analysis: controlled private input is visible',
+            await page.getByText('sample-annotations.csv', { exact: true }).count() === 1);
+        }
+
+        if (tab.id === 'explore') {
+          assert('Exploratory Analysis: guided recipe controls are visible',
+            await page.getByRole('button', { name: 'Run recipe', exact: true }).count() === 1);
+          assert('Exploratory Analysis: aggregate-only privacy boundary is visible',
+            await page.getByText('Private analysis workspace · aggregate-only result', { exact: true }).count() === 1);
         }
 
         if (tab.id === 'lineage') {
           const durableLineageCopy = page.getByText(
-            'Durable analysis-object lineage for the selected project object. Edges are created by reviewed job handlers; this view is read-only.'
+            'Recorded relationships for the selected saved analysis. This view is read-only.'
           );
-          assert('Lineage: durable read-only graph copy visible', await durableLineageCopy.count() === 1);
+          assert('Lineage: recorded read-only relationships visible', await durableLineageCopy.count() === 1);
+          const forkExplanation = page.getByText('Created from a saved version. The source analysis remains unchanged.');
+          assert('Lineage: fork relationship is explained in researcher language', await forkExplanation.count() === 1);
         }
 
         // 2. Screenshot regression
@@ -1123,36 +1399,102 @@ async function main() {
         await umapBtn.click();
         await sleep(PAGE_SETTLE_MS);
         
-        const saveFigBtn = page.locator('button:visible').filter({ hasText: 'Save Figure' }).first();
-        if (await saveFigBtn.count() > 0) {
+        const saveFigBtn = page.getByRole('button', { name: 'Save Figure', exact: true }).first();
+        let saveFigureReady = await saveFigBtn.count() > 0;
+        let savePanelOpened = false;
+
+        // UMAP only cache-hydrates on navigation. A first-time visitor must use
+        // the visible Run control before a result (and its Save Figure action)
+        // exists, so exercise that user workflow rather than treating the
+        // deliberately empty initial state as a missing control.
+        if (!saveFigureReady) {
+          const runUmapBtn = page.getByRole('button', { name: /^(Run 2D UMAP|Re-compute UMAP)$/ }).first();
+          if (await runUmapBtn.count() === 0) {
+            fail('UMAP run control not found before the figure-save flow');
+          } else if (await runUmapBtn.isDisabled()) {
+            fail('UMAP run control is disabled before the figure-save flow');
+          } else {
+            try {
+              // Let Playwright wait and deliver the user-visible click as soon
+              // as the action is actionable. A separate wait followed by a
+              // second interaction can race a React state update in dev mode.
+              await runUmapBtn.click();
+              await saveFigBtn.click({ timeout: 10000 });
+              assert(
+                'UMAP retains server-verified PCA readiness when provenance history is empty',
+                await page.getByRole('heading', { name: 'PCA Required', exact: true }).count() === 0
+              );
+              saveFigureReady = true;
+              savePanelOpened = true;
+              pass('UMAP result rendered before the figure-save flow');
+            } catch {
+              fail('Save Figure could not be opened after running mocked UMAP');
+            }
+          }
+        }
+
+        if (saveFigureReady && !savePanelOpened) {
           await saveFigBtn.click();
+          savePanelOpened = true;
+        }
+
+        if (savePanelOpened) {
+          const figurePanelTitle = page.getByRole('heading', { name: 'Save to Figure Gallery', exact: true }).first();
+          try {
+            await figurePanelTitle.waitFor({ state: 'visible', timeout: 3000 });
+            await sleep(300);
+            assert('Figure save panel remains visibly open after activation', await figurePanelTitle.isVisible());
+          } catch {
+            fail('Figure save panel did not remain visibly open after activation');
+          }
           await sleep(1000);
           
-          const saveToGalleryBtn = page.locator('button:visible').filter({ hasText: 'Save to Figure Gallery' }).first();
+          const saveToGalleryBtn = page.getByRole('button', { name: 'Save to Figure Gallery', exact: true }).first();
           if (await saveToGalleryBtn.count() > 0) {
             await saveToGalleryBtn.click();
-            await sleep(2000); // Wait for R backend generation and API state
-            
-            const galleryBtn = page.locator('aside button:has-text("Figure Gallery")').first();
-            await galleryBtn.click();
-            await sleep(PAGE_SETTLE_MS);
-            
-            // Check for presence of saved figure card
-            const figureCard = page.locator('text=UMAP').first();
-            assert('Saved figure appears in Figures gallery', await figureCard.count() > 0);
-            await checkSnapshot(page, 'e2e_saved_figure');
+            const saveFeedback = page.getByText('Saved as visual-umap.png', { exact: true }).first();
+            try {
+              await saveFeedback.waitFor({ state: 'visible', timeout: 5000 });
+              pass('Figure save completion is shown to the user');
+            } catch {
+              fail('Figure save completion feedback did not appear');
+            }
+
+            // The panel deliberately blocks background controls while it is
+            // open. Close it through the same visible affordance a user uses
+            // before returning to the gallery.
+            const closeFigurePanelBtn = page.getByRole('button', { name: 'Close figure editor', exact: true }).first();
+            if (await closeFigurePanelBtn.count() === 0) {
+              fail('Figure editor close control not found after saving');
+            } else {
+              await closeFigurePanelBtn.click();
+              await figurePanelTitle.waitFor({ state: 'hidden', timeout: 3000 });
+
+              const galleryBtn = page.locator('aside button:has-text("Figure Gallery")').first();
+              await galleryBtn.click();
+              await sleep(PAGE_SETTLE_MS);
+
+              // The saved thumbnail is specific to the gallery card, unlike
+              // the sidebar's UMAP navigation label. Returning to an already
+              // visited gallery must refresh it without requiring a manual
+              // reload, so this remains a strict automatic-persistence check.
+              const figureCard = page.getByRole('img', { name: 'UMAP', exact: true }).first();
+              assert('Saved figure appears in Figures gallery', await figureCard.count() > 0);
+              await checkSnapshot(page, 'e2e_saved_figure_gallery');
+
+            }
           } else {
-            warn('Save to Gallery button not found inside save panel');
+            fail('Save to Gallery button not found inside save panel');
           }
-        } else {
-          warn('Save Figure button not found on UMAP tab');
         }
+      } else {
+        fail('UMAP navigation control not found for the figure-save flow');
       }
     } else {
-      warn('Save Figure flow skipped (requires data)');
+      info('Save Figure flow skipped because no data object was loaded.');
     }
   } catch (e) {
-    warn('Save Figure flow error', e.message);
+    fail('Save Figure flow error', e.message);
   }
 
   // ── Test 7: Console Errors Summary ────────────────────────────────────────
@@ -1189,7 +1531,7 @@ async function main() {
   console.log(`  Passed: ${PASS}`);
   console.log(`  Failed: ${FAIL}`);
   console.log(`  Warned: ${WARN}`);
-  console.log(`  Mode  : ${UPDATE_MODE ? 'BASELINE UPDATE' : 'REGRESSION CHECK'}`);
+  console.log(`  Mode  : ${MODE_NAME}`);
   console.log('');
 
   if (failures.length > 0) {
@@ -1211,7 +1553,7 @@ async function main() {
 }
 
 // ── HTML Report Generator ──────────────────────────────────────────────────────
-function generateHtmlReport({ allResults, failures, warnings, consoleErrors, networkFailures }) {
+function generateHtmlReport({ failures, warnings, consoleErrors }) {
   const timestamp = new Date().toLocaleString();
   const snapshotFiles = fs.existsSync(SNAPSHOTS_DIR) ? fs.readdirSync(SNAPSHOTS_DIR).filter(f => f.endsWith('.png')) : [];
 
@@ -1264,7 +1606,7 @@ function generateHtmlReport({ allResults, failures, warnings, consoleErrors, net
 </head>
 <body>
   <h1>📊 scRNA-seq Dashboard — Visual/UX Test Report</h1>
-  <div class="meta">Generated: ${timestamp} | Mode: ${UPDATE_MODE ? 'Baseline Update' : 'Regression Check'}</div>
+  <div class="meta">Generated: ${timestamp} | Mode: ${MODE_NAME}</div>
 
   <div class="stat-bar">
     <div class="stat"><div class="stat-num pass">${PASS}</div><div class="stat-label">Passed</div></div>

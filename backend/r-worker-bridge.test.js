@@ -412,7 +412,7 @@ describe.skipIf(!CONFIGURED)('r-bridge — artifact public exposure', () => {
     return { job, artifact: arts[0], res };
   }
 
-  it('every project member role (incl. viewer) can read the r_runtime_check artifact metadata', async () => {
+  it('shares object-free project operational artifacts with project viewers', async () => {
     const alice = await createUserWithToken({ email: 'alice@example.com' });
     const viewer = await createUserWithToken({ email: 'viewer@example.com' });
     const proj = await seedProject(alice.user.id);

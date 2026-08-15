@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import Plot from 'react-plotly.js';
+import React, { useState, useEffect, useCallback } from 'react';
+import Plot from '../components/Plot';
 import { Grid3x3, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
+import { publicErrorMessage } from '../publicError';
 
 // Removed API constant
 export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme, deploymentPolicy }) {
@@ -13,7 +14,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
 
   const hasDeg = pipelineState?.cluster;
 
-  const fetchHeatmap = async () => {
+  const fetchHeatmap = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -21,14 +22,14 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
       if (data.error) throw new Error(data.error);
       setHeatmapData(data);
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e, 'The marker heatmap could not be prepared. Please try again.'));
     }
     setLoading(false);
-  };
+  }, [callApi, topN]);
 
   useEffect(() => {
     if (sessionReady && hasDeg) fetchHeatmap();
-  }, [sessionReady, hasDeg]);
+  }, [sessionReady, hasDeg, fetchHeatmap]);
 
   if (!datasetInfo) {
     return (

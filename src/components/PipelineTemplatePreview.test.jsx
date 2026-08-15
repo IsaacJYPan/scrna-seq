@@ -5,7 +5,7 @@ import PipelineTemplatePreview from './PipelineTemplatePreview';
 import { validatePipelineManifest } from '../pipelines/pipelineRegistry';
 
 describe('PipelineTemplatePreview', () => {
-  it('renders every allowlisted parameter type as a disabled preview and never creates executable markup', () => {
+  it('renders every approved setting as a disabled preview and never creates executable markup', () => {
     const manifest = validatePipelineManifest({
       schemaVersion: 1,
       id: 'typed-preview',
@@ -57,7 +57,7 @@ describe('PipelineTemplatePreview', () => {
 
     const { container } = render(<PipelineTemplatePreview manifest={manifest} />);
 
-    expect(screen.getByText(/read-only preview and never submit code or start a job/i)).toBeInTheDocument();
+    expect(screen.getByText(/available in the approved workflow/i)).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Enabled' })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Enabled' })).toBeDisabled();
     expect(screen.getAllByRole('spinbutton')).toHaveLength(2);
@@ -67,10 +67,11 @@ describe('PipelineTemplatePreview', () => {
     expect(screen.getByRole('combobox', { name: 'Method' })).toBeDisabled();
     expect(screen.getByText('<script>alert(1)</script>')).toBeInTheDocument();
     expect(screen.getByText('Marker table')).toBeInTheDocument();
-    expect(screen.getByText('Job logs')).toBeInTheDocument();
+    expect(screen.getByText('Run notes')).toBeInTheDocument();
     expect(container.querySelector('script')).toBeNull();
     expect(container.querySelector('img')).toBeNull();
     expect(container.querySelector('button')).toBeNull();
+    expect(container.textContent).not.toMatch(/seuratQc|differentialExpression|artifactTable|deg_markers|moduleKey/i);
   });
 
   it('shows an explicit empty state when no interface templates are declared', () => {
@@ -78,6 +79,6 @@ describe('PipelineTemplatePreview', () => {
       id: 'inspect', label: 'Inspect', moduleKey: 'inspectObject', parameterSchema: [], resultViews: [],
     }] }} />);
 
-    expect(screen.getByText(/does not declare any parameter or result-view templates/i)).toBeInTheDocument();
+    expect(screen.getByText(/No settings or result previews are available/i)).toBeInTheDocument();
   });
 });

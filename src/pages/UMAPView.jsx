@@ -1,9 +1,10 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Layers, ListFilter, AlertTriangle, ImageDown, FileText } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot, { supportsWebGL } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import FigureSavePanel from '../components/FigureSavePanel';
+import { isTransientComputeBusy } from '../publicError';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
@@ -17,13 +18,24 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     nNeighbors: 30,
     minDist: 0.3,
   });
-  const { nComponents, nNeighbors, minDist } = params;
+  const { nComponents: storedNComponents, nNeighbors, minDist } = params;
+  // Plotly's scatter3d renderer has no SVG equivalent. Never mount or request
+  // it in a renderer without WebGL; a saved 3D preference safely falls back to
+  // the usable 2D view instead.
+  const canUse3D = React.useMemo(() => supportsWebGL(), []);
+  const nComponents = canUse3D ? storedNComponents : 2;
   // dims defaults to the PC count used for clustering (from pipelineState)
   const [clusterParams] = useTabParams('cluster', userEmail, objectId, { dims: 15 });
   const [dims, setDims] = useState(clusterParams.dims);
   const [base64Image, setBase64Image] = useState(null);
   const [loadingBase64, setLoadingBase64] = useState(false);
-  const isHighPerfMode = datasetInfo?.cells > 50000;
+  const cellCount = Number(datasetInfo?.cells) || 0;
+  // SVG is more portable and produces deterministic publication/acceptance
+  // captures for ordinary datasets. Reserve WebGL for the range where it
+  // materially improves interaction; render a server-side image when a large
+  // dataset is opened in a renderer without dependable WebGL.
+  const useSvg2D = cellCount <= 10000 || !canUse3D;
+  const isHighPerfMode = cellCount > 50000 || (!canUse3D && cellCount > 10000);
   const umapParentIds = React.useMemo(
     () => [pcaProvId, pipelineState?.cluster ? clusterProvId : null].filter(Boolean),
     [pcaProvId, clusterProvId, pipelineState?.cluster]
@@ -50,6 +62,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   // attempts the right cache key on reload (e.g. if user last ran 3D UMAP).
   const [params2, setParam2] = useTabParams('umap_meta', userEmail, objectId, { resultNComponents: null, camera3D: null });
   const savedResultNComponents = params2.resultNComponents;
+
+  useEffect(() => {
+    if (!canUse3D && storedNComponents === 3) {
+      setParam('nComponents', 2);
+    }
+  }, [canUse3D, storedNComponents, setParam]);
 
   // Bug A fix: keep the debounce timer in its own ref (not on cameraRef itself).
   // cameraRef holds the latest camera position for the debounce closure.
@@ -81,7 +99,8 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   }, [pipelineState?.clusterDims, pipelineState?.clusterCount]);
 
   const runUMAP = useCallback(async (isInitial = false, nComponentsOverride = null) => {
-    const nc = nComponentsOverride ?? nComponents;
+    const requestedComponents = nComponentsOverride ?? nComponents;
+    const nc = !canUse3D && requestedComponents === 3 ? 2 : requestedComponents;
     const ep = `/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`;
     const ipc = {
       operation: 'umap',
@@ -91,17 +110,24 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
     };
 
-    const data = await runStep(isInitial, ep, ipc);
+    let data = null;
+    const attempts = isInitial ? 1 : 3;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      data = await runStep(isInitial, ep, ipc);
+      if (!isTransientComputeBusy(data?.error) || attempt + 1 >= attempts) break;
+      await new Promise(resolve => window.setTimeout(resolve, 500 * (attempt + 1)));
+    }
 
     if (data?.result) {
       setCachedDims(prev => ({ ...prev, [nc]: data }));
       setParam2('resultNComponents', nc);  // persist for hydration on reload
     }
-  }, [runStep, dims, nComponents, nNeighbors, minDist, activeProjectSeed, setParam2, umapParentIds]);
+  }, [runStep, dims, nComponents, nNeighbors, minDist, activeProjectSeed, setParam2, umapParentIds, canUse3D]);
 
   // Silent cache-only prefetch — populates cachedDims without touching running/error state.
   // Used to warm the other dimension during hydration so 2D↔3D toggle is instant.
   const prefetchDim = useCallback(async (nc) => {
+    if (!canUse3D && nc === 3) return;
     const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`, {}, {
       operation: 'umap',
       step: 'umap',
@@ -113,7 +139,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     if (data?.result) {
       setCachedDims(prev => ({ ...prev, [nc]: data }));
     }
-  }, [callApi, umapParentIds, dims, nNeighbors, minDist, activeProjectSeed]);
+  }, [callApi, umapParentIds, dims, nNeighbors, minDist, activeProjectSeed, canUse3D]);
 
   const is2D = nComponents === 2;
 
@@ -132,14 +158,14 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           x: trace.x,
           y: trace.y,
           mode: 'markers',
-          type: 'scattergl',
+          type: useSvg2D ? 'scatter' : 'scattergl',
           name: newName,
           marker: { size: 4, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
           hovertemplate: `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`,
         };
       })
       : [];
-  }, [cachedDims, activeAnnotations]);
+  }, [cachedDims, activeAnnotations, useSvg2D]);
 
   const traces3D = React.useMemo(() => {
     const dataObj = cachedDims[3];
@@ -175,12 +201,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       // so toggling 2D↔3D is instant without an extra network round-trip.
       ; (async () => {
         await runUMAP(true, activeNC);
-        if (savedNC && savedNC !== activeNC) {
+        if (canUse3D && savedNC && savedNC !== activeNC) {
           await prefetchDim(savedNC);  // silent — no spinner, no error state
         }
       })();
     }
-  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated]);
+  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated, canUse3D, nComponents]);
 
   // When the user toggles the dimension in the UI, clear the stale result
   // and eagerly try to load the required dimension from the local cache.
@@ -195,7 +221,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         runUMAP(true, nComponents);  // Try to load cached data for this specific dimension
       }
     }
-  }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP]);
+  }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP, setResult]);
 
   // Fetch base64 fallback for large datasets
   useEffect(() => {
@@ -212,7 +238,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       })
       .catch(() => setLoadingBase64(false));
     }
-  }, [result, isHighPerfMode, nComponents]);
+  }, [result, isHighPerfMode, nComponents, callApi]);
 
   const isDark = theme === 'dark';
   const plotText = isDark ? '#94a3b8' : '#475569';
@@ -289,7 +315,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            ><FileText size={15} /> View Step Script</button>
+            ><FileText size={15} /> View recorded analysis</button>
           )}
           <button
             onClick={() => runUMAP()}
@@ -326,10 +352,18 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               >2D</button>
               <button
                 onClick={() => setParam('nComponents', 3)}
-                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-textMuted'}`}
+                disabled={!canUse3D}
+                aria-describedby={!canUse3D ? 'umap-3d-unavailable' : undefined}
+                title={!canUse3D ? '3D UMAP requires WebGL, which is unavailable in this renderer.' : undefined}
+                className={`flex-1 py-2 rounded-md text-xs font-bold transition-all ${nComponents === 3 ? 'bg-blue-600 text-white shadow' : 'text-textMuted'} ${!canUse3D ? 'cursor-not-allowed opacity-50' : ''}`}
               >3D</button>
             </div>
             <p className="text-[10px] text-textMuted mt-1">2D for publications</p>
+            {!canUse3D && (
+              <p id="umap-3d-unavailable" role="status" className="text-[10px] text-textMuted mt-1.5">
+                3D UMAP requires WebGL. This renderer supports the 2D view only.
+              </p>
+            )}
           </div>
           <div>
             <label htmlFor="umap-neighbors" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of Neighbors</label>
@@ -413,8 +447,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                   config={plotConfig}
                 />
               </div>
-              <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-                <Plot
+              {canUse3D && (
+                <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                  <Plot
                   data={traces3D}
                   layout={layout3D}
                   useResizeHandler
@@ -443,8 +478,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                       }, 1000); // 1000ms provides a safer buffer to avoid saving mid-interaction
                     }
                   }}
-                />
-              </div>
+                  />
+                </div>
+              )}
             </>
           )}
         </div>

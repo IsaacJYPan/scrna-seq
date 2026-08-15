@@ -79,6 +79,8 @@ COPY --from=build /app/scripts/account-admin.js ./scripts/account-admin.js
 COPY --from=build /app/scripts/backup-runtime.js ./scripts/backup-runtime.js
 COPY --from=build /app/scripts/restore-runtime.js ./scripts/restore-runtime.js
 COPY --from=build /app/scripts/verify-backup-restore.js ./scripts/verify-backup-restore.js
+COPY --from=build /app/scripts/cleanup-demo-guests.js ./scripts/cleanup-demo-guests.js
+COPY --from=build /app/scripts/bootstrap-demo-template.js ./scripts/bootstrap-demo-template.js
 
 USER appuser
 

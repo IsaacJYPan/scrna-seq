@@ -38,10 +38,14 @@ const {
 const INTERNAL_ONLY = [
   '/object/pbmc-pipeline',
   '/object/checkpoint-load',
+  '/object/checkpoint-save',
   '/object/deg-find-markers',
   '/object/enrichment-gsea',
   '/object/cellchat-infer',
+  '/object/explore-summary',
+  '/object/condition-pseudobulk-de',
   '/object/seurat-pipeline',
+  '/object/spatial-seurat-pipeline',
   '/object/inspect',
   '/internal/worker-readiness',
 ];
@@ -285,12 +289,12 @@ describe.skipIf(!CONFIGURED)('R proxy HTTP policy', () => {
     expect(crossSite.status).toBe(403);
 
     const badHeader = await api(server, '/api/r/object/inspect', {
-      method: 'GET', headers: { Cookie: cookie, 'X-BenchOne-CSRF': '0' },
+      method: 'GET', headers: { Cookie: cookie, 'X-TraceOmics-CSRF': '0' },
     });
     expect(badHeader.status).toBe(403);
 
     const firstPartyHeader = await api(server, '/api/r/object/inspect', {
-      method: 'GET', headers: { Cookie: cookie, 'X-BenchOne-CSRF': '1' },
+      method: 'GET', headers: { Cookie: cookie, 'X-TraceOmics-CSRF': '1' },
     });
     expect(firstPartyHeader.status).toBe(404);
 

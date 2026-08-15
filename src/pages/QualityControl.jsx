@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
+import { publicErrorMessage } from '../publicError';
 
 // Shared dark-themed hover template style
 const hoverStyle = {
@@ -22,21 +23,25 @@ const PLOT_TABS = [
 function qcUnavailableMessage(rawError, { datasetInfo, sessionReady } = {}) {
   if (!datasetInfo) return 'Load a dataset in the Workspace first.';
   if (!sessionReady) {
-    return 'A dataset is selected, but the live R session is not ready. Reload or restore the session before running QC.';
+    return 'A dataset is selected, but the private analysis workspace is not ready. Reload or open the saved version before running QC.';
   }
 
   const message = String(rawError || '').trim();
   if (/analysis object not found/i.test(message)) {
-    return 'This analysis object exists in project history, but its live R session is not currently attached. Reload the demo object or load a checkpoint when checkpoint restore is wired for this workflow.';
+    return 'This saved analysis appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis or open its saved version when that workflow is available.';
   }
   if (/no object loaded|load data first/i.test(message)) {
-    return 'This analysis object exists in project history, but its live R session is not currently attached. Reload the demo object to continue interactive analysis.';
+    return 'This saved analysis appears in Runs & Results, but it is not open in your private analysis workspace. Reload the demo analysis to continue interactive work.';
   }
-  return message || 'QC distribution data is unavailable for the selected object.';
+  return publicErrorMessage(message, 'QC distribution data is unavailable for the selected analysis.');
 }
 
-export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, objectId, sessionReady }) {
+export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, userId, objectId, sessionReady, currentWs }) {
   const [activePlot, setActivePlot] = useState('mt');
+  const projectId = datasetInfo?.projectId || currentWs?.selectedProjectId || null;
+  const projectRole = currentWs?.projects?.find((project) => project.id === projectId)?.role;
+  const ownsObject = !datasetInfo?.ownerUserId || Number(datasetInfo.ownerUserId) === Number(userId);
+  const canMutate = ['owner', 'admin', 'analyst'].includes(projectRole) && ownsObject;
 
 
 
@@ -62,6 +67,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
 
   useEffect(() => {
+    if (datasetInfo && !canMutate) {
+      // Detailed distributions come from the owner's private live R object.
+      // Project viewers may inspect persisted summary metrics only.
+      setDistributions(null);
+      setLoadingDist(false);
+      setError(null);
+      return;
+    }
     if (datasetInfo && !sessionReady) {
       setDistributions(null);
       setError(qcUnavailableMessage(null, { datasetInfo, sessionReady }));
@@ -136,6 +149,12 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
     rSessionId
   });
   const handleFiltering = () => {
+    if (!canMutate) {
+      setError(projectRole === 'viewer'
+        ? 'This is a read-only project view. Your role can inspect recorded QC results but cannot change filtering.'
+        : 'Create or open your private saved-analysis copy before changing QC filters.');
+      return;
+    }
     if (validationError) {
       setError(validationError);
       return;
@@ -246,6 +265,12 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         mode: 'markers',
         marker: { size: 2, opacity: pointOpacity[id], color: theme === 'light' ? '#000000' : '#ffffff' },
         hoverinfo: 'skip',
+        // In SVG mode, use the real cell marks for hover rather than mounting
+        // the 20,000-point invisible WebGL hover grid below.
+        svgFallback: {
+          hoverinfo: 'all',
+          hovertemplate: hover,
+        },
         showlegend: false
       }] : []),
       {
@@ -256,6 +281,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         marker: { size: 10, opacity: 0 },
         hovertemplate: hover,
         hoverlabel: { bgcolor: '#1e293b', font: { color: color, size: 12 } },
+        svgFallback: { omit: true },
         showlegend: false
       }
     ];
@@ -334,11 +360,11 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center justify-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            ><FileText size={15} /> View Step Script</button>
+            ><FileText size={15} /> View recorded analysis</button>
           )}
           <button
             onClick={handleFiltering}
-            disabled={filtering || !distributions || Boolean(validationError)}
+            disabled={!canMutate || filtering || !distributions || Boolean(validationError)}
             className={`btn ${(result || pipelineState?.qc) ? 'bg-success/20 text-text border border-success hover:bg-success/30' : 'btn-primary'} flex items-center justify-center gap-2`}
           >
             {filtering && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
@@ -348,6 +374,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
           </button>
         </div>
       </div>
+
+      {!canMutate && (
+        <div role="note" className="card p-4 mb-6 border-primary/30 bg-primary/5 text-sm text-textMuted">
+          {projectRole === 'viewer'
+            ? 'Read-only project view: saved QC summary metrics remain available when recorded. Detailed distributions and plots stay private to the analysis owner.'
+            : 'QC filtering is disabled until this analysis is opened as your private saved-analysis copy.'}
+        </div>
+      )}
 
       {error && (
         <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger flex items-center gap-3">
@@ -423,7 +457,9 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 </div>
                 <div className="p-4 bg-black/20 rounded text-center border border-border/5">
                   <div className="text-[10px] text-textMuted uppercase mb-1 font-bold font-bold">Genes/Features</div>
-                  <div className="text-text font-bold">{distributions?.n_features?.toLocaleString() || '—'}</div>
+                  <div className="text-text font-bold" title={Number.isFinite(distributions?.n_features) ? 'Features measured in the current object.' : 'Feature count was not recorded in this saved summary.'}>
+                    {Number.isFinite(distributions?.n_features) ? distributions.n_features.toLocaleString() : 'Unavailable'}
+                  </div>
                 </div>
               </>
             )}
@@ -443,7 +479,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       )}
 
       {/* Manual Threshold Controls */}
-      <div className="card p-6 mb-8 border-l-4 border-l-primary relative overflow-hidden">
+      <fieldset disabled={!canMutate} className="card p-6 mb-8 border-l-4 border-l-primary relative overflow-hidden disabled:opacity-60">
         {(result || pipelineState?.qc) && (
           <div className="absolute top-0 right-0 px-3 py-1 bg-success/10 text-success text-[9px] font-black uppercase tracking-tighter rounded-bl-lg border-b border-l border-success/20">
             Active Filter Applied
@@ -523,7 +559,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             </div>
           </div>
         </details>
-      </div>
+      </fieldset>
 
       {/* Tabbed Plot Viewer */}
       <div className="card overflow-hidden">
@@ -553,11 +589,13 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '150ms' }}></div>
                 <div className="w-3 h-3 rounded-full bg-primary animate-bounce" style={{ animationDelay: '300ms' }}></div>
               </div>
-              <p className="text-textMuted font-medium animate-pulse">Computing QC distributions from Seurat object...</p>
+              <p className="text-textMuted font-medium animate-pulse">Computing QC distributions from the selected analysis...</p>
             </div>
           ) : !distributions ? (
             <div className="flex items-center justify-center h-[420px] text-slate-400 text-sm">
-              {qcUnavailableMessage(error, { datasetInfo, sessionReady })}
+              {!canMutate
+                ? 'Detailed QC distributions are private to the analysis owner.'
+                : qcUnavailableMessage(error, { datasetInfo, sessionReady })}
             </div>
           ) : activePlot === 'stats' ? (
             <div>
@@ -677,6 +715,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 </div>
                 <div className="h-[500px] bg-black/10 border border-border/50 rounded-xl relative">
                   <Plot
+                    preferSvg
                     data={currentPlot.data}
                     layout={currentPlot.layout}
                     config={{ displayModeBar: false, responsive: true }}

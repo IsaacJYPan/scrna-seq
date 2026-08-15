@@ -32,10 +32,10 @@ const {
   createUser, getUserByEmail,
   createOrganizationForUser, createProjectForUser, addProjectMemberByEmail,
   createJobForUser, createProjectJob, createProjectAnalysisObject, createAnalysisObjectForUser,
-  getJobForUser, getProjectJob, getAnalysisObjectForUser, getProjectAnalysisObject,
-  verifyAnalysisObjectOwner, claimNextJob, reapExpiredJobs, setJobScheduling, cancelProjectJob,
+  getJobForUser, getProjectJob, getProjectAnalysisObject,
+  verifyAnalysisObjectOwner, claimNextJob, cancelProjectJob,
   listProjectArtifacts, listProjectJobArtifacts, getJobArtifactsByJobId,
-  listProjectAnalysisObjectChildren, listProjectAnalysisObjectParents, getProjectAnalysisObjectLineage,
+  listProjectAnalysisObjectChildren, listProjectAnalysisObjectParents,
   isValidJobType, isValidArtifactType, isValidArtifactStorageKind,
   createCheckpointArtifactForJobByWorker, createJobArtifactByWorker, isSafeInternalStorageKey,
   completePbmcPipelineResultByWorker, listAnalysisObjectsForUser,
@@ -44,8 +44,7 @@ const {
 
 const pbmc = require('./pbmcPipeline');
 const {
-  validatePbmcPipelineParams, allocateCheckpointStorageKey,
-  PBMC_PIPELINE_PARAM_SPEC, PBMC_PIPELINE_PARAM_NAMES,
+  validatePbmcPipelineParams, allocateCheckpointStorageKey, PBMC_PIPELINE_PARAM_NAMES,
 } = pbmc;
 
 const bridge = require('./rWorkerBridge');
@@ -125,7 +124,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
 
   it('registers pbmc.pipeline.v1; generic / checkpoint.noop / r.runtime.check / r.object.inspect unchanged', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'checkpoint.save.v1', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.multisample.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1']);
     expect(DEFAULT_HANDLERS['pbmc.pipeline.v1']).toBe(pbmcPipelineHandler);
     expect(DEFAULT_HANDLERS.generic).toBe(worker.genericNoopHandler);
     expect(DEFAULT_HANDLERS['checkpoint.noop']).toBe(worker.checkpointNoopHandler);
@@ -156,7 +155,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
     // /object/deg-find-markers (deg.find_markers.v1 branch), /object/enrichment-gsea,
     // and the narrow durable CellChat endpoint.
     expect([...R_BRIDGE_ALLOWED_TARGETS].sort())
-      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
+      .toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/checkpoint-save', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
   });
 
   it('legacy enrichment names and CellChat aliases are NOT registered job types or handlers', async () => {
@@ -170,7 +169,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — inventory & scope', () => {
     expect(DEFAULT_HANDLERS['cellchat.infer.v1']).toBe(worker.cellChatInferenceHandler);
     // Only the reviewed durable CellChat bridge operation is added; legacy aliases remain absent.
     expect(Object.keys(R_BRIDGE_OPERATIONS).sort())
-      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.load.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.pipeline.v1']);
+      .toEqual(['r.cellchat.infer.v1', 'r.checkpoint.hydrate.v1', 'r.checkpoint.load.v1', 'r.checkpoint.save.v1', 'r.condition.pseudobulk_de.v1', 'r.deg.find_markers.v1', 'r.enrichment.gsea.v1', 'r.explore.summarize.v1', 'r.object.inspect', 'r.pbmc.pipeline.v1', 'r.runtime.check', 'r.seurat.multisample.v1', 'r.seurat.pipeline.v1', 'r.spatial.seurat.v1']);
     for (const op of ['r.enrichment.v1', 'r.cellchat.v1']) {
       expect(isAllowedRBridgeOperation(op)).toBe(false);
     }
@@ -542,7 +541,6 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — ownership & project boundary'
 
   it('a job missing its input object fails before R (R_OBJECT_CONTEXT_REQUIRED)', async () => {
     const alice = await createUser('alice@example.com', 'password123', 'Alice');
-    const proj = await seedProject(alice.id);
     // Legacy/owner job with NO analysis object.
     await createJobForUser(alice.id, { jobType: 'pbmc.pipeline.v1' });
     const calls = [];
@@ -729,7 +727,7 @@ describe.skipIf(!CONFIGURED)('pbmc.pipeline.v1 — failure / cancel / duplicate'
   });
 
   it('failure messages/logs are sanitized (no raw R error / path / stack leak)', async () => {
-    const { job, alice, proj } = await seedPipelineJob({});
+    await seedPipelineJob({});
     const failCaller = async () => ({ status: 500, body: { error: 'R Error: cannot open /vault/u/secret.rds at line 7' } });
     const res = await drainPipeline(failCaller);
     expect(res.status).toBe('indeterminate');

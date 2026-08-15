@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { derivedAnalysisDisplayName } = require('./analysisDisplayName');
 
 const config = require('./config');
 const storage = require('./storage');
@@ -26,7 +27,28 @@ const {
   validateSeuratPipelineParams,
   assertSupportedSeuratPipelineDataset,
 } = require('./seuratPipeline');
+const {
+  validateMultiSampleSeuratParams,
+  assertSupportedMultiSampleDatasets,
+} = require('./multiSampleSeuratPipeline');
+const {
+  validateSpatialSeuratParams,
+  assertSupportedSpatialSeuratDataset,
+} = require('./spatialPipeline');
 const { validateEnrichmentGseaParams } = require('./enrichmentGsea');
+const { validateConditionComparisonParams } = require('./conditionComparison');
+const {
+  storedExpertRParams,
+  expertRSandboxEnabled,
+  MAX_EXPERT_R_OUTPUT_BYTES,
+  MAX_EXPERT_R_BUNDLE_BYTES,
+  EXPERT_R_RESOURCE_POLICY_VERSION,
+  allocateExpertRInputStorageKey,
+  sanitizeExpertRInputFilename,
+  MAX_EXPERT_R_INPUT_BYTES,
+  MAX_EXPERT_R_PRIVATE_INPUTS,
+  MAX_EXPERT_R_PRIVATE_INPUT_STORAGE_BYTES,
+} = require('./expertR');
 const {
   validateCellChatInferenceParams,
   MAX_CELLCHAT_RESULT_ROWS,
@@ -42,12 +64,15 @@ const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
 
 let pool = null;
 
-// The supported Branch 5 topology admits one live heavy job at a time. The
-// session-scoped worker lock prevents two healthy standalone workers from
-// starting together, while this distinct transaction-scoped gate fences the
-// claim itself if that session lock is lost between a topology check and the
-// database mutation.
-const WORKER_CLAIM_GATE_LOCK = [0x5343524e, 501];
+// Claim admission is serialized only long enough to enforce the configured
+// bounded pool capacity. Each slot has its own session advisory lock and its
+// own private R runtime.
+// Keep the global transaction-scoped admission gate outside the per-process
+// worker-slot lock range (501-508). A slot-1 runtime holds key 501 for its
+// lifetime, so reusing that key here would make it deadlock its own claim call.
+const WORKER_CLAIM_GATE_LOCK = [0x5343524e, 520];
+const WORKER_RUNTIME_STATES = new Set(['ready', 'draining', 'unavailable']);
+const DEFAULT_WORKER_RUNTIME_STALE_AFTER_MS = 15000;
 
 // ── Job state machine ───────────────────────────────────────────────────────
 const JOB_STATUSES = new Set([
@@ -91,20 +116,46 @@ const ALLOWED_JOB_TYPES = new Set([
   'r.object.inspect',
   'pbmc.pipeline.v1',
   'seurat.pipeline.v1',
-  'checkpoint.load.v1',
-  'checkpoint.fork.v1',
-  'deg.find_markers.v1',
-  'enrichment.gsea.v1',
-  'cellchat.infer.v1'
-]);
-const RETRYABLE_DURABLE_JOB_TYPES = new Set([
-  'pbmc.pipeline.v1',
-  'seurat.pipeline.v1',
+  'seurat.multisample.v1',
+  'spatial.seurat.v1',
+  'checkpoint.save.v1',
   'checkpoint.load.v1',
   'checkpoint.fork.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
   'cellchat.infer.v1',
+  'explore.summarize.v1',
+  'condition.pseudobulk_de.v1',
+  'expert.r.v1'
+]);
+const RETRYABLE_DURABLE_JOB_TYPES = new Set([
+  'pbmc.pipeline.v1',
+  'seurat.pipeline.v1',
+  'seurat.multisample.v1',
+  'spatial.seurat.v1',
+  'checkpoint.save.v1',
+  'checkpoint.load.v1',
+  'checkpoint.fork.v1',
+  'deg.find_markers.v1',
+  'enrichment.gsea.v1',
+  'cellchat.infer.v1',
+  'condition.pseudobulk_de.v1',
+]);
+// A researcher-requested retry is a new immutable run, separate from the
+// worker's bounded recovery attempts above. Only durable workflows whose
+// complete inputs can be reconstructed from trusted job metadata are eligible.
+// Checkpoint actions already expose their own explicit retry controls, and
+// terminal Expert R jobs intentionally no longer retain source code.
+const MANUALLY_RETRYABLE_PROJECT_JOB_TYPES = new Set([
+  'pbmc.pipeline.v1',
+  'seurat.pipeline.v1',
+  'seurat.multisample.v1',
+  'spatial.seurat.v1',
+  'deg.find_markers.v1',
+  'enrichment.gsea.v1',
+  'cellchat.infer.v1',
+  'explore.summarize.v1',
+  'condition.pseudobulk_de.v1',
 ]);
 
 // An HTTP timeout does not prove the R operation stopped. Keep the original
@@ -129,17 +180,19 @@ function maxAttemptsForJobType(jobType, projectId) {
   return projectId && RETRYABLE_DURABLE_JOB_TYPES.has(jobType) ? 2 : 1;
 }
 const ALLOWED_DATASET_FILE_TYPES = new Set([
-  'tenx_zip', 'tenx_h5', 'seurat_rds', 'h5seurat', 'h5ad',
+  'tenx_zip', 'tenx_h5', 'visium_zip', 'seurat_rds', 'h5seurat', 'h5ad',
   'count_matrix_csv', 'count_matrix_tsv', 'metadata_csv', 'metadata_tsv'
 ]);
 const DATASET_UPLOAD_STATUSES = new Set(['pending', 'uploaded', 'failed']);
 const DATASET_VALIDATION_STATUSES = new Set(['pending', 'valid', 'invalid', 'skipped']);
 const ALLOWED_ARTIFACT_TYPES = new Set([
   'checkpoint', 'metrics', 'log', 'figure', 'script_fragment', 'other_metadata',
-  'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_load',
+  'r_runtime_check', 'r_object_inspection', 'pipeline_summary', 'checkpoint_save', 'checkpoint_load',
   'checkpoint_fork', 'deg_markers', 'deg_summary', 'result_checkpoint',
   'enrichment_results', 'enrichment_summary',
-  'cellchat_results', 'cellchat_summary'
+  'cellchat_results', 'cellchat_summary', 'exploration_summary',
+  'condition_de_results', 'condition_de_summary',
+  'expert_r_bundle', 'expert_r_summary'
 ]);
 const ALLOWED_ARTIFACT_STORAGE_KINDS = new Set(['metadata_only', 'local_internal']);
 const ALLOWED_ARTIFACT_STATUSES = new Set(['available', 'pending', 'error']);
@@ -159,16 +212,39 @@ const WORKER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const DEFAULT_LEASE_SECONDS = 120;
 const MAX_NAME_LENGTH = 200;
 const MAX_DESCRIPTION_LENGTH = 2000;
+const ALLOWED_ANALYSIS_SUMMARY_FIELDS = ['cells', 'features', 'density'];
 const PIPELINE_DEFINITION_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const PIPELINE_SELECTION_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const PIPELINE_REGISTRY_PUBLISH_CAPABILITY = 'pipeline_registry.publish';
+const EXPERT_R_EXECUTE_CAPABILITY = 'expert_r.execute';
 const PLATFORM_PIPELINE_VISIBILITY = 'platform';
 const PLATFORM_PIPELINE_REGISTRY_LIMIT = 200;
 const PROVENANCE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const PROVENANCE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const FIGURE_WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const FIGURE_READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
-const ALLOWED_ANALYSIS_SUMMARY_FIELDS = ['cells', 'features', 'density'];
+function inheritedAnalysisSummary(metadata) {
+  const summary = {};
+  const candidate = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? metadata.summary
+    : null;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return summary;
+  const cells = candidate.cells ?? candidate.nCells ?? candidate.n_cells;
+  const features = candidate.features ?? candidate.nFeatures ?? candidate.n_features;
+  if (typeof cells === 'number' && Number.isFinite(cells) && cells >= 0) summary.cells = cells;
+  if (typeof features === 'number' && Number.isFinite(features) && features >= 0) summary.features = features;
+  if (typeof candidate.density === 'number' && Number.isFinite(candidate.density) && candidate.density >= 0) {
+    summary.density = candidate.density;
+  }
+  for (const field of ['assays', 'reductions']) {
+    if (!Array.isArray(candidate[field])) continue;
+    const values = candidate[field]
+      .filter(value => typeof value === 'string' && /^[A-Za-z0-9_.+-]{1,64}$/.test(value))
+      .slice(0, 64);
+    if (values.length) summary[field] = values;
+  }
+  return summary;
+}
 
 function validateJobTransition(fromStatus, toStatus) {
   if (!JOB_STATUSES.has(fromStatus) || !JOB_STATUSES.has(toStatus)) return false;
@@ -429,6 +505,75 @@ async function checkHealth(options = {}) {
   return true;
 }
 
+async function reportStandaloneWorkerRuntimeState(state, options = {}) {
+  const normalized = typeof state === 'string' ? state.trim().toLowerCase() : '';
+  if (!WORKER_RUNTIME_STATES.has(normalized)) {
+    throw codedError('INVALID_WORKER_RUNTIME_STATE', 'Worker runtime state is invalid.');
+  }
+  const slot = Number(options.slot === undefined ? 1 : options.slot);
+  if (!Number.isInteger(slot) || slot < 1 || slot > 8) {
+    throw codedError('INVALID_WORKER_POOL_SLOT', 'Worker pool slot is invalid.');
+  }
+  const requestedCapabilities = options.capabilities && typeof options.capabilities === 'object'
+    ? options.capabilities
+    : {};
+  const capabilities = {};
+  for (const key of ['pathwayEnrichment', 'cellChat']) {
+    if (typeof requestedCapabilities[key] === 'boolean') capabilities[key] = requestedCapabilities[key];
+  }
+  const { rows } = await query(
+    `INSERT INTO worker_pool_runtime_status (slot, state, capabilities_json, updated_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (slot) DO UPDATE SET state = EXCLUDED.state,
+       capabilities_json = EXCLUDED.capabilities_json, updated_at = now()
+     RETURNING slot, state, capabilities_json, updated_at`,
+    [slot, normalized, JSON.stringify(capabilities)]
+  );
+  return {
+    slot: Number(rows[0]?.slot || slot),
+    state: rows[0]?.state || normalized,
+    updatedAt: toCanonicalTs(rows[0]?.updated_at),
+  };
+}
+
+async function getStandaloneWorkerRuntimeStatus(options = {}) {
+  const staleAfterMs = Number.isInteger(Number(options.staleAfterMs)) && Number(options.staleAfterMs) > 0
+    ? Number(options.staleAfterMs)
+    : DEFAULT_WORKER_RUNTIME_STALE_AFTER_MS;
+  const now = options.now === undefined ? new Date() : normalizeTimestamp(options.now);
+  const { rows } = await query(
+    'SELECT slot, state, capabilities_json, updated_at FROM worker_pool_runtime_status ORDER BY slot'
+  );
+  if (rows.length === 0) return { status: 'unknown', updatedAt: null, capabilities: {} };
+  const freshRows = rows.filter((row) => {
+    const updatedAt = row.updated_at instanceof Date ? row.updated_at : new Date(row.updated_at);
+    return !Number.isNaN(updatedAt.getTime()) && now.getTime() - updatedAt.getTime() <= staleAfterMs;
+  });
+  const latest = rows.reduce((current, row) => (
+    !current || new Date(row.updated_at).getTime() > new Date(current.updated_at).getTime()
+      ? row : current
+  ), null);
+  const readyRows = freshRows.filter((row) => row.state === 'ready');
+  const capabilities = {};
+  for (const key of ['pathwayEnrichment', 'cellChat']) {
+    if (readyRows.length) {
+      // Any ready lane may claim the next job, so advertise a feature only when
+      // every claim-capable lane explicitly reports it. Missing data from an
+      // older worker therefore fails closed during rolling upgrades.
+      capabilities[key] = readyRows.every((row) => (
+        row.capabilities_json
+        && typeof row.capabilities_json === 'object'
+        && row.capabilities_json[key] === true
+      ));
+    }
+  }
+  return {
+    status: freshRows.some((row) => row.state === 'ready') ? 'ready' : 'unavailable',
+    updatedAt: toCanonicalTs(latest.updated_at),
+    capabilities,
+  };
+}
+
 async function acquireWebTopologyLock() {
   const p = await connect();
   const client = await p.connect();
@@ -487,7 +632,15 @@ async function acquireWebTopologyLock() {
   });
 }
 
-async function acquireStandaloneWorkerLock() {
+async function acquireStandaloneWorkerLock(options = {}) {
+  const slot = Number(options.slot === undefined ? 1 : options.slot);
+  const poolSize = Number(options.poolSize === undefined ? 1 : options.poolSize);
+  if (!Number.isInteger(poolSize) || poolSize < 1 || poolSize > 8
+      || !Number.isInteger(slot) || slot < 1 || slot > poolSize) {
+    throw codedError('INVALID_WORKER_POOL_SLOT', 'Worker pool slot configuration is invalid.');
+  }
+  const lockKey = 500 + slot;
+  const workerPrefix = `pool-${slot}:%`;
   const p = await connect();
   const client = await p.connect();
   let released = false;
@@ -497,22 +650,23 @@ async function acquireStandaloneWorkerLock() {
   try {
     const result = await client.query(
       'SELECT pg_try_advisory_lock($1, $2) AS acquired',
-      [0x5343524e, 500]
+      [0x5343524e, lockKey]
     );
     if (!result.rows[0] || result.rows[0].acquired !== true) {
       throw codedError(
         'WORKER_TOPOLOGY_LOCKED',
-        'Another standalone worker already owns the supported single-worker topology.'
+        'Another worker already owns this compute-pool slot.'
       );
     }
     const active = await client.query(
-      "SELECT 1 FROM jobs WHERE status = 'running' AND lease_expires_at > now() LIMIT 1"
+      "SELECT 1 FROM jobs WHERE status = 'running' AND lease_expires_at > now() AND worker_id LIKE $1 LIMIT 1",
+      [workerPrefix]
     );
     if (active.rows[0]) {
-      await client.query('SELECT pg_advisory_unlock($1, $2)', [0x5343524e, 500]);
+      await client.query('SELECT pg_advisory_unlock($1, $2)', [0x5343524e, lockKey]);
       throw codedError(
         'WORKER_ACTIVE_CLAIM_EXISTS',
-        'A prior standalone worker still has an active claim; wait for drain or lease expiry.'
+        'A prior worker in this pool slot still has an active claim; wait for drain or lease expiry.'
       );
     }
   } catch (error) {
@@ -537,7 +691,7 @@ async function acquireStandaloneWorkerLock() {
       if (released) return;
       released = true;
       try {
-        if (!lost) await client.query('SELECT pg_advisory_unlock($1, $2)', [0x5343524e, 500]);
+        if (!lost) await client.query('SELECT pg_advisory_unlock($1, $2)', [0x5343524e, lockKey]);
       } finally {
         client.off('error', onClientError);
         client.release();
@@ -555,10 +709,17 @@ async function resetSchemaForTests() {
   await query(`
     DROP TABLE IF EXISTS
       project_pipeline_selections, pipeline_definitions,
+      project_audit_events,
+      project_canonical_analyses, analysis_branch_review_comments,
+      analysis_branch_reviews, analysis_branch_events,
+      analysis_branches,
+      condition_contrast_samples, condition_contrasts,
+      analysis_object_sample_bindings, biological_samples, study_conditions,
       analysis_object_edges, job_artifacts, jobs, analysis_objects,
-      datasets, project_members, projects, organization_members,
+      expert_r_private_inputs, datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
-      platform_capabilities, operator_audit_events, users
+      worker_pool_runtime_status, worker_runtime_status, platform_capabilities,
+      operator_audit_events, users
     CASCADE;
   `);
   await initSchema();
@@ -937,6 +1098,364 @@ async function verifyUser(email, password) {
   };
 }
 
+async function createDemoGuest(email, password, expiresAt) {
+  const user = await createUser(email, password, 'Demo Guest');
+  if (user.error) throw codedError('DEMO_GUEST_CONFLICT', 'Could not create demo guest.');
+  const { rows } = await query(
+    `UPDATE users SET is_demo_guest = TRUE, expires_at = $2
+      WHERE id = $1
+      RETURNING id, email, display_name, session_version, is_demo_guest, expires_at, created_at`,
+    [Number(user.id), expiresAt]
+  );
+  const guest = rows[0];
+  const organization = await createOrganizationForUser(user.id, { name: 'Demo workspace' });
+  const project = await createProjectForUser(user.id, {
+    organizationId: organization.id, name: 'Curated single-cell demo',
+  });
+  return {
+    user: {
+      id: Number(guest.id), email: guest.email, displayName: guest.display_name,
+      sessionVersion: String(guest.session_version), isDemoGuest: true,
+      expiresAt: guest.expires_at, createdAt: guest.created_at,
+    },
+    organization,
+    project,
+  };
+}
+
+async function getDemoTemplateCheckpoint(templateProjectId) {
+  const { rows } = await query(
+    `SELECT object.id AS analysis_object_id, object.object_type, object.display_name,
+            artifact.id AS artifact_id, artifact.storage_uri,
+            artifact.checksum_sha256, artifact.size_bytes
+       FROM project_canonical_analyses canonical
+       JOIN analysis_objects object ON object.id = canonical.analysis_object_id
+       JOIN job_artifacts artifact
+         ON artifact.project_id = canonical.project_id
+        AND artifact.artifact_type = 'checkpoint'
+        AND artifact.storage_kind = 'local_internal'
+        AND artifact.status = 'available'
+       JOIN jobs artifact_job
+         ON artifact_job.id = artifact.job_id
+        AND artifact_job.project_id = canonical.project_id
+        AND COALESCE(artifact.result_analysis_object_id,
+                     artifact_job.result_analysis_object_id) = object.id
+      WHERE canonical.project_id = $1
+      ORDER BY artifact.created_at DESC, artifact.id DESC LIMIT 1`,
+    [String(templateProjectId)]
+  );
+  if (!rows[0]) throw codedError('DEMO_TEMPLATE_UNAVAILABLE', 'Curated demo data is unavailable.');
+  return {
+    analysisObjectId: rows[0].analysis_object_id,
+    objectType: rows[0].object_type,
+    displayName: rows[0].display_name,
+    artifactId: rows[0].artifact_id,
+    storageUri: rows[0].storage_uri,
+    checksumSha256: rows[0].checksum_sha256,
+    sizeBytes: Number(rows[0].size_bytes),
+  };
+}
+
+async function cloneDemoExperimentalDesign(client, input) {
+  const templateProjectId = String(input.templateProjectId || '');
+  const templateAnalysisObjectId = String(input.templateAnalysisObjectId || '');
+  if (!templateProjectId || !templateAnalysisObjectId) {
+    throw codedError('DEMO_TEMPLATE_UNAVAILABLE', 'Curated demo design is unavailable.');
+  }
+
+  // Only rows attached to the operator-configured project and its canonical
+  // analysis object are eligible. These identifiers are supplied by the
+  // server after resolving the canonical template; no client value reaches
+  // this path.
+  const bindingResult = await client.query(
+      `SELECT binding.*, sample.condition_id, sample.name AS sample_name,
+              sample.donor_code, sample.batch, sample.replicate_label,
+              sample.modality, sample.organism, sample.tissue, sample.platform,
+              sample.metadata_json
+         FROM analysis_object_sample_bindings binding
+         JOIN biological_samples sample
+           ON sample.id = binding.sample_id AND sample.project_id = binding.project_id
+         JOIN study_conditions condition
+           ON condition.id = sample.condition_id AND condition.project_id = binding.project_id
+        WHERE binding.project_id = $1 AND binding.analysis_object_id = $2
+        ORDER BY binding.created_at, binding.id`,
+      [templateProjectId, templateAnalysisObjectId]
+    );
+  const contrastResult = await client.query(
+      `SELECT * FROM condition_contrasts
+        WHERE project_id = $1 AND analysis_object_id = $2
+        ORDER BY created_at, id`,
+      [templateProjectId, templateAnalysisObjectId]
+    );
+
+  const conditionIds = new Set();
+  for (const row of bindingResult.rows) conditionIds.add(row.condition_id);
+  for (const row of contrastResult.rows) {
+    conditionIds.add(row.numerator_condition_id);
+    conditionIds.add(row.denominator_condition_id);
+  }
+  if (conditionIds.size === 0) {
+    return { conditions: 0, samples: 0, bindings: 0, contrasts: 0 };
+  }
+
+  const conditionResult = await client.query(
+    `SELECT * FROM study_conditions
+      WHERE project_id = $1 AND id = ANY($2::text[])
+      ORDER BY created_at, id`,
+    [templateProjectId, [...conditionIds]]
+  );
+  if (conditionResult.rows.length !== conditionIds.size) {
+    throw codedError('DEMO_TEMPLATE_UNAVAILABLE', 'Curated demo design is incomplete.');
+  }
+
+  const conditionIdsBySource = new Map();
+  for (const source of conditionResult.rows) {
+    const id = genId('cond');
+    conditionIdsBySource.set(source.id, id);
+    await client.query(
+      `INSERT INTO study_conditions
+         (id, project_id, name, description, created_by_user_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [id, String(input.projectId), source.name, source.description, Number(input.userId)]
+    );
+  }
+
+  const sampleIdsBySource = new Map();
+  for (const source of bindingResult.rows) {
+    const sampleId = genId('sample');
+    sampleIdsBySource.set(source.sample_id, sampleId);
+    await client.query(
+      `INSERT INTO biological_samples
+         (id, project_id, dataset_id, condition_id, name, donor_code, batch,
+          replicate_label, modality, organism, tissue, platform, metadata_json,
+          created_by_user_id)
+       VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [sampleId, String(input.projectId), conditionIdsBySource.get(source.condition_id),
+        source.sample_name, source.donor_code, source.batch, source.replicate_label,
+        source.modality, source.organism, source.tissue, source.platform,
+        source.metadata_json, Number(input.userId)]
+    );
+    await client.query(
+      `INSERT INTO analysis_object_sample_bindings
+         (id, project_id, analysis_object_id, sample_id, cell_metadata_column,
+          cell_metadata_value, created_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [genId('bind'), String(input.projectId), String(input.analysisObjectId), sampleId,
+        source.cell_metadata_column, source.cell_metadata_value, Number(input.userId)]
+    );
+  }
+
+  let snapshotRows = [];
+  if (contrastResult.rows.length > 0) {
+    const snapshots = await client.query(
+      `SELECT snapshot.* FROM condition_contrast_samples snapshot
+       JOIN condition_contrasts contrast ON contrast.id = snapshot.contrast_id
+       WHERE contrast.project_id = $1 AND contrast.analysis_object_id = $2
+       ORDER BY snapshot.contrast_id, snapshot.sample_id`,
+      [templateProjectId, templateAnalysisObjectId]
+    );
+    snapshotRows = snapshots.rows;
+  }
+  const snapshotsByContrast = new Map();
+  for (const snapshot of snapshotRows) {
+    const rows = snapshotsByContrast.get(snapshot.contrast_id) || [];
+    rows.push(snapshot);
+    snapshotsByContrast.set(snapshot.contrast_id, rows);
+  }
+
+  for (const source of contrastResult.rows) {
+    const contrastId = genId('contrast');
+    await client.query(
+      `INSERT INTO condition_contrasts
+         (id, project_id, analysis_object_id, name, numerator_condition_id,
+          denominator_condition_id, unit_of_replication, paired, cell_type_column,
+          blocking_factor, covariates_json, status, validation_json, created_by_user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [contrastId, String(input.projectId), String(input.analysisObjectId), source.name,
+        conditionIdsBySource.get(source.numerator_condition_id),
+        conditionIdsBySource.get(source.denominator_condition_id),
+        source.unit_of_replication, source.paired, source.cell_type_column,
+        source.blocking_factor, source.covariates_json, source.status,
+        source.validation_json, Number(input.userId)]
+    );
+    for (const snapshot of snapshotsByContrast.get(source.id) || []) {
+      const sampleId = sampleIdsBySource.get(snapshot.sample_id);
+      const conditionId = conditionIdsBySource.get(snapshot.condition_id);
+      if (!sampleId || !conditionId) {
+        throw codedError('DEMO_TEMPLATE_UNAVAILABLE', 'Curated demo contrast is incomplete.');
+      }
+      await client.query(
+        `INSERT INTO condition_contrast_samples
+           (contrast_id, sample_id, condition_id, donor_code,
+            cell_metadata_column, cell_metadata_value)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [contrastId, sampleId, conditionId, snapshot.donor_code,
+          snapshot.cell_metadata_column, snapshot.cell_metadata_value]
+      );
+    }
+  }
+
+  return {
+    conditions: conditionResult.rows.length,
+    samples: bindingResult.rows.length,
+    bindings: bindingResult.rows.length,
+    contrasts: contrastResult.rows.length,
+  };
+}
+
+async function createDemoGuestCheckpoint(input) {
+  const clientPool = await connect();
+  const client = await clientPool.connect();
+  const objectId = genId('ao');
+  const jobId = input.jobId || genId('job');
+  const artifactId = genId('art');
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO analysis_objects
+         (id, owner_user_id, project_id, lineage_root_id, object_type, display_name, metadata_json)
+       VALUES ($1, $2, $3, $1, $4, $5, $6)`,
+      [objectId, Number(input.userId), String(input.projectId), input.objectType || 'seurat',
+        input.displayName || 'Curated scRNA-seq demo',
+        JSON.stringify({ curatedDemo: true })]
+    );
+    await client.query(
+      `INSERT INTO jobs
+         (id, owner_user_id, project_id, result_analysis_object_id, job_type, status,
+          parameters_json, logs_json, created_at, updated_at, started_at, completed_at, attempts)
+       VALUES ($1, $2, $3, $4, 'demo.curated_import.v1', 'completed', $5, $6,
+               now(), now(), now(), now(), 1)`,
+      [jobId, Number(input.userId), String(input.projectId), objectId,
+        JSON.stringify({ curated: true }), JSON.stringify([{ message: 'Curated demo checkpoint provisioned.' }])]
+    );
+    await client.query(
+      `INSERT INTO job_artifacts
+         (id, project_id, job_id, result_analysis_object_id, created_by_user_id,
+          artifact_type, name, description, mime_type, storage_kind, storage_uri,
+          checksum_sha256, size_bytes, status, metadata_json)
+       VALUES ($1, $2, $3, $4, $5, 'checkpoint', 'Curated demo checkpoint',
+               'Immutable checkpoint copied from the operator-reviewed demo template.',
+               'application/x-r-rds', 'local_internal', $6, $7, $8, 'available', $9)`,
+      [artifactId, String(input.projectId), jobId, objectId, Number(input.userId),
+        input.storageUri, input.checksumSha256, Number(input.sizeBytes),
+        JSON.stringify({ curatedDemo: true })]
+    );
+    const experimentalDesign = await cloneDemoExperimentalDesign(client, {
+      userId: input.userId,
+      projectId: input.projectId,
+      analysisObjectId: objectId,
+      templateProjectId: input.templateProjectId,
+      templateAnalysisObjectId: input.templateAnalysisObjectId,
+    });
+    await client.query('COMMIT');
+    return {
+      analysisObject: await getProjectAnalysisObjectRow(objectId, input.projectId),
+      jobId,
+      artifactId,
+      experimentalDesign,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function listExpiredDemoGuests(limit = 100) {
+  const bounded = Math.min(500, Math.max(1, Number(limit) || 100));
+  const { rows } = await query(
+    `SELECT user_row.id, user_row.email,
+            COALESCE(array_agg(DISTINCT project.id) FILTER (WHERE project.id IS NOT NULL), '{}') AS project_ids,
+            COALESCE(array_agg(DISTINCT storage_key) FILTER (WHERE storage_key IS NOT NULL), '{}') AS storage_keys
+       FROM users user_row
+       LEFT JOIN projects project ON project.created_by_user_id = user_row.id
+       LEFT JOIN LATERAL (
+         SELECT artifact.storage_uri AS storage_key FROM job_artifacts artifact
+          WHERE artifact.project_id = project.id AND artifact.storage_uri IS NOT NULL
+         UNION
+         SELECT dataset.internal_storage_key FROM datasets dataset
+          WHERE dataset.project_id = project.id AND dataset.internal_storage_key IS NOT NULL
+         UNION
+         SELECT 'projects/' || project.id || '/artifacts/' || job.id || '/completion-receipt.json'
+           FROM jobs job WHERE job.project_id = project.id
+       ) stored ON TRUE
+      WHERE user_row.is_demo_guest = TRUE AND user_row.expires_at <= now()
+      GROUP BY user_row.id, user_row.email, user_row.expires_at
+      ORDER BY user_row.expires_at, user_row.id LIMIT $1`,
+    [bounded]
+  );
+  return rows.map((row) => ({
+    userId: Number(row.id), email: row.email,
+    projectIds: row.project_ids || [], storageKeys: row.storage_keys || [],
+  }));
+}
+
+async function deleteExpiredDemoGuest(userId) {
+  const clientPool = await connect();
+  const client = await clientPool.connect();
+  try {
+    await client.query('BEGIN');
+    // The audit table is immutable during normal application operation. Demo
+    // expiry is the one deliberate lifecycle deletion, scoped to this transaction.
+    await client.query("SET LOCAL app.demo_cleanup = 'on'");
+    const locked = await client.query(
+      `SELECT id, email FROM users
+        WHERE id = $1 AND is_demo_guest = TRUE AND expires_at <= now() FOR UPDATE`,
+      [Number(userId)]
+    );
+    if (!locked.rows[0]) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    const projectRows = await client.query(
+      'SELECT id, organization_id FROM projects WHERE created_by_user_id = $1',
+      [Number(userId)]
+    );
+    const projectIds = projectRows.rows.map((row) => row.id);
+    const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
+    if (projectIds.length > 0) {
+      await client.query('DELETE FROM project_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM project_canonical_analyses WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM analysis_branch_review_comments WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM analysis_branch_reviews WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM analysis_branch_events WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM analysis_branches WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query(`DELETE FROM condition_contrast_samples WHERE contrast_id IN
+        (SELECT id FROM condition_contrasts WHERE project_id = ANY($1::text[]))`, [projectIds]);
+      await client.query('DELETE FROM condition_contrasts WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM analysis_object_sample_bindings WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM biological_samples WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM study_conditions WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM analysis_object_edges WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM job_artifacts WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM jobs WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM analysis_objects WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM project_pipeline_selections WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM pipeline_definitions WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM figure_collection WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query(`DELETE FROM results_cache WHERE provenance_id IN
+        (SELECT id FROM provenance WHERE project_id = ANY($1::text[]))`, [projectIds]);
+      await client.query('DELETE FROM provenance WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM datasets WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM project_members WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM projects WHERE id = ANY($1::text[])', [projectIds]);
+    }
+    if (orgIds.length > 0) {
+      await client.query('DELETE FROM organization_members WHERE organization_id = ANY($1::text[])', [orgIds]);
+      await client.query('DELETE FROM organizations WHERE id = ANY($1::text[])', [orgIds]);
+    }
+    await client.query('DELETE FROM users WHERE id = $1', [Number(userId)]);
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 const MAX_POSTGRES_BIGINT = 9223372036854775807n;
 
 function isCanonicalPositiveIntegerString(value, maximum) {
@@ -958,9 +1477,10 @@ async function getUserForSession(userId, sessionVersion) {
   const version = String(sessionVersion || '');
   if (!isSafeUserId(userId) || !Number.isSafeInteger(uid) || !isSessionVersion(version)) return null;
   const { rows } = await query(
-    `SELECT id, email, display_name, created_at
+    `SELECT id, email, display_name, is_demo_guest, expires_at, created_at
        FROM users
-      WHERE id = $1 AND session_version = $2`,
+      WHERE id = $1 AND session_version = $2
+        AND (expires_at IS NULL OR expires_at > now())`,
     [uid, version]
   );
   if (!rows[0]) return null;
@@ -968,6 +1488,8 @@ async function getUserForSession(userId, sessionVersion) {
     id: Number(rows[0].id),
     email: rows[0].email,
     displayName: rows[0].display_name,
+    isDemoGuest: rows[0].is_demo_guest === true,
+    expiresAt: rows[0].expires_at,
     createdAt: rows[0].created_at,
   };
 }
@@ -1004,15 +1526,26 @@ async function revokeUserSessions(userId, expectedVersion) {
 }
 
 // ── Organizations / projects / membership ───────────────────────────────────
-async function hasPipelineRegistryPublishCapability(userId) {
+async function hasPlatformCapability(userId, capability) {
   const uid = Number(userId);
   if (!Number.isInteger(uid) || uid <= 0) return false;
+  if (![PIPELINE_REGISTRY_PUBLISH_CAPABILITY, EXPERT_R_EXECUTE_CAPABILITY].includes(capability)) {
+    return false;
+  }
   const { rows } = await query(
     `SELECT 1 FROM platform_capabilities
       WHERE user_id = $1 AND capability = $2`,
-    [uid, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+    [uid, capability]
   );
   return Boolean(rows[0]);
+}
+
+async function hasPipelineRegistryPublishCapability(userId) {
+  return hasPlatformCapability(userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY);
+}
+
+async function hasExpertRExecuteCapability(userId) {
+  return hasPlatformCapability(userId, EXPERT_R_EXECUTE_CAPABILITY);
 }
 
 async function getPipelineRegistryCapabilities(userId) {
@@ -1021,7 +1554,16 @@ async function getPipelineRegistryCapabilities(userId) {
   };
 }
 
-async function setPipelineRegistryPublisherByEmail(email, enabled) {
+async function getExpertRCapabilities(userId) {
+  return {
+    canExecuteExpertR: await hasExpertRExecuteCapability(userId),
+  };
+}
+
+async function setPlatformCapabilityByEmail(email, capability, enabled) {
+  if (![PIPELINE_REGISTRY_PUBLISH_CAPABILITY, EXPERT_R_EXECUTE_CAPABILITY].includes(capability)) {
+    throw codedError('INVALID_CAPABILITY', 'Capability is not operator-manageable.');
+  }
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) throw codedError('INVALID_USER', 'A user email is required.');
   if (typeof enabled !== 'boolean') throw codedError('INVALID_CAPABILITY', 'Capability state must be boolean.');
@@ -1040,12 +1582,12 @@ async function setPipelineRegistryPublisherByEmail(email, enabled) {
         `INSERT INTO platform_capabilities (user_id, capability)
          VALUES ($1, $2)
          ON CONFLICT (user_id, capability) DO NOTHING`,
-        [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+        [userId, capability]
       );
     } else {
       await client.query(
         'DELETE FROM platform_capabilities WHERE user_id = $1 AND capability = $2',
-        [userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY]
+        [userId, capability]
       );
     }
     const audit = await client.query(
@@ -1057,14 +1599,15 @@ async function setPipelineRegistryPublisherByEmail(email, enabled) {
         enabled ? 'platform_capability_granted' : 'platform_capability_revoked',
         userId,
         rows[0].email,
-        JSON.stringify({ capability: PIPELINE_REGISTRY_PUBLISH_CAPABILITY }),
+        JSON.stringify({ capability }),
       ]
     );
     await client.query('COMMIT');
     return {
       userId,
       email: rows[0].email,
-      canPublishPipelineManifests: enabled,
+      enabled,
+      capability,
       auditEventId: String(audit.rows[0].id),
     };
   } catch (error) {
@@ -1073,6 +1616,20 @@ async function setPipelineRegistryPublisherByEmail(email, enabled) {
   } finally {
     client.release();
   }
+}
+
+async function setPipelineRegistryPublisherByEmail(email, enabled) {
+  const result = await setPlatformCapabilityByEmail(
+    email,
+    PIPELINE_REGISTRY_PUBLISH_CAPABILITY,
+    enabled
+  );
+  return { ...result, canPublishPipelineManifests: enabled };
+}
+
+async function setExpertRExecutorByEmail(email, enabled) {
+  const result = await setPlatformCapabilityByEmail(email, EXPERT_R_EXECUTE_CAPABILITY, enabled);
+  return { ...result, canExecuteExpertR: enabled };
 }
 
 async function createOrganization(name, ownerUserId) {
@@ -1192,6 +1749,107 @@ async function requireProjectRole(userId, projectId, allowedRoles) {
     throw codedError('FORBIDDEN', 'You do not have permission to perform this action.');
   }
   return membership;
+}
+
+function rowToExpertRPrivateInput(row, { includeStorage = false } = {}) {
+  if (!row) return null;
+  const value = {
+    id: row.id,
+    projectId: row.project_id,
+    ownerUserId: Number(row.owner_user_id),
+    originalFilename: row.original_filename,
+    mimeType: row.mime_type,
+    sizeBytes: Number(row.file_size_bytes),
+    checksumSha256: row.sha256,
+    createdAt: toCanonicalTs(row.created_at),
+  };
+  if (includeStorage) value.internalStorageKey = row.internal_storage_key;
+  return value;
+}
+
+async function createExpertRPrivateInput(userId, projectId, input = {}) {
+  const owner = Number(userId);
+  const pid = String(projectId || '');
+  const id = String(input.id || '');
+  const originalFilename = sanitizeExpertRInputFilename(input.originalFilename);
+  const sizeBytes = Number(input.sizeBytes);
+  const checksumSha256 = String(input.checksumSha256 || '');
+  const internalStorageKey = String(input.internalStorageKey || '');
+  const mimeType = String(input.mimeType || 'application/octet-stream').slice(0, 100);
+  if (!/^eri_[0-9a-f]{24}$/.test(id)
+      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > MAX_EXPERT_R_INPUT_BYTES
+      || !/^[0-9a-f]{64}$/.test(checksumSha256)
+      || internalStorageKey !== allocateExpertRInputStorageKey(pid, id, originalFilename)
+      || !storage.isProjectStorageKey(internalStorageKey, { projectId: pid, kind: 'artifacts' })) {
+    throw codedError('INVALID_EXPERT_R_INPUT', 'Expert R private input metadata is invalid.');
+  }
+  const p = await connect(); const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const project = await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [pid]);
+    if (!project.rows[0]) throw codedError('NOT_FOUND', 'Project not found.');
+    const membership = await client.query(
+      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [pid, owner]
+    );
+    if (!membership.rows[0]) throw codedError('NOT_FOUND', 'Project not found.');
+    if (!PROJECT_JOB_WRITE_ROLES.includes(membership.rows[0].role)) {
+      throw codedError('FORBIDDEN', 'You do not have permission to import Expert R inputs.');
+    }
+    const capability = await client.query(
+      `SELECT 1 FROM platform_capabilities
+        WHERE user_id = $1 AND capability = $2 FOR KEY SHARE`,
+      [owner, EXPERT_R_EXECUTE_CAPABILITY]
+    );
+    if (!capability.rows[0]) throw codedError('FORBIDDEN', 'Expert R access is not approved for this account.');
+    const usage = await client.query(
+      `SELECT COUNT(*)::int AS count, COALESCE(SUM(file_size_bytes), 0)::bigint AS bytes
+         FROM expert_r_private_inputs WHERE project_id = $1 AND owner_user_id = $2`,
+      [pid, owner]
+    );
+    if (Number(usage.rows[0].count) >= MAX_EXPERT_R_PRIVATE_INPUTS
+        || Number(usage.rows[0].bytes) + sizeBytes > MAX_EXPERT_R_PRIVATE_INPUT_STORAGE_BYTES) {
+      throw codedError('EXPERT_R_INPUT_QUOTA', 'Private Expert R input storage is full.');
+    }
+    const inserted = await client.query(
+      `INSERT INTO expert_r_private_inputs
+         (id, project_id, owner_user_id, original_filename, internal_storage_key,
+          mime_type, file_size_bytes, sha256)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [id, pid, owner, originalFilename, internalStorageKey, mimeType, sizeBytes, checksumSha256]
+    );
+    await client.query('COMMIT');
+    return rowToExpertRPrivateInput(inserted.rows[0]);
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
+    throw error;
+  } finally { client.release(); }
+}
+
+async function listExpertRPrivateInputs(userId, projectId) {
+  const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  const { rows } = await query(
+    `SELECT * FROM expert_r_private_inputs
+      WHERE project_id = $1 AND owner_user_id = $2
+      ORDER BY created_at DESC, id DESC`,
+    [String(projectId), membership.userId]
+  );
+  return rows.map((row) => rowToExpertRPrivateInput(row));
+}
+
+async function resolveExpertRPrivateInputs(userId, projectId, inputIds, { includeStorage = false } = {}) {
+  const ids = Array.isArray(inputIds) ? inputIds : [];
+  if (ids.length === 0) return [];
+  const { rows } = await query(
+    `SELECT * FROM expert_r_private_inputs
+      WHERE project_id = $1 AND owner_user_id = $2 AND id = ANY($3::text[])`,
+    [String(projectId), Number(userId), ids]
+  );
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  if (byId.size !== ids.length || ids.some((id) => !byId.has(id))) {
+    throw codedError('EXPERT_R_INPUT_NOT_FOUND', 'A selected private input is no longer available.');
+  }
+  return ids.map((id) => rowToExpertRPrivateInput(byId.get(id), { includeStorage }));
 }
 
 async function getProjectForUser(projectId, userId) {
@@ -1954,6 +2612,31 @@ async function markDatasetUploadFailed(projectId, datasetId) {
   return getDatasetRow(datasetId, projectId);
 }
 
+async function setDatasetValidationResult(projectId, datasetId, validationStatus, validationErrors = null) {
+  if (!['valid', 'invalid'].includes(validationStatus)) {
+    throw codedError('INVALID_VALIDATION_STATUS', 'Dataset validation must finish as valid or invalid.');
+  }
+  const existing = await getDatasetRow(datasetId, projectId);
+  if (!existing) throw codedError('NOT_FOUND', 'Dataset not found.');
+  if (existing.uploadStatus !== 'uploaded' || !existing.internalStorageKey) {
+    throw codedError('INVALID_STATUS_COMBO', 'Only a stored dataset can receive a validation result.');
+  }
+  await query(
+    `UPDATE datasets
+        SET validation_status = $1,
+            validation_errors = $2,
+            updated_at = now()
+      WHERE id = $3 AND project_id = $4`,
+    [
+      validationStatus,
+      normalizeValidationErrors(validationErrors),
+      String(datasetId),
+      String(projectId),
+    ]
+  );
+  return getDatasetRow(datasetId, projectId);
+}
+
 async function createAnalysisObject(ownerUserId, input = {}) {
   const owner = Number(ownerUserId);
   if (!Number.isInteger(owner) || owner <= 0) {
@@ -2147,6 +2830,76 @@ async function getProjectAnalysisObjectRow(objectId, projectId) {
   return rowToAnalysisObject(rows[0]);
 }
 
+function sharedExpertRResultSql(resultExpression, projectExpression) {
+  return `(
+    EXISTS (
+      SELECT 1 FROM analysis_branches visible_branch
+       WHERE visible_branch.project_id = ${projectExpression}
+         AND visible_branch.visibility = 'project'
+         AND visible_branch.head_analysis_object_id = ${resultExpression}
+    )
+    OR EXISTS (
+      SELECT 1 FROM project_canonical_analyses canonical
+       WHERE canonical.project_id = ${projectExpression}
+         AND canonical.analysis_object_id = ${resultExpression}
+    )
+  )`;
+}
+
+function expertRAnalysisObjectVisibilitySql(alias, actorPlaceholder) {
+  const shared = sharedExpertRResultSql(`${alias}.id`, `${alias}.project_id`);
+  return `(
+    NOT EXISTS (
+      SELECT 1 FROM jobs expert_job
+       WHERE expert_job.project_id = ${alias}.project_id
+         AND expert_job.job_type = 'expert.r.v1'
+         AND expert_job.result_analysis_object_id = ${alias}.id
+    )
+    OR EXISTS (
+      SELECT 1 FROM jobs expert_job
+       WHERE expert_job.project_id = ${alias}.project_id
+         AND expert_job.job_type = 'expert.r.v1'
+         AND expert_job.result_analysis_object_id = ${alias}.id
+         AND (expert_job.owner_user_id = ${actorPlaceholder} OR ${shared})
+    )
+  )`;
+}
+
+function expertRJobVisibilitySql(alias, actorPlaceholder) {
+  const shared = sharedExpertRResultSql(
+    `${alias}.result_analysis_object_id`,
+    `${alias}.project_id`
+  );
+  return `(
+    ${alias}.job_type <> 'expert.r.v1'
+    OR ${alias}.owner_user_id = ${actorPlaceholder}
+    OR (${alias}.result_analysis_object_id IS NOT NULL AND ${shared})
+  )`;
+}
+
+function expertRArtifactVisibilitySql(alias, actorPlaceholder) {
+  const shared = sharedExpertRResultSql(
+    'expert_job.result_analysis_object_id',
+    'expert_job.project_id'
+  );
+  return `(
+    NOT EXISTS (
+      SELECT 1 FROM jobs expert_job
+       WHERE expert_job.id = ${alias}.job_id
+         AND expert_job.job_type = 'expert.r.v1'
+    )
+    OR EXISTS (
+      SELECT 1 FROM jobs expert_job
+       WHERE expert_job.id = ${alias}.job_id
+         AND expert_job.job_type = 'expert.r.v1'
+         AND (
+           expert_job.owner_user_id = ${actorPlaceholder}
+           OR (expert_job.result_analysis_object_id IS NOT NULL AND ${shared})
+         )
+    )
+  )`;
+}
+
 async function createProjectAnalysisObject(userId, projectId, input = {}) {
   const membership = await requireProjectRole(userId, projectId, ANALYSIS_WRITE_ROLES);
   const owner = membership.userId;
@@ -2212,28 +2965,35 @@ async function createProjectAnalysisObject(userId, projectId, input = {}) {
 }
 
 async function listProjectAnalysisObjects(userId, projectId, filters = {}) {
-  await requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
-  const clauses = ['project_id = $1'];
-  const params = [String(projectId)];
+  const membership = await requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
+  const clauses = ['ao.project_id = $1', expertRAnalysisObjectVisibilitySql('ao', '$2')];
+  const params = [String(projectId), Number(membership.userId)];
   const allowed = {
-    datasetId: 'dataset_id',
-    parentObjectId: 'parent_object_id',
-    lineageRootId: 'lineage_root_id',
-    objectType: 'object_type'
+    datasetId: 'ao.dataset_id',
+    parentObjectId: 'ao.parent_object_id',
+    lineageRootId: 'ao.lineage_root_id',
+    objectType: 'ao.object_type'
   };
   for (const [field, column] of Object.entries(allowed)) {
     if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
   }
   const { rows } = await query(
-    `SELECT * FROM analysis_objects WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`,
+    `SELECT ao.* FROM analysis_objects ao WHERE ${clauses.join(' AND ')} ORDER BY ao.created_at DESC, ao.id DESC`,
     params
   );
   return rows.map(rowToAnalysisObject);
 }
 
 async function getProjectAnalysisObject(userId, projectId, objectId) {
-  await requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
-  return getProjectAnalysisObjectRow(objectId, projectId);
+  const membership = await requireProjectRole(userId, projectId, ANALYSIS_READ_ROLES);
+  if (typeof objectId !== 'string' || objectId === '') return null;
+  const { rows } = await query(
+    `SELECT ao.* FROM analysis_objects ao
+      WHERE ao.id = $1 AND ao.project_id = $2
+        AND ${expertRAnalysisObjectVisibilitySql('ao', '$3')}`,
+    [objectId, String(projectId), Number(membership.userId)]
+  );
+  return rowToAnalysisObject(rows[0]);
 }
 
 // ── Jobs ────────────────────────────────────────────────────────────────────
@@ -2274,9 +3034,9 @@ async function createJob(ownerUserId, input = {}) {
     throw codedError('INVALID_JOB_TYPE',
       `Invalid jobType. Allowed: ${[...ALLOWED_JOB_TYPES].join(', ')}.`);
   }
-  if (jobType === 'seurat.pipeline.v1') {
+  if (['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)) {
     throw codedError('INVALID_JOB_TYPE',
-      'seurat.pipeline.v1 jobs must be created through a project-scoped dataset.');
+      `${jobType} jobs must be created through a project-scoped dataset.`);
   }
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
@@ -2326,6 +3086,7 @@ function rowToJob(row) {
     id: row.id,
     ownerUserId: Number(row.owner_user_id),
     projectId: row.project_id,
+    retryOfJobId: row.retry_of_job_id,
     analysisObjectId: row.analysis_object_id,
     resultAnalysisObjectId: row.result_analysis_object_id,
     datasetId: row.dataset_id,
@@ -2353,6 +3114,13 @@ function rowToJob(row) {
 function toPublicJob(job) {
   if (!job) return null;
   const { claimToken, workerId, ...rest } = job; // eslint-disable-line no-unused-vars
+  if (rest.jobType === 'expert.r.v1' && rest.parameters && typeof rest.parameters.script === 'string') {
+    rest.parameters = {
+      profileId: rest.parameters.profileId,
+      inputIds: Array.isArray(rest.parameters.inputIds) ? rest.parameters.inputIds : [],
+      scriptSha256: crypto.createHash('sha256').update(rest.parameters.script, 'utf8').digest('hex'),
+    };
+  }
   return rest;
 }
 
@@ -2477,7 +3245,7 @@ async function getProjectJobRow(jobId, projectId) {
   return rowToJob(rows[0]);
 }
 
-async function createProjectJob(userId, projectId, input = {}) {
+async function createProjectJobInternal(userId, projectId, input = {}, retryOfJobId = null) {
   const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
   const owner = membership.userId;
   const pid = String(projectId);
@@ -2489,26 +3257,39 @@ async function createProjectJob(userId, projectId, input = {}) {
   const serverManagedResultTypes = new Set([
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
+    'seurat.multisample.v1',
+    'spatial.seurat.v1',
+    'checkpoint.save.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
+    'condition.pseudobulk_de.v1',
+    'expert.r.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
   const noDatasetBindingTypes = new Set([
     'pbmc.pipeline.v1',
+    'checkpoint.save.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
+    'condition.pseudobulk_de.v1',
+    'expert.r.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
   const requiresAnalysisObjectTypes = new Set([
     'pbmc.pipeline.v1',
     'seurat.pipeline.v1',
+    'seurat.multisample.v1',
+    'spatial.seurat.v1',
+    'checkpoint.save.v1',
     'deg.find_markers.v1',
     'enrichment.gsea.v1',
     'cellchat.infer.v1',
+    'condition.pseudobulk_de.v1',
+    'expert.r.v1',
     'checkpoint.load.v1',
     'checkpoint.fork.v1',
   ]);
@@ -2527,6 +3308,7 @@ async function createProjectJob(userId, projectId, input = {}) {
   }
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
+  let storedParameters = parameters;
   let analysisObjectId = null;
   let analysisObject = null;
   if (input.analysisObjectId !== undefined && input.analysisObjectId !== null) {
@@ -2567,7 +3349,38 @@ async function createProjectJob(userId, projectId, input = {}) {
     validateSeuratPipelineParams(parameters);
     assertSupportedSeuratPipelineDataset(dataset);
   }
-  if (jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1') {
+  if (jobType === 'seurat.multisample.v1') {
+    if (!datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.multisample.v1 requires a primary datasetId.');
+    }
+    if (!analysisObjectId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.multisample.v1 requires an input analysisObjectId for lineage.');
+    }
+    if (analysisObject.datasetId !== datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'seurat.multisample.v1 input analysisObjectId must reference the primary datasetId.');
+    }
+    const validated = validateMultiSampleSeuratParams(parameters);
+    if (validated.samples[0].datasetId !== datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'Primary datasetId must match the first multi-sample input.');
+    }
+    const datasets = await Promise.all(
+      validated.samples.map(sample => getDatasetRow(sample.datasetId, pid))
+    );
+    assertSupportedMultiSampleDatasets(datasets, validated.samples);
+    storedParameters = { samples: validated.samples, ...validated.params };
+  }
+  if (jobType === 'spatial.seurat.v1') {
+    if (!datasetId) throw codedError('INVALID_PARAMETERS', 'spatial.seurat.v1 requires datasetId.');
+    if (!analysisObjectId) {
+      throw codedError('INVALID_PARAMETERS', 'spatial.seurat.v1 requires an input analysisObjectId for lineage.');
+    }
+    if (analysisObject.datasetId !== datasetId) {
+      throw codedError('INVALID_PARAMETERS', 'spatial.seurat.v1 input analysisObjectId must reference the same datasetId.');
+    }
+    validateSpatialSeuratParams(parameters);
+    assertSupportedSpatialSeuratDataset(dataset);
+  }
+  if (jobType === 'checkpoint.save.v1' || jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1') {
     if (!analysisObjectId) {
       throw codedError('INVALID_PARAMETERS', `${jobType} requires a source analysisObjectId.`);
     }
@@ -2580,55 +3393,139 @@ async function createProjectJob(userId, projectId, input = {}) {
   }
   if (jobType === 'cellchat.infer.v1') {
     validateCellChatInferenceParams(parameters);
-    // CellChat reads a creator-owned, process-local live R object. A project
-    // collaborator may view the durable analysis-object metadata, but cannot
-    // use another member's private R state. Reject before queue insertion so a
-    // cross-owner request cannot consume the one-worker capacity only to fail
-    // later at the worker ownership recheck.
-    if (!analysisObject || analysisObject.ownerUserId !== owner) {
-      throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  if (jobType === 'condition.pseudobulk_de.v1') {
+    const { params: comparisonParams } = validateConditionComparisonParams(parameters);
+    const contrast = await query(
+      `SELECT status FROM condition_contrasts
+       WHERE id = $1 AND project_id = $2 AND analysis_object_id = $3`,
+      [comparisonParams.contrastId, pid, analysisObjectId]
+    );
+    if (!contrast.rows[0]) throw codedError('CONTRAST_NOT_FOUND', 'Condition contrast not found.');
+    if (contrast.rows[0].status === 'invalid') {
+      throw codedError('INVALID_PARAMETERS', 'Condition contrast does not have sufficient biological replication.');
     }
   }
-  if (jobType === 'checkpoint.load.v1' && analysisObject.ownerUserId !== owner) {
+  if (jobType === 'expert.r.v1') {
+    storedParameters = storedExpertRParams(parameters);
+    if (!expertRSandboxEnabled() || config.demoMode()) {
+      throw codedError('EXPERT_R_UNAVAILABLE', 'Expert R sandbox is not enabled for this deployment.');
+    }
+    if (!(await hasExpertRExecuteCapability(owner))) {
+      throw codedError('FORBIDDEN', 'Expert R access is not approved for this account.');
+    }
+    await resolveExpertRPrivateInputs(owner, pid, storedParameters.inputIds);
+  }
+  // These handlers read or mutate a process-local R object. Project membership
+  // permits durable metadata access, but never lets a collaborator use another
+  // member's live state. Reject before queue insertion so an invalid request
+  // cannot consume the deployment's single worker slot only to fail later.
+  const privateLiveInputJobTypes = new Set([
+    'deg.find_markers.v1',
+    'enrichment.gsea.v1',
+    'cellchat.infer.v1',
+    'condition.pseudobulk_de.v1',
+    'expert.r.v1',
+    'checkpoint.save.v1',
+    'checkpoint.load.v1',
+  ]);
+  if (privateLiveInputJobTypes.has(jobType)
+      && (!analysisObject || analysisObject.ownerUserId !== owner)) {
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
   const id = genId('job');
   const { rows } = await query(
     `INSERT INTO jobs
-       (id, owner_user_id, project_id, analysis_object_id, result_analysis_object_id,
-        dataset_id, job_type, status, parameters_json, max_attempts)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       (id, owner_user_id, project_id, retry_of_job_id, analysis_object_id,
+        result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING *`,
-    [id, Number(owner), pid, analysisObjectId, resultAnalysisObjectId, datasetId,
-      jobType, INITIAL_JOB_STATUS, JSON.stringify(parameters), maxAttemptsForJobType(jobType, pid)]
+    [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
+      jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
   );
   return rowToJob(rows[0]);
 }
 
+async function createProjectJob(userId, projectId, input = {}) {
+  if (input.retryOfJobId !== undefined || input.retry_of_job_id !== undefined) {
+    throw codedError('INVALID_PARAMETERS', 'Job retry linkage is server-managed.');
+  }
+  return createProjectJobInternal(userId, projectId, input, null);
+}
+
+async function retryProjectJob(userId, projectId, jobId) {
+  const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  const pid = String(projectId);
+  const source = await getProjectJobRow(jobId, pid);
+  if (!source) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (source.ownerUserId !== membership.userId) {
+    throw codedError('FORBIDDEN', 'Only the run owner can retry this job.');
+  }
+  if (!['failed', 'canceled'].includes(source.status)) {
+    throw codedError('JOB_NOT_RETRYABLE', 'Only failed or canceled jobs can be retried.');
+  }
+  if (!MANUALLY_RETRYABLE_PROJECT_JOB_TYPES.has(source.jobType)) {
+    throw codedError('JOB_NOT_RETRYABLE', 'This run must be restarted from its workflow.');
+  }
+
+  const existing = await query(
+    'SELECT * FROM jobs WHERE project_id = $1 AND retry_of_job_id = $2 LIMIT 1',
+    [pid, source.id]
+  );
+  if (existing.rows[0]) return { job: rowToJob(existing.rows[0]), created: false };
+
+  try {
+    const retryInput = {
+      analysisObjectId: source.analysisObjectId,
+      jobType: source.jobType,
+      parameters: source.parameters,
+    };
+    if (source.datasetId !== null && source.datasetId !== undefined) {
+      retryInput.datasetId = source.datasetId;
+    }
+    const job = await createProjectJobInternal(membership.userId, pid, retryInput, source.id);
+    return { job, created: true };
+  } catch (error) {
+    if (error?.code !== '23505' || error?.constraint !== 'idx_jobs_retry_of_job') throw error;
+    const raced = await query(
+      'SELECT * FROM jobs WHERE project_id = $1 AND retry_of_job_id = $2 LIMIT 1',
+      [pid, source.id]
+    );
+    if (!raced.rows[0]) throw error;
+    return { job: rowToJob(raced.rows[0]), created: false };
+  }
+}
+
 async function listProjectJobs(userId, projectId, filters = {}) {
-  await requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
-  const clauses = ['project_id = $1'];
-  const params = [String(projectId)];
+  const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
+  const clauses = ['j.project_id = $1', expertRJobVisibilitySql('j', '$2')];
+  const params = [String(projectId), Number(membership.userId)];
   const allowed = {
-    status: 'status',
-    jobType: 'job_type',
-    analysisObjectId: 'analysis_object_id',
-    resultAnalysisObjectId: 'result_analysis_object_id',
-    datasetId: 'dataset_id'
+    status: 'j.status',
+    jobType: 'j.job_type',
+    analysisObjectId: 'j.analysis_object_id',
+    resultAnalysisObjectId: 'j.result_analysis_object_id',
+    datasetId: 'j.dataset_id'
   };
   for (const [field, column] of Object.entries(allowed)) {
     if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
   }
   const { rows } = await query(
-    `SELECT * FROM jobs WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`,
+    `SELECT j.* FROM jobs j WHERE ${clauses.join(' AND ')} ORDER BY j.created_at DESC, j.id DESC`,
     params
   );
   return rows.map(rowToJob);
 }
 
 async function getProjectJob(userId, projectId, jobId) {
-  await requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
-  return getProjectJobRow(jobId, projectId);
+  const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
+  const { rows } = await query(
+    `SELECT j.* FROM jobs j
+      WHERE j.id = $1 AND j.project_id = $2
+        AND ${expertRJobVisibilitySql('j', '$3')}`,
+    [String(jobId), String(projectId), Number(membership.userId)]
+  );
+  return rowToJob(rows[0]);
 }
 
 async function cancelProjectJob(userId, projectId, jobId) {
@@ -3430,43 +4327,57 @@ async function getJobArtifactsByJobId(jobId) {
 }
 
 async function listProjectArtifacts(userId, projectId, filters = {}) {
-  await requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
-  const clauses = ['project_id = $1'];
-  const params = [String(projectId)];
+  const membership = await requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
+  const clauses = ['artifact.project_id = $1', expertRArtifactVisibilitySql('artifact', '$2')];
+  const params = [String(projectId), Number(membership.userId)];
   const allowed = {
-    jobId: 'job_id',
-    artifactType: 'artifact_type',
-    status: 'status',
-    analysisObjectId: 'analysis_object_id',
-    resultAnalysisObjectId: 'result_analysis_object_id',
-    datasetId: 'dataset_id',
-    provenanceId: 'provenance_id',
-    figureId: 'figure_id'
+    jobId: 'artifact.job_id',
+    artifactType: 'artifact.artifact_type',
+    status: 'artifact.status',
+    analysisObjectId: 'artifact.analysis_object_id',
+    resultAnalysisObjectId: 'artifact.result_analysis_object_id',
+    datasetId: 'artifact.dataset_id',
+    provenanceId: 'artifact.provenance_id',
+    figureId: 'artifact.figure_id'
   };
   for (const [field, column] of Object.entries(allowed)) {
     if (filters[field]) { params.push(String(filters[field])); clauses.push(`${column} = $${params.length}`); }
   }
   const { rows } = await query(
-    `SELECT * FROM job_artifacts WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`,
+    `SELECT artifact.* FROM job_artifacts artifact
+      WHERE ${clauses.join(' AND ')} ORDER BY artifact.created_at DESC, artifact.id DESC`,
     params
   );
   return rows.map(rowToJobArtifact).map(toPublicJobArtifact);
 }
 
 async function listProjectJobArtifacts(userId, projectId, jobId, filters = {}) {
-  await requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
-  if (!(await getProjectJobRow(jobId, projectId))) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!(await getProjectJob(userId, projectId, jobId))) throw codedError('JOB_NOT_FOUND', 'Job not found.');
   return listProjectArtifacts(userId, projectId, { ...filters, jobId });
 }
 
 async function getProjectArtifact(userId, projectId, artifactId) {
-  await requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
+  const membership = await requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
   if (typeof artifactId !== 'string' || artifactId === '') return null;
   const { rows } = await query(
-    'SELECT * FROM job_artifacts WHERE id = $1 AND project_id = $2',
-    [String(artifactId), String(projectId)]
+    `SELECT artifact.* FROM job_artifacts artifact
+      WHERE artifact.id = $1 AND artifact.project_id = $2
+        AND ${expertRArtifactVisibilitySql('artifact', '$3')}`,
+    [String(artifactId), String(projectId), Number(membership.userId)]
   );
   return toPublicJobArtifact(rowToJobArtifact(rows[0]));
+}
+
+async function getProjectArtifactInternal(userId, projectId, artifactId) {
+  const membership = await requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
+  if (typeof artifactId !== 'string' || artifactId === '') return null;
+  const { rows } = await query(
+    `SELECT artifact.* FROM job_artifacts artifact
+      WHERE artifact.id = $1 AND artifact.project_id = $2
+        AND ${expertRArtifactVisibilitySql('artifact', '$3')}`,
+    [String(artifactId), String(projectId), Number(membership.userId)]
+  );
+  return rowToJobArtifact(rows[0]);
 }
 
 // -- Lineage -----------------------------------------------------------------
@@ -3687,47 +4598,57 @@ async function buildLineageGraph(objectId, projectScope, nodeFetcher) {
   return { objectId: start, nodes, edges, truncated };
 }
 
-function lineageNodeForObject(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    label: row.display_name || null,
-    objectType: row.object_type,
-    lineageRootId: row.lineage_root_id
-  };
-}
-
 async function listProjectAnalysisObjectParents(userId, projectId, objectId) {
   await requireProjectRole(userId, projectId, LINEAGE_READ_ROLES);
   const pid = String(projectId);
-  if (!(await getProjectAnalysisObjectRow(objectId, pid))) {
+  if (!(await getProjectAnalysisObject(userId, pid, objectId))) {
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
-  return listLineageParents(objectId, { projectId: pid });
+  const edges = await listLineageParents(objectId, { projectId: pid });
+  const visible = await Promise.all(edges.map(async (edge) => (
+    (await getProjectAnalysisObject(userId, pid, edge.parentAnalysisObjectId)) ? edge : null
+  )));
+  return visible.filter(Boolean);
 }
 
 async function listProjectAnalysisObjectChildren(userId, projectId, objectId) {
   await requireProjectRole(userId, projectId, LINEAGE_READ_ROLES);
   const pid = String(projectId);
-  if (!(await getProjectAnalysisObjectRow(objectId, pid))) {
+  if (!(await getProjectAnalysisObject(userId, pid, objectId))) {
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
-  return listLineageChildren(objectId, { projectId: pid });
+  const edges = await listLineageChildren(objectId, { projectId: pid });
+  const visible = await Promise.all(edges.map(async (edge) => (
+    (await getProjectAnalysisObject(userId, pid, edge.childAnalysisObjectId)) ? edge : null
+  )));
+  return visible.filter(Boolean);
 }
 
 async function getProjectAnalysisObjectLineage(userId, projectId, objectId) {
   await requireProjectRole(userId, projectId, LINEAGE_READ_ROLES);
   const pid = String(projectId);
-  const root = await getProjectAnalysisObjectRow(objectId, pid);
+  const root = await getProjectAnalysisObject(userId, pid, objectId);
   if (!root) throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
   const graph = await buildLineageGraph(objectId, { projectId: pid }, async (id) => {
-    const { rows } = await query(
-      'SELECT id, display_name, object_type, lineage_root_id FROM analysis_objects WHERE id = $1 AND project_id = $2',
-      [id, pid]
-    );
-    return lineageNodeForObject(rows[0]);
+    const object = await getProjectAnalysisObject(userId, pid, id);
+    return object ? {
+      id: object.id,
+      label: object.displayName || null,
+      objectType: object.objectType,
+      lineageRootId: object.lineageRootId,
+      createdAt: object.createdAt,
+    } : null;
   });
-  return { ...graph, projectId: pid, rootObjectId: root.lineageRootId || root.id };
+  const visibleNodeIds = new Set(graph.nodes.map((node) => node.id));
+  return {
+    ...graph,
+    edges: graph.edges.filter((edge) => (
+      visibleNodeIds.has(edge.parentAnalysisObjectId)
+      && visibleNodeIds.has(edge.childAnalysisObjectId)
+    )),
+    projectId: pid,
+    rootObjectId: root.lineageRootId || root.id,
+  };
 }
 
 async function getJobRowById(id) {
@@ -3770,10 +4691,14 @@ function workerHoldsClaim(row, workerId, claimToken, now) {
 const CLAIMED_OWNED_OBJECT_JOB_TYPES = new Set([
   'r.object.inspect',
   'pbmc.pipeline.v1',
+  'checkpoint.save.v1',
   'checkpoint.load.v1',
   'deg.find_markers.v1',
   'enrichment.gsea.v1',
   'cellchat.infer.v1',
+  'explore.summarize.v1',
+  'condition.pseudobulk_de.v1',
+  'expert.r.v1',
 ]);
 
 async function requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts = {}, expectedJobType = null) {
@@ -3837,6 +4762,46 @@ async function getSeuratPipelineInputsForJobByWorker(jobId, workerId, claimToken
   return { dataset, inputObject };
 }
 
+async function getMultiSampleSeuratPipelineInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'seurat.multisample.v1'
+  );
+  if (!row.project_id || !row.dataset_id || !row.analysis_object_id) {
+    throw codedError('INVALID_JOB_CONTEXT', 'Multi-sample Seurat pipeline job inputs are incomplete.');
+  }
+  const validated = validateMultiSampleSeuratParams(parseJson(row.parameters_json, {}));
+  if (validated.samples[0].datasetId !== row.dataset_id) {
+    throw codedError('INVALID_PARAMETERS', 'Primary datasetId must match the first multi-sample input.');
+  }
+  const [datasets, inputObject] = await Promise.all([
+    Promise.all(validated.samples.map(sample => getDatasetRow(sample.datasetId, row.project_id))),
+    getProjectAnalysisObjectRow(row.analysis_object_id, row.project_id),
+  ]);
+  assertSupportedMultiSampleDatasets(datasets, validated.samples);
+  if (!inputObject || inputObject.datasetId !== row.dataset_id) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  return { datasets, inputObject, validated };
+}
+
+async function getSpatialPipelineInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'spatial.seurat.v1'
+  );
+  if (!row.project_id || !row.dataset_id || !row.analysis_object_id) {
+    throw codedError('INVALID_JOB_CONTEXT', 'Spatial pipeline job inputs are incomplete.');
+  }
+  const [dataset, inputObject] = await Promise.all([
+    getDatasetRow(row.dataset_id, row.project_id),
+    getProjectAnalysisObjectRow(row.analysis_object_id, row.project_id),
+  ]);
+  if (!dataset) throw codedError('DATASET_NOT_FOUND', 'Spatial dataset not found.');
+  if (!inputObject || inputObject.datasetId !== dataset.id) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  return { dataset, inputObject };
+}
+
 async function getLoadableCheckpointForJobByWorker(jobId, workerId, claimToken, opts = {}) {
   const row = await requireClaimedJobRowByWorker(
     jobId, workerId, claimToken, opts, 'checkpoint.load.v1'
@@ -3847,6 +4812,109 @@ async function getLoadableCheckpointForJobByWorker(jobId, workerId, claimToken, 
     analysisObjectId: object.id,
     projectId: object.projectId || null,
     ...checkpoint,
+  };
+}
+
+const CHECKPOINT_HYDRATED_JOB_TYPES = new Set([
+  'r.object.inspect',
+  'pbmc.pipeline.v1',
+  'deg.find_markers.v1',
+  'enrichment.gsea.v1',
+  'cellchat.infer.v1',
+  'explore.summarize.v1',
+  'condition.pseudobulk_de.v1',
+  'expert.r.v1',
+]);
+
+async function getHydrationCheckpointForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(jobId, workerId, claimToken, opts);
+  if (!CHECKPOINT_HYDRATED_JOB_TYPES.has(row.job_type)) {
+    throw codedError('INVALID_JOB_TYPE', 'A claimed checkpoint-backed analysis job is required.');
+  }
+  const object = await resolveOwnedAnalysisObjectForClaimedJob(row);
+  const checkpoint = await resolveCheckpointArtifact(object.id, object.projectId || null);
+  return {
+    analysisObjectId: object.id,
+    projectId: object.projectId || null,
+    ...checkpoint,
+  };
+}
+
+async function getExpertRPrivateInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'expert.r.v1'
+  );
+  const parameters = parseJson(row.parameters_json, {});
+  return resolveExpertRPrivateInputs(
+    Number(row.owner_user_id), row.project_id, parameters.inputIds || [], { includeStorage: true }
+  );
+}
+
+async function getConditionComparisonInputsForJobByWorker(jobId, workerId, claimToken, opts = {}) {
+  const row = await requireClaimedJobRowByWorker(
+    jobId, workerId, claimToken, opts, 'condition.pseudobulk_de.v1'
+  );
+  const object = await resolveOwnedAnalysisObjectForClaimedJob(row);
+  const { params } = validateConditionComparisonParams(parseJson(row.parameters_json, {}));
+  const contrastResult = await query(
+    `SELECT * FROM condition_contrasts
+     WHERE id = $1 AND project_id = $2 AND analysis_object_id = $3`,
+    [params.contrastId, row.project_id, object.id]
+  );
+  const contrast = contrastResult.rows[0];
+  if (!contrast) throw codedError('CONTRAST_NOT_FOUND', 'Condition contrast not found.');
+  if (contrast.status === 'invalid') {
+    throw codedError('INVALID_CONTRAST', 'Condition contrast does not have sufficient biological replication.');
+  }
+  const samplesResult = await query(
+    `SELECT snapshot.sample_id, snapshot.condition_id, snapshot.donor_code,
+            snapshot.cell_metadata_column, snapshot.cell_metadata_value,
+            sample.batch, sample.metadata_json
+     FROM condition_contrast_samples snapshot
+     JOIN biological_samples sample ON sample.id = snapshot.sample_id
+     WHERE snapshot.contrast_id = $1 ORDER BY snapshot.sample_id`, [contrast.id]
+  );
+  if (samplesResult.rows.length < 4
+      || samplesResult.rows.some((sample) => !sample.cell_metadata_column || !sample.cell_metadata_value)) {
+    throw codedError('INVALID_CONTRAST', 'Condition contrast sample snapshot is incomplete.');
+  }
+  const covariates = parseJson(contrast.covariates_json, []);
+  const samples = samplesResult.rows.map((sample) => {
+    const metadata = parseJson(sample.metadata_json, {});
+    const covariateValues = {};
+    for (const name of covariates) {
+      const value = metadata[name];
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        covariateValues[name] = value;
+      } else {
+        covariateValues[name] = null;
+      }
+    }
+    return {
+      sampleId: sample.sample_id,
+      condition: sample.condition_id === contrast.numerator_condition_id ? 'numerator' : 'denominator',
+      donorCode: sample.donor_code || null,
+      batch: sample.batch || null,
+      cellMetadataColumn: sample.cell_metadata_column,
+      cellMetadataValue: sample.cell_metadata_value,
+      unitId: contrast.unit_of_replication === 'donor' ? sample.donor_code : sample.sample_id,
+      covariates: covariateValues,
+    };
+  });
+  return {
+    analysisObjectId: object.id,
+    contrast: {
+      id: contrast.id,
+      name: contrast.name,
+      unitOfReplication: contrast.unit_of_replication,
+      paired: contrast.paired === true,
+      cellTypeColumn: contrast.cell_type_column,
+      blockingFactor: contrast.blocking_factor || null,
+      covariates,
+      status: contrast.status,
+      validation: parseJson(contrast.validation_json, {}),
+    },
+    samples,
   };
 }
 
@@ -3872,6 +4940,10 @@ async function claimNextJob(workerId, opts = {}) {
   const wid = requireWorkerId(workerId);
   const now = normalizeWorkerNow(opts);
   const leaseSeconds = normalizeLeaseSeconds(opts.leaseSeconds);
+  const maxConcurrentClaims = Number(opts.maxConcurrentClaims === undefined ? 1 : opts.maxConcurrentClaims);
+  if (!Number.isInteger(maxConcurrentClaims) || maxConcurrentClaims < 1 || maxConcurrentClaims > 8) {
+    throw codedError('INVALID_WORKER_POOL_SIZE', 'Worker pool size is invalid.');
+  }
   let allowedJobTypes = null;
   if (opts.allowedJobTypes !== undefined && opts.allowedJobTypes !== null) {
     if (!Array.isArray(opts.allowedJobTypes)) {
@@ -3893,14 +4965,13 @@ async function claimNextJob(workerId, opts = {}) {
       WORKER_CLAIM_GATE_LOCK
     );
     const activeClaim = await client.query(
-      `SELECT 1 FROM jobs
+      `SELECT COUNT(*)::int AS count FROM jobs
         WHERE status = 'running'
           AND lease_expires_at IS NOT NULL
-          AND lease_expires_at > $1
-        LIMIT 1`,
+          AND lease_expires_at > $1`,
       [now]
     );
-    if (activeClaim.rows[0]) {
+    if (Number(activeClaim.rows[0]?.count || 0) >= maxConcurrentClaims) {
       await client.query('COMMIT');
       return null;
     }
@@ -3911,8 +4982,13 @@ async function claimNextJob(workerId, opts = {}) {
     // already-running scientific history is preserved.
     const revoked = await client.query(
       `SELECT j.id, j.job_type, j.attempts, j.logs_json,
-              (j.project_id IS NULL) AS invalid_project_scope,
-              (j.result_analysis_object_id IS NOT NULL
+               (j.project_id IS NULL) AS invalid_project_scope,
+               (j.job_type = 'expert.r.v1' AND NOT EXISTS (
+                 SELECT 1 FROM platform_capabilities cap
+                  WHERE cap.user_id = j.owner_user_id
+                    AND cap.capability = $3
+               )) AS expert_access_revoked,
+               (j.result_analysis_object_id IS NOT NULL
                 OR EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = j.id)
                 OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = j.id)
               ) AS has_committed_output
@@ -3921,11 +4997,18 @@ async function claimNextJob(workerId, opts = {}) {
           AND (
             (j.project_id IS NOT NULL
               AND NOT (COALESCE(j.last_worker_error::jsonb ->> 'code', '') = ANY($2::text[]))
-              AND NOT EXISTS (
-                SELECT 1 FROM project_members pm
-                 WHERE pm.project_id = j.project_id
-                   AND pm.user_id = j.owner_user_id
-                   AND pm.role = ANY($1::text[])
+              AND (
+                NOT EXISTS (
+                  SELECT 1 FROM project_members pm
+                   WHERE pm.project_id = j.project_id
+                     AND pm.user_id = j.owner_user_id
+                     AND pm.role = ANY($1::text[])
+                )
+                OR (j.job_type = 'expert.r.v1' AND NOT EXISTS (
+                  SELECT 1 FROM platform_capabilities cap
+                   WHERE cap.user_id = j.owner_user_id
+                     AND cap.capability = $3
+                ))
               ))
             OR
             (j.project_id IS NULL AND (
@@ -3952,18 +5035,24 @@ async function claimNextJob(workerId, opts = {}) {
         ORDER BY j.created_at ASC, j.id ASC
         LIMIT 100
         FOR UPDATE OF j SKIP LOCKED`,
-      [PROJECT_JOB_WRITE_ROLES, RECOVERY_ONLY_PENDING_CODES]
+      [PROJECT_JOB_WRITE_ROLES, RECOVERY_ONLY_PENDING_CODES, EXPERT_R_EXECUTE_CAPABILITY]
     );
     const accessError = normalizeJobError({
       code: 'PROJECT_ACCESS_REVOKED',
       message: 'Job canceled because its creator no longer has permission to run project jobs.',
+    });
+    const expertAccessError = normalizeJobError({
+      code: 'EXPERT_R_ACCESS_REVOKED',
+      message: 'Job canceled because its creator no longer has approved Expert R access.',
     });
     const scopeError = normalizeJobError({
       code: 'INVALID_PROJECT_SCOPE',
       message: 'Job canceled because a project-associated input was submitted without project scope.',
     });
     for (const row of revoked.rows) {
-      const cancellationError = row.invalid_project_scope ? scopeError : accessError;
+      const cancellationError = row.invalid_project_scope
+        ? scopeError
+        : row.expert_access_revoked ? expertAccessError : accessError;
       const logs = [
         ...parseJson(row.logs_json, []),
         normalizeJobLogEntry({ level: 'warn', message: cancellationError.message }),
@@ -4010,7 +5099,7 @@ async function claimNextJob(workerId, opts = {}) {
     }
 
     const found = await client.query(
-      `SELECT j.id, j.project_id, j.owner_user_id,
+      `SELECT j.id, j.project_id, j.owner_user_id, j.job_type,
               (COALESCE(j.last_worker_error::jsonb ->> 'code', '') = ANY($4::text[]))
                 AS recovery_only_pending,
               (j.result_analysis_object_id IS NOT NULL
@@ -4040,11 +5129,18 @@ async function claimNextJob(workerId, opts = {}) {
                 SELECT 1 FROM datasets d
                  WHERE d.id = j.dataset_id AND d.project_id IS NOT NULL
               )
-            ) OR EXISTS (
-              SELECT 1 FROM project_members pm
-               WHERE pm.project_id = j.project_id
-                 AND pm.user_id = j.owner_user_id
-                 AND pm.role = ANY($1::text[])
+            ) OR (
+              EXISTS (
+                SELECT 1 FROM project_members pm
+                 WHERE pm.project_id = j.project_id
+                   AND pm.user_id = j.owner_user_id
+                   AND pm.role = ANY($1::text[])
+              )
+              AND (j.job_type <> 'expert.r.v1' OR EXISTS (
+                SELECT 1 FROM platform_capabilities cap
+                 WHERE cap.user_id = j.owner_user_id
+                   AND cap.capability = $5
+              ))
             )
             OR (
               j.project_id IS NOT NULL
@@ -4066,6 +5162,7 @@ async function claimNextJob(workerId, opts = {}) {
         allowedJobTypes,
         [...RETRYABLE_DURABLE_JOB_TYPES],
         RECOVERY_ONLY_PENDING_CODES,
+        EXPERT_R_EXECUTE_CAPABILITY,
       ]
     );
     if (!found.rows[0]) {
@@ -4085,18 +5182,34 @@ async function claimNextJob(workerId, opts = {}) {
           WHERE project_id = $1 AND user_id = $2 AND role = ANY($3::text[])`,
         [selected.project_id, Number(selected.owner_user_id), PROJECT_JOB_WRITE_ROLES]
       );
-      if (!eligible.rows[0]) {
+      let finalEligibility = Boolean(eligible.rows[0]);
+      if (finalEligibility && selected.job_type === 'expert.r.v1') {
+        // Lock the grant through the claim transaction. A concurrent operator
+        // revocation either commits first (this claim is canceled) or waits for
+        // this already-authorized claim to enter running state.
+        const capability = await client.query(
+          `SELECT 1 FROM platform_capabilities
+            WHERE user_id = $1 AND capability = $2
+            FOR KEY SHARE`,
+          [Number(selected.owner_user_id), EXPERT_R_EXECUTE_CAPABILITY]
+        );
+        finalEligibility = Boolean(capability.rows[0]);
+      }
+      if (!finalEligibility) {
+        const finalAccessError = selected.job_type === 'expert.r.v1'
+          ? expertAccessError
+          : accessError;
         const row = await client.query('SELECT logs_json FROM jobs WHERE id = $1', [id]);
         const logs = [
           ...parseJson(row.rows[0]?.logs_json, []),
-          normalizeJobLogEntry({ level: 'warn', message: accessError.message }),
+          normalizeJobLogEntry({ level: 'warn', message: finalAccessError.message }),
         ];
         await client.query(
           `UPDATE jobs SET status = 'canceled', logs_json = $1, error_json = $2,
              canceled_at = $3, updated_at = $3, worker_id = NULL,
              claim_token = NULL, lease_expires_at = NULL
            WHERE id = $4 AND status = 'queued'`,
-          [JSON.stringify(logs), JSON.stringify(accessError), now, id]
+          [JSON.stringify(logs), JSON.stringify(finalAccessError), now, id]
         );
         await client.query('COMMIT');
         return null;
@@ -4206,6 +5319,8 @@ async function completeJobByWorker(jobId, workerId, claimToken, opts = {}) {
        status = 'completed',
        result_analysis_object_id = $1,
        logs_json = $2,
+       error_json = NULL,
+       last_worker_error = NULL,
        completed_at = $3,
        heartbeat_at = $3,
        updated_at = $3,
@@ -4239,6 +5354,9 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
   const recoverySpecs = {
     'pbmc.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
     'seurat.pipeline.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
+    'seurat.multisample.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
+    'spatial.seurat.v1': { artifacts: ['checkpoint', 'pipeline_summary'], result: true, edges: 1 },
+    'checkpoint.save.v1': { artifacts: ['checkpoint', 'checkpoint_save'], result: true, edges: 1 },
     'checkpoint.fork.v1': {
       artifacts: ['checkpoint_fork'], result: true, edges: 1, runtimeBoundArtifact: 'checkpoint_fork',
     },
@@ -4252,6 +5370,10 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
     'cellchat.infer.v1': {
       artifacts: ['cellchat_results', 'cellchat_summary'], result: false, edges: 0,
     },
+    'condition.pseudobulk_de.v1': {
+      artifacts: ['condition_de_results', 'condition_de_summary'], result: false, edges: 0,
+    },
+    'expert.r.v1': { artifacts: ['expert_r_bundle', 'expert_r_summary'], result: true, edges: 1 },
   };
   const spec = recoverySpecs[row.job_type];
   if (!spec) return { resumed: false, committedOutput: false };
@@ -4317,7 +5439,10 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
         const kind = artifact.artifact_type === 'checkpoint'
           ? 'checkpoints'
           : (artifact.artifact_type === 'deg_markers'
-            || artifact.artifact_type === 'enrichment_results' ? 'artifacts' : null);
+            || artifact.artifact_type === 'enrichment_results'
+            || artifact.artifact_type === 'cellchat_results'
+            || artifact.artifact_type === 'condition_de_results'
+            || artifact.artifact_type === 'expert_r_bundle' ? 'artifacts' : null);
         if (!kind || !row.project_id || !storage.isProjectStorageKey(artifact.storage_uri, {
           projectId: row.project_id,
           kind,
@@ -4372,6 +5497,8 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
     `UPDATE jobs SET
        status = 'completed',
        logs_json = (logs_json::jsonb || $1::jsonb)::text,
+       error_json = NULL,
+       last_worker_error = NULL,
        completed_at = COALESCE($2::timestamptz, CURRENT_TIMESTAMP),
        heartbeat_at = COALESCE($2::timestamptz, CURRENT_TIMESTAMP),
        updated_at = COALESCE($2::timestamptz, CURRENT_TIMESTAMP),
@@ -4880,13 +6007,16 @@ async function completePbmcPipelineResultByWorker(jobId, workerId, claimToken, i
     ? String(result.parentObjectId)
     : (row.analysis_object_id || null);
   let lineageRootId = null;
+  let parentObject = null;
   if (parentObjectId) {
-    const parent = pid ? await getProjectAnalysisObjectRow(parentObjectId, pid)
+    parentObject = pid ? await getProjectAnalysisObjectRow(parentObjectId, pid)
                        : await getAnalysisObjectForUser(parentObjectId, owner);
-    if (!parent) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
-    lineageRootId = parent.lineageRootId || parent.id;
+    if (!parentObject) throw codedError('PARENT_NOT_FOUND', 'Parent analysis object not found.');
+    lineageRootId = parentObject.lineageRootId || parentObject.id;
   }
-  const datasetId = row.dataset_id || null;
+  // Live-object snapshot jobs do not accept a client dataset binding. Preserve
+  // the source object's server-resolved dataset association in the saved child.
+  const datasetId = row.dataset_id || parentObject?.datasetId || null;
   const resultId = generateAnalysisObjectId();
   const checkpointArtifactId = generateJobArtifactId();
   const summaryArtifactId = generateJobArtifactId();
@@ -5294,6 +6424,275 @@ async function completeEnrichmentGseaResultByWorker(jobId, workerId, claimToken,
   };
 }
 
+async function completeConditionComparisonResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) {
+    throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  }
+  if (row.job_type !== 'condition.pseudobulk_de.v1') {
+    throw codedError('INVALID_JOB_TYPE', 'A claimed condition.pseudobulk_de.v1 job is required.');
+  }
+  const table = input.resultsArtifact && typeof input.resultsArtifact === 'object' ? input.resultsArtifact : {};
+  const tableSpec = validateLocalInternalArtifactSpec(table, {
+    defaultArtifactType: 'condition_de_results', helperName: 'completeConditionComparisonResultByWorker',
+  });
+  if (tableSpec.artifactType !== 'condition_de_results') {
+    throw codedError('INVALID_ARTIFACT_TYPE', 'The condition-comparison result artifact type is fixed.');
+  }
+  assertProjectArtifactStorageKey(row, tableSpec.storageUri, 'artifacts');
+  const nRows = tableSpec.metadata && tableSpec.metadata.nRows;
+  if (tableSpec.sizeBytes > 100 * 1024 * 1024
+      || !Number.isInteger(nRows) || nRows < 0 || nRows > 500000) {
+    throw codedError('INVALID_CONDITION_COMPARISON_RESULT', 'Condition-comparison result bounds are invalid.');
+  }
+  const summary = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  const summarySpec = validateMetadataOnlyArtifactSpec(summary, {
+    defaultArtifactType: 'condition_de_summary', artifactTypeRequired: false,
+  });
+  if (summarySpec.artifactType !== 'condition_de_summary'
+      || Buffer.byteLength(JSON.stringify(summarySpec.metadata), 'utf8') > 128 * 1024) {
+    throw codedError('INVALID_CONDITION_COMPARISON_SUMMARY', 'Condition-comparison summary is invalid.');
+  }
+  const resultId = generateJobArtifactId();
+  const summaryId = generateJobArtifactId();
+  const refs = { datasetId: row.dataset_id || null, analysisObjectId: row.analysis_object_id, resultAnalysisObjectId: null };
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const claim = await client.query(
+      `SELECT 1 FROM jobs WHERE id=$1 AND worker_id=$2 AND claim_token=$3
+       AND status='running' AND lease_expires_at>$4 FOR UPDATE`, [row.id, wid, token, now]
+    );
+    if (!claim.rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    const duplicate = await client.query(
+      "SELECT 1 FROM job_artifacts WHERE job_id=$1 AND artifact_type='condition_de_results' LIMIT 1", [row.id]
+    );
+    if (duplicate.rows[0]) throw codedError('CONDITION_COMPARISON_RESULT_EXISTS', 'Job already has a condition-comparison result.');
+    await insertJobArtifactRow(client, {
+      id: resultId, jobRow: row, refs, artifactType: tableSpec.artifactType,
+      name: table.name != null ? String(table.name) : null,
+      description: table.description != null ? String(table.description) : null,
+      mimeType: table.mimeType != null ? String(table.mimeType) : null,
+      storageKind: tableSpec.storageKind, storageUri: tableSpec.storageUri,
+      checksumSha256: tableSpec.checksumSha256, sizeBytes: tableSpec.sizeBytes,
+      status: tableSpec.status, metadata: tableSpec.metadata,
+    });
+    await insertJobArtifactRow(client, {
+      id: summaryId, jobRow: row, refs, artifactType: summarySpec.artifactType,
+      name: summary.name != null ? String(summary.name) : null,
+      description: summary.description != null ? String(summary.description) : null,
+      storageKind: summarySpec.storageKind, status: summarySpec.status, metadata: summarySpec.metadata,
+    });
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  return {
+    resultsArtifact: await getJobArtifactRowById(resultId),
+    summaryArtifact: await getJobArtifactRowById(summaryId),
+  };
+}
+
+async function completeExpertRResultByWorker(jobId, workerId, claimToken, input = {}, opts = {}) {
+  const wid = requireWorkerId(workerId); const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts); const row = await getJobRowById(jobId);
+  if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+  if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+  if (row.job_type !== 'expert.r.v1') throw codedError('INVALID_JOB_TYPE', 'A claimed expert.r.v1 job is required.');
+  if (row.result_analysis_object_id) throw codedError('EXPERT_R_RESULT_EXISTS', 'Job already has an Expert R result.');
+  if (!row.project_id || !row.analysis_object_id) {
+    throw codedError('INVALID_PROJECT_SCOPE', 'Expert R requires a project-scoped analysis object.');
+  }
+  const owner = Number(row.owner_user_id);
+  const pid = row.project_id;
+  const sourceId = row.analysis_object_id;
+  const sourceObject = await getProjectAnalysisObjectRow(sourceId, pid);
+  if (!sourceObject || sourceObject.ownerUserId !== owner) {
+    throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
+  }
+  const expectedCheckpoint = await resolveCheckpointArtifact(sourceId, pid);
+  const jobParameters = parseJson(row.parameters_json, {});
+  const expectedProfileId = jobParameters.profileId;
+  const expectedScriptSha256 = jobParameters.scriptSha256;
+  const expectedPrivateInputs = (await resolveExpertRPrivateInputs(
+    owner, pid, jobParameters.inputIds || []
+  )).map((input) => ({
+    id: input.id,
+    sizeBytes: input.sizeBytes,
+    checksumSha256: input.checksumSha256,
+  }));
+  const result = input.result && typeof input.result === 'object' ? input.result : {};
+  if (result.objectType !== undefined && result.objectType !== 'generic') {
+    throw codedError('INVALID_OBJECT_TYPE', 'Expert R result object type is fixed.');
+  }
+  const resultMetadata = result.metadata === undefined ? {} : result.metadata;
+  assertPlainObject(resultMetadata, 'INVALID_METADATA', 'metadata must be a plain JSON object.');
+  if (Buffer.byteLength(JSON.stringify(resultMetadata), 'utf8') > 128 * 1024) {
+    throw codedError('INVALID_EXPERT_R_RESULT', 'Expert R result metadata is too large.');
+  }
+  const bundle = input.bundleArtifact && typeof input.bundleArtifact === 'object' ? input.bundleArtifact : {};
+  const bundleSpec = validateLocalInternalArtifactSpec(bundle, {
+    defaultArtifactType: 'expert_r_bundle', helperName: 'completeExpertRResultByWorker',
+  });
+  if (bundleSpec.artifactType !== 'expert_r_bundle') throw codedError('INVALID_ARTIFACT_TYPE', 'Expert R bundle type is fixed.');
+  assertProjectArtifactStorageKey(row, bundleSpec.storageUri, 'artifacts');
+  const nFiles = bundleSpec.metadata && bundleSpec.metadata.nFiles;
+  if (bundleSpec.sizeBytes > MAX_EXPERT_R_BUNDLE_BYTES || !Number.isInteger(nFiles) || nFiles < 0 || nFiles > 50) {
+    throw codedError('INVALID_EXPERT_R_RESULT', 'Expert R output bounds are invalid.');
+  }
+  const summary = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  const summarySpec = validateMetadataOnlyArtifactSpec(summary, {
+    defaultArtifactType: 'expert_r_summary', artifactTypeRequired: false,
+  });
+  if (summarySpec.artifactType !== 'expert_r_summary'
+      || Buffer.byteLength(JSON.stringify(summarySpec.metadata), 'utf8') > 128 * 1024) {
+    throw codedError('INVALID_EXPERT_R_RESULT', 'Expert R summary is invalid.');
+  }
+  for (const metadata of [resultMetadata, bundleSpec.metadata, summarySpec.metadata]) {
+    if (metadata.packageProfileId !== expectedProfileId
+        || metadata.scriptSha256 !== expectedScriptSha256
+        || metadata.resourcePolicyVersion !== EXPERT_R_RESOURCE_POLICY_VERSION
+        || !/^sha256:[0-9a-f]{64}$/.test(String(metadata.sandboxImageDigest || ''))
+        || metadata.input?.analysisObjectId !== sourceId
+        || metadata.input?.checkpointArtifactId !== expectedCheckpoint.checkpointArtifactId
+        || metadata.input?.checkpointChecksumSha256 !== expectedCheckpoint.checksumSha256
+        || metadata.input?.checkpointSizeBytes !== expectedCheckpoint.sizeBytes
+        || JSON.stringify(metadata.input?.privateInputs || []) !== JSON.stringify(expectedPrivateInputs)) {
+      throw codedError('INVALID_EXPERT_R_RESULT', 'Expert R provenance is incomplete or inconsistent.');
+    }
+  }
+  const outputFiles = bundleSpec.metadata.files;
+  const filesValid = Array.isArray(outputFiles)
+    && outputFiles.length === nFiles
+    && outputFiles.every((file) => (
+      file && typeof file.name === 'string'
+      && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/.test(file.name)
+      && !file.name.split('/').some((part) => part === '.' || part === '..' || part === '')
+      && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes >= 0
+      && /^[0-9a-f]{64}$/.test(String(file.checksumSha256 || ''))
+    ));
+  const outputBytes = bundleSpec.metadata.outputBytes;
+  if (!filesValid
+      || !Number.isSafeInteger(outputBytes) || outputBytes < 0
+      || outputBytes > MAX_EXPERT_R_OUTPUT_BYTES
+      || outputFiles.reduce((total, file) => total + file.sizeBytes, 0) !== outputBytes
+      || summarySpec.metadata.nFiles !== nFiles
+      || JSON.stringify(summarySpec.metadata.files) !== JSON.stringify(outputFiles)
+      || summarySpec.metadata.outputBundleChecksumSha256 !== bundleSpec.checksumSha256
+      || summarySpec.metadata.outputBundleSizeBytes !== bundleSpec.sizeBytes
+      || resultMetadata.outputBundleChecksumSha256 !== bundleSpec.checksumSha256
+      || resultMetadata.nFiles !== nFiles) {
+    throw codedError('INVALID_EXPERT_R_RESULT', 'Expert R output manifest is inconsistent.');
+  }
+  const resultId = generateAnalysisObjectId();
+  const bundleId = generateJobArtifactId(); const summaryId = generateJobArtifactId();
+  const refs = {
+    datasetId: sourceObject.datasetId || null,
+    analysisObjectId: sourceId,
+    resultAnalysisObjectId: resultId,
+  };
+  const p = await connect(); const client = await p.connect();
+  let committedRows = null;
+  let commitAttempted = false;
+  try {
+    await client.query('BEGIN');
+    const claim = await client.query(
+      "SELECT 1 FROM jobs WHERE id=$1 AND worker_id=$2 AND claim_token=$3 AND status='running' AND lease_expires_at>$4 FOR UPDATE",
+      [row.id, wid, token, now]
+    );
+    if (!claim.rows[0]) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    const duplicate = await client.query("SELECT 1 FROM job_artifacts WHERE job_id=$1 AND artifact_type='expert_r_bundle' LIMIT 1", [row.id]);
+    if (duplicate.rows[0]) throw codedError('EXPERT_R_RESULT_EXISTS', 'Job already has an Expert R result.');
+    await client.query(
+      `INSERT INTO analysis_objects
+         (id, owner_user_id, project_id, dataset_id, parent_object_id, lineage_root_id,
+          object_type, display_name, storage_uri, object_hash, metadata_json, created_by_provenance_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'generic', $7, NULL, NULL, $8, NULL)`,
+      [
+        resultId,
+        owner,
+        pid,
+        sourceObject.datasetId || null,
+        sourceId,
+        sourceObject.lineageRootId || sourceId,
+        result.displayName != null ? String(result.displayName).slice(0, MAX_NAME_LENGTH) : 'Expert R result',
+        JSON.stringify(resultMetadata),
+      ]
+    );
+    const linkInfo = await client.query(
+      `UPDATE jobs SET result_analysis_object_id = $1, updated_at = $2
+        WHERE id = $3 AND worker_id = $4 AND claim_token = $5
+          AND status = 'running' AND lease_expires_at > $2
+          AND result_analysis_object_id IS NULL`,
+      [resultId, now, row.id, wid, token]
+    );
+    if (linkInfo.rowCount !== 1) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    await insertLineageEdgeRow(client, {
+      projectId: pid,
+      parentObjectId: sourceId,
+      childObjectId: resultId,
+      jobId: row.id,
+      edgeType: 'derived_from',
+      parentRole: 'primary',
+      metadata: {
+        analysisKind: 'expert_r',
+        checkpointArtifactId: expectedCheckpoint.checkpointArtifactId,
+        packageProfileId: expectedProfileId,
+        scriptSha256: expectedScriptSha256,
+      },
+      createdByUserId: owner,
+    });
+    await insertJobArtifactRow(client, {
+      id: bundleId, jobRow: row, refs, artifactType: bundleSpec.artifactType,
+      name: bundle.name || null, description: bundle.description || null,
+      mimeType: bundle.mimeType || null, storageKind: bundleSpec.storageKind,
+      storageUri: bundleSpec.storageUri, checksumSha256: bundleSpec.checksumSha256,
+      sizeBytes: bundleSpec.sizeBytes, status: bundleSpec.status, metadata: bundleSpec.metadata,
+    });
+    await insertJobArtifactRow(client, {
+      id: summaryId, jobRow: row, refs, artifactType: summarySpec.artifactType,
+      name: summary.name || null, description: summary.description || null,
+      storageKind: summarySpec.storageKind, status: summarySpec.status, metadata: summarySpec.metadata,
+    });
+    const [resultRows, artifactRows] = await Promise.all([
+      client.query('SELECT * FROM analysis_objects WHERE id = $1 AND project_id = $2', [resultId, pid]),
+      client.query('SELECT * FROM job_artifacts WHERE id = ANY($1::text[])', [[bundleId, summaryId]]),
+    ]);
+    const artifactsById = new Map(artifactRows.rows.map((artifactRow) => [artifactRow.id, artifactRow]));
+    if (!resultRows.rows[0] || !artifactsById.has(bundleId) || !artifactsById.has(summaryId)) {
+      throw codedError('EXPERT_R_PUBLICATION_INVALID', 'Expert R publication could not be verified.');
+    }
+    committedRows = {
+      resultObject: rowToAnalysisObject(resultRows.rows[0]),
+      bundleArtifact: rowToJobArtifact(artifactsById.get(bundleId)),
+      summaryArtifact: rowToJobArtifact(artifactsById.get(summaryId)),
+    };
+    commitAttempted = true;
+    await client.query('COMMIT');
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
+    if (commitAttempted) {
+      const indeterminate = codedError(
+        'EXPERT_R_PUBLICATION_INDETERMINATE',
+        'Expert R publication outcome is indeterminate.'
+      );
+      indeterminate.completionMayHaveCommitted = true;
+      throw indeterminate;
+    }
+    throw error;
+  } finally { client.release(); }
+  return {
+    sourceObject,
+    ...committedRows,
+  };
+}
+
 /**
  * Atomically publish the two outputs of `cellchat.infer.v1`. The complete
  * ligand-receptor candidate table remains in private project storage; the
@@ -5420,7 +6819,7 @@ async function completeCellChatInferenceResultByWorker(jobId, workerId, claimTok
 }
 
 async function resolveCheckpointArtifact(analysisObjectId, projectId) {
-  const { rows } = await query(
+  let { rows } = await query(
     `SELECT * FROM job_artifacts
      WHERE result_analysis_object_id = $1
        AND artifact_type = 'checkpoint'
@@ -5429,6 +6828,32 @@ async function resolveCheckpointArtifact(analysisObjectId, projectId) {
      ORDER BY created_at ASC, id ASC`,
     [analysisObjectId]
   );
+  // A checkpoint fork intentionally reuses the immutable source checkpoint
+  // instead of copying RDS bytes. Resolve that alias only through the trusted
+  // fork job + lineage edge written atomically by the worker; client metadata
+  // alone is never sufficient to select an internal artifact.
+  if (rows.length === 0 && projectId) {
+    ({ rows } = await query(
+      `SELECT source_artifact.*
+         FROM analysis_object_edges edge
+         JOIN jobs fork_job
+          ON fork_job.id = edge.job_id
+         AND fork_job.job_type = 'checkpoint.fork.v1'
+          AND fork_job.result_analysis_object_id = edge.child_analysis_object_id
+          AND fork_job.status = 'completed'
+         JOIN job_artifacts source_artifact
+            ON source_artifact.id = (edge.metadata_json::jsonb ->> 'checkpointArtifactId')
+           AND source_artifact.result_analysis_object_id = edge.parent_analysis_object_id
+           AND source_artifact.artifact_type = 'checkpoint'
+           AND source_artifact.storage_kind = 'local_internal'
+           AND source_artifact.status = 'available'
+        WHERE edge.project_id = $1
+          AND edge.child_analysis_object_id = $2
+          AND edge.edge_type = 'checkpoint_fork'
+        ORDER BY source_artifact.created_at ASC, source_artifact.id ASC`,
+      [projectId, analysisObjectId]
+    ));
+  }
   const candidates = rows.map(rowToJobArtifact).filter((artifact) =>
     (artifact.projectId || null) === (projectId || null));
   if (candidates.length === 0) {
@@ -5532,11 +6957,13 @@ async function completeCheckpointForkByWorker(jobId, workerId, claimToken, input
   }
   const loaded = input.loaded === undefined ? {} : input.loaded;
   assertPlainObject(loaded, 'INVALID_METADATA', 'loaded summary must be a plain JSON object.');
+  const sourceSummary = inheritedAnalysisSummary(sourceObject.metadata);
   const resultMetadata = {
     source: 'checkpoint.fork.v1',
     sourceAnalysisObjectId: sourceObject.id,
     sourceCheckpointArtifactId: checkpoint.checkpointArtifactId,
     scientific_output: true,
+    ...(Object.keys(sourceSummary).length > 0 ? { summary: sourceSummary } : {}),
   };
   const artifactId = generateJobArtifactId();
   const p = await connect();
@@ -5559,7 +6986,11 @@ async function completeCheckpointForkByWorker(jobId, workerId, claimToken, input
         sourceObject.id,
         sourceObject.lineageRootId || sourceObject.id,
         sourceObject.objectType,
-        `Fork of ${sourceObject.displayName || sourceObject.id}`,
+        derivedAnalysisDisplayName(
+          sourceObject.displayName || sourceObject.id,
+          'branch',
+          row.created_at || now
+        ),
         JSON.stringify(resultMetadata),
       ]
     );
@@ -5653,6 +7084,8 @@ module.exports = {
   query,
   initSchema,
   checkHealth,
+  reportStandaloneWorkerRuntimeState,
+  getStandaloneWorkerRuntimeStatus,
   acquireWebTopologyLock,
   acquireStandaloneWorkerLock,
   resetSchemaForTests,
@@ -5661,6 +7094,7 @@ module.exports = {
   JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
   INITIAL_JOB_STATUS,
+  DEFAULT_WORKER_RUNTIME_STALE_AFTER_MS,
   PROJECT_ROLES,
   ALLOWED_OBJECT_TYPES,
   ALLOWED_JOB_TYPES,
@@ -5701,12 +7135,24 @@ module.exports = {
   resetUserPasswordByOperator,
   getUserByEmail,
   verifyUser,
+  createDemoGuest,
+  getDemoTemplateCheckpoint,
+  createDemoGuestCheckpoint,
+  listExpiredDemoGuests,
+  deleteExpiredDemoGuest,
   getUserForSession,
   getUserSessionVersion,
   revokeUserSessions,
   hasPipelineRegistryPublishCapability,
   getPipelineRegistryCapabilities,
   setPipelineRegistryPublisherByEmail,
+  EXPERT_R_EXECUTE_CAPABILITY,
+  hasExpertRExecuteCapability,
+  getExpertRCapabilities,
+  setExpertRExecutorByEmail,
+  createExpertRPrivateInput,
+  listExpertRPrivateInputs,
+  resolveExpertRPrivateInputs,
   // owner-scoped provenance / cache / figures
   saveProvenance,
   getProvenance,
@@ -5761,6 +7207,7 @@ module.exports = {
   updateDatasetForProject,
   markDatasetUploaded,
   markDatasetUploadFailed,
+  setDatasetValidationResult,
   rowToDataset,
   toPublicDataset,
   // analysis objects
@@ -5790,6 +7237,7 @@ module.exports = {
   listJobsForUser,
   listPrivateJobsForUser,
   createProjectJob,
+  retryProjectJob,
   listProjectJobs,
   getProjectJob,
   cancelProjectJob,
@@ -5810,7 +7258,12 @@ module.exports = {
   setJobScheduling,
   getOwnedAnalysisObjectForJobByWorker,
   getSeuratPipelineInputsForJobByWorker,
+  getMultiSampleSeuratPipelineInputsForJobByWorker,
+  getSpatialPipelineInputsForJobByWorker,
   getLoadableCheckpointForJobByWorker,
+  getHydrationCheckpointForJobByWorker,
+  getExpertRPrivateInputsForJobByWorker,
+  getConditionComparisonInputsForJobByWorker,
   getForkableCheckpointForJobByWorker,
   rowToJob,
   toPublicJob,
@@ -5833,6 +7286,7 @@ module.exports = {
   listProjectArtifacts,
   listProjectJobArtifacts,
   getProjectArtifact,
+  getProjectArtifactInternal,
   createJobArtifactByWorker,
   createCheckpointArtifactForJobByWorker,
   createCheckpointForJobByWorker,
@@ -5840,10 +7294,13 @@ module.exports = {
   completeSeuratPipelineResultByWorker,
   completeDegFindMarkersResultByWorker,
   completeEnrichmentGseaResultByWorker,
+  completeConditionComparisonResultByWorker,
+  completeExpertRResultByWorker,
   completeCellChatInferenceResultByWorker,
   getLoadableCheckpointForAnalysisObject,
   getForkableCheckpointForAnalysisObject,
   completeCheckpointForkByWorker,
+  inheritedAnalysisSummary,
   rowToJobArtifact,
   toPublicJobArtifact,
   // lineage

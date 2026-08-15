@@ -34,5 +34,7 @@ describe('production R image build contract', () => {
     expect(job).toContain('Build exact R runtime image');
     expect(job).toContain('Verify required R packages');
     expect(job).toContain('Boot R image and audit authenticated health');
+    expect(dockerfile).toContain("'edgeR', 'limma'");
+    expect(job).toContain("'edgeR','limma'");
   });
 });

@@ -1,0 +1,9 @@
+# Test-only loopback edge for the disposable public-demo browser acceptance.
+# Production/demo hosting still requires HTTPS and secure cookies through Caddy.
+services:
+  web:
+    environment:
+      NODE_ENV: test
+      TRUST_PROXY_HOPS: "0"
+      FRONTEND_ORIGIN: http://127.0.0.1:${WEB_PORT}
+      COOKIE_SECURE: "false"

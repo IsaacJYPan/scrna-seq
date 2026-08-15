@@ -86,6 +86,8 @@ describe('PipelineManager', () => {
       uploadDataset: vi.fn(),
       createProjectAnalysisObject: vi.fn(),
       createSeuratPipelineJob: vi.fn(),
+      createMultiSampleSeuratPipelineJob: vi.fn(),
+      createSpatialSeuratPipelineJob: vi.fn(),
       createProjectJob: vi.fn(),
       getProjectJob: vi.fn(),
       getProjectAnalysisObject: vi.fn(),
@@ -102,8 +104,8 @@ describe('PipelineManager', () => {
   it('loads the per-project trusted pipeline selection and renders default modules', async () => {
     renderPipelineManager();
 
-    expect(await screen.findByText('Pipeline Manager')).toBeInTheDocument();
-    expect(screen.getAllByText('Default Seurat scRNA-seq Pipeline').length).toBeGreaterThan(0);
+    expect(await screen.findByText('Approved workflows')).toBeInTheDocument();
+    expect(screen.getAllByText('Standard scRNA-seq workflow').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Quality Control').length).toBeGreaterThan(0);
     expect(window.electronAPI.getProjectPipelineSelection).toHaveBeenCalledWith('proj_1');
   });
@@ -121,10 +123,11 @@ describe('PipelineManager', () => {
       datasetInfo: { id: 'ao_abc123', projectId: 'proj_1' },
     });
 
-    await screen.findByText('Pipeline Manager');
+    await screen.findByText('Approved workflows');
     expect(window.electronAPI.getProjectPipelineSelection).toHaveBeenCalledWith('proj_2');
   });
 
+  /* Publication controls intentionally remain outside the researcher interface.
   it('fails closed when publisher capability cannot be verified, even for a project owner', async () => {
     window.electronAPI.getPipelineRegistryCapabilities = vi.fn(async () => {
       throw new Error(JSON.stringify({ error: 'Capability lookup failed' }));
@@ -189,6 +192,19 @@ describe('PipelineManager', () => {
     expect(window.electronAPI.getPipelineRegistryCapabilities).toHaveBeenCalledTimes(2);
   });
 
+  */
+  it('keeps manifest publication and platform capability administration out of the researcher interface', async () => {
+    window.electronAPI.getPipelineRegistryCapabilities = vi.fn(async () => ({ canPublishPipelineManifests: true }));
+
+    renderPipelineManager();
+
+    await screen.findByText('Approved workflows');
+    expect(screen.queryByRole('heading', { name: /Publish Trusted Pipeline Manifest/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Manifest JSON')).not.toBeInTheDocument();
+    expect(window.electronAPI.getPipelineRegistryCapabilities).not.toHaveBeenCalled();
+    expect(window.electronAPI.publishPipelineRegistryDefinition).not.toHaveBeenCalled();
+  });
+
   it('falls back visibly when a previously selected registry definition is unavailable', async () => {
     window.electronAPI.getProjectPipelineSelection = vi.fn(async () => ({
       projectId: 'proj_1',
@@ -199,11 +215,11 @@ describe('PipelineManager', () => {
 
     renderPipelineManager({ onPipelineSelectionChanged });
 
-    expect(await screen.findByText(/previous pipeline is no longer available/i)).toBeInTheDocument();
+    expect(await screen.findByText(/previous workflow is no longer available/i)).toBeInTheDocument();
     expect(onPipelineSelectionChanged).toHaveBeenLastCalledWith(expect.objectContaining({
       id: DEFAULT_PIPELINE_ID,
     }));
-    expect(screen.getAllByText('Default Seurat scRNA-seq Pipeline').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Standard scRNA-seq workflow').length).toBeGreaterThan(0);
   });
 
   it('ignores invalid global registry entries returned by a compromised or stale server', async () => {
@@ -370,7 +386,7 @@ describe('PipelineManager', () => {
     renderPipelineManager();
 
     expect(await screen.findByTestId('seurat-pipeline-panel')).toHaveTextContent(/10x Genomics filtered feature-barcode matrix HDF5/i);
-    expect(screen.getByTestId('seurat-pipeline-panel')).toHaveTextContent(/10x \.h5 only/i);
+    expect(screen.getByTestId('seurat-pipeline-panel')).toHaveTextContent(/10x HDF5/i);
 
     const input = screen.getByTestId('seurat-pipeline-upload');
     const file = new File(['not-h5'], 'counts.csv', { type: 'text/csv' });
@@ -378,6 +394,74 @@ describe('PipelineManager', () => {
 
     expect(await screen.findByText(/Unsupported for this pipeline/i)).toBeInTheDocument();
     expect(window.electronAPI.uploadDataset).not.toHaveBeenCalled();
+  });
+
+  it('uploads a classic Visium bundle and launches the spatial Seurat workflow', async () => {
+    window.electronAPI.uploadDataset = vi.fn(async () => ({
+      id: 'ds_spatial123',
+      fileType: 'visium_zip',
+      originalFilename: 'sample_outs.zip',
+      uploadStatus: 'uploaded',
+      validationStatus: 'valid',
+    }));
+    window.electronAPI.createProjectAnalysisObject = vi.fn(async () => ({
+      id: 'ao_spatial_input',
+      projectId: 'proj_1',
+      datasetId: 'ds_spatial123',
+      objectType: 'matrix',
+      displayName: 'sample_outs raw dataset',
+      metadata: {},
+    }));
+    window.electronAPI.createSpatialSeuratPipelineJob = vi.fn(async () => ({
+      id: 'job_spatial123',
+      status: 'queued',
+      jobType: 'spatial.seurat.v1',
+      datasetId: 'ds_spatial123',
+      analysisObjectId: 'ao_spatial_input',
+    }));
+
+    renderPipelineManager({
+      currentWs: { ...currentWs, objects: [], selectedObjectIds: [] },
+      datasetInfo: null,
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Spatial transcriptomics/i }));
+    await waitFor(() => {
+      expect(window.electronAPI.listDatasets).toHaveBeenCalledWith('proj_1', { fileType: 'visium_zip' });
+    });
+    expect(screen.getByTestId('seurat-pipeline-panel')).toHaveTextContent(/Visium HD and Xenium are not accepted/i);
+
+    fireEvent.change(screen.getByTestId('seurat-pipeline-upload'), {
+      target: { files: [new File(['zip'], 'sample_outs.zip', { type: 'application/zip' })] },
+    });
+    expect(await screen.findByText('sample_outs.zip')).toBeInTheDocument();
+    expect(window.electronAPI.uploadDataset).toHaveBeenCalledWith(
+      'proj_1',
+      expect.any(File),
+      expect.objectContaining({ supportedWorkflow: 'spatial.seurat.v1' }),
+      'visium_zip'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Run spatial Seurat preprocessing/i }));
+    await waitFor(() => {
+      expect(window.electronAPI.createProjectAnalysisObject).toHaveBeenCalledWith(
+        'proj_1',
+        expect.objectContaining({
+          datasetId: 'ds_spatial123',
+          metadata: expect.objectContaining({
+            sourceType: 'classic_visium_dataset',
+            supportedWorkflow: 'spatial.seurat.v1',
+          }),
+        })
+      );
+      expect(window.electronAPI.createSpatialSeuratPipelineJob).toHaveBeenCalledWith(
+        'proj_1',
+        expect.objectContaining({
+          datasetId: 'ds_spatial123',
+          analysisObjectId: 'ao_spatial_input',
+        })
+      );
+    });
   });
 
   it('uploads a supported 10x HDF5 dataset, launches seurat.pipeline.v1, and reaches durable DEG handoff', async () => {
@@ -471,6 +555,8 @@ describe('PipelineManager', () => {
     });
 
     expect(await screen.findByText('filtered_feature_bc_matrix.h5')).toBeInTheDocument();
+    expect(screen.getByTestId('seurat-pipeline-panel')).toHaveTextContent(/10x HDF5 · Checking data/i);
+    expect(screen.getByTestId('seurat-pipeline-panel')).not.toHaveTextContent(/ds_abc123|tenx_h5|uploaded \/ pending/i);
     expect(window.electronAPI.uploadDataset).toHaveBeenCalledWith(
       'proj_1',
       expect.any(File),
@@ -481,7 +567,7 @@ describe('PipelineManager', () => {
       'tenx_h5'
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Launch durable Seurat pipeline/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Run Seurat preprocessing/i }));
 
     await waitFor(() => {
       expect(window.electronAPI.createProjectAnalysisObject).toHaveBeenCalledWith(
@@ -511,15 +597,15 @@ describe('PipelineManager', () => {
       );
     });
     expect(JSON.stringify(window.electronAPI.createProjectAnalysisObject.mock.calls)).not.toMatch(/storage|path|state/i);
-    expect((await screen.findAllByText('ao_result123')).length).toBeGreaterThan(0);
-    expect(screen.getByText('artifact_checkpoint')).toBeInTheDocument();
+    expect((await screen.findAllByText(/Saved analysis is ready/i)).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /Open saved version/i })).toBeInTheDocument();
     expect(screen.getByText(/mitochondrial filter warning/i)).toBeInTheDocument();
     expect(container.textContent || '').not.toMatch(/vault\/private|state_key|user-1:obj/i);
 
-    const degButton = screen.getByRole('button', { name: /Continue to durable DEG/i });
+    const degButton = screen.getByRole('button', { name: /Continue to marker analysis/i });
     expect(degButton).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('button', { name: /Load checkpoint/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Open saved version/i }));
     await waitFor(() => {
       expect(window.electronAPI.createProjectJob).toHaveBeenCalledWith(
         'proj_1',
@@ -528,11 +614,107 @@ describe('PipelineManager', () => {
           analysisObjectId: 'ao_result123',
         })
       );
-      expect(screen.getByRole('button', { name: /Continue to durable DEG/i })).toBeEnabled();
+      expect(screen.getByRole('button', { name: /Continue to marker analysis/i })).toBeEnabled();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Continue to durable DEG/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue to marker analysis/i }));
     expect(onSelectAnalysisObject).toHaveBeenCalledWith('proj_1', 'ao_result123');
     expect(setActiveTab).toHaveBeenCalledWith('deg');
+  });
+
+  it('uploads multiple durable sample files and launches a condition-aware Seurat preparation job', async () => {
+    let uploadIndex = 0;
+    window.electronAPI.uploadDataset = vi.fn(async (_projectId, file) => {
+      uploadIndex += 1;
+      return {
+        id: `ds_multi${uploadIndex}`,
+        fileType: 'tenx_h5',
+        originalFilename: file.name,
+        uploadStatus: 'uploaded',
+        validationStatus: 'valid',
+      };
+    });
+    window.electronAPI.createProjectAnalysisObject = vi.fn(async (_projectId, payload) => ({
+      id: 'ao_multi_input',
+      projectId: 'proj_1',
+      datasetId: payload.datasetId,
+      objectType: 'matrix',
+      displayName: 'Primary multi-sample input',
+      metadata: payload.metadata,
+    }));
+    window.electronAPI.createMultiSampleSeuratPipelineJob = vi.fn(async (_projectId, payload) => ({
+      id: 'job_multi',
+      status: 'queued',
+      jobType: 'seurat.multisample.v1',
+      datasetId: payload.samples[0].datasetId,
+      analysisObjectId: payload.analysisObjectId,
+      parameters: payload,
+      createdAt: '2026-08-11T00:00:00.000Z',
+    }));
+    window.electronAPI.getProjectJob = vi.fn(async () => ({
+      id: 'job_multi',
+      status: 'queued',
+      jobType: 'seurat.multisample.v1',
+      datasetId: 'ds_multi1',
+      analysisObjectId: 'ao_multi_input',
+      createdAt: '2026-08-11T00:00:00.000Z',
+    }));
+    window.electronAPI.getProjectJobLogs = vi.fn(async () => ({ logs: [] }));
+    window.electronAPI.listProjectJobArtifacts = vi.fn(async () => []);
+
+    renderPipelineManager({
+      currentWs: { ...currentWs, objects: [], selectedObjectIds: [] },
+      datasetInfo: null,
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Multiple conditions' }));
+    const files = [
+      new File(['h5'], 'control_1.h5'),
+      new File(['h5'], 'control_2.h5'),
+      new File(['h5'], 'treated_1.h5'),
+      new File(['h5'], 'treated_2.h5'),
+    ];
+    fireEvent.change(screen.getByTestId('seurat-pipeline-upload'), { target: { files } });
+
+    expect(await screen.findByText('control_1.h5')).toBeInTheDocument();
+    expect(await screen.findByText('treated_2.h5')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Condition for control_1.h5'), { target: { value: 'control' } });
+    fireEvent.change(screen.getByLabelText('Condition for control_2.h5'), { target: { value: 'control' } });
+    fireEvent.change(screen.getByLabelText('Condition for treated_1.h5'), { target: { value: 'treated' } });
+    fireEvent.change(screen.getByLabelText('Condition for treated_2.h5'), { target: { value: 'treated' } });
+
+    expect(screen.getByText(/minimum replication gate/i)).toBeInTheDocument();
+    const launch = screen.getByRole('button', { name: /Prepare multi-condition analysis/i });
+    fireEvent.change(screen.getByLabelText('Donor code for control_1.h5'), { target: { value: 'donor/1' } });
+    expect(launch).toBeDisabled();
+    expect(screen.getByText(/Labels must be 1-80 characters/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Donor code for control_1.h5'), { target: { value: 'donor_1' } });
+    expect(launch).toBeEnabled();
+    fireEvent.click(launch);
+
+    await waitFor(() => {
+      expect(window.electronAPI.createProjectAnalysisObject).toHaveBeenCalledWith(
+        'proj_1',
+        expect.objectContaining({
+          datasetId: 'ds_multi1',
+          metadata: expect.objectContaining({
+            sourceType: 'tenx_h5_multisample_dataset',
+            supportedWorkflow: 'seurat.multisample.v1',
+          }),
+        })
+      );
+      expect(window.electronAPI.createMultiSampleSeuratPipelineJob).toHaveBeenCalledWith(
+        'proj_1',
+        expect.objectContaining({
+          analysisObjectId: 'ao_multi_input',
+          samples: [
+            expect.objectContaining({ datasetId: 'ds_multi1', sampleName: 'control_1', conditionName: 'control' }),
+            expect.objectContaining({ datasetId: 'ds_multi2', sampleName: 'control_2', conditionName: 'control' }),
+            expect.objectContaining({ datasetId: 'ds_multi3', sampleName: 'treated_1', conditionName: 'treated' }),
+            expect.objectContaining({ datasetId: 'ds_multi4', sampleName: 'treated_2', conditionName: 'treated' }),
+          ],
+        })
+      );
+    });
   });
 });

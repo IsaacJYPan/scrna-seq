@@ -38,12 +38,15 @@ function runtimeConfig(overrides = {}) {
     pollIntervalMs: 5,
     leaseSeconds: 30,
     concurrency: 1,
+    poolSize: 3,
+    poolSlot: 1,
     minFreeMemoryMb: 1,
     drainTimeoutMs: 1000,
     startupTimeoutMs: 20,
     startupRetryMs: 1,
     healthHost: '127.0.0.1',
     healthPort: 0,
+    reportReadiness: true,
     allowedJobTypes: null,
     ...overrides,
   };
@@ -58,6 +61,7 @@ function fakeDb(overrides = {}) {
     initSchema: vi.fn(async () => {}),
     checkHealth: vi.fn(async () => true),
     acquireStandaloneWorkerLock: vi.fn(async () => topologyLock),
+    reportStandaloneWorkerRuntimeState: vi.fn(async () => {}),
     topologyLock,
     close: vi.fn(async () => {}),
     ...overrides,
@@ -100,7 +104,10 @@ function makeRuntime(overrides = {}) {
     db,
     storageProvider: { root, remove() {} },
     availableMemoryBytes: overrides.availableMemoryBytes || (() => 8 * 1024 * 1024 * 1024),
-    probeRReadiness: overrides.probeRReadiness || (async () => ({ status: 'ok', storage_shared: true })),
+    probeRReadiness: overrides.probeRReadiness || (async () => ({
+      status: 'ok', storage_shared: true,
+      capabilities: { pathwayEnrichment: true, cellChat: true },
+    })),
     createJobWorker: overrides.createJobWorker || (() => worker),
     logger: silentLogger(),
   });
@@ -163,6 +170,23 @@ describe('standalone worker readiness and drain lifecycle', () => {
     expect(db.close).toHaveBeenCalledTimes(1);
     expect(db.topologyLock.release).toHaveBeenCalledTimes(1);
     expect(fs.readdirSync(root).filter((name) => name.startsWith(STORAGE_PROBE_PREFIX))).toEqual([]);
+  });
+
+  it('publishes ready then draining runtime status around the worker lifecycle', async () => {
+    const db = fakeDb();
+    const { runtime } = makeRuntime({ db });
+
+    await runtime.start();
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenCalledWith('ready', {
+      slot: 1,
+      capabilities: { pathwayEnrichment: true, cellChat: true },
+    });
+
+    await runtime.shutdown();
+    expect(db.reportStandaloneWorkerRuntimeState).toHaveBeenLastCalledWith('draining', {
+      slot: 1,
+      capabilities: { pathwayEnrichment: true, cellChat: true },
+    });
   });
 
   it('fails closed and never constructs a worker when R readiness misses the startup deadline', async () => {

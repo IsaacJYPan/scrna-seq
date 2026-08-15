@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
+import { publicErrorMessage } from '../publicError';
 
 // Removed API constant
 export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme, deploymentPolicy }) {
@@ -21,7 +22,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     callApi('/genes', {}, { useCache: false })
       .then(d => { if (d.genes) setGeneList(d.genes); })
       .catch(() => {});
-  }, [sessionReady, datasetInfo]);
+  }, [sessionReady, datasetInfo, callApi]);
 
   const handleInputChange = (val) => {
     setGeneInput(val);
@@ -50,7 +51,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
       if (data.error) throw new Error(data.error);
       setDotData(data);
     } catch (e) {
-      setError(e.message);
+      setError(publicErrorMessage(e, 'The dot plot could not be prepared. Please try again.'));
     }
     setLoading(false);
   };
