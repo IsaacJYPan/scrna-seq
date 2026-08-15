@@ -170,6 +170,9 @@ async function main() {
       supportedTarget: 'R 4.5.x', runtime: { status: 'ok', mode: 'mocked browser transport', rVersion: '4.5.3' },
       packages: { Seurat: true, CellChat: true, plumber: true, jsonlite: true },
     }));
+    await page.route('**/api/runtime/compute-status*', route => fulfill(route, {
+      status: 'ready', updatedAt: '2026-07-18T00:00:00.000Z', capabilities: { cellChat: true },
+    }));
     await page.route('**/api/auth/policy*', route => fulfill(route, {
       registrationEnabled: true, legacyLocalImportsEnabled: false, legacyLiveMutationToolsEnabled: false,
       serverFigureExportEnabled: false,
@@ -219,6 +222,8 @@ async function main() {
         objectId: route.request().headers()['x-object-id'],
       });
       return fulfill(route, {
+        ready: true,
+        code: null,
         group_by: 'seurat_clusters',
         groups: [
           { group: 'Group 1', label: 'CD4 T cells', input_cells: 600 },
@@ -298,7 +303,8 @@ async function main() {
     assert.equal(await start.isDisabled(), false, 'CellChat enables only after its fixed scope is confirmed.');
     await start.click();
 
-    await page.getByText('art_cellchat_summary_browser', { exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+    await page.getByRole('heading', { name: 'Recorded run settings', exact: true })
+      .waitFor({ state: 'visible', timeout: 15000 });
     assert.equal(launchBodies.length, 1, 'CellChat created exactly one durable job.');
     assert.deepEqual(launchBodies[0], {
       jobType: 'cellchat.infer.v1', analysisObjectId: object.id,
@@ -311,12 +317,19 @@ async function main() {
     });
     await page.getByText('TGFB1.TGFBR1_TGFBR2', { exact: true }).waitFor({ state: 'visible' });
     await page.getByText('CD4 T cells', { exact: true }).waitFor({ state: 'visible' });
-    assert.deepEqual(groupKeyRequests, [{
-      url: `${origin}/api/r/cellchat-group-map?group_by=seurat_clusters`,
-      objectId: object.id,
-    }], 'The owner-local group key stays scoped to the selected analysis object.');
+    assert.deepEqual(groupKeyRequests, [
+      {
+        url: `${origin}/api/r/cellchat-group-map?group_by=seurat_clusters&preflight=true&min_cells_per_group=10`,
+        objectId: object.id,
+      },
+      {
+        url: `${origin}/api/r/cellchat-group-map?group_by=seurat_clusters`,
+        objectId: object.id,
+      },
+    ], 'CellChat preflight and the owner-local group key stay scoped to the selected analysis object.');
     await page.getByText(/does not prove that cells communicated, physically contacted, or caused a response/i).waitFor({ state: 'visible' });
     const text = await page.locator('body').innerText();
+    assert.doesNotMatch(text, /art_cellchat_(?:summary|results)_browser|job_cellchat_browser/i);
     assert.doesNotMatch(text, /storage[_-]?(?:key|uri)|projects\/|user-\d+:obj-/i);
     assert.equal(serverErrors.length, 0, `Unexpected browser 5xx responses: ${serverErrors.join(' | ')}`);
     assert.equal(consoleErrors.length, 0, `Unexpected browser console errors: ${consoleErrors.join(' | ')}`);

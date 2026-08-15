@@ -455,18 +455,20 @@ Then run the full server and database checks against `scrna_test`:
 npm run test:backend
 ```
 
-Before pushing a release candidate, run the same fail-fast gate used by CI. It
-must have a real test `DATABASE_URL`; CI will not start R installation, image
-builds, deployment drills, or scientific/browser certification until it passes:
+Before pushing a release candidate, run the same fail-fast gates used by CI.
+They must have a real test `DATABASE_URL`; CI will not start R installation,
+image builds, deployment drills, or scientific certification until both pass:
 
 ```powershell
 $env:DATABASE_URL = 'postgres://scrna:scrna@127.0.0.1:5432/scrna_test'
 $env:NODE_ENV = 'test'
 npm run check:ci-preflight
+npm run check:browser-preflight
 ```
 
 The preflight refuses database names that are not explicitly marked `test` or
-`ci`, because the backend suites reset their target schema.
+`ci`, because the backend suites reset their target schema. Install Chromium
+once with `npx playwright install chromium` before running the browser preflight.
 
 For a deeper real-R check, download the small PBMC example data once and run the
 main workflow tests. Keep `DATABASE_URL` pointed at `scrna_test`:
