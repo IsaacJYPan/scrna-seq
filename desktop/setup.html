@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>Connect TraceOmics</title>
+    <link rel="stylesheet" href="setup.css" />
+    <script src="setup.js" defer></script>
+  </head>
+  <body>
+    <main class="setup-card">
+      <div class="mark" aria-hidden="true">B</div>
+      <p class="eyebrow">TraceOmics desktop</p>
+      <h1>Connect to your workspace</h1>
+      <p class="lede">Enter the address of your trusted TraceOmics server. Your account and research data remain on that server.</p>
+      <form id="connection-form">
+        <label for="server-url">Server address</label>
+        <input id="server-url" name="server-url" type="url" inputmode="url" autocomplete="url" placeholder="https://analysis.example.org" required autofocus />
+        <p id="error" class="error" role="alert" hidden></p>
+        <button id="connect" type="submit">Connect</button>
+      </form>
+      <p class="hint">For a local development server, <code>http://localhost:3000</code> is supported.</p>
+    </main>
+  </body>
+</html>

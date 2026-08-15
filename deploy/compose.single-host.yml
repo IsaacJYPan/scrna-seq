@@ -7,7 +7,7 @@
 # proxy. R, worker health, and Postgres are never published.
 
 x-app-image: &app-image
-  image: ${APP_IMAGE:-scrna-seq-workbench:single-host}
+  image: ${APP_IMAGE:-traceomics:single-host}
   build:
     context: ..
     dockerfile: Dockerfile
@@ -16,7 +16,7 @@ x-app-image: &app-image
       APP_GID: ${APP_GID:-10001}
 
 x-operations-image: &operations-image
-  image: ${OPS_IMAGE:-scrna-seq-operations:single-host}
+  image: ${OPS_IMAGE:-traceomics-operations:single-host}
   build:
     context: ..
     dockerfile: Dockerfile
@@ -34,6 +34,7 @@ x-db-client-environment: &db-client-environment
   PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER}
   PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
   PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB}
+  APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:?Set APP_DEPLOYMENT_MODE to private, byoc, or shared-private}
 
 x-private-runtime: &private-runtime
   network_mode: service:namespace-anchor
@@ -115,8 +116,34 @@ services:
     deploy:
       replicas: 1
 
+  # Docker copies an image's existing mount-point contents into a new named
+  # volume on first use. Starting several R services against the same empty
+  # volume can race that copy-up on Docker Desktop. Initialize both shared
+  # volume skeletons exactly once before any consumer is created.
+  storage-init:
+    <<: [*app-image, *private-runtime]
+    command:
+      - node
+      - -e
+      - >-
+        const fs = require('node:fs');
+        for (const target of ['/app/storage-volume/data', '/app/vault-volume/vault'])
+        fs.accessSync(target, fs.constants.R_OK | fs.constants.W_OK);
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+    restart: "no"
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    deploy:
+      replicas: 1
+
   r:
-    image: ${R_IMAGE:-scrna-seq-r:single-host}
+    image: ${R_IMAGE:-traceomics-r:single-host}
     build:
       context: ../r-backend
       dockerfile: Dockerfile
@@ -144,6 +171,8 @@ services:
     depends_on:
       namespace-anchor:
         condition: service_started
+      storage-init:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -160,6 +189,94 @@ services:
       start_period: 90s
     mem_limit: ${R_MEMORY_LIMIT:-16g}
     cpus: ${R_CPU_LIMIT:-4}
+    pids_limit: 1024
+    stop_grace_period: 660s
+    deploy:
+      replicas: 1
+
+  r-compute-1:
+    image: ${R_IMAGE:-traceomics-r:single-host}
+    build:
+      context: ../r-backend
+      dockerfile: Dockerfile
+      args:
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
+    <<: *private-runtime
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
+      PLUMBER_HOST: 127.0.0.1
+      PLUMBER_PORT: "8001"
+      ANALYSIS_ROOT: /app
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+      R_MAX_ACTIVE_SESSIONS: "2"
+      R_MAX_ACTIVE_SESSIONS_PER_USER: "2"
+      R_MAX_ACTIVE_SESSION_BYTES: ${R_COMPUTE_SESSION_BYTES:-8589934592}
+      R_MAX_ACTIVE_SESSION_BYTES_PER_USER: ${R_COMPUTE_SESSION_BYTES:-8589934592}
+      R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION: ${R_COMPUTE_SESSION_BYTES_PER_JOB:-4294967296}
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, Rscript, -e, "con <- url('http://127.0.0.1:8001/health', open='rb', headers=c('X-API-Token'=Sys.getenv('API_TOKEN'))); response <- jsonlite::fromJSON(con); close(con); stopifnot(identical(response[['status']], 'ok'))"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    mem_limit: ${R_COMPUTE_MEMORY_LIMIT:-12g}
+    cpus: ${R_COMPUTE_CPU_LIMIT:-4}
+    pids_limit: 1024
+    stop_grace_period: 660s
+    deploy:
+      replicas: 1
+
+  r-compute-2:
+    image: ${R_IMAGE:-traceomics-r:single-host}
+    build:
+      context: ../r-backend
+      dockerfile: Dockerfile
+      args:
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
+    <<: *private-runtime
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
+      PLUMBER_HOST: 127.0.0.1
+      PLUMBER_PORT: "8002"
+      ANALYSIS_ROOT: /app
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+      R_MAX_ACTIVE_SESSIONS: "2"
+      R_MAX_ACTIVE_SESSIONS_PER_USER: "2"
+      R_MAX_ACTIVE_SESSION_BYTES: ${R_COMPUTE_SESSION_BYTES:-8589934592}
+      R_MAX_ACTIVE_SESSION_BYTES_PER_USER: ${R_COMPUTE_SESSION_BYTES:-8589934592}
+      R_MAX_ACTIVE_SESSION_BYTES_PER_SESSION: ${R_COMPUTE_SESSION_BYTES_PER_JOB:-4294967296}
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, Rscript, -e, "con <- url('http://127.0.0.1:8002/health', open='rb', headers=c('X-API-Token'=Sys.getenv('API_TOKEN'))); response <- jsonlite::fromJSON(con); close(con); stopifnot(identical(response[['status']], 'ok'))"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    mem_limit: ${R_COMPUTE_MEMORY_LIMIT:-12g}
+    cpus: ${R_COMPUTE_CPU_LIMIT:-4}
     pids_limit: 1024
     stop_grace_period: 660s
     deploy:
@@ -187,6 +304,9 @@ services:
       R_API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
       ENABLE_JOB_WORKER: "false"
       R_PROXY_MAX_CONCURRENT: "1"
+      EXPERT_R_ENABLED: ${EXPERT_R_ENABLED:-false}
+      EXPERT_R_SANDBOX_URL: http://127.0.0.1:8090
+      EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
     volumes:
       - durable-storage:/app/storage-volume
       - legacy-vault:/app/vault-volume
@@ -195,6 +315,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -216,6 +338,52 @@ services:
     deploy:
       replicas: 1
 
+  expert-r-broker:
+    build:
+      context: ..
+      dockerfile: deploy/expert-broker.Dockerfile
+    image: traceomics-expert-broker:single-host
+    network_mode: service:namespace-anchor
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,noexec,nosuid,nodev,size=128m]
+    environment:
+      NODE_ENV: production
+      STORAGE_ROOT: /app/storage-volume/data
+      EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
+      EXPERT_R_SANDBOX_IMAGE: ${EXPERT_R_SANDBOX_IMAGE:-disabled}
+      EXPERT_R_SANDBOX_WORK_ROOT: ${EXPERT_R_SANDBOX_HOST_WORK_ROOT:-/var/lib/traceomics-expert}
+      EXPERT_R_SANDBOX_HOST: 127.0.0.1
+      EXPERT_R_SANDBOX_PORT: "8090"
+      EXPERT_R_MAX_CONCURRENT: "2"
+      EXPERT_R_MEMORY_LIMIT: ${EXPERT_R_MEMORY_LIMIT:-8g}
+      EXPERT_R_CPU_LIMIT: ${EXPERT_R_CPU_LIMIT:-2}
+      EXPERT_R_TIMEOUT_MS: ${EXPERT_R_TIMEOUT_MS:-600000}
+      EXPERT_R_MIN_FREE_BYTES: ${EXPERT_R_MIN_FREE_BYTES:-1073741824}
+    volumes:
+      - durable-storage:/app/storage-volume
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${EXPERT_R_SANDBOX_HOST_WORK_ROOT:-/var/lib/traceomics-expert}:${EXPERT_R_SANDBOX_HOST_WORK_ROOT:-/var/lib/traceomics-expert}
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8090/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 256
+    restart: unless-stopped
+    profiles: [expert-r]
+    deploy:
+      replicas: 1
+
   worker:
     <<: [*app-image, *private-runtime]
     command: ["node", "worker.js"]
@@ -231,6 +399,10 @@ services:
       R_API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
       ENABLE_JOB_WORKER: "true"
       JOB_WORKER_CONCURRENCY: "1"
+      JOB_WORKER_POOL_SIZE: "3"
+      JOB_WORKER_POOL_SLOT: "1"
+      JOB_WORKER_REPORT_READINESS: "false"
+      JOB_WORKER_ALLOWED_JOB_TYPES: "generic,checkpoint.noop,r.runtime.check,r.object.inspect,checkpoint.save.v1,checkpoint.load.v1,checkpoint.fork.v1"
       JOB_WORKER_HEALTH_HOST: 127.0.0.1
       JOB_WORKER_HEALTH_PORT: "3101"
       JOB_WORKER_DRAIN_TIMEOUT_MS: "630000"
@@ -245,6 +417,8 @@ services:
         condition: service_healthy
       r:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -267,7 +441,107 @@ services:
     deploy:
       replicas: 1
 
-  # On-demand only: web, worker, and R must be stopped before backup or restore.
+  worker-compute-1:
+    <<: [*app-image, *private-runtime]
+    command: ["node", "worker.js"]
+    environment:
+      <<: *db-client-environment
+      NODE_ENV: production
+      HOME: /tmp
+      SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+      R_RUNTIME_MODE: external
+      R_BACKEND_URL: http://127.0.0.1:8001
+      R_API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
+      ENABLE_JOB_WORKER: "true"
+      JOB_WORKER_CONCURRENCY: "1"
+      JOB_WORKER_POOL_SIZE: "3"
+      JOB_WORKER_POOL_SLOT: "2"
+      JOB_WORKER_ALLOWED_JOB_TYPES: "pbmc.pipeline.v1,seurat.pipeline.v1,spatial.seurat.v1,deg.find_markers.v1,enrichment.gsea.v1,cellchat.infer.v1,explore.summarize.v1,condition.pseudobulk_de.v1,expert.r.v1"
+      EXPERT_R_ENABLED: ${EXPERT_R_ENABLED:-false}
+      EXPERT_R_SANDBOX_URL: http://127.0.0.1:8090
+      EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
+      JOB_WORKER_HEALTH_HOST: 127.0.0.1
+      JOB_WORKER_HEALTH_PORT: "3102"
+      JOB_WORKER_DRAIN_TIMEOUT_MS: "630000"
+      JOB_WORKER_MIN_FREE_MEMORY_MB: ${JOB_WORKER_MIN_FREE_MEMORY_MB:-1024}
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      r-compute-1:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3102/readyz').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${WORKER_CPU_LIMIT:-2}
+    pids_limit: 256
+    stop_grace_period: 650s
+    deploy:
+      replicas: 1
+
+  worker-compute-2:
+    <<: [*app-image, *private-runtime]
+    command: ["node", "worker.js"]
+    environment:
+      <<: *db-client-environment
+      NODE_ENV: production
+      HOME: /tmp
+      SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
+      STORAGE_ROOT: /app/storage-volume/data
+      VAULT_ROOT: /app/vault-volume/vault
+      R_RUNTIME_MODE: external
+      R_BACKEND_URL: http://127.0.0.1:8002
+      R_API_TOKEN: ${R_API_TOKEN:?Set R_API_TOKEN to 64 lowercase hexadecimal characters}
+      ENABLE_JOB_WORKER: "true"
+      JOB_WORKER_CONCURRENCY: "1"
+      JOB_WORKER_POOL_SIZE: "3"
+      JOB_WORKER_POOL_SLOT: "3"
+      JOB_WORKER_ALLOWED_JOB_TYPES: "pbmc.pipeline.v1,seurat.pipeline.v1,spatial.seurat.v1,deg.find_markers.v1,enrichment.gsea.v1,cellchat.infer.v1,explore.summarize.v1,condition.pseudobulk_de.v1,expert.r.v1"
+      EXPERT_R_ENABLED: ${EXPERT_R_ENABLED:-false}
+      EXPERT_R_SANDBOX_URL: http://127.0.0.1:8090
+      EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
+      JOB_WORKER_HEALTH_HOST: 127.0.0.1
+      JOB_WORKER_HEALTH_PORT: "3103"
+      JOB_WORKER_DRAIN_TIMEOUT_MS: "630000"
+      JOB_WORKER_MIN_FREE_MEMORY_MB: ${JOB_WORKER_MIN_FREE_MEMORY_MB:-1024}
+    volumes:
+      - durable-storage:/app/storage-volume
+      - legacy-vault:/app/vault-volume
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      r-compute-2:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3103/readyz').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${WORKER_CPU_LIMIT:-2}
+    pids_limit: 256
+    stop_grace_period: 650s
+    deploy:
+      replicas: 1
+
+  # On-demand only: web, workers, and R runtimes must be stopped before backup or restore.
   # The host backup directory should be on separate durable media and writable
   # only by the configured APP_UID. See docs/deployment.md for exact commands.
   operations:
@@ -293,6 +567,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
     restart: "no"
     mem_limit: ${OPS_MEMORY_LIMIT:-2g}
     cpus: ${OPS_CPU_LIMIT:-2}
@@ -326,6 +602,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
     restart: "no"
     mem_limit: ${OPS_MEMORY_LIMIT:-2g}
     cpus: ${OPS_CPU_LIMIT:-2}

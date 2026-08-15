@@ -15,11 +15,12 @@ const currentWs = {
 function renderDeg(overrides = {}) {
   return render(
     <DifferentialExpression
-      datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k' }}
+      datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'attached' }}
       pipelineState={{ cluster: true }}
       currentWs={currentWs}
       userEmail="owner@example.com"
       objectId="ao_abc123"
+      sessionReady
       {...overrides}
     />
   );
@@ -110,7 +111,7 @@ describe('DifferentialExpression durable worker UI', () => {
   it('launches a durable DEG job instead of the legacy live-R endpoint', async () => {
     renderDeg();
 
-    fireEvent.click(screen.getByRole('button', { name: /Launch Durable DEG Job/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Run marker analysis/i }));
 
     await waitFor(() => {
       expect(window.electronAPI.createDegFindMarkersJob).toHaveBeenCalledTimes(1);
@@ -136,19 +137,32 @@ describe('DifferentialExpression durable worker UI', () => {
 
     expect(await screen.findByText('CD3D')).toBeInTheDocument();
     expect(screen.getByText(/summary available/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_summary/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_markers/i)).toBeInTheDocument();
+    expect(screen.getByText(/A saved summary is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/private marker table is available/i)).toBeInTheDocument();
+    expect(screen.queryByText(/art_summary|art_markers/i)).not.toBeInTheDocument();
+  });
+
+  it('allows a durable DEG job to queue while compute is temporarily unavailable', async () => {
+    renderDeg({ computeStatus: { status: 'unavailable' } });
+
+    const launch = screen.getByRole('button', { name: /Run marker analysis/i });
+    expect(launch).toBeEnabled();
+    expect(screen.getByText(/wait in the durable queue/i)).toBeInTheDocument();
+    fireEvent.click(launch);
+
+    await waitFor(() => expect(window.electronAPI.createDegFindMarkersJob).toHaveBeenCalledTimes(1));
   });
 
   it('does not render internal storage, state, or raw marker fields from public metadata', async () => {
     const { container } = renderDeg();
 
-    fireEvent.click(screen.getByRole('button', { name: /Launch Durable DEG Job/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Run marker analysis/i }));
     await screen.findByText('CD3D');
 
     const text = container.textContent || '';
     expect(text).not.toMatch(/vault\/private/i);
     expect(text).not.toMatch(/storage_uri/i);
+    expect(text).not.toMatch(/art_summary|art_markers|job_abc123/i);
     expect(text).not.toMatch(/storageKey/i);
     expect(text).not.toMatch(/state_key/i);
     expect(text).not.toMatch(/user-1:obj/i);
@@ -160,7 +174,46 @@ describe('DifferentialExpression durable worker UI', () => {
       objectId: 'legacy-object',
     });
 
-    expect(screen.getByRole('button', { name: /Launch Durable DEG Job/i })).toBeDisabled();
-    expect(screen.getByText(/Select a DB-backed analysis object/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
+    expect(screen.getByText(/Select a saved analysis before running marker analysis/i)).toBeInTheDocument();
+  });
+
+  it('queues checkpoint-backed DEG when the interactive private R object is not attached', async () => {
+    renderDeg({
+      datasetInfo: { id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'unknown' },
+      sessionReady: false,
+    });
+
+    const launch = screen.getByRole('button', { name: /Run marker analysis/i });
+    expect(launch).toBeEnabled();
+    expect(screen.getByText(/can still run from its private saved checkpoint/i)).toBeInTheDocument();
+    expect(screen.getByText('saved checkpoint', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText('cluster groups required', { exact: true })).not.toBeInTheDocument();
+    fireEvent.click(launch);
+    await waitFor(() => expect(window.electronAPI.createDegFindMarkersJob).toHaveBeenCalledTimes(1));
+  });
+
+  it('does not queue checkpoint-backed DEG for another member\'s analysis object', () => {
+    renderDeg({
+      datasetInfo: {
+        id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', liveState: 'unknown', ownerUserId: 42,
+      },
+      userId: 7,
+      sessionReady: false,
+    });
+
+    expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
+    expect(screen.getByText(/belongs to another member/i)).toBeInTheDocument();
+    expect(window.electronAPI.createDegFindMarkersJob).not.toHaveBeenCalled();
+  });
+
+  it('shows the exact saved checkpoint and blocks launch while live changes are unsaved', () => {
+    const save = vi.fn();
+    renderDeg({ unsavedLiveChanges: true, onSaveCurrentAnalysis: save });
+
+    expect(screen.getByText(/Saved checkpoint used by this run:/i).parentElement).toHaveTextContent('PBMC 3k');
+    expect(screen.getByRole('button', { name: /Run marker analysis/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /Save current analysis/i }));
+    expect(save).toHaveBeenCalledOnce();
   });
 });

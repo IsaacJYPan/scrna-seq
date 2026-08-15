@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Database, Table, Info, CheckCircle, Activity, Clipboard as ClipboardList, RefreshCw, AlertTriangle } from 'lucide-react';
+import { publicErrorMessage } from '../publicError';
 
 export default function Validation({ callApi, datasetInfo, currentWs: _currentWs }) {
   const [loading, setLoading] = useState(false);
@@ -25,12 +26,12 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
     });
     
     if (!data) {
-      setError('R backend error. Check the console for details.');
+      setError(publicErrorMessage(null, 'Validation could not be completed. Try again.'));
       setLoading(false);
       return;
     }
     if (data.error) {
-      setError(data.error);
+      setError(publicErrorMessage(data.error, 'Validation could not be completed. Try again.'));
       setLoading(false);
       return;
     }
@@ -51,7 +52,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
       <div className="flex justify-between items-center mb-8 border-b border-border pb-6">
         <div>
            <h2 className="text-3xl font-black text-white mb-2 tracking-tighter">Validation</h2>
-           <p className="text-slate-400 text-lg">Extract real metrics from the current Seurat object to verify pipeline state.</p>
+           <p className="text-slate-400 text-lg">Review key measurements from the selected analysis.</p>
         </div>
         <button 
           onClick={performSanityCheck}
@@ -91,7 +92,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
            {/* Detailed metrics table */}
            <div className="card">
               <div className="p-4 border-b border-border bg-slate-800/40">
-                 <h3 className="text-xs font-black text-white uppercase tracking-widest">Seurat Object State</h3>
+                 <h3 className="text-xs font-black text-white uppercase tracking-widest">Analysis measurements</h3>
               </div>
               <div className="overflow-x-auto">
                  <table className="w-full text-left text-xs">
@@ -99,24 +100,22 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
                        <tr>
                           <th className="p-4">Metric</th>
                           <th className="p-4">Value</th>
-                          <th className="p-4">Source</th>
                        </tr>
                     </thead>
                     <tbody className="divide-y divide-border/20">
                        {[
-                         { metric: 'Cell Count', value: metrics.cell_count?.toLocaleString(), source: 'ncol(obj)' },
-                         { metric: 'Feature Count', value: metrics.feature_count?.toLocaleString(), source: 'nrow(obj)' },
-                         { metric: 'Median nFeature_RNA', value: metrics.median_genes, source: 'median(obj$nFeature_RNA)' },
-                         { metric: 'Median nCount_RNA', value: metrics.median_counts?.toLocaleString(), source: 'median(obj$nCount_RNA)' },
-                         { metric: 'Mean percent.mt', value: metrics.mito_mean, source: 'mean(obj$percent.mt)' },
-                         { metric: 'Matrix Sparsity', value: metrics.sparsity, source: '1 - nnz/total' },
-                         { metric: 'PC1 Variance Explained', value: metrics.pca_top_variance, source: 'Stdevs(obj)' },
-                         { metric: 'Cluster Count', value: metrics.n_clusters, source: 'FindClusters()' },
+                          { metric: 'Cell Count', value: metrics.cell_count?.toLocaleString() },
+                          { metric: 'Feature Count', value: metrics.feature_count?.toLocaleString() },
+                          { metric: 'Median genes per cell', value: metrics.median_genes },
+                          { metric: 'Median counts per cell', value: metrics.median_counts?.toLocaleString() },
+                          { metric: 'Mean mitochondrial percentage', value: metrics.mito_mean },
+                          { metric: 'Matrix Sparsity', value: metrics.sparsity },
+                          { metric: 'First component variance explained', value: metrics.pca_top_variance },
+                          { metric: 'Cluster Count', value: metrics.n_clusters },
                        ].map((row, i) => (
                          <tr key={i} className="hover:bg-primary/5 transition-all">
                             <td className="p-4 font-bold text-slate-300">{row.metric}</td>
                             <td className="p-4 font-mono text-primary font-bold">{row.value ?? '—'}</td>
-                            <td className="p-4 text-slate-400 font-mono text-[10px]">{row.source}</td>
                          </tr>
                        ))}
                     </tbody>
@@ -126,7 +125,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
 
            {/* Pipeline state */}
            <div className="card p-6">
-              <h3 className="text-xs font-black text-white uppercase tracking-widest mb-4">Pipeline State</h3>
+               <h3 className="text-xs font-black text-white uppercase tracking-widest mb-4">Analysis progress</h3>
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    <span className="font-mono text-primary font-bold">load</span>
@@ -158,7 +157,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center  select-none pointer-events-none">
            <ClipboardList size={128} className="mb-8" />
-           <p className="text-2xl font-black text-slate-300 tracking-tighter">Click "Run Validation" to inspect Seurat state</p>
+            <p className="text-2xl font-black text-slate-300 tracking-tighter">Click "Run Validation" to inspect this analysis</p>
         </div>
       )}
     </div>

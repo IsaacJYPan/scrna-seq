@@ -152,6 +152,40 @@ describe.skipIf(!CONFIGURED)('running project job claim authorization', () => {
     await db.resetSchemaForTests();
   });
 
+  it.each([
+    ['demoted', async (project, owner, analyst) => {
+      await db.updateProjectMemberRole(
+        project.id, analyst.id, 'viewer', { userId: owner.id }
+      );
+    }],
+    ['removed', async (project, owner, analyst) => {
+      await db.removeProjectMember(project.id, analyst.id, { userId: owner.id });
+    }],
+  ])('cancels a queued Seurat job before R contact when its creator is %s', async (_label, revoke) => {
+    const owner = await db.createUser('owner@example.com', 'password123', 'Owner');
+    const analyst = await db.createUser('analyst@example.com', 'password123', 'Analyst');
+    const project = await createProject(owner);
+    await db.addProjectMemberByEmail(project.id, analyst.email, 'analyst', { userId: owner.id });
+    const { job } = await createUploadedSeuratJob(analyst.id, project.id);
+    await revoke(project, owner, analyst);
+    const calls = [];
+
+    await expect(worker(db, calls).runOnce()).resolves.toMatchObject({ status: 'idle' });
+
+    expect(calls).toEqual([]);
+    expect(await db.getProjectJob(owner.id, project.id, job.id)).toMatchObject({
+      status: 'canceled',
+      error: {
+        code: 'PROJECT_ACCESS_REVOKED',
+      },
+    });
+    expect(await db.getWorkerJob(job.id)).toMatchObject({
+      status: 'canceled',
+      attempts: 0,
+      workerId: null,
+    });
+  });
+
   it('executes a claimed Seurat handler after the creator is demoted below analyst', async () => {
     const owner = await db.createUser('owner@example.com', 'password123', 'Owner');
     const analyst = await db.createUser('analyst@example.com', 'password123', 'Analyst');

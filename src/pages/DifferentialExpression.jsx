@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -12,9 +12,11 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
+import { publicErrorMessage } from '../publicError';
 
 const DEG_JOB_TYPE = 'deg.find_markers.v1';
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
+const JOB_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const POLL_MS = 3000;
 
 const DEFAULT_PARAMS = {
@@ -79,26 +81,10 @@ function parseErrorMessage(error) {
   const raw = error?.message || String(error || 'Request failed.');
   try {
     const parsed = JSON.parse(raw);
-    return parsed?.error || raw;
+    return publicErrorMessage(parsed?.error || raw);
   } catch {
-    return raw;
+    return publicErrorMessage(raw);
   }
-}
-
-function redactUnsafeText(value) {
-  const raw = String(value || '');
-  if (!raw) return '';
-  return raw
-    .replace(/[A-Za-z]:[\\/][^\s'")]+/g, '[redacted path]')
-    .replace(/\/__private_vault__\/[^\s'")]+/g, '[redacted path]')
-    .replace(/\bvault\/[^\s'")]+/gi, '[redacted storage]')
-    .replace(/\bstorage_(uri|key)\b/gi, '[redacted storage field]')
-    .replace(/\bstorage(Uri|Key)\b/g, '[redacted storage field]')
-    .replace(/\binternal_storage_key\b/gi, '[redacted storage field]')
-    .replace(/\binternalStorageKey\b/g, '[redacted storage field]')
-    .replace(/\bclaim_?token\b/gi, '[redacted worker field]')
-    .replace(/\bstate_?key\b/gi, '[redacted state field]')
-    .replace(/\buser-\d+:obj-[A-Za-z0-9_-]+/g, '[redacted state]');
 }
 
 function statusTone(status) {
@@ -106,6 +92,25 @@ function statusTone(status) {
   if (status === 'failed' || status === 'canceled') return 'rose';
   if (status === 'running') return 'blue';
   return 'amber';
+}
+
+function displayRunStatus(status) {
+  return {
+    queued: 'Waiting for compute',
+    running: 'Running',
+    completed: 'Complete',
+    failed: 'Needs attention',
+    canceled: 'Canceled',
+  }[status] || 'Unknown';
+}
+
+function researcherRunNote(entry) {
+  if (entry?.level === 'error') return 'This analysis needs attention.';
+  const message = String(entry?.message || '');
+  if (/completed|finished|published/i.test(message)) return 'Analysis finished.';
+  if (/claim|start|running|comput/i.test(message)) return 'Compute started.';
+  if (entry?.level === 'warn') return 'Analysis warning recorded.';
+  return 'Analysis update recorded.';
 }
 
 function badgeClass(tone = 'slate') {
@@ -150,8 +155,8 @@ function JobLogs({ logs }) {
   const rows = Array.isArray(logs) ? logs : [];
   if (!rows.length) {
     return (
-      <EmptyNotice title="No job logs yet">
-        Logs will appear after the worker claims the durable DEG job.
+      <EmptyNotice title="No run notes yet">
+        Run notes will appear after compute begins.
       </EmptyNotice>
     );
   }
@@ -166,7 +171,7 @@ function JobLogs({ logs }) {
             </StatusBadge>
             <span className="font-mono text-textMuted">{formatDate(entry?.ts)}</span>
           </div>
-          <p className="text-textMuted">{redactUnsafeText(entry?.message)}</p>
+          <p className="text-textMuted">{researcherRunNote(entry)}</p>
         </div>
       ))}
     </div>
@@ -178,7 +183,7 @@ function TopMarkersTable({ markers }) {
   if (!rows.length) {
     return (
       <EmptyNotice title="No top-marker preview">
-        The summary artifact did not include a public top-marker preview.
+        The saved summary did not include a top-marker preview.
       </EmptyNotice>
     );
   }
@@ -220,7 +225,14 @@ export default function DifferentialExpression({
   pipelineState,
   currentWs,
   userEmail,
+  userId,
   objectId,
+  sessionReady,
+  setActiveTab,
+  computeStatus,
+  unsavedLiveChanges = false,
+  onSaveCurrentAnalysis,
+  checkpointSaveBusy = false,
 }) {
   const [params, setParam] = useTabParams('deg', userEmail, objectId, DEFAULT_PARAMS);
   const [job, setJob] = useState(null);
@@ -235,8 +247,27 @@ export default function DifferentialExpression({
   const activeProjectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const selectedObjectId = objectId || datasetInfo?.id || currentWs?.selectedObjectIds?.[0] || null;
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
+  const selectedAnalysis = (currentWs?.objects || []).find(object => object.id === selectedObjectId)
+    || datasetInfo
+    || null;
+  const selectedAnalysisName = selectedAnalysis?.displayName || selectedAnalysis?.name || 'Selected analysis';
   const isDbBackedObject = typeof selectedObjectId === 'string' && /^ao_[0-9a-f]+$/i.test(selectedObjectId);
-  const canLaunch = !!userEmail && !!activeProjectId && !!selectedObjectId && isDbBackedObject && !loading;
+  const liveObjectAttached = datasetInfo?.liveState === 'attached';
+  const canWriteProject = JOB_WRITE_ROLES.has(activeProject?.role);
+  const ownsPrivateLiveObject = !datasetInfo?.ownerUserId
+    || Number(datasetInfo.ownerUserId) === Number(userId);
+  const computeReady = !computeStatus?.status || computeStatus.status === 'ready';
+  const canCancelJob = activeProject?.role === 'owner' || activeProject?.role === 'admin';
+  const canLaunch = Boolean(
+    userEmail
+      && activeProjectId
+      && selectedObjectId
+      && isDbBackedObject
+      && canWriteProject
+      && ownsPrivateLiveObject
+      && !unsavedLiveChanges
+      && !loading
+  );
 
   const safeParams = useMemo(() => buildDegParams(params), [params]);
   const terminal = job?.status ? TERMINAL_STATUSES.has(job.status) : false;
@@ -245,20 +276,20 @@ export default function DifferentialExpression({
   const summary = summaryArtifact?.metadata?.summary || null;
   const resolvedParams = summaryArtifact?.metadata?.resolvedParams || job?.parameters || safeParams;
   const visibleLogs = logs.length ? logs : (Array.isArray(job?.logs) ? job.logs : []);
+  const selectionKey = `${activeProjectId || ''}:${selectedObjectId || ''}`;
+  const selectionKeyRef = useRef(selectionKey);
+  selectionKeyRef.current = selectionKey;
 
-  useEffect(() => {
-    setJob(null);
-    setLogs([]);
-    setArtifacts([]);
-    setError(null);
-    setLastRefreshedAt(null);
-  }, [activeProjectId, selectedObjectId]);
-
-  const refreshJobState = useCallback(async (jobId = job?.id, { silent = false } = {}) => {
+  const refreshJobState = useCallback(async (
+    jobId,
+    { silent = false, expectedSelectionKey = selectionKeyRef.current } = {}
+  ) => {
     if (!jobId || !activeProjectId) return null;
     const api = window.electronAPI || {};
     if (!api.getProjectJob || !api.getProjectJobLogs || !api.listProjectJobArtifacts) {
-      setError('Project job APIs are unavailable in this frontend runtime.');
+      if (selectionKeyRef.current === expectedSelectionKey) {
+        setError('This analysis service is temporarily unavailable.');
+      }
       return null;
     }
 
@@ -269,53 +300,102 @@ export default function DifferentialExpression({
         api.getProjectJobLogs(activeProjectId, jobId),
         api.listProjectJobArtifacts(activeProjectId, jobId),
       ]);
+      if (selectionKeyRef.current !== expectedSelectionKey) return null;
       setJob(nextJob || null);
       setLogs(Array.isArray(logResponse?.logs) ? logResponse.logs : []);
       setArtifacts(Array.isArray(nextArtifacts) ? nextArtifacts : []);
       setLastRefreshedAt(new Date().toISOString());
       return nextJob || null;
     } catch (err) {
-      setError(parseErrorMessage(err));
+      if (selectionKeyRef.current === expectedSelectionKey) setError(parseErrorMessage(err));
       return null;
     } finally {
-      if (!silent) setRefreshing(false);
+      if (!silent && selectionKeyRef.current === expectedSelectionKey) setRefreshing(false);
     }
-  }, [activeProjectId, job?.id]);
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    let canceled = false;
+    setJob(null);
+    setLogs([]);
+    setArtifacts([]);
+    setError(null);
+    setLastRefreshedAt(null);
+    setRefreshing(false);
+    setLoading(false);
+
+    const api = window.electronAPI || {};
+    if (!activeProjectId || !selectedObjectId || !api.listProjectJobs) {
+      return () => { canceled = true; };
+    }
+
+    const restoreLatestJob = async () => {
+      try {
+        const jobs = await api.listProjectJobs(activeProjectId, {
+          jobType: DEG_JOB_TYPE,
+          analysisObjectId: selectedObjectId,
+        });
+        const latest = Array.isArray(jobs) ? jobs[0] : null;
+        if (!canceled && latest?.id) {
+          await refreshJobState(latest.id, {
+            silent: true,
+            expectedSelectionKey: selectionKey,
+          });
+        }
+      } catch (err) {
+        if (!canceled) setError(parseErrorMessage(err));
+      }
+    };
+    restoreLatestJob();
+    return () => { canceled = true; };
+  }, [activeProjectId, refreshJobState, selectedObjectId, selectionKey]);
 
   useEffect(() => {
     if (!job?.id || terminal) return undefined;
     let canceled = false;
     const poll = async () => {
-      if (!canceled) await refreshJobState(job.id, { silent: true });
+      if (!canceled) await refreshJobState(job.id, { silent: true, expectedSelectionKey: selectionKey });
     };
     const id = window.setInterval(poll, POLL_MS);
     return () => {
       canceled = true;
       window.clearInterval(id);
     };
-  }, [job?.id, terminal, refreshJobState]);
+  }, [job?.id, selectionKey, terminal, refreshJobState]);
 
   const launchDegJob = useCallback(async () => {
     setError(null);
     if (!userEmail) {
-      setError('Sign in before launching a durable DEG job.');
+      setError('Sign in before starting marker analysis.');
       return;
     }
     if (!activeProjectId) {
-      setError('Select a backend project before launching DEG.');
+      setError('Select a project before starting marker analysis.');
       return;
     }
     if (!selectedObjectId || !isDbBackedObject) {
-      setError('Select a DB-backed analysis object before launching DEG.');
+      setError('Select a saved analysis before running marker analysis.');
       return;
     }
-
+    if (!canWriteProject) {
+      setError('Your project role can view results but cannot start analysis jobs.');
+      return;
+    }
+    if (!ownsPrivateLiveObject) {
+      setError('This analysis belongs to another member. Create a branch from its saved version in your private analysis workspace before running marker analysis.');
+      return;
+    }
+    if (unsavedLiveChanges) {
+      setError('Save the current analysis before starting this durable run. Unsaved live steps are not included in saved-checkpoint jobs.');
+      return;
+    }
     const api = window.electronAPI || {};
     if (!api.createDegFindMarkersJob && !api.createProjectJob) {
-      setError('Project job creation is unavailable in this frontend runtime.');
+      setError('Marker analysis is temporarily unavailable.');
       return;
     }
 
+    const requestSelectionKey = selectionKeyRef.current;
     setLoading(true);
     setLogs([]);
     setArtifacts([]);
@@ -327,34 +407,37 @@ export default function DifferentialExpression({
           analysisObjectId: selectedObjectId,
           parameters: safeParams,
         });
+      if (selectionKeyRef.current !== requestSelectionKey) return undefined;
       setJob(created);
       setLastRefreshedAt(new Date().toISOString());
-      await refreshJobState(created.id, { silent: true });
+      await refreshJobState(created.id, { silent: true, expectedSelectionKey: requestSelectionKey });
     } catch (err) {
-      setError(parseErrorMessage(err));
+      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(err));
     } finally {
-      setLoading(false);
+      if (selectionKeyRef.current === requestSelectionKey) setLoading(false);
     }
-  }, [activeProjectId, isDbBackedObject, refreshJobState, safeParams, selectedObjectId, userEmail]);
+    return undefined;
+  }, [activeProjectId, canWriteProject, isDbBackedObject, ownsPrivateLiveObject, refreshJobState, safeParams, selectedObjectId, unsavedLiveChanges, userEmail]);
 
   const cancelDegJob = useCallback(async () => {
-    if (!activeProjectId || !job?.id) return;
+    if (!activeProjectId || !job?.id || !canCancelJob) return;
     const api = window.electronAPI || {};
     if (!api.cancelProjectJob) {
-      setError('Job cancellation is unavailable in this frontend runtime.');
+      setError('Canceling this analysis is temporarily unavailable.');
       return;
     }
+    const requestSelectionKey = selectionKeyRef.current;
     setCanceling(true);
     setError(null);
     try {
       await api.cancelProjectJob(activeProjectId, job.id);
-      await refreshJobState(job.id, { silent: true });
+      await refreshJobState(job.id, { silent: true, expectedSelectionKey: requestSelectionKey });
     } catch (err) {
-      setError(parseErrorMessage(err));
+      if (selectionKeyRef.current === requestSelectionKey) setError(parseErrorMessage(err));
     } finally {
-      setCanceling(false);
+      if (selectionKeyRef.current === requestSelectionKey) setCanceling(false);
     }
-  }, [activeProjectId, job?.id, refreshJobState]);
+  }, [activeProjectId, canCancelJob, job?.id, refreshJobState]);
 
   if (!datasetInfo) {
     return (
@@ -362,7 +445,7 @@ export default function DifferentialExpression({
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
           <h2 className="mb-2 text-xl font-bold text-white">No Dataset Loaded</h2>
-          <p className="text-sm text-textMuted">Load or select a DB-backed analysis object before launching durable DEG jobs.</p>
+          <p className="text-sm text-textMuted">Load or select a saved analysis before running marker analysis.</p>
         </div>
       </div>
     );
@@ -375,14 +458,22 @@ export default function DifferentialExpression({
           <div>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <h2 className="text-2xl font-bold tracking-tight text-white">Markers / Differential Expression</h2>
-              <StatusBadge tone="green">durable worker</StatusBadge>
-              <StatusBadge tone="amber">no public download</StatusBadge>
+              <StatusBadge tone="slate">recorded run</StatusBadge>
+              <StatusBadge tone="blue">controlled export</StatusBadge>
             </div>
             <p className="max-w-3xl text-sm text-textMuted">
-              Launches an allowlisted `deg.find_markers.v1` project job and reads sanitized artifact metadata. Full marker tables are stored internally and are not downloadable in this version.
+              Run marker analysis with approved settings and review its saved scientific summary. Authorized result tables can be exported from Runs &amp; Results.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
+            <button
+              onClick={launchDegJob}
+              disabled={!canLaunch}
+              className="btn btn-primary inline-flex items-center gap-2 text-sm shadow-lg shadow-primary/20 disabled:opacity-50"
+            >
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+              Run marker analysis
+            </button>
             {job?.id && (
               <button
                 onClick={() => refreshJobState(job.id)}
@@ -393,57 +484,91 @@ export default function DifferentialExpression({
                 Refresh
               </button>
             )}
-            <button
-              onClick={launchDegJob}
-              disabled={!canLaunch}
-              className="btn btn-primary inline-flex items-center gap-2 text-sm shadow-lg shadow-primary/20 disabled:opacity-50"
-            >
-              {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-              Launch Durable DEG Job
-            </button>
           </div>
         </header>
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="rounded-lg border border-border bg-surface/60 p-4">
             <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || activeProjectId || 'None'}</div>
+            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || 'Selected project'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Analysis object</div>
-            <div className="mt-1 truncate font-mono text-text">{selectedObjectId || 'None'}</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
+            <div className="mt-1 truncate text-text" title={selectedAnalysisName}>{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
           </div>
           <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Live-R ownership</div>
-            <div className="mt-1 text-sm text-text">Worker verifies owner before R contact</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Private analysis workspace</div>
+            <div className="mt-1 text-sm text-text">Available only to the analysis owner</div>
           </div>
         </div>
 
+        {isDbBackedObject && ownsPrivateLiveObject && (
+          <div className={`rounded-lg border p-4 text-sm ${unsavedLiveChanges ? 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200' : 'border-primary/20 bg-primary/5 text-textMuted'}`}>
+            <p><span className="font-bold text-text">Saved checkpoint used by this run:</span> {selectedAnalysisName}</p>
+            {unsavedLiveChanges && (
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <p>Unsaved live steps will not be included. Save the current analysis before launching.</p>
+                {typeof onSaveCurrentAnalysis === 'function' && <button type="button" className="btn btn-secondary text-xs" onClick={onSaveCurrentAnalysis} disabled={checkpointSaveBusy}>{checkpointSaveBusy ? 'Saving…' : 'Save current analysis'}</button>}
+              </div>
+            )}
+          </div>
+        )}
+
         {error && (
           <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">
-            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> DEG job unavailable</div>
-            <p className="mt-1 text-sm">{redactUnsafeText(error)}</p>
+            <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Marker analysis unavailable</div>
+            <p className="mt-1 text-sm">{publicErrorMessage(error, 'This analysis needs attention. Review the settings and try again.')}</p>
           </div>
         )}
 
         {!isDbBackedObject && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-            Select a DB-backed analysis object (`ao_*`) before launching the durable DEG worker.
+            Select a saved analysis before running marker analysis.
+          </div>
+        )}
+
+        {isDbBackedObject && !canWriteProject && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Your project role is read-only. You can inspect saved marker summaries, but only an owner, administrator, or analyst can start a new analysis.
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && !ownsPrivateLiveObject && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            This analysis belongs to another member. Use Runs &amp; Results to create a branch from its saved version in your own private analysis workspace.
+            <button onClick={() => setActiveTab?.('history')} className="btn btn-secondary ml-3 text-xs">Open Runs &amp; Results</button>
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && (!sessionReady || !liveObjectAttached) && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Interactive plots are not available until this saved analysis is open in your private workspace. Marker analysis can still run from its private saved checkpoint.
+            <button onClick={() => setActiveTab?.(datasetInfo?.source === 'pbmc3k_demo' ? 'workspace' : 'history')} className="btn btn-secondary ml-3 text-xs">
+              {datasetInfo?.source === 'pbmc3k_demo' ? 'Open workspace' : 'Open Runs & Results'}
+            </button>
+          </div>
+        )}
+
+        {isDbBackedObject && canWriteProject && ownsPrivateLiveObject && !computeReady && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
+            Compute is temporarily unavailable. You can submit this analysis now; it will wait in the durable queue until compute is available.
           </div>
         )}
 
         <section className="rounded-lg border border-border bg-surface/50 p-5">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="text-lg font-bold text-text">Allowlisted Parameters</h3>
+              <h3 className="text-lg font-bold text-text">Approved settings</h3>
               <p className="mt-1 text-sm text-textMuted">
-                The UI sends only the worker-supported DEG parameter set. The statistical test is fixed to Wilcoxon in v1.
+                This marker analysis uses approved settings. The statistical test is fixed to Wilcoxon in v1.
               </p>
             </div>
-            {pipelineState?.cluster ? (
-              <StatusBadge tone="green">cluster state seen</StatusBadge>
+            {!sessionReady || !liveObjectAttached ? (
+              <StatusBadge tone="blue">saved checkpoint</StatusBadge>
+            ) : pipelineState?.cluster ? (
+              <StatusBadge tone="green">cluster groups ready</StatusBadge>
             ) : (
-              <StatusBadge tone="amber">cluster metadata required by R</StatusBadge>
+              <StatusBadge tone="amber">cluster groups required</StatusBadge>
             )}
           </div>
 
@@ -559,41 +684,37 @@ export default function DifferentialExpression({
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text">
                 <Clock size={18} className="text-primary" />
-                Job Status
+                Run status
               </h3>
               <p className="mt-1 text-sm text-textMuted">
-                The job will remain queued until the opt-in worker is running.
+                Compute is allocated when available. When demand is high, a new analysis waits for compute.
               </p>
             </div>
             <div className="flex items-center gap-2">
-              {job?.status && <StatusBadge tone={statusTone(job.status)}>{job.status}</StatusBadge>}
-              {job?.id && !terminal && (
+              {job?.status && <StatusBadge tone={statusTone(job.status)}>{displayRunStatus(job.status)}</StatusBadge>}
+              {job?.id && !terminal && canCancelJob && (
                 <button
                   onClick={cancelDegJob}
                   disabled={canceling}
                   className="btn btn-secondary inline-flex items-center gap-1.5 text-xs disabled:opacity-50"
                 >
                   {canceling ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
-                  Cancel job
+                  Cancel run
                 </button>
               )}
             </div>
           </div>
 
           {!job ? (
-            <EmptyNotice title="No DEG job launched for this object">
-              Configure parameters and launch a durable worker-backed DEG job. This page does not call the legacy `/api/r/deg` endpoint.
+            <EmptyNotice title="No marker analysis run yet">
+              Configure the scientific parameters and run marker analysis when compute is available.
             </EmptyNotice>
           ) : (
             <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
                 <div>
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job ID</div>
-                  <div className="mt-1 font-mono text-text">{job.id}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Job type</div>
-                  <div className="mt-1 font-mono text-text">{job.jobType || DEG_JOB_TYPE}</div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Outcome</div>
+                  <div className="mt-1 text-text">{displayRunStatus(job.status)}</div>
                 </div>
                 <div>
                   <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Last refreshed</div>
@@ -603,7 +724,7 @@ export default function DifferentialExpression({
 
               {job.error?.message && (
                 <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-                  {job.error.code ? `${redactUnsafeText(job.error.code)}: ` : ''}{redactUnsafeText(job.error.message)}
+                  {publicErrorMessage(job.error, 'This analysis needs attention. Review the settings and try again.')}
                 </div>
               )}
 
@@ -617,10 +738,10 @@ export default function DifferentialExpression({
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text">
                 <Archive size={18} className="text-primary" />
-                DEG Summary Artifact
+                Marker analysis summary
               </h3>
               <p className="mt-1 text-sm text-textMuted">
-                Only bounded `deg_summary` metadata is rendered here. The full marker table artifact remains internal.
+                This page shows a bounded scientific summary. The full marker table remains a controlled result.
               </p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}
@@ -632,7 +753,7 @@ export default function DifferentialExpression({
                 <SummaryMetric label="Groups" value={summary.nGroups ?? summary.groups?.length ?? 'NA'} detail={(summary.groups || []).join(', ') || 'Not reported'} />
                 <SummaryMetric label="Markers" value={summary.nMarkersTotal ?? 'NA'} detail="Bounded public count" />
                 <SummaryMetric label="Assay" value={summary.assay || resolvedParams.assay || 'RNA'} detail={`Group by ${summary.groupBy || resolvedParams.groupBy || 'seurat_clusters'}`} />
-                <SummaryMetric label="Test" value={summary.testUse || resolvedParams.testUse || 'wilcox'} detail="Worker v1 allowlist" />
+                <SummaryMetric label="Test" value={summary.testUse || resolvedParams.testUse || 'wilcox'} detail="Approved settings" />
               </div>
 
               {Array.isArray(summary.markersPerGroup) && summary.markersPerGroup.length > 0 && (
@@ -656,24 +777,24 @@ export default function DifferentialExpression({
               <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
                 <div className="mb-1 flex items-center gap-2 font-bold text-text">
                   <CheckCircle2 size={16} className="text-primary" />
-                  Durable DEG completed
+                  Marker analysis complete
                 </div>
-                Summary artifact: <span className="font-mono text-text">{summaryArtifact.id}</span>. Full raw marker tables are internal-only and downloads are not implemented in this version.
+                A saved summary is available. The full marker table is a private, audited export in Runs &amp; Results.
               </div>
             </div>
           ) : job?.status === 'completed' ? (
-            <EmptyNotice title="DEG job completed without public summary metadata">
-              Full marker tables are stored internally and downloads are not implemented in this version.
+            <EmptyNotice title="Marker analysis completed without a summary">
+              Review the run notes. If the private marker table completed, its authorized export is available in Runs &amp; Results.
             </EmptyNotice>
           ) : (
-            <EmptyNotice title="No public DEG summary yet">
-              A `deg_summary` artifact will appear here after the worker completes successfully.
+            <EmptyNotice title="No DEG summary yet">
+              A scientific summary will appear here after the analysis completes successfully.
             </EmptyNotice>
           )}
 
           {markersArtifact && (
             <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-200">
-              Internal marker artifact <span className="font-mono">{markersArtifact.id}</span> exists for job bookkeeping. It is not downloadable, and no storage path or key is shown.
+              A private marker table is available through the authorized, audited export in Runs &amp; Results.
             </div>
           )}
         </section>
@@ -683,7 +804,7 @@ export default function DifferentialExpression({
             <ShieldCheck size={16} className="text-primary" />
             Boundary note
           </div>
-          Project membership shows metadata only. The worker still verifies that the job creator owns the private live R object before contacting R, and this page does not enable CellChat, reports, public downloads, or reproducibility bundles.
+          Project membership shows metadata only. A saved analysis can be opened only in its owner&apos;s private analysis workspace. Result exports require authorization and visibility checks; saved versions are never downloadable.
         </div>
       </div>
     </div>

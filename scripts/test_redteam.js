@@ -3,14 +3,10 @@
 
 const { spawn } = require('child_process');
 const http = require('http');
-const fs = require('fs');
-const path = require('path');
 
 const PORT = 3005;
-const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 let serverProcess;
-let plumberReady = false;
 
 // Helpers
 let PASS = 0, FAIL = 0;
@@ -46,7 +42,7 @@ async function req(method, path, body = null, headers = {}) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         let parsed = data;
-        try { parsed = JSON.parse(data); } catch(e) {}
+        try { parsed = JSON.parse(data); } catch {}
         resolve({ status: res.statusCode, headers: res.headers, body: parsed, rawBody: data });
       });
     });
@@ -71,8 +67,8 @@ function startServer() {
       }
     });
 
-    serverProcess.stderr.on('data', data => {
-      // process.stderr.write(`[SERVER ERR] ${data.toString()}`);
+    serverProcess.stderr.on('data', _data => {
+      // process.stderr.write(`[SERVER ERR] ${_data.toString()}`);
     });
 
     serverProcess.on('error', err => {

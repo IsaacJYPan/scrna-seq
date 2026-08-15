@@ -25,6 +25,8 @@ function renderPage(overrides = {}) {
       userEmail="owner@example.com"
       objectId="ao_abc123"
       sessionReady
+      computeStatus={{ status: 'ready', capabilities: { pathwayEnrichment: true } }}
+      callApi={vi.fn(async () => ({ values: [{ value: '0', count: 100 }] }))}
       {...overrides}
     />
   );
@@ -126,7 +128,8 @@ describe('PathwayEnrichment durable worker UI', () => {
     const launchButton = screen.getByRole('button', { name: /Start Pathway Enrichment/i });
     expect(launchButton).toBeDisabled();
 
-    fireEvent.change(screen.getByRole('textbox', { name: /Target cluster or group/i }), { target: { value: '0' } });
+    await waitFor(() => expect(screen.getByRole('combobox', { name: /Target cluster or group/i })).not.toBeDisabled());
+    fireEvent.change(screen.getByRole('combobox', { name: /Target cluster or group/i }), { target: { value: '0' } });
     fireEvent.change(screen.getByRole('combobox', { name: /Species/i }), { target: { value: 'human' } });
     expect(launchButton).not.toBeDisabled();
     fireEvent.click(launchButton);
@@ -155,8 +158,9 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(screen.getByText('higher in target')).toBeInTheDocument();
     expect(screen.getByText(/Adjusted p ≤ 0\.010/)).toBeInTheDocument();
     expect(screen.getByText(/94.7%/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_enrichment_summary/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_enrichment_results/i)).toBeInTheDocument();
+    expect(screen.getByText(/A saved summary is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/private result table is available/i)).toBeInTheDocument();
+    expect(screen.queryByText(/art_enrichment_summary|art_enrichment_results/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Saved with R 4\.5\.3 and Seurat 5\.3\.1/i)).toBeInTheDocument();
 
     const text = container.textContent || '';
@@ -164,11 +168,13 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(text).not.toMatch(/C:\/private/i);
     expect(text).not.toMatch(/state_key/i);
     expect(text).not.toMatch(/user-1:obj/i);
+    expect(text).not.toMatch(/art_enrichment_summary|art_enrichment_results|job_enrichment/i);
   });
 
   it('explains that enrichment is descriptive and is not proof of pathway activity', () => {
     renderPage();
 
+    expect(screen.getByText('Advanced options')).toBeInTheDocument();
     expect(screen.getByText(/does not prove that the pathway is active/i)).toBeInTheDocument();
     expect(screen.getByText(/sample-aware study design/i)).toBeInTheDocument();
     expect(screen.getByText(/human and mouse gene identifiers use different reference databases/i)).toBeInTheDocument();
@@ -186,7 +192,7 @@ describe('PathwayEnrichment durable worker UI', () => {
     });
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
-    expect(screen.getByText(/Select a saved analysis object/i)).toBeInTheDocument();
+    expect(screen.getByText(/Select a saved analysis before starting pathway enrichment/i)).toBeInTheDocument();
   });
 
   it('restores the latest saved pathway job for the selected object', async () => {
@@ -229,7 +235,7 @@ describe('PathwayEnrichment durable worker UI', () => {
     });
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
-    expect(screen.getByText(/not attached to the private R session/i)).toBeInTheDocument();
+    expect(screen.getByText(/not open in your private analysis workspace/i)).toBeInTheDocument();
   });
 
   it('offers bounded cluster labels from the attached private R object', async () => {
@@ -241,5 +247,29 @@ describe('PathwayEnrichment durable worker UI', () => {
     await waitFor(() => expect(callApi).toHaveBeenCalledWith('/meta-values?column=seurat_clusters'));
     expect(container.querySelector('option[value="2"]')).not.toBeNull();
     expect(container.querySelector('option[value="CD8 T cells"]')).not.toBeNull();
+  });
+
+  it('blocks stale-checkpoint launches while live changes are unsaved', async () => {
+    const save = vi.fn();
+    renderPage({ unsavedLiveChanges: true, onSaveCurrentAnalysis: save });
+
+    expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
+    expect(screen.getByText(/Unsaved live steps will not be included/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Save current analysis/i }));
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('disables enrichment when the compute worker lacks its approved package profile', () => {
+    renderPage({ computeStatus: { status: 'ready', capabilities: { pathwayEnrichment: false } } });
+
+    expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/not installed in this compute profile/i);
+  });
+
+  it('fails closed while the worker capability report is unknown', () => {
+    renderPage({ computeStatus: { status: 'ready', capabilities: {} } });
+
+    expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/readiness has not been confirmed/i);
   });
 });

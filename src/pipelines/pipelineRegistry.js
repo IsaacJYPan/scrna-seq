@@ -316,10 +316,13 @@ export const DEFAULT_SEURAT_PIPELINE = validatePipelineManifest({
     { id: 'geneviewer', label: 'Gene Expression', moduleKey: 'geneExpression' },
     { id: 'heatmap', label: 'Heatmap', moduleKey: 'heatmap' },
     { id: 'dotplot', label: 'Dot Plot', moduleKey: 'dotPlot' },
+    { id: 'explore', label: 'Exploratory Analysis', moduleKey: 'exploratoryAnalysis' },
     { id: 'deg', label: 'Markers / DEG', moduleKey: 'differentialExpression' },
     { id: 'enrichment', label: 'Pathway Enrichment', moduleKey: 'pathwayEnrichment' },
     { id: 'cellchat', label: 'CellChat', moduleKey: 'cellChat' },
-    { id: 'history', label: 'Jobs & Artifacts', moduleKey: 'projectHistory' },
+    { id: 'study-design', label: 'Study Design & Conditions', moduleKey: 'conditionComparison' },
+    { id: 'expert-r', label: 'Expert R', moduleKey: 'expertR', optional: true },
+    { id: 'history', label: 'Runs & Results', moduleKey: 'projectHistory' },
   ],
 }, { allowBuiltInId: true });
 
@@ -357,7 +360,7 @@ export function buildPipelineSidebarSections(manifest, pipelineState = {}) {
   } catch {
     safeManifest = resolvePipelineManifest(getDefaultPipelineManifest());
   }
-  const exploreModuleKeys = new Set(['featurePlot', 'geneExpression', 'heatmap', 'dotPlot']);
+  const exploreModuleKeys = new Set(['featurePlot', 'geneExpression', 'heatmap', 'dotPlot', 'exploratoryAnalysis']);
   const outputModuleKeys = new Set(['differentialExpression', 'pathwayEnrichment', 'cellChat', 'projectHistory']);
   const mainTabs = safeManifest.tabs.filter(tab => !exploreModuleKeys.has(tab.moduleKey) && !outputModuleKeys.has(tab.moduleKey));
   const exploreTabs = safeManifest.tabs.filter(tab => exploreModuleKeys.has(tab.moduleKey));

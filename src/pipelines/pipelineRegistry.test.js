@@ -34,9 +34,12 @@ describe('pipelineRegistry', () => {
       'geneviewer',
       'heatmap',
       'dotplot',
+      'explore',
       'deg',
       'enrichment',
       'cellchat',
+      'study-design',
+      'expert-r',
       'history',
     ]);
     expect(definition.tabs.some(tab => Object.keys(tab).some(key => [

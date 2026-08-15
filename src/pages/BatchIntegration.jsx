@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Layers, AlertTriangle, CheckCircle2, RefreshCw, Zap, GitMerge, FileText } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
+import { publicErrorMessage } from '../publicError';
 
 const METHOD_INFO = {
   harmony: {
@@ -17,7 +18,7 @@ const METHOD_INFO = {
     reduction: 'harmony',
   },
   cca: {
-    name: 'Seurat CCA',
+    name: 'CCA integration',
     label: 'CCA / Anchors',
     color: 'from-cyan-600 to-teal-700',
     borderColor: 'border-cyan-500/50',
@@ -25,7 +26,7 @@ const METHOD_INFO = {
     textColor: 'text-cyan-400',
     description: 'Canonical Correlation Analysis with anchor-based data integration. Creates a fully integrated expression matrix.',
     pros: ['Robust cross-platform integration', 'Creates integrated assay', 'Best for label transfer', 'Reference-based compatible'],
-    package: null, // built into Seurat
+    package: null,
     reduction: 'pca (integrated assay)',
   },
 };
@@ -83,18 +84,17 @@ export default function BatchIntegration({
         if (preferred) setParam('batchCol', preferred.name);
       }
     } catch (e) {
-      setColsError(e.message);
+      setColsError(publicErrorMessage(e, 'Batch information could not be loaded. Please try again.'));
     } finally {
       setColsLoading(false);
     }
-  }, [datasetInfo, sessionReady, batchCol, setParam]);
+  }, [callApi, datasetInfo, sessionReady, batchCol, setParam]);
 
   useEffect(() => {
     if (datasetInfo && sessionReady && pipelineState?.normalize) {
       fetchMetaCols();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetInfo?.id, sessionReady, pipelineState?.normalize]);
+  }, [datasetInfo, sessionReady, pipelineState?.normalize, fetchMetaCols]);
 
   // Fetch preview for the selected batch column
   const fetchBatchPreview = useCallback(async (col) => {
@@ -104,7 +104,7 @@ export default function BatchIntegration({
       if (data.error) throw new Error(data.error);
       setBatchPreview(data);
     } catch {}
-  }, [sessionReady]);
+  }, [callApi, sessionReady]);
 
   useEffect(() => {
     if (batchCol) fetchBatchPreview(batchCol);
@@ -168,7 +168,7 @@ export default function BatchIntegration({
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            ><FileText size={15} /> View Step Script</button>
+            ><FileText size={15} /> View recorded analysis</button>
           )}
           <button
             onClick={() => runStep(false)}

@@ -324,6 +324,7 @@ describe.skipIf(!CONFIGURED)('Postgres contract (hosted-service database foundat
 
     const graph = await pg.getProjectAnalysisObjectLineage(viewer.id, project.id, root.id);
     expect(graph.nodes.map(n => n.id)).toEqual(expect.arrayContaining([root.id, child.id, secondChild.id]));
+    expect(graph.nodes.find(n => n.id === root.id)?.createdAt).toBeTruthy();
     expect(graph.edges.map(e => e.childAnalysisObjectId)).toEqual(expect.arrayContaining([child.id, secondChild.id]));
   });
 });

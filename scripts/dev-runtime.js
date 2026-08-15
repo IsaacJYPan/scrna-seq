@@ -7,6 +7,11 @@ const path = require('path');
 
 const DEFAULT_WORKER_DRAIN_MS = 630000;
 const DEFAULT_CHILD_STOP_MS = 15000;
+// The production worker deliberately keeps its 1 GiB admission default in
+// workerRuntime.js. The all-in-one local supervisor needs a smaller fallback so
+// contributors can exercise the durable workflow on constrained workstations.
+// An explicit environment value always wins.
+const DEFAULT_DEV_WORKER_MIN_FREE_MEMORY_MB = 256;
 
 function positiveInt(value, fallback) {
   const parsed = Number(value);
@@ -33,7 +38,7 @@ function waitForExit(child, timeoutMs) {
 function requestIpcShutdown(child) {
   if (!child || !child.connected || typeof child.send !== 'function') return false;
   try {
-    child.send({ type: 'benchone:shutdown' }, () => {});
+    child.send({ type: 'traceomics:shutdown' }, () => {});
     return true;
   } catch {
     return false;
@@ -67,6 +72,12 @@ function createDevRuntime(options = {}) {
   const plumberPort = env.PLUMBER_PORT || '8000';
   const rBaseUrl = env.R_BACKEND_URL || `http://127.0.0.1:${plumberPort}`;
   const common = { ...env, R_API_TOKEN: sharedToken };
+  const configuredWorkerMinFreeMemoryMb = env.JOB_WORKER_MIN_FREE_MEMORY_MB;
+  const devWorkerMinFreeMemoryMb = configuredWorkerMinFreeMemoryMb === undefined
+    || configuredWorkerMinFreeMemoryMb === null
+    || String(configuredWorkerMinFreeMemoryMb).trim() === ''
+    ? String(DEFAULT_DEV_WORKER_MIN_FREE_MEMORY_MB)
+    : String(configuredWorkerMinFreeMemoryMb).trim();
   const children = new Map();
   let stopping = false;
   let stopPromise = null;
@@ -106,6 +117,7 @@ function createDevRuntime(options = {}) {
       ENABLE_JOB_WORKER: 'true',
       R_RUNTIME_MODE: 'external',
       R_BACKEND_URL: rBaseUrl,
+      JOB_WORKER_MIN_FREE_MEMORY_MB: devWorkerMinFreeMemoryMb,
     }, true);
     return api;
   }
@@ -170,6 +182,7 @@ if (require.main === module) main();
 
 module.exports = {
   DEFAULT_WORKER_DRAIN_MS,
+  DEFAULT_DEV_WORKER_MIN_FREE_MEMORY_MB,
   waitForExit,
   stopChild,
   createDevRuntime,

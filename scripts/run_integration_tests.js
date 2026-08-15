@@ -36,11 +36,10 @@ const RUN_R_SCRIPT = path.join(WORKSPACE, 'r-backend', 'run.R');
 const EXPORTS_DIR  = path.join(WORKSPACE, 'exports');
 const TIMEOUT_MS   = 300_000;   // 5 min per request (some steps are slow)
 const STARTUP_WAIT = 60_000;    // 60 s to let Plumber fully start
-const API_TOKEN    = 'TEST_DUMMY_TOKEN_123'; // Mock API token for testing
 const TEST_EMAIL   = `integration-${Date.now()}@example.com`;
 const TEST_PASSWORD = 'IntegrationTest123!';
 let authToken = null;
-const SESSION_COOKIE_NAME = 'benchone_session';
+const SESSION_COOKIE_NAME = 'traceomics_session';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -117,7 +116,7 @@ async function req(method, path, body = null, unauth = false) {
         clearTimeout(timeout);
         try {
           resolve({ status: res.statusCode, body: JSON.parse(data), headers: res.headers });
-        } catch (e) {
+        } catch {
           resolve({ status: res.statusCode, body: data, headers: res.headers });
         }
       });
@@ -190,7 +189,7 @@ async function waitForHealth(maxMs) {
       await ensureAuth();
       const { status } = await req('GET', '/health');
       if (status === 200) return true;
-    } catch (_) { /* not ready yet */ }
+    } catch { /* not ready yet */ }
     await sleep(1000);
   }
   return false;
@@ -210,13 +209,13 @@ function findRscript() {
       if (cfg.rscriptPath && fs.existsSync(cfg.rscriptPath)) {
         return cfg.rscriptPath;
       }
-    } catch (_) { /* ignore */ }
+    } catch { /* ignore */ }
   }
 
   for (const candidate of RSCRIPT_CANDIDATES) {
     try {
       if (fs.existsSync(candidate)) return candidate;
-    } catch (_) { /* path check failed */ }
+    } catch { /* path check failed */ }
   }
   // Fall back – let the shell resolve it
   return 'Rscript';
@@ -259,10 +258,8 @@ async function main() {
     cwd: WORKSPACE,
   });
 
-  let rStdout = '';
-  let rStderr = '';
-  rProc.stdout.on('data', d => { rStdout += d; process.stdout.write(`[R] ${d}`); });
-  rProc.stderr.on('data', d => { rStderr += d; process.stdout.write(`[R:err] ${d}`); });
+  rProc.stdout.on('data', d => { process.stdout.write(`[R] ${d}`); });
+  rProc.stderr.on('data', d => { process.stdout.write(`[R:err] ${d}`); });
   rProc.on('error', e => console.error(`[Plumber spawn error] ${e.message}`));
 
   info(`Waiting up to ${STARTUP_WAIT / 1000}s for Plumber to start on port ${TEST_PORT}...`);
@@ -306,12 +303,10 @@ async function main() {
 
   // ── 4. Load PBMC3k dataset ──────────────────────────────────────────────────
   section('STEP 4: /load-data (PBMC3k)');
-  let loadResult = null;
   try {
     info('Loading pbmc3k — this may take 30-60 seconds...');
     const r = await req('GET', '/load-data?min_cells=3&min_features=200');
     if (assertOk('/load-data returns 200 with no error', r)) {
-      loadResult = r.body;
       const res = r.body.result || {};
       assert('/load-data result has cells count', typeof res.cells === 'number');
       assert('/load-data result has features count', typeof res.features === 'number');
@@ -426,7 +421,6 @@ async function main() {
 
   // ── 11. UMAP 2D ─────────────────────────────────────────────────────────────
   section('STEP 11: /umap (2D)');
-  let umapTraceData = null;
   try {
     info('Running UMAP — may take 30-60 seconds...');
     const r = await req('GET', '/umap?dims=15&n_components=2&n_neighbors=30&min_dist=0.3');
@@ -440,7 +434,6 @@ async function main() {
       assert('/umap trace has x coordinates', Array.isArray(trace.x) && trace.x.length > 0);
       assert('/umap trace has y coordinates', Array.isArray(trace.y) && trace.y.length > 0);
       assert('/umap trace does NOT have z (2D mode)', trace.z === undefined || trace.z === null);
-      umapTraceData = res.trace_data;
       const totalCells = res.trace_data.reduce((sum, t) => sum + (t.x ? t.x.length : 0), 0);
       info(`UMAP 2D: ${res.trace_data.length} clusters, ${totalCells} cells plotted`);
     }

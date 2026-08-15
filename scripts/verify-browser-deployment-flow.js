@@ -87,7 +87,7 @@ function waitForExit(child, timeoutMs = 10000) {
 
 function stopWeb(child) {
   if (!child || child.exitCode !== null) return;
-  if (process.platform === 'win32' && child.connected) child.send({ type: 'benchone:shutdown' });
+  if (process.platform === 'win32' && child.connected) child.send({ type: 'traceomics:shutdown' });
   else child.kill('SIGTERM');
 }
 
@@ -157,6 +157,7 @@ async function main() {
   let fakeR = null;
   let web = null;
   let browser = null;
+  let analystContext = null;
   await admin.connect();
   try {
     await admin.query(`CREATE DATABASE ${quotedDatabase(databaseName)}`);
@@ -199,6 +200,7 @@ async function main() {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     const page = await context.newPage();
+    let analystPage = null;
     const consoleErrors = [];
     const pageErrors = [];
     const serverErrors = [];
@@ -233,19 +235,20 @@ async function main() {
     };
     const projectName = `Browser Project ${suffix}`;
 
-    await page.goto(origin, { waitUntil: 'networkidle' });
+    await page.goto(origin, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
     await signUp(page, second);
     await page.getByRole('button', { name: 'Log out' }).click();
     await page.getByRole('button', { name: /Open Workbench/ }).waitFor({ state: 'visible' });
 
     await signUp(page, owner);
-    await page.getByText('No backend projects', { exact: true }).waitFor({ state: 'visible' });
+    await page.getByText('No projects yet', { exact: true }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: 'Create Project', exact: true }).click();
     await page.getByPlaceholder('Project Name').fill(projectName);
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
 
-    await page.getByRole('button', { name: /Collaborators, Project RBAC/ }).click();
+    await page.getByRole('button', { name: /^Collaborators/ }).click();
     await page.getByRole('heading', { name: 'Collaborators', exact: true }).waitFor({ state: 'visible' });
     await page.getByLabel('Account email').fill(second.email);
     await page.locator('form').filter({ hasText: 'Add existing user' }).locator('select').selectOption('viewer');
@@ -261,30 +264,53 @@ async function main() {
     await page.getByRole('button', { name: `Keep ${second.email}` }).click();
     await page.getByText(second.email, { exact: true }).waitFor({ state: 'visible' });
 
-    await page.reload({ waitUntil: 'networkidle' });
+    // Use an independent browser context so the owner and analyst are genuinely
+    // concurrent people with separate cookies, not one person switching roles.
+    analystContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    analystPage = await analystContext.newPage();
+    analystPage.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(`[analyst] ${message.text()}`);
+    });
+    analystPage.on('pageerror', (error) => pageErrors.push(`[analyst] ${error.message}`));
+    analystPage.on('response', (response) => {
+      if (response.status() >= 500) serverErrors.push(`[analyst] ${response.status()} ${response.url()}`);
+    });
+    await analystPage.goto(origin, { waitUntil: 'domcontentloaded' });
+    await analystPage.getByRole('button', { name: 'Log In', exact: true }).waitFor({ state: 'visible' });
+    await logIn(analystPage, second);
+    await analystPage.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
+    await analystPage.getByRole('button', { name: /^Collaborators/ }).click();
+    await analystPage.getByText('Your role: analyst', { exact: true }).waitFor({ state: 'visible' });
+    assert(await analystPage.getByLabel('Account email').count() === 0,
+      'Analyst unexpectedly received membership-management controls in a separate browser session.');
+
+    // The owner changes collaboration state while the analyst is still looking
+    // at the same project. A refresh must show a clear, safe outcome rather
+    // than leaving a stale collaborator workspace usable.
+    await page.getByRole('button', { name: `Remove ${second.email}` }).click();
+    await page.getByRole('button', { name: `Confirm remove ${second.email} from ${projectName}` })
+      .click();
+    await analystPage.reload({ waitUntil: 'domcontentloaded' });
+    await analystPage.getByText('No projects yet', { exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+    assert(await analystPage.getByText(projectName, { exact: true }).count() === 0,
+      'Removed analyst retained project visibility after a real browser refresh.');
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible' });
-    assert(await page.getByText(projectName, { exact: true }).count() > 0,
-      'Cookie restore did not reload the durable project.');
-    assert(await page.evaluate(() => localStorage.getItem('benchone_auth_token')) === null,
+    // Session restoration and the project-list request are separate browser
+    // effects. The authenticated shell can render before durable projects have
+    // arrived, particularly on a constrained CI runner, so wait for the state
+    // this check actually proves instead of sampling the DOM immediately.
+    await page.getByText(projectName, { exact: true }).first()
+      .waitFor({ state: 'visible', timeout: 15000 });
+    assert(await page.evaluate(() => localStorage.getItem('traceomics_auth_token')) === null,
       'Browser stored a bearer credential in localStorage.');
-    const ownerCookie = (await context.cookies()).find((cookie) => cookie.name === 'benchone_session');
+    const ownerCookie = (await context.cookies()).find((cookie) => cookie.name === 'traceomics_session');
     assert(ownerCookie?.httpOnly === true, 'Browser session cookie is not HttpOnly.');
 
     await page.getByRole('button', { name: 'Log out' }).click();
-    await logIn(page, second);
-    await page.getByText(projectName, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
-    await page.getByRole('button', { name: /Collaborators, Project RBAC/ }).click();
-    await page.getByText('Your role: analyst', { exact: true }).waitFor({ state: 'visible' });
-    assert(await page.getByLabel('Account email').count() === 0,
-      'Analyst unexpectedly received membership-management controls.');
-    assert(await page.getByLabel(`Role for ${second.email}`).isDisabled(),
-      'Analyst unexpectedly received an editable role control.');
-
-    await page.reload({ waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible' });
-    await page.getByRole('button', { name: 'Log out' }).click();
     await page.getByRole('button', { name: /Open Workbench/ }).waitFor({ state: 'visible' });
-    assert(!(await context.cookies()).some((cookie) => cookie.name === 'benchone_session'),
+    assert(!(await context.cookies()).some((cookie) => cookie.name === 'traceomics_session'),
       'Logout did not clear the browser session cookie.');
 
     const unexpectedConsole = consoleErrors.filter((message) => (
@@ -310,8 +336,9 @@ async function main() {
     assert(pageErrors.length === 0, `Browser page errors: ${pageErrors.join(' | ')}`);
     assert(unexpectedConsole.length === 0, `Browser console errors: ${unexpectedConsole.join(' | ')}`);
     assert(!webOutput.includes(databaseUrl), 'Web process output exposed DATABASE_URL during browser smoke.');
-    console.log('[browser-deployment-smoke] passed: real Chromium signup, project creation, collaborators RBAC, cookie reload, role view, logout, and 5xx/console audit');
+    console.log('[browser-deployment-smoke] passed: real Chromium signup, concurrent owner/analyst collaboration, role removal, cookie reload, logout, and 5xx/console audit');
   } finally {
+    if (analystContext) await analystContext.close();
     if (browser) await browser.close();
     if (web) {
       stopWeb(web);

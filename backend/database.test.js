@@ -5,7 +5,8 @@ const db = require('./pgDatabase');
 
 const {
   saveProvenance, getProvenance,
-  saveFigure, getFiguresByUser, deleteFigure
+  saveFigure, getFiguresByUser, deleteFigure,
+  reportStandaloneWorkerRuntimeState, getStandaloneWorkerRuntimeStatus
 } = db;
 
 const CONFIGURED = config.hasPostgresConnection();
@@ -39,6 +40,56 @@ describe.skipIf(!CONFIGURED)('pgDatabase.js tests', () => {
     const figures = await getFiguresByUser('test@example.com');
     expect(figures.length).toBe(1);
     expect(figures[0].id).toBe('test-init-id');
+  });
+
+  it('resets the worker readiness singleton with the rest of the test schema', async () => {
+    await reportStandaloneWorkerRuntimeState('ready');
+    expect((await getStandaloneWorkerRuntimeStatus()).status).toBe('ready');
+
+    await db.resetSchemaForTests();
+
+    await expect(getStandaloneWorkerRuntimeStatus()).resolves.toEqual({
+      status: 'unknown',
+      updatedAt: null,
+      capabilities: {},
+    });
+  });
+
+  it('aggregates private compute-pool readiness without exposing slot details', async () => {
+    await reportStandaloneWorkerRuntimeState('ready', { slot: 2, capabilities: { pathwayEnrichment: true } });
+    await reportStandaloneWorkerRuntimeState('unavailable', { slot: 3 });
+
+    const partiallyReady = await getStandaloneWorkerRuntimeStatus();
+    expect(partiallyReady.status).toBe('ready');
+    expect(partiallyReady.updatedAt).toEqual(expect.any(String));
+    expect(partiallyReady.capabilities).toEqual({
+      pathwayEnrichment: true,
+      cellChat: false,
+    });
+    expect(Object.keys(partiallyReady).sort()).toEqual(['capabilities', 'status', 'updatedAt']);
+
+    await reportStandaloneWorkerRuntimeState('ready', {
+      slot: 3,
+      capabilities: { pathwayEnrichment: false, cellChat: true },
+    });
+    const mixedCapabilities = await getStandaloneWorkerRuntimeStatus();
+    expect(mixedCapabilities.capabilities).toEqual({
+      pathwayEnrichment: false,
+      cellChat: false,
+    });
+
+    await reportStandaloneWorkerRuntimeState('unavailable', { slot: 2 });
+    await reportStandaloneWorkerRuntimeState('unavailable', { slot: 3 });
+    const unavailable = await getStandaloneWorkerRuntimeStatus();
+    expect(unavailable.status).toBe('unavailable');
+    expect(Object.keys(unavailable).sort()).toEqual(['capabilities', 'status', 'updatedAt']);
+  });
+
+  it('rejects invalid worker readiness slots', async () => {
+    for (const slot of [0, 9, 1.5, 'invalid']) {
+      await expect(reportStandaloneWorkerRuntimeState('ready', { slot }))
+        .rejects.toMatchObject({ code: 'INVALID_WORKER_POOL_SLOT' });
+    }
   });
 
   it('should save and retrieve a provenance record', async () => {

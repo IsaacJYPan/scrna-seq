@@ -13,14 +13,25 @@ on:
       - ready_for_review
   workflow_dispatch:
 
+# A newer push makes an older run irrelevant. Cancel it before it can continue
+# consuming time in the R, container, and browser certification stages.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/scrna_test
   NODE_ENV: test
 
 jobs:
-  test:
+  preflight:
+    name: Fast release preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -50,8 +61,88 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Audit Node dependency security
-        run: npm audit --audit-level=high
+      - name: Run local-equivalent release preflight
+        # This exact command is available to contributors locally. It runs the
+        # dependency audit, lint, declarative Compose policy check, frontend,
+        # every backend test against real Postgres, the development supervisor
+        # contract, and the production build before costly certification starts.
+        run: npm run check:ci-preflight
+
+  browser-preflight:
+    name: Browser release preflight
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scrna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Chromium for preflight
+        run: npx playwright install --with-deps chromium
+
+      - name: Run local-equivalent browser preflight
+        # These fast browser contracts previously ran after the R/scientific
+        # suite. Gate expensive work on them instead.
+        run: npm run check:browser-preflight
+
+  test:
+    needs: browser-preflight
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scrna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm ci
 
       - name: Install PostgreSQL client tools
         # The real backup/restore drill uses pg_dump and pg_restore against the
@@ -60,21 +151,12 @@ jobs:
           sudo apt-get update &&
           sudo apt-get install -y --no-install-recommends postgresql-client
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Validate supported deployment topology
-        # Renders Compose and pins the single-host security invariants: private
-        # shared namespace, loopback-only ingress, non-root/read-only services,
-        # resource bounds, one replica, and safe shutdown ordering.
-        run: npm run test:deployment:compose
-
       - name: Validate and build deployable Node images
         run: |
           docker build --check --target runtime .
           docker build --check -f r-backend/Dockerfile r-backend
-          docker build --target runtime -t scrna-seq-workbench:ci .
-          docker build --target operations -t scrna-seq-operations:ci .
+          docker build --target runtime -t traceomics:ci .
+          docker build --target operations -t traceomics-operations:ci .
 
       - name: Boot Compose and run containerized backup/restore drill
         # Uses the real hardened Node/Postgres/operations images and namespace.
@@ -119,25 +201,6 @@ jobs:
       - name: Run Unit Tests
         run: npm run test:unit
 
-      - name: Run Frontend Tests
-        run: npm run test:frontend
-
-      - name: Run Backend Tests
-        # The FULL backend suite (backend/*.test.js) against the real Postgres
-        # service: per-user isolation, cookie-only versioned auth, rate limits,
-        # credentials, fail-fast config, health/drain, offline backup validation,
-        # org/project RBAC, datasets, analysis-objects, the durable job-worker
-        # claim/lease/heartbeat contract, standalone worker process/runtime,
-        # crash-output recovery, artifacts/checkpoints, lineage DAG, the R-proxy
-        # ownership/policy/diagnostics gates, and the mocked-R pipeline
-        # worker handlers (pbmc/seurat/deg/checkpoint-load/checkpoint-fork/
-        # object-inspect/bridge).
-        # Every DB-backed suite resets the schema via resetSchemaForTests(), so no
-        # separate init step is needed. Suites with no DB dependency (pure
-        # validators, serializers, config) run unconditionally; DB/HTTP suites skip
-        # only when DATABASE_URL is unset (never in CI).
-        run: npm run test:backend
-
       - name: Run real backup and restore drill
         # Creates an isolated source DB, writes durable dataset/artifact bytes,
         # runs real pg_dump + pg_restore into a new DB/roots, verifies hashes,
@@ -150,19 +213,6 @@ jobs:
         # secure cookie + headers, CSRF, single-web locking, session revocation,
         # graceful drain, and stable public error boundaries.
         run: npm run test:deployment:smoke
-
-      - name: Run Standalone Worker Process and Recovery Tests
-        # Explicitly named audit gate: real child processes + Postgres claim/lease
-        # recovery, dependency/readiness policy, bounded R calls, and crash-window
-        # output convergence. These also run in the full backend suite above.
-        run: >-
-          npx vitest run
-          backend/standalone-worker-runtime.test.js
-          backend/standalone-worker-process.test.js
-          backend/job-output-recovery.test.js
-          backend/job-recovery-lease-fence.test.js
-          backend/r-worker-caller-bounds.test.js
-          --environment node --fileParallelism=false
 
       - name: Run R State Proxy Isolation Test
         # Live Express + R check for owner-scoped DB-backed R object state.
@@ -223,27 +273,14 @@ jobs:
         run: npm run test:cellchat-worker-pipeline
 
       - name: Run Visual/UX Tests
-        # Mocked frontend visual smoke test; it checks UI rendering/layout.
-        run: npm run test:visual
-
-      - name: Run CellChat Playwright browser flow
-        # Real React browser flow with a mocked project/job transport. It proves
-        # explicit scope selection, durable job creation, owner-local group-key
-        # rendering, and sanitized summary display; real CellChat R execution is
-        # covered by the dedicated R smoke above.
-        run: npm run test:cellchat-browser
-
-      - name: Run real Chromium deployment flow
-        # No request interception: browser -> built React app -> actual Express
-        # -> Postgres/private fake R. Covers signup/login/logout, durable project
-        # reload, collaborators RBAC UI, cookies, console, 5xx, and network audit.
-        run: npm run test:deployment:browser
-
-      - name: Build Application
-        run: npm run build
+        # Generated screenshots stay outside version control. CI checks the
+        # browser flows, accessibility, layout, console, and network behavior.
+        run: npm run test:visual:smoke
 
   r-image-smoke:
     name: Build and boot production R image
+    needs: browser-preflight
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -260,7 +297,7 @@ jobs:
           context: r-backend
           file: r-backend/Dockerfile
           load: true
-          tags: scrna-seq-r:ci
+          tags: traceomics-r:ci
           cache-from: type=gha,scope=production-r-image
           cache-to: type=gha,mode=max,scope=production-r-image
 
@@ -269,8 +306,8 @@ jobs:
           docker run --rm --read-only --user 10001:10001
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
-          --entrypoint Rscript scrna-seq-r:ci -e
-          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','BiocNeighbors','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','NMF','presto','CellChat'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE))); stopifnot(identical(as.character(utils::packageVersion('CellChat')), '2.1.2'))"
+          --entrypoint Rscript traceomics-r:ci -e
+          "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','BiocNeighbors','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','edgeR','limma','NMF','presto','CellChat'); stopifnot(all(vapply(required, requireNamespace, logical(1), quietly=TRUE))); stopifnot(identical(as.character(utils::packageVersion('CellChat')), '2.1.2'))"
 
       - name: Run ranked pathway enrichment in the production R image
         run: >-
@@ -278,7 +315,7 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
           --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly"
-          --workdir /workspace --entrypoint Rscript scrna-seq-r:ci
+          --workdir /workspace --entrypoint Rscript traceomics-r:ci
           scripts/verify_enrichment_gsea.R
 
       - name: Run CellChat inference in the production R image
@@ -287,7 +324,7 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges
           --tmpfs /tmp:rw,noexec,nosuid,nodev
           --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace,readonly"
-          --workdir /workspace --entrypoint Rscript scrna-seq-r:ci
+          --workdir /workspace --entrypoint Rscript traceomics-r:ci
           scripts/verify_cellchat_inference.R
 
       - name: Boot R image and audit authenticated health
@@ -299,7 +336,7 @@ jobs:
             --pids-limit 1024 --memory 4g --cpus 2 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev \
             -e API_TOKEN="$token" -e PLUMBER_HOST=127.0.0.1 \
-            scrna-seq-r:ci)"
+            traceomics-r:ci)"
           cleanup() {
             docker logs "$container" || true
             docker rm -f "$container" >/dev/null 2>&1 || true

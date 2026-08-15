@@ -86,7 +86,7 @@ function request(method, requestPath, { token, objectId, body } = {}) {
         let parsed = data;
         try {
           parsed = data ? JSON.parse(data) : null;
-        } catch (_) {}
+        } catch {}
         resolve({ status: res.statusCode, body: parsed, headers: res.headers });
       });
     });

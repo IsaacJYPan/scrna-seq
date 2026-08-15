@@ -1033,6 +1033,41 @@ run_test("AST Security Sandbox for Custom Code", function() {
 })
 
 # ═════════════════════════════════════════════════════════════════════════════
+# TEST: pseudobulk design accepts Plumber's valid data-frame JSON simplification
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+run_test("pseudobulk design normalizes Plumber data-frame sample arrays", function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- sub("^--file=", "", args[grep("^--file=", args)])
+  script_dir <- if (length(file_arg) > 0) dirname(normalizePath(file_arg)) else getwd()
+  candidates <- c(
+    file.path(getwd(), "r-backend", "plumber.R"),
+    file.path(getwd(), "..", "plumber.R"),
+    file.path(script_dir, "..", "plumber.R")
+  )
+  existing <- Filter(file.exists, candidates)
+  assert("plumber.R located for pseudobulk design test", length(existing) > 0)
+  plumber_env <- new.env()
+  sys.source(existing[1], envir = plumber_env)
+  normalize_design <- get("normalize_condition_pseudobulk_design", envir = plumber_env)
+  samples <- data.frame(
+    sample_id = paste0("sample_", 1:4),
+    condition = c("denominator", "denominator", "numerator", "numerator"),
+    donor_code = paste0("D", 1:4),
+    unit_id = paste0("sample_", 1:4),
+    cell_metadata_column = rep("sample_id", 4),
+    cell_metadata_value = c("C1", "C2", "T1", "T2"),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  parsed <- normalize_design(list(
+    unit_of_replication = "sample", paired = FALSE,
+    cell_type_column = "seurat_clusters", samples = samples
+  ))
+  assert("all four parser-simplified samples survive", length(parsed$samples) == 4L)
+  assert("sample fields are preserved", identical(parsed$samples[[3]]$cell_metadata_value, "T1"))
+})
+
 # SUMMARY
 # ═════════════════════════════════════════════════════════════════════════════
 

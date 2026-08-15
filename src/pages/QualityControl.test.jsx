@@ -2,15 +2,15 @@ import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// react-plotly.js pulls in the full Plotly bundle; stub it so the QC page can
-// render in jsdom without WebGL/canvas.
-vi.mock('react-plotly.js', () => ({
+// The shared plot wrapper is covered separately; keep this page test focused
+// on QC behavior without a real canvas in jsdom.
+vi.mock('../components/Plot', () => ({
   default: () => <div data-testid="plot-stub" />,
 }));
 
 import QualityControl from './QualityControl';
 
-const datasetInfo = { id: 'ao_abc123', name: 'PBMC 3k' };
+const datasetInfo = { id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k', ownerUserId: 7 };
 
 function baseProps(overrides = {}) {
   return {
@@ -22,7 +22,12 @@ function baseProps(overrides = {}) {
     theme: 'dark',
     rSessionId: 'sess-1',
     userEmail: 'user@example.com',
+    userId: 7,
     objectId: 'ao_abc123',
+    currentWs: {
+      selectedProjectId: 'proj_1',
+      projects: [{ id: 'proj_1', role: 'owner' }],
+    },
     sessionReady: true,
     ...overrides,
   };
@@ -62,5 +67,20 @@ describe('QualityControl', () => {
     expect(screen.getByText(/Max Features must be/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Apply QC Filters/i })).toBeDisabled();
     expect(callApi).toHaveBeenCalledTimes(1);
+  });
+
+  it('presents viewers with read-only filtering controls', async () => {
+    const callApi = vi.fn(async () => ({ percent_mt: [1], nFeature_RNA: [100], nCount_RNA: [200] }));
+    render(<QualityControl {...baseProps({
+      callApi,
+      currentWs: { selectedProjectId: 'proj_1', projects: [{ id: 'proj_1', role: 'viewer' }] },
+    })} />);
+
+    expect(await screen.findByText(/Read-only project view/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Apply QC Filters/i })).toBeDisabled();
+    expect(screen.getByLabelText('Max MT %')).toBeDisabled();
+    expect(screen.getByText(/Detailed distributions and plots stay private/i)).toBeInTheDocument();
+    expect(screen.queryByText(/QC distribution data is unavailable/i)).not.toBeInTheDocument();
+    expect(callApi).not.toHaveBeenCalled();
   });
 });

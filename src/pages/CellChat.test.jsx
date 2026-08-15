@@ -25,6 +25,9 @@ function renderPage(overrides = {}) {
       userEmail="owner@example.com"
       objectId="ao_abc123"
       sessionReady
+      callApi={vi.fn(async (path) => path.includes('preflight=true')
+        ? { ready: true }
+        : { error: 'Owner group key unavailable.' })}
       {...overrides}
     />
   );
@@ -191,11 +194,12 @@ describe('CellChat durable worker UI', () => {
     expect(screen.getByText('500 analyzed cells')).toBeInTheDocument();
     expect(screen.getAllByRole('cell', { name: 'Group 1' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('cell', { name: 'Group 2' }).length).toBeGreaterThan(0);
-    expect(screen.getByText(/art_cellchat_summary/i)).toBeInTheDocument();
-    expect(screen.getByText(/art_cellchat_results/i)).toBeInTheDocument();
-    expect(screen.getByText(/r 4\.5\.3/i)).toBeInTheDocument();
+    expect(screen.getByText(/A saved summary is available/i)).toBeInTheDocument();
+    expect(screen.getByText(/full interaction table is available only through its authorized export/i)).toBeInTheDocument();
+    expect(screen.queryByText(/art_cellchat_summary|art_cellchat_results/i)).not.toBeInTheDocument();
 
     const text = container.textContent || '';
+    expect(text).not.toMatch(/r 4\.5\.3/i);
     expect(text).not.toMatch(/vault\/private/i);
     expect(text).not.toMatch(/C:\/private/i);
     expect(text).not.toMatch(/storage_key/i);
@@ -203,16 +207,17 @@ describe('CellChat durable worker UI', () => {
     expect(text).not.toMatch(/user-1:obj/i);
     expect(text).not.toMatch(/Private donor identity/i);
     expect(text).not.toMatch(/Unsafe ligand candidate|Unsafe pathway/i);
+    expect(text).not.toMatch(/art_cellchat_summary|art_cellchat_results|job_cellchat/i);
   });
 
   it('renders a private owner-local group key without persisting labels into the durable summary', async () => {
-    const callApi = vi.fn(async () => ({
-      group_by: 'seurat_clusters',
-      groups: [
-        { group: 'Group 1', label: 'CD4 T cells', input_cells: 600 },
-        { group: 'Group 2', label: 'B cells', input_cells: 600 },
-      ],
-    }));
+    const callApi = vi.fn(async (path) => path.includes('preflight=true') ? { ready: true } : ({
+        group_by: 'seurat_clusters',
+        groups: [
+          { group: 'Group 1', label: 'CD4 T cells', input_cells: 600 },
+          { group: 'Group 2', label: 'B cells', input_cells: 600 },
+        ],
+      }));
     renderPage({ callApi });
     const launchButton = screen.getByRole('button', { name: /Start CellChat Inference/i });
     fireEvent.change(screen.getByRole('combobox', { name: /Group labels/i }), { target: { value: 'seurat_clusters' } });
@@ -228,8 +233,21 @@ describe('CellChat durable worker UI', () => {
     ));
     expect(await screen.findByText('CD4 T cells')).toBeInTheDocument();
     expect(screen.getByText('B cells')).toBeInTheDocument();
-    expect(screen.getByText(/not saved in the project artifact/i)).toBeInTheDocument();
+    expect(screen.getByText(/not saved with the shared result/i)).toBeInTheDocument();
     expect(window.electronAPI.listProjectJobArtifacts.mock.calls[0]).toBeDefined();
+  });
+
+  it('shows a specific preflight remediation and does not queue an invalid run', async () => {
+    const callApi = vi.fn(async () => ({ ready: false, code: 'CELLCHAT_MIN_GROUP_CELLS' }));
+    renderPage({ callApi });
+    fireEvent.change(screen.getByRole('combobox', { name: /Group labels/i }), { target: { value: 'seurat_clusters' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Species/i }), { target: { value: 'human' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Database category/i }), { target: { value: 'all' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /Analysis intent/i }), { target: { value: 'single_context' } });
+    fireEvent.click(screen.getByRole('button', { name: /Start CellChat Inference/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/At least two groups must meet the minimum cell threshold/i);
+    expect(window.electronAPI.createCellChatInferenceJob).not.toHaveBeenCalled();
   });
 
   it('states that CellChat results are candidate predictions, not causal or condition comparisons', () => {
@@ -264,7 +282,7 @@ describe('CellChat durable worker UI', () => {
     });
 
     expect(screen.getByRole('button', { name: /Start CellChat Inference/i })).toBeDisabled();
-    expect(screen.getByText(/not attached to the private R session/i)).toBeInTheDocument();
+    expect(screen.getByText(/not open in your private analysis workspace/i)).toBeInTheDocument();
   });
 
   it('restores the latest saved CellChat job for the selected object', async () => {
@@ -282,5 +300,18 @@ describe('CellChat durable worker UI', () => {
       { jobType: 'cellchat.infer.v1', analysisObjectId: 'ao_abc123' }
     ));
     expect(await screen.findByText('IL7–IL7R')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Recorded run settings/i })).toBeInTheDocument();
+    expect(screen.getByText('Advanced options')).toBeInTheDocument();
+  });
+
+  it('requires saving live clustering changes before a durable CellChat run', () => {
+    const save = vi.fn();
+    renderPage({ unsavedLiveChanges: true, onSaveCurrentAnalysis: save });
+
+    expect(screen.getByRole('button', { name: /Start CellChat Inference/i })).toBeDisabled();
+    expect(screen.getByText(/Unsaved live steps will not be included/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Save current analysis/i }));
+    expect(save).toHaveBeenCalledOnce();
+    expect(window.electronAPI.createCellChatInferenceJob).not.toHaveBeenCalled();
   });
 });

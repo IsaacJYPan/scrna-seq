@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { BarChart3, AlertTriangle, FileText } from 'lucide-react';
-import Plot from 'react-plotly.js';
+import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
@@ -97,7 +97,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
-            ><FileText size={15} /> View Step Script</button>
+            ><FileText size={15} /> View recorded analysis</button>
           )}
           <button
             onClick={() => runPCA()}
@@ -194,6 +194,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
               <h3 className="font-semibold text-text mb-4">Elbow Plot — Variance per PC</h3>
               <div className="h-[400px]">
                 <Plot
+                  preferSvg
                   data={elbowData}
                   layout={elbowLayout}
                   config={{ displayModeBar: false, responsive: true }}

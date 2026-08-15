@@ -8,8 +8,22 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 const db = require('./backend/pgDatabase');
+const analysisBranches = require('./backend/analysisBranches');
+const experimentalDesign = require('./backend/experimentalDesign');
+const projectAudit = require('./backend/projectAudit');
+const researchExports = require('./backend/researchExports');
+const {
+  expertRSandboxEnabled,
+  EXPERT_R_PROFILE,
+  MAX_EXPERT_R_INPUT_BYTES,
+  EXPERT_R_INPUT_EXTENSIONS,
+  generateExpertRInputId,
+  sanitizeExpertRInputFilename,
+  allocateExpertRInputStorageKey,
+} = require('./backend/expertR');
 const config = require('./backend/config');
 const storage = require('./backend/storage');
+const { validateStoredDataset } = require('./backend/datasetValidation');
 const rRuntime = require('./backend/rRuntime');
 const { createWebHealthController } = require('./backend/webHealth');
 const { shutdownWebRuntime } = require('./backend/webShutdown');
@@ -21,8 +35,11 @@ const {
 } = require('./backend/rStateKeys');
 const { parseJobWorkerConfig } = require('./backend/jobWorker');
 const { validateSeuratPipelineParams } = require('./backend/seuratPipeline');
+const { validateMultiSampleSeuratParams } = require('./backend/multiSampleSeuratPipeline');
+const { validateSpatialSeuratParams } = require('./backend/spatialPipeline');
 const { validateEnrichmentGseaParams } = require('./backend/enrichmentGsea');
 const { validateCellChatInferenceParams } = require('./backend/cellChatInference');
+const { validateExploratoryAnalysisParams } = require('./backend/exploratoryAnalysis');
 
 // Validate the executable web role before resolving R configuration, creating
 // directories, opening Postgres, or binding a socket. Importing the module in
@@ -403,7 +420,7 @@ function enforceRProxyCsrfForCookieAuth(req, res, next) {
   // policy intentionally removes Referer. This non-simple header is set by our
   // first-party client; a cross-site script cannot send it with cookies unless
   // the configured CORS preflight explicitly admits that origin.
-  if (req.headers['x-benchone-csrf'] === '1') return next();
+  if (req.headers['x-traceomics-csrf'] === '1') return next();
   const origin = req.headers.origin
     || (req.headers.referer ? originOf(req.headers.referer) : '');
   if (config.isAllowedOrigin(origin)
@@ -455,8 +472,11 @@ const RDS_DESERIALIZATION_PROXY_PATHS = new Set(['/load-rds', '/restore-session'
 // dataset from a server-resolved storage key, runs Seurat preprocessing, and saves a
 // checkpoint. It is worker-only for the same durable job/artifact/lineage reasons.
 const R_PROXY_INTERNAL_ONLY_PATHS = new Set([
-  '/object/pbmc-pipeline', '/object/checkpoint-load', '/object/deg-find-markers',
-  '/object/enrichment-gsea', '/object/cellchat-infer', '/object/seurat-pipeline', '/object/inspect',
+  '/object/pbmc-pipeline', '/object/checkpoint-save', '/object/checkpoint-load', '/object/deg-find-markers',
+  '/object/explore-summary',
+  '/object/condition-pseudobulk-de',
+  '/object/enrichment-gsea', '/object/cellchat-infer', '/object/seurat-pipeline',
+  '/object/spatial-seurat-pipeline', '/object/inspect',
   '/internal/worker-readiness'
 ]);
 
@@ -859,6 +879,22 @@ function createRateLimiter() {
   middleware.reset = () => { hits.clear(); nextSweepAt = 0; };
   middleware.keyCount = () => hits.size;
   return middleware;
+}
+
+function isValidBranchIdFormat(value) {
+  return typeof value === 'string' && /^br_[0-9a-f]+$/.test(value);
+}
+
+function isValidReviewIdFormat(value) {
+  return typeof value === 'string' && /^rev_[0-9a-f]+$/.test(value);
+}
+
+function isValidConditionIdFormat(value) {
+  return typeof value === 'string' && /^cond_[0-9a-f]+$/.test(value);
+}
+
+function isValidSampleIdFormat(value) {
+  return typeof value === 'string' && /^sample_[0-9a-f]+$/.test(value);
 }
 
 // Separate limiters per endpoint so login attempts and signup attempts do not
@@ -1268,11 +1304,21 @@ app.get('/readyz', async (req, res) => {
 app.get('/api/auth/policy', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const legacyUiEnabled = !config.isProduction();
+  const demoMode = config.demoMode();
   res.json({
     registrationEnabled: config.registrationEnabled(),
     legacyLocalImportsEnabled: legacyUiEnabled,
-    legacyLiveMutationToolsEnabled: legacyUiEnabled,
+    // Live mutation tools write into the source object's in-memory R state.
+    // Keep them unavailable until they create a durable child checkpoint.
+    legacyLiveMutationToolsEnabled: false,
     serverFigureExportEnabled: legacyUiEnabled,
+    // Expert R entitlement is authenticated account data. The public policy
+    // fails closed so login/demo surfaces cannot disclose or enable it.
+    expertREnabled: false,
+    expertRProfile: null,
+    demoMode,
+    datasetUploadsEnabled: !demoMode,
+    demoGuestTtlSeconds: demoMode ? config.demoGuestTtlSeconds() : null,
   });
 });
 
@@ -1305,6 +1351,60 @@ function requireNetworkRegistrationEnabled(req, res, next) {
 }
 
 const authJson = express.json();
+
+app.post('/api/auth/demo-guest', signupRateLimiter, async (req, res) => {
+  if (!config.demoMode()) return res.status(404).json({ error: 'Not found' });
+  const origin = req.headers.origin
+    || (req.headers.referer ? originOf(req.headers.referer) : '');
+  if (!config.isAllowedOrigin(origin)
+      && (config.isProduction() || !isSameOriginRequest(req, origin))) {
+    return res.status(403).json({ error: 'Request origin is not allowed.' });
+  }
+  let copiedKey = null;
+  try {
+    const template = await db.getDemoTemplateCheckpoint(config.demoTemplateProjectId());
+    const nonce = crypto.randomBytes(18).toString('hex');
+    const expiresAt = new Date(Date.now() + config.demoGuestTtlSeconds() * 1000).toISOString();
+    const provisioned = await db.createDemoGuest(
+      `guest-${nonce}@demo.invalid`, crypto.randomBytes(32).toString('base64url'), expiresAt
+    );
+    const importJobId = db.genId('job');
+    copiedKey = storage.projectStorageFileKey(
+      provisioned.project.id, 'checkpoints', importJobId, 'checkpoint.rds'
+    );
+    const copied = await durableStorage.copyVerified(template.storageUri, copiedKey, {
+      checksumSha256: template.checksumSha256,
+      sizeBytes: template.sizeBytes,
+    });
+    const workspace = await db.createDemoGuestCheckpoint({
+      userId: provisioned.user.id,
+      projectId: provisioned.project.id,
+      jobId: importJobId,
+      storageUri: copied.key,
+      checksumSha256: copied.checksumSha256,
+      sizeBytes: copied.sizeBytes,
+      objectType: template.objectType,
+      displayName: template.displayName || 'Curated scRNA-seq demo',
+      templateProjectId: config.demoTemplateProjectId(),
+      templateAnalysisObjectId: template.analysisObjectId,
+    });
+    const token = issueSession(provisioned.user);
+    setSessionCookie(res, token);
+    return res.status(201).json({
+      success: true,
+      user: publicAuthUser(provisioned.user),
+      expiresAt,
+      project: provisioned.project,
+      analysisObject: db.toPublicAnalysisObject(workspace.analysisObject),
+    });
+  } catch {
+    if (copiedKey) {
+      try { durableStorage.remove(copiedKey); } catch { /* best effort */ }
+    }
+    console.error('[Demo] Guest provisioning failed (DEMO_PROVISION_FAILED).');
+    return res.status(503).json({ error: 'The curated demo is temporarily unavailable.' });
+  }
+});
 
 // Reject disabled registration and apply the IP limiter before consuming an
 // attacker-controlled JSON body. Production signup bodies are never parsed.
@@ -1395,10 +1495,23 @@ app.use('/api/runtime', requireAuth);
 app.get('/api/runtime/diagnostics', async (req, res) => {
   try {
     const diagnostics = await buildRuntimeDiagnostics();
-    res.json(diagnostics);
+    res.json(toPublicRuntimeDiagnostics(diagnostics));
   } catch (err) {
     console.error('[Diagnostics] Runtime diagnostics failed:', err);
     res.status(500).json({ error: 'Runtime diagnostics failed' });
+  }
+});
+
+// Compute availability is projected from a short-lived DB heartbeat written by
+// the standalone worker. Do not proxy the private worker health port or expose
+// worker ids, paths, topology, R URLs, or raw errors to browser clients.
+app.get('/api/runtime/compute-status', async (req, res) => {
+  try {
+    const status = await db.getStandaloneWorkerRuntimeStatus();
+    res.json(status);
+  } catch {
+    console.error('[Runtime] Compute status unavailable.');
+    res.status(503).json({ status: 'unknown', updatedAt: null });
   }
 });
 
@@ -1648,6 +1761,9 @@ app.post('/api/jobs', async (req, res) => {
   if (body.status !== undefined) {
     return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
   }
+  if (body.retryOfJobId !== undefined || body.retry_of_job_id !== undefined) {
+    return res.status(400).json({ error: 'Job retry linkage is server-managed and must not be provided.' });
+  }
   // Durable datasets are project-scoped and therefore unavailable here. Keep a
   // distinct 400 for malformed ids; well-formed ids resolve as 404 below.
   if (body.datasetId !== undefined && body.datasetId !== null) {
@@ -1776,6 +1892,25 @@ app.get('/api/pipeline-registry/capabilities', async (req, res) => {
     res.json(await db.getPipelineRegistryCapabilities(req.user.id));
   } catch (error) {
     sendPipelineRegistryError(res, error);
+  }
+});
+
+// Expert R requires both an operator-enabled deployment and an operator-granted
+// account capability. Project write access and source-object ownership are
+// enforced again when a job is submitted, then rechecked at worker claim time.
+app.use('/api/expert-r', requireAuth);
+app.get('/api/expert-r/capabilities', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const { canExecuteExpertR } = await db.getExpertRCapabilities(req.user.id);
+    const enabled = !config.demoMode() && expertRSandboxEnabled() && canExecuteExpertR;
+    res.json({
+      expertREnabled: enabled,
+      expertRProfile: enabled ? EXPERT_R_PROFILE : null,
+    });
+  } catch (error) {
+    console.error('[ExpertRCapabilities]', error);
+    res.status(500).json({ error: 'Expert R access is temporarily unavailable.' });
   }
 });
 
@@ -2080,6 +2215,8 @@ const REJECTED_DATASET_FIELDS = [
   'createdByUserId', 'created_by_user_id', 'userId', 'user_id',
   'internalStorageKey', 'internal_storage_key', 'storageUri', 'storage_uri',
   'sha256', 'fileSizeBytes', 'file_size_bytes',
+  'uploadStatus', 'upload_status', 'validationStatus', 'validation_status',
+  'validationErrors', 'validation_errors',
   'path', 'filePath', 'file_path', 'storagePath', 'storage_path'
 ];
 
@@ -2095,9 +2232,8 @@ function rejectDatasetServerFields(req, res) {
   return false;
 }
 
-// Coerce a metadata/validation_errors field that may arrive as a JSON string
-// (multipart form field) or a native object (JSON body). Returns { ok:false }
-// when a non-empty string is not valid JSON.
+// Coerce dataset metadata, which arrives as a string for multipart uploads or
+// a native object for JSON requests. Returns { ok:false } for invalid JSON.
 function coerceDatasetJsonField(value) {
   if (value === undefined) return { ok: true, value: undefined };
   if (typeof value === 'string') {
@@ -2132,6 +2268,9 @@ function sendDatasetError(res, e, context = 'Datasets') {
 // body. The database mutation re-checks the role after parsing to close a role-
 // change race; this early gate prevents unauthorized disk/CPU consumption.
 async function requireDatasetWriterBeforeUpload(req, res, next) {
+  if (config.demoMode()) {
+    return res.status(403).json({ error: 'Dataset uploads are disabled in the public demo.' });
+  }
   try {
     await db.requireProjectRole(req.user.id, req.params.projectId, ['owner', 'admin', 'analyst']);
     return next();
@@ -2147,19 +2286,13 @@ app.post('/api/projects/:projectId/datasets', requireDatasetWriterBeforeUpload, 
   const fileType = body.fileType !== undefined ? body.fileType : body.file_type;
   const meta = coerceDatasetJsonField(body.metadata);
   if (!meta.ok) { cleanupDatasetReqFile(req); return res.status(400).json({ error: 'metadata must be valid JSON.' }); }
-  const verrs = coerceDatasetJsonField(body.validationErrors);
-  if (!verrs.ok) { cleanupDatasetReqFile(req); return res.status(400).json({ error: 'validation_errors must be valid JSON.' }); }
-
   try {
     let dataset = await db.createDatasetForProject(req.user.id, req.params.projectId, {
       fileType,
       originalFilename: body.originalFilename !== undefined
         ? body.originalFilename
         : (req.file ? req.file.originalname : undefined),
-      uploadStatus: body.uploadStatus,
-      validationStatus: body.validationStatus,
       metadata: meta.value,
-      validationErrors: verrs.value
     });
 
     // If a file rode along, the server stores it under a server-chosen key and
@@ -2170,6 +2303,15 @@ app.post('/api/projects/:projectId/datasets', requireDatasetWriterBeforeUpload, 
       try {
         stored = await storeDatasetFile(req.file, req.params.projectId, dataset.id);
         dataset = await db.markDatasetUploaded(req.params.projectId, dataset.id, stored);
+        const validation = await validateStoredDataset(durableStorage, dataset);
+        if (validation.validationStatus !== 'pending') {
+          dataset = await db.setDatasetValidationResult(
+            req.params.projectId,
+            dataset.id,
+            validation.validationStatus,
+            validation.validationErrors
+          );
+        }
       } catch (storageErr) {
         console.error('[Datasets] Storage failed:', storageErr);
         if (stored && stored.internalStorageKey) {
@@ -2255,6 +2397,8 @@ app.patch('/api/projects/:projectId/datasets/:datasetId', async (req, res) => {
 // input validation.
 function sendProjectResourceError(res, e, context) {
   switch (e.code) {
+    case 'EXPERT_R_UNAVAILABLE':
+      return res.status(503).json({ error: e.message });
     case 'NOT_FOUND':
     case 'PARENT_NOT_FOUND':
     case 'DATASET_NOT_FOUND':
@@ -2264,11 +2408,25 @@ function sendProjectResourceError(res, e, context) {
     case 'PROVENANCE_NOT_FOUND':
     case 'FIGURE_NOT_FOUND':
     case 'PIPELINE_NOT_FOUND':
+    case 'BRANCH_NOT_FOUND':
+    case 'EXPERIMENTAL_DESIGN_NOT_FOUND':
+    case 'CONTRAST_NOT_FOUND':
+    case 'ARTIFACT_NOT_DOWNLOADABLE':
       return res.status(404).json({ error: e.message });
     case 'FORBIDDEN':
       return res.status(403).json({ error: e.message });
     case 'JOB_NOT_CANCELABLE':
-      return res.status(409).json({ error: e.message });
+    case 'JOB_NOT_RETRYABLE':
+    case 'BRANCH_NAME_EXISTS':
+    case 'BRANCH_ARCHIVED':
+    case 'BRANCH_VERSION_CONFLICT':
+    case 'BRANCH_NOT_REVIEWABLE':
+    case 'REVIEW_NOT_OPEN':
+    case 'REVIEW_NOT_APPROVED':
+    case 'EXPERIMENTAL_DESIGN_CONFLICT':
+    case 'METADATA_VALUE_ALREADY_BOUND':
+    case 'SAMPLE_ALREADY_BOUND':
+      return res.status(409).json({ error: e.message, code: e.code });
     case 'INVALID_OBJECT_TYPE':
     case 'INVALID_METADATA':
     case 'INVALID_JOB_TYPE':
@@ -2282,6 +2440,11 @@ function sendProjectResourceError(res, e, context) {
     case 'INVALID_PIPELINE_DEFINITION':
     case 'INVALID_PIPELINE_MANIFEST':
     case 'INVALID_PIPELINE_SELECTION':
+    case 'INVALID_BRANCH':
+    case 'INVALID_BRANCH_HEAD':
+    case 'INVALID_REVIEW':
+    case 'INVALID_EXPERIMENTAL_DESIGN':
+    case 'INVALID_AUDIT_CURSOR':
       return res.status(400).json({ error: e.message });
     default:
       console.error(`[${context}]`, e);
@@ -2317,6 +2480,86 @@ app.get('/api/projects/:projectId/pipeline-definitions', async (req, res) => {
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectPipelines');
   }
+});
+
+const expertRInputUpload = multer({
+  dest: UPLOAD_DIR,
+  limits: { fileSize: MAX_EXPERT_R_INPUT_BYTES, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (!EXPERT_R_INPUT_EXTENSIONS.has(ext)) {
+      return cb(new Error('Expert R inputs must be CSV, TSV, TXT, or JSON files.'));
+    }
+    cb(null, true);
+  },
+});
+
+async function requireExpertRInputWriter(req, res, next) {
+  if (!expertRSandboxEnabled()) {
+    return res.status(403).json({ error: 'Expert R is not available for this deployment.' });
+  }
+  try {
+    await db.requireProjectRole(req.user.id, req.params.projectId, ['owner', 'admin', 'analyst']);
+    const capability = await db.getExpertRCapabilities(req.user.id);
+    if (!capability.canExecuteExpertR) {
+      return res.status(403).json({ error: 'Expert R access is not approved for this account.' });
+    }
+    return next();
+  } catch (error) {
+    return sendProjectResourceError(res, error, 'ExpertRInputs');
+  }
+}
+
+function sendExpertRInputError(res, error) {
+  if (['NOT_FOUND', 'EXPERT_R_INPUT_NOT_FOUND'].includes(error?.code)) {
+    return res.status(404).json({ error: error.message });
+  }
+  if (error?.code === 'FORBIDDEN') return res.status(403).json({ error: error.message });
+  if (['INVALID_EXPERT_R_INPUT', 'EXPERT_R_INPUT_QUOTA'].includes(error?.code)) {
+    return res.status(400).json({ error: error.message });
+  }
+  console.error('[ExpertRInputs]', error);
+  return res.status(500).json({ error: 'Private input import failed.' });
+}
+
+app.get('/api/expert-r/projects/:projectId/inputs', requireExpertRInputWriter, async (req, res) => {
+  try {
+    res.json(await db.listExpertRPrivateInputs(req.user.id, req.params.projectId));
+  } catch (error) {
+    sendExpertRInputError(res, error);
+  }
+});
+
+app.post('/api/expert-r/projects/:projectId/inputs', requireExpertRInputWriter, (req, res) => {
+  expertRInputUpload.single('file')(req, res, async (uploadError) => {
+    if (uploadError) return res.status(400).json({ error: uploadError.message });
+    if (!req.file) return res.status(400).json({ error: 'Select one private input file.' });
+    let stored = null;
+    try {
+      const id = generateExpertRInputId();
+      const originalFilename = sanitizeExpertRInputFilename(req.file.originalname);
+      const internalStorageKey = allocateExpertRInputStorageKey(
+        req.params.projectId, id, originalFilename
+      );
+      stored = await durableStorage.putFileFromPath(req.file.path, internalStorageKey);
+      const created = await db.createExpertRPrivateInput(req.user.id, req.params.projectId, {
+        id,
+        originalFilename,
+        internalStorageKey,
+        mimeType: req.file.mimetype || 'application/octet-stream',
+        sizeBytes: stored.sizeBytes,
+        checksumSha256: stored.checksumSha256,
+      });
+      res.status(201).json(created);
+    } catch (error) {
+      if (stored?.key) {
+        try { await durableStorage.remove(stored.key); } catch { /* original error wins */ }
+      }
+      sendExpertRInputError(res, error);
+    } finally {
+      cleanupUploadedFiles([req.file]);
+    }
+  });
 });
 
 app.get('/api/projects/:projectId/pipeline-selection', async (req, res) => {
@@ -2478,11 +2721,322 @@ app.get('/api/projects/:projectId/analysis-objects/:objectId/lineage', async (re
   }
 });
 
+// Explicit, project-scoped study design. These routes register metadata and
+// immutable contrast snapshots only; they never accept R code, state keys,
+// ownership fields, or an inferential result from the client.
+app.post('/api/projects/:projectId/conditions', async (req, res) => {
+  if (rejectProjectResourceFields(req, res)) return;
+  try {
+    res.status(201).json(await experimentalDesign.createCondition(
+      req.user.id, req.params.projectId, req.body || {}
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectConditions');
+  }
+});
+
+app.get('/api/projects/:projectId/conditions', async (req, res) => {
+  try {
+    res.json(await experimentalDesign.listConditions(req.user.id, req.params.projectId));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectConditions');
+  }
+});
+
+app.post('/api/projects/:projectId/samples', async (req, res) => {
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['conditionName', 'condition_name', 'createdAt', 'created_at'],
+  })) return;
+  const body = req.body || {};
+  if (!isValidConditionIdFormat(body.conditionId)) {
+    return res.status(400).json({ error: 'Malformed condition ID.' });
+  }
+  if (body.datasetId != null && !isValidDatasetIdFormat(body.datasetId)) {
+    return res.status(400).json({ error: 'Malformed dataset ID.' });
+  }
+  try {
+    res.status(201).json(await experimentalDesign.createSample(
+      req.user.id, req.params.projectId, body
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectSamples');
+  }
+});
+
+app.get('/api/projects/:projectId/samples', async (req, res) => {
+  try {
+    res.json(await experimentalDesign.listSamples(req.user.id, req.params.projectId));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectSamples');
+  }
+});
+
+app.post('/api/projects/:projectId/analysis-objects/:objectId/sample-bindings', async (req, res) => {
+  if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['analysisObjectId', 'analysis_object_id', 'conditionId', 'condition_id'],
+  })) return;
+  if (!isValidSampleIdFormat(req.body?.sampleId)) {
+    return res.status(400).json({ error: 'Malformed sample ID.' });
+  }
+  try {
+    res.status(201).json(await experimentalDesign.bindSample(
+      req.user.id, req.params.projectId, req.params.objectId, req.body || {}
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectSampleBindings');
+  }
+});
+
+app.get('/api/projects/:projectId/analysis-objects/:objectId/sample-bindings', async (req, res) => {
+  if (!isValidAnalysisObjectIdFormat(req.params.objectId)) {
+    return res.status(400).json({ error: 'Malformed analysis object ID.' });
+  }
+  try {
+    res.json(await experimentalDesign.listBindings(
+      req.user.id, req.params.projectId, req.params.objectId
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectSampleBindings');
+  }
+});
+
+app.post('/api/projects/:projectId/contrasts', async (req, res) => {
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['status', 'validation', 'validationJson', 'validation_json'],
+  })) return;
+  const body = req.body || {};
+  if (!isValidAnalysisObjectIdFormat(body.analysisObjectId)
+      || !isValidConditionIdFormat(body.numeratorConditionId)
+      || !isValidConditionIdFormat(body.denominatorConditionId)) {
+    return res.status(400).json({ error: 'Malformed analysis object or condition ID.' });
+  }
+  try {
+    res.status(201).json(await experimentalDesign.createContrast(
+      req.user.id, req.params.projectId, body
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectContrasts');
+  }
+});
+
+app.get('/api/projects/:projectId/contrasts', async (req, res) => {
+  try {
+    res.json(await experimentalDesign.listContrasts(req.user.id, req.params.projectId));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectContrasts');
+  }
+});
+
+// Named private work refs over immutable analysis-object/checkpoint history.
+// Branch identity, owner, visibility, review decisions, and canonical pointers
+// are server-controlled; publishing is explicit and canonical promotion requires
+// an owner/admin decision on an approved review of the exact current head.
+app.post('/api/projects/:projectId/branches', async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['visibility', 'status', 'headAnalysisObjectId', 'head_analysis_object_id', 'version'],
+  })) return;
+  if (!isValidAnalysisObjectIdFormat(body.baseAnalysisObjectId)) {
+    return res.status(400).json({ error: 'Malformed base analysis object ID.' });
+  }
+  try {
+    res.status(201).json(await analysisBranches.createBranch(req.user.id, req.params.projectId, {
+      name: body.name,
+      description: body.description,
+      baseAnalysisObjectId: body.baseAnalysisObjectId,
+    }));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranches');
+  }
+});
+
+app.get('/api/projects/:projectId/branches', async (req, res) => {
+  try {
+    res.json(await analysisBranches.listBranches(req.user.id, req.params.projectId));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranches');
+  }
+});
+
+app.patch('/api/projects/:projectId/branches/:branchId/head', async (req, res) => {
+  if (!isValidBranchIdFormat(req.params.branchId)) {
+    return res.status(400).json({ error: 'Malformed branch ID.' });
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['visibility', 'status', 'baseAnalysisObjectId', 'base_analysis_object_id'],
+  })) return;
+  if (!isValidAnalysisObjectIdFormat(body.headAnalysisObjectId)) {
+    return res.status(400).json({ error: 'Malformed head analysis object ID.' });
+  }
+  try {
+    res.json(await analysisBranches.advanceBranch(
+      req.user.id, req.params.projectId, req.params.branchId,
+      { headAnalysisObjectId: body.headAnalysisObjectId, expectedVersion: body.expectedVersion }
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranches');
+  }
+});
+
+app.post('/api/projects/:projectId/branches/:branchId/publish', async (req, res) => {
+  if (!isValidBranchIdFormat(req.params.branchId)) {
+    return res.status(400).json({ error: 'Malformed branch ID.' });
+  }
+  if (rejectProjectResourceFields(req, res)) return;
+  try {
+    res.json(await analysisBranches.publishBranch(req.user.id, req.params.projectId, req.params.branchId));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranches');
+  }
+});
+
+app.get('/api/projects/:projectId/branches/:branchId/events', async (req, res) => {
+  if (!isValidBranchIdFormat(req.params.branchId)) {
+    return res.status(400).json({ error: 'Malformed branch ID.' });
+  }
+  try {
+    res.json(await analysisBranches.listBranchEvents(req.user.id, req.params.projectId, req.params.branchId));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranches');
+  }
+});
+
+app.post('/api/projects/:projectId/branches/:branchId/reviews', async (req, res) => {
+  if (!isValidBranchIdFormat(req.params.branchId)) {
+    return res.status(400).json({ error: 'Malformed branch ID.' });
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['branchId', 'branch_id', 'headAnalysisObjectId', 'head_analysis_object_id', 'status'],
+  })) return;
+  try {
+    res.status(201).json(await analysisBranches.requestReview(
+      req.user.id, req.params.projectId, req.params.branchId,
+      { title: body.title, summary: body.summary }
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranchReviews');
+  }
+});
+
+app.get('/api/projects/:projectId/reviews', async (req, res) => {
+  if (req.query.branchId !== undefined && !isValidBranchIdFormat(req.query.branchId)) {
+    return res.status(400).json({ error: 'Malformed branch ID.' });
+  }
+  try {
+    res.json(await analysisBranches.listReviews(req.user.id, req.params.projectId, {
+      branchId: req.query.branchId,
+      status: typeof req.query.status === 'string' ? req.query.status : undefined,
+    }));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranchReviews');
+  }
+});
+
+app.get('/api/projects/:projectId/reviews/:reviewId/comments', async (req, res) => {
+  if (!isValidReviewIdFormat(req.params.reviewId)) {
+    return res.status(400).json({ error: 'Malformed review ID.' });
+  }
+  try {
+    res.json(await analysisBranches.listReviewComments(
+      req.user.id, req.params.projectId, req.params.reviewId
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranchReviewComments');
+  }
+});
+
+app.post('/api/projects/:projectId/reviews/:reviewId/comments', async (req, res) => {
+  if (!isValidReviewIdFormat(req.params.reviewId)) {
+    return res.status(400).json({ error: 'Malformed review ID.' });
+  }
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['reviewId', 'review_id', 'authorUserId', 'author_user_id'],
+  })) return;
+  try {
+    res.status(201).json(await analysisBranches.addReviewComment(
+      req.user.id, req.params.projectId, req.params.reviewId,
+      { body: req.body?.body }
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranchReviewComments');
+  }
+});
+
+app.patch('/api/projects/:projectId/reviews/:reviewId/decision', async (req, res) => {
+  if (!isValidReviewIdFormat(req.params.reviewId)) {
+    return res.status(400).json({ error: 'Malformed review ID.' });
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['branchId', 'branch_id', 'headAnalysisObjectId', 'head_analysis_object_id'],
+  })) return;
+  try {
+    res.json(await analysisBranches.decideReview(
+      req.user.id, req.params.projectId, req.params.reviewId,
+      { status: body.status, note: body.note }
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranchReviews');
+  }
+});
+
+app.post('/api/projects/:projectId/branches/:branchId/promote', async (req, res) => {
+  if (!isValidBranchIdFormat(req.params.branchId)) {
+    return res.status(400).json({ error: 'Malformed branch ID.' });
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (rejectProjectResourceFields(req, res, {
+    extra: ['analysisObjectId', 'analysis_object_id', 'version'],
+  })) return;
+  if (!isValidReviewIdFormat(body.reviewId)) {
+    return res.status(400).json({ error: 'Malformed review ID.' });
+  }
+  try {
+    res.json(await analysisBranches.promoteBranch(
+      req.user.id, req.params.projectId, req.params.branchId, { reviewId: body.reviewId }
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectCanonicalAnalysis');
+  }
+});
+
+app.get('/api/projects/:projectId/canonical-analysis', async (req, res) => {
+  try {
+    const canonical = await analysisBranches.getCanonical(req.user.id, req.params.projectId);
+    if (!canonical) return res.status(404).json({ error: 'Canonical analysis not found.' });
+    res.json(canonical);
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectCanonicalAnalysis');
+  }
+});
+
+app.get('/api/projects/:projectId/branch-comparison', async (req, res) => {
+  if (!isValidBranchIdFormat(req.query.leftBranchId)
+      || !isValidBranchIdFormat(req.query.rightBranchId)) {
+    return res.status(400).json({ error: 'Two valid branch IDs are required.' });
+  }
+  try {
+    res.json(await analysisBranches.compareBranches(
+      req.user.id, req.params.projectId, req.query.leftBranchId, req.query.rightBranchId
+    ));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectBranchComparison');
+  }
+});
+
 app.post('/api/projects/:projectId/jobs', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   // Status is server-managed; a client cannot pick the initial status.
   if (body.status !== undefined) {
     return res.status(400).json({ error: 'Job status is server-managed and must not be provided.' });
+  }
+  if (body.retryOfJobId !== undefined || body.retry_of_job_id !== undefined) {
+    return res.status(400).json({ error: 'Job retry linkage is server-managed and must not be provided.' });
   }
   if (rejectProjectResourceFields(req, res)) return;
 
@@ -2503,13 +3057,17 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   // contact. Reject incompatible client references synchronously so they cannot
   // manufacture partial-output/recovery states after dispatch.
   const serverManagedResultTypes = [
-    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
-    'cellchat.infer.v1',
-    'checkpoint.load.v1', 'checkpoint.fork.v1',
+    'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1',
+    'cellchat.infer.v1', 'explore.summarize.v1',
+    'condition.pseudobulk_de.v1', 'expert.r.v1',
+    'spatial.seurat.v1',
+    'checkpoint.save.v1', 'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   const noDatasetBindingTypes = [
     'pbmc.pipeline.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'cellchat.infer.v1',
-    'checkpoint.load.v1', 'checkpoint.fork.v1',
+    'explore.summarize.v1',
+    'condition.pseudobulk_de.v1', 'expert.r.v1',
+    'checkpoint.save.v1', 'checkpoint.load.v1', 'checkpoint.fork.v1',
   ];
   if (serverManagedResultTypes.includes(body.jobType)
       && body.resultAnalysisObjectId !== undefined) {
@@ -2542,6 +3100,30 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
       return res.status(400).json({ error: 'seurat.pipeline.v1 requires datasetId.' });
     }
   }
+  if (body.jobType === 'seurat.multisample.v1') {
+    let validated;
+    try {
+      validated = validateMultiSampleSeuratParams(body.parameters);
+    } catch (e) {
+      return res.status(400).json({ error: e.message || 'Invalid seurat.multisample.v1 parameters.' });
+    }
+    if (body.datasetId === undefined || body.datasetId === null) {
+      return res.status(400).json({ error: 'seurat.multisample.v1 requires a primary datasetId.' });
+    }
+    if (validated.samples[0].datasetId !== body.datasetId) {
+      return res.status(400).json({ error: 'Primary datasetId must match the first multi-sample input.' });
+    }
+  }
+  if (body.jobType === 'spatial.seurat.v1') {
+    try {
+      validateSpatialSeuratParams(body.parameters);
+    } catch (e) {
+      return res.status(400).json({ error: e.message || 'Invalid spatial.seurat.v1 parameters.' });
+    }
+    if (body.datasetId === undefined || body.datasetId === null) {
+      return res.status(400).json({ error: 'spatial.seurat.v1 requires datasetId.' });
+    }
+  }
 
   if (body.jobType === 'enrichment.gsea.v1') {
     try {
@@ -2559,6 +3141,49 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
       return res.status(400).json({
         error: e && e.message ? e.message : 'Invalid cellchat.infer.v1 parameters.',
       });
+    }
+  }
+  if (body.jobType === 'explore.summarize.v1') {
+    try {
+      validateExploratoryAnalysisParams(body.parameters);
+    } catch (e) {
+      return res.status(400).json({
+        error: e && e.message ? e.message : 'Invalid explore.summarize.v1 parameters.',
+      });
+    }
+  }
+
+  if (config.demoMode()) {
+    if (!req.user.isDemoGuest) {
+      return res.status(403).json({ error: 'Only an active demo guest may launch demo compute.' });
+    }
+    if (body.jobType === 'expert.r.v1') {
+      return res.status(403).json({ error: 'Expert R is disabled in the public demo.' });
+    }
+    const heavyTypes = [
+      'pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'deg.find_markers.v1',
+      'enrichment.gsea.v1', 'cellchat.infer.v1', 'explore.summarize.v1',
+      'condition.pseudobulk_de.v1',
+      'spatial.seurat.v1',
+    ];
+    if (heavyTypes.includes(body.jobType)) {
+      const { rows } = await db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE owner_user_id = $1)::int AS guest_active,
+           COUNT(*)::int AS global_active
+         FROM jobs job JOIN users owner ON owner.id = job.owner_user_id
+        WHERE owner.is_demo_guest = TRUE AND job.status IN ('queued', 'running')
+          AND job.job_type = ANY($2::text[])`,
+        [Number(req.user.id), heavyTypes]
+      );
+      if (Number(rows[0]?.guest_active) >= 1 || Number(rows[0]?.global_active) >= 2) {
+        res.setHeader('Retry-After', '10');
+        return res.status(429).json({
+          error: Number(rows[0]?.guest_active) >= 1
+            ? 'This demo session already has an active compute job.'
+            : 'The public demo compute pool is currently full.',
+        });
+      }
     }
   }
 
@@ -2614,6 +3239,29 @@ app.get('/api/projects/:projectId/jobs/:jobId/logs', async (req, res) => {
     res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
+  }
+});
+
+app.post('/api/projects/:projectId/jobs/:jobId/retry', async (req, res) => {
+  if (!isValidJobIdFormat(req.params.jobId)) {
+    return res.status(400).json({ error: 'Malformed job ID.' });
+  }
+  const bodyIsEmptyObject = req.body === undefined || (
+    req.body !== null
+      && typeof req.body === 'object'
+      && !Array.isArray(req.body)
+      && Object.keys(req.body).length === 0
+  );
+  if (!bodyIsEmptyObject) {
+    return res.status(400).json({
+      error: 'Retry uses the recorded run inputs and does not accept request fields.',
+    });
+  }
+  try {
+    const result = await db.retryProjectJob(req.user.id, req.params.projectId, req.params.jobId);
+    res.status(result.created ? 201 : 200).json(db.toPublicJob(result.job));
+  } catch (e) {
+    sendProjectResourceError(res, e, 'ProjectJobRetry');
   }
 });
 
@@ -2792,11 +3440,12 @@ app.get('/api/projects/:projectId/figures/:figureId', async (req, res) => {
 // ── Project-scoped job artifacts & checkpoints (read-only metadata) ──────
 // Durable artifact/checkpoint METADATA produced by jobs, readable by project
 // members by role. There is intentionally NO create/mutate route (artifact
-// creation is worker/helper-driven) and NO download route — these endpoints
-// return metadata only. The serializer omits storage_uri, so no internal/local
-// path or storage key is ever exposed; claim tokens / worker internals are not in
-// the artifact model at all. Legacy NULL-project artifacts never appear (the
-// helpers always pin a real project_id).
+// creation is worker/helper-driven), and these endpoints return metadata only.
+// A separate exact allowlist below provides controlled authenticated exports for
+// selected result tables; checkpoints remain non-downloadable. The serializer
+// omits storage_uri, so no internal/local path or storage key is ever exposed;
+// claim tokens / worker internals are not in the artifact model at all. Legacy
+// NULL-project artifacts never appear (the helpers always pin a real project_id).
 app.get('/api/projects/:projectId/artifacts', async (req, res) => {
   const filters = {
     jobId: typeof req.query.jobId === 'string' ? req.query.jobId : undefined,
@@ -2853,6 +3502,82 @@ app.use('/api/r', (req, res, next) => {
     return res.status(414).json({ error: 'R request URL is too long.' });
   }
   next();
+});
+
+// Explicit authenticated export surfaces. Internal storage keys are resolved
+// only after project membership, artifact allowlist, private-work visibility,
+// size, and checksum checks. Neither response exposes a server path/key.
+app.get('/api/projects/:projectId/artifacts/:artifactId/download', async (req, res) => {
+  if (!isValidArtifactIdFormat(req.params.artifactId)) {
+    return res.status(400).json({ error: 'Malformed artifact ID.' });
+  }
+  let opened;
+  try {
+    const download = await researchExports.authorizeArtifactDownload(
+      req.user.id, req.params.projectId, req.params.artifactId
+    );
+    opened = await durableStorage.openVerifiedRead(download.artifact.storageUri, {
+      checksumSha256: download.artifact.checksumSha256,
+      sizeBytes: download.artifact.sizeBytes,
+    });
+    await projectAudit.recordEvent(db, {
+      projectId: req.params.projectId, actorUserId: req.user.id,
+      action: 'artifact.downloaded', targetType: 'artifact', targetId: download.artifact.id,
+      details: { artifactType: download.artifact.artifactType },
+    });
+    res.setHeader('Content-Type', download.mimeType);
+    res.setHeader('Content-Length', String(opened.stat.size));
+    res.setHeader('Content-Disposition', `attachment; filename="${download.filename}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    const stream = opened.handle.createReadStream({ autoClose: true });
+    opened = null;
+    stream.on('error', (error) => {
+      console.error('[ProjectArtifactDownload]', error);
+      if (!res.headersSent) res.status(500).json({ error: 'Artifact download failed.' });
+      else res.destroy(error);
+    });
+    stream.pipe(res);
+  } catch (error) {
+    if (opened?.handle) await opened.handle.close();
+    sendProjectResourceError(res, error, 'ProjectArtifactDownload');
+  }
+});
+
+app.get('/api/projects/:projectId/reproducibility-manifest', async (req, res) => {
+  try {
+    const manifest = await researchExports.buildReproducibilityManifest(
+      req.user.id,
+      req.params.projectId,
+      {
+        branchId: typeof req.query.branchId === 'string' ? req.query.branchId : undefined,
+        analysisObjectId: typeof req.query.analysisObjectId === 'string'
+          ? req.query.analysisObjectId : undefined,
+      }
+    );
+    await projectAudit.recordEvent(db, {
+      projectId: req.params.projectId, actorUserId: req.user.id,
+      action: 'reproducibility.exported', targetType: 'analysis_object',
+      targetId: manifest.exportedAnalysisObjectId,
+      details: { manifestVersion: manifest.version },
+    });
+    res.setHeader('Content-Disposition',
+      `attachment; filename="reproducibility-${manifest.exportedAnalysisObjectId}.json"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json(manifest);
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectReproducibilityManifest');
+  }
+});
+
+app.get('/api/projects/:projectId/audit-events', async (req, res) => {
+  try {
+    res.json(await projectAudit.listEvents(req.user.id, req.params.projectId, {
+      limit: req.query.limit,
+      before: typeof req.query.before === 'string' ? req.query.before : undefined,
+    }));
+  } catch (error) {
+    sendProjectResourceError(res, error, 'ProjectAudit');
+  }
 });
 // Gate test-only diagnostic endpoints. They must return 404 in production (or
 // whenever diagnostics are disabled) BEFORE the request can reach the proxy/R.
@@ -3021,6 +3746,19 @@ async function buildRuntimeDiagnostics() {
   }
 
   return diagnostics;
+}
+
+function toPublicRuntimeDiagnostics(diagnostics) {
+  const runtime = diagnostics && typeof diagnostics.runtime === 'object' ? diagnostics.runtime : {};
+  const status = ['ok', 'ready'].includes(runtime.status) ? runtime.status : 'unavailable';
+  return {
+    supportedTarget: typeof diagnostics?.supportedTarget === 'string'
+      ? diagnostics.supportedTarget : SUPPORTED_R_TARGET,
+    runtime: {
+      status,
+      rVersion: normalizeRVersion(runtime.rVersion),
+    },
+  };
 }
 
 function startPlumber(options = {}) {
@@ -3371,7 +4109,7 @@ if (require.main === module) {
     process.on(sig, () => onShutdownSignal(0));
   }
   process.on('message', (message) => {
-    if (message && message.type === 'benchone:shutdown') onShutdownSignal(0);
+    if (message && message.type === 'traceomics:shutdown') onShutdownSignal(0);
   });
 }
 
@@ -3428,6 +4166,7 @@ module.exports = {
   R_PROXY_VALIDATED_PATH_FIELDS,
   findRscript,
   buildRuntimeDiagnostics,
+  toPublicRuntimeDiagnostics,
   // Exposed for tests: opt-in job worker startup/shutdown wiring
   startPlumber,
   startWebRBackend,

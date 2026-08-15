@@ -99,7 +99,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — scope & registration', () => 
 
   it('registers r.object.inspect; generic / checkpoint.noop / r.runtime.check unchanged', async () => {
     expect(Object.keys(DEFAULT_HANDLERS).sort())
-      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.pipeline.v1']);
+      .toEqual(['cellchat.infer.v1', 'checkpoint.fork.v1', 'checkpoint.load.v1', 'checkpoint.noop', 'checkpoint.save.v1', 'condition.pseudobulk_de.v1', 'deg.find_markers.v1', 'enrichment.gsea.v1', 'expert.r.v1', 'explore.summarize.v1', 'generic', 'pbmc.pipeline.v1', 'r.object.inspect', 'r.runtime.check', 'seurat.multisample.v1', 'seurat.pipeline.v1', 'spatial.seurat.v1']);
     expect(DEFAULT_HANDLERS['r.object.inspect']).toBe(rObjectInspectHandler);
     // Pre-existing handlers are the exact same functions (not swapped out).
     expect(DEFAULT_HANDLERS.generic).toBe(worker.genericNoopHandler);
@@ -231,7 +231,7 @@ describe.skipIf(!CONFIGURED)('r.object.inspect — bridge allowlist & input cont
   it('createDefaultRCaller (defense-in-depth) refuses any non-allowlisted target BEFORE HTTP', async () => {
     const callR = createDefaultRCaller({ port: 8000, token: 't' });
     // Only the reviewed bridge targets exist; this set remains exact/closed.
-    expect([...R_BRIDGE_ALLOWED_TARGETS].sort()).toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline']);
+    expect([...R_BRIDGE_ALLOWED_TARGETS].sort()).toEqual(['GET /health', 'GET /object/inspect', 'POST /object/cellchat-infer', 'POST /object/checkpoint-load', 'POST /object/checkpoint-save', 'POST /object/condition-pseudobulk-de', 'POST /object/deg-find-markers', 'POST /object/enrichment-gsea', 'POST /object/explore-summary', 'POST /object/pbmc-pipeline', 'POST /object/seurat-pipeline', 'POST /object/spatial-seurat-pipeline']);
     expect(isAllowedRBridgeTarget('GET', '/object/inspect')).toBe(true);
     expect(isAllowedRBridgeTarget('GET', '/health')).toBe(true);
     expect(isAllowedRBridgeTarget('POST', '/object/inspect')).toBe(false);

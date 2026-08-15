@@ -1,7 +1,7 @@
-# scRNA-seq Workbench
+# TraceOmics
 
-A single-cell RNA-seq analysis workbench with a conservative single-host
-deployment topology:
+A collaborative, provenance-first transcriptomic analysis platform with a
+conservative single-host deployment topology:
 
 - React/Vite browser app.
 - Express API server for auth, project/object/job metadata, uploads, and R proxying.
@@ -15,27 +15,34 @@ graceful drain, non-root/read-only Compose services, a private R/Postgres networ
 namespace, resource limits, and verified offline backup/restore. This is not a
 high-availability, hostile-user multi-tenant, or hostile-code-compute platform.
 Data is sensitive by default: project-scoped production APIs expose no public
-downloads, shared live R state, or raw storage paths/keys. Production account
-creation is operator-only and legacy vault uploads are disabled. Read
-[docs/deployment.md](docs/deployment.md) before exposing it.
+downloads, shared live R state, or raw storage paths/keys. An exact set of private
+result downloads is authenticated, visibility-checked, checksum-verified, and
+audited. Production account
+creation is operator-only and legacy vault uploads are disabled. The
+[deployment guide](docs/deployment.md) begins with a non-technical public-demo
+checklist; the detailed operator runbook follows it.
 
 ## Runtime Shape
 
 ```text
-Browser (React/Vite)
-  -> Express API (auth, authorization, DB, uploads, R proxy) --+
-                                                               +-> private R Plumber/Seurat service
-Standalone job worker -> Postgres queue + shared storage ------+
+Browser -> Express -> private interactive R service
+Checkpoint attach/fork worker -> interactive R service
+Postgres queue + shared storage
+  -> compute worker 1 -> private R runtime 1
+  -> compute worker 2 -> private R runtime 2
 ```
 
 Express is the authentication and authorization boundary. The R backend trusts
 only server-injected headers such as `X-API-Token` and server-derived
 `X-Object-ID`; it must not be exposed directly to users or the public network.
-The supported v1 execution topology is deliberately limited to one standalone
-worker process, one in-flight job, and the same private R service used by the web
-proxy. This preserves private live-R object continuity while moving durable work
-out of the web process. Multiple heavy R workers are not yet a supported scaling
-topology.
+The single-host deployment keeps interactive live-R continuity on its existing
+private service and adds two single-flight compute workers, each connected to a
+different private R process. Heavy checkpoint-backed jobs hydrate an immutable,
+server-selected checkpoint into a job-scoped state key before analysis. This
+supports two concurrent heavy jobs without shared mutable R state. The R route
+erases that hydrated key before returning (including after handled failure or a
+response-side timeout), so a later user never inherits residual expression state
+when a compute process is reused.
 
 ## Architecture Status
 
@@ -48,19 +55,24 @@ At a glance:
 - **UI-wired:** auth, organizations/projects, DB-backed analysis objects
   (`ao_*`), live R object state, QC/Normalize/PCA/Cluster/UMAP/plots, DEG through
   durable `deg.find_markers.v1` jobs, ranked GO Biological Process enrichment
-  through durable `enrichment.gsea.v1` jobs, and bounded summary artifacts, the narrow
-  10x HDF5 `seurat.pipeline.v1` Pipeline Manager flow with result checkpoint
-  reattach, project member/role management, private collaborator checkpoint
+  through durable `enrichment.gsea.v1` jobs, bounded `explore.summarize.v1`
+  exploratory recipes, replicate-aware `condition.pseudobulk_de.v1` edgeR
+  comparisons over explicit biological samples and immutable contrast snapshots,
+  and summary artifacts, the single-dataset 10x HDF5 `seurat.pipeline.v1` flow,
+  the multi-sample/multi-condition 10x HDF5 `seurat.multisample.v1` preparation flow, and
+  classic Space Ranger Visium ZIP `spatial.seurat.v1` flow in Approved workflows,
+  explicit saving of modified private live analyses, result saved-version reattach,
+  project member/role management, private collaborator checkpoint
   forks with durable source lineage, a trusted global declarative pipeline
   registry for code-shipped modules, provenance/figures/cache.
 - **Backend implemented with selected UI actions and read-only metadata:** durable jobs,
   artifacts/checkpoints, and lineage exist in the backend, and the React UI now
-  includes a Jobs & Artifacts / durable history surface for safe metadata plus
+  includes a Runs & Results / durable history surface for safe metadata plus
   controlled checkpoint forks. DEG, ranked pathway-enrichment, and narrow
   single-context CellChat launches are wired in their result tabs, and the Pipeline
-  Manager Seurat panel can launch the supported 10x HDF5 pipeline plus checkpoint
-  reattach. Artifact downloads, general job launch/cancel/retry, and lineage
-  mutation are still not UI-wired.
+  Approved workflows Seurat panel can launch the supported single- or multi-sample 10x HDF5 pipeline plus saved-version
+  reattach. Selected result-table/Expert-R downloads and reproducibility-manifest
+  exports are UI-wired; general job launch/cancel/retry and lineage mutation are not.
 - **Backend-only (implemented + tested, no UI yet):** general dataset management,
   standalone worker operations/health controls, and
   the PBMC pipeline / runtime-check / object-inspect worker workflows. The DEG,
@@ -77,13 +89,14 @@ At a glance:
 - **Durable local storage:** new dataset, checkpoint, DEG, pathway-enrichment, and
   CellChat candidate-table files use server-owned project keys under `STORAGE_ROOT`.
   Existing private-vault records
-  remain readable. Project writers can fork a member's durable checkpoint into a
-  new object that they own from Jobs & Artifacts, without sharing live R state;
+  remain readable. Owners can explicitly snapshot current private live state into
+  a new immutable saved analysis; project writers can fork a member's durable checkpoint into a
+  new analysis that they own from Runs & Results, without sharing live R state;
   the fork records its source object, checkpoint, job, and lineage edge.
-- **Not implemented (product):** sample-aware condition comparisons, cell annotation,
-  custom/arbitrary R execution, reports, generated scripts, artifact downloads,
-  object storage, shared project live R state, high availability, and parallel R
-  worker scaling.
+- **Not implemented (product):** cross-condition CellChat, cell annotation,
+  rendered publication reports, generated standalone R scripts,
+  object storage, shared project live R state, high availability, and elastic or
+  multi-host R worker scaling.
 
 See **[docs/architecture.md](docs/architecture.md)** for the full
 implemented-vs-UI-wired table, the DEG dual-path detail, the
@@ -98,8 +111,9 @@ Pipeline manifests are global, declarative definitions for composing UI modules
 that already ship with the application. Any project member may list approved
 manifests and select one for their own user/project pair. Project roles do not
 grant publication rights: only an account with the server-managed
-`pipeline_registry.publish` platform capability sees and may use the publication
-UI.
+`pipeline_registry.publish` platform capability may publish. Manifest publication
+and platform-capability administration are deliberately outside the ordinary
+researcher browser interface.
 
 An operator grants, revokes, or inspects that capability outside the browser:
 
@@ -111,7 +125,7 @@ npm run platform-developer -- revoke developer@example.com
 
 Publication accepts at most 64 KiB of strictly validated JSON and the registry
 is capped at 200 definitions. Backend and frontend consume the same
-data-only module contract. The Pipeline Manager can render declared parameter
+data-only module contract. Approved workflows can render declared parameter
 and result templates as a disabled, read-only preview; the preview never submits
 parameters or starts work. Routes, React components, artifact types, and worker
 job types remain application-controlled. Of the manifest modules currently
@@ -140,7 +154,8 @@ or file paths.
 The job is project-scoped, queued, owner-verified before R contact, protected by
 the same lease and signed completion-receipt recovery used by other durable R
 jobs, and publishes exactly two artifacts: a private internal CSV table and a
-small metadata-only preview for the UI. There is no public download route. The
+small metadata-only preview for the UI. Its complete CSV is available only through
+the authenticated, audited result-download route. The
 signed result records the R, Seurat, pathway-analysis, annotation, and organism-
 database versions used, so later software changes do not erase its provenance.
 UI describes the result as an association, not proof that a pathway is active;
@@ -149,10 +164,84 @@ sample-aware comparison. Species is required rather than guessed. Large
 comparisons use a visible, repeatable per-group cell limit (10,000 by default)
 so one request cannot silently expand to every cell in a very large object.
 
-The production R image makes `clusterProfiler`, `fgsea`, `AnnotationDbi`, both
-human and mouse organism databases, and `GO.db` mandatory. The R 4.5.3 image
-and real-R enrichment smoke pass on this worktree. A release still needs the
-normal deployed database, worker, and browser acceptance checks.
+The production R image makes `clusterProfiler`, `fgsea`, `AnnotationDbi`, edgeR,
+limma, both human and mouse organism databases, and `GO.db` mandatory. The R 4.5.3 image
+and real-R enrichment smoke pass on this worktree. Disposable deployment checks
+cover the real database, workers, browser, and native shell; any announced public
+demo must additionally pass the browser workflow through its final HTTPS host.
+
+Expert R is an opt-in private-deployment feature, disabled in the public demo.
+Both deployment enablement and an operator-granted `expert_r.execute` account
+capability are required. `expert.r.v1` runs a submitted script against one
+caller-owned checkpoint in a fresh digest-pinned container with
+no network, no project-storage mount, a read-only root, non-root identity, dropped
+capabilities, and CPU/memory/PID/time bounds. The output mount is a 200 MiB tmpfs,
+so a script cannot consume the shared host disk before post-run validation. The
+broker also reserves expected work/archive capacity in process and rejects a run
+unless both work and durable-storage filesystems retain an operator-configured
+free-space reserve. Up to 50 bounded output files (200 MiB total) are retained as
+one private archive; `.rds` is excluded and an
+exact byte-for-byte copy of the input is rejected even if it uses another allowed
+extension. Those controls provide workload containment and tenant isolation, not
+data-loss prevention against an authorized data owner: R can transform or encode
+input-derived data. Results and output bundles stay creator-private until an
+explicit audited branch publish. Source is removed from terminal job records while
+its hash and input/profile/image/output provenance remain. Approved users can
+privately import up to five selected CSV, TSV, text, or JSON files through the
+server-controlled picker; those files are owner/project scoped, mounted read-only,
+and addressed in R only by server-generated IDs. Owner-visible script failures use
+a short fixed, path-free explanation. Arbitrary sandbox-created serialized R
+objects are not promoted into the trusted reusable-analysis runtime because RDS
+deserialization is an executable-code boundary. Runtime package install is
+unavailable; operators manage access with
+`npm run expert-r-access -- <grant|revoke|status> <email>`.
+
+The spatial workflow currently supports one classic 10x Visium Space Ranger ZIP
+containing `filtered_feature_bc_matrix.h5` plus its `spatial/` directory. The
+server inspects a bounded archive inventory first and enables the run only after
+the matrix, positions, scalefactors, and low-resolution image pass validation.
+The allowlisted `spatial.seurat.v1` worker independently validates and extracts
+only those required entries, loads counts/image/coordinates with Seurat, performs bounded QC,
+normalization, PCA, clustering, and UMAP, and saves a reusable checkpoint with
+lineage and provenance. Visium HD, Xenium, arbitrary spatial layouts, and
+multi-sample spatial integration are not yet supported.
+
+The approved multi-condition preparation workflow accepts 2-48 separately
+uploaded, validated 10x HDF5 datasets from one project. Each dataset is bound to
+one unique sample name and an explicit condition, with optional donor and batch
+labels. The allowlisted `seurat.multisample.v1` worker resolves every dataset from
+the claimed project job, merges the count matrices with unique cell identifiers,
+adds `sample_id`, `condition`, `donor_code`, and `batch` metadata, runs the bounded
+Seurat preprocessing recipe, and saves one reusable checkpoint-backed result. It
+does not perform automatic batch correction or make a biological condition claim.
+The UI reports when fewer than two samples are present in a condition because the
+downstream pseudobulk gate will reject that comparison.
+
+Study Design may register more than two conditions, but each saved
+`condition.pseudobulk_de.v1` run is one explicit numerator-versus-denominator
+contrast. It requires at least two independent samples or donors in each selected
+condition, supports donor-paired designs only when donor identities match, and
+runs edgeR quasi-likelihood pseudobulk separately per cell type. Multi-arm omnibus
+models, general covariate formulas, and automatic batch correction/integration of
+multiple raw condition datasets are not implemented. The approved multi-condition
+workflow can now ingest and merge separate raw 10x HDF5 samples into one saved
+analysis with explicit sample/condition metadata. The existing Batch Integration tab can
+apply Harmony or Seurat CCA to 2-100 technical-batch labels already present in one
+loaded Seurat object; it is not a multi-file importer or a substitute for a
+biological condition contrast.
+
+The public website demo uses `deploy/compose.demo.yml` as an overlay on a wholly
+separate Compose project. It provisions temporary guest projects from one
+operator-reviewed canonical checkpoint plus a remapped sample/condition/contrast
+design, disables uploads and Expert R, permits one active heavy job per guest and
+two globally, and requires the scheduled `demo:cleanup` operation to remove
+expired guest projects and files. `deploy/compose.demo-free-tier.yml` adds a
+resource-capped ARM64/Caddy candidate for a small public synthetic-data demo; see
+the deployment guide before using it. The disposable demo acceptance creates the
+real synthetic checkpoint and drives Chromium through UMAP and exploratory
+analysis; the ARM64 public host remains a separate required acceptance target. Demo
+credentials, Postgres, storage volumes, R tokens, and session secrets must never
+be shared with a private deployment.
 
 ## Running Locally
 
@@ -220,7 +309,7 @@ erase the local database.
 This command lists any required R packages that are missing:
 
 ```powershell
-Rscript -e "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db'); print(required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)])"
+Rscript -e "required <- c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc','ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','edgeR','limma'); print(required[!vapply(required, requireNamespace, logical(1), quietly=TRUE)])"
 ```
 
 An empty `character(0)` result means all required packages are installed. If
@@ -228,7 +317,7 @@ packages are missing, install the regular R packages first:
 
 ```powershell
 Rscript -e "install.packages(c('plumber','jsonlite','digest','Seurat','hdf5r','ggplot2','base64enc'), repos='https://cloud.r-project.org/')"
-Rscript -e "if (!requireNamespace('BiocManager', quietly=TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(c('ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db'), ask=FALSE)"
+Rscript -e "if (!requireNamespace('BiocManager', quietly=TRUE)) install.packages('BiocManager', repos='https://cloud.r-project.org/'); BiocManager::install(c('ComplexHeatmap','BiocGenerics','clusterProfiler','fgsea','AnnotationDbi','org.Hs.eg.db','org.Mm.eg.db','GO.db','edgeR','limma'), ask=FALSE)"
 ```
 
 These installs can take a while because Seurat has many supporting packages.
@@ -250,6 +339,15 @@ The development supervisor gives Express and the worker a temporary private key
 so both can talk to the same local R process. `npm run dev:no-worker` omits the
 background job worker; use the full `npm run dev` command when testing the
 durable Seurat and differential-expression workflows.
+This compatibility supervisor remains one R process and does not prove the
+two-slot deployment; use the Compose topology for concurrency acceptance.
+
+When `JOB_WORKER_MIN_FREE_MEMORY_MB` is omitted, this local supervisor gives
+only its worker a 256 MiB admission fallback so the development workflow can run
+on constrained workstations. An explicit value is preserved. Standalone workers
+and deployments retain the 1 GiB default documented in `.env.example`; this is
+an admission gate, not a substitute for measured RAM capacity and real resource
+limits.
 
 ### Advanced local runtime details
 
@@ -271,7 +369,9 @@ endpoints default to `127.0.0.1:3101`. Readiness requires Postgres,
 authenticated R, a shared-storage proof, and the configured free-memory
 admission threshold before any claim is taken.
 
-`JOB_WORKER_CONCURRENCY` is fixed at `1` in this topology. The memory threshold
+`JOB_WORKER_CONCURRENCY` remains fixed at `1` per process. A deployment sets a
+bounded `JOB_WORKER_POOL_SIZE` and a unique `JOB_WORKER_POOL_SLOT` for each
+declared lane; do not point two slots at the same R process. The memory threshold
 pauses new claims but is not a hard RAM limit; deployments still need real
 container/VM resource limits. Cancellation is cooperative for shared-R calls:
 it blocks durable output publication, but it does not claim to terminate compute
@@ -283,10 +383,15 @@ authenticated server-derived state keys, retains no empty keys, and applies
 deterministic least-recently-used eviction against global/per-user session-count
 and estimated object-byte budgets. Evicted objects must be reattached from their
 durable checkpoint; collaborators never share another user's live R object.
+Compatibility-proxy mutations are explicitly unsaved. The owner may choose
+**Save current analysis**, which queues parameterless `checkpoint.save.v1`, writes
+the exact live object to a server-allocated private checkpoint, creates an immutable
+child with lineage, and then opens that child. The save endpoint is worker-only;
+the browser cannot provide a path, dataset, result ID, R code, or transformation.
 
 Production `/api/r` is an exact reviewed method/path allowlist, not an open
 Plumber catch-all. Every browser R request carries the explicit
-`X-BenchOne-CSRF: 1` first-party header; the server also accepts a reviewed
+`X-TraceOmics-CSRF: 1` first-party header; the server also accepts a reviewed
 Origin/Referer fallback. This applies even to GET because legacy GET operations
 can mutate private live R state. The compatibility proxy has one global admission slot plus
 rate/deadline/request/response limits, accepts only bodyless GET or bounded JSON
@@ -301,7 +406,7 @@ flow remain local/development compatibility only until they have bounded durable
 Synchronous batch integration is also development-only: CCA anchor search scales
 across batch pairs and cannot be safely interrupted when the shared R service times out.
 The frontend consumes a fail-closed deployment policy: production hides those
-local loaders and live mutations, routes 10X H5 upload to Pipeline Manager, and
+local loaders and live mutations, routes 10X H5 upload to Approved workflows, and
 keeps figure preview while disabling the legacy server-file save action.
 
 RDS imports are disabled by default because RDS deserialization can execute R
@@ -350,6 +455,21 @@ Then run the full server and database checks against `scrna_test`:
 npm run test:backend
 ```
 
+Before pushing a release candidate, run the same fail-fast gates used by CI.
+They must have a real test `DATABASE_URL`; CI will not start R installation,
+image builds, deployment drills, or scientific certification until both pass:
+
+```powershell
+$env:DATABASE_URL = 'postgres://scrna:scrna@127.0.0.1:5432/scrna_test'
+$env:NODE_ENV = 'test'
+npm run check:ci-preflight
+npm run check:browser-preflight
+```
+
+The preflight refuses database names that are not explicitly marked `test` or
+`ci`, because the backend suites reset their target schema. Install Chromium
+once with `npx playwright install chromium` before running the browser preflight.
+
 For a deeper real-R check, download the small PBMC example data once and run the
 main workflow tests. Keep `DATABASE_URL` pointed at `scrna_test`:
 
@@ -357,6 +477,7 @@ main workflow tests. Keep `DATABASE_URL` pointed at `scrna_test`:
 node scripts/download_sample_data.js
 npm run test:r-state-proxy
 npm run test:seurat-pipeline
+npm run test:seurat-multisample
 npm run test:deg-worker-pipeline
 ```
 
@@ -398,7 +519,8 @@ jobs have bounded retry support: exact already-committed outputs can be resumed
 after a worker crash without another R call, including output committed on the
 final execution attempt or before creator removal. Partial or ambiguous output
 sets fail closed, and a canceled job cannot retain published output. There
-is no startup file reconciliation, object storage, or byte-download API yet.
+is no startup file reconciliation or object storage. Byte downloads are limited
+to the reviewed result allowlist and never include checkpoints or arbitrary keys.
 
 R/workflow checks for the hardened, live paths (require a real R/Seurat backend;
 they skip cleanly when Seurat is unavailable):
@@ -411,7 +533,26 @@ npm run test:seurat-pipeline
 npm run test:pbmc-parent
 npm run test:checkpoint-load
 npm run test:deg-markers
+npm run test:spatial-seurat
+npm run test:private-compute-compose
+npm run test:native-ui-compose
+npm run test:expert-r-sandbox
+npm run test:expert-r-browser
+npm run test:demo-compose
 ```
+
+The last five commands create randomized disposable Docker resources to prove
+the isolated two-lane compute topology, a real browser plus two native Electron
+profiles, the digest-pinned Expert R containment boundary and owner browser
+workflow, and the distinct
+website-demo lifecycle including a real Chromium scientific workflow. The native
+run records only exact Electron window handles
+and retains its inspected screenshots/video under
+`playwright/report/release-acceptance/`. The private-compute run retains a
+sanitized JSON report there as well; raw R state keys, runtime identities, and
+user/project identifiers are deliberately omitted. The commands remove their
+containers and volumes after completion unless an explicit acceptance-debug flag
+is set.
 
 The visual tests (`npm run test:visual`, `npm run test:visual:db-flow`) are
 **mocked** frontend smoke tests — they check rendering/layout, not real

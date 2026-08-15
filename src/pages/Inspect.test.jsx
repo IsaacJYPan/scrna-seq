@@ -35,11 +35,38 @@ describe('Inspect deployment policy', () => {
 
     await waitFor(() => expect(callApi).toHaveBeenCalledWith('/object-info', {}, { useCache: false }));
     expect(screen.queryByRole('button', { name: 'Subset' })).not.toBeInTheDocument();
+    expect(screen.getByText(/Subsetting is disabled in this deployment/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Metadata' }));
     expect(await screen.findByRole('button', { name: 'Map from Column' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Import CSV' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Click to select CSV/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/CSV metadata import and live subsetting are local-development tools/i)).toBeInTheDocument();
+    expect(screen.getByText(/This import and subsetting option is not available in this deployment/i)).toBeInTheDocument();
+  });
+
+  it('shows only a selected CSV filename, never its local path', async () => {
+    window.electronAPI = {
+      openDataFileDialog: vi.fn(async () => 'C:\\private-data\\donor-metadata.tsv'),
+    };
+    const callApi = vi.fn(async (endpoint) => {
+      if (endpoint === '/object-info') return objectInfo();
+      return { values: [] };
+    });
+    const { container } = render(
+      <Inspect
+        obj={{ id: 'ao_policy1', name: 'Policy object' }}
+        globalTab="inspect"
+        workspaceObjects={[]}
+        callApi={callApi}
+        deploymentPolicy={{ legacyLiveMutationToolsEnabled: true }}
+      />
+    );
+
+    await waitFor(() => expect(callApi).toHaveBeenCalledWith('/object-info', {}, { useCache: false }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add Metadata' }));
+    fireEvent.click(await screen.findByText(/Click to select CSV/i));
+    expect(await screen.findByText('donor-metadata.tsv')).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/C:\\private-data|private-data/i);
+    delete window.electronAPI;
   });
 });

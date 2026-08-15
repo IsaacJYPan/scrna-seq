@@ -27,13 +27,15 @@ const path = require('path');
 const rRuntime = require('./rRuntime');
 
 const ALLOWED_NODE_ENVS = new Set(['development', 'test', 'production']);
+const ALLOWED_DEPLOYMENT_MODES = new Set(['private', 'byoc', 'shared-private', 'demo', 'public']);
+const EXPERT_R_DEPLOYMENT_MODES = new Set(['private', 'byoc', 'shared-private']);
 const MIN_SESSION_SECRET_LENGTH = 32;
 const SESSION_EPOCH_PATTERN = /^[0-9a-f]{32}$/;
 const DEVELOPMENT_SESSION_EPOCH = '00000000000000000000000000000000';
 const SESSION_TTL_MIN_SECONDS = 5 * 60;
 const SESSION_TTL_MAX_SECONDS = 24 * 60 * 60;
-const LEGACY_SESSION_COOKIE_NAME = 'benchone_session';
-const PRODUCTION_SESSION_COOKIE_NAME = '__Host-benchone_session';
+const LEGACY_SESSION_COOKIE_NAME = 'traceomics_session';
+const PRODUCTION_SESSION_COOKIE_NAME = '__Host-traceomics_session';
 const ALLOWED_DATABASE_URL_QUERY_KEYS = new Set(['sslmode', 'sslrootcert', 'sslcert', 'sslkey']);
 const ALLOWED_POSTGRES_SSL_MODES = new Set(['disable', 'prefer', 'require', 'verify-ca', 'verify-full', 'no-verify']);
 
@@ -152,7 +154,7 @@ function inspectDatabaseUrl() {
  */
 function postgresConfig() {
   const cfg = {
-    application_name: 'scrna-seq-workbench',
+    application_name: 'traceomics',
     max: postgresPoolMax(),
     connectionTimeoutMillis: postgresConnectTimeoutMs(),
     idleTimeoutMillis: postgresIdleTimeoutMs(),
@@ -244,7 +246,24 @@ function hasStrongSessionSecret() {
 // preventing anonymous account creation from becoming a storage/compute abuse
 // primitive. Development and test retain the convenient signup flow.
 function registrationEnabled() {
-  return !isProduction();
+  return !isProduction() && !demoMode();
+}
+
+function demoMode() {
+  return deploymentMode() === 'demo';
+}
+
+function deploymentMode() {
+  const mode = trimmed(process.env.APP_DEPLOYMENT_MODE).toLowerCase();
+  return ALLOWED_DEPLOYMENT_MODES.has(mode) ? mode : 'unknown';
+}
+
+function demoGuestTtlSeconds() {
+  return positiveIntFromEnv(process.env.DEMO_GUEST_TTL_SECONDS, 2 * 60 * 60);
+}
+
+function demoTemplateProjectId() {
+  return trimmed(process.env.DEMO_TEMPLATE_PROJECT_ID);
 }
 
 // HttpOnly session cookies are Secure by default in production and non-Secure by
@@ -447,6 +466,7 @@ function summary() {
     hasStrongSessionSecret: hasStrongSessionSecret(),
     hasSessionEpoch: !!trimmed(process.env.SESSION_EPOCH),
     registrationMode: registrationEnabled() ? 'open-development' : 'operator-only',
+    deploymentMode: deploymentMode(),
     sessionTtlSeconds: sessionTtlSeconds(),
     sessionCookieName: sessionCookieName(),
     cookieSecure: cookieSecure(),
@@ -484,6 +504,10 @@ function validateProductionConfig(options = {}) {
     errors.push('SESSION_EPOCH must be exactly 32 lowercase hexadecimal characters.');
   }
   if (!isProduction()) return errors;
+
+  if (deploymentMode() === 'unknown') {
+    errors.push('APP_DEPLOYMENT_MODE must be private, byoc, shared-private, demo, or public in production.');
+  }
 
   if (role !== 'web' && role !== 'worker') {
     errors.push('Runtime role must be web or worker.');
@@ -610,6 +634,35 @@ function validateProductionConfig(options = {}) {
   if (pathContains(durableRoot, privateRoot) || pathContains(privateRoot, durableRoot)) {
     errors.push('STORAGE_ROOT and VAULT_ROOT must be separate non-overlapping directories.');
   }
+  if (process.env.EXPERT_R_ENABLED === 'true') {
+    let sandboxUrl;
+    try { sandboxUrl = new URL(trimmed(process.env.EXPERT_R_SANDBOX_URL)); } catch { /* checked below */ }
+    if (!sandboxUrl || !['http:', 'https:'].includes(sandboxUrl.protocol)
+        || !isLoopbackHost(sandboxUrl.hostname) || sandboxUrl.username || sandboxUrl.password
+        || (sandboxUrl.pathname && sandboxUrl.pathname !== '/') || sandboxUrl.search || sandboxUrl.hash) {
+      errors.push('EXPERT_R_SANDBOX_URL must be an internal loopback HTTP(S) origin when Expert R is enabled.');
+    }
+    if (!/^[0-9a-f]{64}$/.test(trimmed(process.env.EXPERT_R_SANDBOX_TOKEN))) {
+      errors.push('EXPERT_R_SANDBOX_TOKEN must be 64 lowercase hexadecimal characters when Expert R is enabled.');
+    }
+    if (!EXPERT_R_DEPLOYMENT_MODES.has(deploymentMode())) {
+      errors.push('EXPERT_R_ENABLED requires APP_DEPLOYMENT_MODE=private, byoc, or shared-private.');
+    }
+  }
+  if (demoMode()) {
+    if (process.env.EXPERT_R_ENABLED === 'true') {
+      errors.push('EXPERT_R_ENABLED must be false in public demo mode.');
+    }
+    if (demoGuestTtlSeconds() < 900 || demoGuestTtlSeconds() > 86400) {
+      errors.push('DEMO_GUEST_TTL_SECONDS must be between 900 and 86400 in demo mode.');
+    }
+    if (sessionTtlSeconds() > demoGuestTtlSeconds()) {
+      errors.push('SESSION_TTL_SECONDS must not exceed DEMO_GUEST_TTL_SECONDS in demo mode.');
+    }
+    if (!/^proj_[A-Za-z0-9_-]{3,128}$/.test(demoTemplateProjectId())) {
+      errors.push('DEMO_TEMPLATE_PROJECT_ID must identify the curated template project in demo mode.');
+    }
+  }
   return errors;
 }
 
@@ -636,6 +689,10 @@ module.exports = {
   isValidSessionEpoch,
   hasStrongSessionSecret,
   registrationEnabled,
+  deploymentMode,
+  demoMode,
+  demoGuestTtlSeconds,
+  demoTemplateProjectId,
   cookieSecure,
   cookieSameSite,
   validateCookieConfig,

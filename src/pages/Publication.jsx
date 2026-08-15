@@ -22,10 +22,19 @@ function PlotTypeBadge({ plotType }) {
   );
 }
 
+function safeFigureFileName(value) {
+  if (typeof value !== 'string') return '';
+  const candidate = value.trim().replace(/[?#].*$/, '');
+  if (!candidate || /[\0\r\n]/.test(candidate)) return '';
+  const fileName = candidate.split(/[\\/]+/).pop();
+  return fileName && fileName !== '.' && fileName !== '..' ? fileName.slice(0, 180) : '';
+}
+
 function FigureCard({ figure, onDelete, compact }) {
   const [deleting, setDeleting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [imgError, setImgError] = useState(false);
+  const fileName = safeFigureFileName(figure.filePath);
   const dateStr = figure.createdAt
     ? new Date(figure.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     : '—';
@@ -59,8 +68,8 @@ function FigureCard({ figure, onDelete, compact }) {
             <span className="text-xs text-textMuted">{dateStr}</span>
           </div>
           <p className="text-sm font-semibold text-text truncate">{figure.title || figure.plotType}</p>
-          {figure.filePath && (
-            <p className="text-[10px] text-slate-500 truncate font-mono">{figure.filePath.split(/[/\\]/).pop()}</p>
+          {fileName && (
+            <p className="text-[10px] text-slate-500 truncate font-mono">{fileName}</p>
           )}
         </div>
         <div className={`flex gap-1 transition-opacity ${confirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'}`}>
@@ -135,9 +144,9 @@ function FigureCard({ figure, onDelete, compact }) {
           <span className="text-[10px] text-slate-500">{dateStr}</span>
         </div>
 
-        {figure.filePath && (
-          <p className="text-[10px] text-slate-500 truncate font-mono" title={figure.filePath}>
-            {figure.filePath.split(/[/\\]/).pop()}
+        {fileName && (
+          <p className="text-[10px] text-slate-500 truncate font-mono">
+            {fileName}
           </p>
         )}
       </div>
@@ -147,7 +156,7 @@ function FigureCard({ figure, onDelete, compact }) {
 
 const ALL_TYPES = ['UMAP', 'FeaturePlot', 'DotPlot', 'Heatmap', 'Violin'];
 
-export default function Publication({ userEmail }) {
+export default function Publication({ userEmail, isActive = true }) {
   const [figures, setFigures] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState('All');
@@ -167,9 +176,12 @@ export default function Publication({ userEmail }) {
     }
   }, [userEmail]);
 
+  // TabContent keeps this page mounted while another workspace view is active.
+  // Refresh on entry so a figure saved elsewhere appears immediately instead of
+  // requiring the user to discover and press the manual refresh control.
   useEffect(() => {
-    loadFigures();
-  }, [loadFigures]);
+    if (isActive) loadFigures();
+  }, [isActive, loadFigures]);
 
   const handleDelete = (id) => {
     setFigures(prev => prev.filter(f => f.id !== id));
@@ -188,7 +200,7 @@ export default function Publication({ userEmail }) {
           <div>
             <h2 className="text-2xl font-bold text-text tracking-tight">Figure Gallery</h2>
             <p className="text-textMuted text-sm">
-              {figures.length} figure{figures.length !== 1 ? 's' : ''} saved. Figure metadata/gallery only; no public download surface.
+              {figures.length} figure{figures.length !== 1 ? 's' : ''} saved. Figures remain in this private gallery.
             </p>
           </div>
         </div>
