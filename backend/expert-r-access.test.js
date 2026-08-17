@@ -271,7 +271,7 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
     const provenance = {
       packageProfileId: EXPERT_R_PROFILE.id,
       sandboxImageDigest: `sha256:${'d'.repeat(64)}`,
-      resourcePolicyVersion: 'expert-r-sandbox-policy.v2',
+      resourcePolicyVersion: 'expert-r-sandbox-policy.v3',
       scriptSha256: expertClaim.parameters.scriptSha256,
       input: {
         analysisObjectId: owner.object.id,

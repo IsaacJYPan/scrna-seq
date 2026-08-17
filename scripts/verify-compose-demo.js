@@ -32,6 +32,8 @@ function environment(templateProjectId) {
     `POSTGRES_PASSWORD=${secret(24)}`,
     'POSTGRES_USER=traceomics_demo_accept',
     'POSTGRES_DB=traceomics_demo_accept',
+    `APP_DATABASE_PASSWORD=${secret(24)}`,
+    'APP_DATABASE_USER=traceomics_demo_accept_app',
     `DEMO_TEMPLATE_PROJECT_ID=${templateProjectId}`,
     'DEMO_GUEST_TTL_SECONDS=7200',
     'SESSION_TTL_SECONDS=7200',

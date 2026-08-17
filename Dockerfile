@@ -74,6 +74,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/server.js /app/worker.js ./
 COPY --from=build /app/scripts/enable-job-worker.cjs ./scripts/enable-job-worker.cjs
 COPY --from=build /app/scripts/init-postgres.js ./scripts/init-postgres.js
+COPY --from=build /app/scripts/init-production-database.js ./scripts/init-production-database.js
 COPY --from=build /app/scripts/manage-platform-developer.js ./scripts/manage-platform-developer.js
 COPY --from=build /app/scripts/account-admin.js ./scripts/account-admin.js
 COPY --from=build /app/scripts/backup-runtime.js ./scripts/backup-runtime.js

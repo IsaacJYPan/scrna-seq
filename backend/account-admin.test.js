@@ -120,6 +120,24 @@ describe.skipIf(!CONFIGURED)('operator account lifecycle', () => {
     expect(constraints.rows.length).toBeGreaterThan(0);
   });
 
+  it('enforces operator audit events as append-only in Postgres', async () => {
+    const user = await db.provisionUserByOperator(
+      'immutable-audit@example.com', 'immutable-audit-password', 'Immutable Audit'
+    );
+    const event = await db.query(
+      'SELECT id FROM operator_audit_events WHERE target_user_id = $1 ORDER BY id LIMIT 1',
+      [user.id]
+    );
+    await expect(db.query(
+      'UPDATE operator_audit_events SET event_type = event_type WHERE id = $1',
+      [event.rows[0].id]
+    )).rejects.toThrow(/append-only/i);
+    await expect(db.query(
+      'DELETE FROM operator_audit_events WHERE id = $1',
+      [event.rows[0].id]
+    )).rejects.toThrow(/append-only/i);
+  });
+
   it('audits offline platform-capability grants and revocations transactionally', async () => {
     const user = await db.provisionUserByOperator('developer@example.com', 'developer-password', 'Developer');
     const granted = await db.setPipelineRegistryPublisherByEmail(user.email, true);

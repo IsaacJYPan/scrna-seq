@@ -234,6 +234,15 @@ async function main() {
   try {
     await admin.query(`CREATE DATABASE ${quotedDatabase(databaseName)}`);
     databaseCreated = true;
+    const schemaAdmin = new Client({ connectionString: databaseUrl });
+    await schemaAdmin.connect();
+    try {
+      await schemaAdmin.query(fs.readFileSync(
+        path.join(__dirname, '..', 'backend', 'pg', 'schema.sql'), 'utf8'
+      ));
+    } finally {
+      await schemaAdmin.end();
+    }
     fakeR = await startFakeR();
     const rPort = fakeR.address().port;
     const commonEnv = {
@@ -241,6 +250,7 @@ async function main() {
       NODE_ENV: 'production',
       APP_DEPLOYMENT_MODE: 'private',
       DATABASE_URL: databaseUrl,
+      DATABASE_SCHEMA_MANAGED_EXTERNALLY: 'true',
       SESSION_SECRET,
       SESSION_EPOCH,
       SESSION_TTL_SECONDS: '3600',

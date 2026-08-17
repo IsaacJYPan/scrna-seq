@@ -25,10 +25,19 @@ x-operations-image: &operations-image
       APP_UID: ${APP_UID:-10001}
       APP_GID: ${APP_GID:-10001}
 
-x-db-client-environment: &db-client-environment
+x-db-runtime-environment: &db-runtime-environment
   # PostgreSQL shares the private namespace as well. Keeping its client address
   # on loopback avoids weakening the production certificate-authentication rule
   # for non-loopback database connections.
+  PGHOST: 127.0.0.1
+  PGPORT: "5432"
+  PGUSER: ${APP_DATABASE_USER:?Set APP_DATABASE_USER}
+  PGPASSWORD: ${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD}
+  PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB}
+  DATABASE_SCHEMA_MANAGED_EXTERNALLY: "true"
+  APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:?Set APP_DEPLOYMENT_MODE to private, byoc, or shared-private}
+
+x-db-admin-environment: &db-admin-environment
   PGHOST: 127.0.0.1
   PGPORT: "5432"
   PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER}
@@ -113,6 +122,27 @@ services:
     pids_limit: 512
     restart: unless-stopped
     stop_grace_period: 60s
+    deploy:
+      replicas: 1
+
+  schema-init:
+    <<: [*app-image, *private-runtime]
+    command: ["node", "scripts/init-production-database.js"]
+    environment:
+      <<: *db-admin-environment
+      NODE_ENV: production
+      HOME: /tmp
+      APP_DATABASE_USER: ${APP_DATABASE_USER:?Set APP_DATABASE_USER}
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD}
+    depends_on:
+      namespace-anchor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
     deploy:
       replicas: 1
 
@@ -286,7 +316,7 @@ services:
     <<: [*app-image, *private-runtime]
     command: ["node", "server.js"]
     environment:
-      <<: *db-client-environment
+      <<: *db-runtime-environment
       NODE_ENV: production
       HOME: /tmp
       WEB_HOST: 0.0.0.0
@@ -315,6 +345,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
       storage-init:
         condition: service_completed_successfully
     healthcheck:
@@ -345,6 +377,7 @@ services:
     image: traceomics-expert-broker:single-host
     network_mode: service:namespace-anchor
     read_only: true
+    user: "${EXPERT_R_BROKER_UID:-10001}:${EXPERT_R_BROKER_GID:-10001}"
     init: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -362,9 +395,13 @@ services:
       EXPERT_R_CPU_LIMIT: ${EXPERT_R_CPU_LIMIT:-2}
       EXPERT_R_TIMEOUT_MS: ${EXPERT_R_TIMEOUT_MS:-600000}
       EXPERT_R_MIN_FREE_BYTES: ${EXPERT_R_MIN_FREE_BYTES:-1073741824}
+      EXPERT_R_CLEANUP_GRACE_MS: ${EXPERT_R_CLEANUP_GRACE_MS:-300000}
+      EXPERT_R_RECONCILE_INTERVAL_MS: ${EXPERT_R_RECONCILE_INTERVAL_MS:-300000}
+      EXPERT_R_RUNTIME_ISOLATION: dedicated-rootless
+      DOCKER_HOST: unix:///run/expert-runtime/docker.sock
     volumes:
       - durable-storage:/app/storage-volume
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${EXPERT_R_RUNTIME_SOCKET:-/run/user/10001/docker.sock}:/run/expert-runtime/docker.sock
       - ${EXPERT_R_SANDBOX_HOST_WORK_ROOT:-/var/lib/traceomics-expert}:${EXPERT_R_SANDBOX_HOST_WORK_ROOT:-/var/lib/traceomics-expert}
     depends_on:
       namespace-anchor:
@@ -388,7 +425,7 @@ services:
     <<: [*app-image, *private-runtime]
     command: ["node", "worker.js"]
     environment:
-      <<: *db-client-environment
+      <<: *db-runtime-environment
       NODE_ENV: production
       HOME: /tmp
       SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
@@ -415,6 +452,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
       r:
         condition: service_healthy
       storage-init:
@@ -445,7 +484,7 @@ services:
     <<: [*app-image, *private-runtime]
     command: ["node", "worker.js"]
     environment:
-      <<: *db-client-environment
+      <<: *db-runtime-environment
       NODE_ENV: production
       HOME: /tmp
       SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
@@ -474,6 +513,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
       r-compute-1:
         condition: service_healthy
       storage-init:
@@ -495,7 +536,7 @@ services:
     <<: [*app-image, *private-runtime]
     command: ["node", "worker.js"]
     environment:
-      <<: *db-client-environment
+      <<: *db-runtime-environment
       NODE_ENV: production
       HOME: /tmp
       SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
@@ -524,6 +565,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
       r-compute-2:
         condition: service_healthy
       storage-init:
@@ -550,7 +593,7 @@ services:
       - operations
     command: ["scripts/backup-runtime.js", "--help"]
     environment:
-      <<: *db-client-environment
+      <<: *db-admin-environment
       NODE_ENV: production
       HOME: /tmp
       SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}
@@ -584,7 +627,7 @@ services:
       - operations
     command: ["scripts/restore-runtime.js", "--help"]
     environment:
-      <<: *db-client-environment
+      <<: *db-admin-environment
       NODE_ENV: production
       HOME: /tmp
       SESSION_EPOCH: ${SESSION_EPOCH:?Set SESSION_EPOCH to 32 lowercase hexadecimal characters}

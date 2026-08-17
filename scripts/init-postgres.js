@@ -34,7 +34,7 @@ async function main() {
   console.log('[init-postgres] backend=%s hasDatabaseUrl=%s', s.databaseBackend, s.hasDatabaseUrl);
 
   try {
-    await pg.initSchema();
+    await pg.initSchema({ force: true });
     console.log('[init-postgres] Schema initialized successfully.');
   } catch (err) {
     console.error('[init-postgres] Schema initialization failed:', err.message);

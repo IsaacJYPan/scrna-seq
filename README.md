@@ -44,6 +44,23 @@ erases that hydrated key before returning (including after handled failure or a
 response-side timeout), so a later user never inherits residual expression state
 when a compute process is reused.
 
+## Windows desktop installer
+
+The repository includes a normal Windows NSIS installer target:
+
+```powershell
+npm ci
+npm run desktop:dist
+```
+
+The installer is written under `release/desktop/`. The installed TraceOmics app
+is a hardened Electron shell that connects to a configured HTTPS TraceOmics
+server and keeps the same server-side authentication, RBAC, Postgres, storage,
+and R-compute boundaries. It does not embed Postgres, Docker, or the R workers.
+Set `TRACEOMICS_DESKTOP_URL` for a managed first launch, or let the user enter the
+server address. Public distribution should code-sign the installer through the
+standard electron-builder signing environment so Windows can verify its publisher.
+
 ## Architecture Status
 
 The backend has moved ahead of the React UI: several subsystems are implemented
@@ -180,18 +197,20 @@ so a script cannot consume the shared host disk before post-run validation. The
 broker also reserves expected work/archive capacity in process and rejects a run
 unless both work and durable-storage filesystems retain an operator-configured
 free-space reserve. Up to 50 bounded output files (200 MiB total) are retained as
-one private archive; `.rds` is excluded and an
+one private archive; a derived `.rds` may be retained only in this untrusted
+Expert R artifact tier, and an
 exact byte-for-byte copy of the input is rejected even if it uses another allowed
 extension. Those controls provide workload containment and tenant isolation, not
 data-loss prevention against an authorized data owner: R can transform or encode
 input-derived data. Results and output bundles stay creator-private until an
 explicit audited branch publish. Source is removed from terminal job records while
 its hash and input/profile/image/output provenance remain. Approved users can
-privately import up to five selected CSV, TSV, text, or JSON files through the
+privately import up to five selected CSV, TSV, text, JSON, or RDS files through the
 server-controlled picker; those files are owner/project scoped, mounted read-only,
 and addressed in R only by server-generated IDs. Owner-visible script failures use
-a short fixed, path-free explanation. Arbitrary sandbox-created serialized R
-objects are not promoted into the trusted reusable-analysis runtime because RDS
+a short fixed, path-free explanation. Sandbox RDS inputs and outputs can be reused
+only by downloading/re-importing them through another isolated Expert R run; they
+are never promoted into the trusted guided-analysis runtime because RDS
 deserialization is an executable-code boundary. Runtime package install is
 unavailable; operators manage access with
 `npm run expert-r-access -- <grant|revoke|status> <email>`.
@@ -221,7 +240,10 @@ Study Design may register more than two conditions, but each saved
 `condition.pseudobulk_de.v1` run is one explicit numerator-versus-denominator
 contrast. It requires at least two independent samples or donors in each selected
 condition, supports donor-paired designs only when donor identities match, and
-runs edgeR quasi-likelihood pseudobulk separately per cell type. Multi-arm omnibus
+runs edgeR quasi-likelihood pseudobulk separately per cell type. Unpaired runs
+use exactly `~ condition`; paired runs use exactly `~ donor + condition`.
+Blocking-factor or covariate requests fail before queueing and again at the worker
+boundary, so no accepted design term is silently discarded. Multi-arm omnibus
 models, general covariate formulas, and automatic batch correction/integration of
 multiple raw condition datasets are not implemented. The approved multi-condition
 workflow can now ingest and merge separate raw 10x HDF5 samples into one saved
@@ -412,6 +434,10 @@ keeps figure preview while disabling the legacy server-file save action.
 RDS imports are disabled by default because RDS deserialization can execute R
 code. Set `ALLOW_TRUSTED_RDS_LOAD=true` only for trusted local/dev `.rds` files;
 production always blocks public load and restore regardless of that setting.
+Approved private Expert R deployments are the exception: the picker accepts a
+bounded owner-private RDS, but only a fresh no-network sandbox deserializes it.
+Derived RDS output stays in the same untrusted artifact tier and never becomes a
+guided-analysis checkpoint automatically.
 The Docker image includes ranked-enrichment plus CellChat/NMF and CellChat's pinned
 GitHub `presto`/Bioconductor `BiocNeighbors` dependencies as required runtime
 dependencies; CI verifies CellChat v2.1.2. SeuratDisk remains optional
@@ -540,6 +566,14 @@ npm run test:expert-r-sandbox
 npm run test:expert-r-browser
 npm run test:demo-compose
 ```
+
+For a release candidate, the manually dispatched **Release Certification**
+workflow runs the expensive private-browser, Expert R, demo, multi-sample,
+spatial, and Windows-installer checks as one deliberate certification event.
+A dedicated self-hosted Windows runner can additionally enable the native
+Electron/Compose acceptance input.
+It is not triggered on ordinary pushes, avoiding repeated consumption of hosted
+CI minutes while retaining a reproducible final gate.
 
 The last five commands create randomized disposable Docker resources to prove
 the isolated two-lane compute topology, a real browser plus two native Electron

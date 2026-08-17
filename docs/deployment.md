@@ -117,6 +117,12 @@ Compose profile. Unknown modes fail closed. The broker shares the private servic
 namespace and listens only on loopback; it publishes no port and must never be
 routed through the public reverse proxy. A wildcard or non-loopback broker URL is
 rejected. Treat access to its Docker socket as a privileged operator boundary.
+Production refuses `/var/run/docker.sock`. Provision a dedicated rootless Docker
+daemon (the example uses UID/GID 10001), set `EXPERT_R_RUNTIME_SOCKET` to that
+daemon's Unix socket, and make `EXPERT_R_SANDBOX_HOST_WORK_ROOT` an absolute
+directory owned by the same account. That daemon must be reserved for Expert R
+workloads; do not schedule application, database, proxy, or unrelated containers
+on it. The broker itself remains non-root and receives only that socket.
 
 Enabling the deployment does not grant user access. Grant only approved accounts:
 
@@ -156,12 +162,19 @@ The actual writable output is a 200 MiB tmpfs with a bounded inode count, so a
 running script cannot fill shared disk before the broker checks its output. Alert
 on both filesystems independently and size the reserve for concurrent broker
 capacity, archives, database operations, and host recovery needs.
+The broker writes a server-owned manifest and matching runtime labels for every
+workspace. Startup and a bounded periodic reconciler remove only stale workspaces
+whose manifest, root hash, and owned-container labels all match; active, unknown,
+malformed, or symlinked entries fail closed and remain for operator review.
 
-Approved users import optional CSV, TSV, text, or JSON inputs through the Expert
-Workbench picker. These files remain owner/project private, are mounted read-only
-for selected runs, and are not arbitrary host filesystem paths. Expert R does not
-currently promote a sandbox-created RDS to a trusted reusable analysis; doing so
-would cross the executable deserialization boundary.
+Approved users import optional CSV, TSV, text, JSON, or RDS inputs through the
+Expert Workbench picker. Tabular files are capped at 25 MiB and RDS at 200 MiB.
+These files remain owner/project private, are mounted read-only for selected runs,
+and are not arbitrary host filesystem paths. `read_input()` deserializes RDS only
+inside the fresh sandbox. `save_workspace()` can retain a derived RDS inside the
+private checksummed output bundle; the owner may download and later re-import it
+through Expert R. It is never promoted to the trusted guided-analysis checkpoint
+graph because that would cross the executable deserialization boundary.
 
 ## Supported topology
 
@@ -173,12 +186,13 @@ The supported topology is exactly:
 - one private interactive R/Plumber process shared by web and that worker;
 - two single-flight heavy-compute workers, each with its own private R process;
 - one PostgreSQL 16 instance;
+- one database-owner schema/grant initializer and a distinct non-owner runtime login;
 - one non-root, one-shot initializer for the two shared storage volumes;
 - one persistent project-storage volume and one persistent legacy-vault volume;
 - separate on-demand backup and read-only-input restore operations containers.
 
 `deploy/compose.single-host.yml` puts Postgres, three R processes, web, three workers, the
-one-shot storage initializer, and operations in one project-scoped network namespace. The
+one-shot schema and storage initializers, and operations in one project-scoped network namespace. The
 initializer completes the named-volume copy-up before any concurrent consumer starts,
 avoiding Docker Desktop's empty-volume mount race without changing the persisted layout.
 Only Express port 3000 is published, and
@@ -337,8 +351,11 @@ Grant/revoke/status operations for `pipeline_registry.publish` use
 are recorded in `operator_audit_events`.
 
 For registry images pinned by digest, pull the reviewed images and omit
-`build`. The web process initializes the additive Postgres schema during
-startup. Production validation runs before storage directories or sockets are
+`build`. The one-shot `schema-init` service uses `POSTGRES_USER` to apply the
+exact schema contract, creates/rotates `APP_DATABASE_USER`, and grants runtime
+DML/sequence/function privileges without schema creation or table ownership.
+Web and workers receive only `APP_DATABASE_USER` and verify the schema contract;
+they cannot apply DDL. Keep the two passwords independent. Production validation runs before storage directories or sockets are
 created and refuses weak secrets, insecure cookies/origins, invalid proxy
 settings, overlapping roots, unsafe Postgres TLS, or unsupported R topology.
 
@@ -357,6 +374,17 @@ and worker container health checks will report the compute outage separately.
 During graceful shutdown, readiness changes to HTTP 503 before the listener is
 closed. Concurrent readiness probes are coalesced and briefly cached, but these
 operational endpoints should still be restricted at the proxy.
+
+## Windows desktop application
+
+`npm run desktop:dist` builds the Windows NSIS installer in
+`release/desktop/`. The installed application is a sandboxed Electron client for
+the same HTTPS deployment; it does not bundle or start Postgres, R, or Docker.
+Operators can preconfigure the first server URL with `TRACEOMICS_DESKTOP_URL`, or
+users can enter it on the setup screen. Build public installers in the manual
+Release Certification workflow and configure electron-builder code-signing
+secrets before distribution. An unsigned local build is useful for acceptance
+but will not provide a verified Windows publisher identity.
 
 ## TLS reverse proxy
 
@@ -768,6 +796,15 @@ and writes screenshots plus an MJPEG AVI under
 `BrowserWindow` handle with `PrintWindow`; it never records the desktop or an
 arbitrary foreground rectangle. The harness removes its containers and volumes
 after completion.
+
+For a release candidate, manually dispatch `.github/workflows/release-certification.yml`.
+It groups the expensive private-browser, Expert R, demo, multi-sample, spatial,
+and Windows-installer checks into one explicit release gate. Enable the optional
+native input only when the labeled self-hosted Windows/Docker runner is online.
+It intentionally
+does not run on every push; ordinary pull requests still use the normal CI
+pipeline, while a release tag or deployment must cite one passing certification
+run for the exact commit.
 
 Run `docker compose -p traceomics-demo --env-file deploy/demo.env -f
 deploy/compose.single-host.yml -f deploy/compose.demo.yml --profile demo-ops run
