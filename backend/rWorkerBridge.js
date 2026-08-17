@@ -906,6 +906,8 @@ function sanitizeConditionComparisonSummary(body) {
     cellTypeColumn: sanitizeRuntimeField(source.cell_type_column, 64),
     unitOfReplication: sanitizeRuntimeField(source.unit_of_replication, 20),
     paired: source.paired === true,
+    modelFormula: ['~ condition', '~ donor + condition'].includes(source.model_formula)
+      ? source.model_formula : null,
     sampleCount: sanitizeCount(source.sample_count, 1000),
     testedCellTypeCount: sanitizeCount(source.tested_cell_type_count, 1000),
     testedGeneCount: sanitizeCount(source.tested_gene_count, 100000),
@@ -1482,7 +1484,7 @@ function validateReceiptPayloadSchema(jobType, payload) {
     assertExactObjectKeys(payload, ['ok', 'summary', 'result']);
     if (payload.ok !== true) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
     assertExactObjectKeys(payload.summary, [
-      'method', 'cell_type_column', 'unit_of_replication', 'paired', 'sample_count',
+      'method', 'cell_type_column', 'unit_of_replication', 'paired', 'model_formula', 'sample_count',
       'tested_cell_type_count', 'tested_gene_count', 'significant_result_count',
       'skipped_cell_types', 'top_results', 'package_versions', 'warnings',
     ]);
@@ -2085,11 +2087,19 @@ async function runRBridgeOperation(args = {}) {
         || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
       throw codedError('R_CONDITION_COMPARISON_REQUIRED', 'Server-resolved condition comparison is required.');
     }
+    if (contrast.blockingFactor
+        || (Array.isArray(contrast.covariates) && contrast.covariates.length > 0)) {
+      throw codedError(
+        'R_CONDITION_MODEL_UNSUPPORTED',
+        'Unsupported condition-model terms cannot cross the trusted R boundary.'
+      );
+    }
     request.body = {
       operation,
       design: {
         unit_of_replication: contrast.unitOfReplication,
         paired: contrast.paired === true,
+        model_formula: contrast.paired === true ? '~ donor + condition' : '~ condition',
         cell_type_column: contrast.cellTypeColumn,
         samples: samples.map((sample) => ({
           sample_id: sample.sampleId,

@@ -76,7 +76,7 @@ Status legend:
 | Ranked pathway enrichment (`enrichment.gsea.v1`) | UI-wired (deployment real-R acceptance verified) | The active Pathway Enrichment page launches one cluster/identity-versus-rest ranked GO Biological Process job, polls status/logs, and displays a bounded `enrichment_summary`. The full `enrichment_results` CSV stays private except for its authenticated, visibility-checked, checksummed, audited controlled export. The exact deployment R image and checkpoint-backed worker path pass disposable Compose acceptance; a mocked-transport UI suite separately checks browser payload/rendering. |
 | CellChat / cell-cell communication (`cellchat.infer.v1`) | UI-wired (deployed browser/backend/R acceptance complete) | The CellChat tab requires an owner-attached live R object and explicit fixed choices for grouping (`seurat_clusters` or current identities), species, CellChatDB category, cell caps, and `single_context` intent. Before queueing it checks package availability, RNA assay/normalized data, group count, and the minimum cells per group. Reviewed input failures retain only a stable code and path-free remediation in CellChat and Runs & Results. It launches an allowlisted worker job, polls its durable status, and shows a bounded sanitized candidate summary. The complete candidate CSV is `local_internal`; its metadata-only `cellchat_summary` companion has no storage path/key or public download. Raw group labels are replaced with opaque `Group N` identifiers in durable outputs; an owner-local key is read only from the currently attached private R object. This is candidate inference, not evidence of physical contact, causality, or a condition comparison. Real-R smoke, receipt interoperability, disposable Express/Postgres/worker/R deployment, and a real deployed browser flow through the production React build all pass. |
 | Cell annotation | not implemented (product) | UI placeholder only. A legacy authenticated R endpoint may still exist (see below). |
-| Expert R | UI-wired (real browser/backend/worker/sandbox acceptance complete) | Advanced analysis is disabled by default and in the public demo. A private deployment must enable the loopback-only broker and an operator must grant the authenticated account `expert_r.execute`; project role and source ownership are separately enforced, then the capability is rechecked at worker claim. Arbitrary R is isolated from trusted R services in a fresh digest-pinned, non-root, read-only, networkless container with one private checkpoint input, selected owner-private CSV/TSV/text/JSON inputs, a 200 MiB output tmpfs, a fixed package profile, resource quotas, free-space admission/reservation, and output validation. This is workload/tenant containment, not DLP against an authorized data owner: code can transform or encode input-derived data. Source is retained only while queued/running, then only its SHA-256 remains. Failures expose only a fixed path-free owner explanation. A production-build Chromium flow imports a private CSV, runs real checkpoint-backed sandbox R, verifies the exact downloaded bundle checksum and contents, confirms source erasure, and renders the approved explanation for an intentional path-bearing script failure. A server-created result object, input/profile/image provenance, bundle checksum, and member checksums remain creator-private until an explicit audited branch publish. Arbitrary sandbox RDS is not admitted back into trusted reusable state. |
+| Expert R | UI-wired (real browser/backend/worker/sandbox acceptance complete) | Advanced analysis is disabled by default and in the public demo. A private deployment must enable the loopback-only broker and an operator must grant the authenticated account `expert_r.execute`; project role and source ownership are separately enforced, then the capability is rechecked at worker claim. Arbitrary R is isolated from trusted R services in a fresh digest-pinned, non-root, read-only, networkless container with one private checkpoint input, selected owner-private CSV/TSV/text/JSON/RDS inputs, a 200 MiB output tmpfs, a fixed package profile, resource quotas, free-space admission/reservation, and output validation. Production additionally requires a dedicated rootless container-runtime socket; the broker rejects the host system socket and reconciles only signed, stale workspaces/owned containers after crashes. This is workload/tenant containment, not DLP against an authorized data owner: code can transform or encode input-derived data. Source is retained only while queued/running, then only its SHA-256 remains. Failures expose only a fixed path-free owner explanation. A production-build Chromium flow imports private data, runs real checkpoint-backed sandbox R, verifies the exact downloaded bundle checksum and contents, confirms source erasure, and renders the approved explanation for an intentional path-bearing script failure. A server-created result object, input/profile/image provenance, bundle checksum, and member checksums remain creator-private until an explicit audited branch publish. RDS inputs and derived RDS artifacts remain in the untrusted sandbox/export tier and are never admitted into the trusted guided-analysis runtime. |
 | Reproducibility manifests | UI-wired (real-deployment multi-user acceptance complete) | A branch or owned/shared object can export a versioned JSON manifest covering ancestor lineage, producing jobs and safe parameters, checksummed artifacts with sanitized scientific/software metadata, sample bindings, contrasts, reviews/comments, and canonical promotion. The integrated deployment session verifies the exported branch/canonical head, lineage, producing jobs, artifacts, sample bindings, safe response headers, and absence of storage/runtime/worker/token/source fields; a collaborator cannot export another member's private branch. |
 | Project audit/activity and review discussion | UI-wired (real-deployment multi-user acceptance complete) | Branch, review/comment, canonical promotion, artifact download, and reproducibility export actions append bounded project audit events. The integrated deployment session uses owner, analyst, viewer, and outsider sessions to prove draft privacy, publish visibility, role-gated review, one-winner concurrent head updates, stale-review rejection, exact-head promotion, bounded activity reads, and database-trigger rejection of both update and delete. The explicit expired-demo cleanup transaction remains the only deletion exception. |
 | Artifact downloads | UI-wired (exact private allowlist; real-deployment acceptance complete) | Authenticated/audited download exists only for complete DEG, enrichment, CellChat, condition-comparison tables and Expert R output bundles. Private draft results remain creator-only until their object is explicitly shared/canonical. The deployment acceptance proves full-stream checksum/size/header behavior and fails closed for tampered integrity metadata. Checkpoints, arbitrary storage objects, and raw paths/keys are not exposed. |
@@ -270,7 +270,10 @@ around what the app can report without inventing experimental design:
    and immutable contrast sample snapshots are durable project resources. A fixed
    `condition.pseudobulk_de.v1` worker hydrates the caller-owned checkpoint and runs
    edgeR quasi-likelihood pseudobulk per cell type; invalid single-replicate designs
-   cannot contact R. This guardrail follows the false-positive findings in
+   cannot contact R. The implemented model is exact and visible: unpaired runs
+   use `~ condition`, while valid donor-paired runs use `~ donor + condition`.
+   General blocking factors and covariates fail before queueing and again before
+   R contact instead of being accepted and silently dropped. This guardrail follows the false-positive findings in
    [Squair et al.](https://www.nature.com/articles/s41467-021-25960-2).
 3. **Cell-to-cell communication (implemented narrow slice):** CellChat now
    provides a fixed one-context candidate-inference workflow. Cross-condition
@@ -387,7 +390,7 @@ by `backend/r-proxy-policy.test.js`.
 
 ## RDS loading is a trusted-input boundary
 
-The R backend has legacy `.rds` load/restore endpoints, but they are fail-closed
+The trusted R backend has legacy `.rds` load/restore endpoints, but they are fail-closed
 by default at Express and again in R. **RDS
 deserialization can execute arbitrary R code.** Set `ALLOW_TRUSTED_RDS_LOAD=true`
 only for trusted local/dev inputs; production ignores the override and always
@@ -395,6 +398,9 @@ blocks both public routes. Outside production the route remains owner-scoped and
 path-validated (confined to the per-user vault), but it is not safe for
 untrusted uploads until stronger sandbox/container isolation exists. Worker
 checkpoint loading is a separate internal path for server-created checkpoints.
+Approved Expert R users have a separate production-safe route: an uploaded RDS
+is stored as an owner-private input and deserialized only inside a fresh isolated
+Expert R container. It never enters the long-lived Plumber process.
 
 ## Expert R isolation
 
@@ -406,8 +412,10 @@ project-storage mount, a read-only root, non-root UID/GID, dropped capabilities,
 `no-new-privileges`, and bounded CPU, memory, PIDs, and time. Only allowlisted
 regular output files are archived; symlinks, devices, sockets, unsupported
 extensions, more than 50 files, or more than 200 MiB fail closed. The opt-in
-broker publishes no host port. Its Docker socket is a trusted deployment boundary
-and is never mounted into or exposed to user code.
+broker publishes no host port. In production it refuses the system
+`/var/run/docker.sock` and requires an explicitly configured dedicated rootless
+runtime (or a separately isolated TLS-protected VM runtime). The runtime socket
+is never mounted into or exposed to user code.
 
 Before a run, the broker reserves the maximum expected work and archive footprint
 and verifies the work and durable-storage filesystems will retain the configured
@@ -418,21 +426,28 @@ server-generated IDs, and copied read-only into the sandbox; only their owner in
 the same project can list or select them. Definite completion failures delete an
 unpublished output bundle. A lost acknowledgement after database COMMIT is treated
 as indeterminate and retains the bundle because it may already be referenced.
+Server-owned workspace manifests and matching container labels let startup and
+periodic reconciliation remove stale crash leftovers without following symlinks,
+deleting unknown directories, or killing containers not owned by this broker.
 
 The private checkpoint is a read-only input, not a directly exportable result.
-`.rds` is excluded from the Expert R output allowlist, and the broker rejects an
-exact byte-for-byte input copy even when it is given an allowed output extension;
+RDS is allowed only in this untrusted Expert R tier: tabular inputs are capped at
+25 MiB, RDS inputs at 200 MiB, and `save_workspace()` can place a derived RDS in
+the private bounded output bundle. The broker still rejects an exact byte-for-byte
+input copy even when it is given another allowed output name;
 the container acceptance includes that disguised `file.copy()` rejection probe.
 These are defense-in-depth checks, not a data-loss-prevention claim: an authorized
 researcher can intentionally transform or encode checkpoint-derived data into an
 allowed table or figure. Enable this feature only where that account is authorized
 to access and export the selected project's data.
 
-The sandbox may write tables, plots, and other allowlisted files, but cannot
-promote an arbitrary serialized R object into the trusted stateful Seurat runtime.
-Loading an attacker-controlled RDS can execute code during deserialization, so a
-future reusable-derived-analysis feature requires an isolated reload or a reviewed
-safe interchange contract rather than treating sandbox output as a trusted checkpoint.
+The sandbox may write tables, plots, and other allowlisted files. A researcher can
+download an authorized private bundle, extract a derived RDS, and re-import it as
+another private Expert R input. That is reusable, but deliberately never promotes
+the serialized object into the trusted stateful Seurat runtime. Loading an
+attacker-controlled RDS can execute code during deserialization, so guided tools
+require either a reviewed safe interchange contract or a future isolated
+validation/conversion pipeline rather than treating sandbox output as a checkpoint.
 
 Availability requires all of: a non-demo deployment, valid sandbox configuration,
 project writer role, ownership of the selected analysis object, and the operator-
@@ -557,6 +572,13 @@ The app runtime is Postgres-only.
   (`DATABASE_URL` or `PG*` env). Existing SQLite dev data is not migrated; a
   fresh Postgres database starts empty and users/projects are re-created through
   the normal signup/create flows.
+- **Production role split:** Compose runs a one-shot `schema-init` service with
+  the database-owner credential. It applies the schema contract, creates/rotates
+  a separate runtime login, and grants table/sequence/function access without
+  schema creation or table ownership. Web and workers set
+  `DATABASE_SCHEMA_MANAGED_EXTERNALLY=true` and only verify the exact schema
+  contract on startup; they cannot run DDL. Operator and project audit streams
+  both have database triggers rejecting update and delete.
 - **Local Postgres:** `docker compose up postgres` (localhost-only) or any local
   Postgres; then `DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna npm run init:postgres`.
 - **Evidence:** `npm run test:backend` includes the config contract,

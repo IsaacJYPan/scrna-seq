@@ -521,6 +521,9 @@ function validateProductionConfig(options = {}) {
   if (!hasPostgresConnection()) {
     errors.push('DATABASE_URL (or PGHOST/PGDATABASE) must be set for the Postgres backend.');
   }
+  if (process.env.DATABASE_SCHEMA_MANAGED_EXTERNALLY !== 'true') {
+    errors.push('DATABASE_SCHEMA_MANAGED_EXTERNALLY=true is required so production web and worker processes cannot apply DDL.');
+  }
   if (role === 'web' && !trimmed(process.env.FRONTEND_ORIGIN) && !trimmed(process.env.FRONTEND_URL)) {
     errors.push('FRONTEND_ORIGIN must be set in production so CORS/CSRF are not left at the dev default.');
   }

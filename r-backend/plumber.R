@@ -4455,14 +4455,19 @@ normalize_condition_pseudobulk_design <- function(value) {
       as.list(samples_value[index, , drop = FALSE])
     })
   }
-  if (!is.list(value) || !is_scalar_string(value$unit_of_replication) ||
+  expected_design_fields <- c("unit_of_replication", "paired", "model_formula", "cell_type_column", "samples")
+  if (!is.list(value) || !setequal(names(value), expected_design_fields) ||
+      !is_scalar_string(value$unit_of_replication) ||
       !(value$unit_of_replication %in% c("sample", "donor")) ||
       !is.logical(value$paired) || length(value$paired) != 1L || is.na(value$paired) ||
+      !is_scalar_string(value$model_formula) ||
       !is_scalar_string(value$cell_type_column) ||
       !grepl("^[A-Za-z][A-Za-z0-9_.-]{0,63}$", value$cell_type_column) ||
       !is.list(samples_value) || length(samples_value) < 4L || length(samples_value) > 1000L) {
     stop("Invalid condition design.")
   }
+  expected_formula <- if (isTRUE(value$paired)) "~ donor + condition" else "~ condition"
+  if (!identical(value$model_formula, expected_formula)) stop("Invalid condition model.")
   required <- c("sample_id", "condition", "donor_code", "unit_id",
                 "cell_metadata_column", "cell_metadata_value")
   samples <- lapply(samples_value, function(sample) {
@@ -4485,6 +4490,7 @@ normalize_condition_pseudobulk_design <- function(value) {
   list(
     unit_of_replication = value$unit_of_replication,
     paired = isTRUE(value$paired),
+    model_formula = expected_formula,
     cell_type_column = value$cell_type_column,
     samples = samples
   )
@@ -4597,6 +4603,7 @@ run_condition_pseudobulk_de <- function(input_obj, design) {
       cell_type_column = design$cell_type_column,
       unit_of_replication = design$unit_of_replication,
       paired = design$paired,
+      model_formula = design$model_formula,
       sample_count = as.integer(length(design$samples)),
       tested_cell_type_count = as.integer(length(result_parts)),
       tested_gene_count = as.integer(length(tested_genes)),

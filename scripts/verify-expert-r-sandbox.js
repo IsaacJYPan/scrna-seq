@@ -181,7 +181,7 @@ async function main() {
       'the broker must bind output provenance to the declared checkpoint checksum');
     assert(/^sha256:[0-9a-f]{64}$/.test(safeResult.body.sandboxImageDigest || ''),
       'the broker must report the pinned sandbox image digest');
-    assert(safeResult.body.resourcePolicyVersion === 'expert-r-sandbox-policy.v2',
+    assert(safeResult.body.resourcePolicyVersion === 'expert-r-sandbox-policy.v3',
       'the broker must report the resource policy version');
     assert(safeResult.body.files.every((file) => /^[0-9a-f]{64}$/.test(file.checksumSha256 || '')),
       'every retained Expert R output must have a checksum');
@@ -202,6 +202,38 @@ async function main() {
     }]), 'private input provenance must contain only fixed IDs and integrity metadata');
     assert(archiveText(imported.outputStorageKey, 'selected-input.csv').includes('treated'),
       'the selected private input must drive a normal EDA output');
+    await waitForCleanup();
+
+    const rdsInputId = `eri_${crypto.randomBytes(12).toString('hex')}`;
+    const rdsInputKey = `projects/${projectId}/artifacts/${rdsInputId}/private-input.rds`;
+    run([
+      'run', '--rm', '--user', '0:0', '-v', `${storageRoot}:/storage`,
+      '--entrypoint', 'Rscript', rImage, '-e',
+      `dir.create(dirname('/storage/data/${rdsInputKey}'), recursive=TRUE, showWarnings=FALSE); saveRDS(data.frame(sample=c('S1','S2'), batch=c('A','B')), '/storage/data/${rdsInputKey}')`,
+    ]);
+    const rdsInputPath = path.join(storageRoot, 'data', ...rdsInputKey.split('/'));
+    const rdsInputBytes = fs.readFileSync(rdsInputPath);
+    const rdsInput = {
+      id: rdsInputId,
+      originalFilename: 'batch-metadata.rds',
+      internalStorageKey: rdsInputKey,
+      sizeBytes: rdsInputBytes.length,
+      checksumSha256: crypto.createHash('sha256').update(rdsInputBytes).digest('hex'),
+    };
+    const derived = job(`
+      batch_metadata <- read_input('batch-metadata.rds')
+      obj$imported_batch <- batch_metadata$batch[[1]]
+      save_workspace(obj, 'derived-analysis.rds')
+      write_table(batch_metadata, 'rds-input-summary.csv')
+    `);
+    derived.privateInputs = [rdsInput];
+    const derivedResult = await request(derived);
+    assert(derivedResult.status === 200 && derivedResult.body.saved === true,
+      'sandbox-private RDS input and derived RDS output must succeed', JSON.stringify(derivedResult));
+    assert(derivedResult.body.files.some((file) => file.name === 'derived-analysis.rds'),
+      'derived RDS must be retained only in the bounded private output bundle');
+    assert(archiveText(derived.outputStorageKey, 'rds-input-summary.csv').includes('S2'),
+      'the sandbox must deserialize the selected private RDS input');
     await waitForCleanup();
 
     const oversized = job(`

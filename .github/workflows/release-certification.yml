@@ -1,0 +1,148 @@
+name: Release Certification
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_full_acceptance:
+        description: Run real R, private deployment, Expert R, demo, and browser acceptance
+        required: true
+        type: boolean
+        default: true
+      run_native_windows_acceptance:
+        description: Run Docker plus native Electron acceptance on the dedicated self-hosted Windows runner
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-certification-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NODE_ENV: test
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/scrna_test
+
+jobs:
+  private-deployment-acceptance:
+    if: inputs.run_full_acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scrna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run local-equivalent preflight
+        run: npm run check:ci-preflight
+      - name: Run real private multi-persona browser acceptance
+        run: npm run test:private-compute-compose
+      - name: Build the hardened Expert R broker image
+        run: docker build --file deploy/expert-broker.Dockerfile --tag traceomics-expert-broker:release-test .
+      - name: Run isolated Expert R acceptance
+        run: npm run test:expert-r-sandbox
+      - name: Run Expert R browser acceptance
+        run: npm run test:expert-r-browser
+      - name: Run public-demo deployment acceptance
+        run: npm run test:demo-compose
+
+  native-windows-acceptance:
+    if: inputs.run_native_windows_acceptance
+    runs-on: [self-hosted, windows, traceomics-release]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Run real Chromium and native Electron multi-lane acceptance
+        run: npm run test:native-ui-compose
+
+  scientific-acceptance:
+    if: inputs.run_full_acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scrna_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::Seurat
+            any::plumber
+            any::ggplot2
+            any::dplyr
+            any::RColorBrewer
+            any::jsonlite
+            any::base64enc
+            any::digest
+            any::hdf5r
+            any::edgeR
+            any::limma
+      - name: Verify multi-sample and multiple-condition workflow
+        run: npm run test:seurat-multisample
+      - name: Verify spatial transcriptomics workflow
+        run: npm run test:spatial-seurat
+      - name: Verify fixed condition-model R contract
+        run: Rscript r-backend/tests/test_units.R
+
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Build Windows installer
+        run: npm run desktop:dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: traceomics-windows-installer-${{ github.sha }}
+          path: release/desktop/*.exe
+          if-no-files-found: error

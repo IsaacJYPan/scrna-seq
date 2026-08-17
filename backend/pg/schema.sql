@@ -18,6 +18,17 @@
 -- art_/aoe_...) are chosen by the application, never by the client.
 -- ============================================================================
 
+CREATE TABLE IF NOT EXISTS app_schema_contract (
+  schema_key     TEXT PRIMARY KEY,
+  schema_version INTEGER NOT NULL,
+  applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
+VALUES ('traceomics.runtime', 20260817, now())
+ON CONFLICT (schema_key) DO UPDATE SET
+  schema_version = EXCLUDED.schema_version,
+  applied_at = EXCLUDED.applied_at;
+
 CREATE TABLE IF NOT EXISTS users (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   email         TEXT UNIQUE NOT NULL,
@@ -50,6 +61,21 @@ CREATE TABLE IF NOT EXISTS operator_audit_events (
 );
 CREATE INDEX IF NOT EXISTS idx_operator_audit_created ON operator_audit_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_operator_audit_target ON operator_audit_events(target_user_id);
+
+CREATE OR REPLACE FUNCTION reject_operator_audit_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'operator audit events are append-only' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_operator_audit_no_update ON operator_audit_events;
+CREATE TRIGGER trg_operator_audit_no_update
+  BEFORE UPDATE ON operator_audit_events
+  FOR EACH ROW EXECUTE FUNCTION reject_operator_audit_mutation();
+DROP TRIGGER IF EXISTS trg_operator_audit_no_delete ON operator_audit_events;
+CREATE TRIGGER trg_operator_audit_no_delete
+  BEFORE DELETE ON operator_audit_events
+  FOR EACH ROW EXECUTE FUNCTION reject_operator_audit_mutation();
 
 -- Platform capabilities are assigned out of band by a trusted operator. They
 -- are intentionally separate from organization/project roles and have no

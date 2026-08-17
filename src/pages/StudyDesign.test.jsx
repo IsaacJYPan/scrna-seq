@@ -22,6 +22,8 @@ describe('StudyDesign', () => {
         numeratorConditionName: 'Treated',
         denominatorConditionName: 'Control',
         unitOfReplication: 'sample',
+        paired: false,
+        modelFormula: '~ condition',
         cellTypeColumn: 'seurat_clusters',
         status: 'valid',
       }]),
@@ -42,6 +44,7 @@ describe('StudyDesign', () => {
     expect(await screen.findByText('PBMC cohort')).toBeInTheDocument();
     expect(screen.getByText('Saved version', { selector: 'label' })).toBeInTheDocument();
     expect(screen.getByText('Saved contrasts')).toBeInTheDocument();
+    expect(screen.getAllByText('~ condition', { exact: true }).length).toBeGreaterThanOrEqual(1);
     fireEvent.click(screen.getByRole('button', { name: /run edgeR pseudobulk/i }));
     expect(await screen.findByText(/Condition comparison started/i)).toBeInTheDocument();
     await waitFor(() => expect(window.electronAPI.createProjectJob).toHaveBeenCalled());

@@ -20,6 +20,7 @@ const {
   MAX_EXPERT_R_BUNDLE_BYTES,
   EXPERT_R_RESOURCE_POLICY_VERSION,
   MAX_EXPERT_R_INPUT_BYTES,
+  maxExpertRInputBytesForFilename,
   MAX_EXPERT_R_INPUTS_PER_RUN,
   sanitizeExpertRInputFilename,
 } = require('./expertR');
@@ -27,12 +28,16 @@ const {
 // Expert R may write reviewed tables and figures. Extension and duplicate-input
 // checks are defense in depth only: they do not turn arbitrary R into a general
 // data-loss-prevention boundary.
-const ALLOWED_OUTPUT_EXTENSIONS = new Set(['.csv', '.tsv', '.json', '.txt', '.png', '.pdf', '.svg']);
+const ALLOWED_OUTPUT_EXTENSIONS = new Set(['.csv', '.tsv', '.json', '.txt', '.png', '.pdf', '.svg', '.rds']);
 const MAX_OUTPUT_FILES = 50;
 const MAX_OUTPUT_BYTES = MAX_EXPERT_R_OUTPUT_BYTES;
 const MAX_ARCHIVE_BYTES = MAX_EXPERT_R_BUNDLE_BYTES;
 const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024;
 const OUTPUT_TMPFS_INODES = 1024;
+const WORKSPACE_MANIFEST = '.traceomics-expert-workspace.json';
+const WORKSPACE_DIRECTORY_RE = /^job_[0-9a-f]+-[0-9a-f]{24}$/;
+const CONTAINER_NAME_RE = /^traceomics-expert-job_[0-9a-f]+-[0-9a-f]{10}$/;
+const CONTAINER_LABEL = 'org.traceomics.expert';
 
 function safeEqual(left, right) {
   const a = Buffer.from(String(left || '')); const b = Buffer.from(String(right || ''));
@@ -84,6 +89,129 @@ function positiveInteger(raw, fallback) {
 function isTrustedBrokerBindHost(raw) {
   const host = String(raw || '').trim().toLowerCase();
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
+function validateExpertRuntimeIsolation(env = process.env) {
+  if (String(env.NODE_ENV || '').trim().toLowerCase() !== 'production') return true;
+  const mode = String(env.EXPERT_R_RUNTIME_ISOLATION || '').trim().toLowerCase();
+  const dockerHost = String(env.DOCKER_HOST || '').trim();
+  if (!['dedicated-rootless', 'isolated-vm'].includes(mode)) {
+    throw new Error('Production Expert R requires an explicitly isolated container runtime.');
+  }
+  if (!dockerHost || /^unix:\/\/\/var\/run\/docker\.sock$/i.test(dockerHost)
+      || /^npipe:/i.test(dockerHost)) {
+    throw new Error('Production Expert R cannot use the host system Docker socket.');
+  }
+  if (mode === 'dedicated-rootless' && !/^unix:\/\/\/.+/i.test(dockerHost)) {
+    throw new Error('The dedicated rootless Expert R runtime must use its private Unix socket.');
+  }
+  if (mode === 'isolated-vm' && /^tcp:/i.test(dockerHost)
+      && (env.DOCKER_TLS_VERIFY !== '1' || !path.isAbsolute(String(env.DOCKER_CERT_PATH || '')))) {
+    throw new Error('A remote Expert R runtime requires verified TLS credentials.');
+  }
+  return true;
+}
+
+async function assertExpertRuntimeSecurity(env = process.env, runProcessImpl = runProcess) {
+  if (String(env.NODE_ENV || '').trim().toLowerCase() !== 'production') return true;
+  const result = await runProcessImpl('docker', [
+    'info', '--format', '{{json .SecurityOptions}}',
+  ], { timeoutMs: 30000 });
+  let options;
+  try { options = JSON.parse(String(result.stdout || '').trim()); } catch {
+    throw new Error('Expert R container runtime security could not be verified.');
+  }
+  if (String(env.EXPERT_R_RUNTIME_ISOLATION || '').trim().toLowerCase() === 'dedicated-rootless'
+      && (!Array.isArray(options) || !options.includes('name=rootless'))) {
+    throw new Error('The dedicated Expert R container runtime is not rootless.');
+  }
+  return true;
+}
+
+function workspaceRootHash(workRoot) {
+  return crypto.createHash('sha256').update(path.resolve(workRoot), 'utf8').digest('hex');
+}
+
+async function writeWorkspaceManifest(jobDirectory, workRoot, value) {
+  const manifest = {
+    version: 1,
+    workspace: path.basename(jobDirectory),
+    jobId: value.jobId,
+    containerName: value.containerName || null,
+    createdAt: value.createdAt,
+    workRootSha256: workspaceRootHash(workRoot),
+  };
+  const destination = path.join(jobDirectory, WORKSPACE_MANIFEST);
+  const temporary = `${destination}.tmp`;
+  await fsp.writeFile(temporary, JSON.stringify(manifest), {
+    encoding: 'utf8', flag: 'wx', mode: 0o600,
+  });
+  await fsp.rename(temporary, destination);
+  return manifest;
+}
+
+async function readWorkspaceManifest(jobDirectory, workRoot) {
+  const raw = await fsp.readFile(path.join(jobDirectory, WORKSPACE_MANIFEST), 'utf8');
+  const value = JSON.parse(raw);
+  const keys = Object.keys(value || {}).sort();
+  if (JSON.stringify(keys) !== JSON.stringify([
+    'containerName', 'createdAt', 'jobId', 'version', 'workRootSha256', 'workspace',
+  ])
+      || value.version !== 1
+      || value.workspace !== path.basename(jobDirectory)
+      || !WORKSPACE_DIRECTORY_RE.test(value.workspace)
+      || !/^job_[0-9a-f]+$/.test(String(value.jobId || ''))
+      || (value.containerName !== null && !CONTAINER_NAME_RE.test(String(value.containerName || '')))
+      || !Number.isFinite(Date.parse(value.createdAt))
+      || value.workRootSha256 !== workspaceRootHash(workRoot)) {
+    throw new Error('Expert R workspace manifest is invalid.');
+  }
+  return value;
+}
+
+async function removeOwnedOrphanContainer(manifest, runProcessImpl) {
+  if (!manifest.containerName) return true;
+  let inspected;
+  try {
+    inspected = await runProcessImpl('docker', [
+      'inspect', '--format', '{{json .Config.Labels}}', manifest.containerName,
+    ], { timeoutMs: 30000 });
+  } catch {
+    // An unavailable runtime is not proof that the named container is gone.
+    return false;
+  }
+  let labels;
+  try { labels = JSON.parse(String(inspected.stdout || '').trim()); } catch { return false; }
+  if (!labels || labels[CONTAINER_LABEL] !== 'true'
+      || labels[`${CONTAINER_LABEL}.workspace`] !== manifest.workspace
+      || labels[`${CONTAINER_LABEL}.work-root`] !== manifest.workRootSha256) return false;
+  await runProcessImpl('docker', ['rm', '-f', manifest.containerName], { timeoutMs: 30000 });
+  return true;
+}
+
+async function reconcileExpertSandboxWorkRoot({
+  workRoot, activeWorkspaces = new Set(), staleAfterMs,
+  now = Date.now(), runProcessImpl = runProcess,
+}) {
+  const resolvedRoot = path.resolve(workRoot);
+  await fsp.mkdir(resolvedRoot, { recursive: true, mode: 0o700 });
+  const result = { removed: 0, skipped: 0, invalid: 0 };
+  for (const entry of await fsp.readdir(resolvedRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !WORKSPACE_DIRECTORY_RE.test(entry.name)) continue;
+    if (activeWorkspaces.has(entry.name)) { result.skipped += 1; continue; }
+    const jobDirectory = path.join(resolvedRoot, entry.name);
+    let manifest;
+    try { manifest = await readWorkspaceManifest(jobDirectory, resolvedRoot); } catch {
+      result.invalid += 1; continue;
+    }
+    if (now - Date.parse(manifest.createdAt) < staleAfterMs) { result.skipped += 1; continue; }
+    if (!await removeOwnedOrphanContainer(manifest, runProcessImpl)) {
+      result.skipped += 1; continue;
+    }
+    await removeJobDirectory(jobDirectory, resolvedRoot);
+    result.removed += 1;
+  }
+  return result;
 }
 
 async function freeBytesAt(directory) {
@@ -324,11 +452,14 @@ async function extractContainerOutputs(containerName, outputDirectory, signal) {
 }
 
 function createExpertSandboxBroker(env = process.env) {
+  validateExpertRuntimeIsolation(env);
   const token = String(env.EXPERT_R_SANDBOX_TOKEN || '');
   const image = String(env.EXPERT_R_SANDBOX_IMAGE || '');
-  const workRoot = path.resolve(String(env.EXPERT_R_SANDBOX_WORK_ROOT || ''));
+  const configuredWorkRoot = String(env.EXPERT_R_SANDBOX_WORK_ROOT || '').trim();
+  const workRoot = path.resolve(configuredWorkRoot || '.');
   if (!/^[0-9a-f]{64}$/.test(token)
-      || !/^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$/.test(image) || !path.isAbsolute(workRoot)) {
+      || !/^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$/.test(image)
+      || !configuredWorkRoot || !path.isAbsolute(configuredWorkRoot)) {
     throw new Error('Expert sandbox broker configuration is invalid.');
   }
   const sandboxImageDigest = image.slice(image.lastIndexOf('sha256:'));
@@ -340,7 +471,20 @@ function createExpertSandboxBroker(env = process.env) {
   let active = 0;
   let reservedWorkBytes = 0n;
   let reservedStorageBytes = 0n;
-  return http.createServer(async (req, res) => {
+  const activeWorkspaces = new Set();
+  let reconcileTimer = null;
+  let reconciliation = null;
+  const timeoutMs = positiveInteger(env.EXPERT_R_TIMEOUT_MS, 600000);
+  const cleanupGraceMs = positiveInteger(env.EXPERT_R_CLEANUP_GRACE_MS, 300000);
+  const reconcileIntervalMs = positiveInteger(env.EXPERT_R_RECONCILE_INTERVAL_MS, 300000);
+  const reconcile = async () => {
+    if (reconciliation) return reconciliation;
+    reconciliation = reconcileExpertSandboxWorkRoot({
+      workRoot, activeWorkspaces, staleAfterMs: timeoutMs + cleanupGraceMs,
+    }).finally(() => { reconciliation = null; });
+    return reconciliation;
+  };
+  const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET' && req.url === '/health') return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id }));
     if (req.method !== 'POST' || req.url !== '/run'
@@ -376,7 +520,8 @@ function createExpertSandboxBroker(env = process.env) {
                 || input.sizeBytes > MAX_EXPERT_R_INPUT_BYTES) return true;
             let safeName;
             try { safeName = sanitizeExpertRInputFilename(input.originalFilename); } catch { return true; }
-            if (safeName !== input.originalFilename) return true;
+            if (safeName !== input.originalFilename
+                || input.sizeBytes > maxExpertRInputBytesForFilename(safeName)) return true;
             privateInputIds.add(input.id);
             return false;
           })) throw new Error('Invalid sandbox private inputs.');
@@ -406,6 +551,11 @@ function createExpertSandboxBroker(env = process.env) {
         await assertFreeSpace(provider.root, reservedStorageBytes + reserve);
       }
       await fsp.mkdir(jobDirectory, { recursive: true, mode: 0o700 });
+      activeWorkspaces.add(path.basename(jobDirectory));
+      const workspaceCreatedAt = new Date().toISOString();
+      await writeWorkspaceManifest(jobDirectory, workRoot, {
+        jobId: body.jobId, containerName: null, createdAt: workspaceCreatedAt,
+      });
       await fsp.mkdir(inputDirectory, { mode: 0o700 }); await fsp.mkdir(outputDirectory, { mode: 0o700 });
       phase = 'prepare-checkpoint';
       const checkpointPath = path.join(inputDirectory, 'checkpoint.rds');
@@ -453,6 +603,10 @@ function createExpertSandboxBroker(env = process.env) {
       await fsp.chmod(path.join(inputDirectory, 'analysis.R'), 0o444);
       await fsp.chmod(inputDirectory, 0o555);
       containerName = `traceomics-expert-${body.jobId}-${crypto.randomBytes(5).toString('hex')}`;
+      await fsp.rm(path.join(jobDirectory, WORKSPACE_MANIFEST), { force: true });
+      await writeWorkspaceManifest(jobDirectory, workRoot, {
+        jobId: body.jobId, containerName, createdAt: workspaceCreatedAt,
+      });
       phase = 'execute';
       const sandboxWrapper = [
         'Rscript /app/expert-runner.R',
@@ -462,6 +616,9 @@ function createExpertSandboxBroker(env = process.env) {
       ].join('; ');
       await runProcess('docker', [
         'run', '-d', '--name', containerName, '--network', 'none', '--read-only',
+        '--label', `${CONTAINER_LABEL}=true`,
+        '--label', `${CONTAINER_LABEL}.workspace=${path.basename(jobDirectory)}`,
+        '--label', `${CONTAINER_LABEL}.work-root=${workspaceRootHash(workRoot)}`,
         '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256',
         '--memory', env.EXPERT_R_MEMORY_LIMIT || '8g', '--cpus', env.EXPERT_R_CPU_LIMIT || '2',
         '--user', '10001:10001', '--tmpfs', '/tmp:rw,noexec,nosuid,size=512m',
@@ -473,7 +630,7 @@ function createExpertSandboxBroker(env = process.env) {
         'exec', containerName, '/bin/sh', '-c',
         'while [ ! -f /tmp/traceomics-exit-status ]; do sleep 1; done; cat /tmp/traceomics-exit-status',
       ], {
-        timeoutMs: Number(env.EXPERT_R_TIMEOUT_MS || 600000),
+        timeoutMs,
         onTimeout: () => runProcess('docker', ['rm', '-f', containerName], { timeoutMs: 30000 }),
         signal: abortController.signal,
       });
@@ -558,21 +715,48 @@ function createExpertSandboxBroker(env = process.env) {
         await runProcess('docker', ['rm', '-f', containerName], { timeoutMs: 30000 }).catch(() => {});
       }
       await removeJobDirectory(jobDirectory, workRoot).catch(() => {});
+      if (jobDirectory) activeWorkspaces.delete(path.basename(jobDirectory));
     }
   });
+  server.startReconciliation = async () => {
+    await assertExpertRuntimeSecurity(env);
+    await reconcile();
+    if (!reconcileTimer) {
+      reconcileTimer = setInterval(() => {
+        void reconcile().catch((error) => {
+          console.error(`[expert-r-broker] orphan reconciliation failed code=${safeFailureCode(error)}`);
+        });
+      }, reconcileIntervalMs);
+      reconcileTimer.unref?.();
+    }
+  };
+  server.once('close', () => {
+    if (reconcileTimer) clearInterval(reconcileTimer);
+    reconcileTimer = null;
+  });
+  return server;
 }
 
 if (require.main === module) {
-  const server = createExpertSandboxBroker();
-  const host = String(process.env.EXPERT_R_SANDBOX_HOST || '127.0.0.1').trim();
-  if (!isTrustedBrokerBindHost(host)) {
-    throw new Error('EXPERT_R_SANDBOX_HOST must be a loopback address.');
-  }
-  server.listen(Number(process.env.EXPERT_R_SANDBOX_PORT || 8090), host);
+  void (async () => {
+    const server = createExpertSandboxBroker();
+    const host = String(process.env.EXPERT_R_SANDBOX_HOST || '127.0.0.1').trim();
+    if (!isTrustedBrokerBindHost(host)) {
+      throw new Error('EXPERT_R_SANDBOX_HOST must be a loopback address.');
+    }
+    await server.startReconciliation();
+    server.listen(Number(process.env.EXPERT_R_SANDBOX_PORT || 8090), host);
+  })().catch((error) => {
+    console.error(`[expert-r-broker] startup failed code=${safeFailureCode(error)}`);
+    process.exitCode = 1;
+  });
 }
 
 module.exports = {
   createExpertSandboxBroker, collectOutputs, removeJobDirectory, ALLOWED_OUTPUT_EXTENSIONS, sha256File,
   assertFreeSpace, pathsShareFilesystem, ownerScriptFailureExplanation, MAX_OUTPUT_BYTES, MAX_ARCHIVE_BYTES,
   isTrustedBrokerBindHost,
+  validateExpertRuntimeIsolation, reconcileExpertSandboxWorkRoot,
+  assertExpertRuntimeSecurity,
+  writeWorkspaceManifest, workspaceRootHash, WORKSPACE_MANIFEST,
 };

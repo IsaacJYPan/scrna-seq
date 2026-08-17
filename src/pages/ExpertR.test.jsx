@@ -135,4 +135,34 @@ describe('ExpertR', () => {
     expect(screen.getByText(/no saved analysis you own/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /run r analysis/i })).toBeDisabled();
   });
+
+  it('offers RDS as an explicitly sandbox-only private input', async () => {
+    window.electronAPI.listExpertRInputs = vi.fn(async () => []);
+    window.electronAPI.uploadExpertRInput = vi.fn(async (_projectId, file) => ({
+      id: 'eri_aaaaaaaaaaaaaaaaaaaaaaaa', originalFilename: file.name, sizeBytes: file.size,
+    }));
+    render(
+      <ExpertR
+        currentWs={currentWs}
+        datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }}
+        userId={7}
+        deploymentPolicy={{
+          expertREnabled: true,
+          expertRProfile: { id: 'expert.r.v1', packages: ['Seurat'] },
+        }}
+      />
+    );
+    const picker = screen.getByLabelText(/choose private input/i);
+    expect(picker.getAttribute('accept')).toContain('.rds');
+    expect(screen.getByText(/RDS files remain untrusted/i)).toBeInTheDocument();
+    const file = new File(['serialized-test-object'], 'derived.rds', {
+      type: 'application/octet-stream',
+    });
+    fireEvent.change(picker, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: /import file/i }));
+    await waitFor(() => {
+      expect(window.electronAPI.uploadExpertRInput).toHaveBeenCalledWith('proj_private_1', file);
+    });
+    expect(await screen.findByText('derived.rds')).toBeInTheDocument();
+  });
 });

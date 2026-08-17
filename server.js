@@ -17,6 +17,7 @@ const {
   EXPERT_R_PROFILE,
   MAX_EXPERT_R_INPUT_BYTES,
   EXPERT_R_INPUT_EXTENSIONS,
+  maxExpertRInputBytesForFilename,
   generateExpertRInputId,
   sanitizeExpertRInputFilename,
   allocateExpertRInputStorageKey,
@@ -2444,8 +2445,9 @@ function sendProjectResourceError(res, e, context) {
     case 'INVALID_BRANCH_HEAD':
     case 'INVALID_REVIEW':
     case 'INVALID_EXPERIMENTAL_DESIGN':
+    case 'UNSUPPORTED_CONDITION_MODEL':
     case 'INVALID_AUDIT_CURSOR':
-      return res.status(400).json({ error: e.message });
+      return res.status(400).json({ error: e.message, ...(e.code === 'UNSUPPORTED_CONDITION_MODEL' ? { code: e.code } : {}) });
     default:
       console.error(`[${context}]`, e);
       return res.status(500).json({ error: 'Internal error.' });
@@ -2488,7 +2490,7 @@ const expertRInputUpload = multer({
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname || '').toLowerCase();
     if (!EXPERT_R_INPUT_EXTENSIONS.has(ext)) {
-      return cb(new Error('Expert R inputs must be CSV, TSV, TXT, or JSON files.'));
+      return cb(new Error('Expert R inputs must be CSV, TSV, TXT, JSON, or RDS files.'));
     }
     cb(null, true);
   },
@@ -2538,6 +2540,12 @@ app.post('/api/expert-r/projects/:projectId/inputs', requireExpertRInputWriter, 
     try {
       const id = generateExpertRInputId();
       const originalFilename = sanitizeExpertRInputFilename(req.file.originalname);
+      if (req.file.size > maxExpertRInputBytesForFilename(originalFilename)) {
+        const limitMiB = Math.floor(maxExpertRInputBytesForFilename(originalFilename) / (1024 * 1024));
+        const error = new Error(`This Expert R input exceeds the ${limitMiB} MiB file limit.`);
+        error.code = 'INVALID_EXPERT_R_INPUT';
+        throw error;
+      }
       const internalStorageKey = allocateExpertRInputStorageKey(
         req.params.projectId, id, originalFilename
       );

@@ -45,7 +45,7 @@ const {
   EXPERT_R_RESOURCE_POLICY_VERSION,
   allocateExpertRInputStorageKey,
   sanitizeExpertRInputFilename,
-  MAX_EXPERT_R_INPUT_BYTES,
+  maxExpertRInputBytesForFilename,
   MAX_EXPERT_R_PRIVATE_INPUTS,
   MAX_EXPERT_R_PRIVATE_INPUT_STORAGE_BYTES,
 } = require('./expertR');
@@ -61,6 +61,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
+const SCHEMA_CONTRACT_VERSION = 20260817;
 
 let pool = null;
 
@@ -477,7 +478,25 @@ async function query(text, params = []) {
   return p.query(text, params);
 }
 
-async function initSchema() {
+async function verifySchemaContract() {
+  const result = await query(
+    'SELECT schema_version FROM app_schema_contract WHERE schema_key = $1',
+    ['traceomics.runtime']
+  );
+  if (!result.rows[0] || Number(result.rows[0].schema_version) !== SCHEMA_CONTRACT_VERSION) {
+    throw codedError(
+      'DATABASE_SCHEMA_MISMATCH',
+      'The production database schema is missing or does not match this application build.'
+    );
+  }
+  return true;
+}
+
+async function initSchema(options = {}) {
+  if (options.force !== true && config.isProduction()
+      && process.env.DATABASE_SCHEMA_MANAGED_EXTERNALLY === 'true') {
+    return verifySchemaContract();
+  }
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf8');
   const p = await connect();
   const client = await p.connect();
@@ -708,6 +727,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      app_schema_contract,
       project_pipeline_selections, pipeline_definitions,
       project_audit_events,
       project_canonical_analyses, analysis_branch_review_comments,
@@ -1777,7 +1797,8 @@ async function createExpertRPrivateInput(userId, projectId, input = {}) {
   const internalStorageKey = String(input.internalStorageKey || '');
   const mimeType = String(input.mimeType || 'application/octet-stream').slice(0, 100);
   if (!/^eri_[0-9a-f]{24}$/.test(id)
-      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > MAX_EXPERT_R_INPUT_BYTES
+      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0
+      || sizeBytes > maxExpertRInputBytesForFilename(originalFilename)
       || !/^[0-9a-f]{64}$/.test(checksumSha256)
       || internalStorageKey !== allocateExpertRInputStorageKey(pid, id, originalFilename)
       || !storage.isProjectStorageKey(internalStorageKey, { projectId: pid, kind: 'artifacts' })) {

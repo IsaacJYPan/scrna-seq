@@ -45,6 +45,12 @@ describe.skipIf(!CONFIGURED)('Postgres experimental design', () => {
     expect(contrast.validation.counts).toEqual({
       numeratorSamples: 3, denominatorSamples: 3, numeratorUnits: 3, denominatorUnits: 3,
     });
+    expect(contrast.modelFormula).toBe('~ donor + condition');
+    await expect(design.createContrast(owner.id, project.id, {
+      name: 'unsupported-adjustment', analysisObjectId: object.id,
+      numeratorConditionId: treated.id, denominatorConditionId: control.id,
+      unitOfReplication: 'sample', blockingFactor: 'batch', covariates: ['percent.mt'],
+    })).rejects.toMatchObject({ code: 'UNSUPPORTED_CONDITION_MODEL' });
     expect(await design.listContrasts(viewer.id, project.id)).toHaveLength(1);
     await expect(design.createSample(viewer.id, project.id, {
       name: 'forbidden', conditionId: control.id,
