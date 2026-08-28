@@ -38,4 +38,33 @@ function isAllowedNavigation(targetUrl, serverUrl) {
   }
 }
 
-module.exports = { isAllowedNavigation, normalizeServerUrl };
+async function verifyServerConnection(serverUrl, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+  const normalized = normalizeServerUrl(serverUrl);
+  const policyUrl = new URL('/api/auth/policy', normalized);
+  let response;
+  try {
+    response = await fetchImpl(policyUrl, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    throw new Error('TraceOmics could not reach that server. Check the address, network connection, and server status.');
+  }
+
+  if (!response.ok) {
+    throw new Error('That server did not accept the TraceOmics connection check.');
+  }
+  let policy;
+  try {
+    policy = await response.json();
+  } catch {
+    throw new Error('That address did not return a valid TraceOmics response.');
+  }
+  if (!policy || typeof policy.registrationEnabled !== 'boolean') {
+    throw new Error('That address is not a compatible TraceOmics server.');
+  }
+  return normalized;
+}
+
+module.exports = { isAllowedNavigation, normalizeServerUrl, verifyServerConnection };

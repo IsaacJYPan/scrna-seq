@@ -46,8 +46,8 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: npm
@@ -71,8 +71,8 @@ jobs:
     runs-on: [self-hosted, windows, traceomics-release]
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: npm
@@ -99,16 +99,16 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-r@d3c5be51b12e724e68f33216ca3c148b66d5f0b6 # v2.12.1
         with:
           use-public-rspm: true
-      - uses: r-lib/actions/setup-r-dependencies@v2
+      - uses: r-lib/actions/setup-r-dependencies@d3c5be51b12e724e68f33216ca3c148b66d5f0b6 # v2.12.1
         with:
           packages: |
             any::Seurat
@@ -132,17 +132,45 @@ jobs:
   windows-installer:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      WINDOWS_PUBLISHER_NAME: ${{ secrets.WINDOWS_PUBLISHER_NAME }}
+      TRACEOMICS_DESKTOP_URL: ${{ vars.TRACEOMICS_DESKTOP_URL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - name: Build Windows installer
+      - name: Require release signing credentials
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CSC_LINK)) {
+            throw 'WINDOWS_CSC_LINK is required for a release installer.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)) {
+            throw 'WINDOWS_CSC_KEY_PASSWORD is required for a release installer.'
+          }
+      - name: Build signed Windows installer
         run: npm run desktop:dist
-      - uses: actions/upload-artifact@v4
+      - name: Verify publisher, metadata, and release hash
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -LiteralPath release/desktop -Filter 'TraceOmics-Setup-*-x64.exe'
+          if ($installer.Count -ne 1) {
+            throw "Expected one x64 installer, found $($installer.Count)."
+          }
+          ./scripts/verify-windows-installer.ps1 -InstallerPath $installer.FullName
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding ascii
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: traceomics-windows-installer-${{ github.sha }}
-          path: release/desktop/*.exe
+          path: |
+            release/desktop/TraceOmics-Setup-*-x64.exe
+            release/desktop/TraceOmics-Setup-*-x64.exe.sha256
+            release/desktop/latest.yml
           if-no-files-found: error
+          retention-days: 14
