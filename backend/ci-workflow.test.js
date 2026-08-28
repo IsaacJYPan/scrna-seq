@@ -34,4 +34,10 @@ describe('continuous-integration workflow contracts', () => {
     expect(dependabot).toContain('package-ecosystem: github-actions');
     expect(dependabot).toMatch(/open-pull-requests-limit:\s*[1-9]/g);
   });
+
+  it('installs only the browser engine used by acceptance scripts', () => {
+    const ci = workflowFiles.find(({ name }) => name === 'ci.yml')?.text || '';
+    expect(ci).toContain('npx playwright install --with-deps chromium');
+    expect(ci).not.toMatch(/npx playwright install --with-deps\s*(?:#.*)?$/m);
+  });
 });
