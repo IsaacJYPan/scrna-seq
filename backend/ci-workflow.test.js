@@ -40,4 +40,11 @@ describe('continuous-integration workflow contracts', () => {
     expect(ci).toContain('npx playwright install --with-deps chromium');
     expect(ci).not.toMatch(/npx playwright install --with-deps\s*(?:#.*)?$/m);
   });
+
+  it('builds the SPA before backend fallback coverage runs', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const preflight = packageJson.scripts?.['check:ci-preflight'] || '';
+    expect(preflight.indexOf('npm run build')).toBeGreaterThan(-1);
+    expect(preflight.indexOf('npm run build')).toBeLessThan(preflight.indexOf('npm run test:backend'));
+  });
 });
