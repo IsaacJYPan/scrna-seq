@@ -35,6 +35,31 @@ describe('Login registration policy', () => {
     const signup = await screen.findByRole('button', { name: 'Sign Up' });
     fireEvent.click(signup);
     expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
+    expect(screen.getByText(/at least 15 characters/i)).toBeInTheDocument();
+  });
+
+  it('requires the full passphrase length without claiming shorter passwords are strong', async () => {
+    auth.registrationPolicy.mockResolvedValue({ registrationEnabled: true });
+    render(<Login onLogin={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign Up' }));
+    fireEvent.change(screen.getByLabelText('Full name'), { target: { value: 'Researcher' } });
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'researcher@example.org' } });
+    const password = screen.getByLabelText('Password');
+    fireEvent.change(password, { target: { value: 'thirteenchars!' } });
+
+    expect(screen.getByRole('button', { name: /create account/i })).toBeDisabled();
+    expect(screen.queryByText(/^Strong$/i)).not.toBeInTheDocument();
+
+    fireEvent.change(password, { target: { value: 'violet harbor orbits calmly' } });
+    expect(screen.getByRole('button', { name: /create account/i })).toBeDisabled();
+
+    const confirmation = screen.getByLabelText('Confirm password');
+    fireEvent.change(confirmation, { target: { value: 'violet harbor orbits' } });
+    expect(screen.getByText(/passwords do not match/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /create account/i })).toBeDisabled();
+
+    fireEvent.change(confirmation, { target: { value: 'violet harbor orbits calmly' } });
+    expect(screen.getByRole('button', { name: /create account/i })).not.toBeDisabled();
   });
 
   it('starts an ephemeral curated workspace in public demo mode', async () => {

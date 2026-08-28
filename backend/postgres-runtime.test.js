@@ -5,6 +5,7 @@ const pg = require('./pgDatabase');
 const { startServer, api } = require('./_http-test-utils');
 
 const CONFIGURED = config.hasPostgresConnection();
+const TEST_PASSWORD = 'violet-harbor-orbits-42';
 
 describe.skipIf(!CONFIGURED)('Postgres runtime API', () => {
   let server;
@@ -25,7 +26,7 @@ describe.skipIf(!CONFIGURED)('Postgres runtime API', () => {
     const email = `runtime-${Date.now()}@example.com`;
     const signup = await api(server, '/api/auth/signup', {
       method: 'POST',
-      body: { email, password: 'password123', displayName: 'Runtime User' }
+      body: { email, password: TEST_PASSWORD, displayName: 'Runtime User' }
     });
     expect(signup.status).toBe(201);
     expect(signup.data.user.email).toBe(email);

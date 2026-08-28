@@ -26,7 +26,7 @@ const PLUMBER_PORT = Number(process.env.PLUMBER_TEST_PORT || 18122);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const TEST_EMAIL = `r-state-${Date.now()}@example.com`;
 const OTHER_EMAIL = `r-state-other-${Date.now()}@example.com`;
-const TEST_PASSWORD = 'RStateProxy123!';
+const TEST_PASSWORD = 'violet-harbor-orbits-42';
 const MALICIOUS_OBJECT_ID = 'user-999:obj-objectA/../../<script>';
 const UNKNOWN_OBJECT_ID = 'ao_deadbeefdeadbeef';
 
