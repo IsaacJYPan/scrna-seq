@@ -1,10 +1,10 @@
 .git
 .github
 .project
-.codex-run
+.co?ex-run
 .claude
 .agents
-.codex
+.co?ex
 
 .env
 .env.*

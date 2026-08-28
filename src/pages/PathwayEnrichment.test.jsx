@@ -13,7 +13,9 @@ const currentWs = {
 };
 
 function renderPage(overrides = {}) {
-  return render(
+  const callApi = overrides.callApi
+    || vi.fn(async () => ({ values: [{ value: '0', count: 100 }] }));
+  const view = render(
     <PathwayEnrichment
       datasetInfo={{
         id: 'ao_abc123',
@@ -26,10 +28,17 @@ function renderPage(overrides = {}) {
       objectId="ao_abc123"
       sessionReady
       computeStatus={{ status: 'ready', capabilities: { pathwayEnrichment: true } }}
-      callApi={vi.fn(async () => ({ values: [{ value: '0', count: 100 }] }))}
+      callApi={callApi}
       {...overrides}
     />
   );
+  return { ...view, callApi };
+}
+
+async function waitForTargetGroups() {
+  await waitFor(() => expect(
+    screen.getByRole('combobox', { name: /Target cluster or group/i })
+  ).not.toBeDisabled());
 }
 
 describe('PathwayEnrichment durable worker UI', () => {
@@ -171,8 +180,9 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(text).not.toMatch(/art_enrichment_summary|art_enrichment_results|job_enrichment/i);
   });
 
-  it('explains that enrichment is descriptive and is not proof of pathway activity', () => {
+  it('explains that enrichment is descriptive and is not proof of pathway activity', async () => {
     renderPage();
+    await waitForTargetGroups();
 
     expect(screen.getByText('Advanced options')).toBeInTheDocument();
     expect(screen.getByText(/does not prove that the pathway is active/i)).toBeInTheDocument();
@@ -180,7 +190,7 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(screen.getByText(/human and mouse gene identifiers use different reference databases/i)).toBeInTheDocument();
   });
 
-  it('does not allow launch for an unsaved legacy object', () => {
+  it('does not allow launch for an unsaved legacy object', async () => {
     renderPage({
       datasetInfo: {
         id: 'legacy-object',
@@ -190,6 +200,7 @@ describe('PathwayEnrichment durable worker UI', () => {
       },
       objectId: 'legacy-object',
     });
+    await waitForTargetGroups();
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
     expect(screen.getByText(/Select a saved analysis before starting pathway enrichment/i)).toBeInTheDocument();
@@ -212,13 +223,14 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(await screen.findByText('immune response')).toBeInTheDocument();
   });
 
-  it('lets project viewers inspect saved results but not start a new job', () => {
+  it('lets project viewers inspect saved results but not start a new job', async () => {
     renderPage({
       currentWs: {
         ...currentWs,
         projects: currentWs.projects.map(project => ({ ...project, role: 'viewer' })),
       },
     });
+    await waitForTargetGroups();
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
     expect(screen.getByText(/project role is read-only/i)).toBeInTheDocument();
@@ -252,6 +264,7 @@ describe('PathwayEnrichment durable worker UI', () => {
   it('blocks stale-checkpoint launches while live changes are unsaved', async () => {
     const save = vi.fn();
     renderPage({ unsavedLiveChanges: true, onSaveCurrentAnalysis: save });
+    await waitForTargetGroups();
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
     expect(screen.getByText(/Unsaved live steps will not be included/i)).toBeInTheDocument();
@@ -259,15 +272,17 @@ describe('PathwayEnrichment durable worker UI', () => {
     expect(save).toHaveBeenCalledOnce();
   });
 
-  it('disables enrichment when the compute worker lacks its approved package profile', () => {
+  it('disables enrichment when the compute worker lacks its approved package profile', async () => {
     renderPage({ computeStatus: { status: 'ready', capabilities: { pathwayEnrichment: false } } });
+    await waitForTargetGroups();
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(/not installed in this compute profile/i);
   });
 
-  it('fails closed while the worker capability report is unknown', () => {
+  it('fails closed while the worker capability report is unknown', async () => {
     renderPage({ computeStatus: { status: 'ready', capabilities: {} } });
+    await waitForTargetGroups();
 
     expect(screen.getByRole('button', { name: /Start Pathway Enrichment/i })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(/readiness has not been confirmed/i);

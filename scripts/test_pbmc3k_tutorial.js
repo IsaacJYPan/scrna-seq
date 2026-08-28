@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // ============================================================
-// run_integration_tests.js  –  scRNA-seq Plumber API Integration Tests
+// test_pbmc3k_tutorial.js – PBMC3k reference-workflow acceptance test
 // ============================================================
 // Starts the R Plumber server on a test port (8001), exercises
 // every major pipeline endpoint sequentially with the real PBMC3k
 // dataset (data/pbmc3k/…), validates responses, then shuts down.
 //
 // Usage:
-//   node scripts/run_integration_tests.js
+//   npm run test:tutorial
 // ============================================================
 
 'use strict';

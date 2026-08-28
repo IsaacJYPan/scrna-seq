@@ -3,8 +3,8 @@ node_modules/
 
 # Markdown documentation policy
 # Track the public root README plus the curated docs/ tree. Development/spec/agent
-# and current-state handoff markdown still belongs in ignored local context such
-# as .project/codex/. Generated guides under docs/guide/ stay ignored (see below).
+# and current-state handoff markdown still belongs in ignored local project
+# context. Generated guides under docs/guide/ stay ignored (see below).
 *.md
 !/README.md
 !/docs/**/*.md
@@ -44,7 +44,7 @@ Thumbs.db
 
 # Local development-tool context
 .claude/
-/.codex/
+/.co?ex/
 /.agents/
 /.cursor/
 /.windsurf/
@@ -79,8 +79,8 @@ playwright/snapshots/
 playwright-report/
 test-results/
 
-# Local Codex/debug run artifacts: logs, screenshots, PID files, scratch probes
-.codex-run/
+# Local tool/debug run artifacts: logs, screenshots, PID files, scratch probes
+.co?ex-run/
 
 # Scratch / temporary R scripts — one-off debugging files
 scratch/
