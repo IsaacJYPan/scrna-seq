@@ -196,7 +196,9 @@ jobs:
             github::jinworks/CellChat@a0d3b2d231d46c8787177fffeac908270c253747
 
       - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
+        # Every browser acceptance script in this repository launches Chromium;
+        # avoid downloading unused Firefox and WebKit runtimes on each CI run.
+        run: npx playwright install --with-deps chromium
 
       - name: Run Unit Tests
         run: npm run test:unit
