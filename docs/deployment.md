@@ -107,6 +107,13 @@ The supported exposure model is a trusted lab/team whose accounts are
 provisioned by the host operator. It is not an anonymous-signup service or a
 hostile-user multi-tenant SaaS boundary.
 
+For private use, this is a self-hosted/BYOC-style topology: the customer or lab
+operates every application and data-plane component on infrastructure it
+controls. It does not depend on a vendor-managed control plane. “BYOC” here does
+not imply high availability, managed operations, compliance certification, or
+safe execution of arbitrary hostile workloads. Those properties require
+separate architecture and operational evidence.
+
 ## Optional Expert R sandbox
 
 Expert R is disabled by default and must remain disabled for the public demo. For
@@ -346,6 +353,14 @@ The owner can then create projects and add other already-provisioned accounts
 through Collaborators. To rotate an account password and revoke all of its
 sessions, use the same hidden-input pattern with
 `scripts/account-admin.js reset-password --email user@example.org --password-stdin`.
+Users who know their current password can instead use Account security in the
+application. Self-service changes are atomic with an append-only
+`account_security_events` record, revoke every older cookie, and issue a fresh
+cookie to the requesting browser. New and reset credentials use the same
+15-character minimum and common/repetitive/account-derived password checks;
+long passphrases do not require mixed character classes. Existing credentials
+remain valid until changed or reset. There is no email verification or network
+password-recovery flow in this release, so keep a tested operator recovery path.
 Grant/revoke/status operations for `pipeline_registry.publish` use
 `scripts/manage-platform-developer.js` in the same operations image; mutations
 are recorded in `operator_audit_events`.
@@ -377,14 +392,21 @@ operational endpoints should still be restricted at the proxy.
 
 ## Windows desktop application
 
-`npm run desktop:dist` builds the Windows NSIS installer in
-`release/desktop/`. The installed application is a sandboxed Electron client for
-the same HTTPS deployment; it does not bundle or start Postgres, R, or Docker.
-Operators can preconfigure the first server URL with `TRACEOMICS_DESKTOP_URL`, or
-users can enter it on the setup screen. Build public installers in the manual
-Release Certification workflow and configure electron-builder code-signing
-secrets before distribution. An unsigned local build is useful for acceptance
-but will not provide a verified Windows publisher identity.
+`npm run desktop:dist:unsigned` builds an unsigned Windows NSIS installer for
+local acceptance. `npm run desktop:dist` is release-only: it requires the
+electron-builder signing credential variables and refuses to produce an unsigned
+release artifact. Output uses the stable
+`TraceOmics-Setup-<version>-x64.exe` name. The manual Release Certification
+workflow verifies the Authenticode publisher, product/company metadata, and
+SHA-256 before uploading the installer and checksum sidecar.
+
+The installed application is a sandboxed Electron client for the same HTTPS
+deployment; it does not bundle or start Postgres, R, or Docker. Operators can
+embed the first server URL with `TRACEOMICS_DESKTOP_URL` at build time, or users
+can enter it on the setup screen. The client checks `/api/auth/policy` and accepts
+only a compatible server before saving the address. Automatic in-app updating is
+not configured; distribute each update as a new signed installer and keep the
+application version current before certification.
 
 ## TLS reverse proxy
 
