@@ -1,10 +1,6 @@
 .git
 .github
 .project
-.co?ex-run
-.claude
-.agents
-.co?ex
 
 .env
 .env.*

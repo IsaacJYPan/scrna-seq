@@ -42,12 +42,7 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Local development-tool context
-.claude/
-/.co?ex/
-/.agents/
-/.cursor/
-/.windsurf/
+# Local operating instructions
 /AGENTS.md
 /WORKFLOW.md
 
@@ -78,9 +73,6 @@ playwright/report/
 playwright/snapshots/
 playwright-report/
 test-results/
-
-# Local tool/debug run artifacts: logs, screenshots, PID files, scratch probes
-.co?ex-run/
 
 # Scratch / temporary R scripts — one-off debugging files
 scratch/
