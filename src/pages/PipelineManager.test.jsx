@@ -110,6 +110,22 @@ describe('PipelineManager', () => {
     expect(window.electronAPI.getProjectPipelineSelection).toHaveBeenCalledWith('proj_1');
   });
 
+  it('keeps data upload and workflow launch read-only for project viewers', async () => {
+    renderPipelineManager({
+      currentWs: {
+        ...currentWs,
+        projects: [{ ...currentWs.projects[0], role: 'viewer' }],
+      },
+    });
+
+    expect(await screen.findByText(/project is read-only for your role/i)).toBeInTheDocument();
+    expect(screen.getByText(/uploads are disabled for your role/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('seurat-pipeline-upload')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Run Seurat preprocessing/i })).toBeDisabled();
+    expect(window.electronAPI.uploadDataset).not.toHaveBeenCalled();
+    expect(window.electronAPI.createSeuratPipelineJob).not.toHaveBeenCalled();
+  });
+
   it('uses the workspace-selected project for user-project pipeline selection', async () => {
     renderPipelineManager({
       currentWs: {

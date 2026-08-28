@@ -37,6 +37,7 @@ const CLASSIC_VISIUM_REQUIRED_FILES = [
 
 const MAX_MULTI_SAMPLE_INPUTS = 48;
 const SAFE_MULTI_SAMPLE_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
+const PROJECT_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 
 function isValidMultiSampleLabel(value, { optional = false } = {}) {
   const normalized = String(value || '').trim().replace(/\s+/g, ' ');
@@ -802,6 +803,7 @@ function WorkbenchOverview({
   onReloadPbmcDemo,
 }) {
   const hasProject = !!activeProject;
+  const canWriteProject = PROJECT_WRITE_ROLES.has(activeProject?.role);
   const hasObject = !!selectedObject;
   const hasObjectsInProject = activeProjectObjects.length > 0;
   const isDbBacked = !!selectedObject?.isBackendAnalysisObject || /^ao_/.test(selectedObject?.id || '');
@@ -819,9 +821,13 @@ function WorkbenchOverview({
     nextAction = 'Select a saved analysis from the project list below before opening analysis tools.';
     actionLabel = 'Select analysis';
   } else if (hasProject && !hasObject) {
-    nextAction = 'Load the PBMC demo or use an approved workflow to add a dataset to this project.';
-    actionLabel = 'Load analysis';
-    action = () => setShowLoadModal(true);
+    if (canWriteProject) {
+      nextAction = 'Load the PBMC demo or use an approved workflow to add a dataset to this project.';
+      actionLabel = 'Load analysis';
+      action = () => setShowLoadModal(true);
+    } else {
+      nextAction = 'This project is read-only for your role. You can inspect saved analyses, results, and lineage when they are available.';
+    }
   } else if (hasProject && hasObject && !liveAttached) {
     if (selectedObject?.source === 'pbmc3k_demo' && typeof onReloadPbmcDemo === 'function') {
       nextAction = 'This PBMC demo is selected but is not open in your private analysis workspace. Reload the built-in demo to open it again.';
@@ -929,6 +935,7 @@ export function SeuratPipelinePanel({
   onSelectAnalysisObject,
   setActiveTab,
   datasetUploadsEnabled = true,
+  canWriteProject = false,
 }) {
   const [workflowMode, setWorkflowMode] = useState('scrna');
   const [datasets, setDatasets] = useState([]);
@@ -1114,6 +1121,10 @@ export function SeuratPipelinePanel({
   const uploadDataset = async (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = '';
+    if (!canWriteProject) {
+      setDatasetStatus(prev => ({ ...prev, error: 'Your project role is read-only and cannot upload datasets.' }));
+      return;
+    }
     if (files.length === 0) return;
     const selectedFiles = multiSampleMode ? files : files.slice(0, 1);
     if (multiSampleMode && multiSampleRows.length + selectedFiles.length > MAX_MULTI_SAMPLE_INPUTS) {
@@ -1171,6 +1182,10 @@ export function SeuratPipelinePanel({
   };
 
   const launchPipeline = async () => {
+    if (!canWriteProject) {
+      setJobStatus(prev => ({ ...prev, error: 'Your project role is read-only and cannot start analysis jobs.' }));
+      return;
+    }
     if (!activeProjectId || !selectedDatasetId) return;
     const api = window.electronAPI || {};
     const createJob = spatialMode
@@ -1256,7 +1271,7 @@ export function SeuratPipelinePanel({
     setActiveTab('deg');
   };
 
-  const canLaunch = !!activeProjectId && !!selectedDatasetId && !jobStatus.launching
+  const canLaunch = canWriteProject && !!activeProjectId && !!selectedDatasetId && !jobStatus.launching
     && (!spatialMode || activeDatasetReady)
     && (!multiSampleMode || (activeDatasetReady && multiSampleDesignValid));
 
@@ -1371,13 +1386,18 @@ export function SeuratPipelinePanel({
       ) : (
         <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
           <div className="space-y-4">
+            {!canWriteProject && (
+              <div className="rounded border border-border bg-surface px-3 py-2 text-sm text-textMuted" role="note">
+                This project is read-only for your role. You can review approved workflow settings and recorded results, but only an owner, administrator, or analyst can upload data or start a run.
+              </div>
+            )}
             <div className="rounded border border-border bg-background/40 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h4 className="font-bold text-text">Dataset upload / selection</h4>
                   <p className="mt-1 text-xs text-textMuted">Supported format: {workflow.formatLabel}.</p>
                 </div>
-                {datasetUploadsEnabled ? <label className="btn btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
+                {datasetUploadsEnabled && canWriteProject ? <label className="btn btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
                   <FileUp size={16} />
                   {datasetStatus.uploading
                     ? 'Uploading...'
@@ -1390,12 +1410,14 @@ export function SeuratPipelinePanel({
                     accept={spatialMode ? '.zip' : '.h5'}
                     multiple={multiSampleMode}
                     className="sr-only"
-                    disabled={datasetStatus.uploading}
+                    disabled={datasetStatus.uploading || !canWriteProject}
                     onChange={uploadDataset}
                   />
                 </label> : (
                   <span className="rounded border border-border px-3 py-2 text-xs text-textMuted">
-                    Public demo uses curated data; uploads are disabled.
+                    {canWriteProject
+                      ? 'Public demo uses curated data; uploads are disabled.'
+                      : 'Read-only project; uploads are disabled for your role.'}
                   </span>
                 )}
               </div>
@@ -1924,7 +1946,9 @@ export default function Workspace({
   const displayObject = activeSelectedObjects[0] || null;
   const selectedObject = displayObject;
   const activeProject = currentWs.projects?.find(project => project.id === activeProjectId) || null;
+  const canWriteProject = PROJECT_WRITE_ROLES.has(activeProject?.role);
   const canReloadPbmcDemo = selectedObject?.source === 'pbmc3k_demo'
+    && canWriteProject
     && (!selectedObject?.ownerUserId || Number(selectedObject.ownerUserId) === Number(userId));
 
   const reloadPbmcDemo = async () => {
@@ -2118,7 +2142,8 @@ export default function Workspace({
               </h3>
               <button
                 onClick={() => setShowLoadModal(true)}
-                disabled={!!loadingId || !activeProjectId}
+                disabled={!!loadingId || !activeProjectId || !canWriteProject}
+                title={!canWriteProject && activeProjectId ? 'Your project role is read-only.' : undefined}
                 className="btn btn-primary flex items-center gap-2 px-5 text-sm shadow-lg shadow-primary/20"
               >
                 <FileUp size={16} /> Add analysis
@@ -2145,10 +2170,14 @@ export default function Workspace({
                   <Database size={40} className="text-slate-400 mb-4 opacity-50" />
                   <h4 className="text-text font-bold mb-2">No saved analyses in this project</h4>
                   <p className="text-sm text-textMuted mb-6">
-                    Use an approved workflow or the PBMC demo to create a saved analysis.
+                    {canWriteProject
+                      ? 'Use an approved workflow or the PBMC demo to create a saved analysis.'
+                      : 'Your project role is read-only. An owner, administrator, or analyst can add a saved analysis.'}
                   </p>
                   <button
                     onClick={() => setShowLoadModal(true)}
+                    disabled={!canWriteProject}
+                    title={!canWriteProject ? 'Your project role is read-only.' : undefined}
                     className="btn btn-primary flex items-center gap-2"
                   >
                     <FileUp size={15} /> Add analysis
@@ -2347,7 +2376,7 @@ export default function Workspace({
       </div>
 
       {/* Modals */}
-      {showLoadModal && (
+      {showLoadModal && canWriteProject && (
         <LoadModal
           onClose={() => setShowLoadModal(false)}
           onLoaded={handleLoaded}
