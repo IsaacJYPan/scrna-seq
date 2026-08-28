@@ -128,7 +128,8 @@ async function signUp(page, { name, email, password }) {
   await page.getByRole('button', { name: 'Sign Up', exact: true }).click();
   await page.getByPlaceholder('Dr. Jane Doe').fill(name);
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
-  await page.locator('input[type="password"]').fill(password);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByLabel('Confirm password', { exact: true }).fill(password);
   await page.getByRole('button', { name: /Create Account/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 15000 });
 }
@@ -136,7 +137,7 @@ async function signUp(page, { name, email, password }) {
 async function logIn(page, { email, password }) {
   await page.getByRole('button', { name: 'Log In', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
-  await page.locator('input[type="password"]').fill(password);
+  await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: /Open Workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 15000 });
 }
@@ -226,12 +227,12 @@ async function main() {
     const second = {
       name: 'Browser Analyst',
       email: `analyst-${suffix}@example.invalid`,
-      password: 'analyst-browser-password',
+      password: 'river-saffron-windows-83',
     };
     const owner = {
       name: 'Browser Owner',
       email: `owner-${suffix}@example.invalid`,
-      password: 'owner-browser-password',
+      password: 'mossy-cascade-lanterns-52',
     };
     const projectName = `Browser Project ${suffix}`;
 
