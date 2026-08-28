@@ -22,6 +22,22 @@ creation is operator-only and legacy vault uploads are disabled. The
 [deployment guide](docs/deployment.md) begins with a non-technical public-demo
 checklist; the detailed operator runbook follows it.
 
+New credentials require at least 15 Unicode characters, reject a small set of
+common/repetitive/account-derived values, and allow long passphrases without a
+symbol or capitalization rule. Existing credentials remain login-compatible.
+Authenticated users can change their password from Account security; the change
+rotates the account session generation, preserves the requesting browser with a
+fresh cookie, revokes other sessions, and records an append-only security event.
+Email verification and network password recovery are intentionally not provided;
+production accounts and recovery remain operator-managed.
+
+The supported private-deployment model is self-hosted/BYOC-style: the lab or
+customer operates the web app, Postgres, durable storage, workers, and R services
+on infrastructure it controls. The repository does not provide a managed SaaS
+control plane, automatic multi-host scaling, or an institutional security
+approval. Release certification and the deployment guide's host-specific backup,
+monitoring, TLS, and restore checks still apply to every installation.
+
 ## Runtime Shape
 
 ```text
@@ -46,20 +62,27 @@ when a compute process is reused.
 
 ## Windows desktop installer
 
-The repository includes a normal Windows NSIS installer target:
+For local installer acceptance without a signing certificate:
 
 ```powershell
 npm ci
-npm run desktop:dist
+npm run desktop:dist:unsigned
 ```
 
-The installer is written under `release/desktop/`. The installed TraceOmics app
-is a hardened Electron shell that connects to a configured HTTPS TraceOmics
+The installer is written as
+`release/desktop/TraceOmics-Setup-<version>-x64.exe`. The installed TraceOmics
+app is a hardened Electron shell that connects to a configured HTTPS TraceOmics
 server and keeps the same server-side authentication, RBAC, Postgres, storage,
 and R-compute boundaries. It does not embed Postgres, Docker, or the R workers.
-Set `TRACEOMICS_DESKTOP_URL` for a managed first launch, or let the user enter the
-server address. Public distribution should code-sign the installer through the
-standard electron-builder signing environment so Windows can verify its publisher.
+Set `TRACEOMICS_DESKTOP_URL` during a managed build to make first launch
+preconfigured, or let the user enter the server address. The app verifies a
+compatible server response before saving that address.
+
+`npm run desktop:dist` is the release command and requires Windows code-signing
+credentials. The manual Release Certification workflow builds the signed NSIS
+installer, verifies its publisher and product metadata, emits a SHA-256 sidecar,
+and uploads the artifacts. Automatic in-app updates are not configured; updates
+are distributed as replacement signed installers.
 
 ## Architecture Status
 
@@ -474,6 +497,9 @@ What these mean:
 - `build` proves the browser app can be packaged;
 - `test:frontend` checks the browser-screen logic with simulated API replies;
 - `test:unit` runs the local R/Seurat calculation checks.
+- `test:integration` runs the maintained Postgres/Express contract suite followed
+  by the real R state-isolation check. It requires an isolated test database and
+  a compatible local R runtime.
 
 Then run the full server and database checks against `scrna_test`:
 
