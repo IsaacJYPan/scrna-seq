@@ -558,6 +558,29 @@ describe('API Client (electronAPI)', () => {
     expect(options.headers).not.toHaveProperty('Authorization');
   });
 
+  it('changes the password through the cookie session and refreshes cached user data', async () => {
+    const user = { id: 9, email: 'owner@example.org', displayName: 'Owner' };
+    global.fetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ success: true, allOtherSessionsRevoked: true, user }),
+    });
+
+    await expect(electronAPI.changePassword(
+      'old private password', 'violet harbor orbits calmly'
+    )).resolves.toEqual(user);
+    expect(electronAPI.getCurrentUser()).toEqual(user);
+    expect(global.fetch).toHaveBeenCalledWith('/api/auth/change-password', expect.objectContaining({
+      method: 'POST',
+      credentials: 'include',
+      body: JSON.stringify({
+        currentPassword: 'old private password',
+        newPassword: 'violet harbor orbits calmly',
+      }),
+    }));
+  });
+
   it('keeps cached user state when logout revocation fails', async () => {
     const user = { id: 10, email: 'retry@example.com', displayName: 'Retry' };
     localStorage.setItem('traceomics_auth_user', JSON.stringify(user));

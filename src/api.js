@@ -418,6 +418,17 @@ export const electronAPI = {
       return { error: formatRequestError(error) };
     }
   },
+  changePassword: async (currentPassword, newPassword) => {
+    try {
+      const data = await req('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      return persistAuthResponse(data);
+    } catch (error) {
+      return { error: formatRequestError(error), status: error.status };
+    }
+  },
   getCurrentUser,
   // Restore auth state from the HttpOnly session cookie (source of truth). The
   // cookie is not readable by JS, so the app asks the backend who it is.

@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20260817, now())
+VALUES ('traceomics.runtime', 20260827, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -76,6 +76,36 @@ DROP TRIGGER IF EXISTS trg_operator_audit_no_delete ON operator_audit_events;
 CREATE TRIGGER trg_operator_audit_no_delete
   BEFORE DELETE ON operator_audit_events
   FOR EACH ROW EXECUTE FUNCTION reject_operator_audit_mutation();
+
+-- Append-only events for authenticated account-security actions. This is kept
+-- separate from operator_audit_events because the actor is a browser-authenticated
+-- user, not an out-of-band deployment operator.
+CREATE TABLE IF NOT EXISTS account_security_events (
+  id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  event_type      TEXT NOT NULL,
+  actor_user_id   BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  subject_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  subject_email   TEXT NOT NULL,
+  metadata_json   TEXT NOT NULL DEFAULT '{}',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_account_security_created ON account_security_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_account_security_subject ON account_security_events(subject_user_id);
+
+CREATE OR REPLACE FUNCTION reject_account_security_event_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'account security events are append-only' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_account_security_no_update ON account_security_events;
+CREATE TRIGGER trg_account_security_no_update
+  BEFORE UPDATE ON account_security_events
+  FOR EACH ROW EXECUTE FUNCTION reject_account_security_event_mutation();
+DROP TRIGGER IF EXISTS trg_account_security_no_delete ON account_security_events;
+CREATE TRIGGER trg_account_security_no_delete
+  BEFORE DELETE ON account_security_events
+  FOR EACH ROW EXECUTE FUNCTION reject_account_security_event_mutation();
 
 -- Platform capabilities are assigned out of band by a trusted operator. They
 -- are intentionally separate from organization/project roles and have no
