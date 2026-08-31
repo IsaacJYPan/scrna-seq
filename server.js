@@ -17,11 +17,13 @@ const {
   EXPERT_R_PROFILE,
   MAX_EXPERT_R_INPUT_BYTES,
   EXPERT_R_INPUT_EXTENSIONS,
+  maxExpertRInputBytesForFilename,
   generateExpertRInputId,
   sanitizeExpertRInputFilename,
   allocateExpertRInputStorageKey,
 } = require('./backend/expertR');
 const config = require('./backend/config');
+const passwordPolicy = require('./backend/passwordPolicy');
 const storage = require('./backend/storage');
 const { validateStoredDataset } = require('./backend/datasetValidation');
 const rRuntime = require('./backend/rRuntime');
@@ -319,13 +321,14 @@ function originOf(url) {
 async function requireAuth(req, res, next) {
   if (req.method === 'OPTIONS') return next();
 
-  const { user, via } = await resolveSessionUser(req);
+  const { user, sessionVersion, via } = await resolveSessionUser(req);
   if (!user) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
   req.user = user;
   req.authVia = via;
+  req.sessionVersion = sessionVersion;
   req.session = { id: `user-${user.id}`, user };
 
   if (!enforceCsrfForCookieAuth(req, res)) return undefined;
@@ -338,9 +341,9 @@ function validateSignupBody(body) {
   const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
 
   if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { error: 'A valid email is required.' };
-  if (password.length < 8) return { error: 'Password must be at least 8 characters.' };
-  if (password.length > 1024) return { error: 'Password must be at most 1024 characters.' };
   if (!displayName || displayName.length > 200) return { error: 'Display name must be between 1 and 200 characters.' };
+  const passwordResult = passwordPolicy.validateNewPassword(password, { email, displayName });
+  if (passwordResult.error) return passwordResult;
   return { email, password, displayName };
 }
 
@@ -352,6 +355,18 @@ function validateLoginBody(body) {
   if (!password) return { error: 'Password is required.' };
   if (password.length > 1024) return { error: 'Password must be at most 1024 characters.' };
   return { email, password };
+}
+
+function validatePasswordChangeBody(body, user) {
+  const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+  const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
+
+  if (!currentPassword) return { error: 'Current password is required.' };
+  if (currentPassword.length > 1024) return { error: 'Current password must be at most 1024 characters.' };
+  if (currentPassword === newPassword) return { error: 'New password must be different from the current password.' };
+  const passwordResult = passwordPolicy.validateNewPassword(newPassword, user);
+  if (passwordResult.error) return passwordResult;
+  return { currentPassword, newPassword };
 }
 
 function isInsidePath(childPath, parentPath) {
@@ -901,6 +916,7 @@ function isValidSampleIdFormat(value) {
 // share (or exhaust) one another's budget.
 const loginRateLimiter = createRateLimiter();
 const signupRateLimiter = createRateLimiter();
+const passwordChangeRateLimiter = createRateLimiter();
 
 // A downstream browser disconnect does not prove that a synchronous R handler
 // stopped. Keep the admission lease attached to the request until the upstream
@@ -1307,6 +1323,7 @@ app.get('/api/auth/policy', (req, res) => {
   const demoMode = config.demoMode();
   res.json({
     registrationEnabled: config.registrationEnabled(),
+    passwordPolicy: passwordPolicy.publicPasswordPolicy(),
     legacyLocalImportsEnabled: legacyUiEnabled,
     // Live mutation tools write into the source object's in-memory R state.
     // Keep them unavailable until they create a durable child checkpoint.
@@ -1455,6 +1472,42 @@ app.post('/api/auth/login', loginRateLimiter, authJson, async (req, res) => {
 // only supported browser transport; bearer credentials are ignored.
 app.get('/api/auth/session', requireAuth, (req, res) => {
   res.json({ user: publicAuthUser(req.user) });
+});
+
+app.post('/api/auth/change-password', passwordChangeRateLimiter, authJson, requireAuth, async (req, res) => {
+  if (req.user.isDemoGuest) return res.status(403).json({ error: 'Demo accounts cannot change credentials.' });
+  const validated = validatePasswordChangeBody(req.body || {}, req.user);
+  if (validated.error) return res.status(400).json({ error: validated.error });
+
+  try {
+    const user = await db.changeUserPassword({
+      userId: req.user.id,
+      expectedSessionVersion: req.sessionVersion,
+      currentPassword: validated.currentPassword,
+      newPassword: validated.newPassword,
+    });
+    const token = issueSession(user);
+    setSessionCookie(res, token);
+    return res.json({
+      success: true,
+      allOtherSessionsRevoked: true,
+      user: publicAuthUser(user),
+    });
+  } catch (error) {
+    if (error?.code === 'INVALID_CURRENT_PASSWORD') {
+      return res.status(400).json({ error: 'Current password is incorrect.' });
+    }
+    if (error?.code === 'INVALID_SESSION') {
+      clearSessionCookie(res);
+      return res.status(401).json({ error: 'Your session changed. Sign in again before changing your password.' });
+    }
+    if (error?.code === 'AUTH_HASH_BUSY') {
+      res.setHeader('Retry-After', '1');
+      return res.status(503).json({ error: 'Authentication is temporarily busy. Please try again.' });
+    }
+    console.error('[Auth] Password change failed (PASSWORD_CHANGE_FAILED).');
+    return res.status(503).json({ error: 'Password change is temporarily unavailable.' });
+  }
 });
 
 // Logout clears the browser cookie and atomically increments the authenticated
@@ -2444,8 +2497,9 @@ function sendProjectResourceError(res, e, context) {
     case 'INVALID_BRANCH_HEAD':
     case 'INVALID_REVIEW':
     case 'INVALID_EXPERIMENTAL_DESIGN':
+    case 'UNSUPPORTED_CONDITION_MODEL':
     case 'INVALID_AUDIT_CURSOR':
-      return res.status(400).json({ error: e.message });
+      return res.status(400).json({ error: e.message, ...(e.code === 'UNSUPPORTED_CONDITION_MODEL' ? { code: e.code } : {}) });
     default:
       console.error(`[${context}]`, e);
       return res.status(500).json({ error: 'Internal error.' });
@@ -2488,7 +2542,7 @@ const expertRInputUpload = multer({
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname || '').toLowerCase();
     if (!EXPERT_R_INPUT_EXTENSIONS.has(ext)) {
-      return cb(new Error('Expert R inputs must be CSV, TSV, TXT, or JSON files.'));
+      return cb(new Error('Expert R inputs must be CSV, TSV, TXT, JSON, or RDS files.'));
     }
     cb(null, true);
   },
@@ -2538,6 +2592,12 @@ app.post('/api/expert-r/projects/:projectId/inputs', requireExpertRInputWriter, 
     try {
       const id = generateExpertRInputId();
       const originalFilename = sanitizeExpertRInputFilename(req.file.originalname);
+      if (req.file.size > maxExpertRInputBytesForFilename(originalFilename)) {
+        const limitMiB = Math.floor(maxExpertRInputBytesForFilename(originalFilename) / (1024 * 1024));
+        const error = new Error(`This Expert R input exceeds the ${limitMiB} MiB file limit.`);
+        error.code = 'INVALID_EXPERT_R_INPUT';
+        throw error;
+      }
       const internalStorageKey = allocateExpertRInputStorageKey(
         req.params.projectId, id, originalFilename
       );
@@ -4155,6 +4215,7 @@ module.exports = {
   // Exposed for tests: auth rate limiting + R path-field drift guard
   loginRateLimiter,
   signupRateLimiter,
+  passwordChangeRateLimiter,
   authRateLimitMax,
   authRateLimitWindowMs,
   rateLimitDisabled,

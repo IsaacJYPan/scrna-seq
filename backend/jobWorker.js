@@ -1863,6 +1863,13 @@ async function conditionComparisonHandler(ctx) {
       || design.contrast.id !== params.contrastId) {
     throw codedHandlerError('INVALID_CONTRAST', 'Condition contrast is invalid.');
   }
+  if (design.contrast.blockingFactor
+      || (Array.isArray(design.contrast.covariates) && design.contrast.covariates.length > 0)) {
+    throw codedHandlerError(
+      'UNSUPPORTED_CONDITION_MODEL',
+      'Batch, blocking-factor, and covariate-adjusted condition models are not supported yet.'
+    );
+  }
   const stateKey = await hydrateIsolatedAnalysisObject(ctx, job.analysisObjectId);
   const resultStorageKey = allocateConditionComparisonResultStorageKey(job.projectId, job.id);
   await removeRetryOrphanOutput(ctx, resultStorageKey);

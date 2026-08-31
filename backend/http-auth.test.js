@@ -18,6 +18,7 @@ const db = require('./pgDatabase');
 const { app } = serverModule;
 
 const CONFIGURED = config.hasPostgresConnection();
+const TEST_PASSWORD = 'violet-harbor-orbits-42';
 
 let server;
 let baseUrl;
@@ -46,7 +47,7 @@ async function http(method, path, { token, body } = {}) {
 
 async function signup(email) {
   const res = await http('POST', '/api/auth/signup', {
-    body: { email, password: 'password123', displayName: email.split('@')[0] }
+    body: { email, password: TEST_PASSWORD, displayName: email.split('@')[0] }
   });
   if (res.status !== 201) throw new Error(`signup failed: ${JSON.stringify(res.body)}`);
   const cookie = (res.res.headers.getSetCookie?.() || [])

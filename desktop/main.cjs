@@ -1,9 +1,10 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
-const { isAllowedNavigation, normalizeServerUrl } = require('./desktopConfig.cjs');
+const packageMetadata = require('../package.json');
+const { isAllowedNavigation, normalizeServerUrl, verifyServerConnection } = require('./desktopConfig.cjs');
 
 const SETTINGS_FILE = 'desktop-settings.json';
 let mainWindow = null;
@@ -70,9 +71,17 @@ async function showSetup() {
 }
 
 async function openServer(value) {
-  const normalized = await saveServerUrl(value);
-  await mainWindow?.loadURL(normalized);
-  return normalized;
+  const normalized = normalizeServerUrl(value);
+  const previousUrl = serverUrl;
+  serverUrl = normalized;
+  try {
+    await verifyServerConnection(normalized);
+    await mainWindow?.loadURL(normalized);
+    return await saveServerUrl(normalized);
+  } catch (error) {
+    serverUrl = previousUrl;
+    throw error;
+  }
 }
 
 function installMenu() {
@@ -88,10 +97,27 @@ function installMenu() {
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        {
+          label: 'About TraceOmics',
+          click: () => dialog.showMessageBox(mainWindow, {
+            type: 'info',
+            title: 'About TraceOmics',
+            message: 'TraceOmics',
+            detail: `Version ${app.getVersion()}\nCollaborative transcriptomic analysis workbench`,
+            buttons: ['OK'],
+            defaultId: 0,
+          }),
+        },
+      ],
+    },
   ]));
 }
 
 app.whenReady().then(async () => {
+  app.setAppUserModelId('org.traceomics.workbench');
   ipcMain.handle('desktop:get-server-url', () => serverUrl);
   ipcMain.handle('desktop:configure-server', async (_event, value) => openServer(value));
   ipcMain.handle('desktop:open-external', async (_event, value) => {
@@ -102,7 +128,9 @@ app.whenReady().then(async () => {
 
   createWindow();
   installMenu();
-  const configuredUrl = process.env.TRACEOMICS_DESKTOP_URL || await readSavedServerUrl();
+  const configuredUrl = process.env.TRACEOMICS_DESKTOP_URL
+    || packageMetadata.traceomicsDesktop?.defaultServerUrl
+    || await readSavedServerUrl();
   if (configuredUrl) {
     try {
       await openServer(configuredUrl);

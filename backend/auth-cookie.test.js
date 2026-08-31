@@ -19,6 +19,7 @@ const CONFIGURED = config.hasPostgresConnection();
 const { issueSession } = serverModule;
 const COOKIE_NAME = config.sessionCookieName();
 const ALLOWED_ORIGIN = 'http://localhost:5173'; // config default when FRONTEND_* unset
+const TEST_PASSWORD = 'violet-harbor-orbits-42';
 
 let server;
 let baseUrl;
@@ -76,6 +77,7 @@ afterAll(async () => {
 beforeEach(() => {
   serverModule.loginRateLimiter.reset();
   serverModule.signupRateLimiter.reset();
+  serverModule.passwordChangeRateLimiter.reset();
 });
 
 afterEach(() => {
@@ -87,7 +89,7 @@ describe.skipIf(!CONFIGURED)('cookie session issuance', () => {
     const email = uniqueEmail('signup');
     const { status, data, res } = await http('/api/auth/signup', {
       method: 'POST',
-      body: { email, password: 'password123', displayName: 'Cookie User' }
+      body: { email, password: TEST_PASSWORD, displayName: 'Cookie User' }
     });
     expect(status).toBe(201);
     const cookie = getSessionCookie(res);
@@ -102,10 +104,10 @@ describe.skipIf(!CONFIGURED)('cookie session issuance', () => {
 
   it('sets a session cookie on login', async () => {
     const email = uniqueEmail('login');
-    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'L' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: TEST_PASSWORD, displayName: 'L' } });
     const { status, res } = await http('/api/auth/login', {
       method: 'POST',
-      body: { email, password: 'password123' }
+      body: { email, password: TEST_PASSWORD }
     });
     expect(status).toBe(200);
     expect(getSessionCookie(res)).toContain(`${COOKIE_NAME}=`);
@@ -115,8 +117,8 @@ describe.skipIf(!CONFIGURED)('cookie session issuance', () => {
 describe.skipIf(!CONFIGURED)('cookie session restore + protected access', () => {
   async function loginCookie(tag) {
     const email = uniqueEmail(tag);
-    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
-    const { res } = await http('/api/auth/login', { method: 'POST', body: { email, password: 'password123' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: TEST_PASSWORD, displayName: 'U' } });
+    const { res } = await http('/api/auth/login', { method: 'POST', body: { email, password: TEST_PASSWORD } });
     return { email, cookie: getSessionCookie(res) };
   }
 
@@ -163,11 +165,132 @@ describe.skipIf(!CONFIGURED)('cookie session restore + protected access', () => 
   });
 });
 
+describe.skipIf(!CONFIGURED)('authenticated password change', () => {
+  const replacementPassword = 'amber-fjord-keeps-secrets';
+
+  async function createSession(tag) {
+    const email = uniqueEmail(tag);
+    await http('/api/auth/signup', {
+      method: 'POST',
+      body: { email, password: TEST_PASSWORD, displayName: 'Password Owner' },
+    });
+    const first = getSessionCookie((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: TEST_PASSWORD },
+    })).res);
+    const second = getSessionCookie((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: TEST_PASSWORD },
+    })).res);
+    return { email, first, second };
+  }
+
+  it('rotates the password, revokes prior sessions, and keeps the requesting browser signed in', async () => {
+    const { email, first, second } = await createSession('password-change');
+    const changed = await http('/api/auth/change-password', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}`, Origin: ALLOWED_ORIGIN },
+      body: { currentPassword: TEST_PASSWORD, newPassword: replacementPassword },
+    });
+
+    expect(changed.status).toBe(200);
+    expect(changed.data).toMatchObject({ success: true, allOtherSessionsRevoked: true });
+    const replacementCookie = getSessionCookie(changed.res);
+    expect(replacementCookie).toContain(`${COOKIE_NAME}=`);
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}` },
+    })).status).toBe(401);
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(second)}` },
+    })).status).toBe(401);
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(replacementCookie)}` },
+    })).status).toBe(200);
+    expect((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: TEST_PASSWORD },
+    })).status).toBe(401);
+    expect((await http('/api/auth/login', {
+      method: 'POST', body: { email, password: replacementPassword },
+    })).status).toBe(200);
+
+    const securityEvent = await db.query(
+      `SELECT event_type, subject_email, metadata_json
+         FROM account_security_events
+        WHERE subject_email = $1
+        ORDER BY id DESC LIMIT 1`,
+      [email]
+    );
+    expect(securityEvent.rows[0]).toMatchObject({
+      event_type: 'account.password_changed',
+      subject_email: email,
+    });
+    expect(JSON.parse(securityEvent.rows[0].metadata_json)).toEqual({
+      source: 'self_service',
+      sessionsRevoked: true,
+    });
+  });
+
+  it('keeps account-security events append-only', async () => {
+    const { first } = await createSession('password-audit');
+    const changed = await http('/api/auth/change-password', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}`, Origin: ALLOWED_ORIGIN },
+      body: { currentPassword: TEST_PASSWORD, newPassword: replacementPassword },
+    });
+    expect(changed.status).toBe(200);
+
+    const event = await db.query('SELECT id FROM account_security_events ORDER BY id DESC LIMIT 1');
+    await expect(db.query(
+      'UPDATE account_security_events SET event_type = event_type WHERE id = $1',
+      [event.rows[0].id]
+    )).rejects.toMatchObject({ code: '55000' });
+    await expect(db.query(
+      'DELETE FROM account_security_events WHERE id = $1',
+      [event.rows[0].id]
+    )).rejects.toMatchObject({ code: '55000' });
+  });
+
+  it('rejects an incorrect current password without revoking the session', async () => {
+    const { first } = await createSession('password-wrong-current');
+    const result = await http('/api/auth/change-password', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}`, Origin: ALLOWED_ORIGIN },
+      body: { currentPassword: 'not-the-current-password', newPassword: replacementPassword },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.data).toEqual({ error: 'Current password is incorrect.' });
+    expect((await http('/api/auth/session', {
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}` },
+    })).status).toBe(200);
+  });
+
+  it('enforces the new-password policy before credential work', async () => {
+    const { first } = await createSession('password-policy');
+    const result = await http('/api/auth/change-password', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}`, Origin: ALLOWED_ORIGIN },
+      body: { currentPassword: TEST_PASSWORD, newPassword: 'passwordpassword' },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.data.error).toMatch(/less common/i);
+  });
+
+  it('requires an allowed origin', async () => {
+    const { first } = await createSession('password-csrf');
+    const result = await http('/api/auth/change-password', {
+      method: 'POST',
+      headers: { Cookie: `${COOKIE_NAME}=${cookieValue(first)}` },
+      body: { currentPassword: TEST_PASSWORD, newPassword: replacementPassword },
+    });
+    expect(result.status).toBe(403);
+  });
+});
+
 describe.skipIf(!CONFIGURED)('CSRF protection for cookie-authenticated mutations', () => {
   async function loginCookie(tag) {
     const email = uniqueEmail(tag);
-    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
-    const { res } = await http('/api/auth/login', { method: 'POST', body: { email, password: 'password123' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: TEST_PASSWORD, displayName: 'U' } });
+    const { res } = await http('/api/auth/login', { method: 'POST', body: { email, password: TEST_PASSWORD } });
     return getSessionCookie(res);
   }
 
@@ -230,8 +353,8 @@ describe.skipIf(!CONFIGURED)('CSRF protection for cookie-authenticated mutations
 describe.skipIf(!CONFIGURED)('logout + removed bearer transport', () => {
   it('uses a valid cookie and ignores a different valid bearer token', async () => {
     const cookieEmail = uniqueEmail('cookie-wins');
-    await http('/api/auth/signup', { method: 'POST', body: { email: cookieEmail, password: 'password123', displayName: 'Cookie' } });
-    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email: cookieEmail, password: 'password123' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email: cookieEmail, password: TEST_PASSWORD, displayName: 'Cookie' } });
+    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email: cookieEmail, password: TEST_PASSWORD } });
     const cookie = getSessionCookie(loginRes);
 
     const bearerUser = await db.createUser(uniqueEmail('bearer-loses'), 'password123', 'Bearer');
@@ -251,8 +374,8 @@ describe.skipIf(!CONFIGURED)('logout + removed bearer transport', () => {
 
   it('clears the session cookie on logout', async () => {
     const email = uniqueEmail('logout');
-    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
-    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email, password: 'password123' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: TEST_PASSWORD, displayName: 'U' } });
+    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email, password: TEST_PASSWORD } });
     const cookie = getSessionCookie(loginRes);
 
     const { status, res } = await http('/api/auth/logout', {
@@ -266,9 +389,9 @@ describe.skipIf(!CONFIGURED)('logout + removed bearer transport', () => {
 
   it('preserves the retry credential on a revocation failure, then revokes it on retry', async () => {
     const email = uniqueEmail('logout-retry');
-    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: TEST_PASSWORD, displayName: 'U' } });
     const cookie = getSessionCookie((await http('/api/auth/login', {
-      method: 'POST', body: { email, password: 'password123' }
+      method: 'POST', body: { email, password: TEST_PASSWORD }
     })).res);
     vi.spyOn(db, 'revokeUserSessions').mockRejectedValueOnce(new Error('/private/database'));
 
@@ -306,8 +429,8 @@ describe.skipIf(!CONFIGURED)('logout + removed bearer transport', () => {
 
   it('clears the session cookie on same-origin logout even when FRONTEND_ORIGIN points at the dev server', async () => {
     const email = uniqueEmail('logout-same-origin');
-    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
-    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email, password: 'password123' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: TEST_PASSWORD, displayName: 'U' } });
+    const { res: loginRes } = await http('/api/auth/login', { method: 'POST', body: { email, password: TEST_PASSWORD } });
     const cookie = getSessionCookie(loginRes);
 
     const { status, res } = await http('/api/auth/logout', {
@@ -333,12 +456,12 @@ describe.skipIf(!CONFIGURED)('logout + removed bearer transport', () => {
 
   it('revokes every cookie issued for the account immediately', async () => {
     const email = uniqueEmail('revoke-all');
-    await http('/api/auth/signup', { method: 'POST', body: { email, password: 'password123', displayName: 'U' } });
+    await http('/api/auth/signup', { method: 'POST', body: { email, password: TEST_PASSWORD, displayName: 'U' } });
     const first = getSessionCookie((await http('/api/auth/login', {
-      method: 'POST', body: { email, password: 'password123' }
+      method: 'POST', body: { email, password: TEST_PASSWORD }
     })).res);
     const second = getSessionCookie((await http('/api/auth/login', {
-      method: 'POST', body: { email, password: 'password123' }
+      method: 'POST', body: { email, password: TEST_PASSWORD }
     })).res);
 
     expect((await http('/api/auth/session', {
@@ -356,7 +479,7 @@ describe.skipIf(!CONFIGURED)('logout + removed bearer transport', () => {
     })).status).toBe(401);
 
     const fresh = getSessionCookie((await http('/api/auth/login', {
-      method: 'POST', body: { email, password: 'password123' }
+      method: 'POST', body: { email, password: TEST_PASSWORD }
     })).res);
     expect((await http('/api/auth/session', {
       headers: { Cookie: `${COOKIE_NAME}=${cookieValue(fresh)}` }

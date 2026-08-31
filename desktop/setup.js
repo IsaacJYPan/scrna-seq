@@ -14,12 +14,14 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   error.hidden = true;
   button.disabled = true;
+  button.textContent = 'Checking connection…';
   try {
     await window.desktopShell.configureServer(input.value);
   } catch (reason) {
     error.textContent = reason instanceof Error ? reason.message : 'Unable to save that server address.';
     error.hidden = false;
     button.disabled = false;
+    button.textContent = 'Connect';
     input.focus();
   }
 });

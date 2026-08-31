@@ -152,11 +152,13 @@ describe('UMAPView', () => {
     expect(plotRenderSpy.mock.calls.flatMap(([data]) => data).some(trace => trace.type === 'scatter3d')).toBe(false);
   });
 
-  it('keeps the 3D control available when WebGL is supported', () => {
-    render(<UMAPView {...baseProps()} />);
+  it('keeps the 3D control available when WebGL is supported', async () => {
+    const props = baseProps();
+    render(<UMAPView {...props} />);
 
     expect(screen.getByRole('button', { name: '3D' })).toBeEnabled();
     expect(screen.queryByText(/This renderer supports the 2D view only/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(props.callApi).toHaveBeenCalled());
   });
 
   it('uses the portable SVG trace for an ordinary-sized 2D UMAP', async () => {

@@ -45,7 +45,7 @@ const {
   EXPERT_R_RESOURCE_POLICY_VERSION,
   allocateExpertRInputStorageKey,
   sanitizeExpertRInputFilename,
-  MAX_EXPERT_R_INPUT_BYTES,
+  maxExpertRInputBytesForFilename,
   MAX_EXPERT_R_PRIVATE_INPUTS,
   MAX_EXPERT_R_PRIVATE_INPUT_STORAGE_BYTES,
 } = require('./expertR');
@@ -61,6 +61,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
+const SCHEMA_CONTRACT_VERSION = 20260827;
 
 let pool = null;
 
@@ -477,7 +478,25 @@ async function query(text, params = []) {
   return p.query(text, params);
 }
 
-async function initSchema() {
+async function verifySchemaContract() {
+  const result = await query(
+    'SELECT schema_version FROM app_schema_contract WHERE schema_key = $1',
+    ['traceomics.runtime']
+  );
+  if (!result.rows[0] || Number(result.rows[0].schema_version) !== SCHEMA_CONTRACT_VERSION) {
+    throw codedError(
+      'DATABASE_SCHEMA_MISMATCH',
+      'The production database schema is missing or does not match this application build.'
+    );
+  }
+  return true;
+}
+
+async function initSchema(options = {}) {
+  if (options.force !== true && config.isProduction()
+      && process.env.DATABASE_SCHEMA_MANAGED_EXTERNALLY === 'true') {
+    return verifySchemaContract();
+  }
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf8');
   const p = await connect();
   const client = await p.connect();
@@ -708,6 +727,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      app_schema_contract,
       project_pipeline_selections, pipeline_definitions,
       project_audit_events,
       project_canonical_analyses, analysis_branch_review_comments,
@@ -719,7 +739,7 @@ async function resetSchemaForTests() {
       expert_r_private_inputs, datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
       worker_pool_runtime_status, worker_runtime_status, platform_capabilities,
-      operator_audit_events, users
+      account_security_events, operator_audit_events, users
     CASCADE;
   `);
   await initSchema();
@@ -1096,6 +1116,70 @@ async function verifyUser(email, password) {
     sessionVersion: String(user.session_version),
     createdAt: user.created_at,
   };
+}
+
+async function changeUserPassword({ userId, expectedSessionVersion, currentPassword, newPassword }) {
+  const uid = Number(userId);
+  const version = String(expectedSessionVersion || '');
+  if (!isSafeUserId(userId) || !Number.isSafeInteger(uid) || !isSessionVersion(version)) {
+    throw codedError('INVALID_SESSION', 'A valid session generation is required.');
+  }
+
+  const { rows } = await query(
+    `SELECT id, email, display_name, password_hash, session_version, created_at
+       FROM users
+      WHERE id = $1 AND session_version = $2
+        AND is_demo_guest = FALSE
+        AND (expires_at IS NULL OR expires_at > now())`,
+    [uid, version]
+  );
+  const existing = rows[0];
+  if (!existing) throw codedError('INVALID_SESSION', 'The authenticated session is no longer current.');
+
+  const currentMatches = await passwords.verifyPassword(currentPassword, existing.password_hash);
+  if (!currentMatches) throw codedError('INVALID_CURRENT_PASSWORD', 'Current password is incorrect.');
+
+  const salt = passwords.newSalt();
+  const passwordHash = await passwords.hashPassword(newPassword, salt);
+  const p = await connect();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const updated = await client.query(
+      `UPDATE users
+          SET password_hash = $3,
+              salt = $4,
+              session_version = session_version + 1
+        WHERE id = $1 AND session_version = $2
+          AND password_hash = $5
+          AND session_version < 9223372036854775807
+        RETURNING id, email, display_name, session_version, created_at`,
+      [uid, version, passwordHash, salt, existing.password_hash]
+    );
+    if (!updated.rows[0]) {
+      throw codedError('INVALID_SESSION', 'The authenticated session changed during password update.');
+    }
+    const user = updated.rows[0];
+    await client.query(
+      `INSERT INTO account_security_events
+         (event_type, actor_user_id, subject_user_id, subject_email, metadata_json)
+       VALUES ('account.password_changed', $1, $1, $2, $3)`,
+      [user.id, user.email, JSON.stringify({ source: 'self_service', sessionsRevoked: true })]
+    );
+    await client.query('COMMIT');
+    return {
+      id: Number(user.id),
+      email: user.email,
+      displayName: user.display_name,
+      sessionVersion: String(user.session_version),
+      createdAt: user.created_at,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function createDemoGuest(email, password, expiresAt) {
@@ -1777,7 +1861,8 @@ async function createExpertRPrivateInput(userId, projectId, input = {}) {
   const internalStorageKey = String(input.internalStorageKey || '');
   const mimeType = String(input.mimeType || 'application/octet-stream').slice(0, 100);
   if (!/^eri_[0-9a-f]{24}$/.test(id)
-      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > MAX_EXPERT_R_INPUT_BYTES
+      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0
+      || sizeBytes > maxExpertRInputBytesForFilename(originalFilename)
       || !/^[0-9a-f]{64}$/.test(checksumSha256)
       || internalStorageKey !== allocateExpertRInputStorageKey(pid, id, originalFilename)
       || !storage.isProjectStorageKey(internalStorageKey, { projectId: pid, kind: 'artifacts' })) {
@@ -7135,6 +7220,7 @@ module.exports = {
   resetUserPasswordByOperator,
   getUserByEmail,
   verifyUser,
+  changeUserPassword,
   createDemoGuest,
   getDemoTemplateCheckpoint,
   createDemoGuestCheckpoint,

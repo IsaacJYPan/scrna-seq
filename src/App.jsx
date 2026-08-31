@@ -62,6 +62,7 @@ const ExploratoryAnalysis = React.lazy(() => import('./pages/ExploratoryAnalysis
 const AnalysisBranches = React.lazy(() => import('./pages/AnalysisBranches'));
 const StudyDesign = React.lazy(() => import('./pages/StudyDesign'));
 const ExpertR = React.lazy(() => import('./pages/ExpertR'));
+const AccountSecurity = React.lazy(() => import('./pages/AccountSecurity'));
 
 // Pipeline step ordering — used for downstream invalidation
 const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'];
@@ -70,6 +71,7 @@ const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'
 // authenticated view has a level-1 heading (pages render their own <h2>). This
 // keeps the screen-reader heading tree rooted instead of starting at h2.
 const TAB_TITLES = {
+  account: 'Account security',
   workspace: 'Workbench', 'pipeline-manager': 'Approved workflows', team: 'Collaborators',
   branches: 'Analysis Branches',
   'study-design': 'Study Design',
@@ -948,13 +950,8 @@ export default function App() {
     setDrawerProvId(provId);
   };
 
-  const handleLogout = async () => {
-    const result = await window.electronAPI?.logout?.();
-    if (result?.error) {
-      setApiStatus(result.error);
-      return;
-    }
-    setLoggedOutNotice(result?.warning || '');
+  const clearAuthenticatedWorkspace = (notice = '') => {
+    setLoggedOutNotice(notice);
     setUser(null);
     setActiveTab('workspace');
     setProvenanceRecords([]);
@@ -973,6 +970,15 @@ export default function App() {
       projectCacheCleared: false,
       objectCacheCleared: false,
     });
+  };
+
+  const handleLogout = async () => {
+    const result = await window.electronAPI?.logout?.();
+    if (result?.error) {
+      setApiStatus(result.error);
+      return;
+    }
+    clearAuthenticatedWorkspace(result?.warning || '');
   };
 
   // ── Workspace Persistence ───────────────────────────────────────
@@ -1213,6 +1219,13 @@ export default function App() {
         <ErrorBoundary key="branches"><TabContent id="branches" activeTab={activeTab}><AnalysisBranches {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="study-design"><TabContent id="study-design" activeTab={activeTab}><StudyDesign {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="expert-r"><TabContent id="expert-r" activeTab={activeTab}><ExpertR {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="account"><TabContent id="account" activeTab={activeTab}>
+          <AccountSecurity
+            user={user}
+            onPasswordChanged={(updatedUser) => setUser(updatedUser)}
+            onSessionInvalid={(message) => clearAuthenticatedWorkspace(message || 'Sign in again to continue.')}
+          />
+        </TabContent></ErrorBoundary>
         <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>

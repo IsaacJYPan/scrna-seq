@@ -136,7 +136,7 @@ function observePage(page, label, diagnostics) {
 async function login(page, lane) {
   await page.getByRole('button', { name: 'Log In', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(lane.email);
-  await page.locator('input[type="password"]').fill(lane.password);
+  await page.getByLabel('Password', { exact: true }).fill(lane.password);
   await page.getByRole('button', { name: /Open Workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 30_000 });
   await page.getByText(`Private fixture ${lane.index}`, { exact: true }).first()

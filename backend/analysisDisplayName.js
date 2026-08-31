@@ -20,7 +20,16 @@ function analysisBaseName(value) {
 }
 
 function formatUtcMinute(value) {
-  const date = new Date(value || Date.now());
+  let normalized = value || Date.now();
+  // pgDatabase's canonical TIMESTAMPTZ wire value is UTC but intentionally
+  // omits an offset ("YYYY-MM-DD HH:MM:SS"). Date parses that shape as local
+  // time, which shifted generated version labels on non-UTC hosts. Preserve the
+  // database contract while making its UTC meaning explicit at this boundary.
+  if (typeof normalized === 'string'
+    && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(normalized.trim())) {
+    normalized = `${normalized.trim().replace(' ', 'T')}Z`;
+  }
+  const date = new Date(normalized);
   const safe = Number.isNaN(date.getTime()) ? new Date() : date;
   return safe.toISOString().slice(0, 16).replace('T', ' ') + 'Z';
 }

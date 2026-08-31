@@ -48,9 +48,9 @@ Status legend:
 
 | Subsystem | Status | Notes |
 | --- | --- | --- |
-| Auth / logout | UI-wired (cookie-only + versioned revocation) | A signed HttpOnly session cookie is the only authentication transport; bearer headers are ignored and pre-upgrade localStorage credentials are purged. Session claims contain only a bounded user ID, database-backed session version, deployment epoch, and times. Every authenticated request re-reads the user/session version. Logout atomically increments it and revokes all of that user's cookies; failure is 503 rather than false success. An already-expired cookie is cleared locally so the login screen remains reachable without claiming other sessions were revoked. Production registration is operator-only; stdin-only account and platform-capability mutations record audit events, and password reset revokes sessions. SameSite plus allowed-origin checks protect mutations, and the browser sends an explicit first-party CSRF header on every `/api/r` request because legacy GET operations can mutate R state. |
+| Auth / account security | UI-wired (cookie-only + versioned revocation) | A signed HttpOnly session cookie is the only authentication transport; bearer headers are ignored and pre-upgrade localStorage credentials are purged. Session claims contain only a bounded user ID, database-backed session version, deployment epoch, and times. Every authenticated request re-reads the user/session version. Logout atomically increments it and revokes all of that user's cookies; failure is 503 rather than false success. An already-expired cookie is cleared locally so the login screen remains reachable without claiming other sessions were revoked. Production registration is operator-only; stdin-only account and platform-capability mutations record audit events. New credentials use one shared bounded passphrase policy. Authenticated self-service password changes verify the old credential, rotate the session generation, preserve only the requesting browser with a fresh cookie, and atomically append an account-security event. Email verification and network recovery are not implemented. SameSite plus allowed-origin checks protect mutations, and the browser sends an explicit first-party CSRF header on every `/api/r` request because legacy GET operations can mutate R state. |
 | Organizations / projects | UI-wired | A personal org/project is auto-created for the live-load flow. |
-| Project members / RBAC | UI-wired | Collaborators lists project members for every role and lets owners/admins add existing users, change permitted roles, and remove permitted members. Owner-only owner changes, last-owner protection, non-member 404s, insufficient-role 403s, and server-controlled identities remain backend enforced. This is immediate account membership, not an invitation-token/delivery workflow. |
+| Project members / RBAC | UI-wired | Collaborators lists project members for every role and lets owners/admins add existing users, change permitted roles, and remove permitted members. Viewer workspaces and Approved Workflows keep analysis creation, dataset upload, and job launch controls read-only; backend 403/404 enforcement remains authoritative. Owner-only owner changes, last-owner protection, non-member 404s, insufficient-role 403s, and server-controlled identities remain backend enforced. This is immediate account membership, not an invitation-token/delivery workflow. |
 | Project-scoped datasets | UI-wired (narrow Seurat path) | The Approved workflows Seurat panel lists/uploads `tenx_h5` and classic Visium ZIP datasets for allowlisted workflows. General dataset management remains absent. New uploads use server-owned project storage keys plus SHA-256 checksums, public responses omit internal storage, and upload/validation status is server-controlled rather than accepted from project writers. |
 | DB-backed analysis objects (`ao_*`) | UI-wired | Created/selected via the workspace; authoritative object identity. |
 | Live R object state | UI-wired | Private, transient, keyed by server-derived user/object state. The UI resets pipeline completion on user/object/session changes, confirms attachment against the current R process, and marks compatibility-proxy transformations as unsaved with a close/restart warning. An owner may explicitly save the current state through `checkpoint.save.v1`; further live mutation is blocked until save/open reaches a known state. Cached project metadata and cached plot/provenance results are not accepted as proof of attachment. |
@@ -59,6 +59,8 @@ Status legend:
 | DEG (differential expression) | UI-wired (durable worker path) | The primary DEG UI creates project-scoped `deg.find_markers.v1` jobs from an owner-owned saved analysis and reads job status, logs, and bounded `deg_summary` artifact metadata. A transient interactive attachment is not required: the worker independently resolves the server-selected checkpoint and hydrates isolated job-scoped R state. It does not call legacy `/api/r/deg` for the main workflow. See "DEG paths" below. |
 | Durable DEG worker (`deg.find_markers.v1`) | UI-wired | Durable, allowlisted worker job + `r.deg.find_markers.v1` bridge op. Creation and worker execution preserve project-role and object-owner checks; the worker hydrates an immutable checkpoint under a job-scoped state key and erases that state after the route. The DEG tab displays sanitized summary metadata. Full marker tables remain private and are available only through the authenticated, visibility-checked, audited result-export route in Runs & Results. |
 | Durable Seurat pipeline worker (`seurat.pipeline.v1`) | UI-wired (10x HDF5 only) | Approved workflows can upload/select one `tenx_h5` dataset, create/reuse a raw dataset analysis, launch a durable Seurat preprocessing job, show logs/status/safe summary metadata, and hand the result to a saved-version action or DEG. See "Seurat pipeline path" below. |
+| Multi-sample Seurat preparation (`seurat.multisample.v1`) | UI-wired (real worker smoke; exact-commit deployment certification required) | Approved Workflows accepts 2–48 project-scoped `tenx_h5` datasets, requires unique bounded sample labels and at least two conditions, and records optional donor/batch labels. The worker resolves every server-owned input, creates unique cell identifiers, writes `sample_id`, `condition`, `donor_code`, and `batch` metadata, and publishes one reusable checkpoint. It does not perform automatic batch correction or make a condition-effect claim. |
+| Study Design / condition pseudobulk (`condition.pseudobulk_de.v1`) | UI-wired (targeted backend/R coverage; exact-commit end-to-end certification required) | Study Design persists conditions, biological samples, object-to-sample bindings, and immutable pairwise contrast snapshots. The worker runs edgeR quasi-likelihood pseudobulk per cell type only after the replication gate. Supported models are exactly unpaired `~ condition` and validated donor-paired `~ donor + condition`; arbitrary covariates and blocking factors fail before R contact. Normal CI does not currently run the full multi-sample-to-pseudobulk browser path, so the manual Release Certification workflow remains required. |
 | Durable jobs | UI-wired (metadata + selected launches/recovery) | Durable ownership-scoped job records + API are shown in Runs & Results. The primary run/result sections are filtered to the selected analysis; other project activity is separated and collapsed, and run cards name the input/result context, owner category, terminal status, sanitized failure explanation, and recovery direction. CellChat input failures preserve only an allowlisted reason code and path-free remediation. The workbench can create `checkpoint.save.v1`; DEG, Pathway Enrichment, and CellChat can create `deg.find_markers.v1`, `enrichment.gsea.v1`, and `cellchat.infer.v1`; Approved workflows can create durable Seurat pipelines and result `checkpoint.load.v1`. Durable-analysis pages identify the saved checkpoint they will use and block launch while the attached live object has unsaved transformations. For a selected analysis with exactly one available local checkpoint, Runs & Results lets its owner explicitly restore that server-selected saved version with `checkpoint.load.v1`; project writers can instead create a private `checkpoint.fork.v1` branch. A fork inherits only validated source summary dimensions, assays, and reductions; unavailable dimensions remain unknown rather than becoming zero. The worker heartbeat projects bounded feature capabilities, so Pathway Enrichment is disabled with operator guidance when its curated package profile is absent. The owner of a failed/canceled allowlisted durable analysis can create one linked retry run from the server-recorded inputs; the client cannot override bindings or parameters, the original run stays immutable, and current role/input/design validation runs again. Terminal Expert R and checkpoint actions are excluded from this generic retry path. General job launch and cancel flows are not generally UI-wired. |
 | Bounded job-worker pool | UI/native acceptance verified (two isolated compute slots plus interactive lane) | Every process remains single-flight (`JOB_WORKER_CONCURRENCY=1`), while `JOB_WORKER_POOL_SIZE` bounds aggregate claims and `JOB_WORKER_POOL_SLOT` selects an independently locked slot. The single-host deployment gives two compute workers distinct private R services and keeps checkpoint save/attach/fork on the interactive service. Compute readiness is projected without exposing slots, URLs, or worker identity. Disposable Compose acceptance proves two real checkpoint-backed jobs overlap in distinct R sessions, a third queues, each running lane contains exactly its own job key, and both runtimes contain zero hydrated keys after completion. The native acceptance additionally launches two separate Electron profiles, observes overlapping DEG jobs on distinct runtime identities, and verifies project-private artifacts. |
 | Exploratory analysis (`explore.summarize.v1`) | UI-wired (real-R worker and browser acceptance complete) | A checkpoint-backed worker page offers dataset overview, bounded feature-by-group summaries, and numeric/categorical metadata distributions. Parameters and recipes are allowlisted in Node and R; results are aggregate metadata-only artifacts rendered as Plotly panels. All three recipes pass disposable deployment real-R acceptance, and the native release harness renders the real overview recipe through the deployed browser. It is not arbitrary R, does not accept code/packages/paths/endpoints, and exposes no raw matrix or cell table. |
@@ -74,9 +76,9 @@ Status legend:
 | Runtime check / object inspect workers | backend-only | Read-only, metadata-only bridge operations. |
 | Default visual theme | UI-wired | The React shell is light-first by default with the existing dark toggle retained. |
 | Ranked pathway enrichment (`enrichment.gsea.v1`) | UI-wired (deployment real-R acceptance verified) | The active Pathway Enrichment page launches one cluster/identity-versus-rest ranked GO Biological Process job, polls status/logs, and displays a bounded `enrichment_summary`. The full `enrichment_results` CSV stays private except for its authenticated, visibility-checked, checksummed, audited controlled export. The exact deployment R image and checkpoint-backed worker path pass disposable Compose acceptance; a mocked-transport UI suite separately checks browser payload/rendering. |
-| CellChat / cell-cell communication (`cellchat.infer.v1`) | UI-wired (deployed browser/backend/R acceptance complete) | The CellChat tab requires an owner-attached live R object and explicit fixed choices for grouping (`seurat_clusters` or current identities), species, CellChatDB category, cell caps, and `single_context` intent. Before queueing it checks package availability, RNA assay/normalized data, group count, and the minimum cells per group. Reviewed input failures retain only a stable code and path-free remediation in CellChat and Runs & Results. It launches an allowlisted worker job, polls its durable status, and shows a bounded sanitized candidate summary. The complete candidate CSV is `local_internal`; its metadata-only `cellchat_summary` companion has no storage path/key or public download. Raw group labels are replaced with opaque `Group N` identifiers in durable outputs; an owner-local key is read only from the currently attached private R object. This is candidate inference, not evidence of physical contact, causality, or a condition comparison. Real-R smoke, receipt interoperability, disposable Express/Postgres/worker/R deployment, and a real deployed browser flow through the production React build all pass. |
+| CellChat / cell-cell communication (`cellchat.infer.v1`) | UI-wired (real-R worker path; focused browser automation is mocked) | The CellChat tab requires an owner-attached live R object and explicit fixed choices for grouping (`seurat_clusters` or current identities), species, CellChatDB category, cell caps, and `single_context` intent. Before queueing it checks package availability, RNA assay/normalized data, group count, and the minimum cells per group. Reviewed input failures retain only a stable code and path-free remediation in CellChat and Runs & Results. It launches an allowlisted worker job, polls its durable status, and shows a bounded sanitized candidate summary. The complete candidate CSV is `local_internal` and is eligible only for the authenticated, visibility-checked, checksummed, audited result export; its metadata-only `cellchat_summary` companion has no storage path/key. Raw group labels are replaced with opaque `Group N` identifiers in durable outputs; an owner-local key is read only from the currently attached private R object. This is candidate inference, not evidence of physical contact, causality, or a condition comparison. Real-R smoke, receipt interoperability, and disposable Express/Postgres/worker/R acceptance pass. The focused Playwright UI flow mocks transport; a full exact-commit deployed-browser run remains part of release certification. |
 | Cell annotation | not implemented (product) | UI placeholder only. A legacy authenticated R endpoint may still exist (see below). |
-| Expert R | UI-wired (real browser/backend/worker/sandbox acceptance complete) | Advanced analysis is disabled by default and in the public demo. A private deployment must enable the loopback-only broker and an operator must grant the authenticated account `expert_r.execute`; project role and source ownership are separately enforced, then the capability is rechecked at worker claim. Arbitrary R is isolated from trusted R services in a fresh digest-pinned, non-root, read-only, networkless container with one private checkpoint input, selected owner-private CSV/TSV/text/JSON inputs, a 200 MiB output tmpfs, a fixed package profile, resource quotas, free-space admission/reservation, and output validation. This is workload/tenant containment, not DLP against an authorized data owner: code can transform or encode input-derived data. Source is retained only while queued/running, then only its SHA-256 remains. Failures expose only a fixed path-free owner explanation. A production-build Chromium flow imports a private CSV, runs real checkpoint-backed sandbox R, verifies the exact downloaded bundle checksum and contents, confirms source erasure, and renders the approved explanation for an intentional path-bearing script failure. A server-created result object, input/profile/image provenance, bundle checksum, and member checksums remain creator-private until an explicit audited branch publish. Arbitrary sandbox RDS is not admitted back into trusted reusable state. |
+| Expert R | UI-wired (real browser/backend/worker/sandbox acceptance complete) | Advanced analysis is disabled by default and in the public demo. A private deployment must enable the loopback-only broker and an operator must grant the authenticated account `expert_r.execute`; project role and source ownership are separately enforced, then the capability is rechecked at worker claim. Arbitrary R is isolated from trusted R services in a fresh digest-pinned, non-root, read-only, networkless container with one private checkpoint input, selected owner-private CSV/TSV/text/JSON/RDS inputs, a 200 MiB output tmpfs, a fixed package profile, resource quotas, free-space admission/reservation, and output validation. Production additionally requires a dedicated rootless container-runtime socket; the broker rejects the host system socket and reconciles only signed, stale workspaces/owned containers after crashes. This is workload/tenant containment, not DLP against an authorized data owner: code can transform or encode input-derived data. Source is retained only while queued/running, then only its SHA-256 remains. Failures expose only a fixed path-free owner explanation. A production-build Chromium flow imports private data, runs real checkpoint-backed sandbox R, verifies the exact downloaded bundle checksum and contents, confirms source erasure, and renders the approved explanation for an intentional path-bearing script failure. A server-created result object, input/profile/image provenance, bundle checksum, and member checksums remain creator-private until an explicit audited branch publish. RDS inputs and derived RDS artifacts remain in the untrusted sandbox/export tier and are never admitted into the trusted guided-analysis runtime. |
 | Reproducibility manifests | UI-wired (real-deployment multi-user acceptance complete) | A branch or owned/shared object can export a versioned JSON manifest covering ancestor lineage, producing jobs and safe parameters, checksummed artifacts with sanitized scientific/software metadata, sample bindings, contrasts, reviews/comments, and canonical promotion. The integrated deployment session verifies the exported branch/canonical head, lineage, producing jobs, artifacts, sample bindings, safe response headers, and absence of storage/runtime/worker/token/source fields; a collaborator cannot export another member's private branch. |
 | Project audit/activity and review discussion | UI-wired (real-deployment multi-user acceptance complete) | Branch, review/comment, canonical promotion, artifact download, and reproducibility export actions append bounded project audit events. The integrated deployment session uses owner, analyst, viewer, and outsider sessions to prove draft privacy, publish visibility, role-gated review, one-winner concurrent head updates, stale-review rejection, exact-head promotion, bounded activity reads, and database-trigger rejection of both update and delete. The explicit expired-demo cleanup transaction remains the only deletion exception. |
 | Artifact downloads | UI-wired (exact private allowlist; real-deployment acceptance complete) | Authenticated/audited download exists only for complete DEG, enrichment, CellChat, condition-comparison tables and Expert R output bundles. Private draft results remain creator-only until their object is explicitly shared/canonical. The deployment acceptance proves full-stream checksum/size/header behavior and fails closed for tampered integrity metadata. Checkpoints, arbitrary storage objects, and raw paths/keys are not exposed. |
@@ -167,8 +169,9 @@ not the legacy synchronous `/api/r/enrichment` prototype.
   the recorded seed makes downsampling and tied-score ordering repeatable.
 - **Interpretation:** this is descriptive cluster-versus-rest enrichment. It does
   not prove pathway activation, and it is not a sample-aware treated-versus-control
-  test. Condition claims require durable donor/sample/condition metadata and a
-  pseudobulk or other replicate-aware comparison that is not implemented here.
+  test. Condition claims require the separate implemented Study Design path with
+  durable donor/sample/condition metadata and the replication-gated
+  `condition.pseudobulk_de.v1` comparison described below.
 - **Execution boundary:** the creator must own the selected live R object. The
   worker validates the exact parameter allowlist, derives the private object key,
   allocates the output key, and calls only `r.enrichment.gsea.v1` at
@@ -236,7 +239,8 @@ not the legacy synchronous `/api/r/cellchat` or `/api/r/cellchat-infer` path.
   The owner UI may request a short-lived mapping from
   its attached private R object, but that mapping is neither persisted with the
   job/artifact nor a historical label guarantee if identities change later. No
-  general byte-download route exists.
+  general or unauthenticated byte-download route exists. The complete candidate
+  table is available only through the exact controlled result-export allowlist.
 - **Dependencies and evidence:** the production R image requires `NMF`, the
   exact reviewed GitHub `presto` dependency, Bioconductor `BiocNeighbors`, and
   pinned CellChat 2.1.2.
@@ -251,9 +255,10 @@ not the legacy synchronous `/api/r/cellchat` or `/api/r/cellchat-infer` path.
   proves the job-scoped checkpoint is erased before recovery, and proves
   receipt-only recovery does not execute CellChat twice. The private-compute
   Compose harness additionally proves the Express/Postgres/worker/R deployment
-  path and controlled CellChat table export; it is still not a deployed browser run.
-  The focused Playwright flow uses a real React browser with mocked project/job
-  transport and therefore proves UI contract/rendering only.
+  path and controlled CellChat table export. The focused Playwright flow uses a
+  real React browser with mocked project/job transport and therefore proves UI
+  contract/rendering only; exact-commit deployed-browser certification is a
+  separate release gate.
 
 ## Downstream-analysis roadmap and evidence
 
@@ -270,7 +275,10 @@ around what the app can report without inventing experimental design:
    and immutable contrast sample snapshots are durable project resources. A fixed
    `condition.pseudobulk_de.v1` worker hydrates the caller-owned checkpoint and runs
    edgeR quasi-likelihood pseudobulk per cell type; invalid single-replicate designs
-   cannot contact R. This guardrail follows the false-positive findings in
+   cannot contact R. The implemented model is exact and visible: unpaired runs
+   use `~ condition`, while valid donor-paired runs use `~ donor + condition`.
+   General blocking factors and covariates fail before queueing and again before
+   R contact instead of being accepted and silently dropped. This guardrail follows the false-positive findings in
    [Squair et al.](https://www.nature.com/articles/s41467-021-25960-2).
 3. **Cell-to-cell communication (implemented narrow slice):** CellChat now
    provides a fixed one-context candidate-inference workflow. Cross-condition
@@ -292,8 +300,9 @@ The first supported end-to-end local/dev pipeline is intentionally narrow:
 - **Supported input:** one uploaded 10x Genomics filtered feature-barcode matrix
   HDF5 file, stored as dataset `fileType: "tenx_h5"` under a server-owned
   project storage key. Matrix Market folders/zips,
-  H5AD, H5Seurat, RDS, multi-sample batches, and public downloads are not part of
-  this v1 path.
+  H5AD, H5Seurat, RDS, and public downloads are not part of this single-dataset
+  v1 path. Multi-sample 10x HDF5 preparation is implemented as the separate
+  `seurat.multisample.v1` workflow rather than being inferred by this route.
 - **UI workflow:** Approved workflows lists/uploads `tenx_h5` datasets, creates or
   reuses a DB-backed raw dataset analysis object with the same `datasetId`,
   launches a project-scoped `seurat.pipeline.v1` job, shows job status/logs and
@@ -387,7 +396,7 @@ by `backend/r-proxy-policy.test.js`.
 
 ## RDS loading is a trusted-input boundary
 
-The R backend has legacy `.rds` load/restore endpoints, but they are fail-closed
+The trusted R backend has legacy `.rds` load/restore endpoints, but they are fail-closed
 by default at Express and again in R. **RDS
 deserialization can execute arbitrary R code.** Set `ALLOW_TRUSTED_RDS_LOAD=true`
 only for trusted local/dev inputs; production ignores the override and always
@@ -395,6 +404,9 @@ blocks both public routes. Outside production the route remains owner-scoped and
 path-validated (confined to the per-user vault), but it is not safe for
 untrusted uploads until stronger sandbox/container isolation exists. Worker
 checkpoint loading is a separate internal path for server-created checkpoints.
+Approved Expert R users have a separate production-safe route: an uploaded RDS
+is stored as an owner-private input and deserialized only inside a fresh isolated
+Expert R container. It never enters the long-lived Plumber process.
 
 ## Expert R isolation
 
@@ -406,8 +418,10 @@ project-storage mount, a read-only root, non-root UID/GID, dropped capabilities,
 `no-new-privileges`, and bounded CPU, memory, PIDs, and time. Only allowlisted
 regular output files are archived; symlinks, devices, sockets, unsupported
 extensions, more than 50 files, or more than 200 MiB fail closed. The opt-in
-broker publishes no host port. Its Docker socket is a trusted deployment boundary
-and is never mounted into or exposed to user code.
+broker publishes no host port. In production it refuses the system
+`/var/run/docker.sock` and requires an explicitly configured dedicated rootless
+runtime (or a separately isolated TLS-protected VM runtime). The runtime socket
+is never mounted into or exposed to user code.
 
 Before a run, the broker reserves the maximum expected work and archive footprint
 and verifies the work and durable-storage filesystems will retain the configured
@@ -418,21 +432,28 @@ server-generated IDs, and copied read-only into the sandbox; only their owner in
 the same project can list or select them. Definite completion failures delete an
 unpublished output bundle. A lost acknowledgement after database COMMIT is treated
 as indeterminate and retains the bundle because it may already be referenced.
+Server-owned workspace manifests and matching container labels let startup and
+periodic reconciliation remove stale crash leftovers without following symlinks,
+deleting unknown directories, or killing containers not owned by this broker.
 
 The private checkpoint is a read-only input, not a directly exportable result.
-`.rds` is excluded from the Expert R output allowlist, and the broker rejects an
-exact byte-for-byte input copy even when it is given an allowed output extension;
+RDS is allowed only in this untrusted Expert R tier: tabular inputs are capped at
+25 MiB, RDS inputs at 200 MiB, and `save_workspace()` can place a derived RDS in
+the private bounded output bundle. The broker still rejects an exact byte-for-byte
+input copy even when it is given another allowed output name;
 the container acceptance includes that disguised `file.copy()` rejection probe.
 These are defense-in-depth checks, not a data-loss-prevention claim: an authorized
 researcher can intentionally transform or encode checkpoint-derived data into an
 allowed table or figure. Enable this feature only where that account is authorized
 to access and export the selected project's data.
 
-The sandbox may write tables, plots, and other allowlisted files, but cannot
-promote an arbitrary serialized R object into the trusted stateful Seurat runtime.
-Loading an attacker-controlled RDS can execute code during deserialization, so a
-future reusable-derived-analysis feature requires an isolated reload or a reviewed
-safe interchange contract rather than treating sandbox output as a trusted checkpoint.
+The sandbox may write tables, plots, and other allowlisted files. A researcher can
+download an authorized private bundle, extract a derived RDS, and re-import it as
+another private Expert R input. That is reusable, but deliberately never promotes
+the serialized object into the trusted stateful Seurat runtime. Loading an
+attacker-controlled RDS can execute code during deserialization, so guided tools
+require either a reviewed safe interchange contract or a future isolated
+validation/conversion pipeline rather than treating sandbox output as a checkpoint.
 
 Availability requires all of: a non-demo deployment, valid sandbox configuration,
 project writer role, ownership of the selected analysis object, and the operator-
@@ -557,6 +578,13 @@ The app runtime is Postgres-only.
   (`DATABASE_URL` or `PG*` env). Existing SQLite dev data is not migrated; a
   fresh Postgres database starts empty and users/projects are re-created through
   the normal signup/create flows.
+- **Production role split:** Compose runs a one-shot `schema-init` service with
+  the database-owner credential. It applies the schema contract, creates/rotates
+  a separate runtime login, and grants table/sequence/function access without
+  schema creation or table ownership. Web and workers set
+  `DATABASE_SCHEMA_MANAGED_EXTERNALLY=true` and only verify the exact schema
+  contract on startup; they cannot run DDL. Operator, account-security, and
+  project audit streams have database triggers rejecting update and delete.
 - **Local Postgres:** `docker compose up postgres` (localhost-only) or any local
   Postgres; then `DATABASE_URL=postgres://scrna:scrna@localhost:5432/scrna npm run init:postgres`.
 - **Evidence:** `npm run test:backend` includes the config contract,
@@ -637,9 +665,11 @@ The app runtime is Postgres-only.
   project-scoped, while a removed member can no longer read the project. If that
   worker published an exact atomic output and crashed before terminal status,
   the next worker may only finalize that committed output; it cannot rerun R.
-- There is no public artifact download surface, object storage, generated report
-  export, or shared project live R state. Opt-in Expert R is the only arbitrary-R
-  path and is restricted to approved private-deployment accounts and its isolated
+- There is no unauthenticated or general artifact download surface, object
+  storage, generated report export, or shared project live R state. The exact
+  controlled-result allowlist remains authenticated, visibility-checked,
+  integrity-verified, and audited. Opt-in Expert R is the only arbitrary-R path
+  and is restricted to approved private-deployment accounts and its isolated
   per-run sandbox.
 - New local files survive application restarts when `STORAGE_ROOT` is persistent
   and shared correctly with Express, the worker, and R. Legacy records also
@@ -675,10 +705,11 @@ The app runtime is Postgres-only.
   launch `deg.find_markers.v1`, `enrichment.gsea.v1`, and
   `cellchat.infer.v1` jobs and read bounded summary metadata; and the Pipeline
   Manager Seurat panel launches the
-  narrow `seurat.pipeline.v1` path with result checkpoint reattach. General job
-  launching, artifact downloads, and lineage mutation are still not UI-wired. A
-  passing backend suite means the API/DB contract holds - **not** that every
-  backend feature is surfaced in the UI.
+  narrow `seurat.pipeline.v1` path with result checkpoint reattach. Only the
+  reviewed job types and exact controlled-result export allowlist are UI-wired;
+  there is no generic job launcher, arbitrary artifact browser, or client-driven
+  lineage mutation surface. A passing backend suite means the API/DB contract
+  holds - **not** that every backend feature is surfaced in the UI.
 - `backend/standalone-worker-process.test.js` and the runtime unit tests still
   contain useful single-slot process, drain, token/URL, secret-exclusion,
   response-limit, deadline, lease-recovery, and exact-output recovery coverage.

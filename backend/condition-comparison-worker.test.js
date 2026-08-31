@@ -49,6 +49,7 @@ describe('condition pseudobulk worker contract', () => {
           summary: {
             method: 'edgeR quasi-likelihood pseudobulk', cell_type_column: 'cell_type',
             unit_of_replication: 'sample', paired: false, sample_count: 4,
+            model_formula: '~ condition',
             tested_cell_type_count: 2, tested_gene_count: 1000, significant_result_count: 12,
             skipped_cell_types: [], warnings: [],
             package_versions: { r: '4.5.3', seurat: '5.3.1', edger: '4.8.0', limma: '3.66.0' },
@@ -61,6 +62,7 @@ describe('condition pseudobulk worker contract', () => {
       logger: { info() {}, warn() {}, error() {} },
     });
     expect(calls[0]).toMatchObject({ method: 'POST', path: '/object/condition-pseudobulk-de', objectStateKey: 'private-state' });
+    expect(calls[0].body.design.model_formula).toBe('~ condition');
     expect(calls[0].body.design.samples).toEqual(design.samples.map((sample) => ({
       sample_id: sample.sampleId, condition: sample.condition, donor_code: null,
       unit_id: sample.unitId, cell_metadata_column: 'orig.ident', cell_metadata_value: sample.cellMetadataValue,
@@ -71,6 +73,7 @@ describe('condition pseudobulk worker contract', () => {
     expect(descriptor.summary.topResults[0]).toEqual({
       cellType: 'T', gene: 'IL7R', logFc: 1.2, pValue: 0.001, fdr: 0.01,
     });
+    expect(descriptor.summary.modelFormula).toBe('~ condition');
     expect(JSON.stringify(descriptor)).not.toContain('raw_counts');
     expect(JSON.stringify(descriptor)).not.toContain('secret');
   });
@@ -157,6 +160,32 @@ describe('condition pseudobulk worker contract', () => {
       getConditionComparisonInputs: vi.fn(), getOwnedAnalysisObject: vi.fn(),
     };
     await expect(conditionComparisonHandler(ctx)).rejects.toMatchObject({ code: 'INVALID_PARAMETERS' });
+    expect(ctx.runRBridgeOperation).not.toHaveBeenCalled();
+  });
+
+  it('rejects persisted unsupported model terms before checkpoint hydration or R contact', async () => {
+    const ctx = {
+      job: {
+        id: 'job_def', jobType: 'condition.pseudobulk_de.v1', ownerUserId: 7,
+        projectId: 'proj_abc', analysisObjectId: 'ao_abc',
+        parameters: { contrastId: 'contrast_a1b2' },
+      },
+      heartbeat: vi.fn(), log: vi.fn(), runRBridgeOperation: vi.fn(),
+      getOwnedAnalysisObject: vi.fn(async () => ({ id: 'ao_abc' })),
+      getConditionComparisonInputs: vi.fn(async () => ({
+        analysisObjectId: 'ao_abc',
+        contrast: {
+          id: 'contrast_a1b2', status: 'valid', unitOfReplication: 'sample', paired: false,
+          cellTypeColumn: 'cell_type', blockingFactor: 'batch', covariates: [],
+        },
+        samples: [],
+      })),
+      getHydrationCheckpoint: vi.fn(),
+    };
+    await expect(conditionComparisonHandler(ctx)).rejects.toMatchObject({
+      code: 'UNSUPPORTED_CONDITION_MODEL',
+    });
+    expect(ctx.getHydrationCheckpoint).not.toHaveBeenCalled();
     expect(ctx.runRBridgeOperation).not.toHaveBeenCalled();
   });
 });

@@ -1,20 +1,5 @@
-// scripts/test_visual_ux.js
-// ============================================================
-// Automated Visual & UI/UX Test Suite — scRNA-seq Dashboard
-// ============================================================
-// Starts Vite dev server automatically, exercises every tab,
-// and runs 6 categories of quality checks:
-//   1. Pixel-level screenshot regression (golden snapshots)
-//   2. Interactive flow tests (modals, theme, sidebar, sliders)
-//   3. Accessibility audits (axe-core / WCAG 2.1)
-//   4. Layout overflow detection
-//   5. Network & performance monitoring
-//   6. Console error detection
-//
-// Usage:
-//   npm run test:visual          — run against existing baselines
-//   npm run test:visual:update   — regenerate golden screenshots
-// ============================================================
+// TraceOmics visual acceptance covers snapshots, interaction, accessibility,
+// layout overflow, request failures, performance, and browser console errors.
 
 'use strict';
 
@@ -385,7 +370,7 @@ function stopVite() {
 
 async function main() {
   console.log('='.repeat(60));
-  console.log('  scRNA-seq Dashboard  —  Visual & UI/UX Test Suite');
+  console.log('  TraceOmics Visual & UI/UX Test Suite');
   console.log('='.repeat(60));
   console.log(`  Mode      : ${MODE_NAME}`);
   console.log(`  Snapshots : ${SNAPSHOTS_DIR}`);
@@ -1201,11 +1186,6 @@ async function main() {
           await page.reload({ waitUntil: 'networkidle' });
           await sleep(PAGE_SETTLE_MS);
 
-          // DEBUG STATE
-          await page.evaluate(() => {
-            console.log('[DEBUG] LocalStorage after reload:', localStorage.getItem('traceomics_ws_researcher@lab.edu'));
-          });
-
           await checkSnapshot(page, 'workspace_data_loaded');
         } catch (e) {
           console.log(`[TIMEOUT ERROR] ${e.message}`);
@@ -1580,7 +1560,7 @@ function generateHtmlReport({ failures, warnings, consoleErrors }) {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>scRNA-seq Dashboard — Visual/UX Test Report</title>
+  <title>TraceOmics Visual/UX Test Report</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; padding: 32px; }
@@ -1605,7 +1585,7 @@ function generateHtmlReport({ failures, warnings, consoleErrors }) {
   </style>
 </head>
 <body>
-  <h1>📊 scRNA-seq Dashboard — Visual/UX Test Report</h1>
+  <h1>TraceOmics Visual/UX Test Report</h1>
   <div class="meta">Generated: ${timestamp} | Mode: ${MODE_NAME}</div>
 
   <div class="stat-bar">

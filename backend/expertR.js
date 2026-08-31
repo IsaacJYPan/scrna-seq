@@ -20,10 +20,13 @@ const STORED_PARAM_NAMES = Object.freeze(['profileId', 'script', 'inputIds', 'sc
 const MAX_SCRIPT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 200 * 1024 * 1024;
 const MAX_BUNDLE_BYTES = MAX_OUTPUT_BYTES + (4 * 1024 * 1024);
-const RESOURCE_POLICY_VERSION = 'expert-r-sandbox-policy.v2';
+const RESOURCE_POLICY_VERSION = 'expert-r-sandbox-policy.v3';
 const EXPERT_R_ALLOWED_DEPLOYMENT_MODES = new Set(['private', 'byoc', 'shared-private']);
-const EXPERT_R_INPUT_EXTENSIONS = new Set(['.csv', '.tsv', '.txt', '.json']);
-const MAX_EXPERT_R_INPUT_BYTES = 25 * 1024 * 1024;
+const EXPERT_R_INPUT_EXTENSIONS = new Set(['.csv', '.tsv', '.txt', '.json', '.rds']);
+const MAX_EXPERT_R_TABULAR_INPUT_BYTES = 25 * 1024 * 1024;
+const MAX_EXPERT_R_RDS_INPUT_BYTES = 200 * 1024 * 1024;
+// Multer needs one hard ceiling before the filename-specific policy can run.
+const MAX_EXPERT_R_INPUT_BYTES = MAX_EXPERT_R_RDS_INPUT_BYTES;
 const MAX_EXPERT_R_INPUTS_PER_RUN = 5;
 const MAX_EXPERT_R_PRIVATE_INPUTS = 20;
 const MAX_EXPERT_R_PRIVATE_INPUT_STORAGE_BYTES = 250 * 1024 * 1024;
@@ -84,13 +87,20 @@ function sanitizeExpertRInputFilename(value) {
   const base = path.basename(String(value || '').replace(/\\/g, '/')).normalize('NFKC');
   const extension = path.extname(base).toLowerCase();
   if (!EXPERT_R_INPUT_EXTENSIONS.has(extension)) {
-    throw codedError('INVALID_EXPERT_R_INPUT', 'Expert R inputs must be CSV, TSV, TXT, or JSON files.');
+    throw codedError('INVALID_EXPERT_R_INPUT', 'Expert R inputs must be CSV, TSV, TXT, JSON, or RDS files.');
   }
   const stem = path.basename(base, path.extname(base))
     .replace(/[^A-Za-z0-9._-]+/g, '-')
     .replace(/^[.-]+|[.-]+$/g, '')
     .slice(0, 100) || 'input';
   return `${stem}${extension}`;
+}
+
+function maxExpertRInputBytesForFilename(value) {
+  const filename = sanitizeExpertRInputFilename(value);
+  return path.extname(filename).toLowerCase() === '.rds'
+    ? MAX_EXPERT_R_RDS_INPUT_BYTES
+    : MAX_EXPERT_R_TABULAR_INPUT_BYTES;
 }
 
 function allocateExpertRInputStorageKey(projectId, inputId, originalFilename) {
@@ -133,6 +143,8 @@ module.exports = {
   EXPERT_R_ALLOWED_DEPLOYMENT_MODES,
   EXPERT_R_INPUT_EXTENSIONS,
   MAX_EXPERT_R_INPUT_BYTES,
+  MAX_EXPERT_R_TABULAR_INPUT_BYTES,
+  MAX_EXPERT_R_RDS_INPUT_BYTES,
   MAX_EXPERT_R_INPUTS_PER_RUN,
   MAX_EXPERT_R_PRIVATE_INPUTS,
   MAX_EXPERT_R_PRIVATE_INPUT_STORAGE_BYTES,
@@ -141,6 +153,7 @@ module.exports = {
   allocateExpertRBundleStorageKey,
   generateExpertRInputId,
   sanitizeExpertRInputFilename,
+  maxExpertRInputBytesForFilename,
   allocateExpertRInputStorageKey,
   isTrustedExpertRSandboxUrl,
   expertRSandboxEnabled,

@@ -5,6 +5,7 @@ import { publicErrorMessage } from '../publicError';
 const STARTER = `# Your saved Seurat analysis is available as obj.
 # Selected private files are listed in input_manifest.
 # Use read_input("metadata.csv") or input_path("metadata.csv") to open one.
+# RDS inputs are untrusted and are deserialized only inside this isolated run.
 # Write research outputs only through output_dir or the helpers below.
 summary_table <- data.frame(
   cells = ncol(obj),
@@ -15,6 +16,9 @@ write_table(summary_table, "object-summary.csv")
 
 p <- Seurat::DimPlot(obj, reduction = "umap", group.by = "seurat_clusters")
 save_figure(p, "umap-by-cluster.png", width = 8, height = 6)
+
+# Optional: save a derived object as a private, untrusted Expert R artifact.
+# save_workspace(obj, "derived-analysis.rds")
 `;
 
 function messageFor(error) {
@@ -122,9 +126,9 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
       <label className="block text-sm">Saved analysis<select className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={objectId} onChange={(event) => setObjectId(event.target.value)} disabled={objects.length === 0}><option value="">Select a saved analysis</option>{objects.map((item) => <option value={item.id} key={item.id}>{item.displayName || item.name || 'Saved analysis'}</option>)}</select></label>
       {objects.length === 0 && <p className="text-sm text-slate-400">No saved analysis you own is available for R work. Open a saved version or create a branch first.</p>}
       <section className="card p-4 space-y-3" aria-labelledby="expert-r-inputs-title">
-        <div><h3 id="expert-r-inputs-title" className="font-medium">Private input files</h3><p className="mt-1 text-sm text-slate-400">Import bounded CSV, TSV, TXT, or JSON files. They stay private to you and are mounted read-only only for selected runs.</p></div>
+        <div><h3 id="expert-r-inputs-title" className="font-medium">Private input files</h3><p className="mt-1 text-sm text-slate-400">Import bounded CSV, TSV, TXT, JSON, or RDS files. They stay private to you and are mounted read-only only for selected runs. RDS files remain untrusted and open only inside the isolated Expert R workspace.</p></div>
         <div className="flex flex-wrap items-center gap-2">
-          <input aria-label="Choose private input" type="file" accept=".csv,.tsv,.txt,.json" onChange={(event) => setInputFile(event.target.files?.[0] || null)} />
+          <input aria-label="Choose private input" type="file" accept=".csv,.tsv,.txt,.json,.rds" onChange={(event) => setInputFile(event.target.files?.[0] || null)} />
           <button type="button" className="btn btn-secondary text-xs" disabled={!inputFile || inputBusy} onClick={uploadInput}>{inputBusy ? 'Importing…' : 'Import file'}</button>
         </div>
         {privateInputs.length > 0 ? <div className="grid gap-2 sm:grid-cols-2">{privateInputs.map((input) => {

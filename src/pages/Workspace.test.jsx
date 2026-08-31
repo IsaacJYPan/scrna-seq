@@ -75,6 +75,25 @@ describe('Workspace backend-backed project/object UI', () => {
     expect(screen.getByRole('button', { name: /Add analysis/i })).toBeDisabled();
   });
 
+  it('keeps analysis creation controls read-only for project viewers', () => {
+    renderWorkspace({
+      currentWs: {
+        ...baseWorkspace,
+        projects: [{ id: 'proj_1', name: 'Shared Project', role: 'viewer', isBackendProject: true }],
+        selectedProjectId: 'proj_1',
+      },
+    });
+
+    expect(screen.getAllByRole('button', { name: /Add analysis/i })).toHaveLength(2);
+    for (const button of screen.getAllByRole('button', { name: /Add analysis/i })) {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+    }
+    expect(screen.getAllByText(/project role is read-only/i).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /Load analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /Load saved analysis/i })).not.toBeInTheDocument();
+  });
+
   it('shows saved analyses returned for the selected project after refresh', () => {
     const { container } = renderWorkspace({
       currentWs: {

@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Shield, Lock, Mail, User, Microscope, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
 import auth from '../auth';
+import passwordPolicy from '../../shared/passwordPolicyContract.json';
 
 export default function Login({ onLogin, notice = '', theme = 'light', setTheme }) {
   const [mode, setMode] = useState('login'); // 'login' | 'signup'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirmation, setPasswordConfirmation] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -34,7 +36,8 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
   }, []);
 
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-  const passwordStrong = password.length >= 8;
+  const passwordMeetsLength = Array.from(password).length >= passwordPolicy.minLength;
+  const passwordsMatch = passwordConfirmation.length > 0 && passwordConfirmation === password;
   const isDark = theme === 'dark';
 
   const handleSubmit = async (e) => {
@@ -52,8 +55,13 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
       return;
     }
 
-    if (mode === 'signup' && !passwordStrong) {
-      setError('Password must be at least 8 characters.');
+    if (mode === 'signup' && !passwordMeetsLength) {
+      setError(`Password must be at least ${passwordPolicy.minLength} characters.`);
+      return;
+    }
+
+    if (mode === 'signup' && !passwordsMatch) {
+      setError('The passwords do not match.');
       return;
     }
 
@@ -135,7 +143,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
           {/* Mode Toggle — segmented control */}
           {registrationEnabled && <div className="grid grid-cols-2 gap-1 p-1 mb-6 bg-background border border-border rounded-xl">
             <button
-              onClick={() => { setMode('login'); setError(''); setSuccess(''); }}
+              onClick={() => { setMode('login'); setPasswordConfirmation(''); setError(''); setSuccess(''); }}
               className={`${tabBase} ${mode === 'login' ? 'bg-surface text-text shadow-sm' : 'text-textMuted hover:text-text'}`}
             >
               Log In
@@ -182,8 +190,10 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
                 <div className="relative group">
                   <User className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
                   <input
-                    id="signup-name"
-                    type="text"
+                  id="signup-name"
+                  type="text"
+                  autoComplete="name"
+                  maxLength={200}
                     value={displayName}
                     onChange={e => setDisplayName(e.target.value)}
                     className={`${inputBase} border-border focus:border-primary`}
@@ -201,6 +211,8 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
                   id="login-email"
                   type="email"
                   required
+                  autoComplete="email"
+                  maxLength={320}
                   value={email}
                   onChange={e => setEmail(e.target.value)}
                   className={`${inputBase} pr-10 ${email && !emailValid ? 'border-danger focus:border-danger' : 'border-border focus:border-primary'}`}
@@ -218,9 +230,11 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
                   id="login-password"
                   type={showPassword ? 'text' : 'password'}
                   required
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                  maxLength={passwordPolicy.maxLength}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  className={`${inputBase} pr-11 ${(mode === 'signup' && password && !passwordStrong) ? 'border-danger focus:border-danger' : 'border-border focus:border-primary'}`}
+                  className={`${inputBase} pr-11 ${(mode === 'signup' && password && !passwordMeetsLength) ? 'border-danger focus:border-danger' : 'border-border focus:border-primary'}`}
                   placeholder="••••••••••••"
                 />
                 <button
@@ -232,19 +246,37 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              {mode === 'signup' && password && (
-                <div className="flex items-center gap-2 mt-2 ml-0.5">
-                  <div className="flex gap-1 flex-1">
-                    <div className={`h-1 flex-1 rounded-full transition-colors ${password.length >= 4 ? 'bg-danger' : 'bg-border'}`} />
-                    <div className={`h-1 flex-1 rounded-full transition-colors ${password.length >= 8 ? 'bg-yellow-500' : 'bg-border'}`} />
-                    <div className={`h-1 flex-1 rounded-full transition-colors ${password.length >= 12 ? 'bg-success' : 'bg-border'}`} />
-                  </div>
-                  <span className={`text-[10px] font-semibold uppercase tracking-wide ${passwordStrong ? 'text-success' : 'text-textMuted'}`}>
-                    {password.length < 4 ? 'Weak' : password.length < 8 ? 'Short' : password.length < 12 ? 'Good' : 'Strong'}
-                  </span>
-                </div>
+              {mode === 'signup' && (
+                <p className={`mt-2 ml-0.5 text-xs ${password && !passwordMeetsLength ? 'text-danger' : 'text-textMuted'}`}>
+                  Use at least {passwordPolicy.minLength} characters. Long passphrases are supported; no symbol or capitalization rule is imposed.
+                </p>
               )}
             </div>
+
+            {mode === 'signup' && (
+              <div className="space-y-1.5">
+                <label htmlFor="signup-password-confirmation" className="text-[13px] font-medium text-textMuted ml-0.5">
+                  Confirm password
+                </label>
+                <div className="relative group">
+                  <Shield className="absolute left-3.5 top-1/2 -translate-y-1/2 text-textMuted group-focus-within:text-primary transition-colors" size={17} />
+                  <input
+                    id="signup-password-confirmation"
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="new-password"
+                    maxLength={passwordPolicy.maxLength}
+                    value={passwordConfirmation}
+                    onChange={event => setPasswordConfirmation(event.target.value)}
+                    className={`${inputBase} ${passwordConfirmation && !passwordsMatch ? 'border-danger focus:border-danger' : 'border-border focus:border-primary'}`}
+                    placeholder="Re-enter your password"
+                  />
+                </div>
+                {passwordConfirmation && !passwordsMatch && (
+                  <p className="mt-2 ml-0.5 text-xs text-danger">The passwords do not match.</p>
+                )}
+              </div>
+            )}
 
             {error && (
               <div className="flex items-center gap-2 p-3 bg-danger/10 border border-danger/30 rounded-xl text-xs text-danger">
@@ -262,7 +294,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
 
             <button
               type="submit"
-              disabled={loading || !emailValid || !password || (mode === 'signup' && !passwordStrong)}
+              disabled={loading || !emailValid || !password || (mode === 'signup' && (!passwordMeetsLength || !passwordsMatch))}
               className="w-full bg-primary hover:bg-[#0077ed] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold py-3.5 rounded-xl transition-colors flex items-center justify-center gap-2.5"
             >
               {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : (

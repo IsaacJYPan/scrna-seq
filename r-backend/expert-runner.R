@@ -41,6 +41,7 @@ read_input <- function(name_or_id, ...) {
   if (extension == "tsv") return(utils::read.delim(selected, ...))
   if (extension == "json") return(jsonlite::fromJSON(selected, ...))
   if (extension == "txt") return(readLines(selected, ...))
+  if (extension == "rds") return(readRDS(selected, ...))
   stop("Selected input type is not supported.")
 }
 
@@ -67,6 +68,14 @@ save_figure <- function(plot, file_name, width = 7, height = 5, dpi = 300) {
   ggplot2::ggsave(path, plot = plot, width = width, height = height, dpi = dpi, limitsize = TRUE)
   invisible(path)
 }
+save_workspace <- function(value, file_name = "derived-analysis.rds", compress = TRUE) {
+  if (tolower(tools::file_ext(file_name)) != "rds") {
+    stop("Saved workspace output must use the .rds extension.")
+  }
+  path <- safe_output_path(file_name)
+  saveRDS(value, path, compress = compress)
+  invisible(path)
+}
 
 analysis_environment <- new.env(parent = globalenv())
 analysis_environment$obj <- obj
@@ -76,6 +85,7 @@ analysis_environment$input_path <- input_path_for
 analysis_environment$read_input <- read_input
 analysis_environment$write_table <- write_table
 analysis_environment$save_figure <- save_figure
+analysis_environment$save_workspace <- save_workspace
 source(script_path, local = analysis_environment, echo = FALSE, chdir = FALSE,
        encoding = "UTF-8")
 

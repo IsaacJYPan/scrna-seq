@@ -302,7 +302,8 @@ async function main() {
     await page.getByRole('button', { name: /^Sign Up$/ }).click();
     await page.locator('input[type="text"]').fill('DB Flow Tester');
     await page.locator('input[type="email"]').fill(state.user.email);
-    await page.locator('input[type="password"]').fill('correct-horse-42');
+    await page.getByLabel('Password', { exact: true }).fill('correct-horse-42');
+    await page.getByLabel('Confirm password', { exact: true }).fill('correct-horse-42');
     await page.getByRole('button', { name: /Create Account/i }).click();
 
     await page.getByText('No projects yet').waitFor({ timeout: 15_000 });
