@@ -144,6 +144,7 @@ export default function PipelineManager({
 }) {
   const activeProjectId = currentWs?.selectedProjectId || datasetInfo?.projectId || currentWs?.projects?.[0]?.id || null;
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
+  const canWriteProject = ['owner', 'admin', 'analyst'].includes(activeProject?.role);
   const selectedObject = selectedObjectForProject(currentWs, activeProjectId, datasetInfo);
 
   const [definitions, setDefinitions] = useState([]);
@@ -447,6 +448,7 @@ export default function PipelineManager({
                 onSelectAnalysisObject={onSelectAnalysisObject}
                 setActiveTab={setActiveTab}
                 datasetUploadsEnabled={deploymentPolicy.datasetUploadsEnabled !== false}
+                canWriteProject={canWriteProject}
               />
             )}
           </>

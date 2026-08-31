@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2, ChevronDown, ChevronLeft, Database, GitBranch, LayoutPanelTop,
-  Info, LogOut, Menu, Microscope, Moon, Sun, Users, Wrench,
+  Info, LogOut, Menu, Microscope, Moon, Sun, UserRound, Users, Wrench,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 
@@ -126,6 +126,14 @@ export default function Sidebar({
 
         {user && (
           <div className="mt-auto mb-2 w-full flex flex-col items-center gap-2 group relative">
+            <button
+              aria-label="Account security"
+              className={`w-11 h-11 rounded-xl transition-colors duration-150 flex items-center justify-center ${activeTab === 'account' ? 'bg-primary/10 text-primary' : 'bg-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
+              onClick={() => setActiveTab('account')}
+              title="Account security"
+            >
+              <UserRound size={20} />
+            </button>
             <button
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
               className="w-11 h-11 rounded-xl bg-transparent hover:bg-black/5 transition-colors duration-150 flex items-center justify-center text-textMuted hover:text-text"

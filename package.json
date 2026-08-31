@@ -2,6 +2,10 @@
   "name": "traceomics",
   "version": "1.0.0",
   "description": "TraceOmics: collaborative, provenance-first transcriptomic analysis with React, Express, Postgres, R, and Seurat",
+  "author": {
+    "name": "TraceOmics"
+  },
+  "homepage": "https://github.com/IsaacJYPan/scrna-seq",
   "main": "desktop/main.cjs",
   "engines": {
     "node": ">=22.15.0 <25"
@@ -13,8 +17,9 @@
     "build": "vite build",
     "start": "node server.js",
     "desktop": "electron .",
-    "desktop:package": "npm run build && electron-builder --dir",
-    "desktop:dist": "npm run build && electron-builder",
+    "desktop:package": "npm run build && electron-builder --config electron-builder.config.cjs --dir -c.forceCodeSigning=false",
+    "desktop:dist": "npm run build && electron-builder --config electron-builder.config.cjs --publish never",
+    "desktop:dist:unsigned": "npm run build && electron-builder --config electron-builder.config.cjs --publish never -c.forceCodeSigning=false",
     "worker": "node --require ./scripts/enable-job-worker.cjs worker.js",
     "worker:once": "node --require ./scripts/enable-job-worker.cjs worker.js --once",
     "platform-developer": "node scripts/manage-platform-developer.js",
@@ -25,7 +30,7 @@
     "demo:cleanup": "node scripts/cleanup-demo-guests.js",
     "ops:verify-restore": "node scripts/verify-backup-restore.js",
     "test:unit": "node scripts/run_unit_tests.js",
-    "test:integration": "node scripts/run_integration_tests.js",
+    "test:integration": "npm run test:backend && npm run test:r-state-proxy",
     "test:tutorial": "node scripts/test_pbmc3k_tutorial.js",
     "test:r-state-proxy": "node scripts/verify_r_state_proxy.js",
     "test:seurat-pipeline": "node scripts/verify_seurat_pipeline.js",
@@ -62,10 +67,10 @@
     "test:visual:smoke": "node scripts/test_visual_ux.js --no-snapshots",
     "test:visual:db-flow": "node scripts/test_db_backed_object_flow.js",
     "test:visual:update": "node scripts/test_visual_ux.js --update-snapshots",
-    "test": "npm run test:backend && npm run test:frontend && npm run test:unit && npm run test:integration && npm run test:tutorial && npm run test:r-state-proxy",
+    "test": "npm run test:frontend && npm run test:unit && npm run test:integration",
     "lint": "eslint .",
     "check": "npm run test:backend && npm run test:frontend && npm run lint && npm run build",
-    "check:ci-preflight": "node scripts/require-test-database.js && npm audit --audit-level=high && npm run lint && npm run test:deployment:compose && npm run test:frontend && npm run test:backend && npx vitest run scripts/dev-runtime.test.js --environment node --fileParallelism=false && npm run build",
+    "check:ci-preflight": "node scripts/require-test-database.js && npm audit --audit-level=high && npm run lint && npm run test:deployment:compose && npm run test:frontend && npm run build && npm run test:backend && npx vitest run scripts/dev-runtime.test.js --environment node --fileParallelism=false",
     "check:browser-preflight": "node scripts/require-test-database.js && npm run build && npm run test:cellchat-browser && node scripts/verify-browser-deployment-flow.js"
   },
   "dependencies": {
@@ -82,20 +87,6 @@
     "react-dom": "^19.0.0",
     "react-plotly.js": "^2.6.0",
     "uuid": "^14.0.0"
-  },
-  "build": {
-    "appId": "org.traceomics.workbench",
-    "productName": "TraceOmics",
-    "icon": "build/icon.svg",
-    "asar": true,
-    "files": [
-      "dist/**/*",
-      "desktop/**/*",
-      "package.json"
-    ],
-    "win": {
-      "target": ["nsis"]
-    }
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",

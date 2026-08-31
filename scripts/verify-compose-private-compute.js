@@ -32,6 +32,8 @@ fs.writeFileSync(envFile, [
   `POSTGRES_PASSWORD=${secret(24)}`,
   'POSTGRES_USER=traceomics_accept',
   'POSTGRES_DB=traceomics_accept',
+  `APP_DATABASE_PASSWORD=${secret(24)}`,
+  'APP_DATABASE_USER=traceomics_accept_app',
   'APP_IMAGE=traceomics:single-host',
   'OPS_IMAGE=traceomics-operations:single-host',
   'R_IMAGE=traceomics-r:single-host',

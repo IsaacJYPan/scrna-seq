@@ -17,6 +17,7 @@ const db = require('./pgDatabase');
 const { startServer, api, serverModule } = require('./_http-test-utils');
 
 const CONFIGURED = config.hasPostgresConnection();
+const TEST_PASSWORD = 'violet-harbor-orbits-42';
 
 let server;
 let prev;
@@ -57,11 +58,11 @@ beforeEach(async () => {
 function signup(email) {
   return api(server, '/api/auth/signup', {
     method: 'POST',
-    body: { email, password: 'password123', displayName: email.split('@')[0] }
+    body: { email, password: TEST_PASSWORD, displayName: email.split('@')[0] }
   });
 }
 
-function login(email, password = 'password123') {
+function login(email, password = TEST_PASSWORD) {
   return api(server, '/api/auth/login', { method: 'POST', body: { email, password } });
 }
 

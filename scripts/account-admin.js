@@ -4,6 +4,7 @@
 
 const config = require('../backend/config');
 const db = require('../backend/pgDatabase');
+const passwordPolicy = require('../backend/passwordPolicy');
 
 const ACTIONS = new Set(['create', 'reset-password']);
 
@@ -11,7 +12,7 @@ function usage() {
   console.error('Usage:');
   console.error('  node scripts/account-admin.js create --email <address> --display-name <name> --password-stdin');
   console.error('  node scripts/account-admin.js reset-password --email <address> --password-stdin');
-  console.error('The password must be piped on standard input; it is never accepted in argv or logged.');
+  console.error(`The password must contain at least ${passwordPolicy.publicPasswordPolicy().minLength} characters and be piped on standard input; it is never accepted in argv or logged.`);
 }
 
 function parseArgs(argv) {
@@ -45,9 +46,9 @@ async function readPasswordFromStdin(input = process.stdin) {
     }
   }
   value = value.replace(/\r?\n$/, '');
-  if (/[\r\n\0]/.test(value) || value.length < 8 || value.length > 1024) {
+  if (/[\r\n\0]/.test(value) || value.length > 1024) {
     throw Object.assign(
-      new Error('Password must be between 8 and 1024 characters and contain no line break or NUL.'),
+      new Error('Password input is invalid.'),
       { code: 'INVALID_PASSWORD' }
     );
   }
@@ -74,6 +75,13 @@ async function main() {
     throw new Error('No Postgres connection configured. Set DATABASE_URL or PGHOST/PGDATABASE.');
   }
   const password = await readPasswordFromStdin();
+  const passwordResult = passwordPolicy.validateNewPassword(password, {
+    email: input.email,
+    displayName: input.displayName,
+  });
+  if (passwordResult.error) {
+    throw Object.assign(new Error(passwordResult.error), { code: 'INVALID_PASSWORD' });
+  }
   await db.initSchema();
   const user = input.action === 'create'
     ? await db.provisionUserByOperator(input.email, password, input.displayName)

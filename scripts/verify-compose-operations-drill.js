@@ -91,6 +91,8 @@ function writeEnvironment(file, port, credentials, backupDirectory) {
     `POSTGRES_PASSWORD=${credentials.databasePassword}`,
     'POSTGRES_USER=traceomics',
     'POSTGRES_DB=traceomics',
+    `APP_DATABASE_PASSWORD=${credentials.runtimeDatabasePassword}`,
+    'APP_DATABASE_USER=traceomics_app',
     'APP_IMAGE=traceomics:ci',
     'OPS_IMAGE=traceomics-operations:ci',
     'R_IMAGE=traceomics:ci',
@@ -143,6 +145,17 @@ function assertPublishedPort(project, envFile, expectedPort) {
   assert.match(published, new RegExp(`^127\\.0\\.0\\.1:${expectedPort}$`), 'Compose ingress did not publish the reserved loopback port');
 }
 
+function assertRuntimeDatabaseRole(project, envFile) {
+  const output = compose(project, envFile, [
+    'exec', '-T', 'web', 'node', '-e',
+    "const {Client}=require('pg');const c=new Client(require('./backend/config').postgresConfig());c.connect().then(()=>c.query(\"SELECT current_user, has_schema_privilege(current_user, 'public', 'CREATE') AS can_create, (SELECT tableowner FROM pg_tables WHERE schemaname='public' AND tablename='users') AS owner\")).then(r=>{process.stdout.write(JSON.stringify(r.rows[0]));return c.end()}).catch(e=>{console.error(e.message);process.exit(1)})",
+  ]);
+  const state = JSON.parse(output);
+  assert.equal(state.current_user, 'traceomics_app');
+  assert.equal(state.can_create, false, 'runtime database role must not create schema objects');
+  assert.notEqual(state.owner, state.current_user, 'runtime database role must not own application tables');
+}
+
 function down(project, envFile) {
   try {
     compose(project, envFile, ['down', '--volumes', '--remove-orphans', '--timeout', '20']);
@@ -190,6 +203,7 @@ async function main() {
     sessionSecret: randomSecret(),
     rToken: randomSecret(),
     databasePassword: randomSecret(),
+    runtimeDatabasePassword: randomSecret(),
   };
   const sourcePort = await unusedPort();
   const targetPort = await unusedPort();
@@ -206,6 +220,7 @@ async function main() {
     const sourceReady = await waitForReady(sourcePort);
     assert.equal(sourceReady.status, 'ready');
     assert.equal(sourceReady.computeDegraded, false);
+    assertRuntimeDatabaseRole(sourceProject, sourceEnv);
 
     const operatorPassword = randomSecret();
     const created = compose(sourceProject, sourceEnv, [
@@ -266,6 +281,7 @@ async function main() {
     ]);
     const targetReady = await waitForReady(targetPort);
     assert.equal(targetReady.status, 'ready');
+    assertRuntimeDatabaseRole(targetProject, targetEnv);
     const sentinel = compose(targetProject, targetEnv, [
       'exec', '-T', 'web', 'node', '-e',
       "process.stdout.write(require('fs').readFileSync(require('path').join(process.env.STORAGE_ROOT,'compose-sentinel.txt'),'utf8'))",

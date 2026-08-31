@@ -38,6 +38,22 @@ describe('Sidebar component', () => {
     expect(clusterButton).toBeDisabled();
   });
 
+  it('opens account security from the authenticated-user rail', () => {
+    const setActiveTab = vi.fn();
+    render(
+      <Sidebar
+        activeTab="workspace"
+        {...baseProps}
+        setActiveTab={setActiveTab}
+        user={{ email: 'owner@example.org' }}
+        selectedObjects={[]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /account security/i }));
+    expect(setActiveTab).toHaveBeenCalledWith('account');
+  });
+
   it('enables pipeline options when data is loaded', () => {
     render(
       <Sidebar 

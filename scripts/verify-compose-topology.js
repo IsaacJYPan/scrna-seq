@@ -134,7 +134,11 @@ assert(expertBroker.cap_drop?.includes('ALL'), 'Expert R broker must drop capabi
 assert(expertBroker.security_opt?.includes('no-new-privileges:true'), 'Expert R broker must disable privilege escalation');
 assert.equal(expertBroker.network_mode, 'service:namespace-anchor', 'Expert R broker must use the private shared namespace');
 assert.equal(expertBroker.environment?.EXPERT_R_SANDBOX_HOST, '127.0.0.1', 'Expert R broker must bind only to private loopback');
-assert((expertBroker.volumes || []).some((mount) => mount.source === '/var/run/docker.sock'), 'Expert R broker requires the reviewed Docker socket boundary');
+assert.equal(expertBroker.environment?.EXPERT_R_RUNTIME_ISOLATION, 'dedicated-rootless');
+assert.equal(expertBroker.environment?.DOCKER_HOST, 'unix:///run/expert-runtime/docker.sock');
+assert(!(expertBroker.volumes || []).some((mount) => mount.source === '/var/run/docker.sock'), 'Expert R broker must not receive the system Docker socket');
+assert((expertBroker.volumes || []).some((mount) => mount.source === '/run/user/10001/docker.sock'
+  && mount.target === '/run/expert-runtime/docker.sock'), 'Expert R broker requires its dedicated rootless runtime socket');
 assert((expertBroker.volumes || []).some((mount) => mount.target === expertBroker.environment.EXPERT_R_SANDBOX_WORK_ROOT), 'Expert R broker work root must use the same host/container path');
 
 function durationMs(value) {
@@ -149,11 +153,18 @@ assert.deepEqual(
   Object.keys(services).sort(),
   [
     'namespace-anchor', 'operations', 'postgres', 'r', 'r-compute-1', 'r-compute-2',
-    'restore-operations', 'storage-init', 'web', 'worker', 'worker-compute-1',
+    'restore-operations', 'schema-init', 'storage-init', 'web', 'worker', 'worker-compute-1',
     'worker-compute-2',
   ],
   'supported service set changed without updating the topology contract'
 );
+assert.equal(services.web.environment?.PGUSER, 'traceomics_app', 'web must use the non-owner runtime database role');
+assert.equal(services.worker.environment?.PGUSER, 'traceomics_app', 'workers must use the non-owner runtime database role');
+assert.equal(services.web.environment?.DATABASE_SCHEMA_MANAGED_EXTERNALLY, 'true');
+assert.equal(services['schema-init'].environment?.PGUSER, 'traceomics', 'only schema-init receives the database owner role');
+assert.equal(services['schema-init'].environment?.APP_DATABASE_USER, 'traceomics_app');
+assert.equal(services['schema-init'].restart, 'no');
+assert.equal(services.operations.environment?.PGUSER, 'traceomics', 'offline operations require the owner role');
 assert.notEqual(model.networks?.['private-backend']?.external, true, 'backend network must remain project-scoped');
 
 const anchorPorts = services['namespace-anchor'].ports || [];

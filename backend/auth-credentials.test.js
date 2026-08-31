@@ -19,6 +19,7 @@ const { createUser, verifyUser } = db;
 const { startServer, api } = require('./_http-test-utils');
 
 const CONFIGURED = config.hasPostgresConnection();
+const TEST_PASSWORD = 'violet-harbor-orbits-42';
 
 let server;
 let prevDisabled;
@@ -79,10 +80,10 @@ describe.skipIf(!CONFIGURED)('login route (HTTP)', () => {
   it('returns a generic 401 for both unknown email and wrong password', async () => {
     await api(server, '/api/auth/signup', {
       method: 'POST',
-      body: { email: 'user@example.com', password: 'password123', displayName: 'User' }
+      body: { email: 'user@example.com', password: TEST_PASSWORD, displayName: 'User' }
     });
 
-    const unknown = await login('nobody@example.com', 'password123');
+    const unknown = await login('nobody@example.com', TEST_PASSWORD);
     const wrong = await login('user@example.com', 'wrong-password');
 
     expect(unknown.status).toBe(401);
@@ -93,9 +94,9 @@ describe.skipIf(!CONFIGURED)('login route (HTTP)', () => {
   it('logs in with correct credentials', async () => {
     await api(server, '/api/auth/signup', {
       method: 'POST',
-      body: { email: 'user@example.com', password: 'password123', displayName: 'User' }
+      body: { email: 'user@example.com', password: TEST_PASSWORD, displayName: 'User' }
     });
-    const ok = await login('user@example.com', 'password123');
+    const ok = await login('user@example.com', TEST_PASSWORD);
     expect(ok.status).toBe(200);
     expect(ok.data.token).toBeUndefined();
     expect(ok.data.user.email).toBe('user@example.com');
@@ -105,7 +106,7 @@ describe.skipIf(!CONFIGURED)('login route (HTTP)', () => {
     const busy = Object.assign(new Error('private capacity detail'), { code: 'AUTH_HASH_BUSY' });
     const verify = vi.spyOn(db, 'verifyUser').mockRejectedValueOnce(busy);
     try {
-      const result = await login('user@example.com', 'password123');
+      const result = await login('user@example.com', TEST_PASSWORD);
       expect(result.status).toBe(503);
       expect(result.res.headers.get('retry-after')).toBe('1');
       expect(result.data).toEqual({ error: 'Authentication is temporarily busy. Please try again.' });

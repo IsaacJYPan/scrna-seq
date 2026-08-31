@@ -6,6 +6,7 @@ const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const MODALITIES = new Set(['scrna', 'spatial']);
 const REPLICATION_UNITS = new Set(['sample', 'donor']);
+const CONDITION_MODEL_UNSUPPORTED_MESSAGE = 'Batch, blocking-factor, and covariate-adjusted condition models are not supported yet. Use the fixed unadjusted model or a paired-donor design.';
 
 function codedError(code, message) {
   const error = new Error(message);
@@ -98,6 +99,7 @@ function contrastFromRow(row) {
     cellTypeColumn: row.cell_type_column,
     blockingFactor: row.blocking_factor,
     covariates: typeof row.covariates_json === 'string' ? JSON.parse(row.covariates_json) : row.covariates_json || [],
+    modelFormula: row.paired === true ? '~ donor + condition' : '~ condition',
     status: row.status,
     validation: typeof row.validation_json === 'string' ? JSON.parse(row.validation_json) : row.validation_json || {},
     createdByUserId: Number(row.created_by_user_id), createdAt: row.created_at,
@@ -293,6 +295,9 @@ async function createContrast(userId, projectId, input = {}) {
   if (!REPLICATION_UNITS.has(normalized.unitOfReplication)) {
     throw codedError('INVALID_EXPERIMENTAL_DESIGN', 'Unit of replication must be sample or donor.');
   }
+  if (normalized.blockingFactor || normalized.covariates.length > 0) {
+    throw codedError('UNSUPPORTED_CONDITION_MODEL', CONDITION_MODEL_UNSUPPORTED_MESSAGE);
+  }
   const [object, conditions, bound] = await Promise.all([
     db.query('SELECT id FROM analysis_objects WHERE id = $1 AND project_id = $2', [normalized.analysisObjectId, String(projectId)]),
     db.query('SELECT id FROM study_conditions WHERE project_id = $1 AND id = ANY($2::text[])', [String(projectId), [normalized.numeratorConditionId, normalized.denominatorConditionId]]),
@@ -365,4 +370,5 @@ module.exports = {
   createCondition, listConditions, createSample, listSamples, bindSample,
   listBindings, createContrast, listContrasts, validateReplicates,
   conditionFromRow, sampleFromRow, bindingFromRow, contrastFromRow,
+  CONDITION_MODEL_UNSUPPORTED_MESSAGE,
 };

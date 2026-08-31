@@ -1062,10 +1062,21 @@ run_test("pseudobulk design normalizes Plumber data-frame sample arrays", functi
   )
   parsed <- normalize_design(list(
     unit_of_replication = "sample", paired = FALSE,
+    model_formula = "~ condition",
     cell_type_column = "seurat_clusters", samples = samples
   ))
   assert("all four parser-simplified samples survive", length(parsed$samples) == 4L)
   assert("sample fields are preserved", identical(parsed$samples[[3]]$cell_metadata_value, "T1"))
+  assert("fixed model formula is preserved", identical(parsed$model_formula, "~ condition"))
+  rejected <- tryCatch({
+    normalize_design(list(
+      unit_of_replication = "sample", paired = FALSE,
+      model_formula = "~ batch + condition",
+      cell_type_column = "seurat_clusters", samples = samples
+    ))
+    FALSE
+  }, error = function(e) TRUE)
+  assert("unsupported condition formulas fail closed", rejected)
 })
 
 # SUMMARY

@@ -10,6 +10,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { Client } = require('pg');
 const config = require('../backend/config');
+const { validateNewPassword } = require('../backend/passwordPolicy');
 
 const DATABASE_PREFIX = 'scrna_deploy_smoke_';
 const R_TOKEN = '7d2a9f4c1e6b8035a8c2f7d1e4b6903c5a8f2d7e1b4c69035a8d2f7e1c4b6903';
@@ -234,6 +235,15 @@ async function main() {
   try {
     await admin.query(`CREATE DATABASE ${quotedDatabase(databaseName)}`);
     databaseCreated = true;
+    const schemaAdmin = new Client({ connectionString: databaseUrl });
+    await schemaAdmin.connect();
+    try {
+      await schemaAdmin.query(fs.readFileSync(
+        path.join(__dirname, '..', 'backend', 'pg', 'schema.sql'), 'utf8'
+      ));
+    } finally {
+      await schemaAdmin.end();
+    }
     fakeR = await startFakeR();
     const rPort = fakeR.address().port;
     const commonEnv = {
@@ -241,6 +251,7 @@ async function main() {
       NODE_ENV: 'production',
       APP_DEPLOYMENT_MODE: 'private',
       DATABASE_URL: databaseUrl,
+      DATABASE_SCHEMA_MANAGED_EXTERNALLY: 'true',
       SESSION_SECRET,
       SESSION_EPOCH,
       SESSION_TTL_SECONDS: '3600',
@@ -298,7 +309,11 @@ async function main() {
     assert(plaintext.status === 426, 'Production accepted a non-health request without trusted HTTPS forwarding.');
 
     const email = `deploy-${suffix}@example.invalid`;
-    const password = 'deployment-smoke-password';
+    const displayName = 'Deployment Smoke';
+    const password = 'amber circuit meadows 47';
+    const passwordValidation = validateNewPassword(password, { email, displayName });
+    assert(!passwordValidation.error,
+      `Deployment smoke credential violates the production password policy: ${passwordValidation.error}`);
     const policy = await request(baseUrl, '/api/auth/policy');
     assert(policy.status === 200 && policy.data?.registrationEnabled === false,
       'Production auth policy did not close public registration.');
@@ -311,7 +326,7 @@ async function main() {
       body: {
         email,
         password,
-        displayName: 'Deployment Smoke',
+        displayName,
       },
     });
     assert(signup.status === 403, 'Production accepted network-facing account registration.');
@@ -319,7 +334,7 @@ async function main() {
     const provisioned = await runAccountAdmin(commonEnv, {
       email,
       password,
-      displayName: 'Deployment Smoke',
+      displayName,
     });
     assert(provisioned.code === 0, 'Operator account provisioning failed.');
     assert(!`${provisioned.output.stdout}${provisioned.output.stderr}`.includes(password),

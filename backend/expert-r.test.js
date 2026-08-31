@@ -7,20 +7,31 @@ const path = require('path');
 
 const {
   EXPERT_R_PROFILE, validateExpertRParams, allocateExpertRBundleStorageKey,
-  expertRSandboxEnabled, storedExpertRParams,
+  expertRSandboxEnabled, storedExpertRParams, sanitizeExpertRInputFilename,
+  maxExpertRInputBytesForFilename, MAX_EXPERT_R_TABULAR_INPUT_BYTES,
+  MAX_EXPERT_R_RDS_INPUT_BYTES,
 } = require('./expertR');
 const {
   ALLOWED_OUTPUT_EXTENSIONS, collectOutputs, assertFreeSpace, pathsShareFilesystem,
   ownerScriptFailureExplanation, isTrustedBrokerBindHost,
+  validateExpertRuntimeIsolation, assertExpertRuntimeSecurity, reconcileExpertSandboxWorkRoot,
+  writeWorkspaceManifest, workspaceRootHash,
 } = require('./expertSandboxBroker');
 const { expertRHandler } = require('./jobWorker');
 const { createExpertSandboxClient } = require('./expertSandboxClient');
 
 describe('Expert R isolated job contract', () => {
-  it('does not allow the private checkpoint format in downloadable Expert R outputs', () => {
+  it('allows private RDS artifacts only through the bounded Expert R output bundle', () => {
     const outputExtensions = [...ALLOWED_OUTPUT_EXTENSIONS];
-    expect(outputExtensions).not.toContain('.rds');
+    expect(outputExtensions).toContain('.rds');
     expect(outputExtensions).toEqual(expect.arrayContaining(['.csv', '.tsv', '.json', '.png', '.pdf', '.svg']));
+  });
+
+  it('accepts RDS only as a larger sandbox-private input type', () => {
+    expect(sanitizeExpertRInputFilename('derived analysis.RDS')).toBe('derived-analysis.rds');
+    expect(maxExpertRInputBytesForFilename('metadata.csv')).toBe(MAX_EXPERT_R_TABULAR_INPUT_BYTES);
+    expect(maxExpertRInputBytesForFilename('derived.rds')).toBe(MAX_EXPERT_R_RDS_INPUT_BYTES);
+    expect(() => sanitizeExpertRInputFilename('script.R')).toThrow(/CSV, TSV, TXT, JSON, or RDS/i);
   });
 
   it('rejects an exact private-input copy even when it uses an allowed extension', async () => {
@@ -66,6 +77,78 @@ describe('Expert R isolated job contract', () => {
     expect(isTrustedBrokerBindHost('0.0.0.0')).toBe(false);
     expect(isTrustedBrokerBindHost('192.168.1.10')).toBe(false);
     expect(isTrustedBrokerBindHost('broker.internal')).toBe(false);
+  });
+
+  it('fails closed on the system Docker socket in production', () => {
+    expect(() => validateExpertRuntimeIsolation({
+      NODE_ENV: 'production', EXPERT_R_RUNTIME_ISOLATION: 'dedicated-rootless',
+      DOCKER_HOST: 'unix:///var/run/docker.sock',
+    })).toThrow(/system Docker socket/i);
+    expect(validateExpertRuntimeIsolation({
+      NODE_ENV: 'production', EXPERT_R_RUNTIME_ISOLATION: 'dedicated-rootless',
+      DOCKER_HOST: 'unix:///run/user/10001/docker.sock',
+    })).toBe(true);
+    expect(validateExpertRuntimeIsolation({ NODE_ENV: 'test' })).toBe(true);
+  });
+
+  it('verifies that the dedicated production runtime is actually rootless', async () => {
+    const env = {
+      NODE_ENV: 'production', EXPERT_R_RUNTIME_ISOLATION: 'dedicated-rootless',
+      DOCKER_HOST: 'unix:///run/user/10001/docker.sock',
+    };
+    await expect(assertExpertRuntimeSecurity(env, vi.fn(async () => ({
+      stdout: JSON.stringify(['name=seccomp,profile=builtin']),
+    })))).rejects.toThrow(/not rootless/i);
+    await expect(assertExpertRuntimeSecurity(env, vi.fn(async () => ({
+      stdout: JSON.stringify(['name=seccomp,profile=builtin', 'name=rootless']),
+    })))).resolves.toBe(true);
+  });
+
+  it('reconciles only stale, signed Expert R workspaces and owned containers', async () => {
+    const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-expert-reconcile-'));
+    const staleCreatedAt = new Date(Date.now() - 60_000).toISOString();
+    const removable = path.join(workRoot, `job_${'a'.repeat(8)}-${'b'.repeat(24)}`);
+    const active = path.join(workRoot, `job_${'c'.repeat(8)}-${'d'.repeat(24)}`);
+    const invalid = path.join(workRoot, `job_${'e'.repeat(8)}-${'f'.repeat(24)}`);
+    const withContainer = path.join(workRoot, `job_${'1'.repeat(8)}-${'2'.repeat(24)}`);
+    try {
+      for (const directory of [removable, active, invalid, withContainer]) fs.mkdirSync(directory);
+      await writeWorkspaceManifest(removable, workRoot, {
+        jobId: `job_${'a'.repeat(8)}`, containerName: null, createdAt: staleCreatedAt,
+      });
+      await writeWorkspaceManifest(active, workRoot, {
+        jobId: `job_${'c'.repeat(8)}`, containerName: null, createdAt: staleCreatedAt,
+      });
+      fs.writeFileSync(path.join(invalid, '.traceomics-expert-workspace.json'), '{}');
+      const containerName = `traceomics-expert-job_${'1'.repeat(8)}-${'3'.repeat(10)}`;
+      await writeWorkspaceManifest(withContainer, workRoot, {
+        jobId: `job_${'1'.repeat(8)}`, containerName, createdAt: staleCreatedAt,
+      });
+      const runProcessImpl = vi.fn(async (command, args) => {
+        expect(command).toBe('docker');
+        if (args[0] === 'inspect') return { stdout: JSON.stringify({
+          'org.traceomics.expert': 'true',
+          'org.traceomics.expert.workspace': path.basename(withContainer),
+          'org.traceomics.expert.work-root': workspaceRootHash(workRoot),
+        }) };
+        expect(args).toEqual(['rm', '-f', containerName]);
+        return { stdout: '' };
+      });
+      const result = await reconcileExpertSandboxWorkRoot({
+        workRoot,
+        activeWorkspaces: new Set([path.basename(active)]),
+        staleAfterMs: 1000,
+        runProcessImpl,
+      });
+      expect(result).toEqual({ removed: 2, skipped: 1, invalid: 1 });
+      expect(fs.existsSync(removable)).toBe(false);
+      expect(fs.existsSync(withContainer)).toBe(false);
+      expect(fs.existsSync(active)).toBe(true);
+      expect(fs.existsSync(invalid)).toBe(true);
+      expect(runProcessImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      fs.rmSync(workRoot, { recursive: true, force: true });
+    }
   });
 
   it('maps untrusted R diagnostics to fixed path-free owner explanations', () => {
@@ -122,7 +205,7 @@ describe('Expert R isolated job contract', () => {
       checkpointChecksumSha256: 'c'.repeat(64),
       privateInputs: [],
       sandboxImageDigest: `sha256:${'d'.repeat(64)}`,
-      resourcePolicyVersion: 'expert-r-sandbox-policy.v2',
+      resourcePolicyVersion: 'expert-r-sandbox-policy.v3',
     }));
     const ctx = {
       job: {
@@ -187,7 +270,7 @@ describe('Expert R isolated job contract', () => {
         profileId: EXPERT_R_PROFILE.id, scriptSha256,
         checkpointChecksumSha256: 'c'.repeat(64), privateInputs: [],
         sandboxImageDigest: `sha256:${'d'.repeat(64)}`,
-        resourcePolicyVersion: 'expert-r-sandbox-policy.v2',
+        resourcePolicyVersion: 'expert-r-sandbox-policy.v3',
       })),
       completeExpertRResult: vi.fn(async () => { throw new Error('definite pre-commit failure'); }),
       removeDurableObject,
@@ -223,7 +306,7 @@ describe('Expert R isolated job contract', () => {
         profileId: EXPERT_R_PROFILE.id, scriptSha256,
         checkpointChecksumSha256: 'c'.repeat(64), privateInputs: [],
         sandboxImageDigest: `sha256:${'d'.repeat(64)}`,
-        resourcePolicyVersion: 'expert-r-sandbox-policy.v2',
+        resourcePolicyVersion: 'expert-r-sandbox-policy.v3',
       })),
       completeExpertRResult: vi.fn(async () => { throw indeterminate; }),
       removeDurableObject,

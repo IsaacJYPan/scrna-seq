@@ -1,10 +1,6 @@
 .git
 .github
 .project
-.codex-run
-.claude
-.agents
-.codex
 
 .env
 .env.*
@@ -24,6 +20,7 @@
 node_modules
 dist
 out
+release
 .vite
 
 data

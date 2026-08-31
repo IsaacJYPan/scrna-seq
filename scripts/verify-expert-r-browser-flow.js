@@ -138,7 +138,7 @@ function startReadinessR(storageRoot, port) {
 async function login(page, email, password) {
   await page.getByRole('button', { name: 'Log In', exact: true }).click();
   await page.getByPlaceholder('researcher@lab.edu').fill(email);
-  await page.locator('input[type="password"]').fill(password);
+  await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: /Open Workbench/ }).click();
   await page.getByRole('button', { name: 'Log out' }).waitFor({ state: 'visible', timeout: 15000 });
 }
