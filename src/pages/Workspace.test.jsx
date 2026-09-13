@@ -119,8 +119,8 @@ describe('Workspace backend-backed project/object UI', () => {
     expect(screen.getAllByText('PBMC Project').length).toBeGreaterThan(0);
     expect(screen.getAllByText('PBMC 3k').length).toBeGreaterThan(0);
     expect(screen.getByText(/2,700 cells/i)).toBeInTheDocument();
-    expect(screen.getByText('Analysis workspace')).toBeInTheDocument();
-    expect(screen.getAllByText(/Saved analysis/i).length).toBeGreaterThan(0);
+    expect(screen.getByRole('region', { name: 'Current analysis' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Saved analyses 1' })).toBeInTheDocument();
     expect(screen.getAllByText(/Open a saved version/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/No Objects in Project/i)).not.toBeInTheDocument();
     expect(container.textContent).not.toMatch(/ao_abc123|pbmc3k_demo|DB-backed|Live R/i);
@@ -148,10 +148,9 @@ describe('Workspace backend-backed project/object UI', () => {
       pipelineState: { qc: true, normalize: false, pca: false, cluster: false, umap: false },
     });
 
-    expect(screen.getByText(/Ready for this session/i)).toBeInTheDocument();
     expect(screen.getAllByText(/Ready in your workspace/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Recorded history/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Project membership does not grant access to another researcher/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open Normalize' })).toBeEnabled();
+    expect(screen.getByText(/Your live workspace is private/i)).toBeInTheDocument();
   });
 
   it('does not treat an unselected project object as the active workflow object', () => {

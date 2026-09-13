@@ -1,3 +1,4 @@
+import WorkbenchOverview from '../components/WorkbenchOverview';
 import React, { useRef, useState } from 'react';
 import {
   Database, FileUp, Zap, CheckCircle, Info, Globe, Lock,
@@ -789,142 +790,6 @@ function scrubEmptyParams(params) {
     if (value !== '') out[key] = value;
   }
   return out;
-}
-
-function WorkbenchOverview({
-  activeProject,
-  selectedObject,
-  activeProjectObjects,
-  pipelineState,
-  sessionReady,
-  rSessionId,
-  setActiveTab,
-  setShowLoadModal,
-  onReloadPbmcDemo,
-}) {
-  const hasProject = !!activeProject;
-  const canWriteProject = PROJECT_WRITE_ROLES.has(activeProject?.role);
-  const hasObject = !!selectedObject;
-  const hasObjectsInProject = activeProjectObjects.length > 0;
-  const isDbBacked = !!selectedObject?.isBackendAnalysisObject || /^ao_/.test(selectedObject?.id || '');
-  const liveAttached = selectedObject?.liveState === 'attached';
-  const liveStatus = !hasObject
-    ? { label: 'Select an analysis', tone: 'slate' }
-    : liveAttached
-      ? { label: 'Ready in your workspace', tone: 'green' }
-      : { label: 'Open a saved version', tone: sessionReady && rSessionId ? 'amber' : 'slate' };
-
-  let nextAction = 'Select or create a project.';
-  let actionLabel = 'Create Project';
-  let action = null;
-  if (hasProject && !hasObject && hasObjectsInProject) {
-    nextAction = 'Select a saved analysis from the project list below before opening analysis tools.';
-    actionLabel = 'Select analysis';
-  } else if (hasProject && !hasObject) {
-    if (canWriteProject) {
-      nextAction = 'Load the PBMC demo or use an approved workflow to add a dataset to this project.';
-      actionLabel = 'Load analysis';
-      action = () => setShowLoadModal(true);
-    } else {
-      nextAction = 'This project is read-only for your role. You can inspect saved analyses, results, and lineage when they are available.';
-    }
-  } else if (hasProject && hasObject && !liveAttached) {
-    if (selectedObject?.source === 'pbmc3k_demo' && typeof onReloadPbmcDemo === 'function') {
-      nextAction = 'This PBMC demo is selected but is not open in your private analysis workspace. Reload the built-in demo to open it again.';
-      actionLabel = 'Reload PBMC demo';
-      action = onReloadPbmcDemo;
-    } else {
-      nextAction = 'This saved analysis is not open in your private analysis workspace. Open Runs & Results to open a saved version or create a branch of your own.';
-      actionLabel = 'Open Runs & Results';
-      action = () => setActiveTab('history');
-    }
-  } else if (hasProject && hasObject && !pipelineState?.qc) {
-    nextAction = 'Run quality control in your private analysis workspace.';
-    actionLabel = 'Open Quality Control';
-    action = () => setActiveTab('qc');
-  } else if (hasProject && hasObject && !pipelineState?.normalize) {
-    nextAction = 'Run normalization before PCA and clustering.';
-    actionLabel = 'Open Normalize';
-    action = () => setActiveTab('normalize');
-  } else if (hasProject && hasObject && !pipelineState?.pca) {
-    nextAction = 'Run PCA to unlock clustering and UMAP.';
-    actionLabel = 'Open PCA';
-    action = () => setActiveTab('pca');
-  } else if (hasProject && hasObject) {
-    nextAction = 'Continue through clustering, UMAP, markers, or review Runs & Results.';
-    actionLabel = 'Open Runs & Results';
-    action = () => setActiveTab('history');
-  }
-
-  return (
-    <section className="space-y-5">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h3 className="text-2xl font-black tracking-tight text-text">Analysis workspace</h3>
-          <p className="mt-2 max-w-3xl text-sm text-textMuted">
-            Current project, saved analysis, private analysis workspace, and recorded history status.
-          </p>
-        </div>
-        {action && (
-          <button onClick={action} className="btn btn-primary text-sm font-bold">
-            {actionLabel}
-          </button>
-        )}
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="card p-4 bg-surface/70">
-          <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
-            <FolderTree size={14} /> Project
-          </div>
-          <div className="truncate text-lg font-bold text-text">{activeProject?.name || 'No project selected'}</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {activeProject?.role && <StatusPill label={activeProject.role} tone="blue" />}
-            {hasProject && <StatusPill label="Project selected" tone="green" />}
-          </div>
-        </div>
-
-        <div className="card p-4 bg-surface/70">
-          <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
-            <Database size={14} /> Analysis
-          </div>
-          <div className="truncate text-lg font-bold text-text">{selectedObject?.name || selectedObject?.displayName || 'No analysis selected'}</div>
-          <div className="mt-1 text-xs text-textMuted">{hasObject ? 'Saved project analysis' : `${activeProjectObjects.length} analyses in project`}</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {isDbBacked && <StatusPill label="Saved analysis" tone="green" />}
-            {hasObject && <StatusPill label="Recorded history" tone="blue" />}
-          </div>
-        </div>
-
-        <div className="card p-4 bg-surface/70">
-          <div className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-textMuted">
-            <Lock size={14} /> Private analysis workspace
-          </div>
-          <div className="text-lg font-bold text-text">{liveAttached ? 'Ready for this session' : 'Open a saved version'}</div>
-          <p className="mt-1 text-xs text-textMuted">Project membership does not grant access to another researcher&apos;s private workspace.</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <StatusPill label={liveStatus.label} tone={liveStatus.tone} />
-          </div>
-        </div>
-      </div>
-
-      <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="text-[10px] font-black uppercase tracking-widest text-text">Next action</div>
-            <p className="mt-1 text-sm text-text">{nextAction}</p>
-          </div>
-          {!action && actionLabel === 'Create Project' && (
-            <span className="text-xs text-textMuted">Use the Projects section below.</span>
-          )}
-        </div>
-      </div>
-
-      <p className="px-1 text-xs leading-relaxed text-textMuted">
-        Your private analysis workspace follows the selected analysis in this browser session. Recorded runs, saved results, and branches stay in Runs &amp; Results.
-      </p>
-    </section>
-  );
 }
 
 export function SeuratPipelinePanel({
@@ -1992,7 +1857,7 @@ export default function Workspace({
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-8">
-        <div className="max-w-5xl mx-auto space-y-12 animate-in fade-in slide-in-from-bottom-6">
+        <div className="max-w-5xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-6">
           <WorkbenchOverview
             activeProject={activeProject}
             selectedObject={selectedObject}
@@ -2048,7 +1913,7 @@ export default function Workspace({
           )}
 
           {/* Projects Navigation */}
-          <div className="pt-8">
+          <div>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-text flex items-center gap-3">
                 <FolderTree size={18} className="text-slate-400" />
@@ -2135,7 +2000,7 @@ export default function Workspace({
           <div className="pt-6">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold text-text flex items-center gap-3">
-                Saved analyses
+                Saved analyses{' '}
                 <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
                   {activeProjectObjects.length}
                 </span>
