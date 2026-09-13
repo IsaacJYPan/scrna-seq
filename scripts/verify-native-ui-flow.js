@@ -174,8 +174,8 @@ async function runSeuratPipeline(page, lane, pipelineInputPath, runDirectory) {
   let pipelineJob = null;
   let loadJob = null;
   try {
-    await openSidebarPage(page, 'Approved workflows');
-    await page.getByRole('heading', { name: 'Approved workflows', exact: true })
+    await openSidebarPage(page, 'Pipelines');
+    await page.getByRole('heading', { name: 'Pipelines', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
     const panel = page.getByTestId('seurat-pipeline-panel');
     await panel.waitFor({ state: 'visible', timeout: 30_000 });
@@ -267,8 +267,8 @@ async function runSpatialSeuratPipeline(page, lane, spatialInputPath, runDirecto
   let pipelineJob = null;
   let loadJob = null;
   try {
-    await openSidebarPage(page, 'Approved workflows');
-    await page.getByRole('heading', { name: 'Approved workflows', exact: true })
+    await openSidebarPage(page, 'Pipelines');
+    await page.getByRole('heading', { name: 'Pipelines', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
     const panel = page.getByTestId('seurat-pipeline-panel');
     await panel.getByRole('button', { name: 'Spatial transcriptomics (Visium)', exact: true }).click();

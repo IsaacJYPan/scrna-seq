@@ -38,8 +38,8 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
   single-context CellChat candidate analysis.
 - Save analysis checkpoints, view run history, export selected results, and
   fork a collaborator's saved analysis into your own workspace.
-- Choose a pipeline from the shared catalog. Pipelines combine modules that
-  ship with the application; see [pipeline definitions](docs/pipelines.md).
+- Choose a pipeline from the shared catalog, or import a versioned R pipeline
+  and run it through the private isolated runner. See [sharing pipelines](docs/pipelines.md).
 
 Cell annotation, cross-condition CellChat, and publication report generation
 are not yet available. The [architecture guide](docs/architecture.md) distinguishes
@@ -62,6 +62,7 @@ working browser features from backend-only functionality.
 ```powershell
 npm run lint
 npm run test:frontend
+npm run test:tools
 npm run test:unit
 npm run build
 ```
@@ -74,7 +75,7 @@ with a deterministic R test service.
 
 ## Deploy a demo
 
-The [deployment guide](docs/deployment.md) covers a Linux host with Docker Compose,
+Start with the [student demo guide](docs/demo.md). The [deployment guide](docs/deployment.md) covers a Linux host with Docker Compose,
 HTTPS, persistent storage, backups, and a small public tutorial. The constrained
 demo profile uses synthetic data and disables uploads; it targets a host with
 2 OCPUs and 12 GB RAM. Hosting availability and student credits depend on the
@@ -92,5 +93,6 @@ R session.
 - [Architecture and feature status](docs/architecture.md)
 - [Analysis workflows and interpretation](docs/analysis-workflows.md)
 - [Pipeline registry](docs/pipelines.md)
+- [Student demo setup](docs/demo.md)
 - [Deployment and operations](docs/deployment.md)
 - [Windows desktop distribution](docs/deployment.md#windows-desktop-application)

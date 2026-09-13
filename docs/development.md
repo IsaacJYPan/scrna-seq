@@ -163,7 +163,7 @@ flow remain local/development compatibility only until they have bounded durable
 Synchronous batch integration is also development-only: CCA anchor search scales
 across batch pairs and cannot be safely interrupted when the shared R service times out.
 The frontend consumes a fail-closed deployment policy: production hides those
-local loaders and live mutations, routes 10X H5 upload to Approved workflows, and
+local loaders and live mutations, routes 10X H5 upload to Pipelines, and
 keeps figure preview while disabling the legacy server-file save action.
 
 RDS imports are disabled by default because RDS deserialization can execute R

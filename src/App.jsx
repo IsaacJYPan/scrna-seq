@@ -72,7 +72,7 @@ const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'
 // keeps the screen-reader heading tree rooted instead of starting at h2.
 const TAB_TITLES = {
   account: 'Account security',
-  workspace: 'Workbench', 'pipeline-manager': 'Approved workflows', team: 'Collaborators',
+  workspace: 'Workbench', 'pipeline-manager': 'Pipelines', team: 'Collaborators',
   branches: 'Analysis Branches',
   'study-design': 'Study Design',
   'expert-r': 'Advanced analysis',

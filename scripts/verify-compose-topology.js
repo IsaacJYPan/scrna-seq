@@ -158,13 +158,17 @@ assert.deepEqual(
   ],
   'supported service set changed without updating the topology contract'
 );
-assert.equal(services.web.environment?.PGUSER, 'traceomics_app', 'web must use the non-owner runtime database role');
-assert.equal(services.worker.environment?.PGUSER, 'traceomics_app', 'workers must use the non-owner runtime database role');
+const databaseOwner = services.postgres.environment?.POSTGRES_USER;
+const runtimeDatabaseUser = services['schema-init'].environment?.APP_DATABASE_USER;
+assert(databaseOwner && runtimeDatabaseUser, 'database owner and runtime roles must be configured');
+assert.notEqual(runtimeDatabaseUser, databaseOwner, 'the runtime database role must not own the database');
+for (const name of ['web', 'worker', 'worker-compute-1', 'worker-compute-2']) {
+  assert.equal(services[name].environment?.PGUSER, runtimeDatabaseUser, `${name} must use the non-owner runtime database role`);
+}
 assert.equal(services.web.environment?.DATABASE_SCHEMA_MANAGED_EXTERNALLY, 'true');
-assert.equal(services['schema-init'].environment?.PGUSER, 'traceomics', 'only schema-init receives the database owner role');
-assert.equal(services['schema-init'].environment?.APP_DATABASE_USER, 'traceomics_app');
+assert.equal(services['schema-init'].environment?.PGUSER, databaseOwner, 'schema-init must receive the database owner role');
 assert.equal(services['schema-init'].restart, 'no');
-assert.equal(services.operations.environment?.PGUSER, 'traceomics', 'offline operations require the owner role');
+assert.equal(services.operations.environment?.PGUSER, databaseOwner, 'offline operations require the owner role');
 assert.notEqual(model.networks?.['private-backend']?.external, true, 'backend network must remain project-scoped');
 
 const anchorPorts = services['namespace-anchor'].ports || [];
@@ -232,7 +236,7 @@ for (const name of ['postgres', 'r', 'r-compute-1', 'r-compute-2', 'web', 'worke
 assert.equal(services.web.environment?.NODE_ENV, 'production');
 assert.equal(services.web.environment?.COOKIE_SECURE, 'true');
 assert.equal(services.web.environment?.ENABLE_JOB_WORKER, 'false');
-assert.equal(services.web.environment?.APP_DEPLOYMENT_MODE, 'private');
+assert(['private', 'byoc', 'shared-private', 'demo'].includes(services.web.environment?.APP_DEPLOYMENT_MODE), 'a supported deployment mode is required');
 assert.equal(services.web.environment?.EXPERT_R_SANDBOX_URL, 'http://127.0.0.1:8090');
 for (const name of ['worker', 'worker-compute-1', 'worker-compute-2']) {
   assert.equal(services[name].environment?.JOB_WORKER_CONCURRENCY, '1');

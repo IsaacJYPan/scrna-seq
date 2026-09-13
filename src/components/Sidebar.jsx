@@ -169,7 +169,7 @@ export default function Sidebar({
           <div className="space-y-[2px]">
             <SectionLabel>Project</SectionLabel>
             <NavButton item={{ id: 'workspace', label: 'Analysis workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
-            <NavButton item={{ id: 'pipeline-manager', label: 'Approved workflows', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
+            <NavButton item={{ id: 'pipeline-manager', label: 'Pipelines', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
             <NavButton item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
             <NavButton item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
             <NavButton item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Not enabled for this deployment' }} disabled={!hasProject || deploymentPolicy.expertREnabled !== true} />

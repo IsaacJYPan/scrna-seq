@@ -1,0 +1,12 @@
+{
+  "format": "traceomics-pipeline",
+  "schemaVersion": 1,
+  "id": "cell-summary",
+  "name": "Cell summary",
+  "version": "1.0.0",
+  "description": "Export cell and feature counts from a saved Seurat analysis.",
+  "runtime": {
+    "language": "r",
+    "profileId": "scrna-r-4.5-bioconductor-3.22-v1"
+  }
+}

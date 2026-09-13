@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, CheckCircle2, Layers, Loader2, RefreshCw,
+  AlertTriangle, Layers, Loader2, RefreshCw,
 } from 'lucide-react';
-import PipelineTemplatePreview from '../components/PipelineTemplatePreview';
+import PipelineCatalog from '../components/PipelineCatalog';
+import ExecutablePipelines from '../components/ExecutablePipelines';
 import { SeuratPipelinePanel } from './Workspace';
 import {
   DEFAULT_PIPELINE_ID,
@@ -22,21 +23,6 @@ function parseApiError(error) {
   }
 }
 
-function StatusBadge({ children, tone = 'slate' }) {
-  const tones = {
-    blue: 'bg-primary/10 text-text border-primary/20',
-    green: 'bg-success/10 text-success border-success/30',
-    amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
-    rose: 'bg-danger/10 text-danger border-danger/30',
-    slate: 'bg-slate-800 text-slate-300 border-slate-700',
-  };
-  return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${tones[tone] || tones.slate}`}>
-      {children}
-    </span>
-  );
-}
-
 function selectedObjectForProject(currentWs, activeProjectId, datasetInfo) {
   const selectedIds = currentWs?.selectedObjectIds || [];
   return (currentWs?.objects || []).find(object => object.projectId === activeProjectId && selectedIds.includes(object.id))
@@ -54,18 +40,6 @@ function builtInDefinition(projectId) {
     name: manifest.name,
     manifest,
   };
-}
-
-function researcherWorkflowLabel(definition) {
-  if (definition?.builtin || definition?.id === DEFAULT_PIPELINE_ID) return 'Standard scRNA-seq workflow';
-  const name = typeof definition?.name === 'string' ? definition.name.trim() : '';
-  return name || 'Approved analysis workflow';
-}
-
-function researcherWorkflowDescription(definition) {
-  return definition?.builtin || definition?.id === DEFAULT_PIPELINE_ID
-    ? 'Guided preprocessing, exploration, marker analysis, pathway enrichment, and candidate cell communication analysis.'
-    : 'This workflow uses reviewed settings and result views.';
 }
 
 function normalizeDefinition(definition, projectId) {
@@ -108,30 +82,6 @@ function normalizeSelection(rawSelection, definitions, projectId) {
   };
 }
 
-function PipelineModuleList({ manifest }) {
-  const tabs = Array.isArray(manifest?.tabs) ? manifest.tabs : [];
-  return (
-    <div className="rounded-lg border border-border bg-surface/50">
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 border-b border-border px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-textMuted">
-        <span>Workflow step</span>
-        <span>Availability</span>
-      </div>
-      <div className="divide-y divide-border/50">
-        {tabs.map(tab => (
-          <div key={tab.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-sm">
-            <div className="min-w-0">
-              <div className="truncate font-bold text-text">{tab.label}</div>
-            </div>
-            <StatusBadge tone={tab.executable ? 'green' : 'blue'}>
-              {tab.executable ? 'Runs & results' : 'Available'}
-            </StatusBadge>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export default function PipelineManager({
   currentWs,
   datasetInfo,
@@ -141,6 +91,10 @@ export default function PipelineManager({
   activePipeline,
   onPipelineSelectionChanged,
   deploymentPolicy = {},
+  userEmail,
+  userId,
+  unsavedLiveChanges = false,
+  onExpertRSubmitted,
 }) {
   const activeProjectId = currentWs?.selectedProjectId || datasetInfo?.projectId || currentWs?.projects?.[0]?.id || null;
   const activeProject = (currentWs?.projects || []).find(project => project.id === activeProjectId) || null;
@@ -202,7 +156,7 @@ export default function PipelineManager({
     if (!api.listProjectPipelineDefinitions || !api.getProjectPipelineSelection) {
       if (mountedRef.current && projectId === projectRef.current) {
         setLoading(false);
-        setError('Approved workflows are temporarily unavailable.');
+        setError('Pipelines are temporarily unavailable.');
       }
       return null;
     }
@@ -295,16 +249,12 @@ export default function PipelineManager({
           <div>
             <h2 className="flex items-center gap-3 text-2xl font-black tracking-tight text-text">
               <Layers size={24} className="text-primary" />
-              Approved workflows
+              Pipelines
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-textMuted">
-              Choose an approved analysis workflow for this project. Each researcher works in a private analysis workspace while saved results and review history follow project access.
+              Browse shared pipelines, inspect their steps, and choose one for your project.
             </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <StatusBadge tone="green">project selection</StatusBadge>
-              <StatusBadge tone="blue">approved workflows</StatusBadge>
-              <StatusBadge tone="amber">no custom code</StatusBadge>
-            </div>
+
           </div>
           <button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
@@ -319,20 +269,7 @@ export default function PipelineManager({
           </div>
         ) : (
           <>
-            <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-              <div className="rounded-lg border border-border bg-surface/60 p-4">
-                <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-                <div className="mt-1 truncate font-bold text-text">{activeProject?.name || 'Selected project'}</div>
-              </div>
-              <div className="rounded-lg border border-border bg-surface/60 p-4">
-                <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Selected workflow</div>
-                <div className="mt-1 truncate font-bold text-text">{researcherWorkflowLabel(selection?.definition || { id: manifest.id })}</div>
-              </div>
-              <div className="rounded-lg border border-border bg-surface/60 p-4">
-                <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Selected analysis</div>
-                <div className="mt-1 truncate text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
-              </div>
-            </section>
+            <p className="text-sm text-textMuted">Project: <span className="font-medium text-text">{activeProject?.name || 'Selected project'}</span></p>
 
             {error && (
               <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger" role="alert">
@@ -348,56 +285,30 @@ export default function PipelineManager({
               </div>
             )}
 
-            <section className="space-y-4">
-              <div>
-                <h3 className="text-lg font-bold text-text">Available workflows</h3>
-                <p className="mt-1 text-sm text-textMuted">Choose the workflow you want to use for this project. This does not change another collaborator&apos;s selection or grant access to their private analysis workspace.</p>
-              </div>
-              {loading && definitions.length === 0 ? (
-                <div className="rounded border border-border p-5 text-sm text-textMuted" role="status">
-                  <Loader2 size={16} className="mr-2 inline animate-spin" /> Loading approved workflows…
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  {definitions.map(definition => {
-                    const isActive = selectedPipelineId === definition.id;
-                    const isSelecting = selectingId === definition.id;
-                    return (
-                      <button
-                        key={definition.id}
-                        type="button"
-                        onClick={() => selectPipeline(definition.id)}
-                        disabled={loading || Boolean(selectingId)}
-                        className={`rounded-lg border p-4 text-left transition disabled:cursor-wait disabled:opacity-75 ${
-                          isActive ? 'border-primary bg-primary/10' : 'border-border bg-surface/60 hover:border-primary/40'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate font-bold text-text">{researcherWorkflowLabel(definition)}</div>
-                          </div>
-                          {isSelecting ? <Loader2 size={18} className="animate-spin text-primary" />
-                            : isActive ? <CheckCircle2 size={18} className="text-success" />
-                              : <StatusBadge tone={definition.builtin ? 'slate' : 'blue'}>{definition.builtin ? 'Included' : 'Approved'}</StatusBadge>}
-                        </div>
-                        <p className="mt-3 line-clamp-2 text-xs text-textMuted">{researcherWorkflowDescription(definition)}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+            <PipelineCatalog
+              key={activeProjectId}
+              definitions={definitions}
+              selectedId={selectedPipelineId}
+              selectingId={selectingId}
+              loading={loading}
+              onSelect={selectPipeline}
+              onOpen={() => manifest.id === DEFAULT_PIPELINE_ID
+                ? document.querySelector('[data-testid="seurat-pipeline-panel"]')?.scrollIntoView({ block: 'start' })
+                : setActiveTab(manifest.tabs[0]?.routeId || 'workspace')}
+            />
 
-            <section className="space-y-4">
-              <div>
-                <h3 className="text-lg font-bold text-text">Included workflow steps</h3>
-                <p className="mt-1 text-sm text-textMuted">The available steps and their results are reviewed with the application release.</p>
-              </div>
-              <PipelineModuleList manifest={manifest} />
-            </section>
-
-            <PipelineTemplatePreview manifest={manifest} />
-
+            <ExecutablePipelines
+              key={`${userEmail}:${activeProjectId}`}
+              userEmail={userEmail}
+              userId={userId}
+              projectId={activeProjectId}
+              selectedObject={selectedObject}
+              canWriteProject={canWriteProject}
+              deploymentPolicy={deploymentPolicy}
+              unsavedLiveChanges={unsavedLiveChanges}
+              onSubmitted={onExpertRSubmitted}
+              setActiveTab={setActiveTab}
+            />
             {manifest.id === DEFAULT_PIPELINE_ID && (
               <SeuratPipelinePanel
                 activeProjectId={activeProjectId}

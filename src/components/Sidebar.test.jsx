@@ -103,7 +103,7 @@ describe('Sidebar component', () => {
       />
     );
 
-    expect(screen.getByRole('button', { name: /Approved workflows, Project selection/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Pipelines, Project selection/i })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: /Collaborators, Project access/i })).not.toBeDisabled();
     expect(screen.queryByText(/Demo only/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Standard scRNA-seq workflow/i)).toBeInTheDocument();

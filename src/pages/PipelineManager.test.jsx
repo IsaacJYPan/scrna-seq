@@ -104,7 +104,7 @@ describe('PipelineManager', () => {
   it('loads the per-project trusted pipeline selection and renders default modules', async () => {
     renderPipelineManager();
 
-    expect(await screen.findByText('Approved workflows')).toBeInTheDocument();
+    expect(await screen.findByText('Pipelines')).toBeInTheDocument();
     expect(screen.getAllByText('Standard scRNA-seq workflow').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Quality Control').length).toBeGreaterThan(0);
     expect(window.electronAPI.getProjectPipelineSelection).toHaveBeenCalledWith('proj_1');
@@ -139,7 +139,7 @@ describe('PipelineManager', () => {
       datasetInfo: { id: 'ao_abc123', projectId: 'proj_1' },
     });
 
-    await screen.findByText('Approved workflows');
+    await screen.findByText('Pipelines');
     expect(window.electronAPI.getProjectPipelineSelection).toHaveBeenCalledWith('proj_2');
   });
 
@@ -148,7 +148,7 @@ describe('PipelineManager', () => {
 
     renderPipelineManager();
 
-    await screen.findByText('Approved workflows');
+    await screen.findByText('Pipelines');
     expect(screen.queryByRole('heading', { name: /Publish Trusted Pipeline Manifest/i })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Manifest JSON')).not.toBeInTheDocument();
     expect(window.electronAPI.getPipelineRegistryCapabilities).not.toHaveBeenCalled();
@@ -298,6 +298,7 @@ describe('PipelineManager', () => {
     const initial = renderPipelineManager({ onPipelineSelectionChanged });
 
     fireEvent.click(await screen.findByRole('button', { name: /Project One B/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use pipeline' }));
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
 
     initial.rerender(<PipelineManager

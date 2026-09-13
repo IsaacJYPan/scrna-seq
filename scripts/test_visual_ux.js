@@ -1219,7 +1219,7 @@ async function main() {
 
   // ── Test 5: Per-Tab Rendering ──────────────────────────────────────────────
   const allTabs = [
-    { id: 'pipeline-manager', label: 'Approved workflows',   requiresData: false },
+    { id: 'pipeline-manager', label: 'Pipelines',   requiresData: false },
     { id: 'branches',      label: 'Analysis Branches',        requiresData: true  },
     { id: 'study-design',  label: 'Study Design',             requiresData: true  },
     { id: 'expert-r',      label: 'Advanced analysis',        requiresData: true  },
@@ -1292,10 +1292,29 @@ async function main() {
         if (tab.id === 'pipeline-manager') {
           const trustedDefinition = page.getByText('Visual Inspection View', { exact: true });
           const trustedDefinitionCount = await trustedDefinition.count();
-          assert('Approved workflows: trusted registry definition visible after navigation',
+          assert('Pipelines: trusted registry definition visible after navigation',
             trustedDefinitionCount === 1 && await trustedDefinition.isVisible());
-          assert('Approved workflows: non-developer publication controls hidden',
+          assert('Pipelines: non-developer publication controls hidden',
             await page.getByRole('heading', { name: 'Publish Trusted Pipeline Manifest', exact: true }).count() === 0);
+          const packageMetadata = JSON.parse(fs.readFileSync(path.join(WORKSPACE, 'examples/pipelines/cell-summary.json'), 'utf8'));
+          const packageSource = fs.readFileSync(path.join(WORKSPACE, 'examples/pipelines/cell-summary.R'), 'utf8');
+          await page.getByLabel('Pipeline package file').setInputFiles({
+            name: 'cell-summary.pipeline.json', mimeType: 'application/json',
+            buffer: Buffer.from(JSON.stringify({ ...packageMetadata, script: packageSource })),
+          });
+          await page.getByRole('button', { name: 'Install version 1.0.0', exact: true }).click();
+          assert('Pipelines: imported R package is installed',
+            await page.getByRole('button', { name: 'Run Cell summary', exact: true }).count() === 1);
+          const downloadPromise = page.waitForEvent('download');
+          await page.getByRole('button', { name: 'Export Cell summary version 1.0.0', exact: true }).click();
+          const download = await downloadPromise;
+          const exported = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
+          assert('Pipelines: export preserves version and executable source',
+            exported.version === packageMetadata.version && exported.script === packageSource);
+          await page.screenshot({ path: path.join(REPORT_DIR, 'pipeline-library.png'), fullPage: true });
+          await page.getByRole('button', { name: 'Remove Cell summary version 1.0.0', exact: true }).click();
+          assert('Pipelines: removing an installed version updates the library',
+            await page.getByRole('button', { name: 'Run Cell summary', exact: true }).count() === 0);
         }
 
         if (tab.id === 'branches') {
@@ -1320,6 +1339,8 @@ async function main() {
         }
 
         if (tab.id === 'explore') {
+          await page.getByRole('heading', { name: 'Exploratory Analysis', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+          await page.screenshot({ path: path.join(REPORT_DIR, 'exploratory-analysis.png'), fullPage: true });
           assert('Exploratory Analysis: guided recipe controls are visible',
             await page.getByRole('button', { name: 'Run recipe', exact: true }).count() === 1);
           assert('Exploratory Analysis: aggregate-only privacy boundary is visible',

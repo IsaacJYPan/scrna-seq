@@ -2,15 +2,7 @@ import js from '@eslint/js';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
 
-// Pragmatic flat config for a mixed CommonJS-backend / ESM-frontend codebase.
-// Goal: catch real errors (undeclared globals, unreachable code, accidental
-// redeclarations) without forcing a stylistic rewrite of the existing app.
-// Cosmetic/unused-vars findings are warnings so `eslint .` stays green (0
-// errors) on the current tree; tighten these as the codebase is cleaned up.
-//
-// Known lint debt (intentionally warnings, not errors):
-//   * no-unused-vars and react-hooks/exhaustive-deps across several pages —
-//     surfaced but non-blocking while the mixed prototype/UI code is cleaned up.
+// Browser modules, CommonJS services, and Node scripts use separate globals.
 export default [
   {
     ignores: [
@@ -25,7 +17,7 @@ export default [
 
   // ── Frontend: ESM + browser (React 19, JSX) ───────────────────────────
   {
-    files: ['src/**/*.{js,jsx}'],
+    files: ['src/**/*.{js,jsx,mjs}'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
@@ -43,6 +35,11 @@ export default [
   },
 
   // ── Backend: CommonJS + node ──────────────────────────────────────────
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: { ecmaVersion: 2022, sourceType: 'module', globals: globals.node },
+    rules: js.configs.recommended.rules,
+  },
   {
     files: ['backend/**/*.js', 'server.js'],
     languageOptions: {
