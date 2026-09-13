@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 const STANDARD_CHUNK_BUDGET = 600_000;
-const PLOTLY_CHUNK_BUDGET = 5_500_000;
+const PLOTLY_CHUNK_BUDGET = 2_800_000;
 
 function enforceChunkBudgets() {
   return {
@@ -10,6 +10,11 @@ function enforceChunkBudgets() {
     generateBundle(_options, bundle) {
       for (const output of Object.values(bundle)) {
         if (output.type !== 'chunk') continue;
+        const mapModule = Object.keys(output.modules).find(id =>
+          /node_modules[\\/](?:maplibre-gl|@plotly[\\/]mapbox-gl)[\\/]/.test(id)
+          && !id.endsWith('.css')
+        );
+        if (mapModule) this.error(`Geographic map code must not enter the scientific chart bundle: ${mapModule}`);
         const isLazyPlotlyRenderer = output.name === 'PlotlyRenderer';
         const budget = isLazyPlotlyRenderer ? PLOTLY_CHUNK_BUDGET : STANDARD_CHUNK_BUDGET;
         if (output.code.length > budget) {
@@ -24,6 +29,8 @@ function enforceChunkBudgets() {
 
 export default defineConfig({
   plugins: [react(), enforceChunkBudgets()],
+  resolve: { alias: { buffer: 'buffer/' } },
+  define: { global: 'globalThis' },
   base: './',
   server: {
     port: 5173,

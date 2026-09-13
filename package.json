@@ -74,10 +74,12 @@
     "lint": "eslint .",
     "check": "npm run test:backend && npm run test:frontend && npm run lint && npm run build",
     "check:ci-preflight": "node scripts/require-test-database.js && npm audit --audit-level=high && npm run lint && npm run test:deployment:compose && npm run test:frontend && npm run build && npm run test:backend && npm run test:tools",
-    "check:browser-preflight": "node scripts/require-test-database.js && npm run build && npm run test:cellchat-browser && node scripts/verify-browser-deployment-flow.js"
+    "check:browser-preflight": "node scripts/require-test-database.js && npm run build && npm run test:plots && npm run test:cellchat-browser && node scripts/verify-browser-deployment-flow.js",
+    "test:plots": "node scripts/verify-plot-rendering.js"
   },
   "dependencies": {
     "@xyflow/react": "^12.10.2",
+    "buffer": "^6.0.3",
     "cors": "^2.8.6",
     "dagre": "^0.8.5",
     "express": "^5.2.1",
@@ -85,16 +87,16 @@
     "lucide-react": "^1.0.1",
     "multer": "^2.1.1",
     "pg": "^8.22.0",
-    "plotly.js-dist-min": "^3.4.0",
+    "plotly.js": "3.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-plotly.js": "^2.6.0",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.2.2",
     "@axe-core/playwright": "^4.11.3",
     "@eslint/js": "^9.39.4",
+    "@tailwindcss/postcss": "^4.2.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@vitejs/plugin-react": "^4.3.0",
@@ -115,5 +117,8 @@
     "vite": "^6.2.0",
     "vitest": "^4.1.7",
     "wait-on": "^8.0.0"
+  },
+  "overrides": {
+    "maplibre-gl": "^6.9.0"
   }
 }

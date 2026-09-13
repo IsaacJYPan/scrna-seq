@@ -1,4 +1,4 @@
 import createPlotlyComponent from 'react-plotly.js/factory';
-import Plotly from 'plotly.js-dist-min';
+import Plotly from './plotlyRuntime';
 
 export default createPlotlyComponent(Plotly);

@@ -70,6 +70,11 @@ export default [
     }
   },
 
+  {
+    files: ['scripts/fixtures/*.js'],
+    languageOptions: { sourceType: 'module' },
+  },
+
   // ── Root build/config files: ESM + node ───────────────────────────────
   {
     files: ['*.config.js', '*.config.mjs', 'desktop/**/*.{js,cjs}'],

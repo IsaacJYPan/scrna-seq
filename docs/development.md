@@ -1,5 +1,25 @@
 # Development
 
+## Scientific chart bundle
+
+`src/components/plotlyRuntime.js` registers the chart types used by the app with
+Plotly core. Keep it on the tested Plotly 3.7 release until a separate upgrade
+validates API changes. The full distributed bundle includes geographic renderers
+that this application does not use.
+
+The npm MapLibre override selects a patched version for Plotly's unused map
+dependency ([advisory](https://github.com/advisories/GHSA-jrc7-96c5-q579)). This does
+not certify compatibility with Plotly's map traces. Vite rejects executable
+MapLibre and Mapbox modules in the output; Plotly's shared CSS remains allowed.
+Remove the override when Plotly declares a patched dependency itself. Adding maps
+requires a separate compatibility review and changes to that build boundary.
+
+Run `npm run test:plots` after changing plotting dependencies. It builds a
+production fixture, renders SVG and WebGL traces in Chromium, checks PNG/SVG
+export and updates, and writes `playwright/report/scientific-charts.png` for
+visual review. The check also runs in browser preflight. Install Chromium first
+with `npx playwright install chromium` (add `--with-deps` on Linux).
+
 ## Running Locally
 
 The local app has four parts:
