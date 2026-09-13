@@ -1,6 +1,6 @@
-.*
 .git
 .github
+.*
 
 .env
 .env.*
@@ -50,6 +50,7 @@ npm-debug.log*
 docs
 deploy
 r-backend
+*.md
 
 **/*.test.js
 **/*.test.jsx

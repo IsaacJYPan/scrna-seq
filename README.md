@@ -624,3 +624,7 @@ cookie behavior, project durability, and Collaborators RBAC. See
 [docs/architecture.md](docs/architecture.md#testing--ci-notes) for what each does
 and does not prove (and which runs in CI).
 
+## Documentation
+
+Keep this README and the relevant files in `docs/` up to date when changing
+behavior, setup instructions, or security boundaries.

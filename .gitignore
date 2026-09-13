@@ -68,9 +68,5 @@ scratch/
 # Generated reference metrics — produced by generate_reference_pbmc3k.R
 scripts/reference_metrics.json
 
-# npm lock file — large, frequently changes, regeneratable with `npm install`
-# Uncomment the next line only if you intentionally omit lock files
-# package-lock.json
-
 # Generated Guides (Beginner Full-Stack Course)
 docs/guide/
