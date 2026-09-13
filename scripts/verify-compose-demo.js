@@ -16,12 +16,14 @@ const project = `traceomics-demo-accept-${process.pid}-${Date.now()}`.toLowerCas
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-demo-acceptance-'));
 const envFile = path.join(tempRoot, 'demo.env');
 const webPort = 39500 + crypto.randomInt(400);
+const freeTier = process.argv.includes('--free-tier');
 
 function secret(bytes) { return crypto.randomBytes(bytes).toString('hex'); }
 
 function environment(templateProjectId) {
   return [
     'FRONTEND_ORIGIN=https://demo.accept.invalid',
+    'PUBLIC_HOST=demo.accept.invalid',
     'APP_DEPLOYMENT_MODE=demo',
     `WEB_PORT=${webPort}`,
     'TRUST_PROXY_HOPS=1',
@@ -74,8 +76,14 @@ fs.writeFileSync(envFile, secrets, { mode: 0o600 });
 
 const composeArgs = [
   'compose', '-p', project, '--env-file', envFile,
-  '-f', composeFile, '-f', demoFile, '-f', demoUiFile,
+  '-f', composeFile, '-f', demoFile,
 ];
+if (freeTier) {
+  const loopbackOnly = path.join(tempRoot, 'loopback-only.json');
+  fs.writeFileSync(loopbackOnly, JSON.stringify({ services: { caddy: { profiles: ['acceptance-https'] } } }));
+  composeArgs.push('-f', path.join(root, 'deploy', 'compose.demo-free-tier.yml'), '-f', loopbackOnly);
+}
+composeArgs.push('-f', demoUiFile);
 
 function runDocker(args, options = {}) {
   const result = spawnSync('docker', args, {
@@ -144,8 +152,8 @@ function assertBootstrap(condition, message) {
 async function main() {
   let keep = process.env.KEEP_ACCEPTANCE_STACK === 'true';
   try {
-    console.log(`[demo] project=${project} webPort=${webPort}`);
-    compose(['build', 'web', 'r'], { capture: true });
+    console.log(`[demo] project=${project} webPort=${webPort} profile=${freeTier ? 'free-tier' : 'standard'}`);
+    compose(['build', 'web', 'r']);
     compose(['up', '-d', '--wait', '--wait-timeout', '240']);
     const template = bootstrapTemplate();
     fs.writeFileSync(envFile, secrets.replace(
@@ -162,6 +170,13 @@ async function main() {
     console.log('[demo] PASS real browser guest checkpoint, UMAP, and exploratory workflow');
     console.log(JSON.stringify(browserAcceptance, null, 2));
     compose(['stop', 'worker', 'worker-compute-1', 'worker-compute-2']);
+    const beforeRestart = inner('snapshot-persistence');
+    compose(['restart', 'postgres', 'r', 'r-compute-1', 'r-compute-2', 'web']);
+    compose(['up', '-d', '--wait', '--wait-timeout', '240']);
+    compose(['stop', 'worker', 'worker-compute-1', 'worker-compute-2']);
+    assertBootstrap(JSON.stringify(inner('snapshot-persistence')) === JSON.stringify(beforeRestart),
+      'Saved demo users, projects, jobs, and artifact checksums must survive service restarts.');
+    console.log('[demo] PASS saved demo data survives service restarts');
     const accepted = inner('accept-demo');
     console.log('[demo] PASS provisioning, private checkpoint copies, origin/rate limits, quotas, and disabled surfaces');
     console.log(JSON.stringify(accepted, null, 2));

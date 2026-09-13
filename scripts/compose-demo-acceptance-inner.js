@@ -273,6 +273,19 @@ async function main() {
   if (action === 'seed-template') await seedTemplate();
   else if (action === 'accept-demo') await acceptDemo();
   else if (action === 'verify-cleanup') await verifyCleanup();
+  else if (action === 'snapshot-persistence') {
+    const users = await db.query('SELECT id FROM users ORDER BY id');
+    const projects = await db.query('SELECT id FROM projects ORDER BY id');
+    const jobs = await db.query('SELECT id, status, result_analysis_object_id FROM jobs ORDER BY id');
+    const artifacts = await db.query(
+      "SELECT id, storage_uri, checksum_sha256 FROM job_artifacts WHERE storage_kind = 'local_internal' ORDER BY id"
+    );
+    for (const artifact of artifacts.rows) {
+      const bytes = fs.readFileSync(path.join(config.storageRoot(), ...artifact.storage_uri.split('/')));
+      assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), artifact.checksum_sha256);
+    }
+    emit({ users: users.rows, projects: projects.rows, jobs: jobs.rows, artifacts: artifacts.rows });
+  }
   else throw new Error(`Unknown acceptance action: ${action}`);
   await db.close();
 }

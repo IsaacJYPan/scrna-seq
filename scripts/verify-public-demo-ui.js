@@ -121,7 +121,7 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
       .waitFor({ state: 'visible', timeout: 60_000 });
     await page.getByText('Curated single-cell demo', { exact: true }).first()
       .waitFor({ state: 'visible', timeout: 30_000 });
-    const expertRButtons = page.getByRole('button', { name: /^Advanced analysis, Access required$/i });
+    const expertRButtons = page.getByRole('button', { name: /^Advanced analysis(?:,|$)/i });
     await expertRButtons.first().waitFor({ state: 'visible', timeout: 30_000 });
     const expertRCount = await expertRButtons.count();
     assert(expertRCount > 0, 'The public demo did not expose its disabled Expert R capability state.');

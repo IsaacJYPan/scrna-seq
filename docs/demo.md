@@ -19,6 +19,27 @@ original target was Ampere; use distinct tags if building for another architectu
 The demo profile is sized for the bundled 800-cell tutorial. Uploaded studies and
 user-authored code are disabled in the public service.
 
+## Verify locally
+
+With Docker running, install the Node dependencies and Playwright browser, then
+run the isolated acceptance check:
+
+```bash
+npm ci
+npx playwright install --with-deps chromium
+npm run test:demo-compose -- --free-tier
+```
+
+The check builds the images, creates a synthetic tutorial, and tests guest access,
+plots, analysis, persistence across service restarts, and expired-guest cleanup.
+It uses temporary configuration and separate Docker volumes, which it removes
+afterward. Omit `--free-tier` to test the standard demo profile.
+
+The constrained check applies the production resource limits but uses a local
+HTTP endpoint in place of Caddy. It does not verify public HTTPS, ARM image builds,
+or performance on the chosen VM. Complete the public browser check below before
+sharing the deployment.
+
 ## Prepare configuration
 
 On the chosen host, clone the repository and install Node.js 22 and Docker
