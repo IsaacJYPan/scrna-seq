@@ -100,10 +100,11 @@ async function main() {
     run(['build', '-f', 'r-backend/Dockerfile', '-t', 'traceomics-r:single-host', 'r-backend']);
     const inspected = run([
       'image', 'inspect', 'traceomics-r:single-host',
-      '--format', '{{index .RepoDigests 0}}',
+      '--format', '{{.Id}}',
     ], { capture: true });
     const rImage = inspected.stdout.trim();
-    assert(/^traceomics-r@sha256:[0-9a-f]{64}$/.test(rImage), 'R sandbox image must be repository-digest pinned', rImage);
+    // Local builds have an immutable image ID even before publication to a registry.
+    assert(/^sha256:[0-9a-f]{64}$/.test(rImage), 'R sandbox image must use an immutable image ID', rImage);
 
     fs.mkdirSync(path.join(storageRoot, 'data'), { recursive: true });
     fs.mkdirSync(workRoot, { recursive: true });

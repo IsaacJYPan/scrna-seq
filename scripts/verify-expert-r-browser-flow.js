@@ -152,7 +152,13 @@ async function newestExpertJob(client, userId) {
       LIMIT 1`,
     [Number(userId)]
   );
-  return result.rows[0] || null;
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    ...row,
+    parameters_json: JSON.parse(row.parameters_json || '{}'),
+    error_json: row.error_json ? JSON.parse(row.error_json) : null,
+  };
 }
 
 async function main() {
@@ -200,11 +206,11 @@ async function main() {
     console.log('[expert-r-browser] building reviewed R sandbox image');
     docker(['build', '-f', 'r-backend/Dockerfile', '-t', 'traceomics-r:single-host', 'r-backend']);
     const inspected = docker([
-      'image', 'inspect', 'traceomics-r:single-host', '--format', '{{index .RepoDigests 0}}',
+      'image', 'inspect', 'traceomics-r:single-host', '--format', '{{.Id}}',
     ], { capture: true });
     const sandboxImage = inspected.stdout.trim();
-    assert(/^traceomics-r@sha256:[0-9a-f]{64}$/.test(sandboxImage),
-      'The browser flow requires a digest-pinned sandbox image', sandboxImage);
+    assert(/^sha256:[0-9a-f]{64}$/.test(sandboxImage),
+      'The browser flow requires an immutable local sandbox image ID', sandboxImage);
 
     await admin.query(`CREATE DATABASE ${quotedDatabase(databaseName)}`);
     databaseCreated = true;
@@ -419,6 +425,44 @@ write_table(summary_table, "object-summary.csv")
     assert(/treated/.test(archive.stdout) && /80/.test(archive.stdout) && /120/.test(archive.stdout),
       'Downloaded output did not contain the browser-imported input and checkpoint-derived summary.');
 
+    const { pipelineRunScript } = await import('../src/pipelines/executablePipeline.mjs');
+    const pipeline = {
+      ...JSON.parse(fs.readFileSync(path.join(ROOT, 'examples/pipelines/cell-summary.json'), 'utf8')),
+      script: fs.readFileSync(path.join(ROOT, 'examples/pipelines/cell-summary.R'), 'utf8'),
+    };
+    await page.getByRole('button', { name: /^Pipelines/ }).click();
+    await page.getByLabel('Pipeline package file').setInputFiles({
+      name: 'cell-summary.pipeline.json', mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify(pipeline)),
+    });
+    await page.getByRole('button', { name: 'Install version 1.0.0', exact: true }).click();
+    assert((await newestExpertJob(appClient, user.id)).id === completedJob.id,
+      'Installing a pipeline must not submit a job.');
+    await page.getByRole('button', { name: 'Run Cell summary', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: 'Pipeline submitted.' }).waitFor({ state: 'visible' });
+    const pipelineJob = await waitFor(async () => {
+      const row = await newestExpertJob(appClient, user.id);
+      if (row?.id && !jobIds.includes(row.id)) jobIds.push(row.id);
+      return row?.id !== completedJob.id && ['completed', 'failed'].includes(row?.status) ? row : null;
+    }, 180000, 500);
+    assert(pipelineJob.status === 'completed', 'Imported pipeline execution failed');
+    const expectedSourceHash = crypto.createHash('sha256').update(pipelineRunScript(pipeline)).digest('hex');
+    assert(pipelineJob.parameters_json.scriptSha256 === expectedSourceHash,
+      'The pipeline run must retain the hash of its exact version and source.');
+    assert(!pipelineJob.parameters_json.script, 'A completed pipeline must erase retained source text.');
+    const pipelineArtifact = await appClient.query(
+      "SELECT storage_uri FROM job_artifacts WHERE job_id = $1 AND artifact_type = 'expert_r_bundle'",
+      [pipelineJob.id]
+    );
+    assert(pipelineArtifact.rows.length === 1, 'The imported pipeline must publish one result bundle.');
+    const pipelineArchive = docker([
+      'run', '--rm', '-v', `${storageRoot}:/storage:ro`, 'alpine:3.21',
+      'tar', '-xOzf', `/storage/${pipelineArtifact.rows[0].storage_uri}`, './cell-summary.csv',
+    ], { capture: true });
+    const summaryValues = pipelineArchive.stdout.trim().split(/\r?\n/).at(-1).split(',').map(Number);
+    assert(summaryValues.length === 2 && summaryValues[0] === 80 && summaryValues[1] === 120,
+      'The imported pipeline must compute cell and feature counts from the saved analysis.');
+
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
     await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
     const privateMarker = `${tempRoot}\\private-marker.txt`;
@@ -463,9 +507,9 @@ write_table(summary_table, "object-summary.csv")
         WHERE owner_user_id = $1 AND object_type = 'generic'`,
       [Number(user.id)]
     );
-    assert(Number(published.rows[0].count) === 1,
-      'Only the successful run should publish one creator-private result object.');
-    console.log('[expert-r-browser] PASS private file import, real sandbox execution, exact download, source erasure, and path-free failure UX');
+    assert(Number(published.rows[0].count) === 2,
+      'Only the two successful runs should publish creator-private result objects.');
+    console.log('[expert-r-browser] PASS private file import, pipeline package execution, exact download, source erasure, and path-free failure UX');
   } catch (error) {
     const diagnostics = [
       readBrokerOutput() && `broker:\n${readBrokerOutput()}`,

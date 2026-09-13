@@ -306,8 +306,8 @@ sets fail closed, and a canceled job cannot retain published output. There
 is no startup file reconciliation or object storage. Byte downloads are limited
 to the reviewed result allowlist and never include checkpoints or arbitrary keys.
 
-R/workflow checks for the hardened, live paths (require a real R/Seurat backend;
-they skip cleanly when Seurat is unavailable):
+R/workflow checks for the live paths (standalone scripts require an installed
+R/Seurat backend; container checks build their own runtime):
 
 ```bash
 npm run test:r-storage
@@ -324,6 +324,14 @@ npm run test:expert-r-sandbox
 npm run test:expert-r-browser
 npm run test:demo-compose
 ```
+
+The Expert R checks require Docker with Linux containers. Their first build
+compiles the scientific packages and can take tens of minutes; later runs reuse
+the cache. They run the local image by its immutable ID, so publishing it to a
+registry is unnecessary. The browser check also requires `DATABASE_URL` with
+permission to create a disposable database. It covers private input import,
+pipeline file installation and execution, exact result downloads, source
+fingerprints and erasure, and safe failed-script messages.
 
 For a release candidate, the manually dispatched **Release Certification**
 workflow runs the expensive private-browser, Expert R, demo, multi-sample,
