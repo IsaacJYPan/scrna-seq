@@ -287,41 +287,6 @@ export default function PipelineManager({
     }
   };
 
-  /* Operator publication stays outside the researcher interface.
-  const publishManifest = async () => {
-    setUploadError(null);
-    setUploadSuccess(null);
-    let parsed;
-    try {
-      parsed = validatePipelineManifest(JSON.parse(uploadText));
-    } catch (validationError) {
-      setUploadError(validationError.message || 'Pipeline manifest is not valid JSON.');
-      return;
-    }
-    const api = window.electronAPI || {};
-    if (!capabilities.canPublishPipelineManifests || !api.publishPipelineRegistryDefinition) {
-      setUploadError('Trusted pipeline publication is not available for this account.');
-      return;
-    }
-    const sequence = ++publishSequenceRef.current;
-    setUploading(true);
-    try {
-      const created = await api.publishPipelineRegistryDefinition(parsed);
-      if (!mountedRef.current || sequence !== publishSequenceRef.current) return;
-      const normalized = normalizeDefinition(created, projectRef.current);
-      if (!normalized) throw new Error('The registry returned an invalid pipeline definition.');
-      setUploadText('');
-      setUploadSuccess(`Published “${normalized.name}” to the trusted registry.`);
-      if (projectRef.current) await loadPipelines(projectRef.current);
-    } catch (requestError) {
-      if (!mountedRef.current || sequence !== publishSequenceRef.current) return;
-      setUploadError(parseApiError(requestError));
-      await loadCapabilities();
-    } finally {
-      if (mountedRef.current && sequence === publishSequenceRef.current) setUploading(false);
-    }
-  };
-  */
 
   return (
     <div className="h-full w-full overflow-y-auto bg-background p-4 custom-scrollbar sm:p-8">
@@ -386,9 +351,6 @@ export default function PipelineManager({
             <section className="space-y-4">
               <div>
                 <h3 className="text-lg font-bold text-text">Available workflows</h3>
-                {/*
-                <p className="mt-1 text-sm text-textMuted">Choose your active pipeline for this project. This does not change another collaborator’s selection or grant access to their live R state.</p>
-                */}
                 <p className="mt-1 text-sm text-textMuted">Choose the workflow you want to use for this project. This does not change another collaborator&apos;s selection or grant access to their private analysis workspace.</p>
               </div>
               {loading && definitions.length === 0 ? (
@@ -429,9 +391,6 @@ export default function PipelineManager({
             <section className="space-y-4">
               <div>
                 <h3 className="text-lg font-bold text-text">Included workflow steps</h3>
-                {/*
-                <p className="mt-1 text-sm text-textMuted">Routes, components, job types, and execution privileges come from the application’s allowlisted registry—not from the manifest.</p>
-                */}
                 <p className="mt-1 text-sm text-textMuted">The available steps and their results are reviewed with the application release.</p>
               </div>
               <PipelineModuleList manifest={manifest} />
@@ -454,71 +413,6 @@ export default function PipelineManager({
           </>
         )}
 
-        {/* Operator publication is intentionally outside the researcher interface.
-        {capabilities.canPublishPipelineManifests ? (
-          <section className="rounded-lg border border-primary/30 bg-surface/60 p-5">
-            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h3 className="flex items-center gap-2 text-lg font-bold text-text">
-                  <ShieldCheck size={18} className="text-primary" />
-                  Publish Trusted Pipeline Manifest
-                </h3>
-                <p className="mt-1 max-w-3xl text-sm text-textMuted">
-                  Platform developer access is managed outside the browser. Publication is global and accepts only allowlisted modules, parameter templates, and result views—never R code, endpoints, paths, packages, URLs, or storage keys.
-                </p>
-              </div>
-              <button onClick={publishManifest} disabled={uploading || loading || Boolean(selectingId) || !uploadText.trim()} className="btn btn-primary inline-flex items-center gap-2 text-sm">
-                {uploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
-                Publish
-              </button>
-            </div>
-            <label className="mb-2 block text-xs font-bold text-text" htmlFor="pipeline-manifest-file">Load JSON manifest file</label>
-            <input
-              id="pipeline-manifest-file"
-              type="file"
-              accept=".json,application/json"
-              onChange={loadManifestFile}
-              className="mb-3 block w-full text-sm text-textMuted file:mr-3 file:rounded file:border file:border-border file:bg-background file:px-3 file:py-1.5 file:text-text"
-            />
-            <label className="mb-2 block text-xs font-bold text-text" htmlFor="pipeline-manifest-json">Manifest JSON</label>
-            <textarea
-              id="pipeline-manifest-json"
-              value={uploadText}
-              onChange={event => { setUploadText(event.target.value); setUploadError(null); setUploadSuccess(null); }}
-              rows={9}
-              className="w-full rounded border border-border bg-background p-3 font-mono text-xs text-text focus:border-primary focus:outline-none"
-              placeholder='{"schemaVersion":1,"id":"trusted-inspection-view","name":"Trusted Inspection View","tabs":[{"id":"inspect","label":"Inspect","moduleKey":"inspectObject"}]}'
-            />
-            {uploadError && <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">{uploadError}</div>}
-            {uploadSuccess && <div className="mt-3 rounded border border-success/30 bg-success/10 px-3 py-2 text-sm text-success" role="status">{uploadSuccess}</div>}
-            <div className="mt-4 grid grid-cols-1 gap-3 text-xs text-textMuted md:grid-cols-2">
-              <div className="rounded border border-border bg-background/60 p-3">
-                <div className="mb-2 flex items-center gap-2 font-bold text-text"><Code2 size={14} /> Parameter templates</div>
-                {PARAMETER_TEMPLATE_TYPES.join(', ')}
-              </div>
-              <div className="rounded border border-border bg-background/60 p-3">
-                <div className="mb-2 flex items-center gap-2 font-bold text-text"><Code2 size={14} /> Result-view templates</div>
-                {RESULT_VIEW_TEMPLATES.join(', ')}
-              </div>
-            </div>
-          </section>
-        ) : (
-          <section className="rounded-lg border border-border bg-surface/40 p-4 text-sm text-textMuted">
-            <div className="flex items-center gap-2 font-bold text-text"><ShieldCheck size={17} className="text-primary" /> Trusted registry</div>
-            <p className="mt-1">
-              {capabilities.loaded
-                ? 'You can select approved manifests, but only an out-of-band platform developer can publish new ones.'
-                : 'Checking trusted registry access…'}
-            </p>
-            {capabilityError && <p className="mt-2 text-xs text-danger">Publisher status unavailable: {capabilityError}</p>}
-            {uploadError && (
-              <p className="mt-2 text-xs text-danger" role="alert">
-                Publication failed: {uploadError}
-              </p>
-            )}
-          </section>
-        )}
-        */}
       </div>
     </div>
   );
