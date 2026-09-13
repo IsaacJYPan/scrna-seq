@@ -493,8 +493,7 @@ async function verifySchemaContract() {
 }
 
 async function initSchema(options = {}) {
-  if (options.force !== true && config.isProduction()
-      && process.env.DATABASE_SCHEMA_MANAGED_EXTERNALLY === 'true') {
+  if (options.force !== true && process.env.DATABASE_SCHEMA_MANAGED_EXTERNALLY === 'true') {
     return verifySchemaContract();
   }
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf8');
