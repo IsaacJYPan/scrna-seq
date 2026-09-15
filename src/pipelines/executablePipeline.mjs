@@ -1,3 +1,5 @@
+import { serializePipeline } from './pipelineSerialization.mjs';
+
 export const MAX_PIPELINE_FILE_BYTES = 48 * 1024;
 export const MAX_INSTALLED_PIPELINES = 20;
 const MAX_RUN_SCRIPT_BYTES = 32 * 1024;
@@ -78,7 +80,7 @@ export function validateExecutablePipeline(value) {
   };
   if (bytes(pipelineRunScript(pipeline)) > MAX_RUN_SCRIPT_BYTES)
     throw new Error('Pipeline script exceeds the 32 KiB run limit.');
-  if (bytes(JSON.stringify(pipeline)) > MAX_PIPELINE_FILE_BYTES)
+  if (bytes(serializePipeline(pipeline)) > MAX_PIPELINE_FILE_BYTES)
     throw new Error('Pipeline file exceeds 48 KiB.');
   return pipeline;
 }

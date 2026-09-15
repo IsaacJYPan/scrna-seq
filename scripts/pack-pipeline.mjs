@@ -2,6 +2,7 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { serializePipeline } from '../src/pipelines/pipelineSerialization.mjs';
 import {
   MAX_PIPELINE_FILE_BYTES,
   validateExecutablePipeline,
@@ -19,7 +20,7 @@ export async function packPipeline(metadataPath, scriptPath, outputPath) {
     ...metadata,
     script: await readFile(scriptPath, 'utf8'),
   });
-  await writeFile(outputPath, `${JSON.stringify(pipeline, null, 2)}\n`, { flag: 'wx' });
+  await writeFile(outputPath, serializePipeline(pipeline), { flag: 'wx' });
   return pipeline;
 }
 

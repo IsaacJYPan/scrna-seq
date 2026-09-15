@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_PIPELINE_FILE_BYTES,
   installPipeline,
   parseExecutablePipeline,
   pipelineRunScript,
   validateExecutablePipeline,
 } from './executablePipeline.mjs';
+import { serializePipeline } from './pipelineSerialization.mjs';
 const { validateExpertRParams } = require('../../backend/expertR');
 
 const pipeline = {
@@ -19,6 +21,20 @@ const pipeline = {
 };
 
 describe('executable pipeline packages', () => {
+  it('round-trips at the file byte limit and rejects formatting overflow', () => {
+    const boundary = { ...pipeline, script: '# é\n' + '\t'.repeat(24000) };
+    const remaining = MAX_PIPELINE_FILE_BYTES - new TextEncoder().encode(serializePipeline(boundary)).length;
+    boundary.script += 'x'.repeat(remaining);
+    const source = serializePipeline(validateExecutablePipeline(boundary));
+    expect(new TextEncoder().encode(source).length).toBe(MAX_PIPELINE_FILE_BYTES);
+    expect(parseExecutablePipeline(source)).toEqual(boundary);
+
+    const oversized = { ...boundary, script: boundary.script + 'x' };
+    expect(new TextEncoder().encode(JSON.stringify(oversized)).length).toBeLessThan(MAX_PIPELINE_FILE_BYTES);
+    expect(() => validateExecutablePipeline(oversized)).toThrow(/48 KiB/);
+    expect(() => parseExecutablePipeline(JSON.stringify(oversized))).toThrow(/48 KiB/);
+  });
+
   it('produces a script accepted by the existing isolated runner with version provenance', () => {
     const installed = parseExecutablePipeline(JSON.stringify(pipeline));
     const script = pipelineRunScript(installed);

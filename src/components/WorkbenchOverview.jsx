@@ -8,8 +8,6 @@ export default function WorkbenchOverview({
   selectedObject,
   activeProjectObjects,
   pipelineState,
-  sessionReady,
-  rSessionId,
   setActiveTab,
   setShowLoadModal,
   onReloadPbmcDemo,
@@ -21,10 +19,10 @@ export default function WorkbenchOverview({
 
   const liveAttached = selectedObject?.liveState === 'attached';
   const liveStatus = !hasObject
-    ? { label: 'Select an analysis', tone: 'slate' }
+    ? 'Select an analysis'
     : liveAttached
-      ? { label: 'Ready in your workspace', tone: 'green' }
-      : { label: 'Open a saved version', tone: sessionReady && rSessionId ? 'amber' : 'slate' };
+      ? 'Ready in your workspace'
+      : 'Open a saved version';
 
   let nextAction = 'Select or create a project.';
   let actionLabel = 'Create Project';
@@ -94,7 +92,7 @@ export default function WorkbenchOverview({
           </h3>
           <p className="mt-1 text-sm text-textMuted">
             {hasObject
-              ? liveStatus.label
+              ? liveStatus
               : `${activeProjectObjects.length} saved analyses in this project`}
           </p>
         </div>

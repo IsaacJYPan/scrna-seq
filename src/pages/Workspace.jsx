@@ -1637,8 +1637,6 @@ export default function Workspace({
   onAnalysisObjectLoadFailed,
   onSelectAnalysisObject,
   pipelineState,
-  sessionReady,
-  rSessionId,
   deploymentPolicy = {},
 }) {
   const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
@@ -1863,8 +1861,6 @@ export default function Workspace({
             selectedObject={selectedObject}
             activeProjectObjects={activeProjectObjects}
             pipelineState={pipelineState}
-            sessionReady={sessionReady}
-            rSessionId={rSessionId}
             setActiveTab={setActiveTab}
             setShowLoadModal={setShowLoadModal}
             onReloadPbmcDemo={canReloadPbmcDemo ? reloadPbmcDemo : undefined}
