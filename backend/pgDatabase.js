@@ -61,7 +61,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20260827;
+const SCHEMA_CONTRACT_VERSION = 20260915;
 
 let pool = null;
 
@@ -726,6 +726,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      workflow_snapshots, workflow_artifacts, workflow_runs, workflow_instances,
       app_schema_contract,
       project_pipeline_selections, pipeline_definitions,
       project_audit_events,

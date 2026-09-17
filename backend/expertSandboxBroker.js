@@ -507,6 +507,15 @@ function createExpertSandboxBroker(env = process.env) {
       for await (const chunk of req) { bytes += chunk.length; if (bytes > 65536) throw new Error('Request too large.'); chunks.push(chunk); }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const validated = validateExpertRParams({ profileId: body.profileId, script: body.script });
+      const workflowOutputs = body.workflowOutputs;
+      if (workflowOutputs !== undefined) {
+        const types = { rds: 'rds', table: 'json', metrics: 'json', scatter: 'json', figure: 'png' };
+        if (!workflowOutputs || typeof workflowOutputs !== 'object' || Array.isArray(workflowOutputs)
+            || Object.keys(workflowOutputs).length < 1 || Object.keys(workflowOutputs).length > 8
+            || Object.entries(workflowOutputs).some(([port, output]) => !/^[a-z][a-z0-9-]{1,39}$/.test(port)
+              || !output || !Object.hasOwn(types, output.type) || output.name !== `${port}.${types[output.type]}`
+              || Object.keys(output).some(key => !['type', 'name'].includes(key)))) throw new Error('Invalid workflow output contract.');
+      }
       const privateInputs = body.privateInputs === undefined ? [] : body.privateInputs;
       const privateInputIds = new Set();
       if (!Array.isArray(privateInputs) || privateInputs.length > MAX_EXPERT_R_INPUTS_PER_RUN
@@ -659,8 +668,24 @@ function createExpertSandboxBroker(env = process.env) {
       containerName = null;
       phase = 'collect';
       const outputs = await collectOutputs(outputDirectory, {
-        forbiddenContentHashes,
+        forbiddenContentHashes: workflowOutputs ? new Set() : forbiddenContentHashes,
       });
+      if (workflowOutputs) {
+        const expected = Object.values(workflowOutputs).map(output => output.name);
+        if (outputs.files.length !== expected.length || outputs.files.some(file => !expected.includes(file.relative))) throw new Error('Workflow did not produce exactly its declared outputs.');
+        const workflowFiles = [];
+        for (const file of outputs.files) {
+          const storageKey = `${body.outputStorageKey}-${file.relative}`;
+          const stored = await provider.putFileFromPath(path.join(outputDirectory, file.relative), storageKey);
+          workflowFiles.push({ name: file.relative, storageKey, sizeBytes: stored.sizeBytes, checksumSha256: stored.checksumSha256 });
+        }
+        if (!res.destroyed) res.end(JSON.stringify({
+          ok: true, saved: true, workflowFiles, scriptSha256: validated.scriptSha256,
+          profileId: EXPERT_R_PROFILE.id, checkpointChecksumSha256,
+          sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION,
+        }));
+        return;
+      }
       phase = 'archive';
       await assertFreeSpace(workRoot, MAX_ARCHIVE_BYTES + minFreeBytes);
       const archive = path.join(jobDirectory, 'expert-r-outputs.tar.gz');

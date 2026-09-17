@@ -1925,6 +1925,10 @@ async function conditionComparisonHandler(ctx) {
 
 async function expertRHandler(ctx) {
   await ctx.heartbeat();
+  if (ctx.runWorkflow) {
+    const workflow = await ctx.runWorkflow(ctx);
+    if (workflow) return workflow;
+  }
   const job = ctx.job;
   const { params, scriptSha256 } = validateExpertRParams(job.parameters, { allowStoredHash: true });
   const ownedObject = await ctx.getOwnedAnalysisObject();
@@ -2416,6 +2420,7 @@ function createJobWorker(options = {}) {
         allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
         logger: log,
         runExpertSandbox: typeof runExpertSandbox === 'function' ? runExpertSandbox : undefined,
+        runWorkflow: workflowCtx => require('./workflowWorker').runWorkflowJob(db, workflowCtx, workerId, claimToken, storageProvider),
         recoveringCompletionReceipt: false,
         ...overrides,
       });
@@ -2760,6 +2765,7 @@ function createJobWorker(options = {}) {
       allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
       logger: log,
       runExpertSandbox: typeof runExpertSandbox === 'function' ? runExpertSandbox : undefined,
+      runWorkflow: workflowCtx => require('./workflowWorker').runWorkflowJob(db, workflowCtx, workerId, claimToken, storageProvider),
     };
 
     let outcome;
@@ -2846,6 +2852,9 @@ function createJobWorker(options = {}) {
 
     // 3. Success → complete through the contract (guarded UPDATE; will not resurrect
     //    a job canceled mid-run — that surfaces as CLAIM_LOST).
+    if (outcome?.workflowCommitted) {
+      return { status: 'completed', jobId, jobType, result: outcome.result, reaped };
+    }
     const completeNow = resolveNowTs();
     const completeOpts = withNow({ log: { level: 'info', message: 'Handler completed.' } }, completeNow);
     if (outcome && typeof outcome === 'object' && outcome.resultAnalysisObjectId) {

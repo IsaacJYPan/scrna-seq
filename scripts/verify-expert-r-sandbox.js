@@ -93,6 +93,47 @@ async function waitForCleanup() {
   throw new Error('Expert R container or job directory was not cleaned up.');
 }
 
+async function verifyWorkflowSteps() {
+  const { packWorkflow } = await import('./pack-workflow.mjs');
+  const stateModel = await import('../shared/workflowState.mjs');
+  const { compileStep, digest } = require('../backend/workflowRuntime');
+  const { validateWorkflowOutput } = require('../backend/workflowOutputs');
+  const provider = require('../backend/storage').createLocalStorageProvider({ root: path.join(storageRoot, 'data') });
+  const workflow = await packWorkflow(path.join(root, 'examples/pipelines/scrna-workflow'), path.join(storageRoot, 'workflow.json'));
+  const outputsById = new Map();
+  let state = stateModel.createWorkflowState({ root: true, id: 'source', type: 'rds', sha256: checkpointChecksumSha256, sizeBytes: checkpointSizeBytes, profileId });
+  for (const step of workflow.steps) {
+    const requestBody = job('');
+    state = stateModel.beginWorkflowRun(workflow, state, { id: requestBody.jobId, stepId: step.id });
+    const compiled = compileStep(workflow, state);
+    requestBody.script = compiled.script;
+    requestBody.outputStorageKey = `projects/${projectId}/artifacts/${requestBody.jobId}/workflow-output`;
+    requestBody.workflowOutputs = compiled.outputs;
+    requestBody.privateInputs = Object.values(state.active.inputs).filter(input => !input.root).map(input => ({
+      id: input.id, originalFilename: `${input.id}.${input.type === 'rds' ? 'rds' : 'json'}`,
+      internalStorageKey: outputsById.get(input.id), sizeBytes: input.sizeBytes, checksumSha256: input.sha256,
+    }));
+    const response = await request(requestBody);
+    assert(response.status === 200 && response.body.saved, `workflow ${step.id} must execute in the real R sandbox`, JSON.stringify(response));
+    const outputs = {};
+    for (const [port, spec] of Object.entries(compiled.outputs)) {
+      const file = response.body.workflowFiles.find(file => file.name === spec.name);
+      assert(file, `workflow output ${step.id}.${port} must exist`);
+      const descriptor = { id: `eri_${crypto.randomBytes(12).toString('hex')}`, type: spec.type, sha256: file.checksumSha256, sizeBytes: file.sizeBytes, profileId };
+      await validateWorkflowOutput(provider, file.storageKey, descriptor);
+      outputs[port] = descriptor; outputsById.set(descriptor.id, file.storageKey);
+    }
+    state = stateModel.commitWorkflowRun(workflow, state, { id: requestBody.jobId, generation: state.generation, outputs, producerKey: digest({ script: compiled.script, image: response.body.sandboxImageDigest }) });
+    console.log(`[workflow] PASS ${step.label}`);
+    await waitForCleanup();
+  }
+  const embedding = state.results.umap.outputs.coordinates;
+  const coordinates = JSON.parse(fs.readFileSync(provider.resolveKey(outputsById.get(embedding.id)), 'utf8'));
+  assert(coordinates.ids.length === 120, 'workflow embedding must retain all 120 synthetic cells');
+  assert(state.results['umap-figure'].outputs.figure.sizeBytes > 1000, 'custom R figure must contain a rendered PNG');
+  console.log('[workflow] PASS isolated step handoff, branching, structured outputs, and custom R plots');
+}
+
 async function main() {
   let failed = false;
   try {
@@ -310,6 +351,7 @@ async function main() {
     assert(aborted.every((result) => result.aborted === true), 'disconnects must abort both sandbox clients');
     await waitForCleanup();
 
+    await verifyWorkflowSteps();
     console.log('[expert-r] PASS digest-pinned execution, private mounts, bounds, capacity, cancellation, and cleanup');
     console.log(JSON.stringify({
       rImage, safeJobId: safe.jobId, outputChecksumSha256: safeResult.body.checksumSha256,

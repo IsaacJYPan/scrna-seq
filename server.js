@@ -1890,6 +1890,7 @@ app.use('/api/organizations', express.json());
 app.use('/api/organizations', requireAuth);
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
+app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 
 // Publishing a trusted pipeline manifest is a platform capability, not a
 // project role. Authenticate before parsing the bounded body so cookie CSRF

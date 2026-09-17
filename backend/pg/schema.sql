@@ -8,8 +8,7 @@
 -- Notes:
 --   * users.id uses GENERATED ALWAYS AS IDENTITY.
 --   * timestamps are TIMESTAMPTZ DEFAULT now().
---   * JSON payload columns stay TEXT (JSON stored as a string); JSONB is a
---     documented future optimization.
+--   * Existing JSON payloads use TEXT. Workflow definitions and state use JSONB.
 --   * one-result-checkpoint-per-job immutability is enforced by a PARTIAL UNIQUE
 --     INDEX.
 --
@@ -24,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20260827, now())
+VALUES ('traceomics.runtime', 20260915, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -706,3 +705,47 @@ DROP TRIGGER IF EXISTS trg_project_audit_no_delete ON project_audit_events;
 CREATE TRIGGER trg_project_audit_no_delete
   BEFORE DELETE ON project_audit_events
   FOR EACH ROW EXECUTE FUNCTION reject_project_audit_mutation();
+
+CREATE TABLE IF NOT EXISTS workflow_instances (
+  id TEXT PRIMARY KEY,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id) ON DELETE CASCADE,
+  package_digest TEXT NOT NULL,
+  package_json JSONB NOT NULL,
+  state_json JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(owner_user_id, project_id, analysis_object_id, package_digest)
+);
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  instance_id TEXT REFERENCES workflow_instances(id) ON DELETE SET NULL,
+  request_id TEXT NOT NULL,
+  step_id TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  output_names_json JSONB NOT NULL DEFAULT '[]',
+  UNIQUE(instance_id, request_id)
+);
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS output_names_json JSONB NOT NULL DEFAULT '[]';
+CREATE TABLE IF NOT EXISTS workflow_artifacts (
+  id TEXT PRIMARY KEY,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  descriptor_json JSONB NOT NULL,
+  storage_key TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS workflow_snapshots (
+  id TEXT PRIMARY KEY,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  package_digest TEXT NOT NULL,
+  package_json JSONB NOT NULL,
+  state_json JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_artifacts_owner ON workflow_artifacts(owner_user_id, project_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_snapshots_owner ON workflow_snapshots(owner_user_id, project_id);
