@@ -1,0 +1,275 @@
+{
+  "format": "traceomics-workflow",
+  "schemaVersion": 1,
+  "id": "scrna-workflow",
+  "name": "Single-cell workflow",
+  "version": "1.0.0",
+  "description": "QC, normalization, PCA, independent neighbors and UMAP branches, and custom R figures.",
+  "runtime": {
+    "language": "r",
+    "profileId": "scrna-r-4.5-bioconductor-3.22-v1"
+  },
+  "steps": [
+    {
+      "id": "qc",
+      "label": "Quality Control",
+      "entry": "steps/qc.R",
+      "inputs": {
+        "analysis": {
+          "from": "input.analysis",
+          "type": "rds"
+        }
+      },
+      "parameters": [
+        {
+          "key": "min-features",
+          "label": "Minimum features",
+          "type": "integer",
+          "default": 20,
+          "min": 0,
+          "max": 100000
+        },
+        {
+          "key": "max-mito",
+          "label": "Maximum mitochondrial percentage",
+          "type": "number",
+          "default": 100,
+          "min": 0,
+          "max": 100
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "label": "Dataset summary"
+        },
+        "distribution": {
+          "type": "figure",
+          "label": "Feature counts"
+        }
+      }
+    },
+    {
+      "id": "normalize",
+      "label": "Normalize",
+      "entry": "steps/normalize.R",
+      "inputs": {
+        "analysis": {
+          "from": "qc.analysis",
+          "type": "rds"
+        }
+      },
+      "parameters": [
+        {
+          "key": "features",
+          "label": "Variable features",
+          "type": "integer",
+          "default": 2000,
+          "min": 20,
+          "max": 10000
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis"
+        }
+      }
+    },
+    {
+      "id": "pca",
+      "label": "PCA",
+      "entry": "steps/pca.R",
+      "inputs": {
+        "analysis": {
+          "from": "normalize.analysis",
+          "type": "rds"
+        }
+      },
+      "parameters": [
+        {
+          "key": "components",
+          "label": "Components",
+          "type": "integer",
+          "default": 15,
+          "min": 2,
+          "max": 100
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis"
+        },
+        "elbow": {
+          "type": "figure",
+          "label": "PCA variance"
+        }
+      }
+    },
+    {
+      "id": "neighbors",
+      "label": "Neighbors",
+      "entry": "steps/neighbors.R",
+      "inputs": {
+        "analysis": {
+          "from": "pca.analysis",
+          "type": "rds"
+        }
+      },
+      "parameters": [
+        {
+          "key": "dimensions",
+          "label": "PCA dimensions",
+          "type": "integer",
+          "default": 15,
+          "min": 2,
+          "max": 100
+        }
+      ],
+      "outputs": {
+        "analysis": {
+          "type": "rds",
+          "label": "Analysis"
+        }
+      }
+    },
+    {
+      "id": "clusters",
+      "label": "Clustering",
+      "entry": "steps/clusters.R",
+      "inputs": {
+        "analysis": {
+          "from": "neighbors.analysis",
+          "type": "rds"
+        }
+      },
+      "parameters": [
+        {
+          "key": "resolution",
+          "label": "Resolution",
+          "type": "number",
+          "default": 0.5,
+          "min": 0.01,
+          "max": 10
+        }
+      ],
+      "outputs": {
+        "labels": {
+          "type": "table",
+          "label": "Cluster assignments"
+        }
+      }
+    },
+    {
+      "id": "umap",
+      "label": "UMAP",
+      "entry": "steps/umap.R",
+      "inputs": {
+        "analysis": {
+          "from": "pca.analysis",
+          "type": "rds"
+        }
+      },
+      "parameters": [
+        {
+          "key": "dimensions",
+          "label": "PCA dimensions",
+          "type": "integer",
+          "default": 15,
+          "min": 2,
+          "max": 100
+        },
+        {
+          "key": "neighbors",
+          "label": "Neighbors",
+          "type": "integer",
+          "default": 30,
+          "min": 2,
+          "max": 200
+        }
+      ],
+      "outputs": {
+        "coordinates": {
+          "type": "scatter",
+          "label": "UMAP embedding"
+        }
+      }
+    },
+    {
+      "id": "umap-figure",
+      "label": "Cluster-colored UMAP",
+      "entry": "steps/umap-figure.R",
+      "inputs": {
+        "coordinates": {
+          "from": "umap.coordinates",
+          "type": "scatter"
+        },
+        "labels": {
+          "from": "clusters.labels",
+          "type": "table"
+        }
+      },
+      "parameters": [
+        {
+          "key": "point-size",
+          "label": "Point size",
+          "type": "number",
+          "default": 0.6,
+          "min": 0.1,
+          "max": 5
+        }
+      ],
+      "outputs": {
+        "figure": {
+          "type": "figure",
+          "label": "UMAP by cluster"
+        }
+      }
+    }
+  ],
+  "tabs": [
+    {
+      "id": "qc",
+      "label": "Quality Control",
+      "step": "qc",
+      "plots": []
+    },
+    {
+      "id": "normalize",
+      "label": "Normalize",
+      "step": "normalize",
+      "plots": []
+    },
+    {
+      "id": "pca",
+      "label": "PCA",
+      "step": "pca",
+      "plots": []
+    },
+    {
+      "id": "neighbors",
+      "label": "Neighbors",
+      "step": "neighbors",
+      "plots": []
+    },
+    {
+      "id": "clusters",
+      "label": "Clustering",
+      "step": "clusters",
+      "plots": []
+    },
+    {
+      "id": "umap",
+      "label": "UMAP",
+      "step": "umap",
+      "plots": [
+        "umap-figure"
+      ]
+    }
+  ]
+}

@@ -23,6 +23,7 @@
     "worker": "node --require ./scripts/enable-job-worker.cjs worker.js",
     "worker:once": "node --require ./scripts/enable-job-worker.cjs worker.js --once",
     "pipeline:pack": "node scripts/pack-pipeline.mjs",
+    "workflow:pack": "node scripts/pack-workflow.mjs",
     "platform-developer": "node scripts/manage-platform-developer.js",
     "expert-r-access": "node scripts/manage-expert-r-access.js",
     "account-admin": "node scripts/account-admin.js",

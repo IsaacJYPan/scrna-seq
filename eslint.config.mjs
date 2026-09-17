@@ -15,7 +15,7 @@ export default [
     ]
   },
 
-  // ── Frontend: ESM + browser (React 19, JSX) ───────────────────────────
+  // React browser modules.
   {
     files: ['src/**/*.{js,jsx,mjs}'],
     languageOptions: {
@@ -34,7 +34,12 @@ export default [
     }
   },
 
-  // ── Backend: CommonJS + node ──────────────────────────────────────────
+  // Shared contracts and server modules.
+  {
+    files: ['shared/**/*.mjs'],
+    languageOptions: { ecmaVersion: 2022, sourceType: 'module', globals: { TextEncoder: 'readonly' } },
+    rules: js.configs.recommended.rules,
+  },
   {
     files: ['scripts/**/*.mjs'],
     languageOptions: { ecmaVersion: 2022, sourceType: 'module', globals: globals.node },
@@ -54,8 +59,7 @@ export default [
     }
   },
 
-  // ── Scripts: node test/automation harnesses that also embed browser code
-  // (e.g. Playwright page.evaluate bodies reference window/document) ──────
+  // Node scripts also contain Playwright callbacks that use browser globals.
   {
     files: ['scripts/**/*.js'],
     languageOptions: {
