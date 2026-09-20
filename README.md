@@ -40,6 +40,8 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
   fork a collaborator's saved analysis into your own workspace.
 - Choose a pipeline from the shared catalog, or import a versioned R pipeline
   and run it through the private isolated runner. See [sharing pipelines](docs/pipelines.md).
+- Install [workflows with their own tabs](docs/workflow-pipelines.md), dependency
+  locks, custom R plots, and explicitly saved workflow snapshots.
 
 Cell annotation, cross-condition CellChat, and publication report generation
 are not yet available. The [architecture guide](docs/architecture.md) distinguishes

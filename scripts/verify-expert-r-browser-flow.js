@@ -463,6 +463,65 @@ write_table(summary_table, "object-summary.csv")
     assert(summaryValues.length === 2 && summaryValues[0] === 80 && summaryValues[1] === 120,
       'The imported pipeline must compute cell and feature counts from the saved analysis.');
 
+    const { packWorkflow } = await import('./pack-workflow.mjs');
+    const workflowPath = path.join(tempRoot, 'scrna-workflow.pipeline.json');
+    await packWorkflow(path.join(ROOT, 'examples/pipelines/scrna-workflow'), workflowPath);
+    await page.getByLabel('Workflow package file').setInputFiles(workflowPath);
+    await page.getByRole('button', { name: 'Install Single-cell workflow', exact: true }).click();
+    await page.getByRole('button', { name: 'Open Single-cell workflow', exact: true }).click();
+    await page.getByRole('heading', { name: 'Single-cell workflow', exact: true, level: 1 }).waitFor();
+    const pcaNavigation = page.getByRole('button', { name: 'PCA', exact: true });
+    assert(await pcaNavigation.getAttribute('aria-disabled') === 'true', 'PCA must start locked');
+    await pcaNavigation.focus();
+    await page.getByRole('tooltip').filter({ hasText: 'Requires Normalize.' }).waitFor({ state: 'visible' });
+    async function runWorkflowStep(label, id) {
+      const before = (await appClient.query('SELECT state_json FROM workflow_instances WHERE owner_user_id=$1', [user.id])).rows[0].state_json.generation;
+      if (id !== 'qc' && id !== 'umap-figure') {
+        const navigation = page.getByRole('button', { name: label, exact: true });
+        await waitFor(async () => await navigation.getAttribute('aria-disabled') !== 'true', 15000, 100);
+        await navigation.click();
+      }
+      await page.getByRole('button', { name: `Run ${label}`, exact: true }).click();
+      await waitFor(async () => {
+        const latest = await newestExpertJob(appClient, user.id);
+        if (latest?.id && !jobIds.includes(latest.id)) jobIds.push(latest.id);
+        const { rows } = await appClient.query('SELECT state_json FROM workflow_instances WHERE owner_user_id=$1', [user.id]);
+        const state = rows[0]?.state_json;
+        if (state?.error) throw new Error(state.error);
+        return state?.results[id] && !state.active && state.generation > before;
+      }, 180000, 500);
+      await page.getByRole('button', { name: `Run ${label}`, exact: true }).waitFor({ state: 'visible' });
+    }
+    for (const [label, id] of [['Quality Control', 'qc'], ['Normalize', 'normalize'], ['PCA', 'pca'], ['Neighbors', 'neighbors'], ['Clustering', 'clusters'], ['UMAP', 'umap'], ['Cluster-colored UMAP', 'umap-figure']]) {
+      await runWorkflowStep(label, id);
+      console.log(`[workflow-browser] PASS ${label}`);
+    }
+    await page.getByRole('img', { name: 'UMAP by cluster', exact: true }).waitFor({ state: 'visible' });
+    await waitFor(async () => await page.locator('.scatterlayer .point').count() === 80, 15000, 100);
+    const screenshotDirectory = path.join(ROOT, 'playwright/report/release-acceptance/workflow');
+    fs.mkdirSync(screenshotDirectory, { recursive: true });
+    await page.screenshot({ path: path.join(screenshotDirectory, 'workflow-umap.png'), fullPage: true });
+    const figure = page.getByRole('img', { name: 'UMAP by cluster', exact: true });
+    await waitFor(async () => figure.evaluate(image => image.complete && image.naturalWidth > 0), 15000, 100);
+    await figure.screenshot({ path: path.join(screenshotDirectory, 'workflow-custom-figure.png') });
+    await page.getByLabel('Snapshot name').fill('Completed workflow');
+    await page.getByRole('button', { name: 'Save workflow', exact: true }).click();
+    await page.getByText('Saved Completed workflow.', { exact: true }).waitFor();
+    assert((await appClient.query('SELECT COUNT(*)::int AS count FROM workflow_snapshots WHERE owner_user_id=$1', [user.id])).rows[0].count === 1, 'Explicit save must create one workflow snapshot.');
+    await pcaNavigation.click();
+    await page.getByLabel('Components', { exact: true }).fill('8');
+    await runWorkflowStep('PCA', 'pca');
+    const resetState = (await appClient.query('SELECT state_json FROM workflow_instances WHERE owner_user_id=$1', [user.id])).rows[0].state_json;
+    assert(!resetState.results.umap && !resetState.results.neighbors && !resetState.results.clusters && !resetState.results['umap-figure'], 'Changed PCA must clear both branches and their figures.');
+    await page.getByText('Saved workflows for this analysis', { exact: true }).click();
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: 'Open', exact: true }).click();
+    await page.getByText('Opened Completed workflow.', { exact: true }).waitFor();
+    assert(await page.getByLabel('Components', { exact: true }).inputValue() === '15', 'Snapshot restore must restore the applied form settings.');
+    await page.getByRole('button', { name: 'UMAP', exact: true }).click();
+    await figure.waitFor({ state: 'visible' });
+    console.log('[workflow-browser] PASS import, locks, figures, rerun invalidation, and snapshot restoration');
+
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
     await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
     const privateMarker = `${tempRoot}\\private-marker.txt`;

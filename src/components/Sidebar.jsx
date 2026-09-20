@@ -1,9 +1,51 @@
 import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2, ChevronDown, ChevronLeft, Database, GitBranch, LayoutPanelTop,
-  Info, LogOut, Menu, Microscope, Moon, Sun, UserRound, Users, Wrench,
+  Info, Lock, LogOut, Menu, Microscope, Moon, Sun, UserRound, Users, Wrench,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
+import { workflowTabAvailability } from '../../shared/workflowState.mjs';
+
+function researcherLabel(value) {
+  if (value === 'Expert R') return 'Advanced analysis';
+  if (/seurat/i.test(String(value || ''))) return 'Standard scRNA-seq workflow';
+  return value;
+}
+
+function NavButton({ item, disabled = false, activeTab, onSelect, figuresCount }) {
+  const Icon = item.icon;
+  const isActive = activeTab === item.id;
+  const isDisabled = disabled || item.disabled;
+  return <button
+    onClick={() => { if (!isDisabled) onSelect(item.id); }}
+    disabled={isDisabled && !item.lockReason}
+    aria-disabled={isDisabled || undefined}
+    aria-describedby={item.lockReason ? `${item.id}-dependency` : undefined}
+    title={item.status || researcherLabel(item.label)}
+    aria-label={item.status ? `${researcherLabel(item.label)}, ${item.status}` : researcherLabel(item.label)}
+    className={`relative w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] font-medium transition-colors group
+      ${isDisabled ? 'cursor-not-allowed' : ''} ${isDisabled && !item.lockReason ? 'opacity-45' : ''}
+      ${isActive ? 'border-primary/30 bg-primary/10 text-text' : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
+  >
+    {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />}
+    <span className="min-w-0 flex-1 truncate text-left">{researcherLabel(item.label)}</span>
+    {item.status && <Info size={13} className="flex-shrink-0 text-textMuted" aria-hidden="true" />}
+    {item.lockReason && <>
+      <Lock size={13} className="flex-shrink-0" aria-hidden="true" />
+      <span id={`${item.id}-dependency`} role="tooltip" className="pointer-events-none absolute inset-x-0 top-full z-30 hidden rounded border border-border bg-surface p-2 text-left text-xs text-text shadow group-hover:block group-focus:block">{item.lockReason}</span>
+    </>}
+    {item.id === 'publication' && figuresCount > 0 && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">{figuresCount}</span>}
+    {item.done && <CheckCircle2 size={14} className="text-success flex-shrink-0" />}
+  </button>;
+}
+
+function SectionLabel({ children }) {
+  return <div className="px-2 mb-1">
+    <h3 className="text-[11px] font-semibold text-textMuted flex items-center gap-1.5">
+      <ChevronDown size={12} className="opacity-70" />{children}
+    </h3>
+  </div>;
+}
 
 export default function Sidebar({
   activeTab,
@@ -15,6 +57,7 @@ export default function Sidebar({
   onLogout,
   pipelineState = {},
   activePipeline = null,
+  activeWorkflow = null,
   theme = 'dark',
   setTheme,
   figuresCount = 0,
@@ -45,61 +88,20 @@ export default function Sidebar({
   // Advanced analysis is a project-scoped, capability-gated workbench. Keep its
   // single entry in the Project section rather than duplicating it in a selected
   // workflow's generated navigation.
-  const pipelineSections = buildPipelineSidebarSections(activePipeline, pipelineState)
+  const pipelineSections = (activeWorkflow ? [{ id: 'workflow', label: activeWorkflow.package.name,
+    items: activeWorkflow.package.tabs.map(tab => {
+      const availability = workflowTabAvailability(activeWorkflow.package, activeWorkflow.state, tab);
+      return { id: `workflow:${tab.id}`, label: tab.label, disabled: !availability.ready, lockReason: availability.reason };
+    }) }] : buildPipelineSidebarSections(activePipeline, pipelineState))
     .map((section) => ({
       ...section,
       items: section.items.filter((item) => item.id !== 'expert-r'),
     }))
     .filter((section) => section.items.length > 0);
-  const researcherLabel = (value) => {
-    if (value === 'Expert R') return 'Advanced analysis';
-    if (/seurat/i.test(String(value || ''))) return 'Standard scRNA-seq workflow';
-    return value;
+  const navProps = {
+    activeTab, figuresCount,
+    onSelect: id => { setActiveTab(id); collapseAfterMobileNavigation(); },
   };
-
-  const NavButton = ({ item, disabled = false }) => {
-    const Icon = item.icon;
-    const isActive = activeTab === item.id;
-    const isDisabled = disabled || item.disabled;
-    return (
-      <button
-        onClick={() => {
-          if (isDisabled) return;
-          setActiveTab(item.id);
-          collapseAfterMobileNavigation();
-        }}
-        disabled={isDisabled}
-        title={item.status || researcherLabel(item.label)}
-        aria-label={item.status ? `${researcherLabel(item.label)}, ${item.status}` : researcherLabel(item.label)}
-        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-[14px] font-medium transition-colors group
-          ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}
-          ${isActive
-            ? 'border-primary/30 bg-primary/10 text-text'
-            : 'border-transparent text-textMuted hover:bg-black/5 hover:text-text'
-          }
-        `}
-      >
-        {Icon && <Icon size={18} className={`${isActive ? 'text-primary' : 'text-slate-400'} group-hover:text-text flex-shrink-0`} />}
-        <span className="min-w-0 flex-1 truncate text-left">{researcherLabel(item.label)}</span>
-        {item.status && <Info size={13} className="flex-shrink-0 text-textMuted" aria-hidden="true" />}
-        {item.id === 'publication' && figuresCount > 0 && (
-          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded text-text bg-blue-500/10 border border-blue-500/20">
-            {figuresCount}
-          </span>
-        )}
-        {item.done && <CheckCircle2 size={14} className="text-success flex-shrink-0" />}
-      </button>
-    );
-  };
-
-  const SectionLabel = ({ children }) => (
-    <div className="px-2 mb-1">
-      <h3 className="text-[11px] font-semibold text-textMuted flex items-center gap-1.5">
-        <ChevronDown size={12} className="opacity-70" />
-        {children}
-      </h3>
-    </div>
-  );
 
   return (
     <div className="flex h-full flex-shrink-0 z-20 relative w-[72px] lg:w-auto">
@@ -168,17 +170,17 @@ export default function Sidebar({
         <div className="flex-1 overflow-y-auto px-2 py-4 space-y-5 custom-scrollbar">
           <div className="space-y-[2px]">
             <SectionLabel>Project</SectionLabel>
-            <NavButton item={{ id: 'workspace', label: 'Analysis workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
-            <NavButton item={{ id: 'pipeline-manager', label: 'Pipelines', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
-            <NavButton item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
-            <NavButton item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
-            <NavButton item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Not enabled for this deployment' }} disabled={!hasProject || deploymentPolicy.expertREnabled !== true} />
-            <NavButton item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'workspace', label: 'Analysis workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
+            <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Not enabled for this deployment' }} disabled={!hasProject || deploymentPolicy.expertREnabled !== true} />
+            <NavButton {...navProps} item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
               <SectionLabel>Data & analysis</SectionLabel>
-              <NavButton item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Analysis lineage' : 'Requires a saved analysis' }} disabled={!hasData} />
-              <NavButton item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
-              <NavButton item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
+              <NavButton {...navProps} item={{ id: 'lineage', label: 'Lineage', icon: GitBranch, status: hasData ? 'Analysis lineage' : 'Requires a saved analysis' }} disabled={!hasData} />
+              <NavButton {...navProps} item={{ id: 'publication', label: 'Figure Gallery', icon: LayoutPanelTop, status: 'Saved figures' }} disabled={!hasData} />
+              <NavButton {...navProps} item={{ id: 'validation', label: 'Validation', icon: LayoutPanelTop }} disabled={!hasData} />
             </div>
           </div>
 
@@ -196,7 +198,7 @@ export default function Sidebar({
                     ? { ...item, status: 'Not configured' }
                     : item;
                 return (
-                  <NavButton
+                  <NavButton {...navProps}
                     key={item.id}
                     item={visibleItem}
                     disabled={blockedLegacyMutation

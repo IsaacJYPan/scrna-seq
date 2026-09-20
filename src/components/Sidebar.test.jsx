@@ -29,11 +29,9 @@ describe('Sidebar component', () => {
       />
     );
 
-    // Look for Quality Control button
     const qcButton = screen.getByRole('button', { name: /Quality Control/i });
     expect(qcButton).toBeDisabled();
 
-    // Look for Cluster button
     const clusterButton = screen.getByRole('button', { name: /Cluster/i });
     expect(clusterButton).toBeDisabled();
   });
@@ -64,8 +62,6 @@ describe('Sidebar component', () => {
       />
     );
 
-    // QC should be enabled since data is loaded (whether done or not, it should be clickable if prev steps done or it's the first step)
-    // Wait, let's verify if QC is enabled. The Sidebar logic might disable it if there are NO objects, but enabled if there are.
     const qcButton = screen.getByRole('button', { name: /Quality Control/i });
     expect(qcButton).not.toBeDisabled();
   });
@@ -83,6 +79,28 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /^CellChat$/i })).not.toBeDisabled();
     expect(screen.queryByRole('button', { name: /Custom Script/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Cell Annotation/i })).not.toBeInTheDocument();
+  });
+
+  it('keeps locked workflow tabs focusable for their prerequisite explanation', () => {
+    const setActiveTab = vi.fn();
+    const activeWorkflow = {
+      package: { name: 'Workflow', tabs: [{ id: 'pca', label: 'PCA', step: 'pca' }], steps: [
+        { id: 'normalize', label: 'Normalize', inputs: {}, outputs: { analysis: { type: 'rds' } } },
+        { id: 'pca', label: 'PCA', inputs: { analysis: { from: 'normalize.analysis', type: 'rds' } } },
+      ] },
+      state: { results: {}, active: null },
+    };
+    const view = render(<Sidebar {...baseProps} selectedObjects={[{ id: 'ao_input' }]} activeWorkflow={activeWorkflow} setActiveTab={setActiveTab} />);
+    const pca = screen.getByRole('button', { name: 'PCA', exact: true });
+    expect(pca).toHaveAttribute('aria-disabled', 'true');
+    expect(pca).not.toBeDisabled();
+    expect(pca).toHaveAccessibleDescription('Requires Normalize.');
+    pca.focus();
+    expect(pca).toHaveFocus();
+    view.rerender(<Sidebar {...baseProps} selectedObjects={[{ id: 'ao_input' }]} activeWorkflow={{ ...activeWorkflow }} setActiveTab={setActiveTab} />);
+    expect(pca).toHaveFocus();
+    fireEvent.click(pca);
+    expect(setActiveTab).not.toHaveBeenCalled();
   });
 
   it('shows pipeline-generated sections and utility pipeline manager entry', () => {

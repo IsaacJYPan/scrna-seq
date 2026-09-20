@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
 import { useProjectPipelineSelection } from './pipelines/useProjectPipelineSelection';
+import { mergeWorkflowUpdate } from './pipelines/workflowApi';
 import {
   consumeSavedObjectSelection,
   hasAttachedLiveRObject,
@@ -58,6 +59,7 @@ const Collaborators = React.lazy(() => import('./pages/Collaborators'));
 const Inspect = React.lazy(() => import('./pages/Inspect'));
 const Diagnostics = React.lazy(() => import('./pages/Diagnostics'));
 const PipelineManager = React.lazy(() => import('./pages/PipelineManager'));
+const WorkflowWorkbench = React.lazy(() => import('./components/WorkflowWorkbench'));
 const ExploratoryAnalysis = React.lazy(() => import('./pages/ExploratoryAnalysis'));
 const AnalysisBranches = React.lazy(() => import('./pages/AnalysisBranches'));
 const StudyDesign = React.lazy(() => import('./pages/StudyDesign'));
@@ -81,8 +83,8 @@ const TAB_TITLES = {
   umap: 'UMAP Embedding', featureplot: 'Feature Plot', heatmap: 'Marker Heatmap',
   dotplot: 'Dot Plot', geneviewer: 'Gene Expression', deg: 'Differential Expression',
   explore: 'Exploratory Analysis',
-  history: 'Runs & Results', annotate: 'Cell Annotation', enrichment: 'Pathway Enrichment',
-  cellchat: 'CellChat', customscript: 'Custom Script', publication: 'Figure Gallery',
+  history: 'Runs & Results', enrichment: 'Pathway Enrichment',
+  cellchat: 'CellChat', publication: 'Figure Gallery',
   validation: 'Validation', diagnostics: 'Technical support',
 };
 
@@ -114,36 +116,6 @@ class ErrorBoundary extends React.Component {
     return this.props.children;
   }
 }
-
-function PlaceholderPage({ title, subtitle, icon }) {
-  return (
-    <div className="h-full flex items-center justify-center p-8 bg-background">
-      <div className="text-center max-w-md">
-        <div className="inline-flex items-center justify-center px-3 py-1.5 rounded border border-border bg-surface text-xs font-bold uppercase tracking-widest text-textMuted mb-6">
-          {icon}
-        </div>
-        <h2 className="text-2xl font-black text-text mb-3 tracking-tight">{title}</h2>
-        <p className="text-slate-400 text-sm leading-relaxed mb-6">{subtitle}</p>
-        <div className="inline-flex items-center gap-2 px-4 py-2 bg-primary/10 border border-primary/20 rounded-full text-[10px] font-black text-primary uppercase tracking-widest">
-          Not production-integrated
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const FUTURE_FEATURES = {
-  annotate: {
-    title: 'Cell Annotation Not Integrated',
-    subtitle: 'Cell annotation is intentionally disabled in this workflow. Any future support must keep biological interpretation reviewable by the researcher.',
-    icon: 'Not implemented'
-  },
-  customscript: {
-    title: 'Custom Script Disabled',
-    subtitle: 'Arbitrary user-provided R execution is out of scope and is not exposed by this local development workbench.',
-    icon: 'Disabled'
-  }
-};
 
 // Lazy-mount tab content. A tab's subtree is not mounted until the tab is first
 // activated; after that it stays mounted (just visually hidden) so per-tab state
@@ -185,6 +157,7 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
+  const [activeWorkflow, setActiveWorkflow] = useState(null);
   const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
   const [deploymentPolicy, setDeploymentPolicy] = useState(CLOSED_DEPLOYMENT_POLICY);
 
@@ -248,7 +221,7 @@ export default function App() {
   // Gate that blocks per-page cache hydration until after the R session
   // identity and selected-object attachment probes complete. Without this
   // gate the pages fire onlyIfCached calls with the wrong (new) session ID
-  // and always miss the SQLite cache.
+  // and miss the saved result cache.
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
 
   const [user, setUser] = useState(null);
@@ -332,8 +305,22 @@ export default function App() {
   const currentWs = workspaces[activeWsIndex];
   const selectedObjects = currentWs.objects.filter(obj => currentWs.selectedObjectIds?.includes(obj.id));
   const datasetInfo = selectedObjects.length > 0 ? selectedObjects[0] : (currentWs.objects[0] || null);
-  const currentProvId = currentWs.branches[currentWs.activeBranch];
   const activeProjectIdForPipeline = currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
+  const workflowContext = React.useMemo(() => ({ active: true, userId: user?.id, projectId: activeProjectIdForPipeline, analysisObjectId: datasetInfo?.id }), [user?.id, activeProjectIdForPipeline, datasetInfo?.id]);
+  useEffect(() => {
+    workflowContext.active = true;
+    return () => { workflowContext.active = false; };
+  }, [workflowContext]);
+  const updateWorkflow = useCallback((instance, { replace = false } = {}) => {
+    if (!workflowContext.active || instance.projectId !== workflowContext.projectId || instance.analysisObjectId !== workflowContext.analysisObjectId) return;
+    setActiveWorkflow(current => mergeWorkflowUpdate(current, instance, replace));
+    if (replace) setActiveTab(current => current.startsWith('workflow:') && !instance.package.tabs.some(tab => current === `workflow:${tab.id}`) ? `workflow:${instance.package.tabs[0].id}` : current);
+  }, [workflowContext]);
+  useEffect(() => {
+    setActiveWorkflow(null);
+    setActiveTab(current => current.startsWith('workflow:') ? 'pipeline-manager' : current);
+  }, [user?.id, activeProjectIdForPipeline, datasetInfo?.id]);
+  const currentProvId = currentWs.branches[currentWs.activeBranch];
   const { activePipeline, handlePipelineSelectionChanged } = useProjectPipelineSelection({
     api: window.electronAPI,
     projectId: activeProjectIdForPipeline,
@@ -1189,6 +1176,11 @@ export default function App() {
 
     return (
       <div className="relative w-full h-full bg-background">
+        {activeWorkflow && activeTab.startsWith('workflow:') && <div className="h-full overflow-auto"><ErrorBoundary key={activeWorkflow.id}>
+          <WorkflowWorkbench instance={activeWorkflow} projectId={activeWorkflow.projectId} activeTab={activeTab}
+            onUpdate={updateWorkflow} enabled={deploymentPolicy.expertREnabled === true}
+            onExit={() => { setActiveWorkflow(null); setActiveTab('pipeline-manager'); }} />
+        </ErrorBoundary></div>}
         <ErrorBoundary key="workspace"><TabContent id="workspace" activeTab={activeTab}>
           <Workspace
             {...props}
@@ -1212,6 +1204,7 @@ export default function App() {
             {...props}
             activePipeline={activePipeline}
             onPipelineSelectionChanged={handlePipelineSelectionChanged}
+            onOpenWorkflow={instance => { if (workflowContext.active) { setActiveWorkflow(instance); setActiveTab(`workflow:${instance.package.tabs[0].id}`); } }}
             setActiveTab={setActiveTab}
             onSelectAnalysisObject={handleSelectAnalysisObject}
           />
@@ -1240,10 +1233,8 @@ export default function App() {
         <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} onLiveObjectAttached={handleLiveObjectAttached} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="annotate"><TabContent id="annotate" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.annotate} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="customscript"><TabContent id="customscript" activeTab={activeTab}><PlaceholderPage {...FUTURE_FEATURES.customscript} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
@@ -1272,6 +1263,7 @@ export default function App() {
         onLogout={handleLogout}
         pipelineState={pipelineState}
         activePipeline={activePipeline}
+        activeWorkflow={activeWorkflow}
         theme={theme}
         setTheme={setTheme}
         figuresCount={figuresCount}

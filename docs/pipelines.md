@@ -52,6 +52,15 @@ supported. The public demo permits package import/export but executes only its
 built-in analyses. Executable packages are limited to 48 KiB, including a run
 script of at most 32 KiB, and each browser account can install 20 versions.
 
+## Pipelines with tabs and dependent steps
+
+Use a workflow package for a pipeline with its own QC, normalization, PCA, or
+other analysis tabs. Each step declares inputs, parameters, R source, and outputs;
+the application supplies simple reusable forms and result viewers. Dependencies
+control the sidebar locks and which results a rerun clears. Explicit saves retain
+whole workflow snapshots. See [authoring and running workflow pipelines](workflow-pipelines.md)
+for the package format and the working single-cell example.
+
 ## Share catalog definitions
 
 **Export definition** downloads a `.definition.json` file describing a composition
@@ -92,7 +101,6 @@ quarantined: they are neither listed nor selectable as trusted definitions, and
 an existing selection that references one safely falls back to the built-in
 pipeline. Stored platform definitions are revalidated before being returned.
 
-Manifest publication does not upload JavaScript, R code, R packages, endpoints,
-or new module implementations, and it is not a generic execution engine. Future
-BYOC arbitrary-R support would require isolated per-job containers or VMs,
-strict input/output mounts, network and secret isolation, and resource quotas.
+Manifest publication composes installed modules. Executable R packages and
+workflow packages use the isolated runner described above and have separate
+import formats and execution permissions.

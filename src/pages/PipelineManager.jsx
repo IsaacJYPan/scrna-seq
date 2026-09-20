@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import PipelineCatalog from '../components/PipelineCatalog';
 import ExecutablePipelines from '../components/ExecutablePipelines';
+import WorkflowLibrary from '../components/WorkflowLibrary';
 import { SeuratPipelinePanel } from './Workspace';
 import {
   DEFAULT_PIPELINE_ID,
@@ -90,6 +91,7 @@ export default function PipelineManager({
   setActiveTab,
   activePipeline,
   onPipelineSelectionChanged,
+  onOpenWorkflow,
   deploymentPolicy = {},
   userEmail,
   userId,
@@ -297,6 +299,10 @@ export default function PipelineManager({
                 : setActiveTab(manifest.tabs[0]?.routeId || 'workspace')}
             />
 
+            <WorkflowLibrary key={`workflow:${userEmail}:${activeProjectId}`}
+              userEmail={userEmail} projectId={activeProjectId} selectedObject={selectedObject}
+              enabled={deploymentPolicy.expertREnabled === true && canWriteProject && Number(selectedObject?.ownerUserId) === Number(userId)}
+              unsavedLiveChanges={unsavedLiveChanges} onOpen={onOpenWorkflow} />
             <ExecutablePipelines
               key={`${userEmail}:${activeProjectId}`}
               userEmail={userEmail}
