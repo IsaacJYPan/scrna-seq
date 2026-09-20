@@ -1,12 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
-// NOTE: the SQLite-era "schema & migration" describe (idempotent additive upgrade
-// of a legacy .sqlite file adding the job_artifacts table via better-sqlite3 +
-// sqlite_master introspection) was removed with the Postgres migration. The
-// Postgres schema (backend/pg/schema.sql) ships job_artifacts from the start, so
-// there is no legacy-file migration path to test. The artifact/checkpoint
-// *behavior* below is the durable contract and is fully retained.
-
 const config = require('./config');
 const dbmod = require('./pgDatabase');
 const {
@@ -27,7 +20,7 @@ const CONFIGURED = config.hasPostgresConnection();
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 const { createJobWorker } = require('./jobWorker');
 
-// Deterministic UTC instants in SQLite's canonical 'YYYY-MM-DD HH:MM:SS' format.
+// Fixed UTC time for job leases and artifact timestamps.
 const T0 = '2030-01-01 00:00:00';
 
 function silentLogger() { return { info() {}, warn() {}, error() {} }; }
