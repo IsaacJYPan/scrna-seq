@@ -3,11 +3,25 @@ node_modules/
 
 # Build output
 dist/
+coverage/
+*.tsbuildinfo
+
+# Local editor settings and caches
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
 
 # R
-r-backend/.Rhistory
-r-backend/.RData
-r-backend/*.Rout
+.Rhistory
+.RData
+*.Rout
+.Rproj.user/
 
 # Data — never commit raw sequencing data or large binary matrices
 data/
@@ -31,6 +45,11 @@ npm-debug.log*
 .env.*
 *.env
 !.env.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
 
 # OS
 .DS_Store
@@ -50,7 +69,11 @@ vault/
 
 # SQLite database files (results cache, user auth) — user-specific
 *.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 *.db
+*.db-*
 
 # R library cache
 r-backend/renv/
@@ -70,5 +93,5 @@ scratch/
 # Generated reference metrics — produced by generate_reference_pbmc3k.R
 scripts/reference_metrics.json
 
-# Generated Guides (Beginner Full-Stack Course)
+# Local documentation output
 docs/guide/

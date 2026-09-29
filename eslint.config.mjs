@@ -9,6 +9,12 @@ export default [
       'dist/**',
       'node_modules/**',
       'coverage/**',
+      'scratch/**',
+      'out/**',
+      'release/**',
+      'playwright/report/**',
+      'playwright-report/**',
+      'test-results/**',
       'r-backend/**',
       'vault/**',
       'data/**'
