@@ -92,7 +92,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-plotly.js": "^2.6.0",
-    "uuid": "^14.0.0"
+    "uuid": "^14.0.2"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.3",
