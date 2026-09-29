@@ -79,7 +79,7 @@
     "test:plots": "node scripts/verify-plot-rendering.js"
   },
   "dependencies": {
-    "@xyflow/react": "^12.10.2",
+    "@xyflow/react": "^12.12.0",
     "buffer": "^6.0.3",
     "cors": "^2.8.6",
     "dagre": "^0.8.5",
