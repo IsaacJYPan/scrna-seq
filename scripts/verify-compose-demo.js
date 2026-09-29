@@ -4,6 +4,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
+const net = require('net');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -15,8 +16,10 @@ const innerFile = path.join(root, 'scripts', 'compose-demo-acceptance-inner.js')
 const project = `traceomics-demo-accept-${process.pid}-${Date.now()}`.toLowerCase();
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-demo-acceptance-'));
 const envFile = path.join(tempRoot, 'demo.env');
-const webPort = 39500 + crypto.randomInt(400);
+let webPort;
 const freeTier = process.argv.includes('--free-tier');
+// Exercise a reviewed prebuilt R image without rebuilding its scientific stack.
+const prebuiltRImage = process.env.DEMO_ACCEPTANCE_R_IMAGE;
 
 function secret(bytes) { return crypto.randomBytes(bytes).toString('hex'); }
 
@@ -41,7 +44,7 @@ function environment(templateProjectId) {
     'SESSION_TTL_SECONDS=7200',
     'APP_IMAGE=traceomics:single-host',
     'OPS_IMAGE=traceomics-operations:single-host',
-    'R_IMAGE=traceomics-r:single-host',
+    `R_IMAGE=${prebuiltRImage || 'traceomics-r:single-host'}`,
     'NAMESPACE_IMAGE=alpine:3.21',
     'POSTGRES_IMAGE=postgres:16-alpine',
     'BACKUP_HOST_PATH=C:/traceomics-demo-accept-backups',
@@ -71,8 +74,7 @@ function environment(templateProjectId) {
   ].join('\n');
 }
 
-const secrets = environment('proj_demoaccept0000000000000000');
-fs.writeFileSync(envFile, secrets, { mode: 0o600 });
+let secrets;
 
 const composeArgs = [
   'compose', '-p', project, '--env-file', envFile,
@@ -136,6 +138,10 @@ function bootstrapTemplate() {
     'demo template R generation'
   );
   assertBootstrap(generated?.synthetic === true && generated?.cells === 800, 'Demo R template is invalid.');
+  if (process.env.DEMO_ACCEPTANCE_PRECOMPUTED === 'true') {
+    assertBootstrap(generated.precomputed === true && /^[a-f0-9]{64}$/.test(generated.checksumSha256),
+      'Demo bootstrap must copy the verified precomputed checkpoint.');
+  }
   const finalized = parseLastJsonLine(
     compose(['exec', '-T', 'web', 'node', 'scripts/bootstrap-demo-template.js', 'finalize'], { capture: true }),
     'demo template finalize'
@@ -152,8 +158,19 @@ function assertBootstrap(condition, message) {
 async function main() {
   let keep = process.env.KEEP_ACCEPTANCE_STACK === 'true';
   try {
+    // Let the OS select a usable port, including on Windows with reserved ranges.
+    webPort = await new Promise((resolve, reject) => {
+      const server = net.createServer();
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const port = server.address().port;
+        server.close((error) => error ? reject(error) : resolve(port));
+      });
+    });
+    secrets = environment('proj_demoaccept0000000000000000');
+    fs.writeFileSync(envFile, secrets, { mode: 0o600 });
     console.log(`[demo] project=${project} webPort=${webPort} profile=${freeTier ? 'free-tier' : 'standard'}`);
-    compose(['build', 'web', 'r']);
+    compose(['build', 'web', ...(prebuiltRImage ? [] : ['r'])]);
     compose(['up', '-d', '--wait', '--wait-timeout', '240']);
     const template = bootstrapTemplate();
     fs.writeFileSync(envFile, secrets.replace(

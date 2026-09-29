@@ -27,7 +27,7 @@ const KEYS = [
   'TRUST_PROXY_HOPS', 'WEB_SHUTDOWN_TIMEOUT_MS', 'WEB_DRAIN_DELAY_MS'
   , 'APP_DEPLOYMENT_MODE', 'DEMO_GUEST_TTL_SECONDS', 'DEMO_TEMPLATE_PROJECT_ID',
   'EXPERT_R_ENABLED', 'EXPERT_R_SANDBOX_URL', 'EXPERT_R_SANDBOX_TOKEN',
-  'DATABASE_SCHEMA_MANAGED_EXTERNALLY'
+  'DATABASE_SCHEMA_MANAGED_EXTERNALLY', 'DEMO_MAX_GLOBAL_HEAVY_JOBS'
 ];
 
 function setValidProduction(overrides = {}) {
@@ -53,6 +53,18 @@ beforeEach(() => {
   process.env.R_API_TOKEN = VALID_R_API_TOKEN;
 });
 afterEach(() => { KEYS.forEach((k) => { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }); });
+
+describe('public demo heavy lane admission', () => {
+  it('preserves two lanes by default and accepts a one-lane deployment', () => {
+    expect(config.demoMaxGlobalHeavyJobs()).toBe(2);
+    process.env.DEMO_MAX_GLOBAL_HEAVY_JOBS = '1';
+    expect(config.demoMaxGlobalHeavyJobs()).toBe(1);
+  });
+  it.each(['0', '3', '1.5', 'NaN', '-1', '1e0'])('rejects an invalid override: %s', (value) => {
+    process.env.DEMO_MAX_GLOBAL_HEAVY_JOBS = value;
+    expect(() => config.demoMaxGlobalHeavyJobs()).toThrow('must be 1 or 2');
+  });
+});
 
 describe('database backend selection', () => {
   it('defaults to postgres with no config', () => {

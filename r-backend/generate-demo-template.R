@@ -2,8 +2,6 @@
 
 suppressPackageStartupMessages({
   library(jsonlite)
-  library(Matrix)
-  library(Seurat)
 })
 
 storage_root <- normalizePath(Sys.getenv("STORAGE_ROOT", unset="/app/storage-volume/data"), mustWork=TRUE)
@@ -30,6 +28,34 @@ if (!startsWith(paste0(parent_check, "/"), paste0(root_check, "/"))) {
   stop("Checkpoint destination escaped the storage root.")
 }
 if (file.exists(destination)) stop("Demo checkpoint already exists; refusing to overwrite it.")
+
+precomputed_dir <- Sys.getenv("DEMO_PRECOMPUTED_DIR", unset="")
+if (nzchar(precomputed_dir)) {
+  manifest <- fromJSON(file.path(precomputed_dir, "manifest.json"))
+  source <- file.path(precomputed_dir, "checkpoint.rds")
+  if (!isTRUE(manifest$synthetic) || manifest$cells != 800L || manifest$features != 200L ||
+      !identical(manifest$rVersion, as.character(getRversion())) ||
+      !identical(manifest$seuratVersion, as.character(packageVersion("Seurat"))) ||
+      file.info(source)$size != manifest$sizeBytes ||
+      !identical(digest::digest(file=source, algo="sha256"), manifest$checksumSha256)) {
+    stop("The precomputed synthetic template failed verification.")
+  }
+  temporary <- paste0(destination, ".tmp-", Sys.getpid())
+  if (!file.copy(source, temporary, overwrite=FALSE)) stop("Could not stage the verified template.")
+  if (!identical(digest::digest(file=temporary, algo="sha256"), manifest$checksumSha256) ||
+      !file.link(temporary, destination)) {
+    unlink(temporary)
+    stop("Could not publish the verified template without overwriting an existing file.")
+  }
+  unlink(temporary)
+  Sys.chmod(destination, mode="0600")
+  cat(toJSON(list(checkpointKey=checkpoint_key, cells=800L, features=200L,
+    reductions=c("pca", "umap"), synthetic=TRUE, precomputed=TRUE,
+    checksumSha256=manifest$checksumSha256), auto_unbox=TRUE), "\n", sep="")
+  quit(save="no", status=0L)
+}
+
+suppressPackageStartupMessages({ library(Matrix); library(Seurat) })
 
 set.seed(20260808)
 marker_symbols <- c(

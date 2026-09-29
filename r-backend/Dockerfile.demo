@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+ARG SCIENTIFIC_BASE=traceomics-r-base:local
+ARG DEMO_BASE_IMAGE=demo-dependencies
+FROM ${SCIENTIFIC_BASE} AS selected-packages
+COPY image-packages.R /tmp/image-packages.R
+RUN --network=none Rscript /tmp/image-packages.R select demo \
+    && mkdir /opt/demo-R \
+    && tar -C /usr/local/lib/R --exclude=site-library -cf - . | tar -C /opt/demo-R -xf -
+
+# Same distribution/ABI as rocker/r-ver:4.5.3, without its compilers and -dev
+# libraries. Build-time offline load checks below catch missing shared libraries.
+FROM ubuntu:24.04 AS demo-dependencies
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    ca-certificates libcurl4t64 libssl3t64 libxml2 libsodium23 libuv1t64 \
+    libfontconfig1 libharfbuzz0b libfribidi0 libpng16-16t64 libtiff6 libjpeg-turbo8 \
+    libgfortran5 libgomp1 libblas3 liblapack3 libreadline8t64 libpcre2-8-0 \
+    liblzma5 libbz2-1.0 libicu74 libcairo2 libpangocairo-1.0-0 libxt6 libglpk40 fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=selected-packages /opt/demo-R /usr/local/lib/R
+COPY --from=selected-packages /opt/demo-library /usr/local/lib/R/site-library
+COPY --from=selected-packages /opt/demo-packages.json /usr/local/share/traceomics/demo-package-audit.json
+RUN ln -s /usr/local/lib/R/bin/R /usr/local/bin/R \
+    && ln -s /usr/local/lib/R/bin/Rscript /usr/local/bin/Rscript
+COPY image-packages.R /tmp/image-packages.R
+RUN --network=none Rscript /tmp/image-packages.R manifest demo && rm /tmp/image-packages.R
+RUN --network=none Rscript -e 'for (format in c("png", "svg")) { p <- tempfile(fileext=paste0(".", format)); if (format == "png") png(p, type="cairo") else svg(p); plot(1:3); dev.off(); stopifnot(file.info(p)$size > 100); unlink(p) }'
+
+# The canonical tutorial is generated once at build time, not at R startup or
+# guest creation. This stage also runs with no network access.
+FROM ${DEMO_BASE_IMAGE} AS demo-artifact
+COPY generate-demo-template.R build-demo-artifact.R /tmp/demo-build/
+RUN --network=none Rscript /tmp/demo-build/build-demo-artifact.R
+
+FROM ${DEMO_BASE_IMAGE} AS runtime
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --gid "${APP_GID}" appuser \
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /usr/sbin/nologin appuser \
+    && install -d -o "${APP_UID}" -g "${APP_GID}" -m 0750 \
+      /app/storage-volume/data /app/vault-volume/vault /work/input /work/output
+WORKDIR /app
+COPY plumber.R run.R generate-demo-template.R sample_data.csv /app/
+COPY --from=demo-artifact /opt/traceomics/demo /opt/traceomics/demo
+ENV HOME=/home/appuser \
+    TRACEOMICS_R_PACKAGE_MANIFEST=/usr/local/share/traceomics/r-packages.json \
+    DEMO_PRECOMPUTED_DIR=/opt/traceomics/demo
+USER appuser
+EXPOSE 8000
+ENTRYPOINT ["Rscript", "run.R"]

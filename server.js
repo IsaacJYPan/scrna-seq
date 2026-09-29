@@ -2450,6 +2450,10 @@ app.patch('/api/projects/:projectId/datasets/:datasetId', async (req, res) => {
 // known member lacking the role, 409 for a non-cancelable (terminal) job, 400 for
 // input validation.
 function sendProjectResourceError(res, e, context) {
+  if (e?.code === 'DEMO_COMPUTE_LIMIT') {
+    res.setHeader('Retry-After', '10');
+    return res.status(429).json({ error: e.message });
+  }
   switch (e.code) {
     case 'EXPERT_R_UNAVAILABLE':
       return res.status(503).json({ error: e.message });
@@ -3237,7 +3241,7 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
           AND job.job_type = ANY($2::text[])`,
         [Number(req.user.id), heavyTypes]
       );
-      if (Number(rows[0]?.guest_active) >= 1 || Number(rows[0]?.global_active) >= 2) {
+      if (Number(rows[0]?.guest_active) >= 1 || Number(rows[0]?.global_active) >= config.demoMaxGlobalHeavyJobs()) {
         res.setHeader('Retry-After', '10');
         return res.status(429).json({
           error: Number(rows[0]?.guest_active) >= 1

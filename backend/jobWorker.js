@@ -112,6 +112,7 @@ const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   CELLCHAT_ASSAY_UNAVAILABLE: 'CellChat requires an RNA assay in the saved analysis.',
   CELLCHAT_NORMALIZED_DATA_REQUIRED: 'CellChat requires normalized RNA data. Run normalization and try again.',
   CELLCHAT_DATABASE_OVERLAP_LOW: 'Too few signaling genes overlap the selected CellChat database. Check the species and RNA assay.',
+  CELLCHAT_NO_ELIGIBLE_INTERACTIONS: 'No eligible ligand-receptor pairs remain for this input and database. No communication result was calculated.',
   CELLCHAT_INPUT_INVALID: 'CellChat could not construct a valid input. Review the grouping, assay, species, and saved analysis.',
   ENRICHMENT_PACKAGES_UNAVAILABLE: 'Pathway enrichment is unavailable in the current compute profile. Ask an operator to install the approved enrichment package profile.',
 });

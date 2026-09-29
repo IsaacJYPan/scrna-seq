@@ -1,5 +1,8 @@
 **
 !Dockerfile
+!Dockerfile.demo
+!image-packages.R
+!build-demo-artifact.R
 !install-r-packages.sh
 !plumber.R
 !run.R

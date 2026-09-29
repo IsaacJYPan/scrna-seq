@@ -239,7 +239,8 @@ describe('cellchat.infer.v1 bridge contract', () => {
     expect(descriptor.summary.retainedPathwayCount).toBe(7);
   });
 
-  it('preserves an allowlisted R 400 reason code without exposing the raw response', async () => {
+  it.each(['CELLCHAT_MIN_GROUP_CELLS', 'CELLCHAT_NO_ELIGIBLE_INTERACTIONS'])(
+    'preserves R 400 reason %s without exposing the raw response', async (reason) => {
     await expect(runRBridgeOperation({
       job: job(),
       operation: 'r.cellchat.infer.v1',
@@ -253,14 +254,14 @@ describe('cellchat.infer.v1 bridge contract', () => {
         status: 400,
         body: {
           error: 'private runtime detail at C:\\private\\cellchat.R',
-          code: 'CELLCHAT_MIN_GROUP_CELLS',
+          code: reason,
         },
       }),
       logger: { info() {}, warn() {}, error() {} },
     })).rejects.toMatchObject({
       code: 'R_CELLCHAT_INFERENCE_FAILED',
       rStatus: 400,
-      rCode: 'CELLCHAT_MIN_GROUP_CELLS',
+      rCode: reason,
       message: 'R cell-communication inference run failed.',
     });
   });

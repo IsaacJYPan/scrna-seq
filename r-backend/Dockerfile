@@ -1,4 +1,6 @@
-FROM rocker/r-ver:4.5.3
+# syntax=docker/dockerfile:1.7
+ARG R_BASE_IMAGE=scientific-base
+FROM rocker/r-ver:4.5.3 AS scientific-base
 
 ARG APP_UID=10001
 ARG APP_GID=10001
@@ -94,12 +96,22 @@ RUN if [ "$INSTALL_OPTIONAL_R_PACKAGES" = "true" ]; then \
       echo "Skipping optional SeuratDisk package. Set INSTALL_OPTIONAL_R_PACKAGES=true to include it."; \
     fi
 
+COPY image-packages.R /tmp/image-packages.R
+RUN --network=none Rscript /tmp/image-packages.R manifest private \
+    && rm -f /tmp/image-packages.R /usr/local/bin/install-r-packages /root/.R/Makevars
+
+# A registry digest supplied by build-r-images.py skips the scientific build
+# entirely. The default keeps existing local/private Compose builds functional.
+FROM ${R_BASE_IMAGE} AS runtime
+ARG APP_UID=10001
+ARG APP_GID=10001
+
 # Copy only the runtime files admitted by r-backend/.dockerignore. Application
 # code remains root-owned; the unprivileged runtime may write only to the
 # explicitly created storage roots (which are replaced by persistent volumes in
 # the supported deployment topology).
 WORKDIR /app
-COPY . /app/
+COPY plumber.R run.R expert-runner.R generate-demo-template.R sample_data.csv /app/
 
 RUN rm -f /usr/local/bin/install-r-packages /root/.R/Makevars /app/install-r-packages.sh \
     && groupadd --gid "${APP_GID}" appuser \
@@ -111,7 +123,8 @@ RUN rm -f /usr/local/bin/install-r-packages /root/.R/Makevars /app/install-r-pac
     && install -d -o "${APP_UID}" -g "${APP_GID}" -m 0755 \
       /work /work/input /work/output
 
-ENV HOME=/home/appuser
+ENV HOME=/home/appuser \
+    TRACEOMICS_R_PACKAGE_MANIFEST=/usr/local/share/traceomics/r-packages.json
 USER appuser
 
 # Expose the Plumber port

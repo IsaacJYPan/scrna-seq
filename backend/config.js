@@ -262,6 +262,13 @@ function demoGuestTtlSeconds() {
   return positiveIntFromEnv(process.env.DEMO_GUEST_TTL_SECONDS, 2 * 60 * 60);
 }
 
+function demoMaxGlobalHeavyJobs() {
+  const raw = trimmed(process.env.DEMO_MAX_GLOBAL_HEAVY_JOBS);
+  if (!raw) return 2;
+  if (!/^[12]$/.test(raw)) throw new Error('DEMO_MAX_GLOBAL_HEAVY_JOBS must be 1 or 2.');
+  return Number(raw);
+}
+
 function demoTemplateProjectId() {
   return trimmed(process.env.DEMO_TEMPLATE_PROJECT_ID);
 }
@@ -653,6 +660,7 @@ function validateProductionConfig(options = {}) {
     }
   }
   if (demoMode()) {
+    try { demoMaxGlobalHeavyJobs(); } catch (error) { errors.push(error.message); }
     if (process.env.EXPERT_R_ENABLED === 'true') {
       errors.push('EXPERT_R_ENABLED must be false in public demo mode.');
     }
@@ -670,6 +678,7 @@ function validateProductionConfig(options = {}) {
 }
 
 module.exports = {
+  demoMaxGlobalHeavyJobs,
   positiveIntFromEnv,
   isValidPositiveIntOverride,
   nodeEnv,

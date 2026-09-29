@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const { derivedAnalysisDisplayName } = require('./analysisDisplayName');
 
 const config = require('./config');
+const { admitDemoJob } = require('./demoJobAdmission');
 const storage = require('./storage');
 const passwords = require('./passwords');
 const {
@@ -3139,24 +3140,26 @@ async function createJob(ownerUserId, input = {}) {
     datasetId = String(input.datasetId);
   }
   const id = genId('job');
-  const { rows } = await query(
-    `INSERT INTO jobs
-       (id, owner_user_id, project_id, analysis_object_id, dataset_id, job_type,
-        status, parameters_json, max_attempts)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING *`,
-    [
-      id, owner,
-      input.projectId != null ? String(input.projectId) : null,
-      analysisObjectId,
-      datasetId,
-      jobType,
-      INITIAL_JOB_STATUS,
-      JSON.stringify(parameters),
-      maxAttemptsForJobType(jobType, input.projectId)
-    ]
-  );
-  return rowToJob(rows[0]);
+  return admitDemoJob(await connect(), owner, jobType, async (client) => {
+    const { rows } = await (client ? client.query.bind(client) : query)(
+      `INSERT INTO jobs
+         (id, owner_user_id, project_id, analysis_object_id, dataset_id, job_type,
+          status, parameters_json, max_attempts)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        id, owner,
+        input.projectId != null ? String(input.projectId) : null,
+        analysisObjectId,
+        datasetId,
+        jobType,
+        INITIAL_JOB_STATUS,
+        JSON.stringify(parameters),
+        maxAttemptsForJobType(jobType, input.projectId)
+      ]
+    );
+    return rowToJob(rows[0]);
+  });
 }
 
 const createJobForUser = createJob;
@@ -3519,16 +3522,18 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
     throw codedError('ANALYSIS_OBJECT_NOT_FOUND', 'Analysis object not found.');
   }
   const id = genId('job');
-  const { rows } = await query(
-    `INSERT INTO jobs
-       (id, owner_user_id, project_id, retry_of_job_id, analysis_object_id,
-        result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     RETURNING *`,
-    [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
-      jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
-  );
-  return rowToJob(rows[0]);
+  return admitDemoJob(await connect(), owner, jobType, async (client) => {
+    const { rows } = await (client ? client.query.bind(client) : query)(
+      `INSERT INTO jobs
+         (id, owner_user_id, project_id, retry_of_job_id, analysis_object_id,
+          result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
+        jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
+    );
+    return rowToJob(rows[0]);
+  });
 }
 
 async function createProjectJob(userId, projectId, input = {}) {

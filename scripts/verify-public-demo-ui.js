@@ -199,7 +199,9 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
 
     assert(diagnostics.pageErrors.length === 0, `Page errors: ${diagnostics.pageErrors.join(' | ')}`);
     const expectedGeneric401 = diagnostics.consoleErrors.filter(message => (
-      /Failed to load resource: the server responded with a status of 401 \(Unauthorized\)/i.test(message)
+      // HTTP/2 omits the HTTP/1.1 reason phrase. Match either browser spelling;
+      // response diagnostics still require the exact expected session URL.
+      /Failed to load resource: the server responded with a status of 401 \((?:Unauthorized)?\)/i.test(message)
     ));
     const unexpectedConsoleErrors = diagnostics.consoleErrors.filter(message => !expectedGeneric401.includes(message));
     assert(expectedGeneric401.length <= diagnostics.expectedSession401.length,

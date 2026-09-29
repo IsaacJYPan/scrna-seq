@@ -8,6 +8,37 @@ library(dplyr)
 library(Matrix)
 library(ggplot2)
 
+# Container builds verify these namespaces offline and record their versions in
+# a root-owned manifest. Health probes need not load every optional analysis
+# stack into every interactive R process. Local/source deployments retain the
+# original loadability check; actual analysis handlers still load their packages.
+runtime_package_available <- local({
+  manifest <- NULL
+  checked <- new.env(parent=emptyenv())
+  function(pkg) {
+    manifest_path <- Sys.getenv("TRACEOMICS_R_PACKAGE_MANIFEST", unset="")
+    if (!nzchar(manifest_path)) return(requireNamespace(pkg, quietly=TRUE))
+    if (exists(pkg, envir=checked, inherits=FALSE)) return(checked[[pkg]])
+    if (is.null(manifest)) {
+      manifest <<- jsonlite::fromJSON(manifest_path, simplifyVector=FALSE)
+      if (!identical(manifest$schemaVersion, 1L) ||
+          !identical(manifest$rVersion, as.character(getRversion()))) {
+        stop("The image package manifest does not match this R runtime.")
+      }
+    }
+    entry <- manifest$packages[[pkg]]
+    available <- !is.null(entry) && isTRUE(entry$loadable)
+    if (available) {
+      installed_version <- tryCatch(as.character(utils::packageVersion(pkg)), error=function(e) NULL)
+      if (!identical(installed_version, entry$version)) {
+        stop("The image package manifest does not match its installed packages.")
+      }
+    }
+    checked[[pkg]] <- available
+    available
+  }
+})
+
 # ── Session ID ────────────────────────────────────────────────────
 # Generated fresh on every R process start. Used by the frontend to
 # detect restarts so cached pipeline steps are re-executed in R.
@@ -717,9 +748,7 @@ function(req, res) {
 #* Health check
 #* @get /health
 function(res) {
-  package_available <- function(pkg) {
-    requireNamespace(pkg, quietly = TRUE)
-  }
+  package_available <- runtime_package_available
   list(
     status = "ok",
     timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
@@ -1095,8 +1124,8 @@ function(req, res) {
     storage_shared = shared,
     runtime_session_id = if (shared) r_runtime_instance_id else NULL,
     capabilities = list(
-      pathway_enrichment = all(vapply(enrichment_packages, requireNamespace, logical(1), quietly = TRUE)),
-      cellchat = all(vapply(c("CellChat", "NMF"), requireNamespace, logical(1), quietly = TRUE))
+      pathway_enrichment = all(vapply(enrichment_packages, runtime_package_available, logical(1))),
+      cellchat = all(vapply(c("CellChat", "NMF"), runtime_package_available, logical(1)))
     )
   )
 }
@@ -4224,6 +4253,16 @@ run_cellchat_inference_analysis <- function(input_obj, p) {
     min.cells = p$min_cells_per_group
   ))
   cellchat <- with_cellchat_warnings(CellChat::identifyOverExpressedInteractions(cellchat))
+  # CellChat 2.1.2 indexes a missing probability dimension when no complete
+  # ligand-receptor pairs survive selection. Reject this input before compute
+  # or any result write; a deterministic input rejection must not become an
+  # indeterminate server failure that keeps a durable job in recovery.
+  if (is.null(cellchat@LR$LRsig) || nrow(cellchat@LR$LRsig) == 0L) {
+    cellchat_inference_input_error(
+      "No eligible ligand receptor pairs remain in the selected database and input.",
+      "CELLCHAT_NO_ELIGIBLE_INTERACTIONS"
+    )
+  }
   cellchat <- with_cellchat_warnings(CellChat::computeCommunProb(
     cellchat,
     # `data_input` is the normalized Seurat RNA layer. `raw.use = TRUE` tells
