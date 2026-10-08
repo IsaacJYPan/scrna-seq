@@ -95,3 +95,16 @@ scripts/reference_metrics.json
 
 # Local documentation output
 docs/guide/
+
+# Local development notes and planning
+/docs/architecture.md
+/docs/development.md
+/docs/*backlog*.md
+/docs/*roadmap*.md
+/docs/*review*.md
+/docs/*plan*.md
+!/docs/pipelines.md
+!/docs/workflow-pipelines.md
+/docs/development/
+/docs/internal/
+/docs/plans/

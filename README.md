@@ -8,8 +8,9 @@ inputs, parameters, and history.
 ## Run locally
 
 You need Node.js 22.15–24, Docker Desktop with Linux containers running, and R
-with the analysis packages installed. The release image uses R 4.5.3. See the
-[development guide](docs/development.md#check-the-local-r-installation) for R setup.
+with the analysis packages installed. The release image uses R 4.5.3; its
+required packages are listed in [the R image definition](r-backend/Dockerfile).
+For a containerized installation, use the [deployment guide](docs/deployment.md).
 
 From PowerShell:
 
@@ -44,8 +45,8 @@ with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
   locks, custom R plots, and explicitly saved workflow snapshots.
 
 Cell annotation, cross-condition CellChat, and publication report generation
-are not yet available. The [architecture guide](docs/architecture.md) distinguishes
-working browser features from backend-only functionality.
+are not yet available. See [analysis workflows](docs/analysis-workflows.md) for
+the supported methods and their interpretation.
 
 ## Project structure
 
@@ -69,8 +70,8 @@ npm run test:unit
 npm run build
 ```
 
-Backend tests reset their database. Use a separate test database as described in
-[testing](docs/development.md#testing-without-erasing-your-development-data).
+Backend tests reset their database. Set `DATABASE_URL` to a separate PostgreSQL
+database reserved for tests before running `npm run test:backend`.
 `npm run test:visual:smoke` checks browser layout and interactions with simulated
 API responses. `npm run test:deployment:browser` uses a real API and PostgreSQL
 with a deterministic R test service.
@@ -91,8 +92,6 @@ R session.
 
 ## Further reading
 
-- [Development and testing](docs/development.md)
-- [Architecture and feature status](docs/architecture.md)
 - [Analysis workflows and interpretation](docs/analysis-workflows.md)
 - [Pipeline registry](docs/pipelines.md)
 - [Student demo setup](docs/demo.md)
