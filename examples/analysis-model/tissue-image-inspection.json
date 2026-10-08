@@ -1,0 +1,440 @@
+{
+  "caseId": "tissue-image-inspection",
+  "illustrative": true,
+  "description": "Full-resolution image stays an input reference. A bounded preview retains its physical coordinate transform; the human selection creates an annotation artifact with evidence.",
+  "recipe": {
+    "format": "traceomics-workflow",
+    "schemaVersion": 2,
+    "id": "lab.tissue-inspection",
+    "name": "Tissue inspection",
+    "version": "1.0.0",
+    "description": "Bounded preview followed by an explicit human decision; no full image is embedded in the recipe.",
+    "inputs": {
+      "image": {
+        "type": "image",
+        "cardinality": "one",
+        "format": {
+          "id": "org.ome.tiff",
+          "version": "1",
+          "metadata": {
+            "org.ome:coordinate-unit": "micrometer"
+          }
+        }
+      }
+    },
+    "outputs": {},
+    "environments": {
+      "image": {
+        "profileId": "image-preview-v1",
+        "runtime": {
+          "language": "tool"
+        },
+        "version": "1",
+        "digest": "ec8e4e4b6354fc4c679de0bb115d85318f3f8dd81f0bb81afd879ab7b12854f6"
+      }
+    },
+    "files": {
+      "tools/preview.json": "{\"maximumWidth\":1024,\"retainCoordinateTransform\":true}"
+    },
+    "steps": [
+      {
+        "id": "preview-image",
+        "label": "Inspect tissue preview",
+        "operation": {
+          "kind": "tool",
+          "adapter": "image-preview-v1",
+          "entry": "tools/preview.json",
+          "helpers": [],
+          "arguments": [
+            "--max-width",
+            "1024"
+          ]
+        },
+        "inputs": {
+          "image": {
+            "type": "image",
+            "cardinality": "one",
+            "format": {
+              "id": "org.ome.tiff",
+              "version": "1",
+              "metadata": {
+                "org.ome:coordinate-unit": "micrometer"
+              }
+            }
+          }
+        },
+        "bindings": {
+          "image": {
+            "kind": "input",
+            "port": "image"
+          }
+        },
+        "outputs": {
+          "preview": {
+            "type": "image",
+            "cardinality": "one",
+            "format": {
+              "id": "org.w3.png",
+              "version": "1"
+            }
+          }
+        },
+        "parameters": {},
+        "environment": "image",
+        "ui": {
+          "results": [
+            "preview"
+          ]
+        }
+      },
+      {
+        "id": "mark-region",
+        "label": "Record inspected region",
+        "operation": {
+          "kind": "human",
+          "action": "region-selection",
+          "instructions": "Record polygon coordinates in source image units, scale transform, and inspection notes."
+        },
+        "inputs": {
+          "image": {
+            "type": "image",
+            "cardinality": "one",
+            "format": {
+              "id": "org.ome.tiff",
+              "version": "1",
+              "metadata": {
+                "org.ome:coordinate-unit": "micrometer"
+              }
+            }
+          },
+          "preview": {
+            "type": "image",
+            "cardinality": "one",
+            "format": {
+              "id": "org.w3.png",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "image": {
+            "kind": "input",
+            "port": "image"
+          },
+          "preview": {
+            "kind": "step",
+            "step": "preview-image",
+            "port": "preview"
+          }
+        },
+        "outputs": {
+          "region": {
+            "type": "annotation",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.image-annotation",
+              "version": "1"
+            }
+          }
+        },
+        "parameters": {},
+        "environment": null,
+        "ui": {
+          "results": [
+            "region"
+          ]
+        }
+      }
+    ]
+  },
+  "artifactVersions": [
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "tissue-image-inspection-input-image",
+      "versionId": "tissue-image-inspection-input-image-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "image",
+      "format": {
+        "id": "org.ome.tiff",
+        "version": "1",
+        "metadata": {
+          "org.ome:coordinate-unit": "micrometer",
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "96bd8143d0fad8e44892ecc925931939664e7fdb93a597da5e5712076b340782",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-0",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "tissue-image-inspection-preview-image-preview",
+      "versionId": "tissue-image-inspection-preview-image-preview-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "image",
+      "format": {
+        "id": "org.w3.png",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "e94503638bafaac4af0a9fa92871576895eff1fd2b3d5f21cd57c5ae5d274a0c",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-1",
+      "sourceRunId": "tissue-image-inspection-preview-image-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "tissue-image-inspection-mark-region-region",
+      "versionId": "tissue-image-inspection-mark-region-region-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "annotation",
+      "format": {
+        "id": "org.traceomics.image-annotation",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "bc2754506f36edd03476d8ea379649b711f8c9bae2eeb0a115dcf6a1dcf0feeb",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-2",
+      "sourceRunId": "tissue-image-inspection-mark-region-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    }
+  ],
+  "operationVersions": [
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "lab.tissue-inspection.preview-image",
+      "version": "1.0.0",
+      "digest": "c967efdb093bd0efe40efa00c8269739cc01b7b51084b51623ac5c33f5a6fd69",
+      "method": {
+        "kind": "tool",
+        "adapter": "image-preview-v1",
+        "entry": "tools/preview.json",
+        "helpers": [],
+        "arguments": [
+          "--max-width",
+          "1024"
+        ]
+      },
+      "inputs": {
+        "image": {
+          "type": "image",
+          "cardinality": "one",
+          "format": {
+            "id": "org.ome.tiff",
+            "version": "1",
+            "metadata": {
+              "org.ome:coordinate-unit": "micrometer"
+            }
+          }
+        }
+      },
+      "outputs": {
+        "preview": {
+          "type": "image",
+          "cardinality": "one",
+          "format": {
+            "id": "org.w3.png",
+            "version": "1"
+          }
+        }
+      },
+      "parameters": {},
+      "environment": {
+        "id": "image-preview-v1",
+        "version": "1",
+        "digest": "ec8e4e4b6354fc4c679de0bb115d85318f3f8dd81f0bb81afd879ab7b12854f6"
+      }
+    },
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "lab.tissue-inspection.mark-region",
+      "version": "1.0.0",
+      "digest": "1dd561c76df5d98c762f9a86ce3927b97dba0c412081c7d851a064de1f8d012e",
+      "method": {
+        "kind": "human",
+        "action": "region-selection",
+        "instructions": "Record polygon coordinates in source image units, scale transform, and inspection notes."
+      },
+      "inputs": {
+        "image": {
+          "type": "image",
+          "cardinality": "one",
+          "format": {
+            "id": "org.ome.tiff",
+            "version": "1",
+            "metadata": {
+              "org.ome:coordinate-unit": "micrometer"
+            }
+          }
+        },
+        "preview": {
+          "type": "image",
+          "cardinality": "one",
+          "format": {
+            "id": "org.w3.png",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "region": {
+          "type": "annotation",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.image-annotation",
+            "version": "1"
+          }
+        }
+      },
+      "parameters": {},
+      "environment": null
+    }
+  ],
+  "runs": [
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "tissue-image-inspection-preview-image-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "lab.tissue-inspection.preview-image",
+        "version": "1.0.0",
+        "digest": "c967efdb093bd0efe40efa00c8269739cc01b7b51084b51623ac5c33f5a6fd69"
+      },
+      "recipe": {
+        "id": "lab.tissue-inspection",
+        "version": "1.0.0",
+        "digest": "ca53ad6e127ca3168015687d7d7300559112075cdff11d0bf83bdd1a598bd84b"
+      },
+      "inputs": {
+        "image": {
+          "artifactId": "tissue-image-inspection-input-image",
+          "versionId": "tissue-image-inspection-input-image-v1",
+          "projectId": "example-project",
+          "sha256": "96bd8143d0fad8e44892ecc925931939664e7fdb93a597da5e5712076b340782"
+        }
+      },
+      "parameters": {},
+      "design": null,
+      "environment": {
+        "id": "image-preview-v1",
+        "version": "1",
+        "digest": "ec8e4e4b6354fc4c679de0bb115d85318f3f8dd81f0bb81afd879ab7b12854f6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": null,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "preview": {
+          "artifactId": "tissue-image-inspection-preview-image-preview",
+          "versionId": "tissue-image-inspection-preview-image-preview-v1",
+          "projectId": "example-project",
+          "sha256": "e94503638bafaac4af0a9fa92871576895eff1fd2b3d5f21cd57c5ae5d274a0c"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "tissue-image-inspection-mark-region-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "lab.tissue-inspection.mark-region",
+        "version": "1.0.0",
+        "digest": "1dd561c76df5d98c762f9a86ce3927b97dba0c412081c7d851a064de1f8d012e"
+      },
+      "recipe": {
+        "id": "lab.tissue-inspection",
+        "version": "1.0.0",
+        "digest": "ca53ad6e127ca3168015687d7d7300559112075cdff11d0bf83bdd1a598bd84b"
+      },
+      "inputs": {
+        "image": {
+          "artifactId": "tissue-image-inspection-input-image",
+          "versionId": "tissue-image-inspection-input-image-v1",
+          "projectId": "example-project",
+          "sha256": "96bd8143d0fad8e44892ecc925931939664e7fdb93a597da5e5712076b340782"
+        },
+        "preview": {
+          "artifactId": "tissue-image-inspection-preview-image-preview",
+          "versionId": "tissue-image-inspection-preview-image-preview-v1",
+          "projectId": "example-project",
+          "sha256": "e94503638bafaac4af0a9fa92871576895eff1fd2b3d5f21cd57c5ae5d274a0c"
+        }
+      },
+      "parameters": {},
+      "design": null,
+      "environment": null,
+      "target": {
+        "id": "researcher-a",
+        "kind": "human"
+      },
+      "seed": null,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "region": {
+          "artifactId": "tissue-image-inspection-mark-region-region",
+          "versionId": "tissue-image-inspection-mark-region-region-v1",
+          "projectId": "example-project",
+          "sha256": "bc2754506f36edd03476d8ea379649b711f8c9bae2eeb0a115dcf6a1dcf0feeb"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    }
+  ],
+  "versionBoundaries": {
+    "inputVersions": [
+      "tissue-image-inspection-input-image-v1"
+    ],
+    "operationVersions": [
+      "lab.tissue-inspection.preview-image@1.0.0",
+      "lab.tissue-inspection.mark-region@1.0.0"
+    ],
+    "outputVersions": [
+      "tissue-image-inspection-preview-image-preview-v1",
+      "tissue-image-inspection-mark-region-region-v1"
+    ],
+    "recipeVersion": "lab.tissue-inspection@1.0.0"
+  }
+}

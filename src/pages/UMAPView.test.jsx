@@ -65,8 +65,8 @@ describe('UMAPView', () => {
   });
 
   it('uses edited UMAP parameters and marks a successful run as recomputable', async () => {
-    const callApi = vi.fn(async (_endpoint, _payload, context) => (
-      context?.onlyIfCached ? {} : resultPayload()
+    const callApi = vi.fn(async (_endpoint, _payload) => (
+      _endpoint.startsWith('/reduction-results') ? { result: { exists: false } } : resultPayload()
     ));
     render(<UMAPView {...baseProps({ callApi })} />);
 
@@ -99,9 +99,9 @@ describe('UMAPView', () => {
   });
 
   it('retries short shared-compute contention and then renders the result', async () => {
-    const callApi = vi.fn(async (_endpoint, _payload, context) => {
-      if (context?.onlyIfCached) return {};
-      const explicitCalls = callApi.mock.calls.filter(([, , callContext]) => !callContext?.onlyIfCached).length;
+    const callApi = vi.fn(async (_endpoint, _payload) => {
+      if (_endpoint.startsWith('/reduction-results')) return { result: { exists: false } };
+      const explicitCalls = callApi.mock.calls.filter(([endpoint]) => !endpoint.startsWith('/reduction-results')).length;
       return explicitCalls === 1
         ? { error: 'Analysis compute is busy. Wait a moment and try again.' }
         : resultPayload();
@@ -113,15 +113,15 @@ describe('UMAPView', () => {
     await waitFor(() => expect(run).toBeEnabled());
     fireEvent.click(run);
     await waitFor(() => {
-      const explicitCalls = callApi.mock.calls.filter(([, , context]) => !context?.onlyIfCached);
+      const explicitCalls = callApi.mock.calls.filter(([endpoint]) => !endpoint.startsWith('/reduction-results'));
       expect(explicitCalls).toHaveLength(2);
     }, { timeout: 2_000 });
     expect(await screen.findByRole('button', { name: /Re-compute UMAP/i })).toBeInTheDocument();
   });
 
   it('does not invent provenance parents when an attached session has no local history', async () => {
-    const callApi = vi.fn(async (_endpoint, _payload, context) => (
-      context?.onlyIfCached ? {} : resultPayload()
+    const callApi = vi.fn(async (_endpoint, _payload) => (
+      _endpoint.startsWith('/reduction-results') ? { result: { exists: false } } : resultPayload()
     ));
     render(<UMAPView {...baseProps({ callApi, pcaProvId: undefined, clusterProvId: undefined })} />);
 
@@ -189,8 +189,8 @@ describe('UMAPView', () => {
     expect(screen.getByRole('note')).toHaveTextContent('measured gene expression');
     expect(screen.getByRole('note')).not.toHaveTextContent('simulated');
     await waitFor(() => expect(callApi).toHaveBeenCalled());
-    expect(callApi.mock.calls[0][0]).toContain('dims=10');
-    expect(callApi.mock.calls[0][0]).toContain('seed=42');
+    fireEvent.click(await screen.findByRole('button', { name: /Re-compute UMAP/i }));
+    await waitFor(() => expect(callApi.mock.calls.some(([path]) => path.includes('dims=10') && path.includes('seed=42'))).toBe(true));
   });
 
   it('discloses simulated input and distinguishes edited settings from the plotted calculation', async () => {
@@ -203,4 +203,60 @@ describe('UMAPView', () => {
     fireEvent.click(screen.getByRole('button', { name: /Re-compute UMAP/i }));
     await waitFor(() => expect(screen.queryByText(/Showing a previous calculation/)).not.toBeInTheDocument());
   });
+  it('reads an existing reduction in a new browser session without a computation or invented provenance', async () => {
+    const callApi = vi.fn(async () => ({ result: { ...resultPayload().result, exists: true,
+      restored: true, n_components: 2, settings: { dims: 10, n_neighbors: 20, min_dist: 0.25, seed: 42 } } }));
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await screen.findByText(/Showing the existing UMAP from this analysis/);
+    expect(callApi).toHaveBeenCalledTimes(1);
+    expect(callApi).toHaveBeenCalledWith('/reduction-results?reduction=umap', expect.any(Object), { useCache: false });
+    expect(screen.getByLabelText(/Input Dimensions/)).toHaveValue(10);
+    expect(screen.getByLabelText(/Number of Neighbors/)).toHaveValue(20);
+    expect(screen.getByLabelText(/Minimum Distance/)).toHaveValue(0.25);
+    expect(screen.queryByRole('button', { name: /View recorded analysis/ })).not.toBeInTheDocument();
+    expect(plotRenderSpy.mock.calls.flatMap(([data]) => data).some(trace => trace.x?.[0] === 1)).toBe(true);
+    expect(screen.queryByText(/Showing a previous calculation/)).not.toBeInTheDocument();
+  });
+
+  it('reports a missing reduction without computing a replacement', async () => {
+    const callApi = vi.fn(async () => ({ result: { exists: false } }));
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await screen.findByText(/No UMAP reduction is present/);
+    expect(callApi).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('plot-stub')).not.toBeInTheDocument();
+  });
+
+  it('discards a slow reduction response after switching objects', async () => {
+    let resolveOld;
+    const oldRequest = new Promise(resolve => { resolveOld = resolve; });
+    const callApi = vi.fn().mockReturnValueOnce(oldRequest).mockResolvedValue({ result: { exists: false } });
+    const props = baseProps({ callApi });
+    const { rerender } = render(<UMAPView {...props} />);
+    await waitFor(() => expect(callApi).toHaveBeenCalledTimes(1));
+    rerender(<UMAPView {...props} objectId="ao_other" rSessionId="sess-2" />);
+    await screen.findByText(/No UMAP reduction is present/);
+    resolveOld(resultPayload());
+    await waitFor(() => expect(screen.queryByText('Cluster 0')).not.toBeInTheDocument());
+    expect(screen.queryByTestId('plot-stub')).not.toBeInTheDocument();
+  });
+
+  it('preserves a saved 3D embedding as an explicit 2D projection without WebGL', async () => {
+    supportsWebGLMock.mockReturnValue(false);
+    const callApi = vi.fn(async () => ({ result: { exists: true, restored: true, n_components: 3,
+      trace_data: [{ name: 'Cluster 0', x: [1], y: [2], z: [3] }], settings: {} } }));
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await screen.findByText(/first two coordinates of the saved 3D embedding/);
+    expect(callApi).toHaveBeenCalledTimes(1);
+    expect(plotRenderSpy.mock.calls.flatMap(([data]) => data).some(trace => trace.type === 'scatter3d')).toBe(false);
+  });
+
+  it('can inspect an existing UMAP after its input PCA is absent', async () => {
+    const callApi = vi.fn(async () => ({ result: { ...resultPayload().result, exists: true,
+      restored: true, n_components: 2, settings: {} } }));
+    render(<UMAPView {...baseProps({ callApi, pipelineState: { pca: false, umap: true } })} />);
+    await screen.findByText(/Showing the existing UMAP from this analysis/);
+    expect(screen.getByRole('button', { name: /Re-compute UMAP/ })).toBeDisabled();
+    expect(callApi).toHaveBeenCalledTimes(1);
+  });
+
 });

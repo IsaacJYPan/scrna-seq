@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const { createProxyServer } = require('httpxy');
 const multer = require('multer');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -519,7 +519,7 @@ const R_PROXY_PRODUCTION_BLOCKED_PATHS = new Set([
 const R_PROXY_PRODUCTION_ALLOWLIST = Object.freeze({
   GET: new Set([
     '/health', '/session-id', '/qc-distributions', '/load-data',
-    '/object-info', '/pipeline-state', '/meta-values', '/cellchat-group-map',
+    '/object-info', '/pipeline-state', '/reduction-results', '/meta-values', '/cellchat-group-map',
     '/normalize', '/pca', '/cluster', '/umap',
     '/genes', '/gene-expression', '/feature-values', '/heatmap', '/dot-plot', '/validate',
   ]),
@@ -1353,7 +1353,7 @@ app.use(async (req, res, next) => {
     return res.status(503).json({ error: 'Database unavailable' });
   }
 });
-// Do not use express.json() globally, as it consumes the body stream and breaks http-proxy-middleware for POST requests.
+// Keep the R request stream available for its bounded proxy body parser.
 // ── Auth Endpoints ────────────────────────────────────────────────────────
 app.use('/api/auth', (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -1950,18 +1950,26 @@ app.get('/api/pipeline-registry/capabilities', async (req, res) => {
   }
 });
 
-// Expert R requires both an operator-enabled deployment and an operator-granted
-// account capability. Project write access and source-object ownership are
-// enforced again when a job is submitted, then rechecked at worker claim time.
+// Private R requires a provisioned isolated runtime and the configured account
+// or project-role policy. Project access, explicit denial and object ownership
+// are enforced again when a job is submitted and at worker claim time.
 app.use('/api/expert-r', requireAuth);
 app.get('/api/expert-r/capabilities', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
-    const { canExecuteExpertR } = await db.getExpertRCapabilities(req.user.id);
-    const enabled = !config.demoMode() && expertRSandboxEnabled() && canExecuteExpertR;
+    const projectId = req.query.projectId;
+    if (projectId !== undefined && (typeof projectId !== 'string' || !/^proj_[A-Za-z0-9_-]{3,128}$/.test(projectId))) {
+      return res.status(400).json({ error: 'Choose a valid project to check R access.' });
+    }
+    const { canExecuteExpertR, expertRAccessRevoked } = await db.getExpertRCapabilities(req.user.id, projectId || null);
+    const { probeExpertRRuntime, expertRStatus } = require('./backend/expertRAccess');
+    const runtime = config.demoMode() ? { state: 'not-configured' } : await probeExpertRRuntime();
+    const enabled = !config.demoMode() && runtime.state === 'ready' && canExecuteExpertR;
     res.json({
       expertREnabled: enabled,
       expertRProfile: enabled ? EXPERT_R_PROFILE : null,
+      expertRStatus: expertRStatus({ canExecuteExpertR, runtime,
+        revoked: expertRAccessRevoked, demoMode: config.demoMode() }),
     });
   } catch (error) {
     console.error('[ExpertRCapabilities]', error);
@@ -2560,8 +2568,7 @@ async function requireExpertRInputWriter(req, res, next) {
   }
   try {
     await db.requireProjectRole(req.user.id, req.params.projectId, ['owner', 'admin', 'analyst']);
-    const capability = await db.getExpertRCapabilities(req.user.id);
-    if (!capability.canExecuteExpertR) {
+    if (!(await db.hasExpertRExecuteCapability(req.user.id, req.params.projectId))) {
       return res.status(403).json({ error: 'Expert R access is not approved for this account.' });
     }
     return next();
@@ -3697,17 +3704,14 @@ app.get('/api/r/__test/state-key', (req, res) => {
 });
 
 app.use('/api/r', rProxyAdmission);
-app.use('/api/r', createProxyMiddleware({
+const rProxyTransport = createProxyServer({
   target: R_RUNTIME_CONFIG.baseUrl,
   changeOrigin: true,
   selfHandleResponse: true,
   proxyTimeout: config.rProxyTimeoutMs(),
   timeout: config.rProxyTimeoutMs() + 5000,
-  pathRewrite: {
-    '^/api/r': '', // remove /api/r base
-  },
-  on: {
-    proxyReq: (proxyReq, req) => {
+});
+rProxyTransport.on('proxyReq', (proxyReq, req) => {
       const observeSocket = (socket) => {
         if (!socket || socket.destroyed) return;
         if (socket.connecting) socket.once('connect', () => markRProxyUpstreamConnected(req));
@@ -3716,14 +3720,18 @@ app.use('/api/r', createProxyMiddleware({
       if (proxyReq.socket) observeSocket(proxyReq.socket);
       else proxyReq.once('socket', observeSocket);
       writeRProxyRequest(proxyReq, req);
-    },
-    proxyRes: handleBoundedRProxyResponse,
-    error: (error, req, res) => {
-      markRProxyUpstreamError(req);
-      sendRProxyFailure(res, 502, 'R service is unavailable or exceeded its deadline.');
-    },
-  }
-}));
+});
+rProxyTransport.on('proxyRes', handleBoundedRProxyResponse);
+function handleRProxyTransportError(error, req, res) {
+  markRProxyUpstreamError(req);
+  sendRProxyFailure(res, 502, 'R service is unavailable or exceeded its deadline.');
+}
+rProxyTransport.on('error', handleRProxyTransportError);
+// Express removes the /api/r mount prefix. No pattern matcher is needed for
+// this single, authenticated upstream; admission owns the exact path policy.
+app.use('/api/r', (req, res) => {
+  rProxyTransport.web(req, res).catch((error) => handleRProxyTransportError(error, req, res));
+});
 
 // ── Static Frontend ─────────────────────────────────────────────────────
 app.use('/api', (req, res) => {

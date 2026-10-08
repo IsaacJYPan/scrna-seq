@@ -1,0 +1,1603 @@
+{
+  "caseId": "standard-seurat",
+  "illustrative": true,
+  "description": "Existing QC, normalization, PCA, independent neighbors/clustering and UMAP branches; every output has a new immutable identity.",
+  "recipe": {
+    "format": "traceomics-workflow",
+    "schemaVersion": 2,
+    "id": "scrna-workflow",
+    "name": "Single-cell workflow",
+    "version": "1.0.0",
+    "description": "QC, normalization, PCA, independent neighbors and UMAP branches, and custom R figures.",
+    "inputs": {
+      "analysis": {
+        "type": "object",
+        "cardinality": "one",
+        "format": {
+          "id": "org.r-project.rds",
+          "version": "1"
+        },
+        "label": "Saved analysis"
+      }
+    },
+    "outputs": {},
+    "environments": {
+      "legacy": {
+        "profileId": "scrna-r-4.5-bioconductor-3.22-v1",
+        "runtime": {
+          "language": "r"
+        }
+      }
+    },
+    "files": {
+      "steps/qc.R": "analysis <- inputs$analysis\nanalysis[[\"percent.mt\"]] <- PercentageFeatureSet(analysis, pattern = \"^MT-\")\nkeep <- analysis$nFeature_RNA >= params[[\"min-features\"]] &\n  analysis$percent.mt <= params[[\"max-mito\"]]\nif (!any(keep)) stop(\"No cells match these filters\")\nanalysis <- subset(analysis, cells = colnames(analysis)[keep])\nwrite_output(\"analysis\", analysis)\nwrite_output(\"summary\", list(cells = ncol(analysis), features = nrow(analysis)))\ncounts <- data.frame(features = analysis$nFeature_RNA)\nwrite_output(\"distribution\", ggplot2::ggplot(counts, ggplot2::aes(x = features)) +\n  ggplot2::geom_histogram(bins = 30, fill = \"#1685e8\") + ggplot2::theme_minimal())\n",
+      "steps/normalize.R": "analysis <- NormalizeData(inputs$analysis, verbose = FALSE)\nanalysis <- FindVariableFeatures(analysis, nfeatures = min(params$features, nrow(analysis)), verbose = FALSE)\nanalysis <- ScaleData(analysis, verbose = FALSE)\nwrite_output(\"analysis\", analysis)\n",
+      "steps/pca.R": "analysis <- RunPCA(inputs$analysis, npcs = min(params$components, ncol(inputs$analysis) - 1L,\n  length(VariableFeatures(inputs$analysis)) - 1L), seed.use = seed, verbose = FALSE)\nwrite_output(\"analysis\", analysis)\nwrite_output(\"elbow\", ElbowPlot(analysis))\n",
+      "steps/neighbors.R": "analysis <- inputs$analysis\ndimensions <- seq_len(min(params$dimensions, ncol(Embeddings(analysis, \"pca\"))))\nanalysis <- FindNeighbors(analysis, dims = dimensions, verbose = FALSE)\nwrite_output(\"analysis\", analysis)\n",
+      "steps/clusters.R": "analysis <- FindClusters(inputs$analysis, resolution = params$resolution, random.seed = seed, verbose = FALSE)\nwrite_output(\"labels\", data.frame(cell = colnames(analysis), cluster = as.character(Idents(analysis))))\n",
+      "steps/umap.R": "analysis <- inputs$analysis\ndimensions <- seq_len(min(params$dimensions, ncol(Embeddings(analysis, \"pca\"))))\nanalysis <- RunUMAP(analysis, dims = dimensions, n.neighbors = min(params$neighbors, ncol(analysis) - 1L), seed.use = seed, verbose = FALSE)\ncoordinates <- Embeddings(analysis, \"umap\")\nwrite_output(\"coordinates\", list(x = unname(coordinates[, 1]), y = unname(coordinates[, 2]), ids = rownames(coordinates)))\n",
+      "steps/umap-figure.R": "coordinates <- inputs$coordinates\nlabels <- inputs$labels\nif (anyDuplicated(labels$cell) || !setequal(coordinates$ids, labels$cell)) stop(\"Cell identities differ\")\nmatched <- match(coordinates$ids, labels$cell)\npoints <- data.frame(x = coordinates$x, y = coordinates$y, cluster = labels$cluster[matched])\nwrite_output(\"figure\", ggplot2::ggplot(points, ggplot2::aes(x = x, y = y, color = cluster)) +\n  ggplot2::geom_point(size = params[[\"point-size\"]]) + ggplot2::theme_minimal())\n"
+    },
+    "tabs": [
+      {
+        "id": "qc",
+        "label": "Quality Control",
+        "step": "qc",
+        "plots": []
+      },
+      {
+        "id": "normalize",
+        "label": "Normalize",
+        "step": "normalize",
+        "plots": []
+      },
+      {
+        "id": "pca",
+        "label": "PCA",
+        "step": "pca",
+        "plots": []
+      },
+      {
+        "id": "neighbors",
+        "label": "Neighbors",
+        "step": "neighbors",
+        "plots": []
+      },
+      {
+        "id": "clusters",
+        "label": "Clustering",
+        "step": "clusters",
+        "plots": []
+      },
+      {
+        "id": "umap",
+        "label": "UMAP",
+        "step": "umap",
+        "plots": [
+          "umap-figure"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "qc",
+        "label": "Quality Control",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/qc.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "environment": "legacy",
+        "inputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "analysis": {
+            "kind": "input",
+            "port": "analysis"
+          }
+        },
+        "parameters": {
+          "min-features": {
+            "label": "Minimum features",
+            "type": "integer",
+            "default": 20,
+            "min": 0,
+            "max": 100000
+          },
+          "max-mito": {
+            "label": "Maximum mitochondrial percentage",
+            "type": "number",
+            "default": 100,
+            "min": 0,
+            "max": 100
+          }
+        },
+        "outputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            },
+            "label": "Analysis"
+          },
+          "summary": {
+            "type": "metrics",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.metrics",
+              "version": "1"
+            },
+            "label": "Dataset summary"
+          },
+          "distribution": {
+            "type": "figure",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.figure",
+              "version": "1"
+            },
+            "label": "Feature counts"
+          }
+        },
+        "ui": {
+          "label": "Quality Control",
+          "results": [
+            "analysis",
+            "summary",
+            "distribution"
+          ]
+        }
+      },
+      {
+        "id": "normalize",
+        "label": "Normalize",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/normalize.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "environment": "legacy",
+        "inputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "analysis": {
+            "kind": "step",
+            "step": "qc",
+            "port": "analysis"
+          }
+        },
+        "parameters": {
+          "features": {
+            "label": "Variable features",
+            "type": "integer",
+            "default": 2000,
+            "min": 20,
+            "max": 10000
+          }
+        },
+        "outputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            },
+            "label": "Analysis"
+          }
+        },
+        "ui": {
+          "label": "Normalize",
+          "results": [
+            "analysis"
+          ]
+        }
+      },
+      {
+        "id": "pca",
+        "label": "PCA",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/pca.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "environment": "legacy",
+        "inputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "analysis": {
+            "kind": "step",
+            "step": "normalize",
+            "port": "analysis"
+          }
+        },
+        "parameters": {
+          "components": {
+            "label": "Components",
+            "type": "integer",
+            "default": 15,
+            "min": 2,
+            "max": 100
+          }
+        },
+        "outputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            },
+            "label": "Analysis"
+          },
+          "elbow": {
+            "type": "figure",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.figure",
+              "version": "1"
+            },
+            "label": "PCA variance"
+          }
+        },
+        "ui": {
+          "label": "PCA",
+          "results": [
+            "analysis",
+            "elbow"
+          ]
+        }
+      },
+      {
+        "id": "neighbors",
+        "label": "Neighbors",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/neighbors.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "environment": "legacy",
+        "inputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "analysis": {
+            "kind": "step",
+            "step": "pca",
+            "port": "analysis"
+          }
+        },
+        "parameters": {
+          "dimensions": {
+            "label": "PCA dimensions",
+            "type": "integer",
+            "default": 15,
+            "min": 2,
+            "max": 100
+          }
+        },
+        "outputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            },
+            "label": "Analysis"
+          }
+        },
+        "ui": {
+          "label": "Neighbors",
+          "results": [
+            "analysis"
+          ]
+        }
+      },
+      {
+        "id": "clusters",
+        "label": "Clustering",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/clusters.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "environment": "legacy",
+        "inputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "analysis": {
+            "kind": "step",
+            "step": "neighbors",
+            "port": "analysis"
+          }
+        },
+        "parameters": {
+          "resolution": {
+            "label": "Resolution",
+            "type": "number",
+            "default": 0.5,
+            "min": 0.01,
+            "max": 10
+          }
+        },
+        "outputs": {
+          "labels": {
+            "type": "table",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.table",
+              "version": "1"
+            },
+            "label": "Cluster assignments"
+          }
+        },
+        "ui": {
+          "label": "Clustering",
+          "results": [
+            "labels"
+          ]
+        }
+      },
+      {
+        "id": "umap",
+        "label": "UMAP",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/umap.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "environment": "legacy",
+        "inputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.r-project.rds",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "analysis": {
+            "kind": "step",
+            "step": "pca",
+            "port": "analysis"
+          }
+        },
+        "parameters": {
+          "dimensions": {
+            "label": "PCA dimensions",
+            "type": "integer",
+            "default": 15,
+            "min": 2,
+            "max": 100
+          },
+          "neighbors": {
+            "label": "Neighbors",
+            "type": "integer",
+            "default": 30,
+            "min": 2,
+            "max": 200
+          }
+        },
+        "outputs": {
+          "coordinates": {
+            "type": "coordinates",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.scatter",
+              "version": "1"
+            },
+            "label": "UMAP embedding"
+          }
+        },
+        "ui": {
+          "label": "UMAP",
+          "results": [
+            "coordinates"
+          ]
+        }
+      },
+      {
+        "id": "umap-figure",
+        "label": "Cluster-colored UMAP",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/umap-figure.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "environment": "legacy",
+        "inputs": {
+          "coordinates": {
+            "type": "coordinates",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.scatter",
+              "version": "1"
+            }
+          },
+          "labels": {
+            "type": "table",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.table",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "coordinates": {
+            "kind": "step",
+            "step": "umap",
+            "port": "coordinates"
+          },
+          "labels": {
+            "kind": "step",
+            "step": "clusters",
+            "port": "labels"
+          }
+        },
+        "parameters": {
+          "point-size": {
+            "label": "Point size",
+            "type": "number",
+            "default": 0.6,
+            "min": 0.1,
+            "max": 5
+          }
+        },
+        "outputs": {
+          "figure": {
+            "type": "figure",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.figure",
+              "version": "1"
+            },
+            "label": "UMAP by cluster"
+          }
+        },
+        "ui": {
+          "label": "Cluster-colored UMAP",
+          "results": [
+            "figure"
+          ]
+        }
+      }
+    ]
+  },
+  "artifactVersions": [
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-input-analysis",
+      "versionId": "standard-seurat-input-analysis-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.r-project.rds",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "7deacc85b9df37ce43c84d2990c0cd5702d2a519c5b7fb84b13bd5227f62d5f9",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-0",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-qc-analysis",
+      "versionId": "standard-seurat-qc-analysis-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.r-project.rds",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "9af5e422fe52b48a60a4164a29757df5773656f67bcc22a153fd9f7cf4705db9",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-1",
+      "sourceRunId": "standard-seurat-qc-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-qc-summary",
+      "versionId": "standard-seurat-qc-summary-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "metrics",
+      "format": {
+        "id": "org.traceomics.metrics",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "83a62cf16840eba9a3ba6fbb5e2aaf3735f10d409bfbe6ba901b00c5b699615f",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-2",
+      "sourceRunId": "standard-seurat-qc-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-qc-distribution",
+      "versionId": "standard-seurat-qc-distribution-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "figure",
+      "format": {
+        "id": "org.traceomics.figure",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "d9fe0a519b9670f5c2f7526699ecabcee1dabf441d61ec055a765d833eddd4d9",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-3",
+      "sourceRunId": "standard-seurat-qc-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-normalize-analysis",
+      "versionId": "standard-seurat-normalize-analysis-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.r-project.rds",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "ad23e69f3738b07fa848caca0289c1020d2901be378eb19c57c0e88c3999297d",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-4",
+      "sourceRunId": "standard-seurat-normalize-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-pca-analysis",
+      "versionId": "standard-seurat-pca-analysis-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.r-project.rds",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "6b4d169c469ccf01376d00f7dbd2b04e637e1bb3c36a97caa261c583595abe22",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-5",
+      "sourceRunId": "standard-seurat-pca-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-pca-elbow",
+      "versionId": "standard-seurat-pca-elbow-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "figure",
+      "format": {
+        "id": "org.traceomics.figure",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "b599aaa9d2e4a96eb610964185807a6aca217dbb1aeb8651b694773be0fe0835",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-6",
+      "sourceRunId": "standard-seurat-pca-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-neighbors-analysis",
+      "versionId": "standard-seurat-neighbors-analysis-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.r-project.rds",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "0b35ecfdf5204ef364db8ae9d9c81240d400f7dc6e30830be94246444b765a7e",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-7",
+      "sourceRunId": "standard-seurat-neighbors-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-clusters-labels",
+      "versionId": "standard-seurat-clusters-labels-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "table",
+      "format": {
+        "id": "org.traceomics.table",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "e82ef819133e4565b4fc90cf5e7e1072f56fa0f74ce3bc927bcac789045861ff",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-8",
+      "sourceRunId": "standard-seurat-clusters-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-umap-coordinates",
+      "versionId": "standard-seurat-umap-coordinates-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "coordinates",
+      "format": {
+        "id": "org.traceomics.scatter",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "9489a0d2356e82f7347ef1b1eca45e45c9deda1eb86048490e5ca11c0fd4cf26",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-9",
+      "sourceRunId": "standard-seurat-umap-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "standard-seurat-umap-figure-figure",
+      "versionId": "standard-seurat-umap-figure-figure-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "figure",
+      "format": {
+        "id": "org.traceomics.figure",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "5f1c0801db995643fdb7d83cc07a3478ec235713923ad588f14bc873c9dd549d",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-10",
+      "sourceRunId": "standard-seurat-umap-figure-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    }
+  ],
+  "operationVersions": [
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "scrna-workflow.qc",
+      "version": "1.0.0",
+      "digest": "683aac4c614e2cf61fd34b164e13de000d82c4b3559bf5a5afb49be5819945f9",
+      "method": {
+        "kind": "r",
+        "entry": "steps/qc.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          },
+          "label": "Analysis"
+        },
+        "summary": {
+          "type": "metrics",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.metrics",
+            "version": "1"
+          },
+          "label": "Dataset summary"
+        },
+        "distribution": {
+          "type": "figure",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.figure",
+            "version": "1"
+          },
+          "label": "Feature counts"
+        }
+      },
+      "parameters": {
+        "min-features": {
+          "label": "Minimum features",
+          "type": "integer",
+          "default": 20,
+          "min": 0,
+          "max": 100000
+        },
+        "max-mito": {
+          "label": "Maximum mitochondrial percentage",
+          "type": "number",
+          "default": 100,
+          "min": 0,
+          "max": 100
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      }
+    },
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "scrna-workflow.normalize",
+      "version": "1.0.0",
+      "digest": "be7cabb73949f02012d020d8a7475eb6c4f725bd33781dc6c2f8c5ece1684873",
+      "method": {
+        "kind": "r",
+        "entry": "steps/normalize.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          },
+          "label": "Analysis"
+        }
+      },
+      "parameters": {
+        "features": {
+          "label": "Variable features",
+          "type": "integer",
+          "default": 2000,
+          "min": 20,
+          "max": 10000
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      }
+    },
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "scrna-workflow.pca",
+      "version": "1.0.0",
+      "digest": "518eda1e2ceb3d67f815203923c8587e5b66f7120417aae8f7b0f0a94687af0a",
+      "method": {
+        "kind": "r",
+        "entry": "steps/pca.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          },
+          "label": "Analysis"
+        },
+        "elbow": {
+          "type": "figure",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.figure",
+            "version": "1"
+          },
+          "label": "PCA variance"
+        }
+      },
+      "parameters": {
+        "components": {
+          "label": "Components",
+          "type": "integer",
+          "default": 15,
+          "min": 2,
+          "max": 100
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      }
+    },
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "scrna-workflow.neighbors",
+      "version": "1.0.0",
+      "digest": "5797a655fdf41af0bd9c5c36b5de50a62e32d9ebe2cc253f25e619c09b03590d",
+      "method": {
+        "kind": "r",
+        "entry": "steps/neighbors.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          },
+          "label": "Analysis"
+        }
+      },
+      "parameters": {
+        "dimensions": {
+          "label": "PCA dimensions",
+          "type": "integer",
+          "default": 15,
+          "min": 2,
+          "max": 100
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      }
+    },
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "scrna-workflow.clusters",
+      "version": "1.0.0",
+      "digest": "9403d2de7a6b37ec8054ff0f91914efda7fa6d55b534cbfa47986177db17a795",
+      "method": {
+        "kind": "r",
+        "entry": "steps/clusters.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "labels": {
+          "type": "table",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.table",
+            "version": "1"
+          },
+          "label": "Cluster assignments"
+        }
+      },
+      "parameters": {
+        "resolution": {
+          "label": "Resolution",
+          "type": "number",
+          "default": 0.5,
+          "min": 0.01,
+          "max": 10
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      }
+    },
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "scrna-workflow.umap",
+      "version": "1.0.0",
+      "digest": "9ac46e3433e3dd2ee84ca92028c40066f3a5d0e1bb22d0eddcb11cdcd45a6a62",
+      "method": {
+        "kind": "r",
+        "entry": "steps/umap.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.r-project.rds",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "coordinates": {
+          "type": "coordinates",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.scatter",
+            "version": "1"
+          },
+          "label": "UMAP embedding"
+        }
+      },
+      "parameters": {
+        "dimensions": {
+          "label": "PCA dimensions",
+          "type": "integer",
+          "default": 15,
+          "min": 2,
+          "max": 100
+        },
+        "neighbors": {
+          "label": "Neighbors",
+          "type": "integer",
+          "default": 30,
+          "min": 2,
+          "max": 200
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      }
+    },
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "scrna-workflow.umap-figure",
+      "version": "1.0.0",
+      "digest": "e16af82422db9556a69f9073af738170c92cae0013ed38c788f9cf24ec020648",
+      "method": {
+        "kind": "r",
+        "entry": "steps/umap-figure.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "coordinates": {
+          "type": "coordinates",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.scatter",
+            "version": "1"
+          }
+        },
+        "labels": {
+          "type": "table",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.table",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "figure": {
+          "type": "figure",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.figure",
+            "version": "1"
+          },
+          "label": "UMAP by cluster"
+        }
+      },
+      "parameters": {
+        "point-size": {
+          "label": "Point size",
+          "type": "number",
+          "default": 0.6,
+          "min": 0.1,
+          "max": 5
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      }
+    }
+  ],
+  "runs": [
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "standard-seurat-qc-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "scrna-workflow.qc",
+        "version": "1.0.0",
+        "digest": "683aac4c614e2cf61fd34b164e13de000d82c4b3559bf5a5afb49be5819945f9"
+      },
+      "recipe": {
+        "id": "scrna-workflow",
+        "version": "1.0.0",
+        "digest": "7971aaa91ed87bb433049ba8487fb5d1edad766996b293c4c05394108261d357"
+      },
+      "inputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-input-analysis",
+          "versionId": "standard-seurat-input-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "7deacc85b9df37ce43c84d2990c0cd5702d2a519c5b7fb84b13bd5227f62d5f9"
+        }
+      },
+      "parameters": {
+        "min-features": 20,
+        "max-mito": 100
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-qc-analysis",
+          "versionId": "standard-seurat-qc-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "9af5e422fe52b48a60a4164a29757df5773656f67bcc22a153fd9f7cf4705db9"
+        },
+        "summary": {
+          "artifactId": "standard-seurat-qc-summary",
+          "versionId": "standard-seurat-qc-summary-v1",
+          "projectId": "example-project",
+          "sha256": "83a62cf16840eba9a3ba6fbb5e2aaf3735f10d409bfbe6ba901b00c5b699615f"
+        },
+        "distribution": {
+          "artifactId": "standard-seurat-qc-distribution",
+          "versionId": "standard-seurat-qc-distribution-v1",
+          "projectId": "example-project",
+          "sha256": "d9fe0a519b9670f5c2f7526699ecabcee1dabf441d61ec055a765d833eddd4d9"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "standard-seurat-normalize-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "scrna-workflow.normalize",
+        "version": "1.0.0",
+        "digest": "be7cabb73949f02012d020d8a7475eb6c4f725bd33781dc6c2f8c5ece1684873"
+      },
+      "recipe": {
+        "id": "scrna-workflow",
+        "version": "1.0.0",
+        "digest": "7971aaa91ed87bb433049ba8487fb5d1edad766996b293c4c05394108261d357"
+      },
+      "inputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-qc-analysis",
+          "versionId": "standard-seurat-qc-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "9af5e422fe52b48a60a4164a29757df5773656f67bcc22a153fd9f7cf4705db9"
+        }
+      },
+      "parameters": {
+        "features": 2000
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-normalize-analysis",
+          "versionId": "standard-seurat-normalize-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "ad23e69f3738b07fa848caca0289c1020d2901be378eb19c57c0e88c3999297d"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "standard-seurat-pca-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "scrna-workflow.pca",
+        "version": "1.0.0",
+        "digest": "518eda1e2ceb3d67f815203923c8587e5b66f7120417aae8f7b0f0a94687af0a"
+      },
+      "recipe": {
+        "id": "scrna-workflow",
+        "version": "1.0.0",
+        "digest": "7971aaa91ed87bb433049ba8487fb5d1edad766996b293c4c05394108261d357"
+      },
+      "inputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-normalize-analysis",
+          "versionId": "standard-seurat-normalize-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "ad23e69f3738b07fa848caca0289c1020d2901be378eb19c57c0e88c3999297d"
+        }
+      },
+      "parameters": {
+        "components": 15
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-pca-analysis",
+          "versionId": "standard-seurat-pca-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "6b4d169c469ccf01376d00f7dbd2b04e637e1bb3c36a97caa261c583595abe22"
+        },
+        "elbow": {
+          "artifactId": "standard-seurat-pca-elbow",
+          "versionId": "standard-seurat-pca-elbow-v1",
+          "projectId": "example-project",
+          "sha256": "b599aaa9d2e4a96eb610964185807a6aca217dbb1aeb8651b694773be0fe0835"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "standard-seurat-neighbors-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "scrna-workflow.neighbors",
+        "version": "1.0.0",
+        "digest": "5797a655fdf41af0bd9c5c36b5de50a62e32d9ebe2cc253f25e619c09b03590d"
+      },
+      "recipe": {
+        "id": "scrna-workflow",
+        "version": "1.0.0",
+        "digest": "7971aaa91ed87bb433049ba8487fb5d1edad766996b293c4c05394108261d357"
+      },
+      "inputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-pca-analysis",
+          "versionId": "standard-seurat-pca-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "6b4d169c469ccf01376d00f7dbd2b04e637e1bb3c36a97caa261c583595abe22"
+        }
+      },
+      "parameters": {
+        "dimensions": 15
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-neighbors-analysis",
+          "versionId": "standard-seurat-neighbors-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "0b35ecfdf5204ef364db8ae9d9c81240d400f7dc6e30830be94246444b765a7e"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "standard-seurat-clusters-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "scrna-workflow.clusters",
+        "version": "1.0.0",
+        "digest": "9403d2de7a6b37ec8054ff0f91914efda7fa6d55b534cbfa47986177db17a795"
+      },
+      "recipe": {
+        "id": "scrna-workflow",
+        "version": "1.0.0",
+        "digest": "7971aaa91ed87bb433049ba8487fb5d1edad766996b293c4c05394108261d357"
+      },
+      "inputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-neighbors-analysis",
+          "versionId": "standard-seurat-neighbors-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "0b35ecfdf5204ef364db8ae9d9c81240d400f7dc6e30830be94246444b765a7e"
+        }
+      },
+      "parameters": {
+        "resolution": 0.5
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "labels": {
+          "artifactId": "standard-seurat-clusters-labels",
+          "versionId": "standard-seurat-clusters-labels-v1",
+          "projectId": "example-project",
+          "sha256": "e82ef819133e4565b4fc90cf5e7e1072f56fa0f74ce3bc927bcac789045861ff"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "standard-seurat-umap-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "scrna-workflow.umap",
+        "version": "1.0.0",
+        "digest": "9ac46e3433e3dd2ee84ca92028c40066f3a5d0e1bb22d0eddcb11cdcd45a6a62"
+      },
+      "recipe": {
+        "id": "scrna-workflow",
+        "version": "1.0.0",
+        "digest": "7971aaa91ed87bb433049ba8487fb5d1edad766996b293c4c05394108261d357"
+      },
+      "inputs": {
+        "analysis": {
+          "artifactId": "standard-seurat-pca-analysis",
+          "versionId": "standard-seurat-pca-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "6b4d169c469ccf01376d00f7dbd2b04e637e1bb3c36a97caa261c583595abe22"
+        }
+      },
+      "parameters": {
+        "dimensions": 15,
+        "neighbors": 30
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "coordinates": {
+          "artifactId": "standard-seurat-umap-coordinates",
+          "versionId": "standard-seurat-umap-coordinates-v1",
+          "projectId": "example-project",
+          "sha256": "9489a0d2356e82f7347ef1b1eca45e45c9deda1eb86048490e5ca11c0fd4cf26"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "standard-seurat-umap-figure-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "scrna-workflow.umap-figure",
+        "version": "1.0.0",
+        "digest": "e16af82422db9556a69f9073af738170c92cae0013ed38c788f9cf24ec020648"
+      },
+      "recipe": {
+        "id": "scrna-workflow",
+        "version": "1.0.0",
+        "digest": "7971aaa91ed87bb433049ba8487fb5d1edad766996b293c4c05394108261d357"
+      },
+      "inputs": {
+        "coordinates": {
+          "artifactId": "standard-seurat-umap-coordinates",
+          "versionId": "standard-seurat-umap-coordinates-v1",
+          "projectId": "example-project",
+          "sha256": "9489a0d2356e82f7347ef1b1eca45e45c9deda1eb86048490e5ca11c0fd4cf26"
+        },
+        "labels": {
+          "artifactId": "standard-seurat-clusters-labels",
+          "versionId": "standard-seurat-clusters-labels-v1",
+          "projectId": "example-project",
+          "sha256": "e82ef819133e4565b4fc90cf5e7e1072f56fa0f74ce3bc927bcac789045861ff"
+        }
+      },
+      "parameters": {
+        "point-size": 0.6
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "13fb56ec7d3bb65fccaedaa957b8f730daca6bccf4d90cba99bb88db945ccac6"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "figure": {
+          "artifactId": "standard-seurat-umap-figure-figure",
+          "versionId": "standard-seurat-umap-figure-figure-v1",
+          "projectId": "example-project",
+          "sha256": "5f1c0801db995643fdb7d83cc07a3478ec235713923ad588f14bc873c9dd549d"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    }
+  ],
+  "versionBoundaries": {
+    "inputVersions": [
+      "standard-seurat-input-analysis-v1"
+    ],
+    "operationVersions": [
+      "scrna-workflow.qc@1.0.0",
+      "scrna-workflow.normalize@1.0.0",
+      "scrna-workflow.pca@1.0.0",
+      "scrna-workflow.neighbors@1.0.0",
+      "scrna-workflow.clusters@1.0.0",
+      "scrna-workflow.umap@1.0.0",
+      "scrna-workflow.umap-figure@1.0.0"
+    ],
+    "outputVersions": [
+      "standard-seurat-qc-analysis-v1",
+      "standard-seurat-qc-summary-v1",
+      "standard-seurat-qc-distribution-v1",
+      "standard-seurat-normalize-analysis-v1",
+      "standard-seurat-pca-analysis-v1",
+      "standard-seurat-pca-elbow-v1",
+      "standard-seurat-neighbors-analysis-v1",
+      "standard-seurat-clusters-labels-v1",
+      "standard-seurat-umap-coordinates-v1",
+      "standard-seurat-umap-figure-figure-v1"
+    ],
+    "recipeVersion": "scrna-workflow@1.0.0"
+  }
+}

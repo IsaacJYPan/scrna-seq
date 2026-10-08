@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const { derivedAnalysisDisplayName } = require('./analysisDisplayName');
 
 const config = require('./config');
+const { DENIED_CAPABILITY, expertRAccessSql } = require('./expertRAccess');
 const { admitDemoJob } = require('./demoJobAdmission');
 const storage = require('./storage');
 const passwords = require('./passwords');
@@ -1646,8 +1647,15 @@ async function hasPipelineRegistryPublishCapability(userId) {
   return hasPlatformCapability(userId, PIPELINE_REGISTRY_PUBLISH_CAPABILITY);
 }
 
-async function hasExpertRExecuteCapability(userId) {
-  return hasPlatformCapability(userId, EXPERT_R_EXECUTE_CAPABILITY);
+async function hasExpertRExecuteCapability(userId, projectId = null) {
+  const uid = Number(userId);
+  if (!Number.isSafeInteger(uid) || uid <= 0) return false;
+  const { rows } = await query(
+    `SELECT 1 WHERE ${expertRAccessSql('$1', projectId ? '$2' : null)}
+      ${projectId ? "AND EXISTS (SELECT 1 FROM project_members WHERE user_id=$1 AND project_id=$2 AND role IN ('owner','admin','analyst'))" : ''}`,
+    projectId ? [uid, String(projectId)] : [uid]
+  );
+  return Boolean(rows[0]);
 }
 
 async function getPipelineRegistryCapabilities(userId) {
@@ -1656,9 +1664,14 @@ async function getPipelineRegistryCapabilities(userId) {
   };
 }
 
-async function getExpertRCapabilities(userId) {
+async function getExpertRCapabilities(userId, projectId = null) {
+  const denied = await query(
+    'SELECT 1 FROM platform_capabilities WHERE user_id = $1 AND capability = $2',
+    [Number(userId), DENIED_CAPABILITY]
+  );
   return {
-    canExecuteExpertR: await hasExpertRExecuteCapability(userId),
+    canExecuteExpertR: await hasExpertRExecuteCapability(userId, projectId),
+    expertRAccessRevoked: Boolean(denied.rows[0]),
   };
 }
 
@@ -1679,6 +1692,17 @@ async function setPlatformCapabilityByEmail(email, capability, enabled) {
     );
     if (!rows[0]) throw codedError('USER_NOT_FOUND', 'User not found.');
     const userId = Number(rows[0].id);
+    if (capability === EXPERT_R_EXECUTE_CAPABILITY) {
+      // An explicit denial must override automatic project-role eligibility.
+      if (enabled) await client.query(
+        'DELETE FROM platform_capabilities WHERE user_id = $1 AND capability = $2',
+        [userId, DENIED_CAPABILITY]
+      );
+      else await client.query(
+        'INSERT INTO platform_capabilities (user_id, capability) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [userId, DENIED_CAPABILITY]
+      );
+    }
     if (enabled) {
       await client.query(
         `INSERT INTO platform_capabilities (user_id, capability)
@@ -1899,10 +1923,11 @@ async function createExpertRPrivateInput(userId, projectId, input = {}) {
     if (!PROJECT_JOB_WRITE_ROLES.includes(membership.rows[0].role)) {
       throw codedError('FORBIDDEN', 'You do not have permission to import Expert R inputs.');
     }
+    // Serialize explicit account revocation with imports, using the same user
+    // lock as the operator's grant/revoke transaction.
+    await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [owner]);
     const capability = await client.query(
-      `SELECT 1 FROM platform_capabilities
-        WHERE user_id = $1 AND capability = $2 FOR KEY SHARE`,
-      [owner, EXPERT_R_EXECUTE_CAPABILITY]
+      `SELECT 1 WHERE ${expertRAccessSql('$1', '$2')}`, [owner, pid]
     );
     if (!capability.rows[0]) throw codedError('FORBIDDEN', 'Expert R access is not approved for this account.');
     const usage = await client.query(
@@ -3516,7 +3541,7 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
     if (!expertRSandboxEnabled() || config.demoMode()) {
       throw codedError('EXPERT_R_UNAVAILABLE', 'Expert R sandbox is not enabled for this deployment.');
     }
-    if (!(await hasExpertRExecuteCapability(owner))) {
+    if (!(await hasExpertRExecuteCapability(owner, pid))) {
       throw codedError('FORBIDDEN', 'Expert R access is not approved for this account.');
     }
     await resolveExpertRPrivateInputs(owner, pid, storedParameters.inputIds);
@@ -5090,11 +5115,7 @@ async function claimNextJob(workerId, opts = {}) {
     const revoked = await client.query(
       `SELECT j.id, j.job_type, j.attempts, j.logs_json,
                (j.project_id IS NULL) AS invalid_project_scope,
-               (j.job_type = 'expert.r.v1' AND NOT EXISTS (
-                 SELECT 1 FROM platform_capabilities cap
-                  WHERE cap.user_id = j.owner_user_id
-                    AND cap.capability = $3
-               )) AS expert_access_revoked,
+               (j.job_type = 'expert.r.v1' AND NOT ${expertRAccessSql('j.owner_user_id', 'j.project_id', process.env, '$3')}) AS expert_access_revoked,
                (j.result_analysis_object_id IS NOT NULL
                 OR EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = j.id)
                 OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = j.id)
@@ -5111,11 +5132,7 @@ async function claimNextJob(workerId, opts = {}) {
                      AND pm.user_id = j.owner_user_id
                      AND pm.role = ANY($1::text[])
                 )
-                OR (j.job_type = 'expert.r.v1' AND NOT EXISTS (
-                  SELECT 1 FROM platform_capabilities cap
-                   WHERE cap.user_id = j.owner_user_id
-                     AND cap.capability = $3
-                ))
+                OR (j.job_type = 'expert.r.v1' AND NOT ${expertRAccessSql('j.owner_user_id', 'j.project_id', process.env, '$3')})
               ))
             OR
             (j.project_id IS NULL AND (
@@ -5243,11 +5260,7 @@ async function claimNextJob(workerId, opts = {}) {
                    AND pm.user_id = j.owner_user_id
                    AND pm.role = ANY($1::text[])
               )
-              AND (j.job_type <> 'expert.r.v1' OR EXISTS (
-                SELECT 1 FROM platform_capabilities cap
-                 WHERE cap.user_id = j.owner_user_id
-                   AND cap.capability = $5
-              ))
+              AND (j.job_type <> 'expert.r.v1' OR ${expertRAccessSql('j.owner_user_id', 'j.project_id', process.env, '$5')})
             )
             OR (
               j.project_id IS NOT NULL
@@ -5291,14 +5304,12 @@ async function claimNextJob(workerId, opts = {}) {
       );
       let finalEligibility = Boolean(eligible.rows[0]);
       if (finalEligibility && selected.job_type === 'expert.r.v1') {
-        // Lock the grant through the claim transaction. A concurrent operator
-        // revocation either commits first (this claim is canceled) or waits for
-        // this already-authorized claim to enter running state.
+        // The operator also locks this user row, so grant/revoke and claim
+        // eligibility have a defined order even for automatic role access.
+        await client.query('SELECT id FROM users WHERE id = $1 FOR KEY SHARE', [Number(selected.owner_user_id)]);
         const capability = await client.query(
-          `SELECT 1 FROM platform_capabilities
-            WHERE user_id = $1 AND capability = $2
-            FOR KEY SHARE`,
-          [Number(selected.owner_user_id), EXPERT_R_EXECUTE_CAPABILITY]
+          `SELECT 1 WHERE ${expertRAccessSql('$1', '$2')}`,
+          [Number(selected.owner_user_id), selected.project_id]
         );
         finalEligibility = Boolean(capability.rows[0]);
       }

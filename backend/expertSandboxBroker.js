@@ -15,6 +15,7 @@ const { pipeline } = require('stream/promises');
 const storage = require('./storage');
 const {
   EXPERT_R_PROFILE,
+  expertRProfileProbeCode,
   validateExpertRParams,
   MAX_EXPERT_R_OUTPUT_BYTES,
   MAX_EXPERT_R_BUNDLE_BYTES,
@@ -125,6 +126,25 @@ async function assertExpertRuntimeSecurity(env = process.env, runProcessImpl = r
       && (!Array.isArray(options) || !options.includes('name=rootless'))) {
     throw new Error('The dedicated Expert R container runtime is not rootless.');
   }
+  return true;
+}
+
+async function assertExpertRuntimeImage(env = process.env, runProcessImpl = runProcess) {
+  const image = String(env.EXPERT_R_SANDBOX_IMAGE || '');
+  if (!/^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$/.test(image)) throw new Error('Expert R requires an immutable runtime image.');
+  const inspected = await runProcessImpl('docker', ['image', 'inspect', image, '--format', '{{.Id}}'], { timeoutMs: 30000 });
+  if (!/^sha256:[0-9a-f]{64}$/.test(String(inspected.stdout || '').trim())) throw new Error('Expert R runtime image is unavailable.');
+  const containerName = `traceomics-expert-preflight-${crypto.randomBytes(12).toString('hex')}`;
+  const result = await runProcessImpl('docker', ['run', '--rm', '--name', containerName,
+    '--label', `${CONTAINER_LABEL}=true`, '--network', 'none', '--read-only',
+    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256',
+    '--memory', env.EXPERT_R_MEMORY_LIMIT || '8g', '--cpus', env.EXPERT_R_CPU_LIMIT || '2',
+    '--user', '10001:10001', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=512m',
+    '--entrypoint', 'Rscript', image, '-e', `${expertRProfileProbeCode()}; cat('private-r-profile-ok')`], {
+    timeoutMs: 90000,
+    onTimeout: () => runProcessImpl('docker', ['rm', '-f', containerName], { timeoutMs: 30000 }),
+  });
+  if (!String(result.stdout || '').includes('private-r-profile-ok')) throw new Error('Expert R runtime does not provide the supported package profile.');
   return true;
 }
 
@@ -474,6 +494,7 @@ function createExpertSandboxBroker(env = process.env) {
   const activeWorkspaces = new Set();
   let reconcileTimer = null;
   let reconciliation = null;
+  let runtimeVerified = false;
   const timeoutMs = positiveInteger(env.EXPERT_R_TIMEOUT_MS, 600000);
   const cleanupGraceMs = positiveInteger(env.EXPERT_R_CLEANUP_GRACE_MS, 300000);
   const reconcileIntervalMs = positiveInteger(env.EXPERT_R_RECONCILE_INTERVAL_MS, 300000);
@@ -487,6 +508,12 @@ function createExpertSandboxBroker(env = process.env) {
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET' && req.url === '/health') return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id }));
+    if (req.method === 'GET' && req.url === '/capabilities'
+        && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
+      if (!runtimeVerified) { res.statusCode = 503; return res.end(JSON.stringify({ status: 'unavailable' })); }
+      return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
+        sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION }));
+    }
     if (req.method !== 'POST' || req.url !== '/run'
         || !safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       res.statusCode = 404; return res.end(JSON.stringify({ error: 'Not found.' }));
@@ -745,7 +772,9 @@ function createExpertSandboxBroker(env = process.env) {
   });
   server.startReconciliation = async () => {
     await assertExpertRuntimeSecurity(env);
+    if (!runtimeVerified) await assertExpertRuntimeImage(env);
     await reconcile();
+    runtimeVerified = true;
     if (!reconcileTimer) {
       reconcileTimer = setInterval(() => {
         void reconcile().catch((error) => {
@@ -783,5 +812,6 @@ module.exports = {
   isTrustedBrokerBindHost,
   validateExpertRuntimeIsolation, reconcileExpertSandboxWorkRoot,
   assertExpertRuntimeSecurity,
+  assertExpertRuntimeImage,
   writeWorkspaceManifest, workspaceRootHash, WORKSPACE_MANIFEST,
 };

@@ -335,6 +335,7 @@ services:
       ENABLE_JOB_WORKER: "false"
       R_PROXY_MAX_CONCURRENT: "1"
       EXPERT_R_ENABLED: ${EXPERT_R_ENABLED:-false}
+      EXPERT_R_ACCESS_POLICY: ${EXPERT_R_ACCESS_POLICY:-approved-accounts}
       EXPERT_R_SANDBOX_URL: http://127.0.0.1:8090
       EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
     volumes:
@@ -499,6 +500,7 @@ services:
       JOB_WORKER_POOL_SLOT: "2"
       JOB_WORKER_ALLOWED_JOB_TYPES: "pbmc.pipeline.v1,seurat.pipeline.v1,spatial.seurat.v1,deg.find_markers.v1,enrichment.gsea.v1,cellchat.infer.v1,explore.summarize.v1,condition.pseudobulk_de.v1,expert.r.v1"
       EXPERT_R_ENABLED: ${EXPERT_R_ENABLED:-false}
+      EXPERT_R_ACCESS_POLICY: ${EXPERT_R_ACCESS_POLICY:-approved-accounts}
       EXPERT_R_SANDBOX_URL: http://127.0.0.1:8090
       EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
       JOB_WORKER_HEALTH_HOST: 127.0.0.1
@@ -551,6 +553,7 @@ services:
       JOB_WORKER_POOL_SLOT: "3"
       JOB_WORKER_ALLOWED_JOB_TYPES: "pbmc.pipeline.v1,seurat.pipeline.v1,spatial.seurat.v1,deg.find_markers.v1,enrichment.gsea.v1,cellchat.infer.v1,explore.summarize.v1,condition.pseudobulk_de.v1,expert.r.v1"
       EXPERT_R_ENABLED: ${EXPERT_R_ENABLED:-false}
+      EXPERT_R_ACCESS_POLICY: ${EXPERT_R_ACCESS_POLICY:-approved-accounts}
       EXPERT_R_SANDBOX_URL: http://127.0.0.1:8090
       EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
       JOB_WORKER_HEALTH_HOST: 127.0.0.1

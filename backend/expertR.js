@@ -128,8 +128,14 @@ function isTrustedExpertRSandboxUrl(raw) {
 function expertRSandboxEnabled(env = process.env) {
   return EXPERT_R_ALLOWED_DEPLOYMENT_MODES.has(String(env.APP_DEPLOYMENT_MODE || '').trim().toLowerCase())
     && env.EXPERT_R_ENABLED === 'true'
+    && ['approved-accounts', 'project-roles'].includes(env.EXPERT_R_ACCESS_POLICY || 'approved-accounts')
     && isTrustedExpertRSandboxUrl(env.EXPERT_R_SANDBOX_URL)
     && /^[0-9a-f]{64}$/.test(String(env.EXPERT_R_SANDBOX_TOKEN || ''));
+}
+
+function expertRProfileProbeCode() {
+  const packages = PROFILE.packages.map((name) => JSON.stringify(name)).join(',');
+  return `stopifnot(getRversion() >= '4.5.0', getRversion() < '4.6.0', file.exists('/app/expert-runner.R')); packages <- c(${packages}); stopifnot(all(vapply(packages, requireNamespace, quietly=TRUE, FUN.VALUE=logical(1)))); stopifnot(as.character(BiocManager::version()) == '3.22')`;
 }
 
 module.exports = {
@@ -157,4 +163,5 @@ module.exports = {
   allocateExpertRInputStorageKey,
   isTrustedExpertRSandboxUrl,
   expertRSandboxEnabled,
+  expertRProfileProbeCode,
 };

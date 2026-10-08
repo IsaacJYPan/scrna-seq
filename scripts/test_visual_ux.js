@@ -897,6 +897,19 @@ async function main() {
     });
   });
 
+  // Existing reductions are read independently of the computation routes.
+  // Keep this fixture consistent with the authoritative mock pipeline state.
+  await page.route('**/reduction-results*', async route => {
+    const reduction = new URL(route.request().url()).searchParams.get('reduction');
+    const result = reduction === 'pca'
+      ? { exists: true, restored: true, reduction: 'pca', npcs: 15,
+        settings: { seed: 42 }, stdevs: Array.from({ length: 15 }, (_, index) => 3 / (index + 1)),
+        gene_loadings: {}, trace_data: [{ name: 'Cluster 0', x: [1, 2], y: [2, 4] }] }
+      : { exists: false, reduction: 'umap' };
+    await route.fulfill({ status: 200, contentType: 'application/json', headers: corsHeaders,
+      body: JSON.stringify({ result, live_state: { live_revision: 0, saved_revision: 0, has_unsaved_changes: false } }) });
+  });
+
   await page.route('**/load-data*', async route => {
     await route.fulfill({
       status: 200,

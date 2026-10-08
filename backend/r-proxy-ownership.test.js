@@ -58,6 +58,15 @@ function stateKey(server, token, objectId) {
 }
 
 describe.skipIf(!CONFIGURED)('R proxy object-ownership verification', () => {
+  it('protects saved reduction previews before contacting R', async () => {
+    const { alice, bob } = await setup();
+    const id = await createObject(alice.token);
+    const route = '/api/r/reduction-results?reduction=umap';
+    expect((await api(server, route, { headers: { 'X-Object-ID': id } })).status).toBe(401);
+    expect((await api(server, route, { token: bob.token, headers: { 'X-Object-ID': id } })).status).toBe(404);
+    expect((await api(server, route, { token: alice.token, headers: { 'X-Object-ID': '../../private' } })).status).toBe(400);
+  });
+
   it('requires auth before any ownership logic runs', async () => {
     const res = await api(server, '/api/r/__test/state-key', { headers: { 'X-Object-ID': 'ao_x' } });
     expect(res.status).toBe(401);

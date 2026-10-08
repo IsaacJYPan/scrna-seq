@@ -1,0 +1,301 @@
+{
+  "caseId": "exploratory-r-promotion",
+  "illustrative": true,
+  "description": "A stateful console execution with kernel generation/order becomes a clean operation declaring analysis input and metrics output. The originating run is retained; future execution does not inherit kernel variables.",
+  "recipe": {
+    "format": "traceomics-workflow",
+    "schemaVersion": 2,
+    "id": "lab.cell-inspection",
+    "name": "Promoted cell inspection",
+    "version": "1.0.0",
+    "description": "Illustrative analysis contract; this record does not certify an installed scientific executor.",
+    "inputs": {
+      "analysis": {
+        "type": "object",
+        "cardinality": "one",
+        "format": {
+          "id": "org.seurat.object",
+          "version": "5"
+        }
+      }
+    },
+    "outputs": {},
+    "environments": {
+      "research": {
+        "profileId": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e",
+        "runtime": {
+          "language": "r",
+          "version": "4.5.1"
+        },
+        "lockfile": "environment/renv.lock"
+      }
+    },
+    "files": {
+      "environment/renv.lock": "{\"R\":{\"Version\":\"4.5.1\"},\"Packages\":{}}",
+      "steps/count-cells.R": "write_output(\"summary\", list(cells = ncol(inputs$analysis), features = nrow(inputs$analysis)))"
+    },
+    "steps": [
+      {
+        "id": "count-cells",
+        "label": "count-cells",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/count-cells.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "inputs": {
+          "analysis": {
+            "type": "object",
+            "cardinality": "one",
+            "format": {
+              "id": "org.seurat.object",
+              "version": "5"
+            }
+          }
+        },
+        "bindings": {
+          "analysis": {
+            "kind": "input",
+            "port": "analysis"
+          }
+        },
+        "outputs": {
+          "summary": {
+            "type": "metrics",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.metrics",
+              "version": "1"
+            }
+          }
+        },
+        "parameters": {},
+        "environment": "research",
+        "ui": {
+          "label": "count-cells",
+          "results": [
+            "summary"
+          ]
+        }
+      }
+    ],
+    "package": {
+      "license": "MIT",
+      "authors": [
+        "TraceOmics"
+      ],
+      "permissions": [
+        "read-inputs",
+        "write-outputs"
+      ]
+    }
+  },
+  "artifactVersions": [
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "exploratory-r-promotion-input-analysis",
+      "versionId": "exploratory-r-promotion-input-analysis-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.seurat.object",
+        "version": "5",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "e21e11c246342b0a8f93cac0661ab194a78d681ab3652571c8ebedacdc394658",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-0",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "exploratory-r-promotion-count-cells-summary",
+      "versionId": "exploratory-r-promotion-count-cells-summary-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "metrics",
+      "format": {
+        "id": "org.traceomics.metrics",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "6b3c6f7c85aee0fc08006b05c445ac84695e47b92cdd848278272b74047bcf75",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-1",
+      "sourceRunId": "exploratory-r-promotion-count-cells-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    }
+  ],
+  "operationVersions": [
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "lab.cell-inspection.count-cells",
+      "version": "1.0.0",
+      "digest": "06684ed670361b304dbfba259b8b5a21055f398e4fc934fdabd43b9f8c1efe6e",
+      "method": {
+        "kind": "r",
+        "entry": "steps/count-cells.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analysis": {
+          "type": "object",
+          "cardinality": "one",
+          "format": {
+            "id": "org.seurat.object",
+            "version": "5"
+          }
+        }
+      },
+      "outputs": {
+        "summary": {
+          "type": "metrics",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.metrics",
+            "version": "1"
+          }
+        }
+      },
+      "parameters": {},
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      },
+      "originRunId": "exploratory-origin-run"
+    }
+  ],
+  "runs": [
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "exploratory-origin-run",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "lab.exploratory-inspection",
+        "version": "1",
+        "digest": "40db28f7e325978e03d6640ad542bed7f8ba2dd455b8d18c2114a8f4fa1c5071"
+      },
+      "recipe": null,
+      "inputs": {
+        "analysis": {
+          "artifactId": "exploratory-r-promotion-input-analysis",
+          "versionId": "exploratory-r-promotion-input-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "e21e11c246342b0a8f93cac0661ab194a78d681ab3652571c8ebedacdc394658"
+        }
+      },
+      "parameters": {},
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {},
+      "kernel": {
+        "id": "private-example-kernel",
+        "generation": 1,
+        "order": 7
+      },
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Origin depended on previously loaded private kernel state; promotion declares its input explicitly."
+        ]
+      }
+    },
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "exploratory-r-promotion-count-cells-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "lab.cell-inspection.count-cells",
+        "version": "1.0.0",
+        "digest": "06684ed670361b304dbfba259b8b5a21055f398e4fc934fdabd43b9f8c1efe6e"
+      },
+      "recipe": {
+        "id": "lab.cell-inspection",
+        "version": "1.0.0",
+        "digest": "a9365df6c7b0f9dcbc650baf652c1acbaacafd1b7b18cc03de520b1cad1316ea"
+      },
+      "inputs": {
+        "analysis": {
+          "artifactId": "exploratory-r-promotion-input-analysis",
+          "versionId": "exploratory-r-promotion-input-analysis-v1",
+          "projectId": "example-project",
+          "sha256": "e21e11c246342b0a8f93cac0661ab194a78d681ab3652571c8ebedacdc394658"
+        }
+      },
+      "parameters": {},
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "summary": {
+          "artifactId": "exploratory-r-promotion-count-cells-summary",
+          "versionId": "exploratory-r-promotion-count-cells-summary-v1",
+          "projectId": "example-project",
+          "sha256": "6b3c6f7c85aee0fc08006b05c445ac84695e47b92cdd848278272b74047bcf75"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    }
+  ],
+  "versionBoundaries": {
+    "inputVersions": [
+      "exploratory-r-promotion-input-analysis-v1"
+    ],
+    "operationVersions": [
+      "lab.cell-inspection.count-cells@1.0.0"
+    ],
+    "outputVersions": [
+      "exploratory-r-promotion-count-cells-summary-v1"
+    ],
+    "recipeVersion": "lab.cell-inspection@1.0.0"
+  }
+}

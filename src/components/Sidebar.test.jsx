@@ -143,7 +143,7 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /Integration, Unavailable in this workspace/i })).toBeDisabled();
   });
 
-  it('shows one capability-gated advanced-analysis entry when the deployment does not configure it', () => {
+  it('lets a private project open R setup when its runtime is not configured', () => {
     render(
       <Sidebar
         activeTab="workspace"
@@ -164,8 +164,17 @@ describe('Sidebar component', () => {
 
     const advancedAnalysisButtons = screen.getAllByRole('button', { name: /Advanced analysis/i });
     expect(advancedAnalysisButtons).toHaveLength(1);
-    advancedAnalysisButtons.forEach(button => expect(button).toBeDisabled());
-    expect(advancedAnalysisButtons.every(button => button.getAttribute('aria-label') === 'Advanced analysis, Not enabled for this deployment')).toBe(true);
+    advancedAnalysisButtons.forEach(button => expect(button).not.toBeDisabled());
+    expect(advancedAnalysisButtons[0]).toHaveAccessibleName('Advanced analysis, R setup & availability');
+  });
+
+  it('keeps public demo R setup and execution unavailable', () => {
+    render(<Sidebar {...baseProps}
+      workspaces={[{ ...mockWorkspaces[0], selectedProjectId: 'proj_demo', projects: [{ id: 'proj_demo', role: 'owner' }] }]}
+      selectedObjects={[]}
+      deploymentPolicy={{ demoMode: true, expertREnabled: false }}
+    />);
+    expect(screen.getByRole('button', { name: /Advanced analysis/i })).toBeDisabled();
   });
 
   it('does not require icons for pipeline-generated tabs', () => {
