@@ -30,7 +30,61 @@ describe('FigureSavePanel component', () => {
     );
 
     expect(screen.getByText('Title')).toBeInTheDocument();
+    expect(screen.getByLabelText('Title')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /save to figure gallery/i })).toBeInTheDocument();
+  });
+
+  it('exposes a named modal dialog, focuses its close control, inerts the page, and restores focus on close', () => {
+    const triggerContainer = document.createElement('div');
+    const trigger = document.createElement('button');
+    trigger.textContent = 'Open figure editor';
+    triggerContainer.appendChild(trigger);
+    document.body.appendChild(triggerContainer);
+    trigger.focus();
+
+    const onClose = vi.fn();
+    const view = render(
+      <FigureSavePanel isOpen={false} onClose={onClose} plotType="UMAP" baseParams={{}} />
+    );
+    view.rerender(
+      <FigureSavePanel isOpen={true} onClose={onClose} plotType="UMAP" baseParams={{}} />
+    );
+
+    const dialog = screen.getByRole('dialog', { name: 'Save to Figure Gallery' });
+    const closeButton = screen.getByRole('button', { name: 'Close figure editor' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(document.activeElement).toBe(closeButton);
+    expect(triggerContainer).toHaveProperty('inert', true);
+
+    view.rerender(
+      <FigureSavePanel isOpen={false} onClose={onClose} plotType="UMAP" baseParams={{}} />
+    );
+    expect(triggerContainer).toHaveProperty('inert', false);
+    expect(document.activeElement).toBe(trigger);
+    triggerContainer.remove();
+  });
+
+  it('closes on Escape and wraps Tab and Shift+Tab within the dialog', () => {
+    const onClose = vi.fn();
+    render(
+      <FigureSavePanel isOpen={true} onClose={onClose} plotType="UMAP" baseParams={{}} />
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Save to Figure Gallery' });
+    const focusable = [...dialog.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )];
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+    first.focus();
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(last);
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
 

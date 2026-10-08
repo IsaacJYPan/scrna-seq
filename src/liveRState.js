@@ -14,6 +14,7 @@ export function consumeSavedObjectSelection(expectedObjectId, selectedObjectId) 
 
 export function pipelineProbeAction({ currentKey, nextKey, serverAttached, liveState }) {
   if (currentKey !== nextKey) return 'probe';
+  if (liveState === 'unknown') return 'probe';
   if (!serverAttached && liveState === 'attached') return 'probe';
   return 'skip';
 }

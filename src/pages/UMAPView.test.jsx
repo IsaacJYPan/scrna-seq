@@ -8,8 +8,8 @@ const { plotRenderSpy, supportsWebGLMock } = vi.hoisted(() => ({
 }));
 
 vi.mock('../components/Plot', () => ({
-  default: ({ data = [] }) => {
-    plotRenderSpy(data);
+  default: ({ data = [], layout }) => {
+    plotRenderSpy(data, layout);
     return <div data-testid="plot-stub" />;
   },
   supportsWebGL: supportsWebGLMock,
@@ -95,6 +95,7 @@ describe('UMAPView', () => {
     render(<UMAPView {...baseProps({ callApi })} />);
     await waitFor(() => expect(callApi).toHaveBeenCalled());
     expect(screen.queryByRole('button', { name: /Save Figure/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('plot-stub')).not.toBeInTheDocument();
   });
 
   it('retries short shared-compute contention and then renders the result', async () => {
@@ -170,5 +171,36 @@ describe('UMAPView', () => {
     });
     expect(plotRenderSpy.mock.calls.flatMap(([data]) => data)
       .some(trace => trace.type === 'scattergl')).toBe(false);
+  });
+
+  it('preserves returned coordinates and uses equal axis units', async () => {
+    render(<UMAPView {...baseProps()} />);
+    await waitFor(() => expect(plotRenderSpy).toHaveBeenCalledWith(
+      [expect.objectContaining({ x: [1, 2], y: [3, 4] })],
+      expect.objectContaining({ yaxis: expect.objectContaining({ scaleanchor: 'x', scaleratio: 1 }) }),
+    ));
+    expect(screen.getByText('Cell groups')).toBeInTheDocument();
+  });
+
+  it('uses the public PBMC tutorial defaults and does not describe it as synthetic', async () => {
+    const callApi = vi.fn(async () => resultPayload());
+    render(<UMAPView {...baseProps({ callApi, activeProjectSeed: '',
+      datasetInfo: { cells:2638, source:'pbmc3k_demo' }, deploymentPolicy:{demoMode:true} })} />);
+    expect(screen.getByRole('note')).toHaveTextContent('measured gene expression');
+    expect(screen.getByRole('note')).not.toHaveTextContent('simulated');
+    await waitFor(() => expect(callApi).toHaveBeenCalled());
+    expect(callApi.mock.calls[0][0]).toContain('dims=10');
+    expect(callApi.mock.calls[0][0]).toContain('seed=42');
+  });
+
+  it('discloses simulated input and distinguishes edited settings from the plotted calculation', async () => {
+    render(<UMAPView {...baseProps({ deploymentPolicy: { demoMode: true } })} />);
+    expect(screen.getByRole('note')).toHaveTextContent('800 simulated cells');
+    await screen.findByRole('button', { name: /Re-compute UMAP/i });
+    fireEvent.change(screen.getByLabelText(/Number of Neighbors/i), { target: { value: '42' } });
+    expect(screen.getByRole('status')).toHaveTextContent('Showing a previous calculation');
+    expect(screen.queryByRole('button', { name: /Save Figure/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Re-compute UMAP/i }));
+    await waitFor(() => expect(screen.queryByText(/Showing a previous calculation/)).not.toBeInTheDocument());
   });
 });

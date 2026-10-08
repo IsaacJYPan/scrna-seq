@@ -295,12 +295,12 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
           <aside className="space-y-5">
             <form className="rounded-xl border border-border bg-surface p-4 space-y-3" onSubmit={create}>
               <h3 className="font-bold text-text">Create a private branch</h3>
-              <input className="input w-full" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. alternate QC strategy" maxLength={80} />
-              <textarea className="input w-full min-h-20" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What are you testing?" maxLength={1000} />
-              <select aria-label="Branch source saved analysis" className="input w-full" value={baseObjectId} onChange={(event) => setBaseObjectId(event.target.value)}>
+              <label className="block space-y-1 text-sm"><span>Branch name</span><input className="input w-full" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. alternate QC strategy" maxLength={80} /></label>
+              <label className="block space-y-1 text-sm"><span>Description</span><textarea className="input w-full min-h-20" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What are you testing?" maxLength={1000} /></label>
+              <label className="block space-y-1 text-sm"><span>Source saved version</span><select aria-label="Branch source saved analysis" className="input w-full" value={baseObjectId} onChange={(event) => setBaseObjectId(event.target.value)}>
                 <option value="">Select an owned saved analysis</option>
                 {ownedObjects.map((object) => <option key={object.id} value={object.id} title={savedAnalysisLabel(object)}>{savedAnalysisLabel(object)}</option>)}
-              </select>
+              </select></label>
               <button className="btn btn-primary w-full" disabled={!name.trim() || !baseObjectId || !!busy}>{busy === 'create' ? 'Creating…' : 'Create private branch'}</button>
               {objects.length > ownedObjects.length && (
                 <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs text-textMuted">
@@ -358,8 +358,8 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
 
             <div className="rounded-xl border border-border bg-surface p-4 space-y-3">
               <h3 className="font-bold text-text flex items-center gap-2"><GitCompare size={17} /> Compare branches</h3>
-              <select aria-label="Left branch" className="input w-full" value={leftBranchId} onChange={(event) => setLeftBranchId(event.target.value)}><option value="">Left branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select>
-              <select aria-label="Right branch" className="input w-full" value={rightBranchId} onChange={(event) => setRightBranchId(event.target.value)}><option value="">Right branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select>
+              <label className="block space-y-1 text-sm"><span>Left branch</span><select aria-label="Left branch" className="input w-full" value={leftBranchId} onChange={(event) => setLeftBranchId(event.target.value)}><option value="">Select a branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select></label>
+              <label className="block space-y-1 text-sm"><span>Right branch</span><select aria-label="Right branch" className="input w-full" value={rightBranchId} onChange={(event) => setRightBranchId(event.target.value)}><option value="">Select a branch</option>{branches.map((branch) => <option key={branch.id} value={branch.id} title={branch.name}>{branch.name}</option>)}</select></label>
               <button className="btn btn-secondary w-full" disabled={!leftBranchId || !rightBranchId || !!busy} onClick={() => mutate('compare', async () => setComparison(await window.electronAPI.compareAnalysisBranches(projectId, leftBranchId, rightBranchId)))}>Compare recorded history</button>
               {comparison && (
                 <div className="rounded-lg bg-background border border-border p-3 text-xs text-textMuted space-y-1">

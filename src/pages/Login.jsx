@@ -116,7 +116,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
     'py-2 rounded-lg text-sm font-medium transition-colors';
 
   return (
-    <div className="login-bg min-h-screen w-full flex items-center justify-center p-4 sm:p-6 relative overflow-hidden">
+    <div className="login-bg h-dvh w-full flex items-start justify-center p-4 sm:p-6 relative overflow-y-auto custom-scrollbar">
       {/* Theme toggle — lets users pick the previous dark theme before signing in */}
       <button
         type="button"
@@ -128,7 +128,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
         {isDark ? <Sun size={18} /> : <Moon size={18} />}
       </button>
 
-      <div className="w-full max-w-sm relative z-10">
+      <div className="w-full max-w-sm relative z-10 my-auto shrink-0">
         {/* Brand */}
         <div className="flex flex-col items-center text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 border border-primary/20 mb-4">
@@ -183,7 +183,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} aria-busy={loading} className="space-y-4">
             {mode === 'signup' && (
               <div className="space-y-1.5">
                 <label htmlFor="signup-name" className="text-[13px] font-medium text-textMuted ml-0.5">Full name</label>
@@ -279,14 +279,14 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             )}
 
             {error && (
-              <div className="flex items-center gap-2 p-3 bg-danger/10 border border-danger/30 rounded-xl text-xs text-danger">
+              <div role="alert" className="flex items-center gap-2 p-3 bg-danger/10 border border-danger/30 rounded-xl text-xs text-danger">
                 <AlertTriangle size={15} className="flex-shrink-0" />
                 {error}
               </div>
             )}
 
             {success && (
-              <div className="flex items-center gap-2 p-3 bg-success/10 border border-success/30 rounded-xl text-xs text-success">
+              <div role="status" className="flex items-center gap-2 p-3 bg-success/10 border border-success/30 rounded-xl text-xs text-success">
                 <CheckCircle size={15} className="flex-shrink-0" />
                 {success}
               </div>
@@ -297,7 +297,10 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
               disabled={loading || !emailValid || !password || (mode === 'signup' && (!passwordMeetsLength || !passwordsMatch))}
               className="w-full bg-primary hover:bg-[#0077ed] disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold py-3.5 rounded-xl transition-colors flex items-center justify-center gap-2.5"
             >
-              {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : (
+              {loading ? <>
+                <div aria-hidden="true" className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                {mode === 'signup' ? 'Creating account…' : 'Opening workbench…'}
+              </> : (
                 <>
                   {mode === 'login' ? 'Open Workbench' : 'Create Account'} <Shield size={17} />
                 </>

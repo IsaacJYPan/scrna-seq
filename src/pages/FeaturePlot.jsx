@@ -17,8 +17,26 @@ const DARK_COLORSCALE = [
 
 // Light mode: standard Blues scale (white → dark blue) — common in scRNA-seq publications
 const LIGHT_COLORSCALE = 'Blues';
+const LIGHT_CHART_PALETTE = {
+  background: '#ffffff',
+  text: '#334155',
+  mutedText: '#475569',
+  grid: '#e2e8f0',
+  line: '#cbd5e1',
+  hoverBackground: '#ffffff',
+  hoverBorder: '#cbd5e1',
+};
+const DARK_CHART_PALETTE = {
+  background: '#0e1626',
+  text: '#f1f5f9',
+  mutedText: '#9fb0c9',
+  grid: '#29364b',
+  line: '#34445d',
+  hoverBackground: '#182236',
+  hoverBorder: '#34445d',
+};
 
-export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, deploymentPolicy }) {
+export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, deploymentPolicy, theme = 'light' }) {
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [gene, setGene] = useState('');
   const [geneInput, setGeneInput] = useState('');
@@ -27,7 +45,9 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
   const [error, setError] = useState(null);
   const [geneList, setGeneList] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
-  const [lightMode, setLightMode] = useState(false);
+  const [lightMode, setLightMode] = useState(theme !== 'dark');
+
+  useEffect(() => { setLightMode(theme !== 'dark'); }, [theme]);
 
   useEffect(() => {
     if (!sessionReady || !datasetInfo) return;
@@ -90,6 +110,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
   }
 
   const colorscale = lightMode ? LIGHT_COLORSCALE : DARK_COLORSCALE;
+  const palette = lightMode ? LIGHT_CHART_PALETTE : DARK_CHART_PALETTE;
   // Plotly's 'Blues' goes dark→light by default; reverse so low expression = white
   const reversescale = lightMode;
 
@@ -108,8 +129,8 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
         title: { text: gene, side: 'right' },
         thickness: 14,
         len: 0.6,
-        tickfont: { color: lightMode ? '#334155' : '#94a3b8' },
-        titlefont: { color: lightMode ? '#334155' : '#94a3b8' },
+        tickfont: { color: palette.mutedText },
+        titlefont: { color: palette.text },
       },
       opacity: 0.9,
     },
@@ -118,38 +139,47 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
 
   const layout = {
     autosize: true,
-    paper_bgcolor: lightMode ? '#ffffff' : 'transparent',
-    plot_bgcolor: lightMode ? '#ffffff' : 'transparent',
+    paper_bgcolor: palette.background,
+    plot_bgcolor: palette.background,
     font: {
-      color: lightMode ? '#334155' : '#94a3b8',
+      color: palette.text,
       size: 11,
       family: 'Inter, system-ui',
+    },
+    hoverlabel: {
+      bgcolor: palette.hoverBackground,
+      bordercolor: palette.hoverBorder,
+      font: { color: palette.text, family: 'Inter, system-ui' },
     },
     margin: { l: 50, r: 60, t: 30, b: 50 },
     xaxis: {
       title: 'UMAP 1',
-      gridcolor: lightMode ? '#e2e8f0' : '#1e293b',
-      linecolor: lightMode ? '#cbd5e1' : 'transparent',
+      titlefont: { color: palette.text },
+      tickfont: { color: palette.mutedText },
+      gridcolor: palette.grid,
+      linecolor: palette.line,
       zeroline: false,
     },
     yaxis: {
       title: 'UMAP 2',
-      gridcolor: lightMode ? '#e2e8f0' : '#1e293b',
-      linecolor: lightMode ? '#cbd5e1' : 'transparent',
+      titlefont: { color: palette.text },
+      tickfont: { color: palette.mutedText },
+      gridcolor: palette.grid,
+      linecolor: palette.line,
       zeroline: false,
     },
     showlegend: false,
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-background overflow-hidden">
-      <div className="px-8 pt-6 pb-4 border-b border-border flex items-center justify-between shrink-0">
+    <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
+      <div className="px-4 sm:px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-4 items-center justify-between shrink-0">
         <div>
           <h2 className="text-2xl font-bold text-text tracking-tight">Feature Plot</h2>
           <p className="text-textMuted text-sm">Visualize gene expression overlaid on UMAP coordinates.</p>
         </div>
 
-        <div className="relative flex items-center gap-2">
+        <div className="relative flex flex-wrap min-w-0 items-center gap-2">
           {/* Light / Dark toggle */}
           <button
             onClick={() => setLightMode(m => !m)}
@@ -165,6 +195,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
           <div className="relative">
             <input
               type="text"
+              aria-label="Feature plot gene symbol"
               value={geneInput}
               onChange={e => handleInputChange(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && fetchFeaturePlot()}
@@ -206,7 +237,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
         </div>
       )}
 
-      <div className="flex-1 p-6 overflow-hidden">
+      <div className="flex-1 min-h-60 min-w-0 p-3 sm:p-6 overflow-hidden">
         {plotData ? (
           <Plot
             preferSvg

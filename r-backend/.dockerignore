@@ -1,6 +1,8 @@
 **
 !Dockerfile
 !Dockerfile.demo
+!Dockerfile.pbmc-demo
+!pbmc3k-demo.R
 !image-packages.R
 !build-demo-artifact.R
 !install-r-packages.sh

@@ -43,6 +43,12 @@ describe('QualityControl', () => {
     expect(await screen.findByText('Quality Control')).toBeInTheDocument();
   });
 
+  it('uses the reference QC thresholds only for the PBMC3k tutorial', async () => {
+    render(<QualityControl {...baseProps({ objectId:'ao_reference', datasetInfo:{...datasetInfo,source:'pbmc3k_demo'} })} />);
+    expect(await screen.findByLabelText('Max Features')).toHaveValue(2500);
+    expect(screen.getByLabelText('Min Features')).toHaveValue(200);
+  });
+
   // Regression: hooks (usePipelineStep + the jitter useMemo calls) must run on
   // every render. If datasetInfo becomes null while the page is mounted (logout,
   // project switch, cleared selection) an early return placed before those hooks

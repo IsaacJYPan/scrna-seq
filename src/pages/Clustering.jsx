@@ -5,11 +5,13 @@ import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
 export default function Clustering({ callApi, datasetInfo, currentProvId: _currentProvId, pcaProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed, theme }) {
+  const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
+  const clusterSeed = activeProjectSeed || (isPbmcTutorial ? '0' : '');
   // Persisted parameters
   const [params, setParam] = useTabParams('cluster', userEmail, objectId, {
     algorithm: 1,
-    resolution: 0.8,
-    dims: 15,
+    resolution: isPbmcTutorial ? 0.5 : 0.8,
+    dims: isPbmcTutorial ? 10 : 15,
     kParam: 20,
     nStart: 10
   });
@@ -17,13 +19,13 @@ export default function Clustering({ callApi, datasetInfo, currentProvId: _curre
 
   const { running, result, error, runStep: runClustering } = usePipelineStep({
     callApi,
-    endpoint: `/cluster?dims=${dims}&resolution=${resolution}&algorithm=${algorithm}&seed=${activeProjectSeed || ''}&k_param=${kParam}&n_start=${nStart}`,
+    endpoint: `/cluster?dims=${dims}&resolution=${resolution}&algorithm=${algorithm}&seed=${clusterSeed}&k_param=${kParam}&n_start=${nStart}`,
     ipcContext: {
       operation: 'cluster',
       step: 'cluster',
       parentIds: pcaProvId ? [pcaProvId] : [],
       useCache: true,
-      cacheParams: { type: 'cluster', dims, resolution, algorithm, seed: activeProjectSeed || 'random', kParam, nStart }
+      cacheParams: { type: 'cluster', dims, resolution, algorithm, seed: clusterSeed || 'random', kParam, nStart }
     },
     readyToHydrate: !!(datasetInfo && pipelineState?.pca),
     sessionReady,

@@ -46,10 +46,28 @@ async function main() {
     const types = await page.evaluate(() => window.chartAcceptance);
     assert.equal(types.length, 8);
     assert.deepEqual(errors, [], 'chart rendering must not log browser errors');
+    // Reproduce visiting a chart, leaving its tab, resizing the workspace,
+    // and returning without another window resize event.
+    await page.evaluate(() => {
+      const host = document.getElementById('responsive-chart');
+      host.style.display = 'none';
+      host.style.width = '260px';
+      host.style.height = '420px';
+    });
+    await page.setViewportSize({ width: 900, height: 1080 });
+    await page.evaluate(() => { document.getElementById('responsive-chart').style.display = 'block'; });
+    await page.waitForFunction(() => {
+      const graph = window.responsiveChart;
+      return Math.abs(graph?._fullLayout?.width - 260) < 1
+        && Math.abs(graph?._fullLayout?.height - 420) < 1;
+    }, null, { timeout: 10000 });
+    assert.deepEqual(errors, [], 'restoring a resized hidden chart must not log browser errors');
+    await page.evaluate(() => window.unmountResponsiveChart());
+    await page.setViewportSize({ width: 1320, height: 1080 });
     const report = path.join(root, 'playwright', 'report');
     await fs.mkdir(report, { recursive: true });
     await page.screenshot({ path: path.join(report, 'scientific-charts.png'), fullPage: true });
-    console.log(`Passed production rendering, PNG/SVG export, and updates: ${types.join(', ')}`);
+    console.log(`Passed production rendering, PNG/SVG export, updates, and hidden-tab resizing: ${types.join(', ')}`);
   } finally {
     await browser?.close();
     if (server) await new Promise((resolve) => server.httpServer.close(resolve));

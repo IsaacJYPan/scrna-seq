@@ -21,6 +21,10 @@ describe('hasAttachedLiveRObject', () => {
 describe('pipelineProbeAction', () => {
   const key = 'owner@example.org:ao_1:r-session-1';
 
+  it('rechecks readiness when the same object loses its live projection during a metadata refresh', () => {
+    expect(pipelineProbeAction({ currentKey: key, nextKey: key, serverAttached: true, liveState: 'unknown' })).toBe('probe');
+  });
+
   it('re-probes the same object after a durable checkpoint attach changes the UI projection', () => {
     expect(pipelineProbeAction({
       currentKey: key, nextKey: key, serverAttached: false, liveState: 'attached',

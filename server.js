@@ -1404,6 +1404,7 @@ app.post('/api/auth/demo-guest', signupRateLimiter, async (req, res) => {
       displayName: template.displayName || 'Curated scRNA-seq demo',
       templateProjectId: config.demoTemplateProjectId(),
       templateAnalysisObjectId: template.analysisObjectId,
+      templateMetadata: template.metadata,
     });
     const token = issueSession(provisioned.user);
     setSessionCookie(res, token);

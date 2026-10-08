@@ -436,27 +436,35 @@ export const electronAPI = {
     // Purge credentials that an older release may have written after this
     // module was loaded. They are never sent or accepted as authentication.
     localStorage.removeItem(AUTH_TOKEN_KEY);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15_000);
     try {
       const headers = { 'X-Client-ID': CLIENT_ID };
       const res = await fetch(apiUrl('/api/auth/session'), {
         method: 'GET',
         headers,
-        credentials: 'include'
+        credentials: 'include',
+        signal: controller.signal,
       });
       if (!res.ok) {
-        if (res.status === 401) clearAuthSessionStorage();
-        return null;
+        if (res.status === 401) {
+          clearAuthSessionStorage();
+          return null;
+        }
+        const error = new Error('The session could not be checked. Please retry.');
+        error.status = res.status;
+        throw error;
       }
-      const data = await res.json().catch(() => ({}));
-      if (data?.user) {
+      const data = await res.json();
+      if (data?.user?.email) {
         localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
         return data.user;
       }
-      return null;
-    } catch {
-      // Network/backend unavailable: keep local cache untouched, but do not use
-      // it as auth truth. The app stays logged out until the backend confirms.
-      return null;
+      throw new Error('The session response was incomplete. Please retry.');
+    } finally {
+      // Network/backend failures propagate to the retry screen. Cached user
+      // metadata remains display-only and never authenticates the workspace.
+      clearTimeout(timeoutId);
     }
   },
   startDemoGuest: async () => {

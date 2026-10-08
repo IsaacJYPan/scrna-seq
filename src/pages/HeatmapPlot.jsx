@@ -79,13 +79,13 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-background overflow-hidden">
-      <div className="px-8 pt-6 pb-4 border-b border-border flex items-center justify-between shrink-0">
+    <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
+      <div className="px-4 sm:px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-4 items-center justify-between shrink-0">
         <div>
           <h2 className="text-2xl font-bold text-text tracking-tight">Marker Heatmap</h2>
           <p className="text-textMuted text-sm">Average expression of top marker genes per cluster.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label htmlFor="heatmap-top-n" className="text-xs text-textMuted font-bold uppercase tracking-wide">Top N per cluster</label>
           <input
             id="heatmap-top-n"
@@ -112,7 +112,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
         </div>
       )}
 
-      <div className="flex-1 p-6 overflow-hidden">
+      <div className="flex-1 min-h-60 min-w-0 p-3 sm:p-6 overflow-hidden">
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center text-slate-400">

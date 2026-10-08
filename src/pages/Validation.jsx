@@ -42,22 +42,22 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
   };
 
   const pipelineCheck = (has) => (
-    <span className={`px-2 py-0.5 rounded text-[8px] font-black tracking-widest border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
+    <span className={`shrink-0 whitespace-nowrap px-2 py-0.5 rounded text-[8px] font-black tracking-widest border ${has ? 'bg-success/10 text-success border-success/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
       {has ? '✓ DONE' : 'PENDING'}
     </span>
   );
 
   return (
-    <div className="h-full w-full flex flex-col bg-background p-8 overflow-y-auto custom-scrollbar">
-      <div className="flex justify-between items-center mb-8 border-b border-border pb-6">
-        <div>
+    <div className="h-full w-full flex flex-col bg-background p-4 sm:p-6 lg:p-8 overflow-y-auto custom-scrollbar">
+      <div className="flex flex-col sm:flex-row sm:justify-between items-start sm:items-center gap-4 mb-8 border-b border-border pb-6">
+        <div className="min-w-0">
            <h2 className="text-3xl font-black text-white mb-2 tracking-tighter">Validation</h2>
            <p className="text-slate-400 text-lg">Review key measurements from the selected analysis.</p>
         </div>
         <button 
           onClick={performSanityCheck}
           disabled={loading}
-          className="btn btn-primary px-8 py-4 font-bold flex items-center gap-3 shadow-xl transition-all active:scale-95"
+          className="btn btn-primary w-full sm:w-auto shrink-0 whitespace-nowrap px-4 sm:px-8 py-3 sm:py-4 font-bold flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95"
         >
           {loading ? <RefreshCw className="animate-spin" size={22} /> : <ClipboardList size={22} />}
           {metrics ? 'Refresh Metrics' : 'Run Validation'}
@@ -74,17 +74,17 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
       {metrics ? (
         <div className="space-y-10 animate-in fade-in slide-in-from-bottom-6 duration-500">
            {/* Top summary cards */}
-           <div className="grid grid-cols-4 gap-6">
+           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
               {[
                 { label: 'Cells', value: metrics.cell_count?.toLocaleString(), icon: Database },
                 { label: 'Features', value: metrics.feature_count?.toLocaleString(), icon: Table },
                 { label: 'Median Genes/Cell', value: metrics.median_genes?.toLocaleString(), icon: Info },
                 { label: 'Sparsity', value: metrics.sparsity, icon: CheckCircle }
               ].map((stat, i) => (
-                <div key={i} className="card p-6 border-l-4 border-l-primary bg-slate-800/30">
+                <div key={i} className="card min-w-0 p-4 sm:p-6 border-l-4 border-l-primary bg-slate-800/30">
                    <stat.icon className="text-primary mb-3 opacity-60" size={24} />
-                   <div className="text-2xl font-black text-white mb-1 tracking-tight">{stat.value ?? '—'}</div>
-                   <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{stat.label}</div>
+                   <div className="min-w-0 break-words text-xl sm:text-2xl font-black text-white mb-1 tracking-tight">{stat.value ?? '—'}</div>
+                   <div className="break-words text-[10px] font-black text-slate-400 uppercase tracking-widest">{stat.label}</div>
                 </div>
               ))}
            </div>
@@ -126,32 +126,28 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
            {/* Pipeline state */}
            <div className="card p-6">
                <h3 className="text-xs font-black text-white uppercase tracking-widest mb-4">Analysis progress</h3>
-              <div className="flex items-center gap-4">
+              <div className="flex flex-wrap gap-x-5 gap-y-3">
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    <span className="font-mono text-primary font-bold">load</span>
-                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_normalized, 'normalize')}
                    <span className="font-mono">normalize</span>
-                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_pca, 'pca')}
                    <span className="font-mono">pca</span>
-                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_clusters, 'cluster')}
                    <span className="font-mono">cluster</span>
-                   <span className="text-slate-400">→</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                    {pipelineCheck(metrics.has_umap, 'umap')}
                    <span className="font-mono">umap</span>
                 </div>
               </div>
-              <p className="text-xs text-slate-400 mt-3">Completed steps: <span className="text-primary font-mono">{metrics.pipeline_steps}</span></p>
+              <p className="break-words text-xs text-slate-400 mt-3">Completed steps: <span className="text-primary font-mono">{metrics.pipeline_steps}</span></p>
            </div>
         </div>
       ) : (

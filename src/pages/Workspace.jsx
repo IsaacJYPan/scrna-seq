@@ -109,7 +109,7 @@ function LoadModal({
   const trapDialogFocus = (event) => {
     if (event.key !== 'Tab') return;
     const controls = [...(dialogRef.current?.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
-    if (!controls.length) return;
+    if (!controls.length) { event.preventDefault(); return; }
     const first = controls[0];
     const last = controls.at(-1);
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
@@ -575,8 +575,8 @@ function LoadModal({
   return (
     <>
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40" onClick={requestClose} aria-hidden="true" />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-8 pointer-events-none">
-        <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="dataset-loader-title" onKeyDown={trapDialogFocus} className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-xl pointer-events-auto max-h-[90vh] overflow-y-auto">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8 pointer-events-none">
+        <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="dataset-loader-title" onKeyDown={trapDialogFocus} className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-xl pointer-events-auto max-h-[calc(100dvh-2rem)] sm:max-h-[90vh] overflow-y-auto custom-scrollbar">
           {/* Header */}
           <div className="flex items-center justify-between px-7 pt-7 pb-5 border-b border-slate-800">
             <div>
@@ -607,7 +607,7 @@ function LoadModal({
               {showFilters ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
             </button>
             {showFilters && (
-              <div className="flex gap-4 mt-3 mb-1">
+              <div className="flex flex-col sm:flex-row gap-3 mt-3 mb-1">
                 <div className="flex-1 flex items-center justify-between bg-slate-800 rounded-lg px-3 py-2 border border-slate-700">
                   <span className="text-xs text-slate-400 font-medium">min.cells</span>
                   <input
@@ -641,18 +641,18 @@ function LoadModal({
                     active
                       ? 'bg-primary/10 border-primary'
                       : 'bg-slate-800/60 border-slate-700/50 hover:border-slate-600 hover:bg-slate-800'
-                  } disabled:opacity-50`}
+                  } ${isLoading && !active ? 'opacity-50' : ''}`}
                 >
-                  <div className="w-10 h-10 rounded-lg bg-slate-700/60 flex items-center justify-center flex-shrink-0 transition-colors">
+                  <div className="w-10 h-10 rounded-lg bg-background border border-border flex items-center justify-center flex-shrink-0 transition-colors">
                     {active
-                      ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      ? <Loader2 size={20} aria-hidden="true" className="text-primary animate-spin" />
                       : opt.icon}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <span className="font-bold text-white text-sm">{opt.title}</span>
-                      <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide ${opt.tagColor}`}>
-                        {opt.tag}
+                    <div className="flex flex-wrap items-center gap-2 mb-0.5">
+                      <span className="font-bold text-text text-sm">{opt.title}</span>
+                      <span role={active ? 'status' : undefined} className={`text-[9px] font-black px-1.5 py-0.5 rounded border uppercase tracking-wide ${opt.tagColor}`}>
+                        {active ? <>Loading…<span className="sr-only"> {opt.title}</span></> : opt.tag}
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400 leading-snug">{opt.desc}</p>
@@ -1883,14 +1883,14 @@ export default function Workspace({
                     : `Data Info: ${displayObject.name}`}
                 </h3>
               </div>
-              <div className="grid grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
                 {[
                   { label: 'Cells (Primary)',    value: Number.isFinite(displayObject.cells) ? displayObject.cells.toLocaleString() : 'Unavailable', info: 'Total unique barcodes after filtering.', icon: Database },
                   { label: 'Features (Primary)', value: Number.isFinite(displayObject.features) ? displayObject.features.toLocaleString() : 'Unavailable', info: 'Number of genes measured per cell.', icon: LayoutGrid },
                   { label: 'Density',            value: Number.isFinite(displayObject.density) ? `${displayObject.density}%` : 'Unavailable', info: 'Percentage of non-zero entries in the sparse matrix. This value is unavailable when it was not recorded with an older saved version.', icon: ScatterChart },
                   { label: 'Branch',             value: currentWs.activeBranch.toUpperCase(),                 info: 'Current analytical provenance branch.', icon: FolderTree },
                 ].map((stat, i) => (
-                  <div key={i} className="card p-6 bg-surface/50 border-border/50 relative flex flex-col justify-center items-center min-h-[130px]">
+                  <div key={i} className="card min-w-0 p-3 sm:p-6 bg-surface/50 border-border/50 relative flex flex-col justify-center items-center min-h-[130px]">
                     <div className="absolute top-2 right-2">
                       <div className="group/info relative">
                         <Info size={12} className="text-slate-400 cursor-help" />
@@ -1900,7 +1900,7 @@ export default function Workspace({
                       </div>
                     </div>
                     <stat.icon size={24} className="text-slate-500/50 mb-2" />
-                    <div className="text-2xl font-black text-text mb-1 tracking-tighter text-center">{stat.value}</div>
+                    <div className="text-xl sm:text-2xl font-black text-text mb-1 tracking-tighter text-center break-all">{stat.value}</div>
                     <div className="text-[10px] font-bold text-text uppercase tracking-widest text-center">{stat.label}</div>
                   </div>
                 ))}
@@ -1910,7 +1910,7 @@ export default function Workspace({
 
           {/* Projects Navigation */}
           <div>
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <h3 className="text-lg font-bold text-text flex items-center gap-3">
                 <FolderTree size={18} className="text-slate-400" />
                 Projects
@@ -1994,7 +1994,7 @@ export default function Workspace({
 
           {/* Objects List */}
           <div className="pt-6">
-            <div className="flex justify-between items-center mb-4">
+            <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
               <h3 className="text-lg font-bold text-text flex items-center gap-3">
                 Saved analyses{' '}
                 <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
@@ -2013,7 +2013,7 @@ export default function Workspace({
 
             <div className="grid grid-cols-1 gap-3">
               {!activeProjectId ? (
-                <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
+                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
                   <FolderTree size={40} className="text-slate-400 mb-4 opacity-50" />
                   <h4 className="text-text font-bold mb-2">Select a project</h4>
                   <p className="text-sm text-textMuted mb-6">
@@ -2021,13 +2021,13 @@ export default function Workspace({
                   </p>
                 </div>
               ) : backendModelStatus?.objectsLoading ? (
-                <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
+                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
                   <Database size={40} className="text-slate-400 mb-4 opacity-50" />
                   <h4 className="text-text font-bold mb-2">Loading saved analyses</h4>
                   <p className="text-sm text-textMuted">Loading saved analysis details.</p>
                 </div>
               ) : activeProjectObjects.length === 0 ? (
-                <div className="p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
+                <div className="p-6 sm:p-16 text-center border-2 border-dashed border-border rounded-2xl flex flex-col items-center justify-center">
                   <Database size={40} className="text-slate-400 mb-4 opacity-50" />
                   <h4 className="text-text font-bold mb-2">No saved analyses in this project</h4>
                   <p className="text-sm text-textMuted mb-6">

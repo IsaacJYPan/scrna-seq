@@ -84,6 +84,34 @@
     @apply px-4 py-3 border-b border-border flex items-center justify-between bg-black/5 dark:bg-white/5;
   }
 
+  /* Shared form controls used by the study design and branch forms. */
+  .input {
+    display: block;
+    min-width: 0;
+    min-height: 40px;
+    padding: 0.5rem 0.75rem;
+    color: var(--color-text);
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    font: inherit;
+  }
+  .input::placeholder { color: var(--color-textMuted); opacity: 1; }
+  textarea.input { min-height: 5rem; padding-block: 0.625rem; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 0.25rem 0.625rem;
+    border: 1px solid var(--color-border);
+    border-radius: 9999px;
+    background-color: var(--accent-soft);
+    color: var(--color-text);
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+    overflow-wrap: anywhere;
+  }
+
   /* Consistent, always-visible focus ring for form controls in both themes. */
   input:focus-visible,
   select:focus-visible,

@@ -41,6 +41,7 @@ describe.skipIf(!CONFIGURED)('isolated public demo lifecycle', () => {
     });
     const object = await db.createProjectAnalysisObject(owner.id, project.id, {
       objectType: 'seurat', displayName: 'Curated PBMC demo',
+      metadata: { sourceType:'synthetic_pbmc_demo', summary:{cells:800,features:200}, operatorPrivateNote:'must not be cloned' },
     });
     const control = await design.createCondition(owner.id, project.id, { name: 'control' });
     const treated = await design.createCondition(owner.id, project.id, { name: 'treated' });
@@ -97,7 +98,8 @@ describe.skipIf(!CONFIGURED)('isolated public demo lifecycle', () => {
       method: 'POST', headers: { Origin: 'http://localhost:5173' },
     });
     expect(created.status).toBe(201);
-    expect(created.data.analysisObject.metadata).toMatchObject({ curatedDemo: true });
+    expect(created.data.analysisObject.metadata).toMatchObject({ curatedDemo:true, sourceType:'synthetic_pbmc_demo', synthetic:true, summary:{cells:800,features:200} });
+    expect(created.data.analysisObject.metadata).not.toHaveProperty('operatorPrivateNote');
     const setCookie = created.res.headers.get('set-cookie') || '';
     const cookieValue = setCookie.match(/(?:__Host-traceomics_session|traceomics_session)=([^;]+)/)?.[1];
     expect(cookieValue).toBeTruthy();

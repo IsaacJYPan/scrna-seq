@@ -689,19 +689,19 @@ export default function Inspect({
   return (
     <div className="flex-1 w-full h-full flex flex-col bg-background overflow-hidden relative">
         {/* Header */}
-        <div className="flex items-center justify-between px-8 pt-8 pb-4 border-b border-slate-800 bg-slate-800/10">
-          <div>
+        <div className="flex flex-wrap gap-4 items-center justify-between px-4 sm:px-8 pt-6 sm:pt-8 pb-4 border-b border-slate-800 bg-slate-800/10">
+          <div className="min-w-0">
             <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-[.25em] mb-2">
               <Search size={12} className="text-primary" />
               Analysis details
             </div>
-            <h2 className="text-2xl font-black text-white tracking-tighter flex items-center gap-3">
+            <h2 className="text-2xl font-black text-text tracking-tighter break-words">
               {obj.name}
             </h2>
             <p className="text-[12px] font-bold text-slate-400 mt-1 uppercase tracking-widest">
               {info && !loading
                 ? `${info.n_cells?.toLocaleString()} cells · ${info.n_features?.toLocaleString()} features · ${info.meta_cols?.length} metadata columns`
-                : 'Loading…'}
+                : loading ? 'Loading…' : 'Details unavailable'}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -717,12 +717,13 @@ export default function Inspect({
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-slate-800 px-6">
+        <div className="flex overflow-x-auto custom-scrollbar border-b border-slate-800 px-2 sm:px-6" role="group" aria-label="Analysis detail views">
           {visibleTabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-6 py-4 text-xs font-bold uppercase tracking-widest border-b-2 transition-all ${
+              aria-pressed={activeTab === tab.id}
+              className={`flex shrink-0 whitespace-nowrap items-center gap-2 px-4 sm:px-6 py-4 text-xs font-bold uppercase tracking-widest border-b-2 transition-colors ${
                 activeTab === tab.id
                   ? 'border-blue-400 text-blue-400'
                   : 'border-transparent text-slate-400 hover:text-slate-300'
@@ -741,7 +742,7 @@ export default function Inspect({
         )}
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-8">
           <div className="max-w-4xl mx-auto">
             {loading && (
               <div className="flex flex-col items-center justify-center h-40 gap-3">
