@@ -21,6 +21,15 @@ function workflowRoutes({ db, provider, requireAuth }) {
       if (error.code === 'WORKFLOW_EXECUTOR_UNAVAILABLE' && error.status === 422) {
         return res.status(422).json({ error: error.message, code: error.code, details: error.details });
       }
+      const environmentErrors = {
+        R_ENVIRONMENT_MISMATCH: [409, 'The exact R environment for this run is unavailable. Restore its pinned runtime image and package lock before retrying.'],
+        R_ENVIRONMENT_UNAVAILABLE: [503, 'The exact R environment is unavailable.'],
+        R_ENVIRONMENT_INVALID: [503, 'The recorded R environment could not be verified. Restore its pinned runtime image and package lock before retrying.'],
+      };
+      if (error.publicSafeHandlerError === true && Object.hasOwn(environmentErrors, error.code)) {
+        const [status, message] = environmentErrors[error.code];
+        return res.status(status).json({ error: message, code: error.code });
+      }
       const status = error.status || (['FORBIDDEN', 'PROJECT_ROLE_REQUIRED'].includes(error.code) ? 403 : /NOT_FOUND/.test(error.code || '') ? 404 : 400);
       const message = error.code && !['FORBIDDEN', 'PROJECT_ROLE_REQUIRED'].includes(error.code) ? 'The workflow request could not be completed.' : error.message;
       res.status(status).json({ error: message });

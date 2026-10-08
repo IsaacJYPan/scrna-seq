@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const storage = require('./storage');
 const { EXPERT_R_PROFILE, expertRSandboxEnabled, storedExpertRParams } = require('./expertR');
 const { expertRAccessSql } = require('./expertRAccess');
+const { getExpertREnvironment } = require('./expertSandboxClient');
+const { pinExpertREnvironment } = require('./rEnvironment');
 const contract = Promise.all([import('../shared/workflowPackage.mjs'), import('../shared/workflowState.mjs'), import('../shared/recipePackage.mjs')])
   .then(([packages, state, recipes]) => ({ ...packages, ...state, ...recipes }));
 function canonical(value) {
@@ -77,7 +79,7 @@ ${workflow.files[step.entry]}`;
   return { script, outputs };
 }
 
-function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider()) {
+function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider(), { getEnvironment = getExpertREnvironment } = {}) {
   async function open(userId, projectId, analysisObjectId, source) {
     await authorize(db, userId, projectId);
     const api = await contract; const workflow = api.parseLegacyExecutableWorkflowPackage(source, { environmentProfiles: [EXPERT_R_PROFILE.id] });
@@ -113,6 +115,7 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
     await authorize(db, userId, projectId, true);
     if (!input || typeof input.requestId !== 'string' || !/^[a-f0-9-]{16,64}$/.test(input.requestId)) throw error('A unique run request ID is required.');
     const api = await contract;
+    const environmentManifest = await getEnvironment();
     return transaction(db, async client => {
       await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [userId]);
       await lockExecutionAccess(client, userId, projectId);
@@ -127,9 +130,18 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
       const state = api.beginWorkflowRun(row.package_json, row.state_json, { id: identifier('job'), stepId: input.stepId, parameters: input.parameters, seed: input.seed });
       delete state.error;
       const compiled = compileStep(row.package_json, state);
-      const parameters = storedExpertRParams({ profileId: row.package_json.runtime.profileId, script: compiled.script, inputIds: [] });
+      const parameters = storedExpertRParams(pinExpertREnvironment({ profileId: row.package_json.runtime.profileId, script: compiled.script, inputIds: [],
+        ...(row.state_json.environment ? { environment: row.state_json.environment } : {}) }, environmentManifest));
+      state.environment = parameters.environment;
+      state.active.environment = parameters.environment;
       await db.getLoadableCheckpointForAnalysisObject(projectId, row.analysis_object_id, userId);
-      await client.query("INSERT INTO jobs (id,owner_user_id,project_id,analysis_object_id,job_type,status,parameters_json,max_attempts) VALUES ($1,$2,$3,$4,'expert.r.v1','queued',$5,1)", [state.active.id, userId, projectId, row.analysis_object_id, JSON.stringify(parameters)]);
+      await client.query(`WITH new_job AS (INSERT INTO jobs
+        (id,owner_user_id,project_id,analysis_object_id,job_type,status,parameters_json,max_attempts)
+        VALUES ($1,$2,$3,$4,'expert.r.v1','queued',$5,1) RETURNING *), retained_source AS (
+          INSERT INTO execution_source_versions (id,project_id,owner_user_id,job_id,language,source_code,source_sha256)
+          SELECT 'src_' || id,project_id,owner_user_id,id,'R',parameters_json::jsonb->>'script',parameters_json::jsonb->>'scriptSha256'
+          FROM new_job RETURNING id
+        ) SELECT id FROM new_job`, [state.active.id, userId, projectId, row.analysis_object_id, JSON.stringify(parameters)]);
       await client.query('INSERT INTO workflow_runs (job_id,instance_id,request_id,step_id,generation,output_names_json) VALUES ($1,$2,$3,$4,$5,$6)', [state.active.id, id, input.requestId, input.stepId, state.generation, JSON.stringify(Object.values(compiled.outputs).map(output => output.name))]);
       await client.query('UPDATE workflow_instances SET state_json=$2,updated_at=now() WHERE id=$1', [id, state]);
       return publicInstance({ ...row, state_json: state });

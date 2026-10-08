@@ -22,6 +22,7 @@ const { derivedAnalysisDisplayName } = require('./analysisDisplayName');
 
 const config = require('./config');
 const { DENIED_CAPABILITY, expertRAccessSql } = require('./expertRAccess');
+const { validateEnvironmentReference, assertEnvironmentMatches, readEnvironmentArtifact, MAX_ENVIRONMENT_BYTES } = require('./rEnvironment');
 const { admitDemoJob } = require('./demoJobAdmission');
 const storage = require('./storage');
 const passwords = require('./passwords');
@@ -63,7 +64,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261008;
+const SCHEMA_CONTRACT_VERSION = 20261009;
 
 let pool = null;
 
@@ -195,7 +196,7 @@ const ALLOWED_ARTIFACT_TYPES = new Set([
   'enrichment_results', 'enrichment_summary',
   'cellchat_results', 'cellchat_summary', 'exploration_summary',
   'condition_de_results', 'condition_de_summary',
-  'expert_r_bundle', 'expert_r_summary'
+  'expert_r_bundle', 'expert_r_summary', 'expert_r_environment'
 ]);
 const ALLOWED_ARTIFACT_STORAGE_KINDS = new Set(['metadata_only', 'local_internal']);
 const ALLOWED_ARTIFACT_STATUSES = new Set(['available', 'pending', 'error']);
@@ -737,7 +738,7 @@ async function resetSchemaForTests() {
       analysis_branches,
       condition_contrast_samples, condition_contrasts,
       analysis_object_sample_bindings, biological_samples, study_conditions,
-      analysis_object_edges, managed_artifact_versions, job_artifacts, jobs, analysis_objects,
+      analysis_object_edges, live_execution_records, execution_source_versions, managed_artifact_versions, job_artifacts, jobs, analysis_objects,
       expert_r_private_inputs, datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
       worker_pool_runtime_status, worker_runtime_status, platform_capabilities,
@@ -1536,7 +1537,9 @@ async function deleteExpiredDemoGuest(userId) {
       await client.query('DELETE FROM analysis_object_edges WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM managed_artifact_versions WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM job_artifacts WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM execution_source_versions WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM jobs WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM live_execution_records WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM analysis_objects WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM project_pipeline_selections WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM pipeline_definitions WHERE project_id = ANY($1::text[])', [projectIds]);
@@ -3014,7 +3017,7 @@ function expertRArtifactVisibilitySql(alias, actorPlaceholder) {
     'expert_job.result_analysis_object_id',
     'expert_job.project_id'
   );
-  return `(
+  return `(${alias}.artifact_type <> 'expert_r_environment' OR ${alias}.created_by_user_id = ${actorPlaceholder}) AND (
     NOT EXISTS (
       SELECT 1 FROM jobs expert_job
        WHERE expert_job.id = ${alias}.job_id
@@ -3253,6 +3256,7 @@ function toPublicJob(job) {
       profileId: rest.parameters.profileId,
       inputIds: Array.isArray(rest.parameters.inputIds) ? rest.parameters.inputIds : [],
       scriptSha256: crypto.createHash('sha256').update(rest.parameters.script, 'utf8').digest('hex'),
+      ...(rest.parameters.environment ? { environment: validateEnvironmentReference(rest.parameters.environment) } : {}),
     };
   }
   return rest;
@@ -3570,11 +3574,18 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
   const id = genId('job');
   return admitDemoJob(await connect(), owner, jobType, async (client) => {
     const { rows } = await (client ? client.query.bind(client) : query)(
-      `INSERT INTO jobs
+      `WITH new_job AS (INSERT INTO jobs
          (id, owner_user_id, project_id, retry_of_job_id, analysis_object_id,
           result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING *`,
+       RETURNING *), retained_source AS (
+         INSERT INTO execution_source_versions
+           (id, project_id, owner_user_id, job_id, language, source_code, source_sha256)
+         SELECT 'src_' || id, project_id, owner_user_id, id, 'R',
+           parameters_json::jsonb->>'script', parameters_json::jsonb->>'scriptSha256'
+         FROM new_job WHERE job_type = 'expert.r.v1'
+         RETURNING id
+       ) SELECT * FROM new_job`,
       [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
         jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
     );
@@ -5499,6 +5510,9 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
   };
   const spec = recoverySpecs[row.job_type];
   if (!spec) return { resumed: false, committedOutput: false };
+  if (row.job_type === 'expert.r.v1' && parseJson(row.parameters_json, {}).environment) {
+    spec.artifacts.push('expert_r_environment');
+  }
 
   const artifacts = await query(
     `SELECT artifact_type, storage_kind, storage_uri, checksum_sha256, size_bytes, metadata_json
@@ -5564,7 +5578,8 @@ async function resumeCommittedJobByWorker(jobId, workerId, claimToken, opts = {}
             || artifact.artifact_type === 'enrichment_results'
             || artifact.artifact_type === 'cellchat_results'
             || artifact.artifact_type === 'condition_de_results'
-            || artifact.artifact_type === 'expert_r_bundle' ? 'artifacts' : null);
+            || artifact.artifact_type === 'expert_r_bundle'
+            || artifact.artifact_type === 'expert_r_environment' ? 'artifacts' : null);
         if (!kind || !row.project_id || !storage.isProjectStorageKey(artifact.storage_uri, {
           projectId: row.project_id,
           kind,
@@ -6642,6 +6657,7 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
   const jobParameters = parseJson(row.parameters_json, {});
   const expectedProfileId = jobParameters.profileId;
   const expectedScriptSha256 = jobParameters.scriptSha256;
+  const expectedEnvironment = jobParameters.environment ? validateEnvironmentReference(jobParameters.environment) : null;
   const expectedPrivateInputs = (await resolveExpertRPrivateInputs(
     owner, pid, jobParameters.inputIds || []
   )).map((input) => ({
@@ -6669,6 +6685,21 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
     throw codedError('INVALID_EXPERT_R_RESULT', 'Expert R output bounds are invalid.');
   }
   const summary = input.summaryArtifact && typeof input.summaryArtifact === 'object' ? input.summaryArtifact : {};
+  let environmentSpec = null;
+  if (expectedEnvironment) {
+    environmentSpec = validateLocalInternalArtifactSpec(input.environmentArtifact || {}, {
+      defaultArtifactType: 'expert_r_environment', helperName: 'completeExpertRResultByWorker',
+    });
+    if (environmentSpec.artifactType !== 'expert_r_environment' || environmentSpec.sizeBytes < 1
+        || environmentSpec.sizeBytes > MAX_ENVIRONMENT_BYTES
+        || environmentSpec.storageUri !== `${bundleSpec.storageUri}.environment.json`) throw codedError('INVALID_EXPERT_R_RESULT', 'The exact R environment artifact is invalid.');
+    assertProjectArtifactStorageKey(row, environmentSpec.storageUri, 'artifacts');
+    assertEnvironmentMatches(expectedEnvironment, environmentSpec.metadata.environment);
+    await readEnvironmentArtifact(storage.createLocalStorageProvider(), {
+      internalStorageKey: environmentSpec.storageUri, checksumSha256: environmentSpec.checksumSha256,
+      sizeBytes: environmentSpec.sizeBytes,
+    }, expectedEnvironment);
+  }
   const summarySpec = validateMetadataOnlyArtifactSpec(summary, {
     defaultArtifactType: 'expert_r_summary', artifactTypeRequired: false,
   });
@@ -6677,6 +6708,10 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
     throw codedError('INVALID_EXPERT_R_RESULT', 'Expert R summary is invalid.');
   }
   for (const metadata of [resultMetadata, bundleSpec.metadata, summarySpec.metadata]) {
+    if (expectedEnvironment) {
+      assertEnvironmentMatches(expectedEnvironment, metadata.environment);
+      if (metadata.sandboxImageDigest !== expectedEnvironment.imageDigest) throw codedError('INVALID_EXPERT_R_RESULT', 'The exact R runtime provenance is inconsistent.');
+    }
     if (metadata.packageProfileId !== expectedProfileId
         || metadata.scriptSha256 !== expectedScriptSha256
         || metadata.resourcePolicyVersion !== EXPERT_R_RESOURCE_POLICY_VERSION
@@ -6714,6 +6749,12 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
   }
   const resultId = generateAnalysisObjectId();
   const bundleId = generateJobArtifactId(); const summaryId = generateJobArtifactId();
+  const environmentId = environmentSpec ? generateJobArtifactId() : null;
+  if (environmentSpec) {
+    for (const metadata of [resultMetadata, bundleSpec.metadata, summarySpec.metadata]) metadata.environmentArtifact = {
+      id: environmentId, checksumSha256: environmentSpec.checksumSha256, sizeBytes: environmentSpec.sizeBytes,
+    };
+  }
   const refs = {
     datasetId: sourceObject.datasetId || null,
     analysisObjectId: sourceId,
@@ -6782,18 +6823,26 @@ async function completeExpertRResultByWorker(jobId, workerId, claimToken, input 
       name: summary.name || null, description: summary.description || null,
       storageKind: summarySpec.storageKind, status: summarySpec.status, metadata: summarySpec.metadata,
     });
+    if (environmentSpec) await insertJobArtifactRow(client, {
+      id: environmentId, jobRow: row, refs, artifactType: 'expert_r_environment',
+      name: 'Exact R environment', description: 'Verified package lock and immutable container userspace identity.',
+      mimeType: 'application/json', storageKind: environmentSpec.storageKind,
+      storageUri: environmentSpec.storageUri, checksumSha256: environmentSpec.checksumSha256,
+      sizeBytes: environmentSpec.sizeBytes, status: environmentSpec.status, metadata: environmentSpec.metadata,
+    });
     const [resultRows, artifactRows] = await Promise.all([
       client.query('SELECT * FROM analysis_objects WHERE id = $1 AND project_id = $2', [resultId, pid]),
-      client.query('SELECT * FROM job_artifacts WHERE id = ANY($1::text[])', [[bundleId, summaryId]]),
+      client.query('SELECT * FROM job_artifacts WHERE id = ANY($1::text[])', [[bundleId, summaryId, ...(environmentId ? [environmentId] : [])]]),
     ]);
     const artifactsById = new Map(artifactRows.rows.map((artifactRow) => [artifactRow.id, artifactRow]));
-    if (!resultRows.rows[0] || !artifactsById.has(bundleId) || !artifactsById.has(summaryId)) {
+    if (!resultRows.rows[0] || !artifactsById.has(bundleId) || !artifactsById.has(summaryId) || (environmentId && !artifactsById.has(environmentId))) {
       throw codedError('EXPERT_R_PUBLICATION_INVALID', 'Expert R publication could not be verified.');
     }
     committedRows = {
       resultObject: rowToAnalysisObject(resultRows.rows[0]),
       bundleArtifact: rowToJobArtifact(artifactsById.get(bundleId)),
       summaryArtifact: rowToJobArtifact(artifactsById.get(summaryId)),
+      ...(environmentId ? { environmentArtifact: rowToJobArtifact(artifactsById.get(environmentId)) } : {}),
     };
     commitAttempted = true;
     await client.query('COMMIT');

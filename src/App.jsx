@@ -51,6 +51,7 @@ const FeaturePlot = React.lazy(() => import('./pages/FeaturePlot'));
 const HeatmapPlot = React.lazy(() => import('./pages/HeatmapPlot'));
 const DotPlot = React.lazy(() => import('./pages/DotPlot'));
 const GeneViewer = React.lazy(() => import('./pages/GeneViewer'));
+const HISTORY_PERSISTENCE_NOTICE = 'The analysis completed, but some history or cached result details could not be saved. Keep the current result and check Runs & Results. Do not rerun it just to repair history.';
 const DifferentialExpression = React.lazy(() => import('./pages/DifferentialExpression'));
 const PathwayEnrichment = React.lazy(() => import('./pages/PathwayEnrichment'));
 const CellChat = React.lazy(() => import('./pages/CellChat'));
@@ -222,6 +223,7 @@ export default function App() {
   });
   const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
   const [liveRecoveryNotice, setLiveRecoveryNotice] = useState('');
+  const [historyPersistenceNotice, setHistoryPersistenceNotice] = useState('');
   const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
   const checkpointSaveRequestRef = React.useRef(0);
   const checkpointSaveOpenedObjectRef = React.useRef(null);
@@ -327,6 +329,7 @@ export default function App() {
   const datasetInfo = selectedObjects.length > 0 ? selectedObjects[0] : (currentWs.objects[0] || null);
   const activeProjectIdForPipeline = currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const workflowContext = React.useMemo(() => ({ active: true, userId: user?.id, projectId: activeProjectIdForPipeline, analysisObjectId: datasetInfo?.id }), [user?.id, activeProjectIdForPipeline, datasetInfo?.id]);
+  useEffect(() => { setHistoryPersistenceNotice(''); }, [user?.id, datasetInfo?.id]);
   useEffect(() => {
     workflowContext.active = true;
     return () => { workflowContext.active = false; };
@@ -890,6 +893,9 @@ export default function App() {
       }
       const data = await window.electronAPI.apiRequest(path, options);
       if (!workflowContext.active) return data;
+      if (data.execution_history?.status === 'unavailable') {
+        setHistoryPersistenceNotice(HISTORY_PERSISTENCE_NOTICE);
+      }
       const serverUnsaved = serverUnsavedLiveChanges(data.live_state);
       if (serverUnsaved !== null) {
         setUnsavedLiveChanges(serverUnsaved);
@@ -899,10 +905,12 @@ export default function App() {
 
       if (data.provenance) {
         data.provenance.parentIds = parentIds;
-        await saveProvenance(data);
+        try { await saveProvenance(data); }
+        catch { setHistoryPersistenceNotice(HISTORY_PERSISTENCE_NOTICE); }
         const projectId = datasetInfo?.projectId;
         const projectRole = (currentWs?.projects || []).find((project) => project.id === projectId)?.role;
-        if (projectId && datasetInfo?.id && ['owner', 'admin', 'analyst'].includes(projectRole)
+        if (projectId && datasetInfo?.id && data.execution_history?.status !== 'recorded'
+            && ['owner', 'admin', 'analyst'].includes(projectRole)
             && typeof window.electronAPI?.createProjectProvenance === 'function') {
           const projectPayload = buildProjectProvenancePayload(data.provenance, datasetInfo.id);
           try {
@@ -911,6 +919,7 @@ export default function App() {
             // The scientific operation has already completed in R. Project-level
             // provenance persistence is best-effort here so a transient history
             // write failure cannot cause the user to repeat a mutating operation.
+            setHistoryPersistenceNotice(HISTORY_PERSISTENCE_NOTICE);
           }
         }
 
@@ -951,8 +960,10 @@ export default function App() {
         }
 
         if (useCache && effectiveCacheParams) {
-          const key = await makeCacheKey(operation, effectiveCacheParams, currentWs.dataVersion);
-          await setCachedResult(key, data.provenance.id, data.result);
+          try {
+            const key = await makeCacheKey(operation, effectiveCacheParams, currentWs.dataVersion);
+            await setCachedResult(key, data.provenance.id, data.result);
+          } catch { setHistoryPersistenceNotice(HISTORY_PERSISTENCE_NOTICE); }
         }
       }
       return data;
@@ -1363,6 +1374,12 @@ export default function App() {
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
         <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} />
+        {historyPersistenceNotice && (
+          <div role="alert" className="mx-4 mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-text">
+            {historyPersistenceNotice}
+            <button type="button" onClick={() => setHistoryPersistenceNotice('')} className="btn btn-secondary ml-2 text-xs">Dismiss history notice</button>
+          </div>
+        )}
         {liveRecoveryNotice && (
           <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
             {liveRecoveryNotice}

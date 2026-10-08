@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261008, now())
+VALUES ('traceomics.runtime', 20261009, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -325,6 +325,25 @@ CREATE INDEX IF NOT EXISTS idx_ao_project_parent ON analysis_objects(project_id,
 CREATE INDEX IF NOT EXISTS idx_ao_project_lineage_root ON analysis_objects(project_id, lineage_root_id);
 CREATE INDEX IF NOT EXISTS idx_ao_project_owner ON analysis_objects(project_id, owner_user_id);
 
+-- Successful live R responses recorded at the server trust boundary. Source and
+-- execution order cannot be supplied through browser provenance endpoints.
+CREATE TABLE IF NOT EXISTS live_execution_records (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id) ON DELETE CASCADE,
+  operation TEXT NOT NULL,
+  kernel_generation TEXT NOT NULL CHECK (kernel_generation ~ '^[a-f0-9]{64}$'),
+  kernel_order BIGINT NOT NULL CHECK (kernel_order > 0),
+  live_revision BIGINT CHECK (live_revision >= 0),
+  source_sha256 TEXT NOT NULL CHECK (source_sha256 ~ '^[a-f0-9]{64}$'),
+  record_json JSONB NOT NULL CHECK (octet_length(record_json::text) <= 69632),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (project_id, owner_user_id, kernel_generation, kernel_order)
+);
+CREATE INDEX IF NOT EXISTS idx_live_execution_project_owner
+  ON live_execution_records(project_id, owner_user_id, created_at DESC, id DESC);
+
 -- Explicit experimental-design metadata. Nothing is inferred from filenames or
 -- client-provided R state. Spatial identity fields are modeled for future use;
 -- this does not claim spatial compute support.
@@ -485,7 +504,8 @@ BEGIN
     NEW.parameters_json := jsonb_strip_nulls(jsonb_build_object(
       'profileId', params ->> 'profileId',
       'inputIds', COALESCE(params -> 'inputIds', '[]'::jsonb),
-      'scriptSha256', params ->> 'scriptSha256'
+      'scriptSha256', params ->> 'scriptSha256',
+      'environment', params -> 'environment'
     ))::text;
   END IF;
   RETURN NEW;
@@ -525,6 +545,31 @@ ALTER TABLE worker_pool_runtime_status
   ADD COLUMN IF NOT EXISTS capabilities_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 -- ── Job artifacts / checkpoints (metadata-first; server-owned) ───────────────
+-- Creator-private immutable source versions survive terminal-job transport
+-- cleanup, including failed runs. They are not committed compute outputs.
+CREATE TABLE IF NOT EXISTS execution_source_versions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+  language TEXT NOT NULL CHECK (language = 'R'),
+  source_code TEXT NOT NULL CHECK (octet_length(source_code) BETWEEN 1 AND 32768),
+  source_sha256 TEXT NOT NULL CHECK (source_sha256 ~ '^[a-f0-9]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_execution_source_project_owner
+  ON execution_source_versions(project_id, owner_user_id, job_id);
+CREATE OR REPLACE FUNCTION reject_execution_source_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'execution source versions are immutable' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_execution_source_no_update ON execution_source_versions;
+CREATE TRIGGER trg_execution_source_no_update
+  BEFORE UPDATE ON execution_source_versions
+  FOR EACH ROW EXECUTE FUNCTION reject_execution_source_update();
+
 CREATE TABLE IF NOT EXISTS job_artifacts (
   id                        TEXT PRIMARY KEY,
   project_id                TEXT,

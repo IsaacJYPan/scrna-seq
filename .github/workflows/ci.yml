@@ -116,6 +116,11 @@ jobs:
           TRACEOMICS_ARTIFACT_UI_DB_DISPOSABLE: '1'
         run: npm run test:artifact-versions-browser
 
+      - name: Verify private execution history through the authenticated UI
+        env:
+          TRACEOMICS_EXECUTION_HISTORY_UI_DB_DISPOSABLE: '1'
+        run: npm run test:execution-history-browser
+
   test:
     needs: browser-preflight
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
@@ -264,6 +269,9 @@ jobs:
 
       - name: Verify default R inspection works on raw and processed analyses
         run: npm run test:r-expert-starter
+
+      - name: Verify ordered live R execution provenance
+        run: npm run test:r-execution-order
 
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers

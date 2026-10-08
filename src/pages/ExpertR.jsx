@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Code2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import REnvironment from '../components/REnvironment';
 
 const STARTER = `# Your saved Seurat analysis is available as obj.
 # Selected private files are listed in input_manifest.
@@ -137,7 +138,8 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
     try {
       const created = await window.electronAPI.createProjectJob(projectId, {
         jobType: 'expert.r.v1', analysisObjectId: objectId,
-        parameters: { profileId: profile.id, script, inputIds: selectedInputIds },
+        parameters: { profileId: profile.id, script, inputIds: selectedInputIds,
+          ...(policy.expertREnvironment ? { environment: policy.expertREnvironment } : {}) },
       });
       setJob(created);
       onExpertRSubmitted?.(created?.id);
@@ -185,6 +187,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
       <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm"><p className="font-medium">Your results</p><p className="text-slate-400 mt-1">Create tables and figures to inspect or export. They stay private unless you choose to share them through Analysis Branches.</p></div>
       {error && <div role="alert" className="text-sm text-red-300">{error}</div>}
       {job && <div className="flex flex-wrap items-center gap-3 text-sm"><span role="status" aria-live="polite" className="text-success">Run submitted. Results will remain private until you choose to share them.</span><button type="button" className="btn btn-secondary text-xs" onClick={() => setActiveTab?.('history')}>View in Runs &amp; Results</button></div>}
+      <REnvironment reference={policy.expertREnvironment} projectId={projectId} />
       <label className="block text-sm">Saved analysis<select className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={objectId} onChange={(event) => setObjectId(event.target.value)} disabled={objects.length === 0}><option value="">Select a saved analysis</option>{objects.map((item) => <option value={item.id} key={item.id}>{item.displayName || item.name || 'Saved analysis'}</option>)}</select></label>
       {objects.length === 0 && <p className="text-sm text-slate-400">No saved analysis you own is available for R work. Open a saved version or create a branch first.</p>}
       <section className="card p-4 space-y-3" aria-labelledby="expert-r-inputs-title">

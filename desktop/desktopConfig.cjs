@@ -113,10 +113,10 @@ function normalizedLabel(value, field, maximum = 80) {
   return value.trim();
 }
 
-function normalizedHost(value, field) {
+function normalizedHost(value, field, allowAlias = false) {
   const host = normalizedLabel(value, field, 253);
   const address = host.replace(/^\[|\]$/g, '');
-  if (!isIP(address) && !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host)) {
+  if (!isIP(address) && !(allowAlias ? /^[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?$/i : /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i).test(host)) {
     throw new Error(`Enter a hostname or IP address for ${field}.`);
   }
   return isIP(address) === 6 ? `[${address.toLowerCase()}]` : address.toLowerCase();
@@ -139,7 +139,7 @@ function normalizeTargetProfile(value) {
     if (value.endpoint != null) throw new Error('SSH profiles declare the remote service, not a local tunnel address.');
     requireAllowedFields(value.ssh, ['host', 'username', 'port', 'remoteHost', 'remotePort', 'identityFile']);
     const ssh = {
-      host: normalizedHost(value.ssh.host, 'SSH host'),
+      host: normalizedHost(value.ssh.host, 'SSH host', true),
       remoteHost: normalizedHost(value.ssh.remoteHost || '127.0.0.1', 'remote service host'),
       remotePort: normalizedPort(value.ssh.remotePort, 3000, 'remote service port'),
     };

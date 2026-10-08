@@ -21,6 +21,7 @@ for (const key of ENV_KEYS) SAVED[key] = process.env[key];
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const key of ENV_KEYS) {
     if (SAVED[key] === undefined) delete process.env[key];
     else process.env[key] = SAVED[key];
@@ -309,6 +310,36 @@ describe('bounded authenticated R proxy policy', () => {
     proxyRes.emit('end');
     expect(res.statusCode).toBe(502);
     expect(JSON.parse(res.rawBody.toString('utf8'))).toEqual({ error: 'R request failed.' });
+  });
+
+  it('preserves a completed R result and reports history failure without retrying the mutation', async () => {
+    process.env.R_PROXY_MAX_RESPONSE_BYTES = '4096';
+    const journal = require('./liveExecutionJournal');
+    const capture = vi.spyOn(journal, 'recordLiveRExecutionBounded').mockRejectedValue(new Error('private database connection diagnostic'));
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const proxyRes = new EventEmitter(); proxyRes.statusCode = 200; proxyRes.headers = {}; proxyRes.destroy = vi.fn();
+    const res = fakeResponse();
+    const response = { provenance: { execution: { generation: 'a'.repeat(64), order: 1 } }, result: { completed: true }, live_state: { live_revision: 2 } };
+    handleBoundedRProxyResponse(proxyRes, { method: 'GET', verifiedObjectId: 'ao_owned', user: { id: 1 } }, res);
+    proxyRes.emit('data', Buffer.from(JSON.stringify(response))); proxyRes.emit('end');
+    await vi.waitFor(() => expect(res.writableEnded).toBe(true));
+    expect(JSON.parse(res.rawBody.toString('utf8'))).toEqual({ ...response, execution_history: { status: 'unavailable' } });
+    expect(res.statusCode).toBe(200); expect(capture).toHaveBeenCalledOnce();
+    expect(warning.mock.calls.flat().join(' ')).not.toContain('private database');
+  });
+
+  it('links the recorded live R execution to its successful response', async () => {
+    process.env.R_PROXY_MAX_RESPONSE_BYTES = '4096';
+    const journal = require('./liveExecutionJournal');
+    const capture = vi.spyOn(journal, 'recordLiveRExecutionBounded').mockResolvedValue({ id: 'lex_saved', status: 'recorded' });
+    const proxyRes = new EventEmitter(); proxyRes.statusCode = 200; proxyRes.headers = {}; proxyRes.destroy = vi.fn();
+    const res = fakeResponse();
+    const response = { provenance: { execution: { generation: 'a'.repeat(64), order: 1 } }, result: { completed: true } };
+    handleBoundedRProxyResponse(proxyRes, { method: 'POST', verifiedObjectId: 'ao_owned', user: { id: 1 } }, res);
+    proxyRes.emit('data', Buffer.from(JSON.stringify(response))); proxyRes.emit('end');
+    await vi.waitFor(() => expect(res.writableEnded).toBe(true));
+    expect(JSON.parse(res.rawBody.toString('utf8')).execution_history).toEqual({ id: 'lex_saved', status: 'recorded' });
+    expect(capture).toHaveBeenCalledOnce();
   });
 
   it('removes private runtime/path fields and redacts paths in public scripts', () => {
