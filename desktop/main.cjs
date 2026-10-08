@@ -4,6 +4,8 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron')
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { createSshConnectionManager } = require('./sshConnection.cjs');
+const { unlockNativeIdentity } = require('./sshCredentials.cjs');
 const packageMetadata = require('../package.json');
 const { isAllowedNavigation, normalizeServerUrl, verifyServerConnection,
   normalizeTargetProfile, normalizeTargetSettings, profileForServerUrl,
@@ -20,6 +22,9 @@ let settings = normalizeTargetSettings(null);
 let settingsWarning = null;
 let changingTarget = false;
 let starting = true;
+let sshManager = null;
+const selectedIdentities = new Set();
+const sshVerificationVersions = new Map();
 const windowTargets = new Map();
 const userDataOverride = app.commandLine.getSwitchValue('user-data-dir');
 if (userDataOverride) app.setPath('userData', path.resolve(userDataOverride));
@@ -53,7 +58,8 @@ function targetSummary(profile, status = 'connected') {
   if (!profile) return null;
   return { id: profile.id, name: profile.name, kind: profile.kind,
     endpoint: profile.endpoint || null, serviceIdentity: targetServiceIdentity(profile), status,
-    capabilities: status === 'connected' ? { projectService: true } : null };
+    capabilities: status === 'connected' ? { projectService: true } : null,
+    ...(profile.kind === 'ssh' ? { sshAuthentication: sshManager?.status(profile) || null } : {}) };
 }
 
 function currentTarget() {
@@ -91,7 +97,10 @@ function createWindow({ profile = null, parent = null } = {}) {
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   const contentsId = window.webContents.id;
   window.on('closed', () => {
+    sshVerificationVersions.set(contentsId, (sshVerificationVersions.get(contentsId) || 0) + 1);
+    sshManager?.cancel(contentsId);
     windowTargets.delete(contentsId);
+    sshVerificationVersions.delete(contentsId);
     if (mainWindow === window) mainWindow = null;
     if (setupWindow === window) setupWindow = null;
   });
@@ -121,11 +130,20 @@ function assertTrustedFrame(event, { setupOnly = false } = {}) {
 async function changeSettings(action) {
   if (changingTarget) throw new Error('Another connection change is in progress. Wait a moment and try again.');
   changingTarget = true;
-  try { return await action(); } finally { changingTarget = false; }
+  try { return await action(); } finally {
+    changingTarget = false;
+    if (!starting && process.platform !== 'darwin' && BrowserWindow.getAllWindows().length === 0) app.quit();
+  }
 }
 
 async function saveProfile(value) {
   const profile = normalizeTargetProfile(value);
+  const previous = settings.profiles.find(saved => saved.id === profile.id);
+  if (previous && JSON.stringify(previous) !== JSON.stringify(profile)) sshManager?.invalidate(profile.id);
+  if (profile.ssh?.identityFile && !selectedIdentities.has(profile.ssh.identityFile)
+      && !settings.profiles.some(saved => saved.ssh?.identityFile === profile.ssh.identityFile)) {
+    throw new Error('Choose the identity reference through the native file picker.');
+  }
   const profiles = settings.profiles.filter(existing => existing.id !== profile.id);
   profiles.push(profile);
   await writeTargetSettings({ ...settings, profiles,
@@ -140,7 +158,7 @@ async function openProfile(id) {
 }
 
 async function connectProfile(profile, nextSettings = settings) {
-  if (profile.kind === 'ssh') throw new Error('SSH settings are saved. Managed SSH connections are not available yet.');
+  if (profile.kind === 'ssh') throw new Error('Verify SSH access in the connection settings. Opening the project service through a managed SSH tunnel is not available yet.');
   await verifyServerConnection(profile.endpoint);
   const candidate = createWindow({ profile });
   try {
@@ -188,6 +206,7 @@ function installMenu() {
 app.whenReady().then(async () => {
   app.setAppUserModelId('org.traceomics.workbench');
   await readTargetSettings();
+  sshManager = createSshConnectionManager({ knownHostsFile: path.join(app.getPath('userData'), 'ssh_known_hosts') });
   ipcMain.handle('desktop:get-server-url', event => {
     const entry = assertTrustedFrame(event);
     return entry.profile?.endpoint || serverUrl;
@@ -198,7 +217,49 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('desktop:get-target-profiles', event => {
     assertTrustedFrame(event, { setupOnly: true });
-    return { ...settings, currentTarget: currentTarget(), warning: settingsWarning };
+    return { ...settings, currentTarget: currentTarget(), warning: settingsWarning,
+      sshStatuses: Object.fromEntries(settings.profiles.filter(profile => profile.kind === 'ssh').map(profile => [profile.id, sshManager.status(profile)])) };
+  });
+  ipcMain.handle('desktop:choose-ssh-identity', async event => {
+    assertTrustedFrame(event, { setupOnly: true });
+    const choice = await dialog.showOpenDialog(setupWindow, { title: 'Choose OpenSSH identity reference', properties: ['openFile'] });
+    const identityFile = choice.canceled ? null : choice.filePaths[0];
+    if (identityFile) selectedIdentities.add(identityFile);
+    return identityFile;
+  });
+  ipcMain.handle('desktop:verify-ssh-target', (event, value) => {
+    assertTrustedFrame(event, { setupOnly: true });
+    return changeSettings(async () => {
+      const version = (sshVerificationVersions.get(event.sender.id) || 0) + 1;
+      sshVerificationVersions.set(event.sender.id, version);
+      const profile = await saveProfile(value);
+      assertTrustedFrame(event, { setupOnly: true });
+      if (sshVerificationVersions.get(event.sender.id) !== version) throw new Error('SSH verification was canceled.');
+      return sshManager.verify(profile, event.sender.id);
+    });
+  });
+  ipcMain.handle('desktop:confirm-ssh-host', (event, challengeId, fingerprint) => {
+    assertTrustedFrame(event, { setupOnly: true });
+    return changeSettings(() => sshManager.confirm(challengeId, fingerprint, event.sender.id));
+  });
+  ipcMain.handle('desktop:cancel-ssh-verification', event => {
+    assertTrustedFrame(event, { setupOnly: true });
+    sshVerificationVersions.set(event.sender.id, (sshVerificationVersions.get(event.sender.id) || 0) + 1);
+    sshManager.cancel(event.sender.id); return true;
+  });
+  ipcMain.handle('desktop:open-ssh-host-trust', async event => {
+    assertTrustedFrame(event, { setupOnly: true });
+    const filename = path.join(app.getPath('userData'), 'ssh_known_hosts');
+    await fs.mkdir(path.dirname(filename), { recursive: true });
+    const handle = await fs.open(filename, 'a', 0o600); await handle.close();
+    shell.showItemInFolder(filename); return true;
+  });
+  ipcMain.handle('desktop:unlock-ssh-identity', async (event, identityFile) => {
+    assertTrustedFrame(event, { setupOnly: true });
+    if (!selectedIdentities.has(identityFile) && !settings.profiles.some(profile => profile.ssh?.identityFile === identityFile)) {
+      throw new Error('Choose an identity reference first.');
+    }
+    return unlockNativeIdentity(identityFile, { showInstructions: options => dialog.showMessageBox(setupWindow, options) });
   });
   ipcMain.handle('desktop:save-target-profile', (event, value) => {
     assertTrustedFrame(event, { setupOnly: true });
@@ -223,6 +284,7 @@ app.whenReady().then(async () => {
       if (connectedProfile?.id === id) throw new Error('Connect to another target before removing the current connection.');
       await writeTargetSettings({ ...settings, profiles: settings.profiles.filter(profile => profile.id !== id),
         selectedProfileId: settings.selectedProfileId === id ? null : settings.selectedProfileId });
+      sshManager.invalidate(id);
       return true;
     });
   });
@@ -241,7 +303,11 @@ app.whenReady().then(async () => {
   const configuredUrl = process.env.TRACEOMICS_DESKTOP_URL || packageMetadata.traceomicsDesktop?.defaultServerUrl;
   try {
     if (configuredUrl) { await openServer(configuredUrl); return; }
-    if (settings.selectedProfileId) { await openProfile(settings.selectedProfileId); return; }
+    if (settings.selectedProfileId) {
+      const selected = settings.profiles.find(profile => profile.id === settings.selectedProfileId);
+      if (selected?.kind === 'ssh') { await showSetup(); return; }
+      await openProfile(settings.selectedProfileId); return;
+    }
   } catch {
     settingsWarning = 'The selected target could not be connected. Check its settings or choose another target.';
   }
@@ -249,6 +315,7 @@ app.whenReady().then(async () => {
 }).finally(() => { starting = false; });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !starting && !changingTarget) app.quit(); });
+app.on('before-quit', () => sshManager?.dispose());
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     if (connectedProfile) openProfile(connectedProfile.id).catch(() => showSetup());

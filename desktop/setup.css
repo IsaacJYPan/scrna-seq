@@ -30,3 +30,10 @@ legend { font-weight: 600; margin: 10px 0; }
 button.secondary { background: #e9e9ed; color: #1d1d1f; }
 button.secondary:hover { background: #dedee4; }
 #saved-status { color: #17633b; font-size: 13px; }
+.host-verification { border: 1px solid #d2d2d7; border-radius: 12px; padding: 16px; background: #f5f8fc; }
+.host-verification h2 { margin: 0 0 12px; font-size: 18px; }
+.host-verification p { font-size: 13px; line-height: 1.5; }
+.checkbox-label, .fingerprint-label { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; line-height: 1.5; }
+.checkbox-label input, .fingerprint-label input { width: 18px; min-height: 18px; flex-shrink: 0; margin-top: 2px; }
+.fingerprint-label code { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.host-verification button { padding: 0 18px; }

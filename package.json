@@ -68,6 +68,8 @@
     "test:frontend": "vitest run src/",
     "test:tools": "vitest run scripts/ --environment node --fileParallelism=false",
     "test:desktop": "vitest run desktop/ backend/desktop-packaging.test.js --environment node --fileParallelism=false",
+    "test:desktop:targets-ui": "node scripts/verify-desktop-targets-ui.js",
+    "test:desktop:ssh-ui": "node scripts/verify-desktop-ssh-ui.js",
     "test:artifact-versions-browser": "node scripts/verify-artifact-versions-ui.js",
     "test:backend": "npm run test:backend:postgres",
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",

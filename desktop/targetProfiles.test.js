@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import config from './desktopConfig.cjs';
 
 const { normalizeTargetProfile, normalizeTargetSettings, profileForServerUrl,
@@ -31,13 +31,36 @@ describe('execution target profiles', () => {
   });
 
   it('accepts only documented nonsecret configuration fields', () => {
-    for (const field of ['password', 'token', 'privateKey', 'identityFile', 'command', 'proxyCommand']) {
+    for (const field of ['password', 'token', 'privateKey', 'command', 'proxyCommand']) {
       expect(() => normalizeTargetProfile({ ...ssh(), [field]: 'sensitive' })).toThrow(/documented connection settings/);
       expect(() => normalizeTargetProfile({ ...ssh(), ssh: { ...ssh().ssh, [field]: 'sensitive' } })).toThrow(/documented connection settings/);
     }
+    expect(() => normalizeTargetProfile({ ...ssh(), identityFile: 'C:\\Users\\researcher\\.ssh\\id_ed25519' })).toThrow(/documented connection settings/);
     expect(() => normalizeTargetProfile({ ...local(), endpoint: 'https://user:password@example.org' })).toThrow(/credentials/);
     expect(() => normalizeTargetProfile({ ...ssh(), ssh: { ...ssh().ssh, host: '-oProxyCommand=unsafe' } })).toThrow(/hostname/);
     expect(() => normalizeTargetProfile({ ...ssh(), ssh: { ...ssh().ssh, username: 'user; command' } })).toThrow(/username/);
+  });
+
+  it('stores only an absolute native identity reference without copying credentials', () => {
+    for (const identityFile of ['C:\\Users\\researcher\\.ssh\\lab key', '/home/researcher/.ssh/id_ed25519']) {
+      const profile = normalizeTargetProfile({ ...ssh(), ssh: { ...ssh().ssh, identityFile } });
+      expect(profile.ssh.identityFile).toBe(identityFile);
+      expect(Object.keys(profile.ssh).sort()).toEqual(['host', 'identityFile', 'port', 'remoteHost', 'remotePort', 'username']);
+    }
+    for (const identityFile of ['id_ed25519', '~/.ssh/id_ed25519', 'C:\\keys\\id\n-oProxyCommand=invalid', 42]) {
+      expect(() => normalizeTargetProfile({ ...ssh(), ssh: { ...ssh().ssh, identityFile } })).toThrow(/native file picker/);
+    }
+  });
+
+  it('leaves an omitted SSH port and username to native OpenSSH configuration', () => {
+    for (const port of ['', undefined, null]) {
+      const profile = normalizeTargetProfile({ ...ssh(), ssh: { ...ssh().ssh, port, username: '' } });
+      expect(profile.ssh).not.toHaveProperty('port');
+      expect(profile.ssh).not.toHaveProperty('username');
+      expect(targetServiceIdentity(profile)).toBe('ssh:@compute.example.org:config/127.0.0.1:3000');
+      expect(normalizeTargetProfile(profile)).toEqual(profile);
+    }
+    expect(normalizeTargetProfile(ssh()).ssh.port).toBe(22);
   });
 
   it('validates target type, profile names, and SSH ports', () => {
@@ -61,5 +84,44 @@ describe('execution target profiles', () => {
       expect(options.redirect).toBe('error');
       throw new Error('redirected elsewhere');
     } })).rejects.toThrow(/could not reach/);
+  });
+
+  it('rejects a native policy response over 16 KiB before accepting the service', async () => {
+    const body = JSON.stringify({ registrationEnabled: false, details: 'oversized-private-diagnostic'.repeat(1024) });
+    const pending = verifyServerConnection('https://analysis.example.org', {
+      fetchImpl: async () => new Response(body, { headers: { 'Content-Type': 'application/json' } }),
+    });
+    await expect(pending).rejects.toThrow(/TraceOmics/);
+    await expect(pending).rejects.not.toThrow(/oversized-private-diagnostic/);
+  });
+
+  it('retains the connection deadline while reading a trickling response body', async () => {
+    const encoder = new TextEncoder();
+    let stopped = false, timer;
+    const chunks = ['{"registrationEnabled":', 'false', '}'];
+    const cancel = vi.fn(() => { stopped = true; clearTimeout(timer); });
+    const body = new ReadableStream({
+      async pull(controller) {
+        await new Promise(resolve => { timer = setTimeout(resolve, 50); });
+        if (stopped) return;
+        controller.enqueue(encoder.encode(chunks.shift()));
+        if (!chunks.length) controller.close();
+      },
+      cancel,
+    });
+    try {
+      await expect(verifyServerConnection('https://analysis.example.org', {
+        timeoutMs: 20, fetchImpl: async () => new Response(body),
+      })).rejects.toThrow(/TraceOmics/);
+      expect(cancel).toHaveBeenCalled();
+    } finally { stopped = true; clearTimeout(timer); }
+  });
+
+  it('reports malformed native response JSON without echoing its contents', async () => {
+    const pending = verifyServerConnection('https://analysis.example.org', {
+      fetchImpl: async () => new Response('private-service-error{bad-json'),
+    });
+    await expect(pending).rejects.toThrow(/valid TraceOmics response/);
+    await expect(pending).rejects.not.toThrow(/private-service-error/);
   });
 });

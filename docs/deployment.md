@@ -452,9 +452,24 @@ connected server and its current custom R availability. A failed connection
 leaves the previous server open. Existing saved server addresses migrate
 automatically; `TRACEOMICS_DESKTOP_URL` still selects the startup server.
 
-SSH profiles can currently save nonsecret host and service settings for later
-use. Managed SSH authentication and tunneling are not available yet; saving an
-SSH profile does not establish a connection.
+SSH profiles can verify access through the system OpenSSH client, agent, and
+configuration. Leave username or port blank to use the configured values, or
+choose an identity reference through the native file picker. The application
+stores a file reference and public host trust; keys and passphrases stay with
+OpenSSH. Encrypted identities must be unlocked in a running native SSH agent.
+On Windows, **Unlock with OpenSSH** opens a native OpenSSH credential window.
+
+For a new host, compare the displayed SHA-256 fingerprint with an independently
+verified administrator-provided value before trusting it. Changed keys stop
+authentication; verify the change before editing the native host trust file.
+The check requires permission to run the noninteractive command `true` on the
+remote host. Cancelling the check closes its owned SSH process. Missing clients,
+unavailable identities, authentication failures, and unreachable hosts have
+separate remediation messages.
+
+SSH verification confirms host identity and authentication. Managed application
+tunnels are not available yet, so it does not connect the remote project
+service or replace an existing workspace connection.
 
 ## TLS reverse proxy
 

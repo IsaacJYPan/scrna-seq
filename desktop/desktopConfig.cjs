@@ -2,6 +2,7 @@
 
 const { createHash, randomUUID } = require('node:crypto');
 const { isIP } = require('node:net');
+const path = require('node:path');
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
@@ -44,31 +45,58 @@ function isAllowedNavigation(targetUrl, serverUrl) {
 async function verifyServerConnection(serverUrl, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
   const normalized = normalizeServerUrl(serverUrl);
   const policyUrl = new URL('/api/auth/policy', normalized);
-  let response;
-  try {
-    response = await fetchImpl(policyUrl, {
-      method: 'GET',
-      redirect: 'error',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch {
-    throw new Error('TraceOmics could not reach that server. Check the address, network connection, and server status.');
-  }
+  const controller = new AbortController();
+  let reader, timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('The TraceOmics connection check timed out. Check the server and retry.'));
+    }, timeoutMs);
+  });
+  async function verify() {
+    let response;
+    try {
+      response = await fetchImpl(policyUrl, {
+        method: 'GET', redirect: 'error', headers: { Accept: 'application/json' }, signal: controller.signal,
+      });
+    } catch {
+      throw new Error('TraceOmics could not reach that server. Check the address, network connection, and server status.');
+    }
 
-  if (!response.ok) {
-    throw new Error('That server did not accept the TraceOmics connection check.');
+    if (!response.ok) {
+      throw new Error('That server did not accept the TraceOmics connection check.');
+    }
+    let policy;
+    try {
+      const limit = 16 * 1024;
+      if (Number(response.headers?.get('content-length')) > limit) throw new Error('response limit');
+      if (response.body?.getReader) {
+        reader = response.body.getReader();
+        const chunks = []; let size = 0;
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > limit) throw new Error('response limit');
+          chunks.push(Buffer.from(value));
+        }
+        policy = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } else {
+        // Lightweight fetch doubles can still provide json(); native responses
+        // use the streamed byte bound above.
+        policy = await response.json();
+        if (Buffer.byteLength(JSON.stringify(policy), 'utf8') > limit) throw new Error('response limit');
+      }
+    } catch {
+      throw new Error('That address did not return a valid TraceOmics response.');
+    }
+    if (!policy || typeof policy.registrationEnabled !== 'boolean') {
+      throw new Error('That address is not a compatible TraceOmics server.');
+    }
+    return normalized;
   }
-  let policy;
-  try {
-    policy = await response.json();
-  } catch {
-    throw new Error('That address did not return a valid TraceOmics response.');
-  }
-  if (!policy || typeof policy.registrationEnabled !== 'boolean') {
-    throw new Error('That address is not a compatible TraceOmics server.');
-  }
-  return normalized;
+  try { return await Promise.race([verify(), deadline]); }
+  finally { clearTimeout(timer); controller.abort(); if (reader) void reader.cancel().catch(() => {}); }
 }
 
 function requireAllowedFields(value, allowed) {
@@ -109,13 +137,21 @@ function normalizeTargetProfile(value) {
   if (!['local', 'https', 'ssh'].includes(kind)) throw new Error('Choose a local, HTTPS, or SSH target.');
   if (kind === 'ssh') {
     if (value.endpoint != null) throw new Error('SSH profiles declare the remote service, not a local tunnel address.');
-    requireAllowedFields(value.ssh, ['host', 'username', 'port', 'remoteHost', 'remotePort']);
+    requireAllowedFields(value.ssh, ['host', 'username', 'port', 'remoteHost', 'remotePort', 'identityFile']);
     const ssh = {
       host: normalizedHost(value.ssh.host, 'SSH host'),
-      port: normalizedPort(value.ssh.port, 22, 'SSH port'),
       remoteHost: normalizedHost(value.ssh.remoteHost || '127.0.0.1', 'remote service host'),
       remotePort: normalizedPort(value.ssh.remotePort, 3000, 'remote service port'),
     };
+    if (value.ssh.port !== '' && value.ssh.port != null) ssh.port = normalizedPort(value.ssh.port, 22, 'SSH port');
+    if (value.ssh.identityFile) {
+      if (typeof value.ssh.identityFile !== 'string' || value.ssh.identityFile.length > 4096
+          || /[\0\r\n]/.test(value.ssh.identityFile)
+          || !(path.isAbsolute(value.ssh.identityFile) || path.win32.isAbsolute(value.ssh.identityFile))) {
+        throw new Error('Choose an existing identity file through the native file picker.');
+      }
+      ssh.identityFile = value.ssh.identityFile;
+    }
     if (value.ssh.username) {
       if (typeof value.ssh.username !== 'string' || !/^[a-z_][a-z0-9_.-]{0,63}$/i.test(value.ssh.username)) {
         throw new Error('Enter an SSH username without command options or whitespace.');
@@ -136,7 +172,7 @@ function targetServiceIdentity(value) {
   const profile = normalizeTargetProfile(value);
   if (profile.kind !== 'ssh') return `service:${profile.endpoint}`;
   const ssh = profile.ssh;
-  return `ssh:${ssh.username || ''}@${ssh.host}:${ssh.port}/${ssh.remoteHost}:${ssh.remotePort}`;
+  return `ssh:${ssh.username || ''}@${ssh.host}:${ssh.port || 'config'}/${ssh.remoteHost}:${ssh.remotePort}`;
 }
 
 function targetSessionPartition(value) {

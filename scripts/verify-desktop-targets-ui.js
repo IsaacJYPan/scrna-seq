@@ -180,6 +180,14 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
       return '';
     });
     assert(denied.includes('connection settings'), 'A remotely served page could modify native target profiles.');
+    const deniedSshActions = await page.evaluate(async () => {
+      const actions = [() => window.desktopShell.getTargetProfiles(), () => window.desktopShell.chooseSshIdentity(),
+        () => window.desktopShell.verifySshTarget({}), () => window.desktopShell.confirmSshHost('untrusted', 'fingerprint'),
+        () => window.desktopShell.cancelSshVerification(), () => window.desktopShell.openSshHostTrust(),
+        () => window.desktopShell.unlockSshIdentity('untrusted-file')];
+      return Promise.all(actions.map(async action => { try { await action(); return false; } catch (error) { return error.message.includes('connection settings'); } }));
+    });
+    assert(deniedSshActions.every(Boolean), 'A remotely served page accessed native SSH settings, identity selection, or trust.');
     checks.push('remote renderer cannot alter native connection settings');
 
     let setup = await assertTargetIndicator({ page, name: 'Saved server', endpoint: first.origin,
@@ -230,10 +238,13 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
     await setup.getByLabel('Connection type', { exact: true }).selectOption('ssh');
     await setup.getByLabel('SSH host', { exact: true }).fill('compute.example.org');
     await setup.getByLabel('SSH username (optional)', { exact: true }).fill('researcher');
+    await setup.getByLabel('SSH port (optional)', { exact: true }).fill('22');
     await setup.getByRole('button', { name: 'Save profile', exact: true }).click();
-    await setup.getByText(/SSH configuration saved\. Managed SSH connection is pending/).waitFor();
-    assert(await setup.getByRole('button', { name: 'SSH connection pending', exact: true }).isDisabled(),
-      'A saved SSH configuration claims to have an available managed connection.');
+    await setup.getByText(/SSH configuration saved\. Verify SSH access/).waitFor();
+    assert(await setup.getByRole('button', { name: 'Verify SSH access', exact: true }).isEnabled(),
+      'A saved SSH configuration cannot verify host identity and authentication.');
+    assert(!(await setup.evaluate(() => window.desktopShell.getCurrentTarget())).sshAuthentication,
+      'Saving a configuration falsely authenticated an SSH connection.');
     const saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
     const sshProfile = saved.profiles.find(profile => profile.kind === 'ssh');
     assert(sshProfile && !sshProfile.endpoint && Object.keys(sshProfile.ssh).sort().join(',') === 'host,port,remoteHost,remotePort,username',
