@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import ExecutionTargetIndicator from './components/ExecutionTargetIndicator';
 import { Loader2, Microscope } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
@@ -1361,6 +1362,7 @@ export default function App() {
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
+        <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} />
         {liveRecoveryNotice && (
           <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
             {liveRecoveryNotice}

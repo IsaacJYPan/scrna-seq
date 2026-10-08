@@ -65,7 +65,8 @@ jobs:
         # This exact command is available to contributors locally. It runs the
         # dependency audit, lint, declarative Compose policy check, frontend,
         # every backend test against real Postgres, the development supervisor
-        # contract, and the production build before costly certification starts.
+        # contract, desktop connection profiles, and the production build before
+        # costly certification starts.
         run: npm run check:ci-preflight
 
   browser-preflight:

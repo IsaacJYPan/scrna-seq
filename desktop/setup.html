@@ -17,15 +17,44 @@
         </svg>
       </div>
       <p class="eyebrow">TraceOmics desktop</p>
-      <h1>Connect to your workspace</h1>
-      <p class="lede">Enter the address of your trusted TraceOmics server. Your account and research data remain on that server.</p>
+      <h1>Choose your research server</h1>
+      <p class="lede">Name your local or remote project services. Each service keeps its own account session and workspace selection.</p>
+      <p id="current-target" class="connection-state" role="status">No service connected.</p>
+      <div class="profile-picker">
+        <label for="saved-target">Saved targets</label>
+        <select id="saved-target"><option value="">New target</option></select>
+      </div>
       <form id="connection-form">
+        <label for="target-name">Target name</label>
+        <input id="target-name" name="target-name" maxlength="80" placeholder="Lab workstation" required autofocus />
+        <label for="target-kind">Connection type</label>
+        <select id="target-kind">
+          <option value="https">Direct HTTPS server</option>
+          <option value="local">Local server</option>
+          <option value="ssh">SSH server configuration</option>
+        </select>
+        <div id="endpoint-fields" class="field-group">
         <label for="server-url">Server address</label>
-        <input id="server-url" name="server-url" type="url" inputmode="url" autocomplete="url" placeholder="https://analysis.example.org" required autofocus />
+        <input id="server-url" name="server-url" type="url" inputmode="url" autocomplete="url" placeholder="https://analysis.example.org" required />
+        </div>
+        <fieldset id="ssh-fields" class="field-group" hidden disabled>
+          <legend>SSH connection settings</legend>
+          <label for="ssh-host">SSH host</label><input id="ssh-host" placeholder="compute.example.org" />
+          <label for="ssh-user">SSH username (optional)</label><input id="ssh-user" autocomplete="username" />
+          <label for="ssh-port">SSH port</label><input id="ssh-port" type="number" min="1" max="65535" value="22" />
+          <label for="remote-host">Project service host on the server</label><input id="remote-host" value="127.0.0.1" />
+          <label for="remote-port">Project service port on the server</label><input id="remote-port" type="number" min="1" max="65535" value="3000" />
+          <p class="hint">These settings are configuration only. Managed SSH connections are not available yet. Keys, passwords, and command fragments are never collected here.</p>
+        </fieldset>
         <p id="error" class="error" role="alert" hidden></p>
-        <button id="connect" type="submit">Connect</button>
+        <p id="saved-status" role="status" hidden></p>
+        <div class="actions">
+          <button id="save" class="secondary" type="button">Save profile</button>
+          <button id="connect" type="submit">Save and connect</button>
+          <button id="remove" class="secondary" type="button" hidden>Remove profile</button>
+        </div>
       </form>
-      <p class="hint">The app checks the connection before saving it. For local development, <code>http://localhost:3000</code> is supported.</p>
+      <p class="hint">Connection checks run before switching services. A failed connection keeps your current workspace open. Local installations can use <code>http://localhost:3000</code>.</p>
     </main>
   </body>
 </html>

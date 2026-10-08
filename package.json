@@ -67,6 +67,7 @@
     "test:demo-browser": "node scripts/verify-public-demo-ui.js",
     "test:frontend": "vitest run src/",
     "test:tools": "vitest run scripts/ --environment node --fileParallelism=false",
+    "test:desktop": "vitest run desktop/ backend/desktop-packaging.test.js --environment node --fileParallelism=false",
     "test:backend": "npm run test:backend:postgres",
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",
     "init:postgres": "node scripts/init-postgres.js",
@@ -77,7 +78,7 @@
     "test": "npm run test:frontend && npm run test:unit && npm run test:integration",
     "lint": "eslint .",
     "check": "npm run test:backend && npm run test:frontend && npm run lint && npm run build",
-    "check:ci-preflight": "node scripts/require-test-database.js && npm audit --audit-level=high && npm run lint && npm run test:deployment:compose && npm run test:frontend && npm run build && npm run test:backend && npm run test:tools",
+    "check:ci-preflight": "node scripts/require-test-database.js && npm audit --audit-level=high && npm run lint && npm run test:deployment:compose && npm run test:frontend && npm run build && npm run test:backend && npm run test:tools && npm run test:desktop",
     "check:browser-preflight": "node scripts/require-test-database.js && npm run build && npm run test:plots && npm run test:cellchat-browser && node scripts/verify-browser-deployment-flow.js",
     "test:plots": "node scripts/verify-plot-rendering.js"
   },
