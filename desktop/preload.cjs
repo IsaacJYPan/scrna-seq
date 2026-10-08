@@ -18,5 +18,12 @@ contextBridge.exposeInMainWorld('desktopShell', Object.freeze({
   openSshHostTrust: () => ipcRenderer.invoke('desktop:open-ssh-host-trust'),
   unlockSshIdentity: (identityFile) => ipcRenderer.invoke('desktop:unlock-ssh-identity', identityFile),
   openTargetSettings: () => ipcRenderer.invoke('desktop:open-target-settings'),
+  disconnectTarget: () => ipcRenderer.invoke('desktop:disconnect-target'),
+  onTargetStatus: listener => {
+    if (typeof listener !== 'function') throw new TypeError('A status listener is required.');
+    const handler = (_event, target) => listener(target);
+    ipcRenderer.on('desktop:target-status', handler);
+    return () => ipcRenderer.removeListener('desktop:target-status', handler);
+  },
   openExternal: (url) => ipcRenderer.invoke('desktop:open-external', url),
 }));

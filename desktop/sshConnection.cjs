@@ -9,6 +9,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const { normalizeTargetProfile } = require('./desktopConfig.cjs');
 const { MAX_JUMP_HOSTS, jumpSpecifications, createManagedRouteConfiguration,
   routeDigest, annotateStage, diagnosticStage } = require('./sshRouting.cjs');
+const { snapshotNativeConfiguration } = require('./sshConfigurationSnapshot.cjs');
 
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
 function systemExecutable(name) {
@@ -175,13 +176,13 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativ
   if (nativeConfigFile && (!path.isAbsolute(nativeConfigFile) || /["\r\n\0]/.test(nativeConfigFile))) throw new Error('A valid native SSH configuration path is required.');
   const native = run ? null : createNativeSshRunner();
   const execute = run || native.run;
-  const challenges = new Map(), operations = new Map(), statuses = new Map();
-  async function configuration(profile, signal) {
+  const challenges = new Map(), operations = new Map(), statuses = new Map(), leases = new Set();
+  async function configuration(profile, signal, sourceFile = nativeConfigFile) {
     if (profile.ssh.identityFile) {
       try { if (!(await fs.stat(profile.ssh.identityFile)).isFile()) throw new Error('not a file'); }
       catch { throw failure('SSH_IDENTITY_UNAVAILABLE', 'The selected identity file is unavailable. Choose an existing private-key file through the native picker.'); }
     }
-    const result = await execute('ssh', [...(nativeConfigFile ? ['-F', nativeConfigFile] : []), '-G', ...sshProfileArgs(profile), profile.ssh.host.replace(/^\[|\]$/g, '')], { signal });
+    const result = await execute('ssh', [...(sourceFile ? ['-F', sourceFile] : []), '-G', ...sshProfileArgs(profile), profile.ssh.host.replace(/^\[|\]$/g, '')], { signal });
     if (result.code !== 0) throw failure('SSH_CONFIGURATION_INVALID', 'OpenSSH could not read this connection’s configuration. Review your system SSH settings.');
     return parseSshConfiguration(result.stdout);
   }
@@ -226,9 +227,9 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativ
   async function authenticateWithTrust(profile, config, signal) {
     // Preserve native known-host files and their quoting/configuration. Only an
     // unknown host falls back to the separate, explicitly verified app file.
-    try { return await authenticate(profile, config, signal); }
+    try { const status = await authenticate(profile, config, signal); config.appTrust = false; return status; }
     catch (error) { if (error.code !== 'SSH_HOST_UNKNOWN') throw error; }
-    return authenticate(profile, config, signal, true);
+    const status = await authenticate(profile, config, signal, true); config.appTrust = true; return status;
   }
   async function discoverHostKeys(profile, config, signal) {
     if (!config.route?.length) {
@@ -260,7 +261,7 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativ
       return stat?.isFile() && stat.size <= 65536 ? scannedHostKeys(await fs.readFile(quarantine, 'utf8')) : [];
     } finally { await fs.rm(quarantine, { force: true }); }
   }
-  async function resolveRoute(profile, config, signal) {
+  async function resolveRoute(profile, config, signal, sourceFile = nativeConfigFile, tunnel = false) {
     const route = [];
     async function appendJumps(ownerConfig, ancestors) {
       for (const [index, spec] of jumpSpecifications(ownerConfig.proxyjump).entries()) {
@@ -273,7 +274,7 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativ
           throw failure('SSH_ROUTE_LIMIT', 'Managed SSH supports up to four jump hosts. Simplify the native ProxyJump route.');
         }
         let jumpConfig;
-        try { jumpConfig = await configuration(jumpProfile, signal); }
+        try { jumpConfig = await configuration(jumpProfile, signal, sourceFile); }
         catch (error) { throw annotateStage(error, jumpProfile, route.length); }
         // OpenSSH's explicit comma-separated route overrides later aliases'
         // own proxy settings. The first alias may itself require a jump route.
@@ -288,9 +289,12 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativ
     await appendJumps(config, [profile.ssh.host]);
     config.route = route;
     config.routeDigest = routeDigest(route);
-    if (route.length) {
+    if (tunnel && !route.length && config.proxycommand && config.proxycommand !== 'none') {
+      throw failure('SSH_ROUTE_UNSUPPORTED', 'Managed application tunnels require direct SSH access or a native ProxyJump route. Replace the opaque ProxyCommand with independently verified SSH aliases.');
+    }
+    if (route.length || tunnel) {
       config.managedConfigFile = await createManagedRouteConfiguration({ directory: path.dirname(knownHostsFile),
-        profile, configuration: config, route, executable: systemExecutable('ssh'), nativeConfigFile });
+        profile, configuration: config, route, executable: systemExecutable('ssh'), nativeConfigFile: sourceFile, tunnel });
       config.routeNodes = [...route, { profile, configuration: config }];
       for (const node of route) {
         node.configuration.managedConfigFile = config.managedConfigFile;
@@ -334,6 +338,42 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativ
     try { return await callback(controller.signal); } finally { operations.delete(scope); }
   }
   return {
+    async prepareLease(value, scope) {
+      const profile = normalizeTargetProfile(value);
+      if (profile.kind !== 'ssh' || !profile.endpoint) throw failure('SSH_SERVICE_REQUIRED', 'Add the original HTTPS application address before connecting a managed tunnel.');
+      return operation(scope, async signal => {
+        // Let native OpenSSH enforce the original files' ownership and policy
+        // before copying them. A snapshot must not rehabilitate rejected files.
+        await configuration(profile, signal);
+        const snapshot = await snapshotNativeConfiguration({ directory: path.dirname(knownHostsFile), nativeConfigFile });
+        let config, lease;
+        try {
+          config = await resolveRoute(profile, await configuration(profile, signal, snapshot.filename), signal, snapshot.filename, true);
+          await verifyJumpHosts(config, signal);
+          const status = await authenticateWithTrust(profile, config, signal);
+          if (signal.aborted) throw failure('SSH_CANCELLED', 'SSH connection was canceled.');
+          let disposed = false;
+          lease = { profile, configuration: config, status,
+            args: [...configArgs(config), '-oBatchMode=yes', '-oStrictHostKeyChecking=yes', '-oUpdateHostKeys=no',
+              '-oControlMaster=no', '-oControlPath=none', '-oForwardAgent=no', '-oForwardX11=no', '-oTunnel=no',
+              '-oPermitLocalCommand=no', '-oRequestTTY=no', '-oRemoteCommand=none', '-oConnectTimeout=8', '-oConnectionAttempts=1',
+              ...(config.appTrust ? [`-oUserKnownHostsFile="${knownHostsFile.replace(/\\/g, '/')}"`] : []), ...sshProfileArgs(profile)],
+            dispose() {
+              if (disposed) return; disposed = true; leases.delete(lease);
+              // Electron shutdown cannot wait for filesystem promises.
+              try { fsSync.rmSync(config.managedConfigFile, { force: true }); } catch { /* Retry asynchronously. */ }
+              try { fsSync.rmSync(snapshot.directory, { recursive: true, force: true }); } catch { /* Retry asynchronously. */ }
+              return Promise.all([fs.rm(config.managedConfigFile, { force: true }), snapshot.dispose()]);
+            } };
+          leases.add(lease); return lease;
+        } catch (error) {
+          if (config?.managedConfigFile) await fs.rm(config.managedConfigFile, { force: true });
+          await snapshot.dispose();
+          if (error.code === 'SSH_HOST_UNKNOWN') throw failure('SSH_HOST_UNKNOWN', 'Verify SSH access and independently confirm the host fingerprint in connection settings before opening its HTTPS service.');
+          throw error;
+        }
+      });
+    },
     async verify(value, scope) {
       const profile = normalizeTargetProfile(value);
       if (profile.kind !== 'ssh') throw failure('SSH_PROFILE_REQUIRED', 'Choose an SSH target.');
@@ -389,7 +429,7 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativ
       operations.get(scope)?.abort();
       for (const [id, challenge] of challenges) if (challenge.scope === scope) challenges.delete(id);
     },
-    dispose() { for (const scope of operations.keys()) this.cancel(scope); challenges.clear(); native?.dispose(); },
+    dispose() { for (const scope of operations.keys()) this.cancel(scope); challenges.clear(); for (const lease of leases) void lease.dispose(); native?.dispose(); },
   };
 }
 module.exports = { createNativeSshRunner, createSshConnectionManager, sshProfileArgs,

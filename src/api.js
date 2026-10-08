@@ -567,6 +567,27 @@ export const electronAPI = {
   listProjectPipelineDefinitions: async (projectId) => req(`/api/projects/${projectId}/pipeline-definitions`),
   getPipelineRegistryCapabilities: async () => req('/api/pipeline-registry/capabilities'),
   getExpertRCapabilities: async (projectId) => req(`/api/expert-r/capabilities${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+  listPrivateRKernels: async (projectId, { workspaceId, limit } = {}) => {
+    const query = new URLSearchParams();
+    if (workspaceId) query.set('workspaceId', workspaceId);
+    if (limit) query.set('limit', String(limit));
+    return req(`/api/private-r-kernels/${encodeURIComponent(projectId)}${query.size ? `?${query}` : ''}`);
+  },
+  startPrivateRKernel: async (projectId, input) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}`, {
+    method: 'POST', body: JSON.stringify(input),
+  }),
+  getPrivateRKernel: async (projectId, kernelId) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}`),
+  executePrivateRKernel: async (projectId, kernelId, input) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/executions`, {
+    method: 'POST', body: JSON.stringify(input),
+  }),
+  listPrivateRExecutions: async (projectId, kernelId, { limit, before } = {}) => {
+    const query = new URLSearchParams();
+    if (limit) query.set('limit', String(limit));
+    if (before) query.set('before', String(before));
+    return req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/executions${query.size ? `?${query}` : ''}`);
+  },
+  getPrivateRExecution: async (projectId, kernelId, executionId) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/executions/${encodeURIComponent(executionId)}`),
+  stopPrivateRKernel: async (projectId, kernelId) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/stop`, { method: 'POST' }),
   getExpertREnvironment: async (projectId) => req(`/api/expert-r/environment?projectId=${encodeURIComponent(projectId)}`),
   listExpertRInputs: async (projectId) => req(`/api/expert-r/projects/${projectId}/inputs`),
   uploadExpertRInput: async (projectId, file) => {

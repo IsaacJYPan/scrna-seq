@@ -519,6 +519,8 @@ function createExpertSandboxBroker(env = process.env) {
   let runtimeVerified = false;
   let environmentManifest = null;
   let environment = null;
+  let kernelRuntime = null;
+  let privateKernelStatus = { state: 'disabled' };
   const timeoutMs = positiveInteger(env.EXPERT_R_TIMEOUT_MS, 600000);
   const cleanupGraceMs = positiveInteger(env.EXPERT_R_CLEANUP_GRACE_MS, 300000);
   const reconcileIntervalMs = positiveInteger(env.EXPERT_R_RECONCILE_INTERVAL_MS, 300000);
@@ -536,12 +538,47 @@ function createExpertSandboxBroker(env = process.env) {
         && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       if (!runtimeVerified) { res.statusCode = 503; return res.end(JSON.stringify({ status: 'unavailable' })); }
       return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
-        sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION, environment }));
+        sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION, environment,
+        persistentKernel: privateKernelStatus.state === 'ready', privateKernelStatus }));
     }
     if (req.method === 'GET' && req.url === '/environment'
         && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       if (!runtimeVerified || !environmentManifest) { res.statusCode = 503; return res.end(JSON.stringify({ error: 'Exact R environment is unavailable.' })); }
       return res.end(environmentBytes(environmentManifest));
+    }
+    const kernelRoute = /^\/kernels\/(start|pk_[a-f0-9]{24}\/(?:inspect|execute|stop))$/.exec(req.url || '');
+    if (req.method === 'POST' && kernelRoute
+        && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
+      if (!runtimeVerified || privateKernelStatus.state !== 'ready' || !kernelRuntime) {
+        res.statusCode = 503;
+        return res.end(JSON.stringify({ error: 'Persistent private R is unavailable.', code: 'PRIVATE_KERNEL_UNAVAILABLE' }));
+      }
+      try {
+        const chunks = []; let bytes = 0;
+        for await (const chunk of req) {
+          bytes += chunk.length;
+          if (bytes > 256 * 1024) {
+            res.statusCode = 413;
+            return res.end(JSON.stringify({ error: 'The private R request exceeds its limit.', code: 'PRIVATE_KERNEL_INVALID' }));
+          }
+          chunks.push(chunk);
+        }
+        let body;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+        catch { throw Object.assign(new Error('A valid JSON request is required.'), { code: 'PRIVATE_KERNEL_INVALID', publicSafeHandlerError: true }); }
+        const parts = kernelRoute[1].split('/');
+        const result = parts[0] === 'start' ? await kernelRuntime.start(body)
+          : parts[1] === 'execute' ? await kernelRuntime.execute(body, parts[0], body)
+          : await kernelRuntime[parts[1]](body, parts[0]);
+        return res.end(JSON.stringify(result));
+      } catch (error) {
+        const code = error.publicSafeHandlerError === true ? error.code : 'PRIVATE_KERNEL_UNAVAILABLE';
+        res.statusCode = code === 'PRIVATE_KERNEL_NOT_FOUND' ? 404
+          : /INVALID/.test(code) ? 400 : /BUSY|CONFLICT|ORDER/.test(code) ? 409
+            : /LIMIT/.test(code) ? 429 : 503;
+        return res.end(JSON.stringify({ code,
+          error: error.publicSafeHandlerError === true ? error.message : 'The private R runtime could not confirm this request.' }));
+      }
     }
     if (req.method !== 'POST' || req.url !== '/run'
         || !safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
@@ -826,6 +863,18 @@ function createExpertSandboxBroker(env = process.env) {
       environmentManifest = await discoverExpertRuntimeEnvironment(env);
       environment = summarizeEnvironmentManifest(environmentManifest);
     }
+    if (env.PRIVATE_R_KERNEL_ENABLED === 'true' && !kernelRuntime) {
+      try {
+        const { createPrivateKernelRuntime } = require('./privateKernelRuntime');
+        kernelRuntime = createPrivateKernelRuntime({ env, provider, environmentManifest });
+        await kernelRuntime.initialize();
+        privateKernelStatus = { state: 'ready' };
+      } catch (error) {
+        await kernelRuntime?.close().catch(() => {});
+        kernelRuntime = null;
+        privateKernelStatus = { state: error.code === 'PRIVATE_KERNEL_UNSUPPORTED' ? 'unsupported' : 'unavailable' };
+      }
+    }
     await reconcile();
     runtimeVerified = true;
     if (!reconcileTimer) {
@@ -841,6 +890,15 @@ function createExpertSandboxBroker(env = process.env) {
     if (reconcileTimer) clearInterval(reconcileTimer);
     reconcileTimer = null;
   });
+  // Stop owned containers before the close callback confirms broker shutdown.
+  const nativeClose = server.close.bind(server);
+  server.close = callback => {
+    const cleanup = kernelRuntime ? kernelRuntime.close() : Promise.resolve();
+    nativeClose(error => {
+      cleanup.then(() => callback?.(error), failure => callback?.(error || failure));
+    });
+    return server;
+  };
   return server;
 }
 
@@ -853,6 +911,13 @@ if (require.main === module) {
     }
     await server.startReconciliation();
     server.listen(Number(process.env.EXPERT_R_SANDBOX_PORT || 8090), host);
+    let closing = false;
+    const shutdown = () => {
+      if (closing) return; closing = true;
+      server.close(error => { if (error) process.exitCode = 1; });
+    };
+    process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
+    process.on('message', message => { if (message?.type === 'traceomics:shutdown') shutdown(); });
   })().catch((error) => {
     console.error(`[expert-r-broker] startup failed code=${safeFailureCode(error)}`);
     process.exitCode = 1;

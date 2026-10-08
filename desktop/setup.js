@@ -19,13 +19,19 @@ const hostVerification = document.querySelector('#ssh-host-verification');
 const cancelSsh = document.querySelector('#cancel-ssh');
 const identityInput = document.querySelector('#ssh-identity');
 const trustButton = document.querySelector('#trust-host');
+const tunnelButton = document.querySelector('#connect-ssh-service');
+const disconnectButton = document.querySelector('#disconnect-target');
 
 function updateConnectionFields() {
   const ssh = kindInput.value === 'ssh';
   const locked = busy || Boolean(sshChallenge);
-  document.querySelector('#endpoint-fields').hidden = ssh;
+  document.querySelector('#endpoint-fields').hidden = false;
+  document.querySelector('#ssh-endpoint-hint').hidden = !ssh;
   endpointInput.required = !ssh;
-  endpointInput.disabled = ssh || locked;
+  endpointInput.disabled = locked;
+  tunnelButton.hidden = !ssh;
+  tunnelButton.disabled = locked || !endpointInput.value.trim();
+  disconnectButton.disabled = locked;
   const sshFields = document.querySelector('#ssh-fields');
   sshFields.hidden = !ssh;
   sshFields.disabled = !ssh;
@@ -78,14 +84,17 @@ async function refreshProfiles(selectedId) {
   picker.value = selectedId === undefined ? state.selectedProfileId || '' : selectedId || '';
   selectProfile(picker.value);
   const target = state.currentTarget;
+  disconnectButton.hidden = target?.kind !== 'ssh' || target.status !== 'connected';
   document.querySelector('#current-target').textContent = target?.status === 'connected'
     ? 'Connected project service: ' + target.name + ' · ' + target.endpoint
     : target?.status === 'configuration_only'
       ? target.name + ': SSH configuration saved. No managed SSH connection is active.'
-      : 'No service connected.';
+      : target?.sshTunnel ? target.name + ': SSH tunnel disconnected. ' + (target.sshTunnel.message || 'Reconnect to continue.') : 'No service connected.';
   const sshStatus = state.sshStatuses?.[picker.value];
   if (sshStatus?.state === 'authenticated') {
-    savedStatus.textContent = 'SSH authentication verified for ' + sshStatus.username + '@' + sshStatus.host + '. The project service has not been opened.';
+    savedStatus.textContent = target?.id === picker.value && target.status === 'connected'
+      ? 'SSH authentication verified. The HTTPS project service is connected.'
+      : 'SSH authentication verified for ' + sshStatus.username + '@' + sshStatus.host + '. The project service has not been opened.';
     savedStatus.hidden = false;
   }
   if (state.warning) { error.textContent = state.warning; error.hidden = false; }
@@ -100,6 +109,7 @@ function draftProfile() {
       remoteHost: document.querySelector('#remote-host').value,
       remotePort: document.querySelector('#remote-port').value,
       ...(identityInput.value ? { identityFile: identityInput.value } : {}) };
+    if (endpointInput.value.trim()) profile.endpoint = endpointInput.value;
   } else profile.endpoint = endpointInput.value;
   return profile;
 }
@@ -151,6 +161,20 @@ async function save(connect) {
 
 picker.addEventListener('change', () => selectProfile(picker.value));
 kindInput.addEventListener('change', updateConnectionFields);
+endpointInput.addEventListener('input', updateConnectionFields);
+tunnelButton.addEventListener('click', async () => {
+  if (!form.reportValidity() || !endpointInput.value.trim()) return;
+  setBusy(true); error.hidden = true; savedStatus.hidden = true;
+  try { await window.desktopShell.saveAndConnectTargetProfile(draftProfile()); }
+  catch (reason) { showError(reason); }
+  finally { setBusy(false); }
+});
+disconnectButton.addEventListener('click', async () => {
+  setBusy(true); error.hidden = true;
+  try { await window.desktopShell.disconnectTarget(); await refreshProfiles(editedId); }
+  catch (reason) { showError(reason); }
+  finally { setBusy(false); }
+});
 saveButton.addEventListener('click', () => save(false));
 form.addEventListener('submit', event => { event.preventDefault(); void save(true); });
 function showSshResult(result) {

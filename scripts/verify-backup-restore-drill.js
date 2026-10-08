@@ -219,6 +219,11 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
        VALUES ('lex_restore', 'proj_restore', $1, 'ao_restore', $2, $3, $4, $5, $6, $7::jsonb)`,
       [userId, liveEntry.operation, liveEntry.generation, liveEntry.order, liveEntry.liveRevision, liveEntry.sourceSha256, JSON.stringify(liveEntry.record)]
     );
+    const kernelId='pk_'+ 'd'.repeat(24),completedId='pex_'+ 'e'.repeat(24),runningId='pex_'+ 'f'.repeat(24),kernelGeneration='c'.repeat(64);
+    await client.query(`INSERT INTO private_r_kernels(id,project_id,owner_user_id,workspace_id,request_id,start_sha256,status,runtime_generation,environment_json,environment_manifest_json,inputs_json,next_order,active_execution_id,started_at,expires_at) VALUES($1,'proj_restore',$2,'restore_workspace','11111111-1111-4111-8111-111111111111',$3,'running',$4,$5,$6,'[]',2,$7,NOW(),NOW()+INTERVAL '4 hours')`,[kernelId,userId,sha256('restore kernel fixture'),kernelGeneration,environmentReference,environment,runningId]);
+    const preview={ok:true,kernelId,generation:kernelGeneration,executionId:completedId,order:1,status:'completed',stdout:'[1] 3\n',warnings:[],error:null,tables:[],figures:[],truncated:false,startedAt:'2026-10-08T00:00:00.000Z',completedAt:'2026-10-08T00:00:01.000Z'};
+    await client.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256,result_json,started_at,completed_at) VALUES($1,$2,'proj_restore',$3,'22222222-2222-4222-8222-222222222222',$4,1,'completed','n <- 3',$5,$6,NOW(),NOW())`,[completedId,kernelId,userId,kernelGeneration,sha256('n <- 3'),preview]);
+    await client.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256,started_at) VALUES($1,$2,'proj_restore',$3,'33333333-3333-4333-8333-333333333333',$4,2,'running','n + 1',$5,NOW())`,[runningId,kernelId,userId,kernelGeneration,sha256('n + 1')]);
     await client.query('COMMIT');
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
@@ -315,6 +320,7 @@ async function main() {
     if (restored.securityState?.canceledJobs !== 2) {
       throw new Error('Restore did not cancel both queued/running drill jobs.');
     }
+    if(restored.securityState?.stoppedKernels!==1||restored.securityState?.unknownExecutions!==1)throw new Error('Restore did not invalidate volatile private R memory and pending command completion.');
     const verification = await runVerifier({
       databaseUrl: targetUrl,
       sourceDatabaseUrl: sourceUrl,

@@ -4,7 +4,7 @@ const projection = require('./executionHistoryProjection');
 const { LIMITS, HEX, ID, parse, timestamp, safeText, safeId, boundedJSON, sourceRecord, reference, jobKind, summary } = projection;
 const storage = require('./storage');
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
-const KINDS = new Set(['all', 'guided', 'workflow', 'expert-r', 'live-r', 'provenance']);
+const KINDS = new Set(['all', 'guided', 'workflow', 'expert-r', 'live-r', 'r-console', 'provenance']);
 function historyError(code, message, status = 400) { return Object.assign(new Error(message), { code, status }); }
 const missing = () => historyError('EXECUTION_RECORD_NOT_FOUND', 'Execution record not found.', 404);
 function identityInput(id, name, basis) { return { name, analysisObjectId: safeId(id), precision: 'identity-only', basis, reference: null }; }
@@ -33,6 +33,7 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
         WHERE r.project_id=$1${kind === 'all' ? '' : ` AND (CASE WHEN r.owner_user_id=$2 AND w.job_id IS NOT NULL THEN 'workflow' WHEN r.job_type='expert.r.v1' THEN 'expert-r' ELSE 'guided' END)='${kind}'`}${cursorClause}
         ORDER BY ${time} DESC,r.id DESC LIMIT $3`, parameters).then(result => result.rows.map(row => summary(row, row.kind, Number(row.owner_user_id) === Number(userId), row.display_name))) : [],
       ['all', 'live-r'].includes(kind) ? db.query(`SELECT r.id,r.project_id,r.owner_user_id,r.operation,r.created_at,u.display_name FROM live_execution_records r JOIN users u ON u.id=r.owner_user_id WHERE r.project_id=$1 AND r.owner_user_id=$2${cursorClause} ORDER BY ${time} DESC,r.id DESC LIMIT $3`, parameters).then(result => result.rows.map(row => summary(row, 'live-r', true, row.display_name))) : [],
+      ['all','r-console'].includes(kind) ? db.query(`SELECT r.id,r.project_id,r.owner_user_id,r.status,r.created_at,r.started_at,r.completed_at,u.display_name FROM private_r_executions r JOIN users u ON u.id=r.owner_user_id WHERE r.project_id=$1 AND r.owner_user_id=$2${cursorClause} ORDER BY ${time} DESC,r.id DESC LIMIT $3`,parameters).then(result=>result.rows.map(row=>({...summary({...row,operation:'Free R console command'},'r-console',true,row.display_name),status:row.status}))) : [],
       ['all', 'provenance'].includes(kind) ? db.query(`SELECT r.id,r.project_id,r.created_by_user_id,r.operation,r.created_at,u.display_name FROM provenance r JOIN users u ON u.id=r.created_by_user_id WHERE r.project_id=$1 AND r.created_by_user_id=$2 AND r.job_id IS NULL${cursorClause} ORDER BY ${time} DESC,r.id DESC LIMIT $3`, parameters).then(result => result.rows.map(row => summary(row, 'provenance', true, row.display_name))) : [],
     ]);
     const all = rows.flat().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
@@ -44,6 +45,10 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
   async function ownedRecord(userId, projectId, recordId) {
     await db.requireProjectRole(userId, projectId, READ_ROLES);
     if (!safeId(recordId)) throw missing();
+    if(recordId.startsWith('pex_')) {
+      const consoleRecord=(await db.query(`SELECT e.*,k.environment_json,k.environment_manifest_json,k.inputs_json,k.resources_json,k.target_json,k.workspace_id,k.analysis_object_id AS kernel_analysis_object_id FROM private_r_executions e JOIN private_r_kernels k ON k.id=e.kernel_id WHERE e.id=$1 AND e.project_id=$2 AND e.owner_user_id=$3 AND k.owner_user_id=$3`,[recordId,projectId,userId])).rows[0];
+      if(consoleRecord)return {kind:'r-console',row:consoleRecord};throw missing();
+    }
     const jobs = await db.query('SELECT * FROM jobs WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [recordId, projectId, userId]);
     if (jobs.rows[0]) return { kind: 'job', row: jobs.rows[0] };
     const live = await db.query('SELECT * FROM live_execution_records WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [recordId, projectId, userId]);
@@ -108,7 +113,17 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
     const issues = [];
     const ownerName = (await db.query('SELECT display_name FROM users WHERE id=$1', [userId])).rows[0]?.display_name;
     let detail;
-    if (origin !== 'job') {
+    if(origin==='r-console') {
+      const api=require('./rEnvironment');
+      let environment;
+      try {const manifest=api.validateEnvironmentManifest(row.environment_manifest_json);const exact=api.summarizeEnvironmentManifest(manifest);api.assertEnvironmentMatches(row.environment_json,exact);environment={precision:'pinned-reference',reference:exact,manifestAvailable:true,manifestReference:{versionId:row.kernel_id,sha256:exact.manifestSha256,sizeBytes:api.environmentBytes(manifest).length},observed:null,note:'Pinned private kernel userspace environment. The worker host kernel and hardware remain outside this snapshot.'};}
+      catch {environment={precision:'unavailable',reference:null,manifestAvailable:false,observed:null,note:'The retained kernel environment is inconsistent.'};addGap(issues,'environment-inconsistent',environment.note);}
+      const inputs=(row.inputs_json||[]).map(input=>({...reference(projectId,input.versionId,input.checksumSha256,input.sizeBytes,input.name,'Exact verified session-start input version'),reference:input.reference,role:input.role}));
+      addGap(issues,'unsaved-kernel-state','The selected input versions initialize the session. Intermediate variables, files, external effects, and randomness were not captured as independent artifact versions; source order does not prove a complete replay.');
+      addGap(issues,'console-previews-not-artifacts','Bounded console previews are retained in the private command journal. Scientific output artifact versions have not been published.');
+      if(row.status==='unknown')addGap(issues,'completion-unknown','The runtime connection ended without a confirmed terminal result. This command is not rerun automatically.');
+      detail={...summary({...row,operation:'Free R console command'},'r-console',true,ownerName),status:row.status,origin:'server-private-r-console',source:{...sourceRecord(row.source_code,row.source_sha256),versionId:row.id},inputs,parameters:{precision:'source-defined',values:{},seed:null},environment,target:{...row.target_json,precision:'recorded-service-generation'},timestamps:{createdAt:timestamp(row.created_at),recordedAt:timestamp(row.created_at),startedAt:timestamp(row.started_at),completedAt:timestamp(row.completed_at)},outputs:[],kernel:{available:true,id:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),scope:'Creator-private persistent R kernel; command order is local to this generation.'}};
+    } else if (origin !== 'job') {
       const journal = origin === 'live-r'; const data = journal ? parse(row.record_json) : {};
       const parameters = boundedJSON(journal ? data.parameters : parse(row.parameters));
       const source = sourceRecord(journal ? data.source?.code : row.script, journal ? row.source_sha256 : null, safeText(journal ? data.source?.language : row.language) || 'R');
@@ -180,6 +195,10 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
 
   async function environment(userId, projectId, recordId) {
     const record = await ownedRecord(userId, projectId, recordId);
+    if(record.kind==='r-console') {
+      try {const api=require('./rEnvironment');const manifest=api.validateEnvironmentManifest(record.row.environment_manifest_json);const reference=api.summarizeEnvironmentManifest(manifest);api.assertEnvironmentMatches(record.row.environment_json,reference);await db.requireProjectRole(userId,projectId,READ_ROLES);return {reference,manifest,integrityVerified:true};}
+      catch(error){if(error.code==='NOT_FOUND'||error.code==='PROJECT_ROLE_REQUIRED')throw error;throw historyError('ENVIRONMENT_MANIFEST_INVALID','The retained private kernel environment is inconsistent.',409);}
+    }
     if (record.kind !== 'job') throw historyError('ENVIRONMENT_MANIFEST_UNAVAILABLE', 'A verified environment manifest is unavailable for this execution.', 404);
     const rows = (await db.query("SELECT * FROM job_artifacts WHERE project_id=$1 AND job_id=$2 AND created_by_user_id=$3 AND artifact_type='expert_r_environment' AND status='available' AND storage_kind='local_internal' LIMIT 2", [projectId, recordId, userId])).rows;
     if (rows.length !== 1 || Number(rows[0].size_bytes) > LIMITS.detailBytes || !storage.isProjectStorageKey(rows[0].storage_uri, { projectId })) throw historyError('ENVIRONMENT_MANIFEST_UNAVAILABLE', 'A verified environment manifest is unavailable for this execution.', 404);

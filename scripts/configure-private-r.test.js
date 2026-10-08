@@ -30,6 +30,7 @@ describe('private R setup preflight', () => {
     const first = privateREnvironment(options, identity);
     const second = privateREnvironment(options, identity);
     expect(first).toContain('EXPERT_R_ACCESS_POLICY=project-roles');
+    expect(first).toContain('PRIVATE_R_KERNEL_ENABLED=true');
     expect(first).toMatch(/EXPERT_R_SANDBOX_TOKEN=[a-f0-9]{64}\n/);
     expect(first).not.toBe(second);
   });

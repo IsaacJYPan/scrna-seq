@@ -9,5 +9,7 @@
 !plumber.R
 !run.R
 !expert-runner.R
+!private-kernel-bridge.py
+!private-kernel-init.R
 !generate-demo-template.R
 !sample_data.csv

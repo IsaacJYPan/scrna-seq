@@ -81,6 +81,22 @@ deserialization is an executable-code boundary. Runtime package install is
 unavailable; operators manage access with
 `npm run expert-r-access -- <grant|revoke|status> <email>`.
 
+**Advanced analysis → Private R console** accepts free R cells or selected
+source with an optional saved analysis and up to five exact private input
+versions. Variables persist between commands in that private session. Use
+`display_table()` for bounded table previews and ordinary R plotting for PNG
+figures; `input_manifest`, `read_input()`, and `input_path()` address the selected
+files. A selected saved Seurat analysis is available as `obj`. An empty session
+supports general R inspection without requiring a preconfigured pipeline.
+
+Reloading reconnects to an existing session without executing earlier cells.
+Stopping, expiry, or process loss discards unsaved memory. The console retains
+ordered source and bounded output privately, and shows uncertain completion
+without retrying a command. These previews are inspection evidence; they do not
+create published scientific artifact versions or make an unsaved workspace
+fully reproducible. The existing one-shot R form remains available for durable
+table, figure, and file-producing runs.
+
 **Runs & Results → Execution history** brings guided jobs, recipe steps, private
 R submissions, live guided R operations, and imported provenance into one bounded
 view. It shows recorded source, resolved parameters, input/output versions,

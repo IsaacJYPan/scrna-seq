@@ -64,7 +64,8 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500 } = {}) {
           if (environment.profileId !== result.profileId || environment.imageDigest !== result.sandboxImageDigest) throw new Error('Inconsistent environment');
         } catch { resolve({ state: 'incompatible' }); return; }
         resolve({ state: 'ready', profileId: result.profileId, imageDigest: result.sandboxImageDigest,
-          resourcePolicyVersion: result.resourcePolicyVersion, environment });
+          resourcePolicyVersion: result.resourcePolicyVersion, environment,
+          persistentKernel: result.persistentKernel === true });
       });
     });
     const deadline = setTimeout(() => { resolve({ state: 'unreachable' }); request.destroy(); }, timeoutMs);

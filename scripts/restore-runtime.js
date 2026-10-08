@@ -134,8 +134,15 @@ async function finalizeRestoredSecurityState(postgresConfig = config.postgresCon
              locked_at = NULL
        WHERE status IN ('queued', 'running')
     `);
+    let stoppedKernels=0,unknownExecutions=0;
+    // Older backups predate private sessions. Restoring them must not require
+    // creating new tables or pretend that volatile runtime memory was saved.
+    const kernels=await client.query("SELECT to_regclass('public.private_r_kernels') AS name");
+    const executions=await client.query("SELECT to_regclass('public.private_r_executions') AS name");
+    if(executions.rows[0]?.name) unknownExecutions=Number((await client.query("UPDATE private_r_executions SET status='unknown',updated_at=NOW() WHERE status IN ('reserved','running')")).rowCount||0);
+    if(kernels.rows[0]?.name) stoppedKernels=Number((await client.query("UPDATE private_r_kernels SET status='stopped',active_execution_id=NULL,stopped_at=NOW(),updated_at=NOW() WHERE status IN ('starting','ready','running','unknown','stopping')")).rowCount||0);
     await client.query('COMMIT');
-    return { canceledJobs: Number(canceled.rowCount || 0) };
+    return { canceledJobs: Number(canceled.rowCount || 0),stoppedKernels,unknownExecutions };
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
     throw error;

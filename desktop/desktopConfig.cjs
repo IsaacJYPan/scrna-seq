@@ -59,7 +59,8 @@ async function verifyServerConnection(serverUrl, { fetchImpl = fetch, timeoutMs 
       response = await fetchImpl(policyUrl, {
         method: 'GET', redirect: 'error', headers: { Accept: 'application/json' }, signal: controller.signal,
       });
-    } catch {
+    } catch (error) {
+      if (error.code === 'DESKTOP_TLS_REJECTED') throw error;
       throw new Error('TraceOmics could not reach that server. Check the address, network connection, and server status.');
     }
 
@@ -136,7 +137,11 @@ function normalizeTargetProfile(value) {
   const kind = value.kind;
   if (!['local', 'https', 'ssh'].includes(kind)) throw new Error('Choose a local, HTTPS, or SSH target.');
   if (kind === 'ssh') {
-    if (value.endpoint != null) throw new Error('SSH profiles declare the remote service, not a local tunnel address.');
+    let endpoint;
+    if (value.endpoint != null) {
+      endpoint = normalizeServerUrl(value.endpoint);
+      if (new URL(endpoint).protocol !== 'https:') throw new Error('An SSH target requires the original HTTPS server address, never a local tunnel address.');
+    }
     requireAllowedFields(value.ssh, ['host', 'username', 'port', 'remoteHost', 'remotePort', 'identityFile']);
     const ssh = {
       host: normalizedHost(value.ssh.host, 'SSH host', true),
@@ -158,7 +163,8 @@ function normalizeTargetProfile(value) {
       }
       ssh.username = value.ssh.username;
     }
-    return { id, name, kind, ssh };
+    if (endpoint && !LOOPBACK_HOSTS.has(ssh.remoteHost)) throw new Error('Managed HTTPS tunnels forward only a loopback service on the SSH destination.');
+    return { id, name, kind, ssh, ...(endpoint ? { endpoint } : {}) };
   }
   if (value.ssh != null) throw new Error('SSH settings belong only to SSH profiles.');
   const endpoint = normalizeServerUrl(value.endpoint);
@@ -168,15 +174,16 @@ function normalizeTargetProfile(value) {
   return { id, name, kind, endpoint };
 }
 
-function targetServiceIdentity(value) {
+function targetServiceIdentity(value, resolved) {
   const profile = normalizeTargetProfile(value);
   if (profile.kind !== 'ssh') return `service:${profile.endpoint}`;
   const ssh = profile.ssh;
-  return `ssh:${ssh.username || ''}@${ssh.host}:${ssh.port || 'config'}/${ssh.remoteHost}:${ssh.remotePort}`;
+  const identity = `ssh:${resolved?.username || ssh.username || ''}@${resolved?.host || ssh.host}:${resolved?.port || ssh.port || 'config'}/${ssh.remoteHost}:${ssh.remotePort}`;
+  return profile.endpoint ? identity + '/' + profile.endpoint : identity;
 }
 
-function targetSessionPartition(value) {
-  const digest = createHash('sha256').update(targetServiceIdentity(value)).digest('hex');
+function targetSessionPartition(value, resolved) {
+  const digest = createHash('sha256').update(targetServiceIdentity(value, resolved)).digest('hex');
   return `persist:traceomics-service-${digest}`;
 }
 

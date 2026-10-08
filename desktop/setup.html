@@ -36,6 +36,7 @@
         <div id="endpoint-fields" class="field-group">
         <label for="server-url">Server address</label>
         <input id="server-url" name="server-url" type="url" inputmode="url" autocomplete="url" placeholder="https://analysis.example.org" required />
+        <p id="ssh-endpoint-hint" class="hint" hidden>For an SSH tunnel, enter the original HTTPS address on the server certificate. Leave it empty to save and verify SSH access only.</p>
         </div>
         <fieldset id="ssh-fields" class="field-group" hidden disabled>
           <legend>SSH connection settings</legend>
@@ -46,7 +47,7 @@
           <div class="actions"><button id="choose-identity" class="secondary" type="button">Choose identity file</button><button id="clear-identity" class="secondary" type="button">Use agent/config</button><button id="unlock-identity" class="secondary" type="button" disabled>Unlock with OpenSSH</button></div>
           <label for="remote-host">Project service host on the server</label><input id="remote-host" value="127.0.0.1" />
           <label for="remote-port">Project service port on the server</label><input id="remote-port" type="number" min="1" max="65535" value="3000" />
-          <p class="hint">SSH uses your system OpenSSH agent and configuration. Only an optional file reference is saved. Encrypted keys unlock in a native OpenSSH credential window. SSH verification does not open the project service; managed application tunnels are not available yet.</p>
+          <p class="hint">SSH uses your system OpenSSH agent and configuration. Encrypted keys unlock in a native OpenSSH credential window. Verify SSH access first, then connect the HTTPS application. Only its loopback service is forwarded; the original HTTPS certificate must be valid and trusted by this computer.</p>
           <section id="ssh-host-verification" class="host-verification" aria-labelledby="ssh-host-verification-title" hidden>
             <h2 id="ssh-host-verification-title">Verify the server’s host identity</h2>
             <p id="ssh-discovered-host"></p>
@@ -62,6 +63,8 @@
         <div class="actions">
           <button id="save" class="secondary" type="button">Save profile</button>
           <button id="connect" type="submit">Save and connect</button>
+          <button id="connect-ssh-service" type="button" hidden>Connect HTTPS service</button>
+          <button id="disconnect-target" class="secondary" type="button" hidden>Disconnect SSH tunnel</button>
           <button id="remove" class="secondary" type="button" hidden>Remove profile</button>
         </div>
       </form>

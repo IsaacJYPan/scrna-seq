@@ -49,9 +49,10 @@ describe('Windows release packaging contract', () => {
     const main = fs.readFileSync(path.join(root, 'desktop', 'main.cjs'), 'utf8');
     const preload = fs.readFileSync(path.join(root, 'desktop', 'preload.cjs'), 'utf8');
     expect(buildConfig.files).toContain('desktop/**/*');
-    expect(main).toContain('partition: profile ? targetSessionPartition(profile)');
+    expect(main).toContain('runtime?.partition || targetSessionPartition(profile)');
     expect(main).toContain('event.senderFrame !== event.sender.mainFrame');
     expect(preload).toContain('getCurrentTarget:');
     expect(preload).toContain('openTargetSettings:');
+    expect(preload).toContain('onTargetStatus:');
   });
 });

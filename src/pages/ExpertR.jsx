@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Code2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import REnvironment from '../components/REnvironment';
+import RConsole from '../components/RConsole';
 
 const STARTER = `# Your saved Seurat analysis is available as obj.
 # Selected private files are listed in input_manifest.
@@ -180,7 +181,12 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
     );
   }
   return (
-    <div className="h-full overflow-y-auto p-6 bg-background text-text"><form className="max-w-5xl mx-auto space-y-4" onSubmit={submit}>
+    <div className="h-full overflow-y-auto p-6 bg-background text-text">
+      <div className="max-w-5xl mx-auto mb-8">
+        <RConsole projectId={projectId} userId={userId} workspaceId={currentWs?.id || 'default'}
+          objects={objects} preferredObjectId={preferredObjectId} deploymentPolicy={policy} />
+      </div>
+      <form className="max-w-5xl mx-auto space-y-4" onSubmit={submit}>
       <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold flex gap-2 items-center"><Code2 size={20} />Expert R Workbench</h2><p className="text-sm text-slate-400 mt-1">Use R for custom exploratory analysis on a private saved analysis.</p></div><button className="btn btn-primary shrink-0" disabled={busy || checkingRuntime || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button></div>
       {policy.expertRStatus?.state === 'ready' && <div className="flex flex-wrap items-center gap-3"><p role="status" className="text-sm text-textMuted">Isolated R runtime ready · {policy.expertRStatus.accessPolicy === 'project-roles' ? 'Project-role access' : 'Approved-account access'}</p><button type="button" className="btn btn-secondary text-xs" disabled={checkingRuntime} onClick={refreshCapability}>{checkingRuntime ? 'Checking R availability…' : 'Check R availability'}</button></div>}
       <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm"><div className="flex gap-2 items-center font-medium"><ShieldCheck size={16} />Private analysis workspace</div><p className="text-slate-400 mt-1">Your saved analysis opens in a fresh, time-limited R workspace. It cannot reach the network or files outside this analysis, and uses the packages listed below.</p></div>

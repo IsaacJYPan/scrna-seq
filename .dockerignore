@@ -60,3 +60,5 @@ r-backend
 **/*.test.ts
 **/*.test.tsx
 backend/_http-test-utils.js
+backend/_r-environment-test-utils.js
+backend/_privateKernelFixtures.js

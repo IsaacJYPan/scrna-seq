@@ -63,6 +63,12 @@ jobs:
         run: npm run test:expert-r-sandbox
       - name: Run Expert R browser acceptance
         run: npm run test:expert-r-browser
+      - name: Verify persistent R sessions and the authenticated console
+        run: |
+          docker build --file r-backend/Dockerfile --tag traceomics-r:kernel-test r-backend
+          export EXPERT_R_SANDBOX_IMAGE="$(docker image inspect traceomics-r:kernel-test --format '{{.Id}}')"
+          npm run test:private-r-kernel
+          npm run test:private-r-console-browser
       - name: Run public-demo deployment acceptance
         run: npm run test:demo-compose
 
@@ -79,6 +85,8 @@ jobs:
       - run: npm ci
       - name: Run real Chromium and native Electron multi-lane acceptance
         run: npm run test:native-ui-compose
+      - name: Verify the managed SSH application tunnel
+        run: npm run test:desktop:tunnel-ui
 
   scientific-acceptance:
     if: inputs.run_full_acceptance

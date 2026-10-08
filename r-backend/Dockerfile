@@ -96,6 +96,16 @@ RUN if [ "$INSTALL_OPTIONAL_R_PACKAGES" = "true" ]; then \
       echo "Skipping optional SeuratDisk package. Set INSTALL_OPTIONAL_R_PACKAGES=true to include it."; \
     fi
 
+# Reference Jupyter kernel support is installed at build time. Exact R package
+# versions and the operating-system client packages are captured in the image
+# manifest; isolated analysis containers never download dependencies.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    libzmq3-dev python3-jupyter-client jupyter-client jupyter-core \
+    && rm -rf /var/lib/apt/lists/*
+RUN install-r-packages private-r-kernel \
+    -e "versions <- c(uuid='1.2-2', repr='1.1.7', pbdZMQ='0.3-14', IRdisplay='1.1', IRkernel='1.3.2'); for (pkg in names(versions)) remotes::install_version(pkg, version=versions[[pkg]], dependencies=FALSE, upgrade='never', repos='https://cran.r-project.org'); stopifnot(all(vapply(names(versions), function(pkg) utils::packageVersion(pkg) == package_version(versions[[pkg]]), logical(1)))); IRkernel::installspec(user=FALSE)"
+RUN --network=none /usr/bin/python3 -c "from jupyter_client import KernelManager; from jupyter_client.kernelspec import KernelSpecManager; assert 'IRkernel::main' in ' '.join(KernelSpecManager().get_kernel_spec('ir').argv)"
+
 COPY image-packages.R /tmp/image-packages.R
 RUN --network=none Rscript /tmp/image-packages.R manifest private \
     && rm -f /tmp/image-packages.R /usr/local/bin/install-r-packages /root/.R/Makevars
@@ -111,7 +121,7 @@ ARG APP_GID=10001
 # explicitly created storage roots (which are replaced by persistent volumes in
 # the supported deployment topology).
 WORKDIR /app
-COPY plumber.R run.R expert-runner.R generate-demo-template.R sample_data.csv /app/
+COPY plumber.R run.R expert-runner.R private-kernel-bridge.py private-kernel-init.R generate-demo-template.R sample_data.csv /app/
 
 RUN rm -f /usr/local/bin/install-r-packages /root/.R/Makevars /app/install-r-packages.sh \
     && groupadd --gid "${APP_GID}" appuser \
