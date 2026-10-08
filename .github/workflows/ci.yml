@@ -250,6 +250,9 @@ jobs:
       - name: Run Public R Endpoint Bound Tests
         run: npm run test:r-public-bounds
 
+      - name: Run Live R Revision Recovery Tests
+        run: npm run test:r-live-revisions
+
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
 

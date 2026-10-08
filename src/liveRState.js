@@ -26,3 +26,16 @@ export function pipelineProbeRetryDelay(attempt, jitter = 0) {
   const safeJitter = Number.isFinite(jitter) ? Math.min(250, Math.max(0, jitter)) : 0;
   return Math.min(5_000, 500 * (2 ** (safeAttempt - 1))) + safeJitter;
 }
+
+export function serverUnsavedLiveChanges(state) {
+  if (state?.exists === false) return false;
+  if (typeof state?.has_unsaved_changes === 'boolean') return state.has_unsaved_changes;
+  if (Number.isSafeInteger(state?.live_revision) && state.live_revision >= 0) {
+    if (state.saved_revision === null) return true;
+    if (Number.isSafeInteger(state.saved_revision) && state.saved_revision >= 0) {
+      return state.live_revision !== state.saved_revision;
+    }
+  }
+  // An older server cannot establish a saved baseline.
+  return null;
+}

@@ -12,6 +12,7 @@ import {
   pipelineProbeAction,
   pipelineProbeRetryDelay,
   reconcileRestoredSession,
+  serverUnsavedLiveChanges,
 } from './liveRState';
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
 import { publicErrorMessage } from './publicError';
@@ -216,6 +217,7 @@ export default function App() {
     clusterDims: 15  // default dims; updated when clustering runs
   });
   const [unsavedLiveChanges, setUnsavedLiveChanges] = useState(false);
+  const [liveRecoveryNotice, setLiveRecoveryNotice] = useState('');
   const [checkpointSaveState, setCheckpointSaveState] = useState({ phase: 'idle', message: '', durableSaved: false });
   const checkpointSaveRequestRef = React.useRef(0);
   const checkpointSaveOpenedObjectRef = React.useRef(null);
@@ -578,6 +580,7 @@ export default function App() {
   const handleLiveObjectAttached = useCallback((projectId, objectId) => {
     if (!projectId || !objectId) return;
     setUnsavedLiveChanges(false);
+    setLiveRecoveryNotice('');
     patchActiveWorkspace(ws => ({
       objects: ws.objects.map(object => (
         object.projectId === projectId && object.id === objectId
@@ -623,7 +626,6 @@ export default function App() {
           onPhase: (phase) => {
             if (checkpointSaveRequestRef.current !== requestId) return;
             if (phase === 'opening') {
-              setUnsavedLiveChanges(false);
               setCheckpointSaveState({
                 phase,
                 message: 'Saved. Opening the durable version in your private workspace...',
@@ -648,7 +650,6 @@ export default function App() {
     } catch (error) {
       if (checkpointSaveRequestRef.current !== requestId) return;
       const durableSaved = error?.durableSaved === true;
-      if (durableSaved) setUnsavedLiveChanges(false);
       const stillPending = error?.code === 'JOB_POLL_TIMEOUT' && !durableSaved;
       setCheckpointSaveState({
         phase: stillPending ? 'pending' : 'error',
@@ -881,6 +882,12 @@ export default function App() {
         options.headers['X-Object-ID'] = datasetInfo.id;
       }
       const data = await window.electronAPI.apiRequest(path, options);
+      if (!workflowContext.active) return data;
+      const serverUnsaved = serverUnsavedLiveChanges(data.live_state);
+      if (serverUnsaved !== null) {
+        setUnsavedLiveChanges(serverUnsaved);
+        setLiveRecoveryNotice('');
+      }
       if (data.error) throw new Error(data.error);
 
       if (data.provenance) {
@@ -922,7 +929,7 @@ export default function App() {
             extraState.qcSummary = data.result;
           }
           markPipelineStep(step, extraState);
-          setUnsavedLiveChanges(true);
+          setUnsavedLiveChanges(serverUnsaved ?? true);
           setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
           // QC: update workspace object cell count to post-filter value
           if (step === 'qc' && data.result?.post_filter_cells) {
@@ -952,7 +959,7 @@ export default function App() {
       else console.error(err);
       return { error: publicErrorMessage(err) };
     }
-  }, [checkpointSaveBusy, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo]);
+  }, [checkpointSaveBusy, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo, workflowContext]);
 
   const openProvenance = async (provId) => {
     const chain = await getProvenanceChain(provId);
@@ -1004,13 +1011,14 @@ export default function App() {
 
   const verifiedRSessionRef = React.useRef(null);
   useEffect(() => {
+    let active = true;
+    setLiveRecoveryNotice('');
     if (!user?.email) {
       verifiedRSessionRef.current = null;
       setUnsavedLiveChanges(false);
       setSessionCheckDone(true);
-      return;
+      return undefined;
     }
-    let active = true;
     setSessionCheckDone(false);
     const savedSelection = consumeSavedObjectSelection(
       checkpointSaveOpenedObjectRef.current,
@@ -1078,11 +1086,12 @@ export default function App() {
     if (pipelineProbeKeyRef.current !== key) pipelineProbeAttachedRef.current = false;
     pipelineProbeKeyRef.current = key;
     let active = true;
-
+    let completed = false;
     window.electronAPI.apiRequest('/pipeline-state', {
       headers: { 'X-Object-ID': objectId }
     }).then(state => {
       if (!active) return;
+      completed = true;
       // A transient proxy/R failure (e.g. HTTP 429 "R service is busy", a network
       // blip, or a temporarily unreachable backend) comes back as { error } — NOT
       // as an authoritative "object does not exist". Treat it as retryable and
@@ -1098,17 +1107,26 @@ export default function App() {
         }
         return;
       }
-      if (!state?.exists) {
+      if (state?.exists === false) {
         pipelineProbeAttemptsRef.current = 0;
         pipelineProbeAttachedRef.current = false;
+        setUnsavedLiveChanges(false);
+        setLiveRecoveryNotice('Live analysis is unavailable. Restore a saved version to continue. Any unsaved changes from the previous R session are unavailable.');
         resetPipelineState();
         patchActiveWorkspace(ws => ({
           objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'not_attached' } : object),
         }));
         return;
       }
+      if (state?.exists !== true) {
+        pipelineProbeKeyRef.current = null;
+        return;
+      }
       pipelineProbeAttemptsRef.current = 0;
       pipelineProbeAttachedRef.current = true;
+      setLiveRecoveryNotice('');
+      const serverUnsaved = serverUnsavedLiveChanges(state);
+      if (serverUnsaved !== null) setUnsavedLiveChanges(serverUnsaved);
       patchActiveWorkspace(ws => ({
         objects: ws.objects.map(object => object.id === objectId ? { ...object, liveState: 'attached' } : object),
       }));
@@ -1125,6 +1143,7 @@ export default function App() {
       }));
     }).catch(() => {
       if (!active) return;
+      completed = true;
       pipelineProbeKeyRef.current = null;
       if (pipelineProbeAttemptsRef.current < PIPELINE_PROBE_MAX_RETRIES) {
         pipelineProbeAttemptsRef.current += 1;
@@ -1137,6 +1156,7 @@ export default function App() {
     // object/session after switching.
     return () => {
       active = false;
+      if (!completed && pipelineProbeKeyRef.current === key) pipelineProbeKeyRef.current = null;
       if (pipelineProbeRetryTimeoutRef.current) {
         window.clearTimeout(pipelineProbeRetryTimeoutRef.current);
         pipelineProbeRetryTimeoutRef.current = null;
@@ -1335,12 +1355,20 @@ export default function App() {
       />
       <main className="flex-1 flex flex-col relative overflow-hidden h-full min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
+        {liveRecoveryNotice && (
+          <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
+            {liveRecoveryNotice}
+            <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
+          </div>
+        )}
         {(unsavedLiveChanges || checkpointSaveState.phase !== 'idle') && (
           <div className={`shrink-0 border-b px-4 py-2 text-xs text-text ${checkpointSaveState.phase === 'completed' ? 'border-emerald-500/30 bg-emerald-500/10' : checkpointSaveState.phase === 'error' ? 'border-red-500/30 bg-red-500/10' : 'border-amber-500/30 bg-amber-500/10'}`} role="status">
             {checkpointSaveState.phase === 'idle' ? (
               <>
                 <span className="font-bold">Unsaved live changes.</span>{' '}
-                Closing this window or restarting compute can discard them.
+                Closing this window or restarting compute can discard them.{' '}
+                Queued analyses use the saved version <strong>{datasetInfo?.displayName || datasetInfo?.name || 'Selected analysis'}</strong>.{' '}
+                Save the current analysis to include these changes.
               </>
             ) : <span className="font-medium">{checkpointSaveState.message}</span>}
             {unsavedLiveChanges && !checkpointSaveBusy && (

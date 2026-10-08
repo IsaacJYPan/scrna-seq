@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { FlaskConical, Link2, Loader2, RefreshCw } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 
@@ -37,6 +37,8 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
   const [samples, setSamples] = useState([]);
   const [contrasts, setContrasts] = useState([]);
   const [bindings, setBindings] = useState([]);
+  const [bindingsContext, setBindingsContext] = useState(null);
+  const designRequestRef = useRef(0);
   const [objectId, setObjectId] = useState(datasetInfo?.id || '');
   const [conditionName, setConditionName] = useState('');
   const [sample, setSample] = useState({ name: '', conditionId: '', donorCode: '', batch: '', modality: 'scrna' });
@@ -46,46 +48,63 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [conditionComparisonStarted, setConditionComparisonStarted] = useState(false);
-  const [singleSampleWarning, setSingleSampleWarning] = useState(false);
+  const [singleSampleWarning, setSingleSampleWarning] = useState(null);
 
   const refresh = useCallback(async () => {
     if (!projectId || !window.electronAPI?.listStudyConditions) return;
+    const request = ++designRequestRef.current;
+    setBindingsContext(null);
+    setSingleSampleWarning(null);
     setBusy('refresh'); setError('');
     try {
-      const [nextConditions, nextSamples, nextContrasts] = await Promise.all([
+      const [nextConditions, nextSamples, nextContrasts, nextBindings] = await Promise.all([
         window.electronAPI.listStudyConditions(projectId),
         window.electronAPI.listBiologicalSamples(projectId),
         window.electronAPI.listConditionContrasts(projectId),
+        objectId ? window.electronAPI.listAnalysisObjectSampleBindings(projectId, objectId) : [],
       ]);
+      if (request !== designRequestRef.current) return;
       setConditions(nextConditions || []); setSamples(nextSamples || []); setContrasts(nextContrasts || []);
-      if (objectId) {
-        setBindings(await window.electronAPI.listAnalysisObjectSampleBindings(projectId, objectId));
-      } else setBindings([]);
-    } catch (loadError) { setError(errorMessage(loadError)); } finally { setBusy(''); }
+      setBindings(nextBindings || []);
+      setBindingsContext({ projectId, objectId });
+    } catch (loadError) {
+      if (request === designRequestRef.current) setError(errorMessage(loadError));
+    } finally {
+      if (request === designRequestRef.current) setBusy('');
+    }
   }, [objectId, projectId]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    return () => { designRequestRef.current += 1; };
+  }, [refresh]);
   useEffect(() => { if (datasetInfo?.id) setObjectId(datasetInfo.id); }, [datasetInfo?.id]);
   useEffect(() => {
     let cancelled = false;
+    setSingleSampleWarning(null);
     const workspaceSelected = objects.find((object) => object.id === objectId);
     const selected = datasetInfo?.id === objectId
       ? { ...(workspaceSelected || {}), ...datasetInfo }
       : workspaceSelected;
-    const canInspectPrivateObject = selected?.liveState === 'attached'
+    const canInspectPrivateObject = datasetInfo?.id === objectId
+      && bindingsContext?.projectId === projectId
+      && bindingsContext?.objectId === objectId
+      && selected?.liveState === 'attached'
       && Number(selected?.ownerUserId) === Number(userId)
       && typeof callApi === 'function';
-    if (!canInspectPrivateObject) {
-      setSingleSampleWarning(false);
-      return () => { cancelled = true; };
-    }
-    void callApi('/meta-values?column=orig.ident').then((result) => {
-      if (!cancelled) setSingleSampleWarning(Number(result?.n_unique) === 1);
+    if (!canInspectPrivateObject) return () => { cancelled = true; };
+
+    const mappedColumns = [...new Set(bindings.map((item) => item.cellMetadataColumn).filter(Boolean))];
+    // Mixed-column mappings are validated by the saved contrast rather than this single-column hint.
+    if (mappedColumns.length > 1) return () => { cancelled = true; };
+    const column = mappedColumns[0] || 'orig.ident';
+    void callApi('/meta-values?column=' + encodeURIComponent(column)).then((result) => {
+      if (!cancelled) setSingleSampleWarning(Number(result?.n_unique) === 1 ? column : null);
     }).catch(() => {
-      if (!cancelled) setSingleSampleWarning(false);
+      if (!cancelled) setSingleSampleWarning(null);
     });
     return () => { cancelled = true; };
-  }, [callApi, datasetInfo, objectId, objects, userId]);
+  }, [bindings, bindingsContext, callApi, datasetInfo, objectId, objects, projectId, userId]);
 
   const mutate = async (key, action) => {
     if (!canWriteStudyDesign) return;
@@ -149,7 +168,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
         </div>
         {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}
         {!canWriteStudyDesign && <div className="rounded-lg border border-border bg-surface p-3 text-sm text-textMuted">Study design is read-only for your project role. An owner, administrator, or analyst can change conditions, samples, mappings, and comparisons.</div>}
-        {singleSampleWarning && <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">This analysis contains one <code>orig.ident</code> group, so it cannot represent multiple independent biological samples. Load a multi-sample analysis or use a metadata column that distinguishes samples before condition-level inference.</div>}
+        {singleSampleWarning && <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">This analysis contains one <code>{singleSampleWarning}</code> group. Map cells through a metadata column that distinguishes independent biological samples before condition-level inference.</div>}
         {conditionComparisonStarted && <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">Condition comparison started. Track it in Runs &amp; Results.</div>}
         <div className="block text-sm"><label className="block" htmlFor={selectIds.savedVersion}>Saved version</label><select id={selectIds.savedVersion} className="input mt-1 w-full" value={objectId} onChange={(event) => setObjectId(event.target.value)}><option value="">Select a saved version</option>{objects.map((object) => <option key={object.id} value={object.id}>{object.displayName || object.name || 'Saved version'}</option>)}</select></div>
 
