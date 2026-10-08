@@ -11,6 +11,12 @@ contextBridge.exposeInMainWorld('desktopShell', Object.freeze({
   connectTargetProfile: (id) => ipcRenderer.invoke('desktop:connect-target-profile', id),
   saveAndConnectTargetProfile: (profile) => ipcRenderer.invoke('desktop:save-and-connect-target-profile', profile),
   removeTargetProfile: (id) => ipcRenderer.invoke('desktop:remove-target-profile', id),
+  chooseSshIdentity: () => ipcRenderer.invoke('desktop:choose-ssh-identity'),
+  verifySshTarget: (profile) => ipcRenderer.invoke('desktop:verify-ssh-target', profile),
+  confirmSshHost: (challengeId, fingerprint) => ipcRenderer.invoke('desktop:confirm-ssh-host', challengeId, fingerprint),
+  cancelSshVerification: () => ipcRenderer.invoke('desktop:cancel-ssh-verification'),
+  openSshHostTrust: () => ipcRenderer.invoke('desktop:open-ssh-host-trust'),
+  unlockSshIdentity: (identityFile) => ipcRenderer.invoke('desktop:unlock-ssh-identity', identityFile),
   openTargetSettings: () => ipcRenderer.invoke('desktop:open-target-settings'),
   openExternal: (url) => ipcRenderer.invoke('desktop:open-external', url),
 }));

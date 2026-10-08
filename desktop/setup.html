@@ -31,7 +31,7 @@
         <select id="target-kind">
           <option value="https">Direct HTTPS server</option>
           <option value="local">Local server</option>
-          <option value="ssh">SSH server configuration</option>
+          <option value="ssh">SSH research server</option>
         </select>
         <div id="endpoint-fields" class="field-group">
         <label for="server-url">Server address</label>
@@ -41,10 +41,21 @@
           <legend>SSH connection settings</legend>
           <label for="ssh-host">SSH host</label><input id="ssh-host" placeholder="compute.example.org" />
           <label for="ssh-user">SSH username (optional)</label><input id="ssh-user" autocomplete="username" />
-          <label for="ssh-port">SSH port</label><input id="ssh-port" type="number" min="1" max="65535" value="22" />
+          <label for="ssh-port">SSH port (optional)</label><input id="ssh-port" type="number" min="1" max="65535" placeholder="From OpenSSH configuration, otherwise 22" />
+          <label for="ssh-identity">Identity reference (optional)</label><input id="ssh-identity" readonly placeholder="Use your existing SSH agent and configuration" />
+          <div class="actions"><button id="choose-identity" class="secondary" type="button">Choose identity file</button><button id="clear-identity" class="secondary" type="button">Use agent/config</button><button id="unlock-identity" class="secondary" type="button" disabled>Unlock with OpenSSH</button></div>
           <label for="remote-host">Project service host on the server</label><input id="remote-host" value="127.0.0.1" />
           <label for="remote-port">Project service port on the server</label><input id="remote-port" type="number" min="1" max="65535" value="3000" />
-          <p class="hint">These settings are configuration only. Managed SSH connections are not available yet. Keys, passwords, and command fragments are never collected here.</p>
+          <p class="hint">SSH uses your system OpenSSH agent and configuration. Only an optional file reference is saved. Encrypted keys unlock in a native OpenSSH credential window. SSH verification does not open the project service; managed application tunnels are not available yet.</p>
+          <section id="ssh-host-verification" class="host-verification" aria-labelledby="ssh-host-verification-title" hidden>
+            <h2 id="ssh-host-verification-title">Verify the server’s host identity</h2>
+            <p id="ssh-discovered-host"></p>
+            <p>Compare a fingerprint with one provided independently by the server administrator. Discovery alone does not verify the server.</p>
+            <div id="ssh-fingerprints"></div>
+            <label class="checkbox-label"><input id="ssh-host-verified" type="checkbox" />I verified the selected fingerprint with the server administrator.</label>
+            <button id="trust-host" type="button" disabled>Trust this fingerprint and verify SSH</button>
+          </section>
+          <div class="actions"><button id="cancel-ssh" class="secondary" type="button" hidden>Cancel SSH check</button><button id="open-host-trust" class="secondary" type="button">Open host trust file</button></div>
         </fieldset>
         <p id="error" class="error" role="alert" hidden></p>
         <p id="saved-status" role="status" hidden></p>
