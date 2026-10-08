@@ -50,6 +50,7 @@
     "test:cellchat-browser": "node scripts/verify_cellchat_browser_flow.js",
     "test:r-storage": "Rscript r-backend/tests/test_storage_paths.R",
     "test:r-public-bounds": "Rscript r-backend/tests/test_public_endpoint_bounds.R",
+    "test:r-live-revisions": "Rscript r-backend/tests/test_live_revisions.R",
     "test:backup-restore": "vitest run backend/backup-restore.test.js --environment node --fileParallelism=false",
     "test:backup-restore:real": "node scripts/verify-backup-restore-drill.js",
     "test:deployment:smoke": "node scripts/verify-deployment-smoke.js",

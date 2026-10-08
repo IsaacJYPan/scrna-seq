@@ -115,4 +115,82 @@ describe('StudyDesign', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/contains one orig.ident group/i);
     expect(callApi).toHaveBeenCalledWith('/meta-values?column=orig.ident');
   });
+  it('checks the mapped sample column instead of orig.ident for a multi-sample cohort', async () => {
+    window.electronAPI.listAnalysisObjectSampleBindings.mockResolvedValue(
+      ['C1', 'C2', 'T1', 'T2'].map((value) => ({
+        id: value, sampleName: value, cellMetadataColumn: 'sample_id', cellMetadataValue: value,
+      }))
+    );
+    const callApi = vi.fn(async (endpoint) => ({ n_unique: endpoint.includes('sample_id') ? 4 : 1 }));
+    render(<StudyDesign currentWs={workspace}
+      datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1', liveState: 'attached', ownerUserId: 7 }}
+      userId={7} callApi={callApi} />);
+
+    await waitFor(() => expect(callApi).toHaveBeenCalledWith('/meta-values?column=sample_id'));
+    expect(callApi).not.toHaveBeenCalledWith('/meta-values?column=orig.ident');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('names the mapped column when it contains only one sample group', async () => {
+    window.electronAPI.listAnalysisObjectSampleBindings.mockResolvedValue([{
+      id: 'mapping', sampleName: 'Sample 1', cellMetadataColumn: 'sample id', cellMetadataValue: 'C1',
+    }]);
+    const callApi = vi.fn(async () => ({ n_unique: 1 }));
+    render(<StudyDesign currentWs={workspace}
+      datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1', liveState: 'attached', ownerUserId: 7 }}
+      userId={7} callApi={callApi} />);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/contains one sample id group/i);
+    expect(callApi).toHaveBeenCalledWith('/meta-values?column=sample%20id');
+  });
+
+  it('waits for sample mappings before inspecting the attached object', async () => {
+    let finishMappings;
+    window.electronAPI.listAnalysisObjectSampleBindings.mockImplementation(() => new Promise((resolve) => {
+      finishMappings = resolve;
+    }));
+    const callApi = vi.fn(async () => ({ n_unique: 4 }));
+    render(<StudyDesign currentWs={workspace}
+      datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1', liveState: 'attached', ownerUserId: 7 }}
+      userId={7} callApi={callApi} />);
+
+    await waitFor(() => expect(finishMappings).toBeTypeOf('function'));
+    expect(callApi).not.toHaveBeenCalled();
+    finishMappings([{ id: 'mapping', cellMetadataColumn: 'sample_id' }]);
+    await waitFor(() => expect(callApi).toHaveBeenCalledWith('/meta-values?column=sample_id'));
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('does not inspect the active R object when the form selects another saved version', async () => {
+    const callApi = vi.fn(async () => ({ n_unique: 1 }));
+    render(<StudyDesign currentWs={{ ...workspace, objects: [
+      ...workspace.objects,
+      { id: 'ao_other', projectId: 'proj_private_1', displayName: 'Other version', liveState: 'attached', ownerUserId: 7 },
+    ] }}
+      datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1', liveState: 'attached', ownerUserId: 7 }}
+      userId={7} callApi={callApi} />);
+
+    await screen.findByRole('status');
+    callApi.mockClear();
+    fireEvent.change(screen.getByLabelText('Saved version'), { target: { value: 'ao_other' } });
+    await waitFor(() => expect(window.electronAPI.listAnalysisObjectSampleBindings)
+      .toHaveBeenLastCalledWith('proj_private_1', 'ao_other'));
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    expect(callApi).not.toHaveBeenCalled();
+  });
+
+  it('keeps an unreplicated contrast blocked and explains the deficient condition', async () => {
+    window.electronAPI.listConditionContrasts.mockResolvedValue([{
+      id: 'contrast_single', analysisObjectId: 'ao_private_1', name: 'Single treated sample',
+      numeratorConditionName: 'Treated', denominatorConditionName: 'Control', unitOfReplication: 'sample',
+      status: 'invalid', validation: { issues: ['Treated has one independent sample; at least two are required.'] },
+    }]);
+    render(<StudyDesign currentWs={workspace} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />);
+    expect(await screen.findByText('Treated has one independent sample; at least two are required.')).toBeInTheDocument();
+    const run = screen.getByRole('button', { name: /run edgeR pseudobulk/i });
+    expect(run).toBeDisabled();
+    fireEvent.click(run);
+    expect(window.electronAPI.createProjectJob).not.toHaveBeenCalled();
+  });
+
 });

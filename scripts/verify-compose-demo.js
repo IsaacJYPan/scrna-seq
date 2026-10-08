@@ -20,6 +20,10 @@ let webPort;
 const freeTier = process.argv.includes('--free-tier');
 // Exercise a reviewed prebuilt R image without rebuilding its scientific stack.
 const prebuiltRImage = process.env.DEMO_ACCEPTANCE_R_IMAGE;
+const acceptanceDataset = process.env.DEMO_ACCEPTANCE_DATASET || 'synthetic';
+if (!['synthetic', 'pbmc3k'].includes(acceptanceDataset)) {
+  throw new Error('Unsupported demo acceptance dataset.');
+}
 
 function secret(bytes) { return crypto.randomBytes(bytes).toString('hex'); }
 
@@ -110,7 +114,8 @@ function compose(extra, options) { return runDocker([...composeArgs, ...extra], 
 function inner(action, input) {
   const source = fs.readFileSync(innerFile, 'utf8');
   const encoded = Buffer.from(source).toString('base64');
-  const args = ['exec', '-T', '-e', `ACCEPTANCE_ACTION=${action}`];
+  const args = ['exec', '-T', '-e', `ACCEPTANCE_ACTION=${action}`,
+    '-e', `DEMO_DATASET=${acceptanceDataset}`];
   if (input) args.push('-e', `ACCEPTANCE_INPUT=${JSON.stringify(input)}`);
   args.push('web', 'node', '-e', `eval(Buffer.from('${encoded}','base64').toString('utf8'))`);
   const stdout = compose(args, { capture: true });
@@ -129,21 +134,26 @@ function parseLastJsonLine(output, label) {
 
 function bootstrapTemplate() {
   const prepared = parseLastJsonLine(
-    compose(['exec', '-T', 'web', 'node', 'scripts/bootstrap-demo-template.js', 'prepare'], { capture: true }),
+    compose(['exec', '-T', '-e', `DEMO_DATASET=${acceptanceDataset}`,
+      'web', 'node', 'scripts/bootstrap-demo-template.js', 'prepare'], { capture: true }),
     'demo template prepare'
   );
   assertBootstrap(prepared?.action === 'prepared' && prepared?.projectId, 'Demo template prepare failed.');
   const generated = parseLastJsonLine(
-    compose(['exec', '-T', 'r', 'Rscript', '/app/generate-demo-template.R'], { capture: true }),
+    compose(['exec', '-T', '-e', `DEMO_DATASET=${acceptanceDataset}`,
+      'r', 'Rscript', '/app/generate-demo-template.R'], { capture: true }),
     'demo template R generation'
   );
-  assertBootstrap(generated?.synthetic === true && generated?.cells === 800, 'Demo R template is invalid.');
+  const expectedCells = acceptanceDataset === 'pbmc3k' ? 2638 : 800;
+  assertBootstrap(generated?.synthetic === (acceptanceDataset === 'synthetic')
+    && generated?.cells === expectedCells, 'Demo R template is invalid.');
   if (process.env.DEMO_ACCEPTANCE_PRECOMPUTED === 'true') {
     assertBootstrap(generated.precomputed === true && /^[a-f0-9]{64}$/.test(generated.checksumSha256),
       'Demo bootstrap must copy the verified precomputed checkpoint.');
   }
   const finalized = parseLastJsonLine(
-    compose(['exec', '-T', 'web', 'node', 'scripts/bootstrap-demo-template.js', 'finalize'], { capture: true }),
+    compose(['exec', '-T', '-e', `DEMO_DATASET=${acceptanceDataset}`,
+      'web', 'node', 'scripts/bootstrap-demo-template.js', 'finalize'], { capture: true }),
     'demo template finalize'
   );
   assertBootstrap(finalized?.action === 'finalized'
@@ -183,9 +193,21 @@ async function main() {
     const browserAcceptance = await runPublicDemoAcceptance({
       origin: `http://127.0.0.1:${webPort}`,
       allowLoopbackHttp: true,
+      expectedDataset: acceptanceDataset,
     });
     console.log('[demo] PASS real browser guest checkpoint, UMAP, and exploratory workflow');
     console.log(JSON.stringify(browserAcceptance, null, 2));
+    const { runAnalysisIntegrityAcceptance } = require('./verify-analysis-integrity-ui');
+    const integrityAcceptance = await runAnalysisIntegrityAcceptance({
+      origin: 'http://127.0.0.1:' + webPort,
+      expectedDataset: acceptanceDataset,
+      restartInteractiveRuntime: () => {
+        compose(['restart', 'r']);
+        compose(['up', '-d', '--wait', '--wait-timeout', '240', 'r']);
+      },
+    });
+    console.log('[demo] PASS saved/live recovery and biological sample mapping');
+    console.log(JSON.stringify(integrityAcceptance, null, 2));
     compose(['stop', 'worker', 'worker-compute-1', 'worker-compute-2']);
     const beforeRestart = inner('snapshot-persistence');
     compose(['restart', 'postgres', 'r', 'r-compute-1', 'r-compute-2', 'web']);
