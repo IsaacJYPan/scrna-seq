@@ -153,6 +153,7 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
   serverFigureExportEnabled: false,
   expertREnabled: false,
   expertRProfile: null,
+  expertRStatus: null,
   demoMode: false,
   datasetUploadsEnabled: false,
   demoGuestTtlSeconds: null,
@@ -176,6 +177,7 @@ export default function App() {
         serverFigureExportEnabled: policy?.serverFigureExportEnabled === true,
         expertREnabled: current.expertREnabled,
         expertRProfile: current.expertRProfile,
+        expertRStatus: current.expertRStatus,
         demoMode: policy?.demoMode === true,
         datasetUploadsEnabled: policy?.datasetUploadsEnabled === true,
         demoGuestTtlSeconds: policy?.demoGuestTtlSeconds || null,
@@ -186,6 +188,7 @@ export default function App() {
           ...CLOSED_DEPLOYMENT_POLICY,
           expertREnabled: current.expertREnabled,
           expertRProfile: current.expertRProfile,
+          expertRStatus: current.expertRStatus,
         }));
       }
     });
@@ -243,6 +246,7 @@ export default function App() {
         ...current,
         expertREnabled: false,
         expertRProfile: null,
+        expertRStatus: null,
       }));
       return undefined;
     }
@@ -252,6 +256,7 @@ export default function App() {
         ...current,
         expertREnabled: capability?.expertREnabled === true,
         expertRProfile: capability?.expertRProfile || null,
+        expertRStatus: capability?.expertRStatus || null,
       }));
     }).catch(() => {
       if (active) {
@@ -259,6 +264,7 @@ export default function App() {
           ...current,
           expertREnabled: false,
           expertRProfile: null,
+          expertRStatus: null,
         }));
       }
     });

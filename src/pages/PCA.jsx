@@ -3,6 +3,7 @@ import { BarChart3, AlertTriangle, FileText } from 'lucide-react';
 import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
+import { useRestoredReduction } from '../hooks/useRestoredReduction';
 
 export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvId, normProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed, theme }) {
   const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
@@ -18,7 +19,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
     : null;
   const [activeView, setActiveView] = useState('elbow');
 
-  const { running, result, error, runStep: runPCA } = usePipelineStep({
+  const { running, result, error, setResult, runStep } = usePipelineStep({
     callApi,
     endpoint: `/pca?npcs=${npcs}&seed=${pcaSeed}`,
     ipcContext: {
@@ -30,8 +31,24 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
     },
     readyToHydrate: !!(datasetInfo && pipelineState?.normalize),
     sessionReady,
-    rSessionId
+    rSessionId,
+    autoHydrate: false
   });
+
+  const contextKey = JSON.stringify([userEmail, objectId, rSessionId, sessionReady]);
+  const restored = useRestoredReduction({
+    callApi, reduction: 'pca', contextKey,
+    enabled: !!(datasetInfo && (pipelineState?.normalize || pipelineState?.pca) && sessionReady),
+    onReset: () => setResult(null),
+    onResult: (data) => {
+      setResult(data);
+      const actualNpcs = Number(data.result.npcs);
+      if (actualNpcs >= 5 && actualNpcs <= 100) {
+        setNpcs(actualNpcs); setInputNpcs(actualNpcs);
+      }
+    }
+  });
+  const runPCA = () => { restored.invalidate(); runStep(); };
 
   if (!datasetInfo) {
     return (
@@ -44,7 +61,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
     );
   }
 
-  if (!pipelineState?.normalize) {
+  if (!pipelineState?.normalize && !pipelineState?.pca) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
@@ -77,14 +94,15 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
     margin: { l: 60, r: 20, t: 10, b: 50 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: plotText, size: 11 },
-    xaxis: { title: 'Principal Component', gridcolor: plotGrid, zeroline: false },
-    yaxis: { title: 'Standard Deviation', gridcolor: plotGrid, zeroline: false },
+    xaxis: { title: { text: 'Principal Component' }, gridcolor: plotGrid, zeroline: false },
+    yaxis: { title: { text: 'Standard Deviation' }, gridcolor: plotGrid, zeroline: false },
     showlegend: false
   };
 
   const viewTabs = [
     { id: 'elbow', label: 'Elbow Plot' },
-    { id: 'loadings', label: 'Gene Loadings' }
+    { id: 'loadings', label: 'Gene Loadings' },
+    ...(result?.result?.trace_data?.length ? [{ id: 'embedding', label: 'PC1 vs PC2' }] : [])
   ];
 
   return (
@@ -95,7 +113,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
           <p className="text-textMuted">Scale data and compute PCA for dimensionality reduction.</p>
         </div>
         <div className="flex items-center gap-3">
-          {result && (
+          {result?.provenance?.id && (
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => openProvenance(result.provenance.id)}
@@ -103,11 +121,11 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
           )}
           <button
             onClick={() => runPCA()}
-            disabled={running || Boolean(pcaValidationError)}
-            className={`btn ${result ? 'bg-success/20 text-success border border-success' : 'btn-primary'} flex items-center gap-2`}
+            disabled={running || restored.loading || !pipelineState?.normalize || Boolean(pcaValidationError)}
+            className="btn btn-primary flex items-center gap-2"
           >
             {running && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
-            {result ? 'PCA Complete' : 'Run PCA'}
+            {result ? 'Re-compute PCA' : 'Run PCA'}
           </button>
         </div>
       </div>
@@ -119,6 +137,21 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
         </div>
       )}
       {pcaValidationError && <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger text-sm" role="alert">{pcaValidationError}</div>}
+      {restored.loading && <p role="status" className="text-sm text-textMuted mb-4">Loading the existing PCA result...</p>}
+      {!pipelineState?.normalize && <p role="status" className="text-sm text-textMuted mb-4">
+        The existing PCA can be inspected. Normalization is required to compute PCA again.
+      </p>}
+      {restored.error && <div role="alert" className="card p-4 mb-4 text-danger">
+        {restored.error} <button onClick={restored.retry} className="underline">Retry loading result</button>
+      </div>}
+      {restored.missing && !result && <p role="status" className="text-sm text-textMuted mb-4">
+        No PCA reduction is present in this analysis. Run PCA to create one.
+      </p>}
+      {result?.result?.restored && <p role="note" className="text-sm text-textMuted mb-4">
+        Showing the existing PCA from this analysis; no computation was run.
+        {result.result.settings?.seed != null && ` Seed: ${result.result.settings.seed}.`}
+        {!Object.keys(result.result.settings || {}).length && ' Original calculation settings are unavailable.'}
+      </p>}
 
       {/* Parameters */}
       {!result && !running && (
@@ -207,6 +240,25 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
               <p className="text-xs text-textMuted mt-3 italic">
                 Look for the "elbow" where variance drops off — PCs beyond that point capture noise.
               </p>
+            </div>
+          )}
+
+          {activeView === 'embedding' && (
+            <div className="card p-6">
+              <h3 className="font-semibold text-text mb-4">Existing PCA coordinates</h3>
+              <div className="h-[400px]">
+                <Plot preferSvg useResizeHandler className="w-full h-full"
+                  data={result.result.trace_data.map(trace => ({ ...trace, type: 'scatter', mode: 'markers',
+                    marker: { size: 4 }, hovertemplate: '%{x:.2f}, %{y:.2f}<extra>%{fullData.name}</extra>' }))}
+                  layout={{ ...elbowLayout,
+                    xaxis: { ...elbowLayout.xaxis, title: { text: 'PC 1' } },
+                    yaxis: { ...elbowLayout.yaxis, title: { text: 'PC 2' }, scaleanchor: 'x', scaleratio: 1 } }}
+                  config={{ displayModeBar: false, responsive: true }} />
+              </div>
+              {result.result.sampled && <p role="note" className="text-xs text-textMuted mt-3">
+                Preview shows {result.result.n_points?.toLocaleString()} of {result.result.n_cells?.toLocaleString()} cells.
+                {result.result.clusters_truncated && ' Some cell groups are omitted by the preview limit.'}
+              </p>}
             </div>
           )}
 

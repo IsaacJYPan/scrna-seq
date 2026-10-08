@@ -114,7 +114,7 @@ not imply high availability, managed operations, compliance certification, or
 safe execution of arbitrary hostile workloads. Those properties require
 separate architecture and operational evidence.
 
-## Optional Expert R sandbox
+## Private R execution
 
 Expert R is disabled by default and must remain disabled for the public demo. For
 a private deployment, set `APP_DEPLOYMENT_MODE` to an exact approved private mode,
@@ -131,7 +131,40 @@ directory owned by the same account. That daemon must be reserved for Expert R
 workloads; do not schedule application, database, proxy, or unrelated containers
 on it. The broker itself remains non-root and receives only that socket.
 
-Enabling the deployment does not grant user access. Grant only approved accounts:
+For a new private installation, prepare the dedicated rootless daemon and its
+mode-0700 work root under the installation's non-root `APP_UID`/`APP_GID`, and
+load the reviewed, digest-pinned R image into that daemon. Run the setup
+preflight on its Linux host:
+
+```bash
+node scripts/configure-private-r.js \
+  --deployment-env /private/installation.env \
+  --image traceomics-r@sha256:YOUR_REVIEWED_IMAGE_DIGEST \
+  --socket /run/user/10001/docker.sock \
+  --work-root /srv/traceomics-expert \
+  --output /private/private-r.env
+docker compose --env-file /private/installation.env \
+  --env-file /private/private-r.env -f deploy/compose.single-host.yml \
+  --profile expert-r up -d
+```
+
+The preflight verifies rootless isolation, daemon dedication, filesystem
+ownership, immutable image availability, R/Bioconductor versions, the installed
+package profile, isolated runner, and the exact sandbox user and read-only
+input/writable output mounts. It refuses to overwrite an existing
+configuration. Use the application's Docker runtime to start Compose; the
+dedicated daemon remains reserved for analysis containers. The generated file
+contains a credential and must remain private.
+
+New setup selects `EXPERT_R_ACCESS_POLICY=project-roles`: project owners, admins,
+and analysts can run their own saved analyses without an individual operator
+grant. Viewers and anonymous demo guests cannot execute R. Existing deployments
+without that setting retain `approved-accounts` access. Unknown policies fail
+closed. The interface checks authenticated broker capabilities and explains
+missing configuration, an unreachable runtime, incompatible profiles, and
+revoked access; it does not claim readiness from environment variables alone.
+
+Administrators can explicitly grant or revoke an account in either policy:
 
 ```bash
 npm run expert-r-access -- grant researcher@example.org
@@ -139,8 +172,11 @@ npm run expert-r-access -- status researcher@example.org
 npm run expert-r-access -- revoke researcher@example.org
 ```
 
-Each change is recorded in the operator audit log. Revocation prevents new work
-and cancels queued Expert R jobs before compute contact. The feature contains the
+Each change is recorded in the operator audit log. An explicit revocation
+overrides project roles and prior grants until an administrator grants access
+again. Revocation prevents new work and cancels queued Expert R and recipe jobs
+before compute contact. Already claimed execution is not forcibly interrupted;
+previous durable results remain available. The feature contains the
 workload and isolates tenants, but it is not DLP: an authorized researcher can
 write data-derived tables and figures and export a bundle after the result is
 explicitly published. Do not grant the capability unless that export authority is

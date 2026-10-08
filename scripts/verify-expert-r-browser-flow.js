@@ -219,6 +219,7 @@ async function main() {
     process.env.VAULT_ROOT = vaultRoot;
     process.env.APP_DEPLOYMENT_MODE = 'private';
     process.env.EXPERT_R_ENABLED = 'true';
+    process.env.EXPERT_R_ACCESS_POLICY = 'project-roles';
     process.env.EXPERT_R_SANDBOX_URL = `http://127.0.0.1:${brokerPort}`;
     process.env.EXPERT_R_SANDBOX_TOKEN = sandboxToken;
     db = require('../backend/pgDatabase');
@@ -245,7 +246,8 @@ async function main() {
     await db.updateJobStatusForUser(user.id, producer.id, 'completed', {
       resultAnalysisObjectId: analysis.id,
     });
-    await db.setExpertRExecutorByEmail(email, true);
+    assert(await db.hasExpertRExecuteCapability(user.id, project.id),
+      'New private project-role policy must authorize its owner without an individual grant.');
 
     const checkpointKey = `projects/${project.id}/checkpoints/${producer.id}/checkpoint.rds`;
     const checkpointPath = path.join(storageRoot, ...checkpointKey.split('/'));
@@ -286,6 +288,7 @@ async function main() {
       VAULT_ROOT: vaultRoot,
       APP_DEPLOYMENT_MODE: 'private',
       EXPERT_R_ENABLED: 'true',
+      EXPERT_R_ACCESS_POLICY: 'project-roles',
       EXPERT_R_SANDBOX_URL: `http://127.0.0.1:${brokerPort}`,
       EXPERT_R_SANDBOX_TOKEN: sandboxToken,
       R_RUNTIME_MODE: 'external',
@@ -369,6 +372,9 @@ async function main() {
     await page.getByText('Expert browser project', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
     await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
+    const rStatusScreenshots = path.join(ROOT, 'playwright/report/release-acceptance/private-r');
+    fs.mkdirSync(rStatusScreenshots, { recursive: true });
+    await page.screenshot({ path: path.join(rStatusScreenshots, 'runtime-ready.png'), fullPage: true });
     await page.getByLabel('Choose private input').setInputFiles(inputPath);
     await page.getByRole('button', { name: 'Import file' }).click();
     await page.getByText('covariates.csv', { exact: true }).waitFor({ state: 'visible' });
@@ -568,6 +574,19 @@ write_table(summary_table, "object-summary.csv")
     );
     assert(Number(published.rows[0].count) === 2,
       'Only the two successful runs should publish creator-private result objects.');
+    await db.setExpertRExecutorByEmail(email, false);
+    await page.getByRole('button', { name: /^Advanced analysis/ }).click();
+    await page.reload();
+    await page.getByRole('button', { name: /^Advanced analysis/ }).click();
+    await page.getByText(/administrator has revoked R execution/i).waitFor({ state: 'visible' });
+    await page.screenshot({ path: path.join(rStatusScreenshots, 'access-revoked.png'), fullPage: true });
+    assert(await page.getByRole('button', { name: 'Check R availability', exact: true }).isEnabled(),
+      'Revoked researchers must be able to inspect R setup/status.');
+    assert(await page.getByRole('button', { name: 'Run R analysis', exact: true }).count() === 0,
+      'Revoked researchers must not receive an execution control.');
+    assert((await appClient.query("SELECT COUNT(*)::int AS count FROM jobs WHERE owner_user_id=$1 AND job_type='expert.r.v1' AND status='queued'", [user.id])).rows[0].count === 0,
+      'Reviewing revoked R status must not queue analysis work.');
+    console.log('[expert-r-browser] PASS role-authorized isolated R without an individual grant and revoked-access UI');
     console.log('[expert-r-browser] PASS private file import, pipeline package execution, exact download, source erasure, and path-free failure UX');
   } catch (error) {
     const diagnostics = [

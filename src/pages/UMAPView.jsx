@@ -5,6 +5,7 @@ import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import FigureSavePanel from '../components/FigureSavePanel';
 import { isTransientComputeBusy } from '../publicError';
+import { useRestoredReduction } from '../hooks/useRestoredReduction';
 
 const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '#00bfc4', '#00b0f6', '#9590ff', '#e76bf3', '#ff62bc', '#ff6a6a', '#c49a00'];
 
@@ -15,7 +16,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   const umapSeed = activeProjectSeed || (isPbmcTutorial ? 42 : '');
 
   // Persisted parameters
-  const [params, setParam] = useTabParams('umap', userEmail, objectId, {
+  const [params, setParam, setParams] = useTabParams('umap', userEmail, objectId, {
     nComponents: 2,
     nNeighbors: 30,
     minDist: 0.3,
@@ -44,7 +45,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   );
 
   // Pipeline step hook for state and cache-checking
-  const { running, result, error, setResult, hasHydrated, setHasHydrated, runStep } = usePipelineStep({
+  const { running, error, setResult, runStep } = usePipelineStep({
     callApi,
     endpoint: `/umap?dims=${dims}&n_components=${nComponents}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`,
     ipcContext: {
@@ -57,13 +58,11 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     readyToHydrate: !!(datasetInfo && pipelineState?.pca),
     sessionReady,
     rSessionId,
-    autoHydrate: false // Manages its own complex hydration sequence
+    autoHydrate: false // Existing reductions are inspected through a read-only route.
   });
 
-  // Track which n_components was actually computed last — persisted so hydration
-  // attempts the right cache key on reload (e.g. if user last ran 3D UMAP).
-  const [params2, setParam2] = useTabParams('umap_meta', userEmail, objectId, { resultNComponents: null, camera3D: null });
-  const savedResultNComponents = params2.resultNComponents;
+  // Camera preferences may be local; reduction existence comes from R.
+  const [params2, setParam2] = useTabParams('umap_meta', userEmail, objectId, { camera3D: null });
 
   useEffect(() => {
     if (!canUse3D && storedNComponents === 3) {
@@ -82,9 +81,6 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   // angle shift (Plotly keeps its own state while the div stays mounted).
   const initialCamera3D = React.useRef(params2.camera3D || null);
 
-  // Mirrors persisted completion metadata so the primary action reflects a
-  // successful run immediately after setParam2('resultNComponents', ...).
-  const resultNComponents = savedResultNComponents;
 
   // Keep dims in sync if the user re-clusters with different dims
   useEffect(() => {
@@ -95,14 +91,46 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
   // In-memory UI cache dictionary to enable zero-latency dimension toggling
   const [cachedDims, setCachedDims] = useState({});
-  const settingsKey = JSON.stringify([dims, nNeighbors, minDist, umapSeed, rSessionId, pcaProvId, clusterProvId]);
+  const contextKey = JSON.stringify([userEmail, objectId, rSessionId, sessionReady]);
+  const runGeneration = React.useRef(0);
+  const currentReductionComponents = React.useRef(null);
+  const settingsKeyFor = (values) => JSON.stringify([values.dims, values.nNeighbors, values.minDist, umapSeed, rSessionId, pcaProvId, clusterProvId]);
+  const settingsKey = settingsKeyFor({ dims, nNeighbors, minDist });
   useEffect(() => {
     // Drop in-memory UI cache if clustering parameters change
     setCachedDims({});
   }, [pipelineState?.clusterDims, pipelineState?.clusterCount]);
 
-  const runUMAP = useCallback(async (isInitial = false, nComponentsOverride = null) => {
-    const requestedComponents = nComponentsOverride ?? nComponents;
+  const { invalidate: invalidateRestored, ...restored } = useRestoredReduction({
+    callApi, reduction: 'umap', contextKey,
+    enabled: !!(datasetInfo && (pipelineState?.pca || pipelineState?.umap) && sessionReady),
+    onReset: () => {
+      runGeneration.current += 1;
+      currentReductionComponents.current = null;
+      setCachedDims({}); setResult(null); setBase64Image(null);
+    },
+    onResult: (data) => {
+      const actualComponents = Number(data.result.n_components) || 2;
+      const viewComponents = !canUse3D && actualComponents === 3 ? 2 : actualComponents;
+      currentReductionComponents.current = viewComponents;
+      const settings = data.result.settings || {};
+      const restoredDims = Number(settings.dims) || dims;
+      const restoredNeighbors = Number(settings.n_neighbors) || nNeighbors;
+      const restoredMinDist = Number.isFinite(settings.min_dist) ? settings.min_dist : minDist;
+      setDims(restoredDims);
+      setParams(previous => ({ ...previous, nComponents: viewComponents,
+        nNeighbors: restoredNeighbors, minDist: restoredMinDist }));
+      const restoredKey = settingsKeyFor({ dims: restoredDims, nNeighbors: restoredNeighbors, minDist: restoredMinDist });
+      setCachedDims({ [viewComponents]: { ...data, contextKey, settingsKey: restoredKey,
+        projectedFrom3D: actualComponents === 3 && !canUse3D } });
+      setResult(data);
+    }
+  });
+
+  const runUMAP = useCallback(async () => {
+    invalidateRestored();
+    const generation = ++runGeneration.current;
+    const requestedComponents = nComponents;
     const nc = !canUse3D && requestedComponents === 3 ? 2 : requestedComponents;
     const ep = `/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`;
     const ipc = {
@@ -114,35 +142,19 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     };
 
     let data = null;
-    const attempts = isInitial ? 1 : 3;
+    const attempts = 3;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      data = await runStep(isInitial, ep, ipc);
+      data = await runStep(false, ep, ipc);
+      if (generation !== runGeneration.current) return;
       if (!isTransientComputeBusy(data?.error) || attempt + 1 >= attempts) break;
       await new Promise(resolve => window.setTimeout(resolve, 500 * (attempt + 1)));
     }
 
     if (data?.result) {
-      setCachedDims(prev => ({ ...prev, [nc]: { ...data, settingsKey } }));
-      setParam2('resultNComponents', nc);  // persist for hydration on reload
+      currentReductionComponents.current = nc;
+      setCachedDims(prev => ({ ...prev, [nc]: { ...data, settingsKey, contextKey } }));
     }
-  }, [runStep, dims, nComponents, nNeighbors, minDist, umapSeed, setParam2, umapParentIds, canUse3D, settingsKey]);
-
-  // Silent cache-only prefetch — populates cachedDims without touching running/error state.
-  // Used to warm the other dimension during hydration so 2D↔3D toggle is instant.
-  const prefetchDim = useCallback(async (nc) => {
-    if (!canUse3D && nc === 3) return;
-    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`, {}, {
-      operation: 'umap',
-      step: 'umap',
-      parentIds: umapParentIds,
-      useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: umapSeed || 'random' },
-      onlyIfCached: true  // never triggers a real R computation
-    });
-    if (data?.result) {
-      setCachedDims(prev => ({ ...prev, [nc]: { ...data, settingsKey } }));
-    }
-  }, [callApi, umapParentIds, dims, nNeighbors, minDist, umapSeed, canUse3D, settingsKey]);
+  }, [runStep, dims, nComponents, nNeighbors, minDist, umapSeed, umapParentIds, canUse3D, settingsKey, contextKey, invalidateRestored]);
 
   const is2D = nComponents === 2;
 
@@ -193,43 +205,14 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
   // Traces corresponding to the actively viewed dimension
   const activeTraces = is2D ? traces2D : traces3D;
-  const displayedResult = cachedDims[nComponents];
+  const displayedResult = cachedDims[nComponents]?.contextKey === contextKey ? cachedDims[nComponents] : null;
+  const result = displayedResult;
+  const resultNComponents = result ? nComponents : null;
   const settingsChanged = !!displayedResult && displayedResult.settingsKey !== settingsKey;
-
-  // Hydration effect is intact because it uses async IIFE to prefetch
-  useEffect(() => {
-    if (datasetInfo && pipelineState?.pca && !result && !running && !hasHydrated && sessionReady) {
-      setHasHydrated(true);
-      const savedNC = savedResultNComponents ?? null;
-      const activeNC = nComponents; // dimension currently shown in the UI
-      // Hydrate the active view first, then silently prefetch the other dimension
-      // so toggling 2D↔3D is instant without an extra network round-trip.
-      ; (async () => {
-        await runUMAP(true, activeNC);
-        if (canUse3D && savedNC && savedNC !== activeNC) {
-          await prefetchDim(savedNC);  // silent — no spinner, no error state
-        }
-      })();
-    }
-  }, [datasetInfo, pipelineState?.pca, result, running, runUMAP, prefetchDim, hasHydrated, sessionReady, savedResultNComponents, setHasHydrated, canUse3D, nComponents]);
-
-  // When the user toggles the dimension in the UI, clear the stale result
-  // and eagerly try to load the required dimension from the local cache.
-  const [prevNComponents, setPrevNComponents] = useState(nComponents);
-  useEffect(() => {
-    if (nComponents !== prevNComponents && hasHydrated && sessionReady) {
-      setPrevNComponents(nComponents);
-      if (cachedDims[nComponents]) {
-        setResult(cachedDims[nComponents]); // Instant UI switch from memory
-      } else {
-        setResult(null);             // Instantly clear the plot to prevent "visible on both tabs"
-        runUMAP(true, nComponents);  // Try to load cached data for this specific dimension
-      }
-    }
-  }, [nComponents, prevNComponents, hasHydrated, sessionReady, cachedDims, runUMAP, setResult]);
 
   // Fetch base64 fallback for large datasets
   useEffect(() => {
+    let active = true;
     if (result && isHighPerfMode && nComponents === 2) {
       setLoadingBase64(true);
       callApi('/render-plot-base64', {
@@ -238,11 +221,13 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         body: JSON.stringify({ plot_type: 'UMAP', width: 8, height: 6, res: 200 })
       })
       .then(data => {
+        if (!active) return;
         if (data.result?.base64) setBase64Image(data.result.base64);
         setLoadingBase64(false);
       })
-      .catch(() => setLoadingBase64(false));
+      .catch(() => { if (active) setLoadingBase64(false); });
     }
+    return () => { active = false; };
   }, [result, isHighPerfMode, nComponents, callApi]);
 
   const isDark = theme === 'dark';
@@ -292,7 +277,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     );
   }
 
-  if (!pipelineState?.pca) {
+  if (!pipelineState?.pca && !pipelineState?.umap) {
     return (
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
@@ -312,7 +297,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           <p className="text-textMuted">Uniform Manifold Approximation and Projection for visualization.</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          {result && !settingsChanged && activeTraces.length > 0 && <button
+          {result && !settingsChanged && currentReductionComponents.current === nComponents && activeTraces.length > 0 && <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => setSavePanelOpen(true)}
             ><ImageDown size={15} /> Save Figure</button>}
@@ -324,7 +309,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           )}
           <button
             onClick={() => runUMAP()}
-            disabled={running}
+            disabled={running || restored.loading || !pipelineState?.pca}
             className={`btn ${result && resultNComponents === nComponents
                 ? 'btn-secondary border-primary text-primary'
                 : 'btn-primary'
@@ -351,6 +336,24 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           Seurat calculates the embedding; the input is not measured patient data and these results are not biological evidence.
         </p>
       )}
+      {restored.loading && <p role="status" className="text-sm text-textMuted mb-4">Loading the existing UMAP result...</p>}
+      {!pipelineState?.pca && <p role="status" className="text-sm text-textMuted mb-4">
+        The existing UMAP can be inspected. PCA is required to compute another embedding.
+      </p>}
+      {restored.error && <div role="alert" className="card p-4 mb-4 text-danger">
+        {restored.error} <button onClick={restored.retry} className="underline">Retry loading result</button>
+      </div>}
+      {displayedResult?.result?.restored && <p role="note" className="text-sm text-textMuted mb-4">
+        Showing the existing UMAP from this analysis; no computation was run.
+        {displayedResult.result.settings?.dims != null && ` Input PCs: ${displayedResult.result.settings.dims}.`}
+        {displayedResult.result.settings?.seed != null && ` Seed: ${displayedResult.result.settings.seed}.`}
+        {!Object.keys(displayedResult.result.settings || {}).length && ' Original calculation settings are unavailable.'}
+        {displayedResult.projectedFrom3D && ' Showing the first two coordinates of the saved 3D embedding.'}
+      </p>}
+      {displayedResult?.result?.sampled && <p role="note" className="text-sm text-textMuted mb-4">
+        Preview shows {displayedResult.result.n_points?.toLocaleString()} of {displayedResult.result.n_cells?.toLocaleString()} cells.
+        {displayedResult.result.clusters_truncated && ' Some cell groups are omitted by the preview limit.'}
+      </p>}
       {settingsChanged && (
         <p role="status" className="text-sm text-textMuted mb-4">
           Showing a previous calculation. Settings or analysis state have changed; re-compute UMAP to apply them.
@@ -424,10 +427,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       {/* Plot area */}
       <div className="flex-1 flex flex-col xl:flex-row gap-5 min-h-0">
         <div className="flex-1 min-w-0 min-h-[320px] bg-surface border border-border rounded-lg relative overflow-hidden flex items-center justify-center">
-          {!result && !running && (
+          {!result && !running && !restored.loading && (
             <div className="text-center p-8">
               <Layers size={48} className="mx-auto mb-4 text-slate-600" />
-              <p className="text-textMuted">Configure parameters and click "Run UMAP".</p>
+              <p className="text-textMuted">{restored.missing
+                ? 'No UMAP reduction is present in this analysis. Configure parameters and run UMAP to create one.'
+                : `No existing ${nComponents}D UMAP is available. Configure parameters and run UMAP to create one.`}</p>
             </div>
           )}
 

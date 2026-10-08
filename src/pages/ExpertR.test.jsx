@@ -88,6 +88,31 @@ describe('ExpertR', () => {
     expect(setActiveTab).toHaveBeenCalledWith('team');
     expect(screen.queryByText(/ephemeral Expert R sandbox/i)).not.toBeInTheDocument();
   });
+  it('explains missing runtime setup and can refresh into a verified ready workspace', async () => {
+    window.electronAPI.getExpertRCapabilities = vi.fn()
+      .mockResolvedValueOnce({ expertREnabled: false, expertRProfile: null, expertRStatus: { state: 'not-configured' } })
+      .mockResolvedValueOnce({ expertREnabled: true, expertRProfile: { id: 'expert.r.v1', packages: ['Seurat'] }, expertRStatus: { state: 'ready', accessPolicy: 'project-roles' } });
+    render(<ExpertR currentWs={currentWs} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} userId={7} deploymentPolicy={{ expertREnabled: false }} />);
+    expect(await screen.findByText(/runtime has not been configured/i)).toBeInTheDocument();
+    expect(window.electronAPI.getExpertRCapabilities).toHaveBeenCalledWith('proj_private_1');
+    fireEvent.click(screen.getByText('Set up private R'));
+    expect(screen.getByText('node scripts/configure-private-r.js --help')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Check R availability' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Check R availability' }));
+    expect(await screen.findByText(/Isolated R runtime ready/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Run R analysis' })).toBeEnabled();
+  });
+  it('shows explicit revocation and offers status checks without an execution control', () => {
+    render(<ExpertR currentWs={currentWs} userId={7} deploymentPolicy={{ expertREnabled: false, expertRStatus: { state: 'access-revoked' } }} />);
+    expect(screen.getByText(/administrator has revoked R execution/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Run R analysis' })).not.toBeInTheDocument();
+  });
+  it('keeps anonymous demo restrictions separate from private installation setup', () => {
+    render(<ExpertR currentWs={currentWs} userId={7} deploymentPolicy={{ expertREnabled: false, demoMode: true }} />);
+    expect(screen.getByText(/unavailable in the public demo/i)).toBeInTheDocument();
+    expect(screen.queryByText('Set up private R')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Check R availability' })).not.toBeInTheDocument();
+  });
 
   it('offers only analyses owned by the current researcher and links to the private result', async () => {
     const setActiveTab = vi.fn();

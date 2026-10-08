@@ -23,12 +23,37 @@ changing an installed ID/version's contents requires a new version number.
 Removing a package from the browser does not delete its server-side work.
 Reinstalling and opening the same version on the same saved analysis resumes it.
 
-Execution requires the private [isolated R runtime](deployment.md#optional-expert-r-sandbox),
-an account with `expert_r.execute`, and an owner, admin, or analyst project role.
+Execution requires the private [isolated R runtime](deployment.md#optional-expert-r-sandbox)
+and an owner, admin, or analyst project role. Installations configured for
+project-role access enable these researchers automatically; approved-account
+installations additionally require an `expert_r.execute` grant. An explicit
+account revocation overrides either policy.
 Once access is configured, installations and individual runs need no operator
 approval. Public demo deployments can import and export packages but do not run
 custom code. The global catalog still contains built-in tool definitions;
 workflow packages are currently shared as files.
+
+## Recipe format versions
+
+Existing **schema version 1** packages continue to open and run through the
+installed R workflow executor. Their source, parameter values, saved inputs and
+results retain the current behavior.
+
+**Schema version 2** describes declared root inputs, bounded collections,
+typed ports, R/human/tool operations, helper files and environment references.
+Import validates the graph and shows its execution requirements. You can review,
+install and export a valid version-2 recipe, preserving its exact source and
+metadata. **Open** remains disabled because the current executor supports
+version 1. Importing a valid contract does not install its runtime or tool
+adapters. Unknown versions, cycles and inconsistent bindings are rejected.
+
+The [six analysis examples](../examples/analysis-model) include standard Seurat,
+an explicit zero filter, condition pseudobulk, an LR subset, tissue inspection,
+and an exploratory R command promoted to a declared step. Each JSON file
+contains a `recipe` plus illustrative artifact and execution records; import
+the `recipe` object as a package. Their data/environment references are
+placeholders, and these examples do not certify production scientific methods.
+The existing packer and execution instructions below apply to version 1.
 
 ## Dependencies and reruns
 

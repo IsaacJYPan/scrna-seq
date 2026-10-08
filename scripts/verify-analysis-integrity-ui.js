@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
+const { assertRestoredAnalysisResults } = require('./verify-restored-results-ui');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -69,6 +70,11 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
     assert(await page.getByText('Unsaved live changes.', { exact: true }).count() === 0,
       'A freshly restored checkpoint was marked dirty.');
     checks.push('restored checkpoint is clean');
+
+    const restoredResults = await assertRestoredAnalysisResults({
+      page, objectId: identity.objectId, artifactDirectory: path.join(output, 'restored-results'),
+    });
+    checks.push(...restoredResults.checks);
 
     const mappingResponse = page.waitForResponse(response => {
       const url = new URL(response.url());

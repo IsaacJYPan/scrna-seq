@@ -3,8 +3,9 @@
 const crypto = require('node:crypto');
 const storage = require('./storage');
 const { EXPERT_R_PROFILE, expertRSandboxEnabled, storedExpertRParams } = require('./expertR');
-const contract = Promise.all([import('../shared/workflowPackage.mjs'), import('../shared/workflowState.mjs')])
-  .then(([packages, state]) => ({ ...packages, ...state }));
+const { expertRAccessSql } = require('./expertRAccess');
+const contract = Promise.all([import('../shared/workflowPackage.mjs'), import('../shared/workflowState.mjs'), import('../shared/recipePackage.mjs')])
+  .then(([packages, state, recipes]) => ({ ...packages, ...state, ...recipes }));
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
@@ -24,11 +25,12 @@ async function transaction(db, callback) {
 }
 async function authorize(db, userId, projectId, execute = false) {
   await db.requireProjectRole(userId, projectId, ['owner', 'admin', 'analyst']);
-  if (execute && (!expertRSandboxEnabled() || !(await db.hasExpertRExecuteCapability(userId)))) throw error('Custom R execution is unavailable for this account.', 403);
+  if (execute && (!expertRSandboxEnabled() || !(await db.hasExpertRExecuteCapability(userId, projectId)))) throw error('Custom R execution is unavailable for this account.', 403);
 }
 async function lockExecutionAccess(client, userId, projectId) {
   const membership = await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId]);
-  const capability = await client.query("SELECT capability FROM platform_capabilities WHERE user_id=$1 AND capability='expert_r.execute' FOR SHARE", [userId]);
+  await client.query('SELECT id FROM users WHERE id=$1 FOR KEY SHARE', [userId]);
+  const capability = await client.query(`SELECT 1 WHERE ${expertRAccessSql('$1', '$2')}`, [userId, projectId]);
   if (!['owner', 'admin', 'analyst'].includes(membership.rows[0]?.role) || !capability.rows[0]) throw error('Custom R execution is unavailable for this account.', 403);
 }
 async function lockedInstance(client, userId, projectId, instanceId) {
@@ -78,7 +80,7 @@ ${workflow.files[step.entry]}`;
 function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider()) {
   async function open(userId, projectId, analysisObjectId, source) {
     await authorize(db, userId, projectId);
-    const api = await contract; const workflow = api.parseWorkflowPackage(source);
+    const api = await contract; const workflow = api.parseLegacyExecutableWorkflowPackage(source, { environmentProfiles: [EXPERT_R_PROFILE.id] });
     if (workflow.runtime.profileId !== EXPERT_R_PROFILE.id) throw error('This R runtime profile is not installed.');
     const checkpoint = await db.getLoadableCheckpointForAnalysisObject(projectId, analysisObjectId, userId);
     const packageDigest = digest(workflow);

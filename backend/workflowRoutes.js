@@ -18,6 +18,9 @@ function workflowRoutes({ db, provider, requireAuth }) {
   const route = handler => async (req, res) => {
     try { await handler(req, res); }
     catch (error) {
+      if (error.code === 'WORKFLOW_EXECUTOR_UNAVAILABLE' && error.status === 422) {
+        return res.status(422).json({ error: error.message, code: error.code, details: error.details });
+      }
       const status = error.status || (['FORBIDDEN', 'PROJECT_ROLE_REQUIRED'].includes(error.code) ? 403 : /NOT_FOUND/.test(error.code || '') ? 404 : 400);
       const message = error.code && !['FORBIDDEN', 'PROJECT_ROLE_REQUIRED'].includes(error.code) ? 'The workflow request could not be completed.' : error.message;
       res.status(status).json({ error: message });

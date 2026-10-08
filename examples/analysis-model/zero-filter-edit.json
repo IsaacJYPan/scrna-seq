@@ -1,0 +1,318 @@
+{
+  "caseId": "zero-filter-edit",
+  "illustrative": true,
+  "description": "A recipe fork inserts an explicit zero-score rule. The input table is preserved; the selected table and retained/excluded metrics are new versions.",
+  "recipe": {
+    "format": "traceomics-workflow",
+    "schemaVersion": 2,
+    "id": "lab.zero-filter",
+    "name": "Explicit zero filter",
+    "version": "1.0.0",
+    "description": "Illustrative analysis contract; this record does not certify an installed scientific executor.",
+    "inputs": {
+      "scores": {
+        "type": "table",
+        "cardinality": "one",
+        "format": {
+          "id": "org.traceomics.table",
+          "version": "1"
+        }
+      }
+    },
+    "outputs": {},
+    "environments": {
+      "research": {
+        "profileId": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e",
+        "runtime": {
+          "language": "r",
+          "version": "4.5.1"
+        },
+        "lockfile": "environment/renv.lock"
+      }
+    },
+    "files": {
+      "environment/renv.lock": "{\"R\":{\"Version\":\"4.5.1\"},\"Packages\":{}}",
+      "steps/drop-zeroes.R": "values <- inputs$scores\nkeep <- rowSums(values[c(\"score_a\", \"score_b\")] == 0) == 0\nwrite_output(\"selected\", values[keep, , drop = FALSE])\nwrite_output(\"counts\", list(retained = sum(keep), excluded = sum(!keep)))"
+    },
+    "steps": [
+      {
+        "id": "drop-zeroes",
+        "label": "drop-zeroes",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/drop-zeroes.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "inputs": {
+          "scores": {
+            "type": "table",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.table",
+              "version": "1"
+            }
+          }
+        },
+        "bindings": {
+          "scores": {
+            "kind": "input",
+            "port": "scores"
+          }
+        },
+        "outputs": {
+          "selected": {
+            "type": "table",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.table",
+              "version": "1"
+            }
+          },
+          "counts": {
+            "type": "metrics",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.metrics",
+              "version": "1"
+            }
+          }
+        },
+        "parameters": {
+          "rule": {
+            "type": "choice",
+            "label": "Zero rule",
+            "options": [
+              "either-score-zero"
+            ],
+            "default": "either-score-zero"
+          }
+        },
+        "environment": "research",
+        "ui": {
+          "label": "drop-zeroes",
+          "results": [
+            "selected",
+            "counts"
+          ]
+        }
+      }
+    ],
+    "package": {
+      "license": "MIT",
+      "authors": [
+        "TraceOmics"
+      ],
+      "permissions": [
+        "read-inputs",
+        "write-outputs"
+      ]
+    }
+  },
+  "artifactVersions": [
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "zero-filter-edit-input-scores",
+      "versionId": "zero-filter-edit-input-scores-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "table",
+      "format": {
+        "id": "org.traceomics.table",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "abd6f0df67f7f00da9e38d697a7e520144e18e3984766e5b04f37b3032dba775",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-0",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "zero-filter-edit-drop-zeroes-selected",
+      "versionId": "zero-filter-edit-drop-zeroes-selected-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "table",
+      "format": {
+        "id": "org.traceomics.table",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "9db491317b05561abfba176af05290e47854dd5f754f8821185c4b1687eaa9e3",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-1",
+      "sourceRunId": "zero-filter-edit-drop-zeroes-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "zero-filter-edit-drop-zeroes-counts",
+      "versionId": "zero-filter-edit-drop-zeroes-counts-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "metrics",
+      "format": {
+        "id": "org.traceomics.metrics",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "29a0866c4587ecb1bb6bc743a6b2ed3522355bd381ccdd44510036bc32a594cf",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-2",
+      "sourceRunId": "zero-filter-edit-drop-zeroes-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    }
+  ],
+  "operationVersions": [
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "lab.zero-filter.drop-zeroes",
+      "version": "1.0.0",
+      "digest": "554d1e5518cb01ccc418c37004431f9af06090fbdd278d66ec70fc11cc775395",
+      "method": {
+        "kind": "r",
+        "entry": "steps/drop-zeroes.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "scores": {
+          "type": "table",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.table",
+            "version": "1"
+          }
+        }
+      },
+      "outputs": {
+        "selected": {
+          "type": "table",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.table",
+            "version": "1"
+          }
+        },
+        "counts": {
+          "type": "metrics",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.metrics",
+            "version": "1"
+          }
+        }
+      },
+      "parameters": {
+        "rule": {
+          "type": "choice",
+          "label": "Zero rule",
+          "options": [
+            "either-score-zero"
+          ],
+          "default": "either-score-zero"
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      }
+    }
+  ],
+  "runs": [
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "zero-filter-edit-drop-zeroes-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "lab.zero-filter.drop-zeroes",
+        "version": "1.0.0",
+        "digest": "554d1e5518cb01ccc418c37004431f9af06090fbdd278d66ec70fc11cc775395"
+      },
+      "recipe": {
+        "id": "lab.zero-filter",
+        "version": "1.0.0",
+        "digest": "0b250673466f692871ce235f1b0dbb48a2b4d8f6ece985ce51981f81e88ef5ac"
+      },
+      "inputs": {
+        "scores": {
+          "artifactId": "zero-filter-edit-input-scores",
+          "versionId": "zero-filter-edit-input-scores-v1",
+          "projectId": "example-project",
+          "sha256": "abd6f0df67f7f00da9e38d697a7e520144e18e3984766e5b04f37b3032dba775"
+        }
+      },
+      "parameters": {
+        "rule": "either-score-zero"
+      },
+      "design": null,
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "selected": {
+          "artifactId": "zero-filter-edit-drop-zeroes-selected",
+          "versionId": "zero-filter-edit-drop-zeroes-selected-v1",
+          "projectId": "example-project",
+          "sha256": "9db491317b05561abfba176af05290e47854dd5f754f8821185c4b1687eaa9e3"
+        },
+        "counts": {
+          "artifactId": "zero-filter-edit-drop-zeroes-counts",
+          "versionId": "zero-filter-edit-drop-zeroes-counts-v1",
+          "projectId": "example-project",
+          "sha256": "29a0866c4587ecb1bb6bc743a6b2ed3522355bd381ccdd44510036bc32a594cf"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    }
+  ],
+  "versionBoundaries": {
+    "inputVersions": [
+      "zero-filter-edit-input-scores-v1"
+    ],
+    "operationVersions": [
+      "lab.zero-filter.drop-zeroes@1.0.0"
+    ],
+    "outputVersions": [
+      "zero-filter-edit-drop-zeroes-selected-v1",
+      "zero-filter-edit-drop-zeroes-counts-v1"
+    ],
+    "recipeVersion": "lab.zero-filter@1.0.0"
+  }
+}

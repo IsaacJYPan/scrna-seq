@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Code2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 
@@ -10,12 +10,15 @@ const STARTER = `# Your saved Seurat analysis is available as obj.
 summary_table <- data.frame(
   cells = ncol(obj),
   features = nrow(obj),
-  clusters = length(unique(obj$seurat_clusters))
+  clusters = if ("seurat_clusters" %in% colnames(obj[[]])) length(unique(obj$seurat_clusters)) else NA_integer_
 )
 write_table(summary_table, "object-summary.csv")
 
-p <- Seurat::DimPlot(obj, reduction = "umap", group.by = "seurat_clusters")
-save_figure(p, "umap-by-cluster.png", width = 8, height = 6)
+if ("umap" %in% Seurat::Reductions(obj)) {
+  group_column <- if ("seurat_clusters" %in% colnames(obj[[]])) "seurat_clusters" else NULL
+  p <- Seurat::DimPlot(obj, reduction = "umap", group.by = group_column)
+  save_figure(p, "umap-by-cluster.png", width = 8, height = 6)
+}
 
 # Optional: save a derived object as a private, untrusted Expert R artifact.
 # save_workspace(obj, "derived-analysis.rds")
@@ -24,6 +27,15 @@ save_figure(p, "umap-by-cluster.png", width = 8, height = 6)
 function messageFor(error) {
   return publicErrorMessage(error, 'Could not queue Expert R. Review the saved analysis and script, then try again.');
 }
+
+const ACCESS_MESSAGES = {
+  'not-configured': 'The isolated R runtime has not been configured for this installation.',
+  unreachable: 'The isolated R runtime is unavailable. Ask the installation administrator to start or reconnect it, then check again.',
+  incompatible: 'The R runtime does not match this installation’s supported profile. The installation administrator must update its image or connection credentials.',
+  'access-required': 'Your account needs R execution access. An administrator can grant access, or an owner can give you an analyst role when project-role access is enabled.',
+  'access-revoked': 'An administrator has revoked R execution for your account. Existing saved results remain available; new and queued R analyses cannot run.',
+  'demo-disabled': 'Advanced analysis is intentionally unavailable in the public demo.',
+};
 
 export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {}, userId, setActiveTab, onExpertRSubmitted }) {
   const projectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
@@ -46,7 +58,43 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
   const [selectedInputIds, setSelectedInputIds] = useState([]);
   const [inputFile, setInputFile] = useState(null);
   const [inputBusy, setInputBusy] = useState(false);
-  const profile = deploymentPolicy.expertRProfile;
+  const [capability, setCapability] = useState(null);
+  const [checkingRuntime, setCheckingRuntime] = useState(false);
+  const capabilityRequest = useRef(0);
+  const policy = capability || deploymentPolicy;
+  const profile = policy.expertRProfile;
+
+  useEffect(() => {
+    let active = true;
+    const requestId = ++capabilityRequest.current;
+    setCapability(null); setPrivateInputs([]); setSelectedInputIds([]); setInputFile(null);
+    if (typeof window.electronAPI?.getExpertRCapabilities !== 'function') { setCheckingRuntime(false); return undefined; }
+    setCheckingRuntime(true);
+    window.electronAPI.getExpertRCapabilities(projectId).then((value) => {
+      if (active && capabilityRequest.current === requestId) setCapability(value);
+    }).catch(() => {
+      if (active && capabilityRequest.current === requestId) {
+        setCapability({ expertREnabled: false, expertRProfile: null, expertRStatus: { state: 'unreachable' } });
+        setError('R availability could not be checked. Check your connection and try again.');
+      }
+    }).finally(() => { if (active && capabilityRequest.current === requestId) setCheckingRuntime(false); });
+    return () => { active = false; capabilityRequest.current += 1; };
+  }, [projectId, userId]);
+
+  const refreshCapability = async () => {
+    if (typeof window.electronAPI?.getExpertRCapabilities !== 'function') return;
+    const requestId = ++capabilityRequest.current;
+    setCheckingRuntime(true); setError('');
+    try {
+      const value = await window.electronAPI.getExpertRCapabilities(projectId);
+      if (capabilityRequest.current === requestId) setCapability(value);
+    } catch {
+      if (capabilityRequest.current === requestId) {
+        setCapability({ expertREnabled: false, expertRProfile: null, expertRStatus: { state: 'unreachable' } });
+        setError('R availability could not be checked. Check your connection and try again.');
+      }
+    } finally { if (capabilityRequest.current === requestId) setCheckingRuntime(false); }
+  };
 
   useEffect(() => {
     setObjectId((currentObjectId) => (
@@ -56,7 +104,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
 
   useEffect(() => {
     let active = true;
-    if (!projectId || !deploymentPolicy.expertREnabled
+    if (!projectId || !policy.expertREnabled
         || typeof window.electronAPI?.listExpertRInputs !== 'function') return undefined;
     window.electronAPI.listExpertRInputs(projectId).then((rows) => {
       if (!active) return;
@@ -65,7 +113,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
       if (active) setError(messageFor(loadError));
     });
     return () => { active = false; };
-  }, [deploymentPolicy.expertREnabled, projectId]);
+  }, [policy.expertREnabled, projectId]);
 
   const uploadInput = async () => {
     if (!inputFile) return;
@@ -83,7 +131,9 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
   };
 
   const submit = async (event) => {
-    event.preventDefault(); setBusy(true); setError('');
+    event.preventDefault();
+    if (!policy.expertREnabled || !profile || checkingRuntime) return;
+    setBusy(true); setError('');
     try {
       const created = await window.electronAPI.createProjectJob(projectId, {
         jobType: 'expert.r.v1', analysisObjectId: objectId,
@@ -94,19 +144,30 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
     } catch (submitError) { setError(messageFor(submitError)); } finally { setBusy(false); }
   };
 
-  if (!deploymentPolicy.expertREnabled || !profile) {
+  if (!policy.expertREnabled || !profile) {
+    const status = policy.expertRStatus?.state;
+    const publicDemo = deploymentPolicy.demoMode || status === 'demo-disabled';
     return (
       <div className="h-full overflow-y-auto bg-background p-8 text-textMuted">
         <div className="mx-auto max-w-2xl rounded-xl border border-border bg-surface p-6">
           <h2 className="text-xl font-semibold text-text">Advanced analysis</h2>
           <p className="mt-3 text-sm">
-            {deploymentPolicy.demoMode
+            {ACCESS_MESSAGES[status] || (publicDemo
               ? 'Advanced analysis is intentionally unavailable in the public demo.'
-              : 'Advanced analysis is an optional capability that has not been enabled for this account or deployment.'}
+              : 'Advanced analysis has not been enabled for this account or deployment.')}
           </p>
           <p className="mt-3 text-sm">
-            It requires an approved role and an operator-managed private R sandbox with a curated package profile. Ask a project owner or deployment administrator to review access for this project.
+            It requires an isolated R runtime and an authorized project role or account grant. Ask a project owner or deployment administrator to review access for this project.
           </p>
+          {error && <p role="alert" className="mt-3 text-sm text-red-300">{error}</p>}
+          {!publicDemo && <>
+            <button type="button" className="btn btn-secondary mt-4" disabled={checkingRuntime || typeof window.electronAPI?.getExpertRCapabilities !== 'function'} onClick={refreshCapability}>{checkingRuntime ? 'Checking R availability…' : 'Check R availability'}</button>
+            <details className="mt-4 text-sm"><summary className="cursor-pointer text-text">Set up private R</summary>
+              <p className="mt-3">The installation administrator can configure a pinned R image and the dedicated isolated runtime using:</p>
+              <code className="mt-2 block break-all rounded bg-background p-3">node scripts/configure-private-r.js --help</code>
+              <p className="mt-3">The setup preflight checks the runtime before enabling it. New private installations use owner, admin, and analyst project roles. Administrators can explicitly revoke account access.</p>
+            </details>
+          </>}
           {projectId && (
             <button type="button" className="btn btn-secondary mt-4" onClick={() => setActiveTab?.('team')}>
               Open project collaborators
@@ -118,7 +179,8 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
   }
   return (
     <div className="h-full overflow-y-auto p-6 bg-background text-text"><form className="max-w-5xl mx-auto space-y-4" onSubmit={submit}>
-      <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold flex gap-2 items-center"><Code2 size={20} />Expert R Workbench</h2><p className="text-sm text-slate-400 mt-1">Use R for custom exploratory analysis on a private saved analysis.</p></div><button className="btn btn-primary shrink-0" disabled={busy || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button></div>
+      <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold flex gap-2 items-center"><Code2 size={20} />Expert R Workbench</h2><p className="text-sm text-slate-400 mt-1">Use R for custom exploratory analysis on a private saved analysis.</p></div><button className="btn btn-primary shrink-0" disabled={busy || checkingRuntime || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button></div>
+      {policy.expertRStatus?.state === 'ready' && <div className="flex flex-wrap items-center gap-3"><p role="status" className="text-sm text-textMuted">Isolated R runtime ready · {policy.expertRStatus.accessPolicy === 'project-roles' ? 'Project-role access' : 'Approved-account access'}</p><button type="button" className="btn btn-secondary text-xs" disabled={checkingRuntime} onClick={refreshCapability}>{checkingRuntime ? 'Checking R availability…' : 'Check R availability'}</button></div>}
       <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm"><div className="flex gap-2 items-center font-medium"><ShieldCheck size={16} />Private analysis workspace</div><p className="text-slate-400 mt-1">Your saved analysis opens in a fresh, time-limited R workspace. It cannot reach the network or files outside this analysis, and uses the packages listed below.</p></div>
       <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm"><p className="font-medium">Your results</p><p className="text-slate-400 mt-1">Create tables and figures to inspect or export. They stay private unless you choose to share them through Analysis Branches.</p></div>
       {error && <div role="alert" className="text-sm text-red-300">{error}</div>}

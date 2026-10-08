@@ -132,6 +132,9 @@ afterEach(() => {
 describe('production R proxy exact allowlist', () => {
   it('contains only reviewed method/path pairs and rejects unknown or wrong-method variants', () => {
     expect(R_PROXY_PRODUCTION_ALLOWLIST.GET.has('/normalize')).toBe(true);
+    expect(R_PROXY_PRODUCTION_ALLOWLIST.GET.has('/reduction-results')).toBe(true);
+    expect(isAllowedProductionRProxyRequest('GET', '/reduction-results', { NODE_ENV: 'production' })).toBe(true);
+    expect(isAllowedProductionRProxyRequest('POST', '/reduction-results', { NODE_ENV: 'production' })).toBe(false);
     // The owner-local CellChat key is a fixed, read-only group choice endpoint;
     // it never accepts arbitrary metadata columns and is not a worker route.
     expect(R_PROXY_PRODUCTION_ALLOWLIST.GET.has('/cellchat-group-map')).toBe(true);

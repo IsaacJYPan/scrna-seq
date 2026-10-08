@@ -10,7 +10,7 @@ const { createWorkflowRuntime, digest } = require('./workflowRuntime');
 const { createJobWorker } = require('./jobWorker');
 const { EXPERT_R_RESOURCE_POLICY_VERSION } = require('./expertR');
 const configured = Boolean(process.env.DATABASE_URL);
-const environment = ['APP_DEPLOYMENT_MODE', 'EXPERT_R_ENABLED', 'EXPERT_R_SANDBOX_URL', 'EXPERT_R_SANDBOX_TOKEN'];
+const environment = ['APP_DEPLOYMENT_MODE', 'EXPERT_R_ENABLED', 'EXPERT_R_SANDBOX_URL', 'EXPERT_R_SANDBOX_TOKEN', 'EXPERT_R_ACCESS_POLICY'];
 let savedEnvironment, directory, provider, runtime, source, user, project, object, instance;
 let server, http;
 let replacement = 'first';
@@ -27,6 +27,7 @@ describe.skipIf(!configured)('workflow runtime', () => {
     server = await http.startServer();
   });
   beforeEach(async () => {
+    delete process.env.EXPERT_R_ACCESS_POLICY;
     await db.resetSchemaForTests();
     provider = storage.createLocalStorageProvider({ root: path.join(directory, Math.random().toString(16).slice(2)) });
     runtime = createWorkflowRuntime(db, provider);
@@ -82,6 +83,18 @@ describe.skipIf(!configured)('workflow runtime', () => {
     expect(JSON.stringify(instance)).not.toContain('storage_key');
     const jobs = await db.query("SELECT parameters_json FROM jobs WHERE job_type='expert.r.v1'");
     expect(jobs.rows.every(row => !Object.hasOwn(JSON.parse(row.parameters_json), 'script'))).toBe(true);
+  });
+  it('runs a role-authorized workflow without an individual grant and enforces explicit denial', async () => {
+    process.env.EXPERT_R_ACCESS_POLICY = 'project-roles';
+    await db.query("DELETE FROM platform_capabilities WHERE user_id=$1 AND capability='expert_r.execute'", [user.id]);
+    expect((await execute('qc')).status).toBe('completed');
+    instance = await runtime.run(user.id, project.id, instance.id, { requestId: crypto.randomUUID(), stepId: 'normalize' });
+    const queuedId = instance.state.active.id;
+    await db.setExpertRExecutorByEmail(user.email, false);
+    expect(await db.claimNextJob('role-revoked-workflow', { allowedJobTypes: ['expert.r.v1'], leaseSeconds: 30 })).toBeNull();
+    expect((await db.getProjectJob(user.id, project.id, queuedId)).status).toBe('canceled');
+    await expect(runtime.run(user.id, project.id, instance.id, { requestId: crypto.randomUUID(), stepId: 'normalize' })).rejects.toMatchObject({ status: 403 });
+    expect((await runtime.get(user.id, project.id, instance.id)).state.results.qc).toBeTruthy();
   });
   it('keeps working data on failure, then clears dependent output after a changed rerun', async () => {
     await execute('qc'); await execute('normalize');

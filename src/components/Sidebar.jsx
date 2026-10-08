@@ -233,7 +233,7 @@ export default function Sidebar({
             <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
-            <NavButton {...navProps} item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : 'Not enabled for this deployment' }} disabled={!hasProject || deploymentPolicy.expertREnabled !== true} />
+            <NavButton {...navProps} item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
             <NavButton {...navProps} item={{ id: 'team', label: 'Collaborators', icon: Users, status: hasProject ? 'Project access' : 'Select project' }} disabled={!hasProject} />
             <div className="pt-3">
               <SectionLabel>Data & analysis</SectionLabel>
@@ -249,7 +249,7 @@ export default function Sidebar({
               {section.items.map(item => {
                 const blockedLegacyMutation = deploymentPolicy.legacyLiveMutationToolsEnabled !== true
                   && item.id === 'integrate';
-                const blockedExpertR = deploymentPolicy.expertREnabled !== true
+                const blockedExpertR = (deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled')
                   && item.id === 'expert-r';
                 const visibleItem = blockedLegacyMutation
                   ? { ...item, status: 'Unavailable in this workspace' }

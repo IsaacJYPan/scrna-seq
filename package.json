@@ -51,6 +51,8 @@
     "test:r-storage": "Rscript r-backend/tests/test_storage_paths.R",
     "test:r-public-bounds": "Rscript r-backend/tests/test_public_endpoint_bounds.R",
     "test:r-live-revisions": "Rscript r-backend/tests/test_live_revisions.R",
+    "test:r-restored-reductions": "Rscript r-backend/tests/test_restored_reductions.R",
+    "test:r-expert-starter": "Rscript r-backend/tests/test_expert_starter.R",
     "test:backup-restore": "vitest run backend/backup-restore.test.js --environment node --fileParallelism=false",
     "test:backup-restore:real": "node scripts/verify-backup-restore-drill.js",
     "test:deployment:smoke": "node scripts/verify-deployment-smoke.js",
@@ -85,9 +87,9 @@
     "cors": "^2.8.6",
     "dagre": "^0.8.5",
     "express": "^5.2.1",
-    "http-proxy-middleware": "^4.0.0",
+    "httpxy": "^0.5.5",
     "lucide-react": "^1.0.1",
-    "multer": "^2.1.1",
+    "multer": "^2.4.0",
     "pg": "^8.22.0",
     "plotly.js": "3.7.0",
     "react": "^19.0.0",
@@ -104,7 +106,7 @@
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.27",
     "concurrently": "^9.1.0",
-    "electron": "^43.2.0",
+    "electron": "^43.7.9",
     "electron-builder": "^26.15.3",
     "eslint": "^9.39.4",
     "eslint-plugin-react-hooks": "^7.1.1",
@@ -121,6 +123,12 @@
     "wait-on": "^8.0.0"
   },
   "overrides": {
-    "maplibre-gl": "^6.9.0"
+    "maplibre-gl": "^6.9.0",
+    "concurrently": {
+      "shell-quote": "^1.12.0"
+    },
+    "minimatch@3": {
+      "brace-expansion": "^1.1.21"
+    }
   }
 }

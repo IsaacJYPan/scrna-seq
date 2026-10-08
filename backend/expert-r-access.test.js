@@ -4,6 +4,7 @@ const config = require('./config');
 const db = require('./pgDatabase');
 const analysisBranches = require('./analysisBranches');
 const researchExports = require('./researchExports');
+const http = require('http');
 const { EXPERT_R_PROFILE, allocateExpertRInputStorageKey } = require('./expertR');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
 
@@ -13,15 +14,18 @@ const ORIGINAL_ENV = {
   EXPERT_R_ENABLED: process.env.EXPERT_R_ENABLED,
   EXPERT_R_SANDBOX_URL: process.env.EXPERT_R_SANDBOX_URL,
   EXPERT_R_SANDBOX_TOKEN: process.env.EXPERT_R_SANDBOX_TOKEN,
+  EXPERT_R_ACCESS_POLICY: process.env.EXPERT_R_ACCESS_POLICY,
 };
 
 let server;
+let broker;
 
 function enablePrivateExpertR() {
   process.env.APP_DEPLOYMENT_MODE = 'private';
   process.env.EXPERT_R_ENABLED = 'true';
-  process.env.EXPERT_R_SANDBOX_URL = 'http://127.0.0.1:8090';
+  process.env.EXPERT_R_SANDBOX_URL = `http://127.0.0.1:${broker?.address()?.port || 8090}`;
   process.env.EXPERT_R_SANDBOX_TOKEN = 'a'.repeat(64);
+  delete process.env.EXPERT_R_ACCESS_POLICY;
 }
 
 function restoreEnv() {
@@ -55,6 +59,14 @@ function expertJobBody(objectId, script = 'write_table(data.frame(cells=1), "sum
 
 beforeAll(async () => {
   if (!CONFIGURED) return;
+  broker = http.createServer((req, res) => {
+    if (req.url !== '/capabilities' || req.headers.authorization !== `Bearer ${'a'.repeat(64)}`) {
+      res.statusCode = 404; res.end(); return;
+    }
+    res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
+      sandboxImageDigest: `sha256:${'f'.repeat(64)}`, resourcePolicyVersion: 'expert-r-sandbox-policy.v3' }));
+  });
+  await new Promise((resolve) => broker.listen(0, '127.0.0.1', resolve));
   enablePrivateExpertR();
   server = await startServer();
 });
@@ -69,10 +81,71 @@ afterAll(async () => {
   restoreEnv();
   if (!CONFIGURED) return;
   if (server) await new Promise((resolve) => server.close(resolve));
+  if (broker) await new Promise((resolve) => broker.close(resolve));
   await db.close();
 });
 
 describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
+  it('admits private owner and analyst work without individual grants under project-role policy', async () => {
+    process.env.EXPERT_R_ACCESS_POLICY = 'project-roles';
+    const owner = await seedOwnerProject('role-owner@example.com');
+    const analyst = await createUserWithToken({ email: 'role-analyst@example.com' });
+    const viewer = await createUserWithToken({ email: 'role-viewer@example.com' });
+    await db.addProjectMemberByEmail(owner.project.id, analyst.user.email, 'analyst', { userId: owner.user.id });
+    await db.addProjectMemberByEmail(owner.project.id, viewer.user.email, 'viewer', { userId: owner.user.id });
+    const analystObject = await db.createProjectAnalysisObject(analyst.user.id, owner.project.id,
+      { objectType: 'seurat', displayName: 'Analyst saved version' });
+    expect(await db.hasExpertRExecuteCapability(owner.user.id, owner.project.id)).toBe(true);
+    expect(await db.hasExpertRExecuteCapability(analyst.user.id, owner.project.id)).toBe(true);
+    expect(await db.hasExpertRExecuteCapability(viewer.user.id, owner.project.id)).toBe(false);
+    const capability = await api(server, '/api/expert-r/capabilities', { token: analyst.token });
+    expect(capability.data).toMatchObject({ expertREnabled: true,
+      expertRStatus: { state: 'ready', accessPolicy: 'project-roles' } });
+    const created = await db.createProjectJob(analyst.user.id, owner.project.id, expertJobBody(analystObject.id));
+    const claim = await db.claimNextJob('role-policy-worker', { allowedJobTypes: ['expert.r.v1'], leaseSeconds: 30 });
+    expect(claim.id).toBe(created.id);
+  });
+
+  it('explicit revocation overrides role access and cancels queued work until an audited grant', async () => {
+    process.env.EXPERT_R_ACCESS_POLICY = 'project-roles';
+    const owner = await seedOwnerProject('role-revoked@example.com');
+    const created = await db.createProjectJob(owner.user.id, owner.project.id, expertJobBody(owner.object.id));
+    await db.setExpertRExecutorByEmail(owner.user.email, false);
+    expect(await db.hasExpertRExecuteCapability(owner.user.id, owner.project.id)).toBe(false);
+    expect((await api(server, '/api/expert-r/capabilities', { token: owner.token })).data)
+      .toMatchObject({ expertREnabled: false, expertRStatus: { state: 'access-revoked' } });
+    await expect(db.createProjectJob(owner.user.id, owner.project.id, expertJobBody(owner.object.id)))
+      .rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(await db.claimNextJob('role-revoked-worker', { allowedJobTypes: ['expert.r.v1'], leaseSeconds: 30 })).toBeNull();
+    expect((await db.getProjectJob(owner.user.id, owner.project.id, created.id)).status).toBe('canceled');
+    await db.setExpertRExecutorByEmail(owner.user.email, true);
+    expect(await db.hasExpertRExecuteCapability(owner.user.id, owner.project.id)).toBe(true);
+  });
+  it('scopes readiness to the selected project even when another project or account grant enables R', async () => {
+    process.env.EXPERT_R_ACCESS_POLICY = 'project-roles';
+    const researcher = await seedOwnerProject('multi-project-researcher@example.com');
+    const other = await seedOwnerProject('other-project-owner@example.com');
+    await db.addProjectMemberByEmail(other.project.id, researcher.user.email, 'viewer', { userId: other.user.id });
+    const global = await api(server, '/api/expert-r/capabilities', { token: researcher.token });
+    expect(global.data.expertREnabled).toBe(true);
+    const selected = `/api/expert-r/capabilities?projectId=${other.project.id}`;
+    expect((await api(server, selected, { token: researcher.token })).data)
+      .toMatchObject({ expertREnabled: false, expertRStatus: { state: 'access-required', canExecute: false } });
+    await db.setExpertRExecutorByEmail(researcher.user.email, true);
+    expect((await api(server, selected, { token: researcher.token })).data.expertREnabled).toBe(false);
+    expect((await api(server, `/api/expert-r/capabilities?projectId=proj_${'f'.repeat(24)}`, { token: researcher.token })).data.expertREnabled).toBe(false);
+    expect((await api(server, `/api/expert-r/capabilities?projectId=${researcher.project.id}`, { token: researcher.token })).data.expertREnabled).toBe(true);
+  });
+
+  it('does not expose a configured but unreachable runtime as ready', async () => {
+    const owner = await seedOwnerProject('runtime-missing@example.com');
+    await db.setExpertRExecutorByEmail(owner.user.email, true);
+    process.env.EXPERT_R_SANDBOX_URL = 'http://127.0.0.1:1';
+    const capability = await api(server, '/api/expert-r/capabilities', { token: owner.token });
+    expect(capability.data).toMatchObject({ expertREnabled: false, expertRProfile: null,
+      expertRStatus: { state: 'unreachable' } });
+  });
+
   it('keeps imported tabular inputs creator-private and resolves paths only for the claimed worker', async () => {
     const owner = await seedOwnerProject('expert-input-owner@example.com');
     const collaborator = await createUserWithToken({
@@ -133,7 +206,8 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
 
     const unavailable = await api(server, '/api/expert-r/capabilities', { token: owner.token });
     expect(unavailable.status).toBe(200);
-    expect(unavailable.data).toEqual({ expertREnabled: false, expertRProfile: null });
+    expect(unavailable.data).toMatchObject({ expertREnabled: false, expertRProfile: null,
+      expertRStatus: { state: 'access-required', accessPolicy: 'approved-accounts' } });
 
     const denied = await api(server, `/api/projects/${owner.project.id}/jobs`, {
       method: 'POST', token: owner.token, body: expertJobBody(owner.object.id),
@@ -148,7 +222,8 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
     }));
     const available = await api(server, '/api/expert-r/capabilities', { token: owner.token });
     expect(available.status).toBe(200);
-    expect(available.data).toEqual({ expertREnabled: true, expertRProfile: EXPERT_R_PROFILE });
+    expect(available.data).toMatchObject({ expertREnabled: true, expertRProfile: EXPERT_R_PROFILE,
+      expertRStatus: { state: 'ready' } });
 
     const source = 'write_table(data.frame(cells=1), "summary.csv")';
     const created = await api(server, `/api/projects/${owner.project.id}/jobs`, {

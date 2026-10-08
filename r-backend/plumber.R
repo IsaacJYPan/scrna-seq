@@ -5677,6 +5677,93 @@ function(res, npcs = 50, seed = "") {
 # PIPELINE STEP 4: Clustering
 # ──────────────────────────────────────────────────────────────────
 
+# Return only scientific settings, never a command environment or host paths.
+restored_reduction_settings <- function(object, reduction) {
+  prefix <- if (identical(reduction, "pca")) "^RunPCA\\." else "^RunUMAP\\."
+  commands <- grep(prefix, names(object@commands), value = TRUE)
+  if (!length(commands)) return(list())
+  params <- tryCatch(object@commands[[tail(commands, 1L)]]@params, error = function(e) list())
+  scalar <- function(name) {
+    value <- params[[name]]
+    if (!is.numeric(value) || length(value) != 1L || !is.finite(value)) return(NULL)
+    as.numeric(value)
+  }
+  if (identical(reduction, "pca")) {
+    return(Filter(Negate(is.null), list(npcs = scalar("npcs"), seed = scalar("seed.use"))))
+  }
+  dims <- params$dims
+  dims_used <- if (is.numeric(dims) && length(dims) && all(is.finite(dims))) length(dims) else NULL
+  input_reduction <- if (is.character(params$reduction) && length(params$reduction) == 1L &&
+                         params$reduction %in% c("pca", "harmony")) params$reduction else NULL
+  Filter(Negate(is.null), list(
+    dims = dims_used, input_reduction = input_reduction,
+    n_components = scalar("n.components"), n_neighbors = scalar("n.neighbors"),
+    min_dist = scalar("min.dist"), seed = scalar("seed.use")
+  ))
+}
+
+#* Inspect an existing reduction without running an analysis or recording provenance
+#* @get /reduction-results
+function(res, reduction = "umap") {
+  if (!is.character(reduction) || length(reduction) != 1L ||
+      !reduction %in% c("pca", "umap")) {
+    res$status <- 400L
+    return(list(error = "Choose an existing PCA or UMAP reduction."))
+  }
+  if (is.null(global_obj)) return(list(error = "No object loaded. Restore a saved version first."))
+  if (!reduction %in% names(global_obj@reductions)) {
+    return(list(result = list(exists = FALSE, reduction = reduction,
+                             message = paste0(toupper(reduction), " is not present in this analysis.")),
+                live_state = live_session_revision_state()))
+  }
+  tryCatch({
+    emb <- Embeddings(global_obj, reduction)
+    if (nrow(emb) > MAX_PUBLIC_SYNC_CELLS || ncol(emb) < 2L) {
+      res$status <- 413L
+      return(list(error = "This reduction exceeds the supported live preview limits."))
+    }
+    dimensions <- min(ncol(emb), if (identical(reduction, "umap")) 3L else 2L)
+    identities <- Idents(global_obj)[rownames(emb)]
+    labels <- as.character(identities)
+    labels[is.na(labels)] <- "Unassigned"
+    all_groups <- public_identity_levels(factor(labels, levels = unique(labels)))
+    groups <- head(all_groups, MAX_PUBLIC_CLUSTERS)
+    finite <- rowSums(!is.finite(emb[, seq_len(dimensions), drop = FALSE])) == 0L
+    eligible <- which(labels %in% groups & finite)
+    selected <- eligible[bounded_group_sample_indices(labels[eligible], MAX_PUBLIC_CELL_VALUES)]
+    traces <- lapply(groups, function(group) {
+      index <- selected[labels[selected] == group]
+      name <- if (grepl("^[0-9]+$", group)) paste("Cluster", group) else group
+      trace <- list(name = bounded_public_labels(name),
+                    x = as.numeric(emb[index, 1L]), y = as.numeric(emb[index, 2L]))
+      if (dimensions == 3L) trace$z <- as.numeric(emb[index, 3L])
+      trace
+    })
+    result <- list(exists = TRUE, restored = TRUE, reduction = reduction,
+                   n_components = ncol(emb), settings = restored_reduction_settings(global_obj, reduction),
+                   n_cells = nrow(emb), n_points = length(selected), sampled = length(selected) < nrow(emb),
+                   nonfinite_points = sum(!finite), n_clusters = length(all_groups),
+                   returned_clusters = length(groups), clusters_truncated = length(groups) < length(all_groups),
+                   trace_data = traces)
+    if (identical(reduction, "pca")) {
+      result$npcs <- ncol(emb)
+      result$stdevs <- as.numeric(head(global_obj[["pca"]]@stdev, MAX_REDUCTION_DIMS))
+      loadings <- Loadings(global_obj, "pca")
+      result$gene_loadings <- lapply(seq_len(min(5L, ncol(loadings))), function(index) {
+        column <- loadings[, index]
+        positive <- head(order(column, decreasing = TRUE), 5L)
+        negative <- head(order(column, decreasing = FALSE), 5L)
+        bounded_public_labels(rownames(loadings)[c(positive, negative)], MAX_PUBLIC_GENE_NAME_CHARS)
+      })
+      names(result$gene_loadings) <- paste0("PC", seq_along(result$gene_loadings))
+    }
+    list(result = result, live_state = live_session_revision_state())
+  }, error = function(e) {
+    res$status <- 500L
+    list(error = "The existing reduction could not be inspected. Restore the saved version and try again.")
+  })
+}
+
 #* Find neighbors and cluster cells
 #* @get /cluster
 function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "",

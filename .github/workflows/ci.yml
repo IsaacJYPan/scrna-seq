@@ -253,6 +253,12 @@ jobs:
       - name: Run Live R Revision Recovery Tests
         run: npm run test:r-live-revisions
 
+      - name: Verify saved reduction previews are read-only
+        run: npm run test:r-restored-reductions
+
+      - name: Verify default R inspection works on raw and processed analyses
+        run: npm run test:r-expert-starter
+
       - name: Run DEG Find-Markers Smoke Test
         run: npm run test:deg-markers
 

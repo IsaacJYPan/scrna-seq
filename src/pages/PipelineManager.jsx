@@ -301,6 +301,7 @@ export default function PipelineManager({
 
             <WorkflowLibrary key={`workflow:${userEmail}:${activeProjectId}`}
               userEmail={userEmail} projectId={activeProjectId} selectedObject={selectedObject}
+              runtimeProfileId={deploymentPolicy.expertRProfile?.id}
               enabled={deploymentPolicy.expertREnabled === true && canWriteProject && Number(selectedObject?.ownerUserId) === Number(userId)}
               unsavedLiveChanges={unsavedLiveChanges} onOpen={onOpenWorkflow} />
             <ExecutablePipelines

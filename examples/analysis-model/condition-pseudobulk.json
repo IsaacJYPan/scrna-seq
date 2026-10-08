@@ -1,0 +1,445 @@
+{
+  "caseId": "condition-pseudobulk",
+  "illustrative": true,
+  "description": "Explicit independent biological samples, design and a finite contrast collection enter together. Sample-level aggregation and model validation belong to the selected method; condition names alone do not establish replication.",
+  "recipe": {
+    "format": "traceomics-workflow",
+    "schemaVersion": 2,
+    "id": "lab.pseudobulk",
+    "name": "Condition pseudobulk",
+    "version": "1.0.0",
+    "description": "Illustrative analysis contract; this record does not certify an installed scientific executor.",
+    "inputs": {
+      "analyses": {
+        "type": "object",
+        "cardinality": "collection",
+        "format": {
+          "id": "org.seurat.object",
+          "version": "5"
+        },
+        "minItems": 2,
+        "maxItems": 24
+      },
+      "design": {
+        "type": "design",
+        "cardinality": "one",
+        "format": {
+          "id": "org.traceomics.experimental-design",
+          "version": "1"
+        }
+      },
+      "contrasts": {
+        "type": "table",
+        "cardinality": "collection",
+        "format": {
+          "id": "org.traceomics.table",
+          "version": "1"
+        },
+        "minItems": 1,
+        "maxItems": 12
+      }
+    },
+    "outputs": {},
+    "environments": {
+      "research": {
+        "profileId": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e",
+        "runtime": {
+          "language": "r",
+          "version": "4.5.1"
+        },
+        "lockfile": "environment/renv.lock"
+      }
+    },
+    "files": {
+      "environment/renv.lock": "{\"R\":{\"Version\":\"4.5.1\"},\"Packages\":{}}",
+      "steps/compare-conditions.R": "validate_design(inputs$design, inputs$analyses)\nstop(\"Contract example: bind a validated sample-level pseudobulk implementation before execution.\")",
+      "helpers/design.R": "validate_design <- function(design, analyses) { if (is.null(design$samples)) stop(\"Declare biological samples and replication in the design.\") }"
+    },
+    "steps": [
+      {
+        "id": "compare-conditions",
+        "label": "compare-conditions",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/compare-conditions.R",
+          "helpers": [
+            "helpers/design.R"
+          ],
+          "state": "isolated"
+        },
+        "inputs": {
+          "analyses": {
+            "type": "object",
+            "cardinality": "collection",
+            "format": {
+              "id": "org.seurat.object",
+              "version": "5"
+            },
+            "minItems": 2,
+            "maxItems": 24
+          },
+          "design": {
+            "type": "design",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.experimental-design",
+              "version": "1"
+            }
+          },
+          "contrasts": {
+            "type": "table",
+            "cardinality": "collection",
+            "format": {
+              "id": "org.traceomics.table",
+              "version": "1"
+            },
+            "minItems": 1,
+            "maxItems": 12
+          }
+        },
+        "bindings": {
+          "analyses": {
+            "kind": "input",
+            "port": "analyses"
+          },
+          "design": {
+            "kind": "input",
+            "port": "design"
+          },
+          "contrasts": {
+            "kind": "input",
+            "port": "contrasts"
+          }
+        },
+        "outputs": {
+          "results": {
+            "type": "table",
+            "cardinality": "collection",
+            "format": {
+              "id": "org.traceomics.table",
+              "version": "1"
+            },
+            "minItems": 1,
+            "maxItems": 12
+          }
+        },
+        "parameters": {
+          "formula": {
+            "type": "formula",
+            "label": "Model formula",
+            "default": "~ donor + condition",
+            "input": "design",
+            "maxLength": 240
+          }
+        },
+        "environment": "research",
+        "ui": {
+          "label": "compare-conditions",
+          "results": [
+            "results"
+          ]
+        }
+      }
+    ],
+    "package": {
+      "license": "MIT",
+      "authors": [
+        "TraceOmics"
+      ],
+      "permissions": [
+        "read-inputs",
+        "write-outputs"
+      ]
+    }
+  },
+  "artifactVersions": [
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "condition-pseudobulk-input-analyses-0",
+      "versionId": "condition-pseudobulk-input-analyses-0-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.seurat.object",
+        "version": "5",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "e302edafc8b6864c4c1004cce7a77c459e762a764cf80e5dfcb46c008febdbc6",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-0",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "condition-pseudobulk-input-analyses-1",
+      "versionId": "condition-pseudobulk-input-analyses-1-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "object",
+      "format": {
+        "id": "org.seurat.object",
+        "version": "5",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "2501ec6529abecb63272c115a007036d9e738c3f22df4d5befbe81d710ec86d9",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-1",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "condition-pseudobulk-input-design",
+      "versionId": "condition-pseudobulk-input-design-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "design",
+      "format": {
+        "id": "org.traceomics.experimental-design",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "45e416e07679a00ebada95ed6d0b02e0e7a99d1c30946ebefbc8146e19e95c4a",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-2",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "condition-pseudobulk-input-contrasts-0",
+      "versionId": "condition-pseudobulk-input-contrasts-0-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "table",
+      "format": {
+        "id": "org.traceomics.table",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "43991ba4ddc5166a3a81db4b080a751549839f746ffb01133ced599ae56eefad",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-3",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "condition-pseudobulk-compare-conditions-results-0",
+      "versionId": "condition-pseudobulk-compare-conditions-results-0-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "table",
+      "format": {
+        "id": "org.traceomics.table",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "07930bed4cf0971b932a4f7519adbd1031712fd83b3bee9926781bca8ec22097",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-4",
+      "sourceRunId": "condition-pseudobulk-compare-conditions-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    }
+  ],
+  "operationVersions": [
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "lab.pseudobulk.compare-conditions",
+      "version": "1.0.0",
+      "digest": "dea2fd916d3274a21db9e1518219808c83eb2500b38aa206a6b74c3588a09d9b",
+      "method": {
+        "kind": "r",
+        "entry": "steps/compare-conditions.R",
+        "helpers": [
+          "helpers/design.R"
+        ],
+        "state": "isolated"
+      },
+      "inputs": {
+        "analyses": {
+          "type": "object",
+          "cardinality": "collection",
+          "format": {
+            "id": "org.seurat.object",
+            "version": "5"
+          },
+          "minItems": 2,
+          "maxItems": 24
+        },
+        "design": {
+          "type": "design",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.experimental-design",
+            "version": "1"
+          }
+        },
+        "contrasts": {
+          "type": "table",
+          "cardinality": "collection",
+          "format": {
+            "id": "org.traceomics.table",
+            "version": "1"
+          },
+          "minItems": 1,
+          "maxItems": 12
+        }
+      },
+      "outputs": {
+        "results": {
+          "type": "table",
+          "cardinality": "collection",
+          "format": {
+            "id": "org.traceomics.table",
+            "version": "1"
+          },
+          "minItems": 1,
+          "maxItems": 12
+        }
+      },
+      "parameters": {
+        "formula": {
+          "type": "formula",
+          "label": "Model formula",
+          "default": "~ donor + condition",
+          "input": "design",
+          "maxLength": 240
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      }
+    }
+  ],
+  "runs": [
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "condition-pseudobulk-compare-conditions-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "lab.pseudobulk.compare-conditions",
+        "version": "1.0.0",
+        "digest": "dea2fd916d3274a21db9e1518219808c83eb2500b38aa206a6b74c3588a09d9b"
+      },
+      "recipe": {
+        "id": "lab.pseudobulk",
+        "version": "1.0.0",
+        "digest": "bfee9fcfc6bffeb951969c3b5177f1b590b2bf35c87f85a9186015791b3b7555"
+      },
+      "inputs": {
+        "analyses": [
+          {
+            "artifactId": "condition-pseudobulk-input-analyses-0",
+            "versionId": "condition-pseudobulk-input-analyses-0-v1",
+            "projectId": "example-project",
+            "sha256": "e302edafc8b6864c4c1004cce7a77c459e762a764cf80e5dfcb46c008febdbc6"
+          },
+          {
+            "artifactId": "condition-pseudobulk-input-analyses-1",
+            "versionId": "condition-pseudobulk-input-analyses-1-v1",
+            "projectId": "example-project",
+            "sha256": "2501ec6529abecb63272c115a007036d9e738c3f22df4d5befbe81d710ec86d9"
+          }
+        ],
+        "design": {
+          "artifactId": "condition-pseudobulk-input-design",
+          "versionId": "condition-pseudobulk-input-design-v1",
+          "projectId": "example-project",
+          "sha256": "45e416e07679a00ebada95ed6d0b02e0e7a99d1c30946ebefbc8146e19e95c4a"
+        },
+        "contrasts": [
+          {
+            "artifactId": "condition-pseudobulk-input-contrasts-0",
+            "versionId": "condition-pseudobulk-input-contrasts-0-v1",
+            "projectId": "example-project",
+            "sha256": "43991ba4ddc5166a3a81db4b080a751549839f746ffb01133ced599ae56eefad"
+          }
+        ]
+      },
+      "parameters": {
+        "formula": "~ donor + condition"
+      },
+      "design": {
+        "artifactId": "condition-pseudobulk-input-design",
+        "versionId": "condition-pseudobulk-input-design-v1",
+        "projectId": "example-project",
+        "sha256": "45e416e07679a00ebada95ed6d0b02e0e7a99d1c30946ebefbc8146e19e95c4a"
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "results": [
+          {
+            "artifactId": "condition-pseudobulk-compare-conditions-results-0",
+            "versionId": "condition-pseudobulk-compare-conditions-results-0-v1",
+            "projectId": "example-project",
+            "sha256": "07930bed4cf0971b932a4f7519adbd1031712fd83b3bee9926781bca8ec22097"
+          }
+        ]
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    }
+  ],
+  "versionBoundaries": {
+    "inputVersions": [
+      "condition-pseudobulk-input-analyses-0-v1",
+      "condition-pseudobulk-input-analyses-1-v1",
+      "condition-pseudobulk-input-design-v1",
+      "condition-pseudobulk-input-contrasts-0-v1"
+    ],
+    "operationVersions": [
+      "lab.pseudobulk.compare-conditions@1.0.0"
+    ],
+    "outputVersions": [
+      "condition-pseudobulk-compare-conditions-results-0-v1"
+    ],
+    "recipeVersion": "lab.pseudobulk@1.0.0"
+  }
+}

@@ -1,0 +1,383 @@
+{
+  "caseId": "lr-subset",
+  "illustrative": true,
+  "description": "Named LR pairs are selected from a versioned candidate table. An empty pair list explicitly retains all pairs; downstream results reference the saved subset and exact criteria.",
+  "recipe": {
+    "format": "traceomics-workflow",
+    "schemaVersion": 2,
+    "id": "lab.lr-subset",
+    "name": "Select LR pairs",
+    "version": "1.0.0",
+    "description": "Illustrative analysis contract; this record does not certify an installed scientific executor.",
+    "inputs": {
+      "candidates": {
+        "type": "table",
+        "cardinality": "one",
+        "format": {
+          "id": "org.traceomics.lr-candidates",
+          "version": "1"
+        }
+      },
+      "design": {
+        "type": "design",
+        "cardinality": "one",
+        "format": {
+          "id": "org.traceomics.experimental-design",
+          "version": "1"
+        },
+        "optional": true
+      }
+    },
+    "outputs": {},
+    "environments": {
+      "research": {
+        "profileId": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e",
+        "runtime": {
+          "language": "r",
+          "version": "4.5.1"
+        },
+        "lockfile": "environment/renv.lock"
+      }
+    },
+    "files": {
+      "environment/renv.lock": "{\"R\":{\"Version\":\"4.5.1\"},\"Packages\":{}}",
+      "steps/select-pairs.R": "pairs <- params$pairs\ncandidates <- inputs$candidates\nif (length(pairs) == 0) selected <- candidates else {\n  wanted <- vapply(pairs, function(pair) paste(pair$ligand, pair$receptor, sep = \"\\\\r\"), character(1))\n  selected <- candidates[paste(candidates$ligand, candidates$receptor, sep = \"\\\\r\") %in% wanted, , drop = FALSE]\n}\nwrite_output(\"selected\", selected)\nwrite_output(\"counts\", list(retained = nrow(selected), excluded = nrow(candidates) - nrow(selected)))"
+    },
+    "steps": [
+      {
+        "id": "select-pairs",
+        "label": "select-pairs",
+        "operation": {
+          "kind": "r",
+          "entry": "steps/select-pairs.R",
+          "helpers": [],
+          "state": "isolated"
+        },
+        "inputs": {
+          "candidates": {
+            "type": "table",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.lr-candidates",
+              "version": "1"
+            }
+          },
+          "design": {
+            "type": "design",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.experimental-design",
+              "version": "1"
+            },
+            "optional": true
+          }
+        },
+        "bindings": {
+          "candidates": {
+            "kind": "input",
+            "port": "candidates"
+          },
+          "design": {
+            "kind": "input",
+            "port": "design"
+          }
+        },
+        "outputs": {
+          "selected": {
+            "type": "table",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.lr-candidates",
+              "version": "1"
+            }
+          },
+          "counts": {
+            "type": "metrics",
+            "cardinality": "one",
+            "format": {
+              "id": "org.traceomics.metrics",
+              "version": "1"
+            }
+          }
+        },
+        "parameters": {
+          "pairs": {
+            "type": "pair-list",
+            "label": "Ligand receptor pairs",
+            "default": [],
+            "empty": "all",
+            "maxItems": 200,
+            "input": "candidates"
+          }
+        },
+        "environment": "research",
+        "ui": {
+          "label": "select-pairs",
+          "results": [
+            "selected",
+            "counts"
+          ]
+        }
+      }
+    ],
+    "package": {
+      "license": "MIT",
+      "authors": [
+        "TraceOmics"
+      ],
+      "permissions": [
+        "read-inputs",
+        "write-outputs"
+      ]
+    }
+  },
+  "artifactVersions": [
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "lr-subset-input-candidates",
+      "versionId": "lr-subset-input-candidates-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "table",
+      "format": {
+        "id": "org.traceomics.lr-candidates",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "4020e9d3ef1d5eea017c833aaa28f220046ba4d7f0bb86d847d482a2e4711848",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-0",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "lr-subset-input-design",
+      "versionId": "lr-subset-input-design-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "design",
+      "format": {
+        "id": "org.traceomics.experimental-design",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "49beeb4235e6f152b0a41ff54ffd0ccc000ae972e50098b45f43ea0f1a2aa43f",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-1",
+      "sourceRunId": null,
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "lr-subset-select-pairs-selected",
+      "versionId": "lr-subset-select-pairs-selected-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "table",
+      "format": {
+        "id": "org.traceomics.lr-candidates",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "4cc7399e0cbc4c99e16568b79948b0ddcf60b0beb6fb32bc8be9699dcdf9ad32",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-2",
+      "sourceRunId": "lr-subset-select-pairs-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    },
+    {
+      "kind": "artifact-version",
+      "schemaVersion": 1,
+      "artifactId": "lr-subset-select-pairs-counts",
+      "versionId": "lr-subset-select-pairs-counts-v1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "type": "metrics",
+      "format": {
+        "id": "org.traceomics.metrics",
+        "version": "1",
+        "metadata": {
+          "org.traceomics.example:placeholder": true
+        }
+      },
+      "sha256": "b98dd998209aca8a7a8bbeb3f1ee255e6c10391b4a3898ae1bb8113dfd946be5",
+      "sizeBytes": 0,
+      "storageRef": "example-storage-3",
+      "sourceRunId": "lr-subset-select-pairs-run1",
+      "createdAt": "2026-10-08T00:00:00Z",
+      "previews": []
+    }
+  ],
+  "operationVersions": [
+    {
+      "kind": "operation-version",
+      "schemaVersion": 1,
+      "id": "lab.lr-subset.select-pairs",
+      "version": "1.0.0",
+      "digest": "fb526d5a78b23745670f15d2de5036e197f0aaea8830a871aaad1eda174a32e6",
+      "method": {
+        "kind": "r",
+        "entry": "steps/select-pairs.R",
+        "helpers": [],
+        "state": "isolated"
+      },
+      "inputs": {
+        "candidates": {
+          "type": "table",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.lr-candidates",
+            "version": "1"
+          }
+        },
+        "design": {
+          "type": "design",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.experimental-design",
+            "version": "1"
+          },
+          "optional": true
+        }
+      },
+      "outputs": {
+        "selected": {
+          "type": "table",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.lr-candidates",
+            "version": "1"
+          }
+        },
+        "counts": {
+          "type": "metrics",
+          "cardinality": "one",
+          "format": {
+            "id": "org.traceomics.metrics",
+            "version": "1"
+          }
+        }
+      },
+      "parameters": {
+        "pairs": {
+          "type": "pair-list",
+          "label": "Ligand receptor pairs",
+          "default": [],
+          "empty": "all",
+          "maxItems": 200,
+          "input": "candidates"
+        }
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      }
+    }
+  ],
+  "runs": [
+    {
+      "kind": "run",
+      "schemaVersion": 1,
+      "id": "lr-subset-select-pairs-run1",
+      "projectId": "example-project",
+      "ownerId": "researcher-a",
+      "operation": {
+        "id": "lab.lr-subset.select-pairs",
+        "version": "1.0.0",
+        "digest": "fb526d5a78b23745670f15d2de5036e197f0aaea8830a871aaad1eda174a32e6"
+      },
+      "recipe": {
+        "id": "lab.lr-subset",
+        "version": "1.0.0",
+        "digest": "a36123b5089aa96d324f4f3a35d53d0e6c48dea15ea57b1942cafab1ea316950"
+      },
+      "inputs": {
+        "candidates": {
+          "artifactId": "lr-subset-input-candidates",
+          "versionId": "lr-subset-input-candidates-v1",
+          "projectId": "example-project",
+          "sha256": "4020e9d3ef1d5eea017c833aaa28f220046ba4d7f0bb86d847d482a2e4711848"
+        },
+        "design": {
+          "artifactId": "lr-subset-input-design",
+          "versionId": "lr-subset-input-design-v1",
+          "projectId": "example-project",
+          "sha256": "49beeb4235e6f152b0a41ff54ffd0ccc000ae972e50098b45f43ea0f1a2aa43f"
+        }
+      },
+      "parameters": {
+        "pairs": []
+      },
+      "design": {
+        "artifactId": "lr-subset-input-design",
+        "versionId": "lr-subset-input-design-v1",
+        "projectId": "example-project",
+        "sha256": "49beeb4235e6f152b0a41ff54ffd0ccc000ae972e50098b45f43ea0f1a2aa43f"
+      },
+      "environment": {
+        "id": "scrna-r-4.5-bioconductor-3.22-v1",
+        "version": "1",
+        "digest": "f6baa2a2bec09b0934bf9452dd88d10ead6db6b694c7ede7242a3392c4a1540e"
+      },
+      "target": {
+        "id": "remote-workstation",
+        "kind": "remote"
+      },
+      "seed": 42,
+      "status": "succeeded",
+      "startedAt": "2026-10-08T00:00:00Z",
+      "finishedAt": "2026-10-08T00:00:01Z",
+      "outputs": {
+        "selected": {
+          "artifactId": "lr-subset-select-pairs-selected",
+          "versionId": "lr-subset-select-pairs-selected-v1",
+          "projectId": "example-project",
+          "sha256": "4cc7399e0cbc4c99e16568b79948b0ddcf60b0beb6fb32bc8be9699dcdf9ad32"
+        },
+        "counts": {
+          "artifactId": "lr-subset-select-pairs-counts",
+          "versionId": "lr-subset-select-pairs-counts-v1",
+          "projectId": "example-project",
+          "sha256": "b98dd998209aca8a7a8bbeb3f1ee255e6c10391b4a3898ae1bb8113dfd946be5"
+        }
+      },
+      "kernel": null,
+      "replay": {
+        "complete": false,
+        "issues": [
+          "Illustrative references contain no scientific data or executable environment."
+        ]
+      }
+    }
+  ],
+  "versionBoundaries": {
+    "inputVersions": [
+      "lr-subset-input-candidates-v1",
+      "lr-subset-input-design-v1"
+    ],
+    "operationVersions": [
+      "lab.lr-subset.select-pairs@1.0.0"
+    ],
+    "outputVersions": [
+      "lr-subset-select-pairs-selected-v1",
+      "lr-subset-select-pairs-counts-v1"
+    ],
+    "recipeVersion": "lab.lr-subset@1.0.0"
+  }
+}
