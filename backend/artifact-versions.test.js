@@ -136,8 +136,16 @@ describe.skipIf(!configured)('immutable artifact versions with real HTTP/storage
     expect((await multipart('table.csv', 'a\n1')).status).toBe(403);
   });
   it('paginates timestamp ties without losing microsecond records and bounds cursors', async () => {
-    const versions = await Promise.all(Array.from({ length: 4 }, (_, index) => file('table.csv', 'gene,score\nA,' + index)));
-    for (const [index, version] of versions.entries()) await db.query("UPDATE managed_artifact_versions SET created_at=$2::timestamptz WHERE id=$1", [version.versionId, `2026-10-08T00:00:00.12300${index}Z`]);
+    const base = await file('table.csv', 'gene,score\nA,1');
+    const original=(await db.query('SELECT * FROM managed_artifact_versions WHERE id=$1',[base.versionId])).rows[0];
+    const versions=[];
+    for (let index=0;index<4;index++) {
+      const versionId='av_'+crypto.randomBytes(12).toString('hex');
+      const key=storage.projectStorageFileKey(project.id,'artifacts',versionId,'content.csv');await provider.copyVerified(original.storage_key,key,{checksumSha256:original.checksum_sha256,sizeBytes:original.size_bytes});
+      await db.query(`INSERT INTO managed_artifact_versions(id,artifact_id,project_id,owner_user_id,name,version_number,artifact_type,format_json,mime_type,checksum_sha256,size_bytes,storage_key,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz)`,[versionId,original.artifact_id,project.id,user.id,original.name,index+2,original.artifact_type,original.format_json,original.mime_type,original.checksum_sha256,original.size_bytes,key,`2026-10-08T00:00:00.12300${index}Z`]);
+      versions.push({versionId});
+    }
+    await db.query('DELETE FROM managed_artifact_versions WHERE id=$1',[base.versionId]);
     const collected = []; let before;
     do {
       const page = await service.list(user.id, project.id, { limit: 1, before });

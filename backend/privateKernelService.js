@@ -10,6 +10,7 @@ const { getExpertREnvironment } = require('./expertSandboxClient');
 const { validateEnvironmentManifest, summarizeEnvironmentManifest, validateEnvironmentReference, assertEnvironmentMatches } = require('./rEnvironment');
 const { createPrivateKernelClient } = require('./privateKernelClient');
 const c = require('./privateKernelContract');
+const { createPrivateKernelPublicationService } = require('./privateKernelPublications');
 const ACTIVE = ['starting','ready','running','unknown','stopping'];
 const id = prefix => prefix + '_' + crypto.randomBytes(12).toString('hex');
 const time = value => value == null ? null : new Date(value).toISOString();
@@ -43,7 +44,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     if (!row) throw missing(); return row;
   }
   function session(row) {
-    return { id:row.id,projectId:row.project_id,workspaceId:row.workspace_id,analysisObjectId:row.analysis_object_id,status:row.status,generation:row.runtime_generation,environment:row.environment_json,inputs:row.inputs_json,resources:row.resources_json,target:row.target_json,nextOrder:Number(row.next_order),activeExecutionId:row.active_execution_id,createdAt:time(row.created_at),startedAt:time(row.started_at),expiresAt:time(row.expires_at),stoppedAt:time(row.stopped_at),memoryState:['ready','running'].includes(row.status)?'available':['stopped','failed'].includes(row.status)?'lost':'unknown',replay:{complete:false,issues:['Variables and files in kernel memory are unsaved. Selected input versions and ordered source alone do not capture every intermediate value.','Console previews are journal evidence; scientific outputs have not been published as artifact versions.']}};
+    return { id:row.id,projectId:row.project_id,workspaceId:row.workspace_id,analysisObjectId:row.analysis_object_id,status:row.status,generation:row.runtime_generation,environment:row.environment_json,inputs:row.inputs_json,resources:row.resources_json,target:row.target_json,nextOrder:Number(row.next_order),activeExecutionId:row.active_execution_id,createdAt:time(row.created_at),startedAt:time(row.started_at),expiresAt:time(row.expires_at),stoppedAt:time(row.stopped_at),memoryState:['ready','running'].includes(row.status)?'available':['stopped','failed'].includes(row.status)?'lost':'unknown',replay:{complete:false,issues:['Variables and files in kernel memory are unsaved. Selected input versions and ordered source alone do not capture every intermediate value.','Console previews are journal evidence. Explicitly saved outputs retain artifact versions; other variables and files remain unsaved.']}};
   }
   function receipt(row, detail = false) {
     return { id:row.id,kernelId:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),status:row.status,sourceSha256:row.source_sha256,createdAt:time(row.created_at),startedAt:time(row.started_at),completedAt:time(row.completed_at),...(detail?{source:row.source_code,result:row.result_json}:{}),completionKnown:['completed','failed'].includes(row.status) };
@@ -59,6 +60,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
       await connection.query("UPDATE private_r_executions SET status='unknown',updated_at=NOW() WHERE kernel_id=$1 AND status IN ('reserved','running')",[row.id]);
       await connection.query(`UPDATE private_r_kernels SET status=$2,active_execution_id=NULL,stopped_at=CASE WHEN $2='stopped' THEN NOW() ELSE stopped_at END,updated_at=NOW() WHERE id=$1 AND status=ANY($3::text[])`,[row.id,stopped?'stopped':'unknown',ACTIVE]);
     });
+    if(stopped)await publications.afterStop(row);
     return owned(row.owner_user_id,row.project_id,row.id);
   }
   async function checked(row) {
@@ -77,6 +79,8 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
   async function reconcile(row) {
     if (!ACTIVE.includes(row.status)) return row;
     if (Date.parse(row.expires_at)<=now()) return stopRow(row);
+    const publishing = await publications.reconcileActive(row);
+    if (publishing) return publishing;
     try {
       const observed = c.state(await client.inspect(c.scope(row),row.id),row);
       if (row.active_execution_id) {
@@ -172,6 +176,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     await checked(await owned(userId,projectId,kernelId)); return execution(userId,projectId,kernelId,started.id);
   }
   async function stop(userId,projectId,kernelId) { const row=await owned(userId,projectId,kernelId); await checked(row); const result=await stopRow(row); await access(userId,projectId); return session(result); }
-  return {list,start,get,execute,execution,executions,stop};
+  const publications=createPrivateKernelPublicationService({db,provider,client,artifacts,transaction,access,lockedAccess,owned,checked,probe:options.probeCapabilities||require('./expertRAccess').probeExpertRRuntime});
+  return {list,start,get,execute,execution,executions,stop,publish:publications.publish,publications:publications.list};
 }
 module.exports={createPrivateKernelService};

@@ -539,14 +539,16 @@ function createExpertSandboxBroker(env = process.env) {
       if (!runtimeVerified) { res.statusCode = 503; return res.end(JSON.stringify({ status: 'unavailable' })); }
       return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
         sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION, environment,
-        persistentKernel: privateKernelStatus.state === 'ready', privateKernelStatus }));
+        persistentKernel: privateKernelStatus.state === 'ready',
+        persistentKernelPublications: privateKernelStatus.state === 'ready' && privateKernelStatus.publications === true,
+        privateKernelStatus }));
     }
     if (req.method === 'GET' && req.url === '/environment'
         && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       if (!runtimeVerified || !environmentManifest) { res.statusCode = 503; return res.end(JSON.stringify({ error: 'Exact R environment is unavailable.' })); }
       return res.end(environmentBytes(environmentManifest));
     }
-    const kernelRoute = /^\/kernels\/(start|pk_[a-f0-9]{24}\/(?:inspect|execute|stop))$/.exec(req.url || '');
+    const kernelRoute = /^\/kernels\/(start|pk_[a-f0-9]{24}\/(?:inspect|execute|export|export-status|stop))$/.exec(req.url || '');
     if (req.method === 'POST' && kernelRoute
         && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       if (!runtimeVerified || privateKernelStatus.state !== 'ready' || !kernelRuntime) {
@@ -569,11 +571,13 @@ function createExpertSandboxBroker(env = process.env) {
         const parts = kernelRoute[1].split('/');
         const result = parts[0] === 'start' ? await kernelRuntime.start(body)
           : parts[1] === 'execute' ? await kernelRuntime.execute(body, parts[0], body)
+          : parts[1] === 'export' ? await kernelRuntime.export(body, parts[0], body)
+          : parts[1] === 'export-status' ? await kernelRuntime.exportStatus(body, parts[0], body)
           : await kernelRuntime[parts[1]](body, parts[0]);
         return res.end(JSON.stringify(result));
       } catch (error) {
         const code = error.publicSafeHandlerError === true ? error.code : 'PRIVATE_KERNEL_UNAVAILABLE';
-        res.statusCode = code === 'PRIVATE_KERNEL_NOT_FOUND' ? 404
+        res.statusCode = /NOT_FOUND$/.test(code) ? 404
           : /INVALID/.test(code) ? 400 : /BUSY|CONFLICT|ORDER/.test(code) ? 409
             : /LIMIT/.test(code) ? 429 : 503;
         return res.end(JSON.stringify({ code,
@@ -867,8 +871,8 @@ function createExpertSandboxBroker(env = process.env) {
       try {
         const { createPrivateKernelRuntime } = require('./privateKernelRuntime');
         kernelRuntime = createPrivateKernelRuntime({ env, provider, environmentManifest });
-        await kernelRuntime.initialize();
-        privateKernelStatus = { state: 'ready' };
+        const initialized = await kernelRuntime.initialize();
+        privateKernelStatus = { state: 'ready', publications: initialized.publications === true };
       } catch (error) {
         await kernelRuntime?.close().catch(() => {});
         kernelRuntime = null;

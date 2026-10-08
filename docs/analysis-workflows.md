@@ -92,9 +92,34 @@ supports general R inspection without requiring a preconfigured pipeline.
 Reloading reconnects to an existing session without executing earlier cells.
 Stopping, expiry, or process loss discards unsaved memory. The console retains
 ordered source and bounded output privately, and shows uncertain completion
-without retrying a command. These previews are inspection evidence; they do not
-create published scientific artifact versions or make an unsaved workspace
-fully reproducible. The existing one-shot R form remains available for durable
+without retrying a command. Previews are inspection evidence until explicitly
+saved; retaining them does not make an unsaved workspace fully reproducible.
+
+Use **Save a private artifact version** to retain an existing global R binding as
+an RDS object or a data frame as a complete CSV. Enter its exact binding name,
+such as `obj` or `markers`, rather than an R expression. Object and table saves
+add an ordered serialization command to the private source journal. The initial
+per-file limit is 20 MiB; CSV output includes every row even when the console or
+browser preview shows fewer. CSV saves data columns without R row names or other
+attributes; add important row identifiers as a column, or save the data frame as
+an RDS object to preserve its R attributes. Tables that exceed browser column or cell budgets
+remain available for inspection in private R with a metadata-only browser preview.
+
+Use **Save figure** below a completed console PNG to retain those exact image
+bytes. A retained completed figure can be saved after stopping its session. To
+keep revisions together, select **Version to extend**; earlier versions keep
+their own bytes, checksums, and lineage. Saves remain creator-private and survive
+session termination. Their evidence records the exact source command, earlier
+source references, selected inputs, runtime generation, and pinned environment.
+It also reports that untracked intermediate state and external influences can
+prevent exact replay.
+
+Inspect saved outputs in the console or **Runs & Results → Artifact versions**.
+To reopen an object or table, select its exact saved input version before
+starting a new session, then use `read_input("VERSION_ID")`. RDS deserialization
+occurs only inside the isolated private runtime. A lost save response requires
+an explicit status refresh; refreshing inspects the existing receipt and never
+reruns serialization. The existing one-shot R form remains available for durable
 table, figure, and file-producing runs.
 
 **Runs & Results → Execution history** brings guided jobs, recipe steps, private

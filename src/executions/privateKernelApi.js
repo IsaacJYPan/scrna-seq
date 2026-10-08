@@ -16,3 +16,5 @@ export const executePrivateRKernel=(projectId,kernelId,input,signal)=>request(`$
 export const listPrivateRExecutions=(projectId,kernelId,{limit=30,before,signal}={})=>request(`${base(projectId)}/${encodeURIComponent(kernelId)}/executions?${new URLSearchParams({limit:String(limit),...(before?{before:String(before)}:{})})}`,{signal});
 export const getPrivateRExecution=(projectId,kernelId,executionId,signal)=>request(`${base(projectId)}/${encodeURIComponent(kernelId)}/executions/${encodeURIComponent(executionId)}`,{signal});
 export const stopPrivateRKernel=(projectId,kernelId,signal)=>request(`${base(projectId)}/${encodeURIComponent(kernelId)}/stop`,{method:'POST',body:{},signal});
+export const publishPrivateROutput=(projectId,kernelId,input,signal)=>request(`${base(projectId)}/${encodeURIComponent(kernelId)}/publications`,{method:'POST',body:input,signal});
+export const listPrivateRPublications=(projectId,kernelId,{limit=30,before,signal}={})=>request(`${base(projectId)}/${encodeURIComponent(kernelId)}/publications?${new URLSearchParams({limit:String(limit),...(before?{before:String(before)}:{})})}`,{signal});

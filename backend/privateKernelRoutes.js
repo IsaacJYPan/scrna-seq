@@ -13,6 +13,8 @@ function privateKernelRoutes({db,provider,requireAuth,serviceOptions}) {
   router.post('/:projectId/:kernelId/executions',route(req=>service.execute(req.user.id,req.params.projectId,req.params.kernelId,req.body)));
   router.get('/:projectId/:kernelId/executions',route(req=>service.executions(req.user.id,req.params.projectId,req.params.kernelId,req.query)));
   router.get('/:projectId/:kernelId/executions/:executionId',route(req=>service.execution(req.user.id,req.params.projectId,req.params.kernelId,req.params.executionId)));
+  router.post('/:projectId/:kernelId/publications',route(req=>service.publish(req.user.id,req.params.projectId,req.params.kernelId,req.body)));
+  router.get('/:projectId/:kernelId/publications',route(req=>service.publications(req.user.id,req.params.projectId,req.params.kernelId,req.query)));
   return router;
 }
 module.exports={privateKernelRoutes};

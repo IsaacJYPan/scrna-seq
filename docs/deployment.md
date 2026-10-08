@@ -158,7 +158,9 @@ contains a credential and must remain private.
 
 New setup also selects `PRIVATE_R_KERNEL_ENABLED=true`. With the current pinned
 R image, the broker independently verifies IRkernel and the reference Jupyter
-client before advertising persistent sessions. Older images can continue
+client before advertising persistent sessions. Named object/table export support
+is probed separately: images with the older kernel adapter can still run console
+commands while output saving remains unavailable. Older images can continue
 one-shot R; the console reports missing kernel support separately. Existing
 installations can enable the flag in their private environment file and rebuild
 and pin the current R image. No kernel connection file or port is published.
@@ -174,8 +176,19 @@ expiry, process loss, or broker restart discards unsaved variables and files.
 The private database retains exact selected input references, environment
 manifest, source, command order, and bounded console previews. A lost response
 leaves completion unconfirmed until inspected; it never triggers automatic
-execution. Scientific output publication and cooperative interruption are
-separate workflows.
+execution.
+
+The console can explicitly save a global R binding as RDS, a data frame as full
+CSV, or a completed preview PNG as an immutable, creator-private managed artifact
+version. Object/table exports stream at most 20 MiB per file through the broker;
+the current bound does not provide large-object export support. Serialization
+shares command ordering and exclusivity with ordinary R execution. The server
+reserves storage capacity before export, verifies actual saved bytes, and commits
+the version and source/input/environment lineage together. Pending or unconfirmed
+saves retain quota reservations. Completed versions survive stopping or restoring
+the session; unsaved R memory does not. Backups include publication receipts and
+managed output files, and restore marks unfinished saves unconfirmed without
+rerunning them. Cooperative interruption and restart remain separate work.
 
 New setup selects `EXPERT_R_ACCESS_POLICY=project-roles`: project owners, admins,
 and analysts can run their own saved analyses without an individual operator

@@ -65,7 +65,8 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500 } = {}) {
         } catch { resolve({ state: 'incompatible' }); return; }
         resolve({ state: 'ready', profileId: result.profileId, imageDigest: result.sandboxImageDigest,
           resourcePolicyVersion: result.resourcePolicyVersion, environment,
-          persistentKernel: result.persistentKernel === true });
+          persistentKernel: result.persistentKernel === true,
+          persistentKernelPublications: result.persistentKernelPublications === true });
       });
     });
     const deadline = setTimeout(() => { resolve({ state: 'unreachable' }); request.destroy(); }, timeoutMs);

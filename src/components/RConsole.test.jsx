@@ -1,16 +1,19 @@
 import React from 'react';
-import {act,fireEvent,render,screen,waitFor} from '@testing-library/react';
+import {act,fireEvent,render,screen,waitFor,within} from '@testing-library/react';
 import {beforeEach,expect,it,vi} from 'vitest';
 import RConsole from './RConsole';
 import * as api from '../executions/privateKernelApi';
-import {listArtifactVersions} from '../artifacts/artifactApi';
-vi.mock('../executions/privateKernelApi',()=>({listPrivateRKernels:vi.fn(),startPrivateRKernel:vi.fn(),getPrivateRKernel:vi.fn(),executePrivateRKernel:vi.fn(),listPrivateRExecutions:vi.fn(),getPrivateRExecution:vi.fn(),stopPrivateRKernel:vi.fn()}));
-vi.mock('../artifacts/artifactApi',()=>({listArtifactVersions:vi.fn()}));
+import {listArtifactVersions,getArtifactVersion,previewArtifactVersion} from '../artifacts/artifactApi';
+vi.mock('../executions/privateKernelApi',()=>({listPrivateRKernels:vi.fn(),startPrivateRKernel:vi.fn(),getPrivateRKernel:vi.fn(),executePrivateRKernel:vi.fn(),listPrivateRExecutions:vi.fn(),getPrivateRExecution:vi.fn(),stopPrivateRKernel:vi.fn(),publishPrivateROutput:vi.fn(),listPrivateRPublications:vi.fn()}));
+vi.mock('../artifacts/artifactApi',()=>({listArtifactVersions:vi.fn(),getArtifactVersion:vi.fn(),previewArtifactVersion:vi.fn(),artifactImageUrl:(project,id)=>`/api/artifact-versions/${project}/${id}/image`}));
 const environment={rVersion:'4.5.3',manifestSha256:'a'.repeat(64)};
 const kernel={id:'pk_one',status:'ready',generation:'b'.repeat(64),environment,inputs:[],resources:{cpuLimit:1,memoryBytes:1024**3,idleTimeoutSeconds:900},target:{id:'private-r-kernel'},memoryState:'available'};
 const entry={id:'pex_one',order:1,status:'completed',source:'n <- 3',sourceSha256:'c'.repeat(64),completionKnown:true,result:{stdout:'[1] 3\n',warnings:['R warning'],error:null,tables:[{name:'Cells',columns:['count','condition'],rows:[[3,'<script>inert</script>']]}],figures:[{mimeType:'image/png',data:'YWJj',sha256:'d'.repeat(64)}]}};
 const props={projectId:'project_one',userId:1,workspaceId:'workspace_one',deploymentPolicy:{expertREnabled:true,persistentKernel:true,expertREnvironment:environment},objects:[]};
-beforeEach(()=>{vi.resetAllMocks();api.listPrivateRKernels.mockResolvedValue({items:[]});api.startPrivateRKernel.mockResolvedValue(kernel);api.getPrivateRKernel.mockResolvedValue(kernel);api.executePrivateRKernel.mockResolvedValue(entry);api.listPrivateRExecutions.mockResolvedValue({items:[entry]});api.getPrivateRExecution.mockResolvedValue(entry);api.stopPrivateRKernel.mockResolvedValue({...kernel,status:'stopped',memoryState:'lost'});listArtifactVersions.mockResolvedValue({items:[]});});
+const publishingProps={...props,deploymentPolicy:{...props.deploymentPolicy,persistentKernelPublications:true}};
+const savedVersion={versionId:'av_saved',artifactId:'art_saved',name:'Saved cells',versionNumber:1,format:{id:'org.r-project.rds',version:'1'},sha256:'e'.repeat(64),ownerId:'1',canReplace:true,reference:{artifactId:'art_saved',versionId:'av_saved',projectId:'project_one',sha256:'e'.repeat(64)},provenance:{sourceExecutionId:'pex_save',environment}};
+const publication={id:'pub_one',status:'completed',type:'object',name:'Saved cells',kernelId:'pk_one',generation:kernel.generation,sourceExecutionId:'pex_save',order:2,sourceSha256:'f'.repeat(64),lineage:{environment,inputs:[],sourceVersions:[{id:'pex_one',order:1,sha256:entry.sourceSha256,status:'completed'}],replay:{complete:false,issues:['Untracked intermediate state']}}};
+beforeEach(()=>{vi.resetAllMocks();api.listPrivateRKernels.mockResolvedValue({items:[]});api.startPrivateRKernel.mockResolvedValue(kernel);api.getPrivateRKernel.mockResolvedValue(kernel);api.executePrivateRKernel.mockResolvedValue(entry);api.listPrivateRExecutions.mockResolvedValue({items:[entry]});api.getPrivateRExecution.mockResolvedValue(entry);api.stopPrivateRKernel.mockResolvedValue({...kernel,status:'stopped',memoryState:'lost'});api.listPrivateRPublications.mockResolvedValue({items:[]});api.publishPrivateROutput.mockResolvedValue({publication,version:savedVersion});listArtifactVersions.mockResolvedValue({items:[]});getArtifactVersion.mockResolvedValue(savedVersion);previewArtifactVersion.mockResolvedValue({integrityVerified:true,preview:{family:'metadata',message:'Open only in a suitable private R runtime.'}});});
 async function start(){await waitFor(()=>expect(api.listPrivateRKernels).toHaveBeenCalled());fireEvent.click(screen.getByRole('button',{name:'Start private session'}));await screen.findByText('Session ready · unsaved memory available');}
 it('starts empty R with exact environment and no pipeline and renders bounded inert source/output/table/PNG',async()=>{
   render(<RConsole {...props}/>);await start();expect(api.startPrivateRKernel).toHaveBeenCalledWith('project_one',expect.objectContaining({workspaceId:'workspace_one',analysisObjectId:null,environment,inputs:[],requestId:expect.any(String)}));
@@ -35,4 +38,51 @@ it('discards late command responses after changing project or user, without subm
 });
 it('keeps unsupported old runtimes and demo deployments explicit without probing or starting kernels',()=>{
   render(<RConsole {...props} deploymentPolicy={{expertREnabled:true,expertREnvironment:environment}}/>);expect(screen.getByRole('status')).toHaveTextContent('private kernel support');expect(api.listPrivateRKernels).not.toHaveBeenCalled();expect(api.startPrivateRKernel).not.toHaveBeenCalled();
+});
+it('saves an exact named binding, verifies saved bytes, retains evidence and refreshes inputs for a new generation',async()=>{
+  listArtifactVersions.mockResolvedValueOnce({items:[]}).mockResolvedValue({items:[savedVersion]});
+  render(<RConsole {...publishingProps}/>);await start();
+  fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'cells with spaces'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Saved cells'}});
+  fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));await screen.findByRole('region',{name:'Saved R artifact preview'});
+  expect(api.publishPrivateROutput).toHaveBeenCalledWith('project_one','pk_one',{requestId:expect.any(String),type:'object',name:'Saved cells',binding:'cells with spaces'});
+  expect(getArtifactVersion).toHaveBeenCalledWith('project_one','av_saved');expect(previewArtifactVersion).toHaveBeenCalledWith('project_one','av_saved',{limit:25});
+  expect(screen.getByText('Saved checksum verified · preview from this exact version')).toBeVisible();expect(screen.getByText(/Source SHA-256/)).toHaveTextContent(publication.sourceSha256);expect(screen.getByText(/Source command 2/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Stop session',exact:true}));fireEvent.click(screen.getByRole('button',{name:'Stop and discard unsaved memory'}));await screen.findByText('Session stopped · unsaved memory lost');
+  expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();fireEvent.click(screen.getByLabelText('Use Saved cells'));fireEvent.click(screen.getByRole('button',{name:'Start private session',exact:true}));
+  await waitFor(()=>expect(api.startPrivateRKernel).toHaveBeenCalledTimes(2));expect(api.startPrivateRKernel.mock.lastCall[1].inputs).toEqual([savedVersion.reference]);
+});
+it('offers only compatible owned managed versions when saving an immutable CSV replacement',async()=>{
+  const table={...savedVersion,versionId:'av_table',name:'Counts',format:{id:'org.ietf.csv'},versionNumber:2};
+  listArtifactVersions.mockResolvedValue({items:[savedVersion,table,{...table,versionId:'av_other',ownerId:'2',name:'Other user'},{...table,versionId:'av_import',canReplace:false,name:'Immutable run output'}]});
+  render(<RConsole {...publishingProps}/>);await start();fireEvent.change(screen.getByLabelText('R output type'),{target:{value:'table'}});
+  expect(within(screen.getByLabelText('Version to extend')).getAllByRole('option').map(option=>option.textContent)).toEqual(['New artifact','Counts · v2']);
+  fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'condition_counts'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Counts'}});fireEvent.change(screen.getByLabelText('Version to extend'),{target:{value:'av_table'}});fireEvent.click(screen.getByRole('button',{name:'Save table',exact:true}));
+  await waitFor(()=>expect(api.publishPrivateROutput).toHaveBeenCalledWith('project_one','pk_one',expect.objectContaining({type:'table',binding:'condition_counts',name:'Counts',previousVersionId:'av_table'})));
+});
+it('saves a completed figure by its original execution and index even after stopping the kernel',async()=>{
+  api.executePrivateRKernel.mockResolvedValue({...entry,result:{...entry.result,figures:[{mimeType:'text/html',data:'invalid'},entry.result.figures[0]]}});
+  render(<RConsole {...publishingProps}/>);await start();fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));await screen.findByRole('img',{name:'R figure 2'});fireEvent.click(screen.getByRole('button',{name:'Save figure 2',exact:true}));fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Condition plot'}});
+  fireEvent.click(screen.getByRole('button',{name:'Stop session',exact:true}));fireEvent.click(screen.getByRole('button',{name:'Stop and discard unsaved memory'}));await screen.findByText('Session stopped · unsaved memory lost');
+  fireEvent.click(screen.getByRole('button',{name:'Save figure',exact:true}));await waitFor(()=>expect(api.publishPrivateROutput).toHaveBeenCalledWith('project_one','pk_one',{requestId:expect.any(String),type:'figure',name:'Condition plot',executionId:'pex_one',figureIndex:1}));
+});
+it('blocks unknown publication retries and reconciles only through explicit status inspection',async()=>{
+  api.publishPrivateROutput.mockRejectedValueOnce(Object.assign(new Error('Publication completion is unknown.'),{code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'}));render(<RConsole {...publishingProps}/>);await start();fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'obj'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Saved cells'}});fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));await screen.findByRole('alert');
+  expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();expect(api.publishPrivateROutput).toHaveBeenCalledTimes(1);
+  api.listPrivateRPublications.mockResolvedValue({items:[{...publication,version:savedVersion}]});fireEvent.click(screen.getByRole('button',{name:'Refresh session status'}));await screen.findByRole('button',{name:'Inspect Saved cells · v1'});expect(api.publishPrivateROutput).toHaveBeenCalledTimes(1);expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeEnabled();
+});
+it('never renders tampered saved bytes and clears saved private evidence after membership revocation',async()=>{
+  api.listPrivateRKernels.mockResolvedValue({items:[kernel]});api.listPrivateRPublications.mockResolvedValue({items:[{...publication,version:savedVersion}]});previewArtifactVersion.mockRejectedValueOnce(Object.assign(new Error('Saved checksum failed.'),{status:409}));render(<RConsole {...publishingProps}/>);fireEvent.click(await screen.findByRole('button',{name:'Inspect Saved cells · v1'}));await screen.findByRole('alert');expect(screen.queryByRole('region',{name:'Saved R artifact preview'})).not.toBeInTheDocument();
+  api.getPrivateRKernel.mockRejectedValueOnce(Object.assign(new Error('Project access revoked.'),{status:403}));fireEvent.click(screen.getByRole('button',{name:'Refresh session status'}));await screen.findByText('Project access revoked.');expect(screen.queryByRole('region',{name:'Saved R outputs'})).not.toBeInTheDocument();expect(screen.queryByText(publication.generation)).not.toBeInTheDocument();
+});
+it('discards a late publication response after changing user or project without loading its private preview',async()=>{
+  let finish;api.publishPrivateROutput.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));const view=render(<RConsole {...publishingProps}/>);await start();fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'obj'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Saved cells'}});fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));view.rerender(<RConsole {...publishingProps} projectId="project_two" userId={2}/>);await act(async()=>finish({publication,version:savedVersion}));expect(screen.queryByRole('region',{name:'Saved R outputs'})).not.toBeInTheDocument();expect(getArtifactVersion).not.toHaveBeenCalled();expect(api.publishPrivateROutput).toHaveBeenCalledTimes(1);
+});
+it('keeps the existing console available on older runtimes and requires independently verified publication support',async()=>{
+  render(<RConsole {...props}/>);await start();expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled();expect(screen.getByText(/Saving R outputs requires a runtime/)).toBeVisible();expect(screen.queryByRole('button',{name:'Save object',exact:true})).not.toBeInTheDocument();expect(api.listPrivateRPublications).not.toHaveBeenCalled();
+});
+it('blocks further commands while a returned publication receipt remains unknown and never creates a partial preview',async()=>{
+  api.publishPrivateROutput.mockResolvedValue({publication:{...publication,status:'unknown'},version:null});render(<RConsole {...publishingProps}/>);await start();fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'obj'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Saved cells'}});fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));await screen.findByText('Saved cells · object · unknown');await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh session status'})).toBeEnabled());expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();expect(screen.queryByRole('region',{name:'Saved R artifact preview'})).not.toBeInTheDocument();expect(getArtifactVersion).not.toHaveBeenCalled();expect(api.publishPrivateROutput).toHaveBeenCalledTimes(1);
+});
+it('retains a failed save receipt without publishing partial output and permits a later explicit command',async()=>{
+  api.publishPrivateROutput.mockResolvedValue({publication:{...publication,status:'failed',message:'The binding was not saved.'},version:null});render(<RConsole {...publishingProps}/>);await start();fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'missing'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Missing object'}});fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));await screen.findByText('The binding was not saved.');await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());expect(screen.queryByRole('region',{name:'Saved R artifact preview'})).not.toBeInTheDocument();expect(getArtifactVersion).not.toHaveBeenCalled();expect(screen.getByText(/20 MiB limit per saved file/)).toBeVisible();expect(api.publishPrivateROutput).toHaveBeenCalledTimes(1);
 });

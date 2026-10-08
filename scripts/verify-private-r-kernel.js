@@ -12,6 +12,7 @@ const { discoverExpertRuntimeEnvironment } = require('../backend/expertSandboxBr
 const { summarizeEnvironmentManifest,environmentBytes } = require('../backend/rEnvironment');
 const { createLocalStorageProvider } = require('../backend/storage');
 const { validatePrivateKernelStatus } = require('../backend/privateKernelContract');
+const { generatePrivateKernelExportSource } = require('../backend/privateKernelExports');
 
 const image=String(process.env.EXPERT_R_SANDBOX_IMAGE||'');
 if(!/^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$/.test(image))throw new Error('Set EXPERT_R_SANDBOX_IMAGE to the reviewed immutable kernel image.');
@@ -27,9 +28,9 @@ async function main(){
   await fs.mkdir(directory,{recursive:true});
   const manifest=await discoverExpertRuntimeEnvironment(env,runCommand),environment=summarizeEnvironmentManifest(manifest);
   await fs.writeFile(path.join(directory,'environment.json'),environmentBytes(manifest));
-  const provider=createLocalStorageProvider(path.join(directory,'storage'));
+  const provider=createLocalStorageProvider({root:path.join(directory,'storage')});
   const runtime=createPrivateKernelRuntime({env,provider,environmentManifest:manifest});runtimes.push(runtime);
-  await runtime.initialize();check('reference Jupyter adapter is available in the exact pinned environment');
+  const supported=await runtime.initialize();assert.equal(supported.publications,true);check('reference Jupyter adapter and publications are available in the exact pinned environment');
   const scope={ownerUserId:1101,projectId:'private_kernel_acceptance',workspaceId:'workspace1'};
   const kernelId=id('pk_');const started=await runtime.start({...scope,kernelId,environment,inputs:[]});
   validatePrivateKernelStatus(started,{kernelId,environment});check('actual private kernel starts with generation, resources and lifetime');
@@ -39,6 +40,36 @@ async function main(){
   const first=await runtime.execute(executionScope,kernelId,{executionId:firstId,order:++order,source});assert.equal(first.status,'completed');
   const repeated=await runtime.execute(executionScope,kernelId,{executionId:firstId,order,source});assert.deepEqual(repeated,first);
   const persisted=await execute('cat(private_value + 1L)');assert.equal(persisted.status,'completed');assert.match(persisted.stdout,/42/);check('variables persist and repeated execution receipts do not rerun source');
+  await execute('assign("complete table ` α", data.frame(cell=paste0("cell",seq_len(125)),count=seq_len(125)),envir=.GlobalEnv); full_object <- list(table=get("complete table ` α"), note="snapshot")');
+  function publication(scoped,type,binding,nextOrder) {
+    const publicationId=id('pub_'),version=id('av_'),spec={publicationId,type,binding,executionId:id('pex_'),order:nextOrder,
+      internalStorageKey:`projects/${scope.projectId}/artifacts/${version}/content.${type==='object'?'rds':'csv'}`};
+    spec.source=generatePrivateKernelExportSource({...spec,generation:scoped.generation});return spec;
+  }
+  const savedTableCommand=publication(executionScope,'table','complete table ` α',++order);
+  const savedTable=await runtime.export(executionScope,kernelId,savedTableCommand);assert.equal(savedTable.status,'completed',JSON.stringify(savedTable));
+  assert.equal(savedTable.file.format,'csv');const savedCsv=await fs.readFile(provider.resolveKey(savedTable.file.internalStorageKey));
+  assert.equal(savedCsv.toString('utf8').trim().split('\n').length,126);assert.match(savedCsv.toString('utf8'),/"cell125",125/);
+  assert.equal(digest(savedCsv),savedTable.file.checksumSha256);await provider.inspect(savedTable.file.internalStorageKey,savedTable.file);
+  check('a named complete data frame publishes all 125 rows rather than only its bounded preview');
+  await execute('assign("complete table ` α", data.frame(changed=999), envir=.GlobalEnv)');
+  const repeatedTable=await runtime.export(executionScope,kernelId,savedTableCommand);
+  assert.deepEqual(repeatedTable.file,savedTable.file);assert.equal((await runtime.exportStatus(executionScope,kernelId,{publicationId:savedTableCommand.publicationId})).file.checksumSha256,savedTable.file.checksumSha256);
+  check('later binding edits and publication retries preserve the original immutable bytes');
+  const savedObjectCommand=publication(executionScope,'object','full_object',++order);
+  const savedObject=await runtime.export(executionScope,kernelId,savedObjectCommand);assert.equal(savedObject.status,'completed',JSON.stringify(savedObject));
+  await provider.inspect(savedObject.file.internalStorageKey,savedObject.file);assert.equal(savedObject.file.format,'rds');
+  check('an existing global R object is serialized only in the private container and stored with exact evidence');
+  await assert.rejects(runtime.export(executionScope,kernelId,{...savedObjectCommand,source:savedObjectCommand.source+'\ncat(1)'}),{code:'PRIVATE_KERNEL_PUBLICATION_INVALID'});
+  await assert.rejects(runtime.export({...executionScope,generation:'f'.repeat(64)},kernelId,savedObjectCommand),{code:'PRIVATE_KERNEL_NOT_FOUND'});
+  for(const binding of ['private_value','missing_binding']) {
+    const invalid=await runtime.export(executionScope,kernelId,publication(executionScope,'table',binding,++order));
+    assert.equal(invalid.status,'failed');assert.equal(invalid.file,undefined);
+  }
+  await execute('oversize <- data.frame(value=strrep("x", 21L*1024L*1024L))');
+  const oversize=await runtime.export(executionScope,kernelId,publication(executionScope,'table','oversize',++order));
+  assert.equal(oversize.status,'failed');assert.match(oversize.result.error.message,/20 MiB/);assert.equal(oversize.file,undefined);
+  check('invalid source, generation, missing binding, wrong table type and oversized output fail without saved bytes');
   const table=await execute('display_table(data.frame(cell=c("a","b"), count=c(2,3)), name="Counts")');assert.equal(table.status,'completed');assert.deepEqual(table.tables[0].columns,['cell','count']);assert.deepEqual(table.tables[0].rows,[['a',2],['b',3]]);check('bounded typed tables use a validated rich MIME adapter');
   const figure=await execute('plot(1:3, c(2,4,3), main="Private inspection")');await fs.writeFile(path.join(directory,'plot-result.json'),JSON.stringify(figure));assert.equal(figure.status,'completed',JSON.stringify(figure));assert.equal(figure.figures[0]?.mimeType,'image/png',JSON.stringify({...figure,figures:figure.figures?.map(value=>({...value,data:'<omitted>'}))}));assert.equal(digest(Buffer.from(figure.figures[0].data,'base64')),figure.figures[0].sha256);await fs.writeFile(path.join(directory,'inspection.png'),Buffer.from(figure.figures[0].data,'base64'));check('actual R plot is transported as a bounded verified PNG');
   const warning=await execute('warning("inspect warning"); cat("continued")');assert.equal(warning.status,'completed');assert.match(warning.warnings.join(''),/inspect warning/);
@@ -56,6 +87,12 @@ async function main(){
   const inspected=JSON.parse((await runCommand('docker',['inspect',names.stdout.trim(),'--format','{{json .HostConfig}}'])).stdout);
   assert.equal(inspected.NetworkMode,'none');assert.equal(inspected.ReadonlyRootfs,true);assert.equal(inspected.Privileged,false);assert.ok(inspected.CapDrop.includes('ALL'));assert.equal(inspected.Memory,started.resources.memoryBytes);check('real Docker host configuration enforces the declared network/filesystem/resource boundary');
   await runtime.stop(otherScope,otherId);
+  const restoredId=id('pk_'),objectInput={id:'saved_object',versionId:'object_version',type:'object',format:'rds',name:'object.rds',role:'input',
+    internalStorageKey:savedObject.file.internalStorageKey,checksumSha256:savedObject.file.checksumSha256,sizeBytes:savedObject.file.sizeBytes};
+  const restored=await runtime.start({...otherScope,kernelId:restoredId,environment,inputs:[objectInput]});
+  const reopened=await runtime.execute({...otherScope,generation:restored.generation},restoredId,{executionId:id('pex_'),order:1,source:'restored_object <- read_input("saved_object"); stopifnot(nrow(restored_object$table)==125L, restored_object$table$count[[125L]]==125L, identical(restored_object$note,"snapshot")); cat("reopened saved object")'});
+  assert.equal(reopened.status,'completed',JSON.stringify(reopened));assert.match(reopened.stdout,/reopened saved object/);await runtime.stop(otherScope,restoredId);
+  check('published RDS reopens with its exact saved values on a separate compatible kernel');
   const busy=execute('Sys.sleep(100); private_value <- 99');await sleep(500);await runtime.stop(executionScope,kernelId);assert.equal((await busy).status,'unknown');assert.equal((await runtime.inspect(executionScope,kernelId)).unsavedState,'lost');await assert.rejects(runtime.start({...scope,kernelId,environment,inputs:[]}),{code:'PRIVATE_KERNEL_STOPPED'});check('stopping a busy kernel confirms removal and reports unknown command completion with lost unsaved memory');
 
   const inputKey='projects/private_kernel_acceptance/artifacts/table1/table.csv',csv=Buffer.from('cell,count\na,2\nb,3\n');
@@ -67,6 +104,17 @@ async function main(){
   await assert.rejects(runtime.start({...scope,kernelId:id('pk_'),environment,inputs:[{...input,checksumSha256:'0'.repeat(64)}]}),{code:'PRIVATE_KERNEL_START_FAILED'});check('unavailable exact input bytes fail instead of substituting another version');
   const deadId=id('pk_'),dead=await runtime.start({...scope,kernelId:deadId,environment,inputs:[]});
   const killed=await runtime.execute({...scope,generation:dead.generation},deadId,{executionId:id('pex_'),order:1,source:'system(sprintf("kill -KILL %d", Sys.getpid()))'});assert.equal(killed.status,'unknown');assert.equal((await runtime.inspect(scope,deadId)).status,'unknown');await assert.rejects(runtime.start({...scope,kernelId:deadId,environment,inputs:[]}),{code:'PRIVATE_KERNEL_STOPPED'});check('a dead R subprocess loses memory and never silently restarts or reruns its generation');
+  const slowId=id('pk_'),slow=await runtime.start({...scope,kernelId:slowId,environment,inputs:[]}),slowScope={...scope,generation:slow.generation};
+  await runtime.execute(slowScope,slowId,{executionId:id('pex_'),order:1,source:'makeActiveBinding("slow_value", function(value) { Sys.sleep(100); data.frame(count=1L) }, .GlobalEnv)'});
+  const slowSpec=publication(slowScope,'table','slow_value',2),pendingSave=runtime.export(slowScope,slowId,slowSpec);await sleep(500);await runtime.stop(slowScope,slowId);
+  const interrupted=await pendingSave;assert.equal(interrupted.status,'unknown');assert.equal(interrupted.file,undefined);
+  assert.equal((await runtime.exportStatus(slowScope,slowId,{publicationId:slowSpec.publicationId})).status,'unknown');assert.equal((await runtime.export(slowScope,slowId,slowSpec)).status,'unknown');
+  await assert.rejects(provider.inspect(slowSpec.internalStorageKey));check('stop during publication records unknown completion with no file and never reruns serialization');
+  const unsafeId=id('pk_'),unsafe=await runtime.start({...scope,kernelId:unsafeId,environment,inputs:[]}),unsafeScope={...scope,generation:unsafe.generation};
+  await runtime.execute(unsafeScope,unsafeId,{executionId:id('pex_'),order:1,source:'value <- data.frame(x=1); unlink("/work/export",recursive=TRUE); stopifnot(file.symlink("/work/input","/work/export"))'});
+  const unsafeSpec=publication(unsafeScope,'table','value',2),unsafeResult=await runtime.export(unsafeScope,unsafeId,unsafeSpec);
+  assert.equal(unsafeResult.status,'unknown');assert.equal(unsafeResult.file,undefined);await assert.rejects(provider.inspect(unsafeSpec.internalStorageKey));
+  check('a replaced export-directory symlink is rejected without following a container path or publishing bytes');
   await runtime.close();
 
   const quotaEnv={...env,EXPERT_R_SANDBOX_WORK_ROOT:path.join(directory,'quota-work'),PRIVATE_R_KERNEL_IDLE_SECONDS:'2',PRIVATE_R_KERNEL_LIFETIME_SECONDS:'40'};
