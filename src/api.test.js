@@ -535,11 +535,31 @@ describe('API Client (electronAPI)', () => {
     localStorage.setItem('traceomics_auth_user', JSON.stringify({ email: 'offline@example.com' }));
     global.fetch.mockRejectedValue(new Error('network down'));
 
-    const result = await electronAPI.restoreSession();
-
-    expect(result).toBeNull();
+    await expect(electronAPI.restoreSession()).rejects.toThrow('network down');
     expect(localStorage.getItem('traceomics_auth_token')).toBeNull();
     expect(electronAPI.getCurrentUser()).toEqual({ email: 'offline@example.com' });
+  });
+
+  it('distinguishes a session service outage from an expired cookie and keeps it retryable', async () => {
+    const cachedUser = { email: 'offline@example.com' };
+    localStorage.setItem('traceomics_auth_user', JSON.stringify(cachedUser));
+    global.fetch.mockResolvedValue({ ok: false, status: 503 });
+    await expect(electronAPI.restoreSession()).rejects.toMatchObject({ status: 503 });
+    expect(electronAPI.getCurrentUser()).toEqual(cachedUser);
+  });
+
+  it('ends an unresponsive session check so the app can offer recovery', async () => {
+    vi.useFakeTimers();
+    try {
+      global.fetch.mockImplementation((_url, { signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('Request timed out', 'AbortError')), { once: true });
+      }));
+      const check = expect(electronAPI.restoreSession()).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await check;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not persist a bearer returned by an older login response', async () => {

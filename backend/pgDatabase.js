@@ -1210,7 +1210,7 @@ async function createDemoGuest(email, password, expiresAt) {
 
 async function getDemoTemplateCheckpoint(templateProjectId) {
   const { rows } = await query(
-    `SELECT object.id AS analysis_object_id, object.object_type, object.display_name,
+    `SELECT object.id AS analysis_object_id, object.object_type, object.display_name, object.metadata_json,
             artifact.id AS artifact_id, artifact.storage_uri,
             artifact.checksum_sha256, artifact.size_bytes
        FROM project_canonical_analyses canonical
@@ -1238,6 +1238,7 @@ async function getDemoTemplateCheckpoint(templateProjectId) {
     storageUri: rows[0].storage_uri,
     checksumSha256: rows[0].checksum_sha256,
     sizeBytes: Number(rows[0].size_bytes),
+    metadata: parseJson(rows[0].metadata_json, {}),
   };
 }
 
@@ -1394,6 +1395,22 @@ async function createDemoGuestCheckpoint(input) {
   const objectId = genId('ao');
   const jobId = input.jobId || genId('job');
   const artifactId = genId('art');
+  // Copy only public dataset identity and a bounded display summary. Never
+  // inherit arbitrary operator metadata, template IDs or private storage paths.
+  const metadata = { curatedDemo: true };
+  const source = input.templateMetadata?.sourceType;
+  if (['pbmc3k_demo', 'synthetic_pbmc_demo'].includes(source)) {
+    metadata.sourceType = source;
+    metadata.synthetic = source === 'synthetic_pbmc_demo';
+    metadata.summary = inheritedAnalysisSummary(input.templateMetadata);
+    if (source === 'pbmc3k_demo') {
+      metadata.dataset = 'pbmc3k';
+      metadata.singleSample = true;
+      metadata.tutorialUrl = 'https://satijalab.org/seurat/articles/pbmc3k_tutorial';
+      metadata.sourceUrl = 'https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz';
+      metadata.sourceSha256 = '847d6ebd9a1ec9a768f2be7e40ca42cbfe75ebeb6d76a4c24167041699dc28b5';
+    }
+  }
   try {
     await client.query('BEGIN');
     await client.query(
@@ -1402,7 +1419,7 @@ async function createDemoGuestCheckpoint(input) {
        VALUES ($1, $2, $3, $1, $4, $5, $6)`,
       [objectId, Number(input.userId), String(input.projectId), input.objectType || 'seurat',
         input.displayName || 'Curated scRNA-seq demo',
-        JSON.stringify({ curatedDemo: true })]
+        JSON.stringify(metadata)]
     );
     await client.query(
       `INSERT INTO jobs

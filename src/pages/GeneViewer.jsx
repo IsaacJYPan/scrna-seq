@@ -209,15 +209,15 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
       </div>
 
       {/* Main plot area */}
-      <div className="flex-1 flex flex-col p-6 overflow-y-auto custom-scrollbar">
-        <div className="flex justify-between items-center mb-6">
-          <div>
+      <div className="flex-1 min-w-0 flex flex-col p-4 sm:p-6 overflow-y-auto custom-scrollbar">
+        <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
+          <div className="min-w-0 flex-1 basis-72">
             <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Gene Expression Viewer</h2>
             <p className="text-textMuted text-sm">Visualize per-cluster expression profiles via VlnPlot and FeaturePlot.</p>
           </div>
           {activeGene && (
-            <div className="flex items-center gap-3">
-              <div className="flex bg-slate-800 rounded-lg p-1 border border-border">
+            <div className="flex flex-wrap shrink-0 items-center gap-2 sm:gap-3 max-w-full">
+              <div className="flex flex-wrap shrink-0 bg-slate-800 rounded-lg p-1 border border-border">
                 <button 
                   onClick={() => setViewMode('violin')}
                   className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'violin' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}

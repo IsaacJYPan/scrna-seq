@@ -81,6 +81,20 @@ describe('Login registration policy', () => {
     expect(screen.queryByRole('button', { name: 'Sign Up' })).not.toBeInTheDocument();
   });
 
+  it('keeps a named action while login is pending and announces a recoverable error', async () => {
+    auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false });
+    let finishLogin;
+    auth.login.mockImplementation(() => new Promise(resolve => { finishLogin = resolve; }));
+    render(<Login onLogin={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'researcher@example.org' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'preview passphrase' } });
+    fireEvent.click(screen.getByRole('button', { name: /open workbench/i }));
+    expect(screen.getByRole('button', { name: /opening workbench/i })).toBeDisabled();
+    finishLogin({ error: 'Please try again.' });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Please try again.');
+    expect(screen.getByRole('button', { name: /open workbench/i })).not.toBeDisabled();
+  });
+
   it('shows a logout warning after an expired cookie is cleared locally', async () => {
     auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false });
     render(<Login onLogin={vi.fn()} notice="Your session had already expired. Local session data was cleared." />);

@@ -164,11 +164,14 @@ async function acceptDemo() {
     [guests.map((guest) => guest.project.id)]
   );
   assert.equal(designRows.rows.length, 3);
+  const expectedDesign = process.env.DEMO_DATASET === 'pbmc3k'
+    ? { conditions:1, samples:1, contrasts:0, datasetRefs:0 }
+    : { conditions:2, samples:4, contrasts:1, datasetRefs:0 };
   for (const row of designRows.rows) {
     assert.deepEqual({
       conditions: row.conditions, samples: row.samples,
       contrasts: row.contrasts, datasetRefs: row.dataset_refs,
-    }, { conditions: 2, samples: 4, contrasts: 1, datasetRefs: 0 });
+    }, expectedDesign);
   }
   const firstDesign = await Promise.all([
     request(`/api/projects/${guests[0].project.id}/conditions`, {
@@ -182,10 +185,10 @@ async function acceptDemo() {
     }),
   ]);
   assert(firstDesign.every((result) => result.status === 200));
-  assert.equal(firstDesign[0].data.length, 2);
-  assert.equal(firstDesign[1].data.length, 4);
-  assert.equal(firstDesign[2].data.length, 1);
-  assert.equal(firstDesign[2].data[0].analysisObjectId, guests[0].analysisObject.id);
+  assert.equal(firstDesign[0].data.length, expectedDesign.conditions);
+  assert.equal(firstDesign[1].data.length, expectedDesign.samples);
+  assert.equal(firstDesign[2].data.length, expectedDesign.contrasts);
+  if (expectedDesign.contrasts) assert.equal(firstDesign[2].data[0].analysisObjectId, guests[0].analysisObject.id);
 
   const crossTenant = await request(`/api/projects/${guests[1].project.id}`, {
     cookie: guests[0].cookie, ip: '198.51.100.11',

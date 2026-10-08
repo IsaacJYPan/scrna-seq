@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { Loader2, Microscope } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
 import ProvenanceDrawer from './components/ProvenanceDrawer';
@@ -35,6 +36,7 @@ import {
   loadProjectAnalysisObjectState,
   mapBackendAnalysisObject,
   persistAnalysisObjectSummary,
+  reconcileAnalysisObjectMetadata,
 } from './backendWorkspaceModel';
 
 const Workspace = React.lazy(() => import('./pages/Workspace'));
@@ -130,10 +132,10 @@ const TabContent = ({ id, activeTab, children }) => {
   }, [activeTab, id]);
   return (
     <div className={`absolute inset-0 ${activeTab === id ? 'block' : 'hidden'}`}>
-      {hasBeenActive ? (
+      {hasBeenActive || activeTab === id ? (
         <React.Suspense fallback={(
           <div role="status" className="flex h-full items-center justify-center text-sm text-textMuted">
-            Opening workspace…
+            Opening {TAB_TITLES[id] || 'workspace'}…
           </div>
         )}>
           {children}
@@ -225,6 +227,10 @@ export default function App() {
   const [sessionCheckDone, setSessionCheckDone] = useState(false);
 
   const [user, setUser] = useState(null);
+  const [authResolution, setAuthResolution] = useState(() => (
+    typeof window.electronAPI?.restoreSession === 'function' ? 'checking' : 'resolved'
+  ));
+  const [authRetry, setAuthRetry] = useState(0);
   const [loggedOutNotice, setLoggedOutNotice] = useState('');
   const isLoggedIn = !!user;
 
@@ -258,20 +264,25 @@ export default function App() {
   }, [user?.id]);
 
   // Restore auth state from the HttpOnly session cookie (source of truth) on
-  // mount, rather than trusting cached local user metadata. The cookie is not
-  // readable by JS, so we ask the backend who we are. This reconciles the fast
-  // synchronous bootstrap (cached user) with the real server session: if the
-  // cookie session is valid we adopt/refresh the user; if it is gone we stay
-  // logged out so a reload cannot trust stale local user metadata.
+  // mount, rather than trusting cached local user metadata. Keep the login form
+  // out of the initial render until the server resolves that session; an outage
+  // is retryable and does not mean the user has been signed out.
   useEffect(() => {
     let cancelled = false;
-    if (!window.electronAPI?.restoreSession) return undefined;
+    if (!window.electronAPI?.restoreSession) {
+      setAuthResolution('resolved');
+      return undefined;
+    }
+    setAuthResolution('checking');
     window.electronAPI.restoreSession().then((restored) => {
       if (cancelled) return;
       setUser((currentUser) => reconcileRestoredSession(currentUser, restored));
-    }).catch(() => { /* transient failure: keep current state */ });
+      setAuthResolution('resolved');
+    }).catch(() => {
+      if (!cancelled) setAuthResolution('error');
+    });
     return () => { cancelled = true; };
-  }, []);
+  }, [authRetry]);
 
   const [figuresCount, setFiguresCount] = useState(0);
 
@@ -403,8 +414,8 @@ export default function App() {
     setBackendModelStatus(prev => ({ ...prev, objectsLoading: true, error: null, objectCacheCleared: false }));
     try {
       const state = await loadProjectAnalysisObjectState(window.electronAPI, localStorage, user, projectId);
-      patchActiveWorkspace(ws => ({
-        objects: state.objects,
+      patchActiveWorkspace(ws => ws.selectedProjectId !== projectId ? {} : ({
+        objects: reconcileAnalysisObjectMetadata(ws.objects, state.objects),
         selectedObjectIds: state.selectedObjectId ? [state.selectedObjectId] : [],
         lastSelectedByProject: state.selectedObjectId
           ? { ...(ws.lastSelectedByProject || {}), [projectId]: state.selectedObjectId }
@@ -418,7 +429,11 @@ export default function App() {
       return state;
     } catch (err) {
       console.error('[App] Failed to load analysis objects:', err);
-      patchActiveWorkspace({ objects: [], selectedObjectIds: [] });
+      // An outage is not an authoritative deletion. Keep the selected live
+      // object and its dirty state; access denials still remove the projection.
+      if ([401, 403, 404].includes(err.status)) {
+        patchActiveWorkspace(ws => ws.selectedProjectId === projectId ? { objects: [], selectedObjectIds: [] } : {});
+      }
       setBackendModelStatus(prev => ({
         ...prev,
         objectsLoading: false,
@@ -433,13 +448,15 @@ export default function App() {
     setBackendModelStatus(prev => ({ ...prev, projectsLoading: true, error: null, projectCacheCleared: false }));
     try {
       const state = await loadBackendProjectState(window.electronAPI, localStorage, user);
-      patchActiveWorkspace({
+      patchActiveWorkspace(ws => ({
         projects: state.projects,
         selectedProjectId: state.selectedProjectId,
-        objects: [],
-        selectedObjectIds: [],
-        lastSelectedByProject: {},
-      });
+        ...(ws.selectedProjectId === state.selectedProjectId ? {} : {
+          objects: [],
+          selectedObjectIds: [],
+          lastSelectedByProject: {},
+        }),
+      }));
       setBackendModelStatus(prev => ({
         ...prev,
         projectsLoading: false,
@@ -451,7 +468,13 @@ export default function App() {
       return state;
     } catch (err) {
       console.error('[App] Failed to load projects:', err);
-      patchActiveWorkspace({ projects: [], selectedProjectId: null, objects: [], selectedObjectIds: [] });
+      if ([401, 403, 404].includes(err.status)) {
+        patchActiveWorkspace({ projects: [], selectedProjectId: null, objects: [], selectedObjectIds: [] });
+      } else {
+        // Preserve the analysis during a transient outage, while withholding
+        // cached mutation permissions until the project list can be verified.
+        patchActiveWorkspace(ws => ({ projects: ws.projects.map(project => ({ ...project, role: null })) }));
+      }
       setBackendModelStatus(prev => ({
         ...prev,
         projectsLoading: false,
@@ -940,6 +963,7 @@ export default function App() {
   const clearAuthenticatedWorkspace = (notice = '') => {
     setLoggedOutNotice(notice);
     setUser(null);
+    setAuthResolution('resolved');
     setActiveTab('workspace');
     setProvenanceRecords([]);
     setDrawerProvId(null);
@@ -978,11 +1002,15 @@ export default function App() {
   // Live R state is private and transient. A selected database object is never
   // treated as attached until the current R process confirms it.
 
+  const verifiedRSessionRef = React.useRef(null);
   useEffect(() => {
     if (!user?.email) {
+      verifiedRSessionRef.current = null;
+      setUnsavedLiveChanges(false);
       setSessionCheckDone(true);
       return;
     }
+    let active = true;
     setSessionCheckDone(false);
     const savedSelection = consumeSavedObjectSelection(
       checkpointSaveOpenedObjectRef.current,
@@ -1005,14 +1033,23 @@ export default function App() {
     }
     window.electronAPI.apiRequest('/session-id')
       .then(data => {
-        if (data?.sessionId) setRSessionId(data.sessionId);
+        if (!active || !data?.sessionId) return;
+        const previous = verifiedRSessionRef.current;
+        if (previous?.email === user.email && previous.sessionId !== data.sessionId) {
+          setUnsavedLiveChanges(false);
+          setCheckpointSaveState({ phase: 'idle', message: '', durableSaved: false });
+        }
+        verifiedRSessionRef.current = { email: user.email, sessionId: data.sessionId };
+        setRSessionId(data.sessionId);
       })
       .catch(e => {
+        if (!active) return;
         console.warn('[Session] R session probe failed:', e);
         setRSessionId(null);
         resetPipelineState();
       })
-      .finally(() => setSessionCheckDone(true));
+      .finally(() => { if (active) setSessionCheckDone(true); });
+    return () => { active = false; };
   }, [user?.email, datasetInfo?.id, resetPipelineState, patchActiveWorkspace]);
 
   const pipelineProbeKeyRef = React.useRef(null);
@@ -1040,10 +1077,12 @@ export default function App() {
     }
     if (pipelineProbeKeyRef.current !== key) pipelineProbeAttachedRef.current = false;
     pipelineProbeKeyRef.current = key;
+    let active = true;
 
     window.electronAPI.apiRequest('/pipeline-state', {
       headers: { 'X-Object-ID': objectId }
     }).then(state => {
+      if (!active) return;
       // A transient proxy/R failure (e.g. HTTP 429 "R service is busy", a network
       // blip, or a temporarily unreachable backend) comes back as { error } — NOT
       // as an authoritative "object does not exist". Treat it as retryable and
@@ -1082,9 +1121,10 @@ export default function App() {
         cluster: Boolean(state.has_clusters),
         umap: Boolean(state.has_umap),
         clusterCount: Number(state.n_clusters) || 0,
-        clusterDims: Number(state.pca_dims) || 15,
+        clusterDims: Number(state.cluster_dims) || Number(state.pca_dims) || 15,
       }));
     }).catch(() => {
+      if (!active) return;
       pipelineProbeKeyRef.current = null;
       if (pipelineProbeAttemptsRef.current < PIPELINE_PROBE_MAX_RETRIES) {
         pipelineProbeAttemptsRef.current += 1;
@@ -1096,6 +1136,7 @@ export default function App() {
     // component unmounts, so a stale timer can't fire a probe against the wrong
     // object/session after switching.
     return () => {
+      active = false;
       if (pipelineProbeRetryTimeoutRef.current) {
         window.clearTimeout(pipelineProbeRetryTimeoutRef.current);
         pipelineProbeRetryTimeoutRef.current = null;
@@ -1115,11 +1156,34 @@ export default function App() {
   // for history, script viewing, and parent links without changing R state.
   // ────────────────────────────────────────────────────────────────
 
+  if (!isLoggedIn && authResolution !== 'resolved') return (
+    <div className="login-bg flex min-h-dvh items-center justify-center p-6 text-text">
+      <div className="w-full max-w-sm text-center">
+        <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary">
+          <Microscope size={30} aria-hidden="true" />
+        </div>
+        <h1 className="text-2xl font-bold tracking-tight">TraceOmics</h1>
+        {authResolution === 'checking' ? (
+          <div role="status" className="mt-4 flex items-center justify-center gap-2 text-sm text-textMuted">
+            <Loader2 size={18} className="animate-spin" aria-hidden="true" />
+            Opening your workspace…
+          </div>
+        ) : (
+          <div className="mt-4">
+            <p role="alert" className="text-sm text-textMuted">We couldn’t check your session. Check your connection and try again.</p>
+            <button type="button" className="btn btn-primary mt-5" onClick={() => setAuthRetry(value => value + 1)}>Retry</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   if (!isLoggedIn) return (
     <Login
       onLogin={(u) => {
         setLoggedOutNotice('');
         setUser(u || null);
+        setAuthResolution('resolved');
       }}
       notice={loggedOutNotice}
       theme={theme}

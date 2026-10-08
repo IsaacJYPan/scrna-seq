@@ -37,6 +37,7 @@ function qcUnavailableMessage(rawError, { datasetInfo, sessionReady } = {}) {
 }
 
 export default function QualityControl({ callApi, datasetInfo, currentProvId, openProvenance, pipelineState, theme, rSessionId, userEmail, userId, objectId, sessionReady, currentWs }) {
+  const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
   const [activePlot, setActivePlot] = useState('mt');
   const projectId = datasetInfo?.projectId || currentWs?.selectedProjectId || null;
   const projectRole = currentWs?.projects?.find((project) => project.id === projectId)?.role;
@@ -53,8 +54,8 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   const [params, setParam] = useTabParams('qc', userEmail, objectId, {
     mtCutoff: 5,
     minFeatures: 200,
-    maxFeatures: 5000,
-    minCounts: 500,
+    maxFeatures: isPbmcTutorial ? 2500 : 5000,
+    minCounts: isPbmcTutorial ? 0 : 500,
   });
   const { mtCutoff, minFeatures, maxFeatures, minCounts, removeDoublets, filterFeatures } = params;
 
@@ -404,7 +405,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             )}
           </div>
 
-          <div className="grid grid-cols-1 gap-4 font-mono text-sm sm:grid-cols-2 xl:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 font-mono text-sm sm:gap-4 xl:grid-cols-5">
             {(result?.result || pipelineState?.qcSummary) ? (
               <>
                 {/* Detailed stats from a fresh run or persisted summary */}
@@ -564,12 +565,13 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       {/* Tabbed Plot Viewer */}
       <div className="card overflow-hidden">
         {/* Tab bar */}
-        <div className="flex border-b border-border bg-black/5 dark:bg-white/5 px-4 pt-2 gap-1">
+        <div className="flex overflow-x-auto custom-scrollbar border-b border-border bg-black/5 dark:bg-white/5 px-4 pt-2 gap-1" role="group" aria-label="QC distribution views">
           {PLOT_TABS.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActivePlot(tab.id)}
-              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-all border-b-2 -mb-[1px]
+              aria-pressed={activePlot === tab.id}
+              className={`shrink-0 whitespace-nowrap px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-[1px]
                 ${activePlot === tab.id
                   ? 'text-blue-400 border-blue-400 bg-background/40'
                   : 'text-slate-400 border-transparent hover:text-slate-300 hover:border-slate-600'
@@ -581,7 +583,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         </div>
 
         {/* Plot area */}
-        <div className="p-6">
+        <div className="p-4 sm:p-6">
           {loadingDist ? (
             <div className="flex flex-col items-center justify-center h-[420px] space-y-4">
               <div className="flex gap-2">
@@ -664,13 +666,13 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             <div className="flex flex-col lg:flex-row gap-8">
               {/* Plot Column */}
               <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex flex-wrap items-center gap-3 justify-between mb-4">
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full" style={{ backgroundColor: currentPlot.color }}></div>
                     <h3 className="text-sm font-bold text-text">{currentPlot.title}</h3>
                   </div>
                   {['mt', 'features', 'counts'].includes(activePlot) && (
-                    <div className="flex items-center gap-5">
+                    <div className="flex flex-wrap items-center gap-3">
                       <label className="flex items-center gap-2 text-xs text-textMuted cursor-pointer hover:text-text transition-colors">
                         <input type="checkbox" checked={zoomY} onChange={e => setZoomY(e.target.checked)} title="Stretch the Y-axis to ignore extreme upper outliers" className="rounded border-slate-600 bg-slate-800 text-primary focus:ring-primary focus:ring-offset-slate-900" />
                         Stretch Vertical (Zoom)
@@ -683,9 +685,9 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                       </div>
                     </div>
                   )}
-                  <div className="flex items-center justify-end">
+                  <div className="flex flex-wrap items-center gap-3">
                     {['mt', 'features', 'counts', 'scatter'].includes(activePlot) && (showPoints[activePlot] || activePlot === 'scatter') && (
-                      <div className="flex items-center gap-2 border border-border/50 rounded-full px-3 py-1 bg-black/5 dark:bg-black/10 mr-4">
+                      <div className="flex items-center gap-2 border border-border/50 rounded-full px-3 py-1 bg-black/5 dark:bg-black/10">
                         <span className="text-[10px] text-textMuted uppercase tracking-wider">Opacity</span>
                         <input
                           type="range" min="0.05" max="1" step="0.05"
@@ -696,14 +698,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                       </div>
                     )}
                     {activePlot === 'scatter' && (
-                      <div className="flex items-center gap-3 text-xs text-textMuted font-medium">
+                      <div className="grid grid-cols-[auto_minmax(0,1fr)] sm:flex items-center gap-2 sm:gap-3 text-xs text-textMuted font-medium">
                         <span>X Axis:</span>
                         <select aria-label="Scatter X axis" className="bg-surface border border-border rounded text-text p-1 px-2 focus:ring-1 focus:ring-primary focus:outline-none" value={scatterX} onChange={e => setScatterX(e.target.value)}>
                           <option value="nCount_RNA">nCount_RNA</option>
                           <option value="nFeature_RNA">nFeature_RNA</option>
                           <option value="percent.mt">percent.mt</option>
                         </select>
-                        <span className="ml-2">Y Axis:</span>
+                        <span>Y Axis:</span>
                         <select aria-label="Scatter Y axis" className="bg-surface border border-border rounded text-text p-1 px-2 focus:ring-1 focus:ring-primary focus:outline-none" value={scatterY} onChange={e => setScatterY(e.target.value)}>
                           <option value="nCount_RNA">nCount_RNA</option>
                           <option value="nFeature_RNA">nFeature_RNA</option>

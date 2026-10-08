@@ -92,8 +92,8 @@ describe('StudyDesign', () => {
     }]);
     render(<StudyDesign currentWs={workspace} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />);
 
-    fireEvent.change(await screen.findByLabelText('Bound sample'), { target: { value: 'sample_2' } });
-    fireEvent.change(screen.getByLabelText('Metadata value'), { target: { value: 'SeuratProject' } });
+    fireEvent.change(await screen.findByLabelText('Biological sample'), { target: { value: 'sample_2' } });
+    fireEvent.change(screen.getByLabelText('Cell metadata value'), { target: { value: 'SeuratProject' } });
     fireEvent.click(screen.getByRole('button', { name: 'Bind sample' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/One metadata value cannot represent multiple independent samples/i);

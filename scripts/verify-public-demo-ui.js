@@ -89,7 +89,7 @@ async function waitForVisibleUmap(page, timeout = 60_000) {
   ), null, { timeout });
 }
 
-async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbackHttp = false } = {}) {
+async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbackHttp = false, expectedDataset } = {}) {
   const acceptedOrigin = validateOrigin(origin, { allowLoopbackHttp });
   const runDirectory = artifactDirectory || path.join(
     root, 'playwright', 'report', 'release-acceptance', `demo-ui-${timestampSegment()}`
@@ -151,6 +151,14 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
     }), 180_000, 'The public demo checkpoint job did not reach a terminal state.');
     assert(checkpointJob.status === 'completed',
       `The public demo checkpoint job ${checkpointJob.status}: ${checkpointJob.error?.message || 'unknown error'}`);
+    if (expectedDataset === 'pbmc3k') {
+      const object = await page.evaluate(async () => {
+        const projects = await window.electronAPI.listProjects();
+        return (await window.electronAPI.listProjectAnalysisObjects(projects[0].id))[0];
+      });
+      assert(object.metadata?.sourceType === 'pbmc3k_demo', 'Guest must receive the reviewed PBMC3k template.');
+      assert(object.metadata?.synthetic === false, 'PBMC3k must not be marked synthetic.');
+    }
     const umapNavigation = page.getByRole('button', { name: /^UMAP(?:,|$)/i });
     await umapNavigation.waitFor({ state: 'visible', timeout: 30_000 });
     await page.waitForFunction(() => {
@@ -173,6 +181,13 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
       await waitForVisibleUmap(page, 180_000);
     }
     const umapPath = path.join(runDirectory, 'public-demo-umap.png');
+    if (expectedDataset === 'pbmc3k') {
+      await page.getByText(/Public 10x PBMC3k tutorial: measured gene expression/).waitFor({state:'visible'});
+      const points = await page.locator('.js-plotly-plot').evaluateAll(elements =>
+        Math.max(...elements.map(e => (e.data || []).reduce((n,t) => n + (t.x?.length || 0),0))));
+      assert(points === 2638, `PBMC3k UMAP must render all 2638 cells, got ${points}.`);
+      assert(await page.getByLabel('Input Dimensions (PCs)').inputValue() === '10', 'Restored graph used 10 PCs, not all available PCs.');
+    }
     await page.screenshot({ path: umapPath, fullPage: false });
 
     await openSidebarPage(page, 'Exploratory Analysis');

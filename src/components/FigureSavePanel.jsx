@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useId } from 'react';
 import {
   X, Image, Download, RefreshCw, ChevronDown, ChevronRight,
   Type, Palette, Settings2, Layers, Loader2, CheckCircle2, AlertCircle, Info
@@ -50,14 +50,15 @@ function CollapsibleSection({ title, icon: Icon, children, defaultOpen = true })
 }
 
 function SliderRow({ label, value, min, max, step = 0.1, onChange, hint }) {
+  const inputId = useId();
   return (
     <div>
       <div className="flex justify-between items-center mb-1">
-        <label className="text-xs text-textMuted font-medium">{label}</label>
+        <label htmlFor={inputId} className="text-xs text-textMuted font-medium">{label}</label>
         <span className="text-xs font-mono text-primary">{value}</span>
       </div>
       <input
-        type="range" min={min} max={max} step={step} value={value}
+        id={inputId} type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
         className="w-full accent-primary"
       />
@@ -67,11 +68,12 @@ function SliderRow({ label, value, min, max, step = 0.1, onChange, hint }) {
 }
 
 function FieldRow({ label, value, onChange, type = 'text', placeholder = '' }) {
+  const inputId = useId();
   return (
     <div>
-      <label className="block text-xs text-textMuted font-medium mb-1">{label}</label>
+      <label htmlFor={inputId} className="block text-xs text-textMuted font-medium mb-1">{label}</label>
       <input
-        type={type} value={value} placeholder={placeholder}
+        id={inputId} type={type} value={value} placeholder={placeholder}
         onChange={e => onChange(type === 'number' ? parseFloat(e.target.value) : e.target.value)}
         className="w-full bg-background border border-border rounded px-3 py-1.5 text-sm text-text focus:outline-none focus:border-primary"
       />
@@ -138,6 +140,11 @@ export default function FigureSavePanel({
   const [saveError, setSaveError] = useState(null);
 
   const debounceRef = useRef(null);
+  const dialogRef = useRef(null);
+  const closeButtonRef = useRef(null);
+  const previousFocusRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   // Build params object for R
   const buildParams = useCallback(() => ({
@@ -217,6 +224,71 @@ export default function FigureSavePanel({
     }
   }, [isOpen]);
 
+  // Keep keyboard and screen-reader interaction inside the editor while it is
+  // open, and return focus to the control that launched it when it closes.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+
+    previousFocusRef.current = document.activeElement;
+    const dialog = dialogRef.current;
+    const previousInertValues = new Map();
+
+    // Inert each body subtree outside the overlay. The editor can live at
+    // different depths in the app tree, so walk the path to it instead of
+    // assuming a particular application-root element.
+    const overlay = dialog?.parentElement;
+    const makeOutsideContentInert = (parent) => {
+      [...parent.children].forEach((child) => {
+        if (child === overlay) return;
+        if (child.contains(overlay)) {
+          makeOutsideContentInert(child);
+          return;
+        }
+        previousInertValues.set(child, child.inert === true);
+        child.inert = true;
+      });
+    };
+    if (overlay) makeOutsideContentInert(document.body);
+
+    closeButtonRef.current?.focus({ preventScroll: true });
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseRef.current?.();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const focusable = [...(dialog?.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) || [])].filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog?.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialog?.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog?.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      previousInertValues.forEach((wasInert, element) => { element.inert = wasInert; });
+      const previousFocus = previousFocusRef.current;
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    };
+  }, [isOpen]);
+
   const handleSave = async () => {
     if (!serverFigureExportEnabled) return;
     setSaving(true);
@@ -273,17 +345,23 @@ export default function FigureSavePanel({
       <div className="flex-1 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
       {/* Panel */}
-      <div className="w-[900px] max-w-[95vw] bg-background border-l border-border flex flex-col shadow-2xl overflow-hidden">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="figure-save-panel-title"
+        className="w-[900px] max-w-[95vw] bg-background border-l border-border flex flex-col shadow-2xl overflow-hidden"
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0 bg-surface">
           <div className="flex items-center gap-3">
             <Image size={20} className="text-primary" />
             <div>
-              <h3 className="font-bold text-text text-sm">Save to Figure Gallery</h3>
+              <h3 id="figure-save-panel-title" className="font-bold text-text text-sm">Save to Figure Gallery</h3>
               <p className="text-[11px] text-textMuted">{plotType} · Publication-quality export</p>
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close figure editor" className="text-textMuted hover:text-text transition-colors p-1 rounded hover:bg-white/10">
+          <button ref={closeButtonRef} onClick={onClose} aria-label="Close figure editor" className="text-textMuted hover:text-text transition-colors p-1 rounded hover:bg-white/10">
             <X size={18} />
           </button>
         </div>

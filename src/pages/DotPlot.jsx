@@ -178,17 +178,18 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-background overflow-hidden">
-      <div className="px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-3 items-start justify-between shrink-0">
+    <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
+      <div className="px-4 sm:px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-3 items-start justify-between shrink-0">
         <div>
           <h2 className="text-2xl font-bold text-text tracking-tight">Dot Plot</h2>
           <p className="text-textMuted text-sm">Bubble size = % cells expressing gene; color = average expression.</p>
         </div>
-        <div className="flex flex-col gap-2 items-end">
-          <div className="relative flex items-center gap-2">
+        <div className="flex min-w-0 flex-col gap-2 items-start sm:items-end">
+          <div className="relative flex flex-wrap items-center gap-2">
             <div className="relative">
               <input
                 type="text"
+                aria-label="Add gene to dot plot"
                 value={geneInput}
                 onChange={e => handleInputChange(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && addGene()}
@@ -222,7 +223,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
               {genes.map(g => (
                 <span key={g} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 border border-primary/30 text-primary text-xs font-medium">
                   {g}
-                  <button onClick={() => removeGene(g)} className="text-primary/60 hover:text-danger">×</button>
+                  <button onClick={() => removeGene(g)} aria-label={`Remove ${g}`} className="text-primary/60 hover:text-danger">×</button>
                 </span>
               ))}
             </div>
@@ -236,7 +237,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         </div>
       )}
 
-      <div className="flex-1 p-6 overflow-hidden">
+      <div className="flex-1 min-h-60 min-w-0 p-3 sm:p-6 overflow-hidden">
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center text-slate-400">

@@ -228,12 +228,12 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /Collapse sidebar/i })).toBeInTheDocument();
   });
 
-  it('starts collapsed on narrow viewports', () => {
+  it.each([500, 1000])('starts collapsed at a %ipx viewport', (width) => {
     const originalInnerWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
       writable: true,
-      value: 500,
+      value: width,
     });
 
     try {
@@ -252,6 +252,68 @@ describe('Sidebar component', () => {
         writable: true,
         value: originalInnerWidth,
       });
+    }
+  });
+
+  it.each([
+    ['the default pipeline', undefined],
+    ['a custom pipeline', {
+      schemaVersion: 1,
+      id: 'custom-study-design-view',
+      name: 'Custom Study View',
+      tabs: [
+        { id: 'study-design', label: 'Alternate study design', moduleKey: 'conditionComparison' },
+        { id: 'inspect', label: 'Inspect object', moduleKey: 'inspectObject' },
+      ],
+    }],
+  ])('shows one selected Study Design destination for %s', (_pipelineName, activePipeline) => {
+    const { container } = render(
+      <Sidebar
+        activeTab="study-design"
+        {...baseProps}
+        activePipeline={activePipeline}
+        workspaces={[{
+          id: 'ws-1',
+          name: 'Test WS',
+          type: 'personal',
+          projects: [{ id: 'proj_1', name: 'Project', role: 'owner' }],
+          selectedProjectId: 'proj_1',
+          objects: [{ id: 'ao_abc123' }],
+          selectedObjectIds: ['ao_abc123'],
+        }]}
+        selectedObjects={[{ id: 'ao_abc123' }]}
+      />
+    );
+
+    const studyDesignLinks = screen.getAllByRole('button', { name: /Study Design/i });
+    expect(studyDesignLinks).toHaveLength(1);
+    expect(studyDesignLinks[0]).toHaveClass('bg-primary/10');
+    expect(container.querySelectorAll('button.bg-primary\\/10')).toHaveLength(1);
+    if (activePipeline) {
+      expect(screen.getByRole('button', { name: /Inspect object/i })).toBeInTheDocument();
+    }
+  });
+
+  it('dismisses the narrow drawer with its backdrop or Escape and restores focus', () => {
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1000 });
+    try {
+      render(<div><Sidebar activeTab="workspace" {...baseProps} selectedObjects={[{ id: 'ao_abc123' }]} />
+        <main><button>Page action</button></main></div>);
+      const main = screen.getByRole('main');
+      fireEvent.click(screen.getByRole('button', { name: 'Expand sidebar' }));
+      expect(main.inert).toBe(true);
+      expect(screen.getByRole('button', { name: 'Collapse sidebar' })).toHaveFocus();
+      fireEvent.click(screen.getByRole('button', { name: 'Close navigation overlay' }));
+      expect(main.inert).not.toBe(true);
+      expect(screen.getByRole('button', { name: 'Expand sidebar' })).toHaveFocus();
+      expect(screen.queryByRole('button', { name: /Quality Control/i })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Expand sidebar' }));
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Collapse sidebar' }), { key: 'Escape' });
+      expect(main.inert).not.toBe(true);
+      expect(screen.getByRole('button', { name: 'Expand sidebar' })).toHaveFocus();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: originalInnerWidth });
     }
   });
 

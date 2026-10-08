@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+# Reuses the reviewed scientific demo base; no package installation in this file.
+ARG DEMO_BASE_IMAGE
+FROM ${DEMO_BASE_IMAGE} AS demo-artifact
+ADD --checksum=sha256:847d6ebd9a1ec9a768f2be7e40ca42cbfe75ebeb6d76a4c24167041699dc28b5 https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz /tmp/pbmc3k.tar.gz
+RUN mkdir /tmp/pbmc3k && tar -xzf /tmp/pbmc3k.tar.gz -C /tmp/pbmc3k
+COPY generate-demo-template.R build-demo-artifact.R pbmc3k-demo.R /tmp/demo-build/
+ENV DEMO_DATASET=pbmc3k
+RUN --network=none Rscript /tmp/demo-build/build-demo-artifact.R
+
+FROM ${DEMO_BASE_IMAGE} AS runtime
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --gid "${APP_GID}" appuser \
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /usr/sbin/nologin appuser \
+    && install -d -o "${APP_UID}" -g "${APP_GID}" -m 0750 \
+      /app/storage-volume/data /app/vault-volume/vault /work/input /work/output
+WORKDIR /app
+COPY plumber.R run.R generate-demo-template.R pbmc3k-demo.R sample_data.csv /app/
+COPY --from=demo-artifact /opt/traceomics/demo /opt/traceomics/demo
+ENV HOME=/home/appuser \
+    TRACEOMICS_R_PACKAGE_MANIFEST=/usr/local/share/traceomics/r-packages.json \
+    DEMO_PRECOMPUTED_DIR=/opt/traceomics/demo \
+    DEMO_DATASET=pbmc3k
+USER appuser
+EXPOSE 8000
+ENTRYPOINT ["Rscript", "run.R"]

@@ -5,6 +5,8 @@ import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 
 export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvId, normProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, activeProjectSeed, theme }) {
+  const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
+  const pcaSeed = activeProjectSeed || (isPbmcTutorial ? 42 : '');
   const [params, setParam] = useTabParams('pca', userEmail, objectId, { npcs: 50 });
   const npcs = params.npcs;
   const setNpcs = (v) => setParam('npcs', v);
@@ -18,13 +20,13 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
 
   const { running, result, error, runStep: runPCA } = usePipelineStep({
     callApi,
-    endpoint: `/pca?npcs=${npcs}&seed=${activeProjectSeed || ''}`,
+    endpoint: `/pca?npcs=${npcs}&seed=${pcaSeed}`,
     ipcContext: {
       operation: 'pca',
       step: 'pca',
       parentIds: normProvId ? [normProvId] : [],
       useCache: true,
-      cacheParams: { type: 'pca', npcs, seed: activeProjectSeed || 'random' }
+      cacheParams: { type: 'pca', npcs, seed: pcaSeed || 'random' }
     },
     readyToHydrate: !!(datasetInfo && pipelineState?.normalize),
     sessionReady,

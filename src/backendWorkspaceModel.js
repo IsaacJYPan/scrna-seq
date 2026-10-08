@@ -134,6 +134,24 @@ export function mapBackendAnalysisObject(object, liveResult = {}) {
   };
 }
 
+// A metadata refresh must not replace a live-session projection with a durable
+// row's unknown attachment state. Preserve only runtime values established in
+// this workspace, and only while the object, project, and owner still match.
+export function reconcileAnalysisObjectMetadata(currentObjects, refreshedObjects) {
+  const currentById = new Map(currentObjects.map(object => [object.id, object]));
+  return refreshedObjects.map(object => {
+    const current = currentById.get(object.id);
+    if (!current || current.projectId !== object.projectId || current.ownerUserId !== object.ownerUserId) return object;
+    const next = { ...object, liveState: current.liveState || 'unknown' };
+    if (current.liveState === 'attached') {
+      for (const field of ['cells', 'features', 'density']) {
+        if (Number.isFinite(current[field])) next[field] = current[field];
+      }
+    }
+    return next;
+  });
+}
+
 export function resolveCachedSelection(items, cachedId, { selectFirstWhenUncached = false } = {}) {
   const ids = new Set(items.map(item => item.id));
   if (cachedId) {

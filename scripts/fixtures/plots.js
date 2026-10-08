@@ -1,3 +1,6 @@
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import PlotlyRenderer from '../../src/components/PlotlyRenderer';
 import Plotly from '../../src/components/plotlyRuntime';
 
 const x = [1, 2, 3, 4, 5];
@@ -67,5 +70,21 @@ window.chartAcceptance = (async () => {
     throw new Error('Chart update failed');
   Plotly.purge(mixed);
   mixed.remove();
+  const responsiveHost = document.createElement('div');
+  responsiveHost.id = 'responsive-chart';
+  responsiveHost.style.cssText = 'width:640px;height:320px';
+  document.body.append(responsiveHost);
+  const responsiveRoot = createRoot(responsiveHost);
+  await new Promise(resolve => responsiveRoot.render(React.createElement(PlotlyRenderer, {
+    data: [traces[0]],
+    layout: { autosize: true, margin: { t: 30, b: 35, l: 45, r: 20 } },
+    style: { width: '100%', height: '100%' },
+    useResizeHandler: true,
+    onInitialized: (_figure, graph) => { window.responsiveChart = graph; resolve(); },
+  })));
+  window.unmountResponsiveChart = () => {
+    responsiveRoot.unmount();
+    responsiveHost.remove();
+  };
   return results;
 })();

@@ -11,6 +11,7 @@ import {
   loadProjectAnalysisObjectState,
   mapBackendAnalysisObject,
   persistAnalysisObjectSummary,
+  reconcileAnalysisObjectMetadata,
   selectedObjectStorageKey,
   selectedProjectStorageKey,
 } from './backendWorkspaceModel';
@@ -28,6 +29,24 @@ function makeStorage(initial = {}) {
 const user = { id: 42, email: 'scientist@example.com' };
 
 describe('backend workspace model', () => {
+  it('retains verified attachment and live counts while refreshing authoritative object metadata', () => {
+    const current = { id: 'ao_1', projectId: 'proj_1', ownerUserId: 42, name: 'Before rename', liveState: 'attached', cells: 2643 };
+    const refreshed = { ...current, name: 'Renamed analysis', liveState: 'unknown', cells: 2700 };
+    expect(reconcileAnalysisObjectMetadata([current], [refreshed])).toEqual([
+      { ...refreshed, liveState: 'attached', cells: 2643 },
+    ]);
+  });
+
+  it('never carries an attachment across a changed owner, project, or newly returned object', () => {
+    const current = { id: 'ao_1', projectId: 'proj_1', ownerUserId: 42, liveState: 'attached' };
+    const changedOwner = { ...current, ownerUserId: 43, liveState: 'unknown' };
+    const changedProject = { ...current, projectId: 'proj_2', liveState: 'unknown' };
+    const newObject = { ...current, id: 'ao_2', liveState: 'unknown' };
+    expect(reconcileAnalysisObjectMetadata([current], [changedOwner, changedProject, newObject]))
+      .toEqual([changedOwner, changedProject, newObject]);
+    expect(reconcileAnalysisObjectMetadata([current], [])).toEqual([]);
+  });
+
   it('starts without a fake durable Default Project or local analysis objects', () => {
     const ws = createEmptyWorkspace();
 

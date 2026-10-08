@@ -2326,6 +2326,12 @@ function(req, res) {
     has_umap <- "umap" %in% names(global_obj@reductions)
     qc_marker <- tryCatch(isTRUE(global_obj@misc$traceomics_pipeline$qc), error = function(e) FALSE)
     pca_dims <- if (has_pca) tryCatch(ncol(Embeddings(global_obj, "pca")), error = function(e) 15) else 15
+    # Number of available PCs is not the number used to construct the graph.
+    # Recover the actual neighbor dimensions for restored tutorial checkpoints.
+    neighbor_commands <- grep("^FindNeighbors\\.", names(global_obj@commands), value=TRUE)
+    cluster_dims <- if (length(neighbor_commands)) tryCatch(
+      length(global_obj@commands[[tail(neighbor_commands, 1L)]]@params$dims),
+      error=function(e) 0L) else 0L
     list(
       exists = TRUE,
       has_qc = qc_marker || has_normalized || has_pca || has_clusters || has_umap,
@@ -2333,6 +2339,7 @@ function(req, res) {
       has_integrated = "harmony" %in% names(global_obj@reductions),
       has_pca = has_pca,
       pca_dims = pca_dims,
+      cluster_dims = if (cluster_dims > 0L) cluster_dims else pca_dims,
       has_clusters = has_clusters,
       n_clusters = if (has_clusters) length(unique(global_obj$seurat_clusters)) else 0,
       has_umap = has_umap

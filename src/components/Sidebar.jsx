@@ -1,10 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2, ChevronDown, ChevronLeft, Database, GitBranch, LayoutPanelTop,
   Info, Lock, LogOut, Menu, Microscope, Moon, Sun, UserRound, Users, Wrench,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 import { workflowTabAvailability } from '../../shared/workflowState.mjs';
+
+const PRIMARY_DESTINATION_IDS = new Set([
+  'workspace', 'pipeline-manager', 'branches', 'study-design', 'expert-r',
+  'team', 'lineage', 'publication', 'validation',
+]);
 
 function researcherLabel(value) {
   if (value === 'Expert R') return 'Advanced analysis';
@@ -63,21 +68,59 @@ export default function Sidebar({
   figuresCount = 0,
   deploymentPolicy = {},
 }) {
+  const shellRef = useRef(null);
+  const expandRef = useRef(null);
+  const collapseRef = useRef(null);
+  const [isNarrow, setIsNarrow] = useState(() => (
+    typeof window !== 'undefined' ? window.innerWidth < 1024 : false
+  ));
   const [isCollapsed, setIsCollapsed] = useState(() => (
-    typeof window !== 'undefined' ? window.innerWidth < 900 : false
+    typeof window !== 'undefined' ? window.innerWidth < 1024 : false
   ));
 
   useEffect(() => {
     const collapseForNarrowViewport = () => {
-      if (window.innerWidth < 900) setIsCollapsed(true);
+      const narrow = window.innerWidth < 1024;
+      setIsNarrow(narrow);
+      if (narrow) setIsCollapsed(true);
     };
     collapseForNarrowViewport();
     window.addEventListener('resize', collapseForNarrowViewport);
     return () => window.removeEventListener('resize', collapseForNarrowViewport);
   }, []);
 
+  useEffect(() => {
+    if (!isNarrow || isCollapsed) return;
+    const previousFocus = document.activeElement;
+    const expand = expandRef.current;
+    const main = shellRef.current?.parentElement.querySelector('main');
+    const previousInert = main?.inert;
+    if (main) main.inert = true;
+    collapseRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (main) main.inert = previousInert;
+      if (expand?.isConnected && !expand.hidden) expand.focus({ preventScroll: true });
+      else if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    };
+  }, [isNarrow, isCollapsed]);
+
+  const handleDrawerKeyDown = (event) => {
+    if (!isNarrow || isCollapsed) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setIsCollapsed(true);
+    }
+    if (event.key !== 'Tab') return;
+    const controls = [...shellRef.current.querySelectorAll('button:not([disabled]):not([tabindex="-1"])')]
+      .filter(element => element.getClientRects().length > 0);
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  };
+
   const collapseAfterMobileNavigation = () => {
-    if (typeof window !== 'undefined' && window.innerWidth < 900) {
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
       setIsCollapsed(true);
     }
   };
@@ -95,7 +138,7 @@ export default function Sidebar({
     }) }] : buildPipelineSidebarSections(activePipeline, pipelineState))
     .map((section) => ({
       ...section,
-      items: section.items.filter((item) => item.id !== 'expert-r'),
+      items: section.items.filter((item) => !PRIMARY_DESTINATION_IDS.has(item.id)),
     }))
     .filter((section) => section.items.length > 0);
   const navProps = {
@@ -104,23 +147,25 @@ export default function Sidebar({
   };
 
   return (
-    <div className="flex h-full flex-shrink-0 z-20 relative w-[72px] lg:w-auto">
-      <nav className="w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0 border-r border-border">
+    <div ref={shellRef} onKeyDown={handleDrawerKeyDown} className="flex h-full flex-shrink-0 z-20 relative w-[72px] lg:w-auto">
+      <nav aria-label="Account and navigation controls" className="relative z-50 w-[72px] bg-background flex flex-col items-center py-3 gap-2 h-full flex-shrink-0 border-r border-border">
         <div className="w-11 h-11 rounded-xl bg-primary flex items-center justify-center shadow-sm mb-1" title="TraceOmics">
           <Microscope size={22} className="text-on-accent" />
         </div>
 
-        {isCollapsed && (
           <button
+            ref={expandRef}
             type="button"
             onClick={() => setIsCollapsed(false)}
             aria-label="Expand sidebar"
-            className="w-12 h-8 rounded-md bg-surface border border-border text-textMuted hover:bg-black/5 hover:text-text dark:hover:bg-slate-700 transition-colors flex items-center justify-center shadow-sm"
+            aria-controls="workspace-navigation"
+            aria-expanded={!isCollapsed}
+            hidden={!isCollapsed}
+            className={`w-12 h-8 rounded-md bg-surface border border-border text-textMuted hover:bg-black/5 hover:text-text dark:hover:bg-slate-700 transition-colors items-center justify-center shadow-sm ${isCollapsed ? 'flex' : 'hidden'}`}
             title="Expand sidebar"
           >
             <Menu size={16} />
           </button>
-        )}
 
         <div className="w-8 h-0.5 bg-black/10 dark:bg-slate-800 rounded-full my-1" />
 
@@ -131,7 +176,7 @@ export default function Sidebar({
             <button
               aria-label="Account security"
               className={`w-11 h-11 rounded-xl transition-colors duration-150 flex items-center justify-center ${activeTab === 'account' ? 'bg-primary/10 text-primary' : 'bg-transparent text-textMuted hover:bg-black/5 hover:text-text'}`}
-              onClick={() => setActiveTab('account')}
+              onClick={() => { setActiveTab('account'); collapseAfterMobileNavigation(); }}
               title="Account security"
             >
               <UserRound size={20} />
@@ -156,8 +201,22 @@ export default function Sidebar({
         )}
       </nav>
 
-      <aside className={`bg-surface flex flex-col h-full select-none transition-[width,opacity] duration-200 overflow-hidden ${isCollapsed ? 'w-0 opacity-0 pointer-events-none' : 'absolute left-[72px] top-0 z-40 w-[calc(100vw-72px)] max-w-60 opacity-100 shadow-xl lg:static lg:left-auto lg:top-auto lg:z-auto lg:w-60 lg:max-w-none'}`}>
+      {isNarrow && !isCollapsed && <button
+        type="button"
+        aria-label="Close navigation overlay"
+        tabIndex={-1}
+        onClick={() => setIsCollapsed(true)}
+        className="fixed inset-0 left-[72px] z-30 bg-black/25 dark:bg-black/45 lg:hidden"
+      />}
+      <aside
+        id="workspace-navigation"
+        aria-label="Workspace navigation"
+        aria-hidden={isCollapsed || undefined}
+        inert={isCollapsed}
+        className={`absolute left-[72px] top-0 z-40 w-[calc(100vw-72px)] max-w-60 bg-surface flex flex-col h-full select-none transition-[width,translate] duration-200 ease-out overflow-hidden shadow-xl lg:static lg:max-w-none lg:translate-x-0 lg:shadow-none ${isCollapsed ? '-translate-x-full pointer-events-none lg:w-0' : 'translate-x-0 lg:w-60'}`}
+      >
         <button
+          ref={collapseRef}
           type="button"
           aria-label="Collapse sidebar"
           className="h-12 w-full flex items-center px-4 border-b border-border hover:bg-black/5 transition-colors cursor-pointer group text-left"

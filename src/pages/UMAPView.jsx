@@ -11,6 +11,8 @@ const CLUSTER_COLORS = ['#f8766d', '#d89000', '#a3a500', '#39b600', '#00bf7d', '
 export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId, currentWs, activeProjectSeed, theme, deploymentPolicy }) {
 
   const [savePanelOpen, setSavePanelOpen] = useState(false);
+  const isPbmcTutorial = datasetInfo?.source === 'pbmc3k_demo' || datasetInfo?.metadata?.sourceType === 'pbmc3k_demo';
+  const umapSeed = activeProjectSeed || (isPbmcTutorial ? 42 : '');
 
   // Persisted parameters
   const [params, setParam] = useTabParams('umap', userEmail, objectId, {
@@ -25,7 +27,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   const canUse3D = React.useMemo(() => supportsWebGL(), []);
   const nComponents = canUse3D ? storedNComponents : 2;
   // dims defaults to the PC count used for clustering (from pipelineState)
-  const [clusterParams] = useTabParams('cluster', userEmail, objectId, { dims: 15 });
+  const [clusterParams] = useTabParams('cluster', userEmail, objectId, { dims: isPbmcTutorial ? 10 : 15 });
   const [dims, setDims] = useState(clusterParams.dims);
   const [base64Image, setBase64Image] = useState(null);
   const [loadingBase64, setLoadingBase64] = useState(false);
@@ -44,13 +46,13 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   // Pipeline step hook for state and cache-checking
   const { running, result, error, setResult, hasHydrated, setHasHydrated, runStep } = usePipelineStep({
     callApi,
-    endpoint: `/umap?dims=${dims}&n_components=${nComponents}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`,
+    endpoint: `/umap?dims=${dims}&n_components=${nComponents}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`,
     ipcContext: {
       operation: 'umap',
       step: 'umap',
       parentIds: umapParentIds,
       useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nComponents, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
+      cacheParams: { type: 'umap', dims, n_components: nComponents, n_neighbors: nNeighbors, min_dist: minDist, seed: umapSeed || 'random' }
     },
     readyToHydrate: !!(datasetInfo && pipelineState?.pca),
     sessionReady,
@@ -93,6 +95,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
   // In-memory UI cache dictionary to enable zero-latency dimension toggling
   const [cachedDims, setCachedDims] = useState({});
+  const settingsKey = JSON.stringify([dims, nNeighbors, minDist, umapSeed, rSessionId, pcaProvId, clusterProvId]);
   useEffect(() => {
     // Drop in-memory UI cache if clustering parameters change
     setCachedDims({});
@@ -101,13 +104,13 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   const runUMAP = useCallback(async (isInitial = false, nComponentsOverride = null) => {
     const requestedComponents = nComponentsOverride ?? nComponents;
     const nc = !canUse3D && requestedComponents === 3 ? 2 : requestedComponents;
-    const ep = `/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`;
+    const ep = `/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`;
     const ipc = {
       operation: 'umap',
       step: 'umap',
       parentIds: umapParentIds,
       useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' }
+      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: umapSeed || 'random' }
     };
 
     let data = null;
@@ -119,27 +122,27 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     }
 
     if (data?.result) {
-      setCachedDims(prev => ({ ...prev, [nc]: data }));
+      setCachedDims(prev => ({ ...prev, [nc]: { ...data, settingsKey } }));
       setParam2('resultNComponents', nc);  // persist for hydration on reload
     }
-  }, [runStep, dims, nComponents, nNeighbors, minDist, activeProjectSeed, setParam2, umapParentIds, canUse3D]);
+  }, [runStep, dims, nComponents, nNeighbors, minDist, umapSeed, setParam2, umapParentIds, canUse3D, settingsKey]);
 
   // Silent cache-only prefetch — populates cachedDims without touching running/error state.
   // Used to warm the other dimension during hydration so 2D↔3D toggle is instant.
   const prefetchDim = useCallback(async (nc) => {
     if (!canUse3D && nc === 3) return;
-    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${activeProjectSeed || ''}`, {}, {
+    const data = await callApi(`/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`, {}, {
       operation: 'umap',
       step: 'umap',
       parentIds: umapParentIds,
       useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: activeProjectSeed || 'random' },
+      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: umapSeed || 'random' },
       onlyIfCached: true  // never triggers a real R computation
     });
     if (data?.result) {
-      setCachedDims(prev => ({ ...prev, [nc]: data }));
+      setCachedDims(prev => ({ ...prev, [nc]: { ...data, settingsKey } }));
     }
-  }, [callApi, umapParentIds, dims, nNeighbors, minDist, activeProjectSeed, canUse3D]);
+  }, [callApi, umapParentIds, dims, nNeighbors, minDist, umapSeed, canUse3D, settingsKey]);
 
   const is2D = nComponents === 2;
 
@@ -190,6 +193,8 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
   // Traces corresponding to the actively viewed dimension
   const activeTraces = is2D ? traces2D : traces3D;
+  const displayedResult = cachedDims[nComponents];
+  const settingsChanged = !!displayedResult && displayedResult.settingsKey !== settingsKey;
 
   // Hydration effect is intact because it uses async IIFE to prefetch
   useEffect(() => {
@@ -248,8 +253,8 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     margin: { l: 50, r: 20, t: 10, b: 50 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: plotText },
-    xaxis: { title: 'UMAP 1', showgrid: false, zeroline: false },
-    yaxis: { title: 'UMAP 2', showgrid: false, zeroline: false },
+    xaxis: { title: { text: 'UMAP 1' }, showgrid: false, zeroline: false, constrain: 'domain' },
+    yaxis: { title: { text: 'UMAP 2' }, showgrid: false, zeroline: false, scaleanchor: 'x', scaleratio: 1 },
     showlegend: false,
     hovermode: 'closest'
   }), [plotText]);
@@ -300,21 +305,21 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   }
 
   return (
-    <div className="h-full w-full flex flex-col bg-background p-6">
-      <div className="flex flex-wrap gap-y-3 justify-between items-center mb-6">
+    <div className="h-full w-full flex flex-col bg-background p-4 sm:p-6 overflow-y-auto custom-scrollbar">
+      <div className="flex shrink-0 flex-wrap gap-y-3 justify-between items-center mb-6">
         <div>
           <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">UMAP Embedding</h2>
           <p className="text-textMuted">Uniform Manifold Approximation and Projection for visualization.</p>
         </div>
-        <div className="flex gap-3">
-          {result && activeTraces.length > 0 && <button
+        <div className="flex flex-wrap gap-3">
+          {result && !settingsChanged && activeTraces.length > 0 && <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => setSavePanelOpen(true)}
             ><ImageDown size={15} /> Save Figure</button>}
-          {result && (
+          {displayedResult?.provenance?.id && (
             <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
-              onClick={() => openProvenance(result.provenance.id)}
+              onClick={() => openProvenance(displayedResult.provenance.id)}
             ><FileText size={15} /> View recorded analysis</button>
           )}
           <button
@@ -333,6 +338,24 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         </div>
       </div>
 
+      {deploymentPolicy?.demoMode && isPbmcTutorial && (
+        <p role="note" className="text-sm text-textMuted mb-4">
+          Public 10x PBMC3k tutorial: measured gene expression, processed with Seurat QC, PCA, graph clustering and UMAP.
+          Numeric clusters are computed groups, not validated cell-type annotations. This is one sample, without treatment replicates.{' '}
+          <a href="https://satijalab.org/seurat/articles/pbmc3k_tutorial" target="_blank" rel="noreferrer">Source and workflow</a>
+        </p>
+      )}
+      {deploymentPolicy?.demoMode && !isPbmcTutorial && (
+        <p role="note" className="text-sm text-textMuted mb-4">
+          Synthetic tutorial: 800 simulated cells and 200 features with deliberately strong group signals.
+          Seurat calculates the embedding; the input is not measured patient data and these results are not biological evidence.
+        </p>
+      )}
+      {settingsChanged && (
+        <p role="status" className="text-sm text-textMuted mb-4">
+          Showing a previous calculation. Settings or analysis state have changed; re-compute UMAP to apply them.
+        </p>
+      )}
       {error && (
         <div className="card p-4 mb-4 bg-danger/10 border-danger text-danger flex items-center gap-3">
           <AlertTriangle size={18} />
@@ -341,8 +364,8 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       )}
 
       {/* Parameters */}
-      <div className="card p-5 mb-6 border-l-4 border-l-primary">
-        <div className="grid grid-cols-4 gap-5">
+      <div className="card shrink-0 p-5 mb-6 border-l-4 border-l-primary">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
           <div>
             <label className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Dimensions</label>
             <div className="flex bg-black/5 dark:bg-slate-800 rounded-lg p-0.5 border border-border">
@@ -399,8 +422,8 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       </div>
 
       {/* Plot area */}
-      <div className="flex-1 flex gap-5 min-h-0">
-        <div className="flex-1 bg-surface border border-border rounded-lg relative overflow-hidden flex items-center justify-center">
+      <div className="flex-1 flex flex-col xl:flex-row gap-5 min-h-0">
+        <div className="flex-1 min-w-0 min-h-[320px] bg-surface border border-border rounded-lg relative overflow-hidden flex items-center justify-center">
           {!result && !running && (
             <div className="text-center p-8">
               <Layers size={48} className="mx-auto mb-4 text-slate-600" />
@@ -438,7 +461,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             </div>
           ) : (
             <>
-              <div className={`w-full h-full absolute inset-0 ${is2D && cachedDims[2] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+              {cachedDims[2] && <div aria-hidden={!is2D} className={`w-full h-full absolute inset-0 ${is2D && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
                 <Plot
                   data={traces2D}
                   layout={layout2D}
@@ -446,9 +469,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
                   className="w-full h-full"
                   config={plotConfig}
                 />
-              </div>
-              {canUse3D && (
-                <div className={`w-full h-full absolute inset-0 ${!is2D && cachedDims[3] && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+              </div>}
+              {canUse3D && cachedDims[3] && (
+                <div aria-hidden={is2D} className={`w-full h-full absolute inset-0 ${!is2D && result ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
                   <Plot
                   data={traces3D}
                   layout={layout3D}
@@ -487,10 +510,10 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
         {/* Cluster legend sidebar */}
         {result && (
-          <div className="w-64 flex flex-col gap-4 flex-shrink-0">
+          <div className="w-full xl:w-64 flex flex-col gap-4 flex-shrink-0">
             <div className="card p-4 flex-1 flex flex-col">
               <h4 className="font-semibold border-b border-border pb-2 mb-3 text-text text-sm">
-                <ListFilter size={14} className="inline text-primary mr-2" />Clusters
+                <ListFilter size={14} className="inline text-primary mr-2" />Cell groups
               </h4>
               <div className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar">
                 {activeTraces.map((trace, i) => (

@@ -40,6 +40,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--registry', required=True)
     parser.add_argument('--profile', choices=['private', 'demo'], default='demo')
+    parser.add_argument('--dataset', choices=['synthetic', 'pbmc3k'], default='synthetic')
     parser.add_argument('--tag', default='local-review')
     parser.add_argument('--platform', default='linux/amd64')
     parser.add_argument('--base-revision', default='1')
@@ -48,7 +49,9 @@ def main():
     if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.:-]*(?:/[a-zA-Z0-9_.-]+)*', args.registry):
         parser.error('Registry must be a hostname[:port][/namespace], without credentials or URL scheme')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    records = {'profile': args.profile, 'platform': args.platform, 'bases': []}
+    if args.dataset == 'pbmc3k' and args.profile != 'demo':
+        parser.error('PBMC3k selection is only supported for the demo image')
+    records = {'profile': args.profile, 'dataset': args.dataset, 'platform': args.platform, 'bases': []}
 
     def base(name, filename, target, content, build_args=()):
         key = hashlib.sha256(content + args.platform.encode() + args.base_revision.encode()).hexdigest()[:20]
@@ -82,7 +85,7 @@ def main():
         demo_source = (CONTEXT / 'Dockerfile.demo').read_text().split('FROM ${DEMO_BASE_IMAGE} AS demo-artifact')[0].encode()
         scientific = base('traceomics-r-demo-base', 'Dockerfile.demo', 'demo-dependencies',
                           demo_source + package_code + scientific.encode(), ['SCIENTIFIC_BASE=' + scientific])
-        filename = 'Dockerfile.demo'
+        filename = 'Dockerfile.pbmc-demo' if args.dataset == 'pbmc3k' else 'Dockerfile.demo'
         runtime_arg = 'DEMO_BASE_IMAGE=' + scientific
     image = f'{args.registry}/traceomics-r{ "-demo" if args.profile == "demo" else ""}:{args.tag}'
     cache = f'{args.registry}/traceomics-r-{args.profile}:app-cache-{args.platform.replace("/", "-")}'
