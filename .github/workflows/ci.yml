@@ -111,6 +111,11 @@ jobs:
         # suite. Gate expensive work on them instead.
         run: npm run check:browser-preflight
 
+      - name: Verify immutable artifacts through the authenticated UI
+        env:
+          TRACEOMICS_ARTIFACT_UI_DB_DISPOSABLE: '1'
+        run: npm run test:artifact-versions-browser
+
   test:
     needs: browser-preflight
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false

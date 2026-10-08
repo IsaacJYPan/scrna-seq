@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20260915, now())
+VALUES ('traceomics.runtime', 20261008, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -565,6 +565,28 @@ CREATE INDEX IF NOT EXISTS idx_job_artifacts_created ON job_artifacts(created_at
 CREATE UNIQUE INDEX IF NOT EXISTS idx_job_artifacts_one_checkpoint
   ON job_artifacts(job_id)
   WHERE artifact_type = 'result_checkpoint';
+
+-- Managed file versions are immutable; replacing a file appends a new row.
+CREATE TABLE IF NOT EXISTS managed_artifact_versions (
+  id                  TEXT PRIMARY KEY,
+  artifact_id         TEXT NOT NULL,
+  project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id       BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name                TEXT NOT NULL,
+  version_number      INTEGER NOT NULL CHECK (version_number > 0),
+  previous_version_id TEXT REFERENCES managed_artifact_versions(id),
+  artifact_type       TEXT NOT NULL,
+  format_json         JSONB NOT NULL,
+  mime_type           TEXT NOT NULL,
+  checksum_sha256     TEXT NOT NULL,
+  size_bytes          BIGINT NOT NULL CHECK (size_bytes >= 0),
+  storage_key         TEXT NOT NULL UNIQUE,
+  source_job_id       TEXT REFERENCES jobs(id),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (artifact_id, version_number)
+);
+CREATE INDEX IF NOT EXISTS idx_managed_artifact_versions_project_owner
+  ON managed_artifact_versions(project_id, owner_user_id, created_at DESC, id DESC);
 
 -- ── Analysis object lineage edges (DAG-ready parent→child model) ─────────────
 CREATE TABLE IF NOT EXISTS analysis_object_edges (

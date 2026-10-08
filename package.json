@@ -68,6 +68,7 @@
     "test:frontend": "vitest run src/",
     "test:tools": "vitest run scripts/ --environment node --fileParallelism=false",
     "test:desktop": "vitest run desktop/ backend/desktop-packaging.test.js --environment node --fileParallelism=false",
+    "test:artifact-versions-browser": "node scripts/verify-artifact-versions-ui.js",
     "test:backend": "npm run test:backend:postgres",
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",
     "init:postgres": "node scripts/init-postgres.js",

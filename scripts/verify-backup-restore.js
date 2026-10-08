@@ -127,6 +127,22 @@ async function verifyDurableDatabaseReferences(client, storageFiles) {
     checkedArtifacts += 1;
   }
 
+  let checkedManagedVersions = 0;
+  const managedTable = await client.query("SELECT to_regclass('public.managed_artifact_versions') AS name");
+  if (managedTable.rows[0]?.name) {
+    const versions = await client.query(`
+      SELECT id, storage_key, size_bytes, checksum_sha256
+        FROM managed_artifact_versions ORDER BY id
+    `);
+    for (const row of versions.rows) {
+      assertDatabaseReference(inventoryByPath, {
+        key: String(row.storage_key), sizeBytes: row.size_bytes,
+        sha256: row.checksum_sha256, label: 'A managed artifact version',
+      });
+      checkedManagedVersions += 1;
+    }
+  }
+
   const legacyObjects = await client.query(`
     SELECT count(*)::integer AS count
       FROM analysis_objects
@@ -135,6 +151,7 @@ async function verifyDurableDatabaseReferences(client, storageFiles) {
   return {
     checkedDatasets,
     checkedArtifacts,
+    checkedManagedVersions,
     legacyDatasetReferences,
     legacyAnalysisObjectReferences: Number(legacyObjects.rows[0]?.count || 0),
   };
@@ -288,9 +305,10 @@ async function main(argv = process.argv.slice(2)) {
   }
 
   console.log(
-    '[verify-restore] passed: datasets=%d artifacts=%d legacyDatasetRefs=%d legacyObjectRefs=%d',
+    '[verify-restore] passed: datasets=%d artifacts=%d managedVersions=%d legacyDatasetRefs=%d legacyObjectRefs=%d',
     references.checkedDatasets,
     references.checkedArtifacts,
+    references.checkedManagedVersions,
     references.legacyDatasetReferences,
     references.legacyAnalysisObjectReferences
   );

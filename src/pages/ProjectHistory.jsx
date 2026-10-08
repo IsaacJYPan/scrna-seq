@@ -4,6 +4,7 @@ import {
   GitBranch, ImageIcon, Loader2, RefreshCw, ShieldCheck,
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import ArtifactInspector from '../components/ArtifactInspector';
 
 function formatDate(value) {
   if (!value) return 'Unknown';
@@ -552,6 +553,7 @@ export default function ProjectHistory({
   onLiveObjectAttached,
   setActiveTab,
   historyRefreshToken,
+  deploymentPolicy,
 }) {
   const activeProjectId = currentWs?.selectedProjectId || datasetInfo?.projectId || currentWs?.projects?.[0]?.id || null;
   const activeProject = currentWs?.projects?.find(project => project.id === activeProjectId) || null;
@@ -926,10 +928,12 @@ export default function ProjectHistory({
             </div>
             <div>
               <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Access model</div>
-              <div className="mt-1 text-text">Project metadata visibility only</div>
+              <div className="mt-1 text-text">Project history and authorized artifact versions</div>
             </div>
           </div>
         </div>
+
+        <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
 
         {selectedObject && selectedObject.liveState !== 'attached' && (
           <section className="rounded-lg border border-primary/20 bg-primary/5 p-5">

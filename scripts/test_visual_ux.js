@@ -588,6 +588,9 @@ async function main() {
       })
     });
   });
+  await page.route('**/api/artifact-versions/*', async route => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], nextCursor: null }) });
+  });
   await page.route('**/api/expert-r/projects/*/inputs*', async route => {
     await route.fulfill({
       status: 200,
