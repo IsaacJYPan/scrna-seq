@@ -1903,6 +1903,7 @@ app.use('/api/projects', requireAuth);
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/execution-history', require('./backend/executionHistoryRoutes').executionHistoryRoutes({ db, provider: durableStorage, requireAuth }));
+app.use('/api/private-r-kernels', require('./backend/privateKernelRoutes').privateKernelRoutes({ db, provider: durableStorage, requireAuth }));
 
 // Publishing a trusted pipeline manifest is a platform capability, not a
 // project role. Authenticate before parsing the bounded body so cookie CSRF
@@ -1980,6 +1981,7 @@ app.get('/api/expert-r/capabilities', async (req, res) => {
       expertREnabled: enabled,
       expertRProfile: enabled ? EXPERT_R_PROFILE : null,
       expertREnvironment: enabled ? runtime.environment || null : null,
+      persistentKernel: enabled && runtime.persistentKernel === true,
       expertRStatus: expertRStatus({ canExecuteExpertR, runtime,
         revoked: expertRAccessRevoked, demoMode: config.demoMode() }),
     });

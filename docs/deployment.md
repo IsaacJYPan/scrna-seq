@@ -156,6 +156,27 @@ configuration. Use the application's Docker runtime to start Compose; the
 dedicated daemon remains reserved for analysis containers. The generated file
 contains a credential and must remain private.
 
+New setup also selects `PRIVATE_R_KERNEL_ENABLED=true`. With the current pinned
+R image, the broker independently verifies IRkernel and the reference Jupyter
+client before advertising persistent sessions. Older images can continue
+one-shot R; the console reports missing kernel support separately. Existing
+installations can enable the flag in their private environment file and rebuild
+and pin the current R image. No kernel connection file or port is published.
+
+Persistent sessions run as one private non-root, networkless container per
+researcher and workspace. The application allows one active session per account
+and two globally. Defaults are 8 GiB memory, two CPUs, a 15-minute idle timeout,
+a four-hour total lifetime, and a five-minute command limit. Operators can tune
+`PRIVATE_R_KERNEL_MEMORY_LIMIT`, `PRIVATE_R_KERNEL_CPU_LIMIT`,
+`PRIVATE_R_KERNEL_IDLE_SECONDS`, `PRIVATE_R_KERNEL_LIFETIME_SECONDS`, and
+`PRIVATE_R_KERNEL_EXECUTION_SECONDS` within the runtime's bounded policy. Stopping,
+expiry, process loss, or broker restart discards unsaved variables and files.
+The private database retains exact selected input references, environment
+manifest, source, command order, and bounded console previews. A lost response
+leaves completion unconfirmed until inspected; it never triggers automatic
+execution. Scientific output publication and cooperative interruption are
+separate workflows.
+
 New setup selects `EXPERT_R_ACCESS_POLICY=project-roles`: project owners, admins,
 and analysts can run their own saved analyses without an individual operator
 grant. Viewers and anonymous demo guests cannot execute R. Existing deployments
@@ -212,6 +233,9 @@ local Docker and Postgres:
 ```bash
 npm run test:expert-r-sandbox
 DATABASE_URL=postgres://... npm run test:expert-r-browser
+# For persistent sessions, use the reviewed immutable local kernel image:
+EXPERT_R_SANDBOX_IMAGE=sha256:YOUR_IMAGE_ID npm run test:private-r-kernel
+EXPERT_R_SANDBOX_IMAGE=sha256:YOUR_IMAGE_ID npm run test:private-r-console-browser
 ```
 
 The first command probes the containment and resource boundary directly. The
@@ -502,9 +526,23 @@ remote host. Cancelling the check closes its owned SSH process. Missing clients,
 unavailable identities, authentication failures, and unreachable hosts have
 separate remediation messages.
 
-SSH verification confirms host identity and authentication. Managed application
-tunnels are not available yet, so it does not connect the remote project
-service or replace an existing workspace connection.
+To connect the application through SSH, enter its original HTTPS URL and the
+HTTPS ingress port on the remote host's loopback interface. The desktop starts
+one owned local forward through the verified account and jump chain, checks the
+application, then opens that server. The original HTTPS hostname and port remain
+the browser origin, so its certificate, secure session cookies, and CSRF policy
+are verified normally. Private certificate authorities must already be trusted
+by the operating system. SSH profiles without an application URL remain usable
+for configuration and authentication checks.
+
+Only the configured application's HTTPS authority can pass through the managed
+proxy. R, Postgres, arbitrary remote hosts, and unrelated forwards in native
+configuration are not exposed. Each resolved remote account/server route has
+separate browser storage. Closing the workspace or changing servers removes its
+owned tunnel. A failed candidate connection preserves the previous workspace;
+an established tunnel loss appears in the server indicator and requires explicit
+reconnection through server settings. It never moves analysis work to the laptop
+automatically. Server-side jobs continue under their normal lifetime and quotas.
 
 ## TLS reverse proxy
 

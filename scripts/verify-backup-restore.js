@@ -267,6 +267,42 @@ async function verifyRestoredJobSecurityDelta(sourceConfig, restoredConfig) {
   return canceledJobs;
 }
 
+async function kernelRows(postgresConfig) {
+  const client=new Client(postgresConfig);await client.connect();
+  try {
+    const records={};
+    for(const table of ['private_r_kernels','private_r_executions']) {
+      const exists=(await client.query('SELECT to_regclass($1) AS name',['public.'+table])).rows[0]?.name;
+      records[table]=exists?(await client.query(`SELECT to_jsonb(record)::text AS value FROM public.${table} AS record ORDER BY id`)).rows.map(row=>JSON.parse(row.value)):null;
+    }
+    return records;
+  } finally {await client.end();}
+}
+function verifyPrivateKernelRowsDelta(sourceRecords,restoredRecords) {
+  const counts={stoppedKernels:0,unknownExecutions:0};
+  for(const table of ['private_r_kernels','private_r_executions']) {
+    const sources=sourceRecords[table],restored=restoredRecords[table];
+    if(sources===null&&restored===null)continue;
+    if(!Array.isArray(sources)||!Array.isArray(restored)||sources.length!==restored.length)throw new Error('Restore changed private R journal tables or record counts.');
+    const kernel=table==='private_r_kernels';
+    for(let index=0;index<sources.length;index++) {
+      const source=sources[index],target=restored[index];
+      if(source.id!==target.id)throw new Error('Restore changed private R record identities.');
+      const active=(kernel?['starting','ready','running','unknown','stopping']:['reserved','running']).includes(source.status);
+      if(!active){if(JSON.stringify(source)!==JSON.stringify(target))throw new Error('Restore changed terminal private R source or result evidence.');continue;}
+      if(target.status!==(kernel?'stopped':'unknown')||!Number.isFinite(Date.parse(target.updated_at))||kernel&&(!Number.isFinite(Date.parse(target.stopped_at))||target.active_execution_id!==null))throw new Error('Restored private R memory or command completion was not safely invalidated.');
+      const normalized={...target,status:source.status,updated_at:source.updated_at,...(kernel?{active_execution_id:source.active_execution_id,stopped_at:source.stopped_at}:{})};
+      if(JSON.stringify(source)!==JSON.stringify(normalized))throw new Error('Restore changed private R fields outside explicit memory/completion invalidation.');
+      counts[kernel?'stoppedKernels':'unknownExecutions']++;
+    }
+  }
+  return counts;
+}
+async function verifyRestoredKernelSecurityDelta(sourceConfig,restoredConfig) {
+  const [source,restored]=await Promise.all([kernelRows(sourceConfig),kernelRows(restoredConfig)]);
+  return verifyPrivateKernelRowsDelta(source,restored);
+}
+
 async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -295,13 +331,16 @@ async function main(argv = process.argv.slice(2)) {
 
   if (process.env.SOURCE_DATABASE_URL) {
     const sourceConfig = { connectionString: process.env.SOURCE_DATABASE_URL };
-    const sourceFingerprint = await databaseFingerprint(sourceConfig, { excludedTables: ['jobs'] });
-    const restoredFingerprint = await databaseFingerprint(config.postgresConfig(), { excludedTables: ['jobs'] });
+    const excludedTables=['jobs','private_r_kernels','private_r_executions'];
+    const sourceFingerprint = await databaseFingerprint(sourceConfig, { excludedTables });
+    const restoredFingerprint = await databaseFingerprint(config.postgresConfig(), { excludedTables });
     if (JSON.stringify(sourceFingerprint) !== JSON.stringify(restoredFingerprint)) {
       throw new Error('Source and restored database table fingerprints differ.');
     }
     const canceledJobs = await verifyRestoredJobSecurityDelta(sourceConfig, config.postgresConfig());
+    const kernels=await verifyRestoredKernelSecurityDelta(sourceConfig,config.postgresConfig());
     console.log('[verify-restore] security-finalized active jobs=%d', canceledJobs);
+    console.log('[verify-restore] invalidated volatile sessions=%d unconfirmed commands=%d',kernels.stoppedKernels,kernels.unknownExecutions);
   }
 
   console.log(
@@ -326,5 +365,7 @@ module.exports = {
   main,
   parseArgs,
   verifyRestoredJobSecurityDelta,
+  verifyRestoredKernelSecurityDelta,
+  verifyPrivateKernelRowsDelta,
   verifyDurableDatabaseReferences,
 };

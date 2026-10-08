@@ -1,10 +1,11 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, session } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { createSshConnectionManager } = require('./sshConnection.cjs');
+const { createSshTunnel, createHttpsConnectProxy, disposeOwnedTunnels } = require('./sshTunnel.cjs');
 const { unlockNativeIdentity } = require('./sshCredentials.cjs');
 const packageMetadata = require('../package.json');
 const { isAllowedNavigation, normalizeServerUrl, verifyServerConnection,
@@ -18,6 +19,7 @@ let mainWindow = null;
 let setupWindow = null;
 let serverUrl = null;
 let connectedProfile = null;
+let connectedRuntime = null;
 let settings = normalizeTargetSettings(null);
 let settingsWarning = null;
 let changingTarget = false;
@@ -26,6 +28,7 @@ let sshManager = null;
 const selectedIdentities = new Set();
 const sshVerificationVersions = new Map();
 const windowTargets = new Map();
+const pendingConnections = new Map();
 const userDataOverride = app.commandLine.getSwitchValue('user-data-dir');
 if (userDataOverride) app.setPath('userData', path.resolve(userDataOverride));
 
@@ -54,21 +57,23 @@ async function writeTargetSettings(next) {
   settingsWarning = null;
 }
 
-function targetSummary(profile, status = 'connected') {
+function targetSummary(profile, status = 'connected', runtime = null) {
   if (!profile) return null;
+  if (runtime) status = runtime.state;
   return { id: profile.id, name: profile.name, kind: profile.kind,
-    endpoint: profile.endpoint || null, serviceIdentity: targetServiceIdentity(profile), status,
+    endpoint: profile.endpoint || null, serviceIdentity: runtime?.serviceIdentity || targetServiceIdentity(profile), status,
     capabilities: status === 'connected' ? { projectService: true } : null,
-    ...(profile.kind === 'ssh' ? { sshAuthentication: sshManager?.status(profile) || null } : {}) };
+    ...(profile.kind === 'ssh' ? { sshAuthentication: runtime?.authentication || sshManager?.status(profile) || null,
+      ...(runtime ? { sshTunnel: { state: runtime.state, connectedAt: runtime.tunnel?.connectedAt || null, message: runtime.message || null } } : {}) } : {}) };
 }
 
 function currentTarget() {
-  if (connectedProfile) return targetSummary(connectedProfile);
+  if (connectedProfile) return targetSummary(connectedProfile, 'connected', connectedRuntime);
   const selected = settings.profiles.find(profile => profile.id === settings.selectedProfileId);
   return targetSummary(selected, selected?.kind === 'ssh' ? 'configuration_only' : 'disconnected');
 }
 
-function createWindow({ profile = null, parent = null } = {}) {
+function createWindow({ profile = null, parent = null, runtime = null } = {}) {
   const isSetup = !profile;
   const window = new BrowserWindow({
     width: isSetup ? 760 : 1440, height: isSetup ? 900 : 960,
@@ -77,9 +82,9 @@ function createWindow({ profile = null, parent = null } = {}) {
     backgroundColor: '#f5f5f7', title: 'TraceOmics',
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true,
       preload: path.join(__dirname, 'preload.cjs'),
-      partition: profile ? targetSessionPartition(profile) : 'traceomics-target-setup' },
+      partition: profile ? runtime?.partition || targetSessionPartition(profile) : 'traceomics-target-setup' },
   });
-  windowTargets.set(window.webContents.id, { window, profile });
+  windowTargets.set(window.webContents.id, { window, profile, runtime });
   const allowedNavigation = url => isSetup ? url === SETUP_URL : isAllowedNavigation(url, profile.endpoint);
   window.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -99,7 +104,9 @@ function createWindow({ profile = null, parent = null } = {}) {
   window.on('closed', () => {
     sshVerificationVersions.set(contentsId, (sshVerificationVersions.get(contentsId) || 0) + 1);
     sshManager?.cancel(contentsId);
+    pendingConnections.get(contentsId)?.abort();
     windowTargets.delete(contentsId);
+    if (runtime && ![...windowTargets.values()].some(entry => entry.runtime === runtime)) void disposeRuntime(runtime);
     sshVerificationVersions.delete(contentsId);
     if (mainWindow === window) mainWindow = null;
     if (setupWindow === window) setupWindow = null;
@@ -151,33 +158,100 @@ async function saveProfile(value) {
   return profile;
 }
 
-async function openProfile(id) {
+async function openProfile(id, scope) {
   const profile = settings.profiles.find(item => item.id === id);
   if (!profile) throw new Error('Choose a saved target profile.');
-  return connectProfile(profile);
+  return connectProfile(profile, settings, scope);
 }
 
-async function connectProfile(profile, nextSettings = settings) {
-  if (profile.kind === 'ssh') throw new Error('Verify SSH access in the connection settings. Opening the project service through a managed SSH tunnel is not available yet.');
-  await verifyServerConnection(profile.endpoint);
-  const candidate = createWindow({ profile });
+function publishTargetStatus(runtime) {
+  for (const entry of windowTargets.values()) if (entry.runtime === runtime && !entry.window.isDestroyed()) {
+    entry.window.webContents.send('desktop:target-status', targetSummary(entry.profile, 'connected', runtime));
+  }
+}
+async function disposeRuntime(runtime, message = null) {
+  if (!runtime) return;
+  const firstDisposal = !runtime.disposed;
+  runtime.disposed = true; runtime.state = 'disconnected';
+  if (message) runtime.message = message;
+  runtime.authentication = { ...runtime.authentication, applicationConnected: false };
+  if (firstDisposal) {
+    runtime.session?.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (_details, callback) => callback({ cancel: true }));
+    publishTargetStatus(runtime);
+  }
+  // A later reconnect may reuse this partition. Repeated cleanup of its old
+  // window must not replace the new request boundary or close its sockets.
+  await Promise.allSettled([runtime.proxy?.dispose(), runtime.tunnel?.dispose(),
+    firstDisposal ? runtime.session?.closeAllConnections() : undefined, runtime.lease?.dispose()]);
+}
+async function prepareRuntime(profile, scope, signal) {
+  const lease = await sshManager.prepareLease(profile, scope);
+  const runtime = { lease, partition: targetSessionPartition(profile, lease.status),
+    serviceIdentity: targetServiceIdentity(profile, lease.status), authentication: lease.status, state: 'connecting', disposed: false };
+  if (connectedRuntime?.state === 'connected' && connectedRuntime.partition === runtime.partition) {
+    await lease.dispose(); return connectedRuntime;
+  }
   try {
+    runtime.tunnel = await createSshTunnel(lease, { signal, onLost: error => { void disposeRuntime(runtime, error.message); } });
+    if (runtime.disposed || signal.aborted) throw new Error(runtime.message || 'SSH connection was canceled.');
+    runtime.proxy = await createHttpsConnectProxy({ endpoint: profile.endpoint, forwardPort: runtime.tunnel.port });
+    if (runtime.disposed || signal.aborted) throw new Error('SSH connection was canceled.');
+    runtime.session = session.fromPartition(runtime.partition);
+    runtime.session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+      let allowed = false;
+      try { const url = new URL(details.url); allowed = !runtime.disposed && ['https:', 'wss:'].includes(url.protocol)
+        && url.host === new URL(profile.endpoint).host; } catch { /* Keep malformed requests inside the boundary. */ }
+      callback({ cancel: !allowed });
+    });
+    await runtime.session.closeAllConnections();
+    await runtime.session.setProxy({ mode: 'fixed_servers', proxyRules: '127.0.0.1:' + runtime.proxy.port, proxyBypassRules: '<-loopback>' });
+    await verifyServerConnection(profile.endpoint, { fetchImpl: async (url, options) => {
+      try { return await runtime.session.fetch(String(url), options); }
+      catch (error) {
+        if (/ERR_CERT_|certificate/i.test(error.message)) throw Object.assign(new Error('The HTTPS certificate was rejected. Use the original certificate hostname and a valid certificate trusted by this computer.'), { code: 'DESKTOP_TLS_REJECTED' });
+        throw error;
+      }
+    } });
+    if (runtime.disposed || signal.aborted) throw new Error(runtime.message || 'SSH connection was canceled.');
+    runtime.state = 'connected'; runtime.authentication = { ...runtime.authentication, applicationConnected: true }; return runtime;
+  } catch (error) { await disposeRuntime(runtime); throw error; }
+}
+async function connectProfile(profile, nextSettings = settings, scope = 'startup') {
+  if (profile.kind === 'ssh' && !profile.endpoint) throw new Error('Add the original HTTPS application address to open the project service through SSH.');
+  const controller = new AbortController(); pendingConnections.set(scope, controller);
+  let runtime = null, candidate = null;
+  try {
+    if (profile.kind === 'ssh') runtime = await prepareRuntime(profile, scope, controller.signal);
+    else await verifyServerConnection(profile.endpoint);
+    if (controller.signal.aborted) throw new Error('The connection was canceled.');
+    if (runtime && runtime === connectedRuntime) {
+      await writeTargetSettings({ ...nextSettings, selectedProfileId: profile.id });
+      connectedProfile = profile;
+      for (const entry of windowTargets.values()) if (entry.runtime === runtime) entry.profile = profile;
+      publishTargetStatus(runtime); mainWindow?.show(); mainWindow?.focus();
+      if (setupWindow && setupWindow !== mainWindow) setupWindow.destroy();
+      return targetSummary(profile, 'connected', runtime);
+    }
+    candidate = createWindow({ profile, runtime });
     await candidate.loadURL(profile.endpoint);
+    if (controller.signal.aborted || runtime?.disposed) throw new Error(runtime?.message || 'The connection was canceled.');
     await writeTargetSettings({ ...nextSettings, selectedProfileId: profile.id });
   } catch (error) {
-    candidate.destroy();
+    candidate?.destroy();
+    if (runtime !== connectedRuntime) await disposeRuntime(runtime);
     throw error;
-  }
+  } finally { pendingConnections.delete(scope); }
   const previousMain = mainWindow;
   const previousSetup = setupWindow;
   mainWindow = candidate;
   serverUrl = profile.endpoint;
   connectedProfile = profile;
+  connectedRuntime = runtime;
   setupWindow = null;
   candidate.show();
   if (previousSetup && previousSetup !== candidate && !previousSetup.isDestroyed()) previousSetup.destroy();
   if (previousMain && previousMain !== previousSetup && previousMain !== candidate && !previousMain.isDestroyed()) previousMain.destroy();
-  return targetSummary(profile);
+  return targetSummary(profile, 'connected', runtime);
 }
 
 async function openServer(value) {
@@ -213,7 +287,7 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('desktop:get-current-target', event => {
     const entry = assertTrustedFrame(event);
-    return entry.profile ? targetSummary(entry.profile) : currentTarget();
+    return entry.profile ? targetSummary(entry.profile, 'connected', entry.runtime) : currentTarget();
   });
   ipcMain.handle('desktop:get-target-profiles', event => {
     assertTrustedFrame(event, { setupOnly: true });
@@ -245,6 +319,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('desktop:cancel-ssh-verification', event => {
     assertTrustedFrame(event, { setupOnly: true });
     sshVerificationVersions.set(event.sender.id, (sshVerificationVersions.get(event.sender.id) || 0) + 1);
+    pendingConnections.get(event.sender.id)?.abort();
     sshManager.cancel(event.sender.id); return true;
   });
   ipcMain.handle('desktop:open-ssh-host-trust', async event => {
@@ -267,14 +342,16 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('desktop:connect-target-profile', (event, id) => {
     assertTrustedFrame(event, { setupOnly: true });
-    return changeSettings(() => openProfile(id));
+    return changeSettings(() => openProfile(id, event.sender.id));
   });
   ipcMain.handle('desktop:save-and-connect-target-profile', (event, value) => {
     assertTrustedFrame(event, { setupOnly: true });
     return changeSettings(async () => {
       const profile = normalizeTargetProfile(value);
+      if (profile.ssh?.identityFile && !selectedIdentities.has(profile.ssh.identityFile)
+          && !settings.profiles.some(saved => saved.ssh?.identityFile === profile.ssh.identityFile)) throw new Error('Choose the identity reference through the native file picker.');
       const profiles = [...settings.profiles.filter(existing => existing.id !== profile.id), profile];
-      return connectProfile(profile, { ...settings, profiles });
+      return connectProfile(profile, { ...settings, profiles }, event.sender.id);
     });
   });
   ipcMain.handle('desktop:remove-target-profile', (event, id) => {
@@ -289,6 +366,10 @@ app.whenReady().then(async () => {
     });
   });
   ipcMain.handle('desktop:open-target-settings', event => { assertTrustedFrame(event); return showSetup(); });
+  ipcMain.handle('desktop:disconnect-target', event => {
+    assertTrustedFrame(event, { setupOnly: true });
+    return changeSettings(async () => { await disposeRuntime(connectedRuntime, 'The SSH tunnel was disconnected in execution target settings.'); return currentTarget(); });
+  });
   ipcMain.handle('desktop:configure-server', (event, value) => {
     assertTrustedFrame(event, { setupOnly: true });
     return changeSettings(() => openServer(value));
@@ -305,7 +386,7 @@ app.whenReady().then(async () => {
     if (configuredUrl) { await openServer(configuredUrl); return; }
     if (settings.selectedProfileId) {
       const selected = settings.profiles.find(profile => profile.id === settings.selectedProfileId);
-      if (selected?.kind === 'ssh') { await showSetup(); return; }
+      if (selected?.kind === 'ssh' && !selected.endpoint) { await showSetup(); return; }
       await openProfile(settings.selectedProfileId); return;
     }
   } catch {
@@ -315,7 +396,11 @@ app.whenReady().then(async () => {
 }).finally(() => { starting = false; });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !starting && !changingTarget) app.quit(); });
-app.on('before-quit', () => sshManager?.dispose());
+app.on('before-quit', () => {
+  for (const controller of pendingConnections.values()) controller.abort();
+  disposeOwnedTunnels();
+  void disposeRuntime(connectedRuntime); sshManager?.dispose();
+});
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     if (connectedProfile) openProfile(connectedProfile.id).catch(() => showSetup());

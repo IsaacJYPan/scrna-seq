@@ -50,11 +50,12 @@ const ROUTE_SAFETY = ['BatchMode yes', 'StrictHostKeyChecking yes', 'UpdateHostK
   'ForwardX11 no', 'Tunnel no', 'PermitLocalCommand no', 'RequestTTY no',
   'RemoteCommand none', 'ConnectTimeout 8', 'ConnectionAttempts 1'];
 
-async function createManagedRouteConfiguration({ directory, profile, configuration, route, executable, nativeConfigFile }) {
+async function createManagedRouteConfiguration({ directory, profile, configuration, route, executable, nativeConfigFile, tunnel = false }) {
   const filename = path.join(directory, '.ssh-route-' + randomUUID() + '.conf');
   const includeFiles = await nativeConfigurationFiles(nativeConfigFile);
   const nodes = [...route, { profile, configuration }];
-  const lines = ['# Temporary native route policy. Original SSH configuration remains user-owned.', 'Host *', ...ROUTE_SAFETY.map(value => '  ' + value)];
+  const safety = ROUTE_SAFETY.map(value => tunnel && value === 'ClearAllForwardings yes' ? 'ClearAllForwardings no' : value);
+  const lines = ['# Temporary native route policy. Original SSH configuration remains user-owned.', 'Host *', ...safety.map(value => '  ' + value)];
   for (const [index, node] of nodes.entries()) {
     const config = node.configuration;
     lines.push('Host ' + configValue(node.profile.ssh.host.replace(/^\[|\]$/g, '')),
@@ -63,7 +64,7 @@ async function createManagedRouteConfiguration({ directory, profile, configurati
     if (index === 0) lines.push('  ProxyCommand none');
     else {
       const previous = nodes[index - 1];
-      const args = [executable, '-F', nativePath(filename), '-T', '-v', '-W',
+      const args = [executable, '-F', nativePath(filename), '-T', '-v', '-oClearAllForwardings=yes', '-W',
         '[' + config.hostname.replace(/^\[|\]$/g, '') + ']:' + config.port,
         previous.profile.ssh.host.replace(/^\[|\]$/g, '')];
       lines.push('  ProxyCommand ' + args.map(value => commandArgument(value)).join(' '));

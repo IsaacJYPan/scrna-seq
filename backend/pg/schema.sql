@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261009, now())
+VALUES ('traceomics.runtime', 20261010, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -816,3 +816,95 @@ CREATE TABLE IF NOT EXISTS workflow_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_artifacts_owner ON workflow_artifacts(owner_user_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_snapshots_owner ON workflow_snapshots(owner_user_id, project_id);
+
+-- Private persistent R sessions and immutable command evidence.
+CREATE TABLE IF NOT EXISTS private_r_kernels (
+  id TEXT PRIMARY KEY CHECK (id ~ '^pk_[a-f0-9]{24}$'),
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL CHECK (octet_length(workspace_id) BETWEEN 1 AND 120),
+  analysis_object_id TEXT REFERENCES analysis_objects(id) ON DELETE SET NULL,
+  request_id UUID NOT NULL,
+  start_sha256 TEXT NOT NULL CHECK (start_sha256 ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL CHECK (status IN ('starting','ready','running','unknown','stopping','stopped','failed')),
+  runtime_generation TEXT CHECK (runtime_generation ~ '^[a-f0-9]{64}$'),
+  environment_json JSONB NOT NULL CHECK (octet_length(environment_json::text) <= 4096),
+  environment_manifest_json JSONB NOT NULL CHECK (octet_length(environment_manifest_json::text) <= 278528),
+  inputs_json JSONB NOT NULL CHECK (octet_length(inputs_json::text) <= 69632),
+  resources_json JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (octet_length(resources_json::text) <= 4096),
+  target_json JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (octet_length(target_json::text) <= 4096),
+  next_order BIGINT NOT NULL DEFAULT 0 CHECK (next_order >= 0 AND next_order <= 500),
+  active_execution_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  last_activity_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  stopped_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (project_id,owner_user_id,request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_private_kernel_owner_project
+  ON private_r_kernels(project_id,owner_user_id,created_at DESC,id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_private_kernel_workspace_active
+  ON private_r_kernels(project_id,owner_user_id,workspace_id)
+  WHERE status IN ('starting','ready','running','unknown','stopping');
+
+CREATE TABLE IF NOT EXISTS private_r_executions (
+  id TEXT PRIMARY KEY CHECK (id ~ '^pex_[a-f0-9]{24}$'),
+  kernel_id TEXT NOT NULL REFERENCES private_r_kernels(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  request_id UUID NOT NULL,
+  kernel_generation TEXT NOT NULL CHECK (kernel_generation ~ '^[a-f0-9]{64}$'),
+  execution_order BIGINT NOT NULL CHECK (execution_order BETWEEN 1 AND 500),
+  status TEXT NOT NULL CHECK (status IN ('reserved','running','completed','failed','unknown')),
+  source_code TEXT NOT NULL CHECK (octet_length(source_code) BETWEEN 1 AND 32768),
+  source_sha256 TEXT NOT NULL CHECK (source_sha256 ~ '^[a-f0-9]{64}$'),
+  result_json JSONB CHECK (octet_length(result_json::text) <= 1114112),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(kernel_id,request_id),
+  UNIQUE(kernel_id,execution_order)
+);
+CREATE INDEX IF NOT EXISTS idx_private_execution_kernel_order
+  ON private_r_executions(kernel_id,execution_order DESC);
+CREATE INDEX IF NOT EXISTS idx_private_execution_project_owner
+  ON private_r_executions(project_id,owner_user_id,created_at DESC,id DESC);
+
+CREATE OR REPLACE FUNCTION reject_private_execution_identity_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.kernel_id,NEW.project_id,NEW.owner_user_id,NEW.request_id,
+         NEW.kernel_generation,NEW.execution_order,NEW.source_code,NEW.source_sha256,NEW.created_at)
+    IS DISTINCT FROM
+     ROW(OLD.id,OLD.kernel_id,OLD.project_id,OLD.owner_user_id,OLD.request_id,
+         OLD.kernel_generation,OLD.execution_order,OLD.source_code,OLD.source_sha256,OLD.created_at)
+  THEN RAISE EXCEPTION 'private execution identity and source are immutable' USING ERRCODE='55000'; END IF;
+  IF OLD.status IN ('completed','failed') AND ROW(NEW.status,NEW.result_json,NEW.completed_at)
+     IS DISTINCT FROM ROW(OLD.status,OLD.result_json,OLD.completed_at)
+  THEN RAISE EXCEPTION 'completed private execution evidence is immutable' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_private_execution_identity_no_update ON private_r_executions;
+CREATE TRIGGER trg_private_execution_identity_no_update
+  BEFORE UPDATE ON private_r_executions
+  FOR EACH ROW EXECUTE FUNCTION reject_private_execution_identity_update();
+
+CREATE OR REPLACE FUNCTION reject_private_kernel_identity_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.project_id,NEW.owner_user_id,NEW.workspace_id,NEW.request_id,NEW.start_sha256,
+         NEW.environment_json,NEW.environment_manifest_json,NEW.inputs_json,NEW.created_at)
+    IS DISTINCT FROM
+     ROW(OLD.id,OLD.project_id,OLD.owner_user_id,OLD.workspace_id,OLD.request_id,OLD.start_sha256,
+         OLD.environment_json,OLD.environment_manifest_json,OLD.inputs_json,OLD.created_at)
+    OR (OLD.runtime_generation IS NOT NULL AND NEW.runtime_generation IS DISTINCT FROM OLD.runtime_generation)
+  THEN RAISE EXCEPTION 'private kernel identity and inputs are immutable' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_private_kernel_identity_no_update ON private_r_kernels;
+CREATE TRIGGER trg_private_kernel_identity_no_update
+  BEFORE UPDATE ON private_r_kernels
+  FOR EACH ROW EXECUTE FUNCTION reject_private_kernel_identity_update();

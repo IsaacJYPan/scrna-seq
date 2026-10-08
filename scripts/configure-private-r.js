@@ -113,6 +113,7 @@ function preflightPrivateR(options, deployment, { runDocker = docker, filesystem
 function privateREnvironment(options, identity) {
   return ['# Private R execution. Keep this generated credential file local.',
     'EXPERT_R_ENABLED=true', 'EXPERT_R_ACCESS_POLICY=project-roles',
+    'PRIVATE_R_KERNEL_ENABLED=true',
     `EXPERT_R_SANDBOX_TOKEN=${crypto.randomBytes(32).toString('hex')}`,
     `EXPERT_R_SANDBOX_IMAGE=${options.image}`, `EXPERT_R_RUNTIME_SOCKET=${options.socket}`,
     `EXPERT_R_SANDBOX_HOST_WORK_ROOT=${options.workRoot}`,

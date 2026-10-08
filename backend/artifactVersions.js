@@ -170,7 +170,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       const current = await internal(userId, projectId, reference.versionId);
       if (current.checksum !== row.checksum || current.size !== row.size || current.key !== row.key) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The selected artifact version changed during verification.', 409);
       if (purpose === 'execution') await db.requireProjectRole(userId, projectId, WRITE_ROLES);
-      return { ...opened, version: await display(row) };
+      return { ...opened, internalStorageKey: row.key, version: await display(row) };
     } catch (error) {
       if (opened) await opened.handle.close();
       if (['STORAGE_SIZE_MISMATCH', 'STORAGE_CHECKSUM_MISMATCH', 'STORAGE_OBJECT_MISSING', 'UNSAFE_STORAGE_PATH'].includes(error.code)) throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The saved artifact is missing or its integrity check failed. Earlier versions remain available.', 409);

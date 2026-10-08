@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getExecutionEnvironment, getExecutionHistory, listExecutionHistory } from '../executions/executionHistoryApi';
 import { artifactImageUrl, getArtifactVersion, previewArtifactVersion } from '../artifacts/artifactApi';
 
-const kinds = { all: 'All executions', guided: 'Guided jobs', workflow: 'Recipe steps', 'expert-r': 'Expert R jobs', 'live-r': 'Live R changes', provenance: 'Imported provenance' };
+const kinds = { all: 'All executions', guided: 'Guided jobs', workflow: 'Recipe steps', 'expert-r': 'Expert R jobs', 'live-r': 'Live R changes', 'r-console':'Private R console', provenance: 'Imported provenance' };
 const date = value => value ? new Date(value).toLocaleString() : 'Not recorded';
 const precision = value => String(value || 'unavailable').replace(/-/g, ' ');
 function ArtifactRows({ items, onInspect }) {
