@@ -79,6 +79,8 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
   const artifactKey = 'projects/proj_restore/artifacts/job_restore/result.csv';
   const managedVersionId = 'av_0123456789abcdef01234567';
   const managedKey = `projects/proj_restore/artifacts/${managedVersionId}/content.csv`;
+  const publicationVersionId='av_'+ 'b'.repeat(24);
+  const publicationKey=`projects/proj_restore/artifacts/${publicationVersionId}/content.csv`;
   const datasetBytes = Buffer.from('restore-drill-dataset\n');
   const artifactBytes = Buffer.from('gene,score\nMS4A1,1.5\n');
   // These records exercise backup fidelity; their synthetic inventory does not
@@ -100,7 +102,7 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
     timestamp: '2026-10-08T00:00:00Z', parameters: { method: 'LogNormalize' },
     execution: { generation: 'b'.repeat(64), order: 1, packages: [{ name: 'Seurat', version: '5.3.0' }] } },
     live_state: { live_revision: 1 } });
-  for (const [key, bytes] of [[datasetKey, datasetBytes], [artifactKey, artifactBytes], [managedKey, artifactBytes], [environmentKey, manifestBytes]]) {
+  for (const [key, bytes] of [[datasetKey, datasetBytes], [artifactKey, artifactBytes], [managedKey, artifactBytes], [publicationKey, artifactBytes], [environmentKey, manifestBytes]]) {
     const file = path.join(storageRoot, ...key.split('/'));
     await fs.promises.mkdir(path.dirname(file), { recursive: true });
     await fs.promises.writeFile(file, bytes, { flag: 'wx' });
@@ -224,6 +226,12 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
     const preview={ok:true,kernelId,generation:kernelGeneration,executionId:completedId,order:1,status:'completed',stdout:'[1] 3\n',warnings:[],error:null,tables:[],figures:[],truncated:false,startedAt:'2026-10-08T00:00:00.000Z',completedAt:'2026-10-08T00:00:01.000Z'};
     await client.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256,result_json,started_at,completed_at) VALUES($1,$2,'proj_restore',$3,'22222222-2222-4222-8222-222222222222',$4,1,'completed','n <- 3',$5,$6,NOW(),NOW())`,[completedId,kernelId,userId,kernelGeneration,sha256('n <- 3'),preview]);
     await client.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256,started_at) VALUES($1,$2,'proj_restore',$3,'33333333-3333-4333-8333-333333333333',$4,2,'running','n + 1',$5,NOW())`,[runningId,kernelId,userId,kernelGeneration,sha256('n + 1')]);
+    const publicationId='pub_'+ 'a'.repeat(24),publicationArtifactId='af_'+ 'a'.repeat(24);
+    const lineage={schema:'traceomics.private-r-publication.v1',kernelId,generation:kernelGeneration,source:{executionId:completedId,order:1},environment:environmentReference,inputs:[],replay:{complete:false}};
+    await client.query(`INSERT INTO private_r_publications(id,kernel_id,project_id,owner_user_id,request_id,request_sha256,status,publication_type,name,binding_name,source_execution_id,kernel_generation,kernel_order,artifact_id,version_id,storage_key,reserved_bytes,checksum_sha256,size_bytes,lineage_json,completed_at) VALUES($1,$2,'proj_restore',$3,'44444444-4444-4444-8444-444444444444',$4,'completed','table','Saved console table','cells',$5,$6,1,$7,$8,$9,$10,$11,$10,$12,NOW())`,[publicationId,kernelId,userId,sha256('saved table fixture'),completedId,kernelGeneration,publicationArtifactId,publicationVersionId,publicationKey,artifactBytes.length,sha256(artifactBytes),lineage]);
+    await client.query(`INSERT INTO managed_artifact_versions(id,artifact_id,project_id,owner_user_id,name,version_number,artifact_type,format_json,mime_type,checksum_sha256,size_bytes,storage_key,source_publication_id,provenance_json) VALUES($1,$2,'proj_restore',$3,'Saved console table',1,'table','{"id":"org.ietf.csv","version":"1"}','text/csv',$4,$5,$6,$7,$8)`,[publicationVersionId,publicationArtifactId,userId,sha256(artifactBytes),artifactBytes.length,publicationKey,publicationId,lineage]);
+    const unfinishedVersion='av_'+ 'c'.repeat(24);
+    await client.query(`INSERT INTO private_r_publications(id,kernel_id,project_id,owner_user_id,request_id,request_sha256,status,publication_type,name,binding_name,source_execution_id,kernel_generation,kernel_order,artifact_id,version_id,previous_version_id,storage_key,reserved_bytes,lineage_json) VALUES($1,$2,'proj_restore',$3,'55555555-5555-4555-8555-555555555555',$4,'running','table','Unfinished console save','more_cells',$5,$6,2,$7,$8,$9,$10,20971520,$11)`,['pub_'+ 'b'.repeat(24),kernelId,userId,sha256('unfinished table fixture'),runningId,kernelGeneration,publicationArtifactId,unfinishedVersion,publicationVersionId,`projects/proj_restore/artifacts/${unfinishedVersion}/content.csv`,{...lineage,source:{executionId:runningId,order:2}}]);
     await client.query('COMMIT');
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
@@ -320,7 +328,7 @@ async function main() {
     if (restored.securityState?.canceledJobs !== 2) {
       throw new Error('Restore did not cancel both queued/running drill jobs.');
     }
-    if(restored.securityState?.stoppedKernels!==1||restored.securityState?.unknownExecutions!==1)throw new Error('Restore did not invalidate volatile private R memory and pending command completion.');
+    if(restored.securityState?.stoppedKernels!==1||restored.securityState?.unknownExecutions!==1||restored.securityState?.unknownPublications!==1)throw new Error('Restore did not invalidate volatile private R memory, pending commands and unfinished saves.');
     const verification = await runVerifier({
       databaseUrl: targetUrl,
       sourceDatabaseUrl: sourceUrl,

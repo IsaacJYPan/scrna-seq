@@ -46,6 +46,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       reference: { artifactId: record.artifactId, versionId: record.versionId, projectId: record.projectId, sha256: record.sha256 },
       previewBudget: { responseBytes: previews.PREVIEW_LIMITS.bytes, imageBytes: previews.PREVIEW_LIMITS.imageBytes, maximumRows: previews.PREVIEW_LIMITS.rows },
       canReplace: row.sourceKind === 'managed-file',
+      ...(row.sourcePublicationId ? { sourcePublicationId: row.sourcePublicationId, provenance: row.provenance } : {}),
     };
   }
   function managed(row) {
@@ -56,6 +57,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       sourceRunId: row.source_job_id, createdAt: row.created_at,
       sourceKind: 'managed-file', sourceId: row.id,
       versionNumber: Number(row.version_number), previousVersionId: row.previous_version_id,
+      sourcePublicationId: row.source_publication_id, provenance: row.provenance_json,
     };
   }
   function privateInput(row) {
@@ -181,7 +183,17 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
   async function preview(userId, projectId, versionId, options = {}) {
     const version = await get(userId, projectId, versionId);
     const opened = await resolveVerified(userId, projectId, version.reference);
-    try { return { version, integrityVerified: true, preview: version.previews.length ? await previews.buildPreview(opened, version, options) : { family: 'metadata', message: 'Integrity verified. This version supports metadata inspection; its contents require an appropriate private analysis runtime.' } }; }
+    try {
+      let result;
+      try { result = version.previews.length ? await previews.buildPreview(opened, version, options) : { family: 'metadata', message: 'Integrity verified. This version supports metadata inspection; its contents require an appropriate private analysis runtime.' }; }
+      catch (error) {
+        // The private serializer can save a full data frame whose dimensions or
+        // cells exceed browser preview budgets. Preserve those verified bytes.
+        if (!version.sourcePublicationId || version.format.id !== 'org.ietf.csv' || error.code !== 'ARTIFACT_PREVIEW_INVALID') throw error;
+        result = { family: 'metadata', message: 'Integrity verified. This complete saved table exceeds the bounded browser preview. Inspect it in a private R session.' };
+      }
+      return { version, integrityVerified: true, preview: result };
+    }
     finally { await opened.handle.close(); }
   }
 
@@ -214,8 +226,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
         const membership = (await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId])).rows[0];
         if (!membership) notFound();
         if (!WRITE_ROLES.includes(membership.role)) throw artifactError('FORBIDDEN', 'Your project role cannot import artifact versions.', 403);
-        const usage = (await client.query('SELECT COUNT(*)::int AS count,COALESCE(SUM(size_bytes),0)::bigint AS bytes FROM managed_artifact_versions WHERE project_id=$1 AND owner_user_id=$2', [projectId, userId])).rows[0];
-        if (usage.count >= QUOTA.versions || Number(usage.bytes) + stored.sizeBytes > QUOTA.bytes) throw artifactError('ARTIFACT_STORAGE_LIMIT', 'Your managed artifact storage is full. Keep earlier versions and ask the installation administrator to review retention.', 409);
+        await assertCapacity(client, userId, projectId, stored.sizeBytes);
         if (previous) {
           const latest = await internal(userId, projectId, previousVersionId);
           if (latest.checksum !== previous.checksum) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The previous artifact version changed during import.', 409);
@@ -231,7 +242,38 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     }
   }
 
-  return { list, get, preview, importFile, resolveVerified };
+  async function assertCapacity(connection, userId, projectId, bytes, excludePublicationId = null) {
+    const usage = (await connection.query(`SELECT COUNT(*)::int AS count,COALESCE(SUM(bytes),0)::bigint AS bytes FROM (
+      SELECT size_bytes AS bytes FROM managed_artifact_versions WHERE project_id=$1 AND owner_user_id=$2
+      UNION ALL SELECT reserved_bytes AS bytes FROM private_r_publications WHERE project_id=$1 AND owner_user_id=$2
+        AND status IN ('reserved','running','unknown') AND ($3::text IS NULL OR id<>$3)
+    ) usage`, [projectId, userId, excludePublicationId])).rows[0];
+    if (usage.count >= QUOTA.versions || Number(usage.bytes) + bytes > QUOTA.bytes) throw artifactError('ARTIFACT_STORAGE_LIMIT', 'Your managed artifact storage is full. Unconfirmed saves reserve space until their completion is resolved.', 409);
+  }
+  async function planProduced(connection, userId, projectId, { type, formatId, previousVersionId }) {
+    await connection.query('SELECT id FROM projects WHERE id=$1 FOR UPDATE', [projectId]);
+    if (!previousVersionId) return { artifactId: id('af') };
+    const previous = (await connection.query('SELECT * FROM managed_artifact_versions WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [previousVersionId, projectId, userId])).rows[0];
+    if (!previous) notFound();
+    if (previous.artifact_type !== type || previous.format_json.id !== formatId) throw artifactError('ARTIFACT_FORMAT_CHANGED', 'A replacement version must retain the artifact type and format. Save a separate artifact for a different format.', 409);
+    return { artifactId: previous.artifact_id };
+  }
+  // Server-owned producers call this inside the publication transaction after
+  // verifying real bytes. It intentionally accepts no HTTP or client file data.
+  async function registerProduced(connection, userId, projectId, value) {
+    const plan = await planProduced(connection, userId, projectId, { type: value.type, formatId: value.format.id, previousVersionId: value.previousVersionId });
+    if (value.previousVersionId && plan.artifactId !== value.artifactId) throw artifactError('ARTIFACT_VERSION_CHANGED','The previous version no longer matches this artifact.',409);
+    await assertCapacity(connection, userId, projectId, value.sizeBytes, value.publicationId);
+    (await analysisContract).validateArtifactFormat(value.format);
+    if (!/^av_[a-f0-9]{24}$/.test(value.versionId) || !/^af_[a-f0-9]{24}$/.test(value.artifactId) || !validBytes({checksum:value.checksumSha256,size:value.sizeBytes,key:value.key}) || !storage.isProjectStorageKey(value.key,{projectId,kind:'artifacts'})) throw artifactError('INVALID_ARTIFACT_FILE','The saved artifact evidence is invalid.');
+    const next = (await connection.query('SELECT COALESCE(MAX(version_number),0)+1 AS version FROM managed_artifact_versions WHERE artifact_id=$1', [value.artifactId])).rows[0];
+    const inserted = await connection.query(`INSERT INTO managed_artifact_versions
+      (id,artifact_id,project_id,owner_user_id,name,version_number,previous_version_id,artifact_type,format_json,mime_type,checksum_sha256,size_bytes,storage_key,source_publication_id,provenance_json)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+      [value.versionId,value.artifactId,projectId,userId,safeName(value.name),Number(next.version),value.previousVersionId||null,value.type,value.format,value.mimeType,value.checksumSha256,value.sizeBytes,value.key,value.publicationId,value.provenance]);
+    return inserted.rows[0];
+  }
+  return { list, get, preview, importFile, resolveVerified, assertCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

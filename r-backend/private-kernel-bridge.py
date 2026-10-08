@@ -9,7 +9,9 @@ import json
 import math
 import os
 import queue
+import re
 import select
+import stat
 import struct
 import sys
 import time
@@ -22,6 +24,38 @@ STDOUT_BYTES = 65536
 DIAGNOSTIC_BYTES = 8192
 FIGURE_BYTES = 262144
 RESPONSE_BYTES = 1048576
+EXPORT_BYTES = 20 * 1024 * 1024
+
+
+def export_directory():
+    root = os.open('/work', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return os.open('export', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    finally:
+        os.close(root)
+
+
+def export_evidence(directory, filename):
+    handle = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+    try:
+        entry = os.fstat(handle)
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_size > EXPORT_BYTES:
+            raise ValueError('Invalid isolated output.')
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(handle, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > EXPORT_BYTES:
+                raise ValueError('Isolated output exceeds its limit.')
+            digest.update(chunk)
+        if total != entry.st_size:
+            raise ValueError('Isolated output changed during verification.')
+        return {'checksumSha256': digest.hexdigest(), 'sizeBytes': total}
+    finally:
+        os.close(handle)
 
 
 def bounded(value, maximum):
@@ -173,9 +207,10 @@ def main():
         spec = KernelSpecManager().get_kernel_spec('ir')
         if not spec.argv or 'IRkernel::main' not in ' '.join(spec.argv):
             raise RuntimeError('The installed R kernelspec is incompatible.')
-        emit({'ok': True, 'protocol': 'jupyter', 'adapter': 1})
+        emit({'ok': True, 'protocol': 'jupyter', 'adapter': 1, 'publications': True})
         return
     os.umask(0o077)
+    os.mkdir('/work/export', mode=0o700)
     manager = KernelManager(kernel_name='ir', connection_file='/tmp/private-r-connection.json')
     manager.autorestart = False
     sink = open(os.devnull, 'w')
@@ -205,7 +240,25 @@ def main():
                 break
             if request.get('action') != 'execute' or not isinstance(request.get('source'), str) or len(request['source'].encode('utf-8')) > SOURCE_BYTES:
                 raise ValueError('Invalid private kernel request.')
-            result = execute(client, request['source'], min(600, max(1, int(request.get('timeoutSeconds', 300)))), manager.is_alive)
+            publication = request.get('publication')
+            directory = None
+            try:
+                if publication is not None:
+                    if not isinstance(publication, dict) or not re.fullmatch(r'[0-9a-f]{64}\.(rds|csv)', publication.get('filename', '')):
+                        raise ValueError('Invalid publication.')
+                    directory = export_directory()
+                    try:
+                        os.stat(publication['filename'], dir_fd=directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise ValueError('Publication output already exists.')
+                result = execute(client, request['source'], min(600, max(1, int(request.get('timeoutSeconds', 300)))), manager.is_alive)
+                if publication is not None and result['status'] == 'completed':
+                    result['exportFile'] = export_evidence(directory, publication['filename'])
+            finally:
+                if directory is not None:
+                    os.close(directory)
             emit({'ok': True, 'event': 'execution', 'executionId': request['executionId'], **result})
     finally:
         if manager.has_kernel:

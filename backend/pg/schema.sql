@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261010, now())
+VALUES ('traceomics.runtime', 20261011, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -908,3 +908,73 @@ DROP TRIGGER IF EXISTS trg_private_kernel_identity_no_update ON private_r_kernel
 CREATE TRIGGER trg_private_kernel_identity_no_update
   BEFORE UPDATE ON private_r_kernels
   FOR EACH ROW EXECUTE FUNCTION reject_private_kernel_identity_update();
+-- Durable console publication identities and receipts. Storage keys are private.
+CREATE TABLE IF NOT EXISTS private_r_publications (
+  id TEXT PRIMARY KEY CHECK (id ~ '^pub_[a-f0-9]{24}$'),
+  kernel_id TEXT NOT NULL REFERENCES private_r_kernels(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK (request_sha256 ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL CHECK (status IN ('reserved','running','completed','failed','unknown')),
+  publication_type TEXT NOT NULL CHECK (publication_type IN ('object','table','figure')),
+  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
+  binding_name TEXT CHECK (octet_length(binding_name) BETWEEN 1 AND 256),
+  source_execution_id TEXT NOT NULL REFERENCES private_r_executions(id),
+  kernel_generation TEXT NOT NULL CHECK (kernel_generation ~ '^[a-f0-9]{64}$'),
+  kernel_order INTEGER NOT NULL CHECK (kernel_order BETWEEN 1 AND 500),
+  figure_index INTEGER CHECK (figure_index BETWEEN 0 AND 3),
+  artifact_id TEXT NOT NULL CHECK (artifact_id ~ '^af_[a-f0-9]{24}$'),
+  version_id TEXT NOT NULL UNIQUE CHECK (version_id ~ '^av_[a-f0-9]{24}$'),
+  previous_version_id TEXT REFERENCES managed_artifact_versions(id) DEFERRABLE INITIALLY DEFERRED,
+  storage_key TEXT NOT NULL CHECK (length(storage_key) BETWEEN 1 AND 2048),
+  reserved_bytes BIGINT NOT NULL CHECK (reserved_bytes BETWEEN 1 AND 20971520),
+  checksum_sha256 TEXT CHECK (checksum_sha256 ~ '^[a-f0-9]{64}$'),
+  size_bytes BIGINT CHECK (size_bytes BETWEEN 1 AND 20971520),
+  lineage_json JSONB NOT NULL CHECK (octet_length(lineage_json::text) <= 196608),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  UNIQUE(kernel_id,request_id),
+  CHECK ((publication_type='figure' AND binding_name IS NULL AND figure_index IS NOT NULL) OR
+         (publication_type IN ('object','table') AND binding_name IS NOT NULL AND figure_index IS NULL)),
+  CHECK (status <> 'completed' OR (checksum_sha256 IS NOT NULL AND size_bytes IS NOT NULL AND completed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_private_publications_owner
+  ON private_r_publications(project_id,owner_user_id,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_private_publications_pending
+  ON private_r_publications(kernel_id,status) WHERE status IN ('reserved','running','unknown');
+ALTER TABLE managed_artifact_versions ADD COLUMN IF NOT EXISTS provenance_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE managed_artifact_versions ADD COLUMN IF NOT EXISTS source_publication_id TEXT REFERENCES private_r_publications(id);
+ALTER TABLE managed_artifact_versions DROP CONSTRAINT IF EXISTS managed_artifact_provenance_bound;
+ALTER TABLE managed_artifact_versions ADD CONSTRAINT managed_artifact_provenance_bound CHECK (octet_length(provenance_json::text) <= 196608);
+CREATE OR REPLACE FUNCTION enforce_private_publication_identity() RETURNS TRIGGER AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.kernel_id,NEW.project_id,NEW.owner_user_id,NEW.request_id,NEW.request_sha256,
+         NEW.publication_type,NEW.name,NEW.binding_name,NEW.source_execution_id,NEW.kernel_generation,
+         NEW.kernel_order,NEW.figure_index,NEW.artifact_id,NEW.version_id,NEW.previous_version_id,
+         NEW.storage_key,NEW.reserved_bytes,NEW.lineage_json,NEW.created_at)
+     IS DISTINCT FROM
+     ROW(OLD.id,OLD.kernel_id,OLD.project_id,OLD.owner_user_id,OLD.request_id,OLD.request_sha256,
+         OLD.publication_type,OLD.name,OLD.binding_name,OLD.source_execution_id,OLD.kernel_generation,
+         OLD.kernel_order,OLD.figure_index,OLD.artifact_id,OLD.version_id,OLD.previous_version_id,
+         OLD.storage_key,OLD.reserved_bytes,OLD.lineage_json,OLD.created_at) THEN
+    RAISE EXCEPTION 'Private publication identity is immutable';
+  END IF;
+  IF OLD.status IN ('completed','failed') AND
+     ROW(NEW.status,NEW.checksum_sha256,NEW.size_bytes,NEW.completed_at)
+     IS DISTINCT FROM ROW(OLD.status,OLD.checksum_sha256,OLD.size_bytes,OLD.completed_at) THEN
+    RAISE EXCEPTION 'Terminal private publication evidence is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_private_publication_identity ON private_r_publications;
+CREATE TRIGGER trg_private_publication_identity BEFORE UPDATE ON private_r_publications
+  FOR EACH ROW EXECUTE FUNCTION enforce_private_publication_identity();
+CREATE OR REPLACE FUNCTION enforce_managed_artifact_version_immutable() RETURNS TRIGGER AS $$
+BEGIN RAISE EXCEPTION 'Managed artifact versions are immutable'; END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_managed_artifact_version_immutable ON managed_artifact_versions;
+CREATE TRIGGER trg_managed_artifact_version_immutable BEFORE UPDATE ON managed_artifact_versions
+  FOR EACH ROW EXECUTE FUNCTION enforce_managed_artifact_version_immutable();

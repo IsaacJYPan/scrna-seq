@@ -11,6 +11,8 @@ const { spawn } = require('node:child_process');
 const { pipeline } = require('node:stream/promises');
 const storage = require('./storage');
 const { validateEnvironmentManifest, summarizeEnvironmentManifest, assertEnvironmentMatches } = require('./rEnvironment');
+const { validatePrivateKernelExportRequest, extractPrivateKernelFile, PRIVATE_KERNEL_PUBLICATION_ID_RE,
+  MAX_PRIVATE_KERNEL_EXPORT_BYTES } = require('./privateKernelExports');
 
 const KERNEL_ID = /^pk_[0-9a-f]{16,64}$/;
 const GENERATION = /^[0-9a-f]{64}$/;
@@ -122,12 +124,12 @@ function createTransport(child,{onLost,startTimeoutMs=120000}={}) {
   child.stderr.on('data',()=>{});
   child.once('error',lost);child.once('close',lost);child.stdin.on('error',lost);
   return { ready,
-    request(executionId,source,timeoutSeconds) {
+    request(executionId,source,timeoutSeconds,publication) {
       if(!alive)return Promise.reject(failure('PRIVATE_KERNEL_TRANSPORT_FAILED','The private kernel is no longer available.'));
       if(pending)return Promise.reject(failure('PRIVATE_KERNEL_BUSY','The private kernel is already executing.'));
       return new Promise((resolve,reject)=>{
         pending={executionId,resolve,reject,timer:setTimeout(lost,(timeoutSeconds+5)*1000)};
-        child.stdin.write(JSON.stringify({action:'execute',executionId,source,timeoutSeconds})+'\n');
+        child.stdin.write(JSON.stringify({action:'execute',executionId,source,timeoutSeconds,...(publication?{publication}: {})})+'\n');
       });
     },
     close(){if(alive){try{child.stdin.end(JSON.stringify({action:'stop'})+'\n');}catch{}}lost();child.kill('SIGKILL');},
@@ -136,6 +138,7 @@ function createTransport(child,{onLost,startTimeoutMs=120000}={}) {
 
 function createPrivateKernelRuntime({env=process.env,provider=storage.createLocalStorageProvider(),environmentManifest,
   runProcessImpl=runCommand,spawnImpl=spawn,clock=Date.now,transportFactory=createTransport,
+  extractFileImpl=extractPrivateKernelFile,
   maxRetiredIds=MAX_RETIRED_IDS,maxTombstones=MAX_TOMBSTONES}={}) {
   const policy=resourcePolicy(env), manifest=validateEnvironmentManifest(environmentManifest);
   const environment=summarizeEnvironmentManifest(manifest), image=String(env.EXPERT_R_SANDBOX_IMAGE||'');
@@ -145,7 +148,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   const endedRoot=path.join(kernelRoot,'ended');
   const rootHash=crypto.createHash('sha256').update(kernelRoot).digest('hex');
   const managerId=crypto.randomBytes(32).toString('hex');
-  const records=new Map(),retiredIds=new Set();let initialized=false,closed=false,timer=null,lastMetadataSweep=0;
+  const records=new Map(),retiredIds=new Set();let initialized=false,publications=false,closed=false,timer=null,lastMetadataSweep=0;
   const target={kind:'service',id:'private-r-kernel',generation:managerId};
   const docker=(args,options)=>runProcessImpl('docker',args,options);
   function retire(record) {
@@ -154,8 +157,12 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     retiredIds.add(record.kernelId);
   }
   function releaseEnded(record) {
-    const last=record.lastExecution;const receipt=last&&record.executions?.get(last.id);
-    record.executions=new Map(receipt?[[last.id,{order:receipt.order,hash:receipt.hash,status:receipt.status}]]:[]);
+    const last=record.lastExecution;
+    const retained=[];
+    for(const [id,entry] of record.executions||[]) {
+      if(entry.publication||id===last?.id){const {result,...small}=entry;void result;retained.push([id,small]);}
+    }
+    record.executions=new Map(retained);
     if(last)record.lastExecution={id:last.id,order:last.order,status:last.status};
     record.inputs=[];record.transport=null;record.endedAt=record.endedAt||clock();
   }
@@ -221,8 +228,12 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   }
   async function terminate(record,reason='stopped') {
     record.stopRequested=true;
+    record.publicationAbort?.abort();
     if(record.transport){await removeOwned(record);record.transport.close();}
     if(record.creation)await record.creation.catch(()=>{});
+    if(record.pendingPublication)await record.pendingPublication.catch(()=>{});
+    for(const entry of record.executions?.values()||[])if(entry.status==='executing')entry.status='unknown';
+    if(record.lastExecution?.status==='executing')record.lastExecution={...record.lastExecution,status:'unknown'};
     await writeEnded(record,'stopped');
     await removeOwned(record);record.status='stopped';record.reason=reason;record.stoppedAt=clock();
     record.transport?.close();await removeDirectory(record);releaseEnded(record);
@@ -231,8 +242,12 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     if(record.status==='stopped'||record.stopRequested)return;
     if(record.lossCleanup)return record.lossCleanup;
     record.status='unknown';record.reason='process-lost';
+    record.publicationAbort?.abort();
     if(record.lastExecution?.status==='executing')record.lastExecution={...record.lastExecution,status:'unknown'};
-    record.lossCleanup=(async()=>{try{await writeEnded(record,'unknown');await removeOwned(record);record.transport?.close();await removeDirectory(record);releaseEnded(record);}catch{/* Retry through explicit stop or lifetime sweep. */}})();
+    record.lossCleanup=(async()=>{try{await writeEnded(record,'unknown');await removeOwned(record);record.transport?.close();
+      if(record.pendingPublication)await record.pendingPublication.catch(()=>{});
+      for(const entry of record.executions?.values()||[])if(entry.status==='executing')entry.status='unknown';
+      await removeDirectory(record);releaseEnded(record);}catch{/* Retry through explicit stop or lifetime sweep. */}})();
     return record.lossCleanup;
   }
   async function reconcile() {
@@ -258,7 +273,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     }
   }
   async function initialize() {
-    if(initialized)return {supported:true,environment};
+    if(initialized)return {supported:true,publications,environment};
     if(env.PRIVATE_R_KERNEL_ENABLED!=='true')throw failure('PRIVATE_KERNEL_DISABLED','Persistent private R kernels are not enabled on this installation.');
     if(closed)throw failure('PRIVATE_KERNEL_UNAVAILABLE','The private kernel broker has stopped.');
     await fsp.mkdir(kernelRoot,{recursive:true,mode:0o700});
@@ -280,9 +295,10 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     finally{await removeOwned(probeRecord);}
     let value;try{value=JSON.parse(probe.stdout);}catch{}
     if(!value?.ok||value.protocol!=='jupyter'||value.adapter!==1)throw failure('PRIVATE_KERNEL_UNSUPPORTED','This pinned R image does not provide the persistent Jupyter kernel adapter.');
+    publications=value.publications===true;
     await reconcile();initialized=true;
     timer=setInterval(()=>{void sweep().catch(()=>{});},1000);timer.unref?.();
-    return {supported:true,environment};
+    return {supported:true,publications,environment};
   }
   async function stage(record) {
     record.directory=path.join(kernelRoot,record.kernelId);await fsp.mkdir(record.directory,{mode:0o700});
@@ -368,35 +384,97 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   async function inspect(scope,kernelId) {
     const record=requireRecord(scope,kernelId);await expire(record);return publicRecord(record);
   }
-  async function execute(scope,kernelId,{executionId,order,source}={}) {
+  function publicationReceipt(record,executionId,entry) {
+    return {ok:true,kernelId:record.kernelId,generation:record.generation,publicationId:entry.publication.publicationId,
+      executionId,order:entry.order,status:entry.status,...(entry.result?{result:entry.result}:{}),...(entry.file?{file:entry.file}:{})};
+  }
+  async function saveOutput(record,spec,evidence) {
+    if(!evidence||!Number.isSafeInteger(evidence.sizeBytes)||evidence.sizeBytes<0||evidence.sizeBytes>MAX_PRIVATE_KERNEL_EXPORT_BYTES
+        ||!GENERATION.test(evidence.checksumSha256||''))throw failure('PRIVATE_KERNEL_PUBLICATION_UNAVAILABLE','The isolated output evidence is invalid.');
+    const inspected=await inspectContainer(record.containerName);
+    if(!inspected||inspected.id!==record.containerId||inspected.labels[`${LABEL}.manager`]!==managerId
+        ||inspected.labels[`${LABEL}.kernel`]!==record.kernelId||inspected.labels[`${LABEL}.generation`]!==record.generation
+        ||inspected.labels[`${LABEL}.root`]!==rootHash||inspected.labels[LABEL]!=='true') {
+      throw failure('PRIVATE_KERNEL_OWNERSHIP_INVALID','The private kernel container ownership could not be verified.');
+    }
+    const temporary=path.join(record.directory,`${crypto.randomBytes(16).toString('hex')}.export`);
+    const aborted=new AbortController();record.publicationAbort=aborted;
+    let published=false;
+    try {
+      if(record.stopRequested)throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
+      await extractFileImpl({containerId:record.containerId,filename:spec.filename,destination:temporary,expected:evidence,
+        spawnImpl,signal:aborted.signal});
+      if(record.stopRequested||record.status!=='executing')throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
+      const stored=await provider.putFileFromPath(temporary,spec.internalStorageKey);published=true;
+      if(record.stopRequested||record.status!=='executing')throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
+      if(stored.sizeBytes!==evidence.sizeBytes||stored.checksumSha256!==evidence.checksumSha256)throw failure('PRIVATE_KERNEL_PUBLICATION_UNAVAILABLE','The saved output failed integrity verification.');
+      await provider.inspect(spec.internalStorageKey,evidence);
+      if(record.stopRequested||record.status!=='executing')throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
+      return {type:spec.type,format:spec.type==='object'?'rds':'csv',internalStorageKey:spec.internalStorageKey,
+        checksumSha256:stored.checksumSha256,sizeBytes:stored.sizeBytes};
+    } catch(error) {
+      if(published)await provider.remove(spec.internalStorageKey).catch(()=>{});
+      throw error;
+    } finally {
+      if(record.publicationAbort===aborted)record.publicationAbort=null;
+      await fsp.unlink(temporary).catch(()=>{});
+    }
+  }
+  async function executeOperation(scope,kernelId,{executionId,order,source}={},publication=null) {
     const record=requireRecord(scope,kernelId);await expire(record);
     if(!scopedId(executionId)||!Number.isSafeInteger(order)||order<1||typeof source!=='string'||!source.trim()||Buffer.byteLength(source)>MAX_SOURCE_BYTES||source.includes('\0'))throw failure('PRIVATE_KERNEL_INVALID','The R command is empty, invalid, or exceeds 32 KiB.');
     const hash=crypto.createHash('sha256').update(source).digest('hex');
     const prior=record.executions.get(executionId);
-    if(prior){if(prior.order!==order||prior.hash!==hash)throw failure('PRIVATE_KERNEL_CONFLICT','The execution ID already belongs to a different command.');return prior.result||{ok:true,kernelId,generation:record.generation,executionId,order,status:prior.status};}
+    if(prior){if(prior.order!==order||prior.hash!==hash||Boolean(prior.publication)!==Boolean(publication)
+        ||(publication&&JSON.stringify(prior.publication)!==JSON.stringify(publication)))throw failure('PRIVATE_KERNEL_CONFLICT','The execution ID already belongs to a different command.');
+      return publication?publicationReceipt(record,executionId,prior):prior.result||{ok:true,kernelId,generation:record.generation,executionId,order,status:prior.status};}
     if(record.status==='executing')throw failure('PRIVATE_KERNEL_BUSY','Wait for the current R command to finish.');
     if(record.status!=='ready')throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel is unavailable; its unsaved variables are lost.');
     if(order!==(record.lastExecution?.order||0)+1)throw failure('PRIVATE_KERNEL_ORDER_INVALID','The R execution order does not match this kernel generation.');
     if(record.executions.size>=MAX_EXECUTIONS)throw failure('PRIVATE_KERNEL_LIFETIME_LIMIT','This kernel has reached its command limit. Start a new kernel.');
-    const startedAt=utc(clock()), entry={order,hash,status:'executing'};record.executions.set(executionId,entry);
+    const startedAt=utc(clock()), entry={order,hash,status:'executing',...(publication?{publication}:{})};record.executions.set(executionId,entry);
     record.status='executing';record.lastExecution={id:executionId,order,status:'executing'};record.lastActivity=clock();
     try{
-      const value=await record.transport.request(executionId,source,policy.executionSeconds);
+      const value=await record.transport.request(executionId,source,policy.executionSeconds,publication?{filename:publication.filename}:undefined);
+      const evidence=value.exportFile;delete value.exportFile;
       const result={...value,ok:true,kernelId,generation:record.generation,executionId,order,startedAt,completedAt:utc(clock())};delete result.event;
       const {validatePrivateKernelExecutionResult}=require('./privateKernelContract');
       const validated=validatePrivateKernelExecutionResult(result,{kernelId,generation:record.generation,executionId,order});
-      if(record.status==='stopped')return {ok:true,kernelId,generation:record.generation,executionId,order,status:'unknown'};
+      if(record.stopRequested||['stopped','unknown'].includes(record.status))throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
+      if(publication&&validated.status==='completed') {
+        record.pendingPublication=saveOutput(record,publication,evidence);
+        try{entry.file=await record.pendingPublication;}finally{record.pendingPublication=null;}
+      }
       // Retain one rich result only. Older IDs retain a receipt, preventing rerun,
       // while their durable results are held by the application's journal.
       for(const previous of record.executions.values())delete previous.result;
       entry.status=validated.status;entry.result=validated;
       record.status='ready';record.lastActivity=clock();record.lastExecution={id:executionId,order,status:validated.status,result:validated};
-      return validated;
+      return publication?publicationReceipt(record,executionId,entry):validated;
     }catch{
       entry.status='unknown';record.lastExecution={id:executionId,order,status:'unknown'};
       await lost(record);
-      return {ok:true,kernelId,generation:record.generation,executionId,order,status:'unknown'};
+      return publication?publicationReceipt(record,executionId,entry):{ok:true,kernelId,generation:record.generation,executionId,order,status:'unknown'};
     }
+  }
+  async function execute(scope,kernelId,spec) {return executeOperation(scope,kernelId,spec);}
+  async function exportOutput(scope,kernelId,spec) {
+    const record=requireRecord(scope,kernelId);
+    if(!scope.generation)throw failure('PRIVATE_KERNEL_PUBLICATION_INVALID','The saved output requires an exact kernel generation.');
+    if(!publications)throw failure('PRIVATE_KERNEL_PUBLICATION_UNSUPPORTED','This pinned private R image does not support saved outputs.');
+    const normalized=validatePrivateKernelExportRequest(spec,{projectId:record.scope.projectId,generation:record.generation});
+    for(const [id,entry]of record.executions) {
+      if(entry.publication?.publicationId===normalized.publicationId&&id!==spec.executionId)throw failure('PRIVATE_KERNEL_CONFLICT','The publication ID already belongs to another command.');
+    }
+    // Retain bounded identity/evidence, rather than the generated source itself.
+    const {source,executionId,order,...publication}=normalized;void source;void executionId;void order;
+    return executeOperation(scope,kernelId,spec,publication);
+  }
+  async function exportStatus(scope,kernelId,{publicationId}={}) {
+    const record=requireRecord(scope,kernelId);await expire(record);
+    if(!scope.generation||!PRIVATE_KERNEL_PUBLICATION_ID_RE.test(publicationId||''))throw failure('PRIVATE_KERNEL_PUBLICATION_INVALID','The saved-output identity is invalid.');
+    for(const [id,entry]of record.executions)if(entry.publication?.publicationId===publicationId)return publicationReceipt(record,id,entry);
+    throw failure('PRIVATE_KERNEL_PUBLICATION_NOT_FOUND','No saved-output command was reserved for this publication.');
   }
   async function stop(scope,kernelId) {
     scope=validateScope(scope);if(!KERNEL_ID.test(kernelId))throw failure('PRIVATE_KERNEL_INVALID','The private kernel ID is invalid.');
@@ -437,7 +515,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     }
   }
   async function close(){closed=true;if(timer)clearInterval(timer);for(const record of records.values()){record.stopRequested=true;if(record.creation)await record.creation.catch(()=>{});await terminate(record).catch(()=>{});}}
-  return {initialize,start,inspect,execute,stop,close,sweep,environment,resources:policy.resources};
+  return {initialize,start,inspect,execute,export:exportOutput,exportStatus,stop,close,sweep,environment,resources:policy.resources};
 }
 module.exports={createPrivateKernelRuntime,createTransport,runCommand,resourcePolicy,validateInputs,validateScope,
   PRIVATE_KERNEL_ID_RE:KERNEL_ID,PRIVATE_KERNEL_LABEL:LABEL,MAX_PRIVATE_KERNEL_SOURCE_BYTES:MAX_SOURCE_BYTES,MAX_PRIVATE_KERNEL_RESPONSE_BYTES:MAX_RESPONSE_BYTES,

@@ -6,6 +6,7 @@ const { validateEnvironmentReference, assertEnvironmentMatches } = require('./rE
 const LIMITS = Object.freeze({ sourceBytes: 32768, resultBytes: 1048576, stdoutBytes: 65536, diagnosticBytes: 8192, tables: 2, rows: 100, columns: 30, cellCharacters: 2000, figures: 4, imageBytes: 262144, imagePixels: 12000000, executions: 500, inputs: 5, inputBytes: 250 * 1024 * 1024 });
 const KERNEL_ID = /^pk_[a-f0-9]{24}$/;
 const EXECUTION_ID = /^pex_[a-f0-9]{24}$/;
+const PUBLICATION_ID = /^pub_[a-f0-9]{24}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
@@ -61,4 +62,21 @@ function validatePrivateKernelStatus(raw, expected = {}) {
 function validatePrivateKernelExecutionResult(raw, expected = {}) {
   return result(raw, { id: expected.kernelId || raw?.kernelId, runtime_generation: expected.generation || raw?.generation }, { id: expected.executionId || raw?.executionId, execution_order: expected.order ?? raw?.order });
 }
-module.exports = { LIMITS, KERNEL_ID, EXECUTION_ID, HASH, UUID, digest, kernelError, utc, source, scope, state, result, validatePrivateKernelStatus, validatePrivateKernelExecutionResult };
+function publicationResult(raw, kernel, publication, execution) {
+  publicationSource(kernel,publication,execution);
+  const identity = identities(raw,kernel);
+  if (raw.publicationId!==publication.id || raw.executionId!==execution.id || raw.order!==Number(execution.execution_order) || !['completed','failed','executing','unknown'].includes(raw.status)) invalid();
+  const output = raw.result ? result(raw.result,kernel,execution) : null;
+  if (output && output.status!==raw.status) invalid();
+  if (raw.status==='completed') {
+    const file=raw.file;
+    if (!file || file.type!==publication.publication_type || file.format!==(file.type==='object'?'rds':'csv') || file.internalStorageKey!==publication.storage_key || !HASH.test(file.checksumSha256||'') || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes<1 || file.sizeBytes>20*1024*1024) invalid();
+    return {...identity,publicationId:publication.id,executionId:execution.id,order:Number(execution.execution_order),status:raw.status,result:output,file:{type:file.type,format:file.format,internalStorageKey:file.internalStorageKey,checksumSha256:file.checksumSha256,sizeBytes:file.sizeBytes}};
+  }
+  if (raw.file) invalid();
+  return {...identity,publicationId:publication.id,executionId:execution.id,order:Number(execution.execution_order),status:raw.status,result:output};
+}
+function publicationSource(kernel,publication,execution) {
+  if(!execution || execution.id!==publication.source_execution_id || execution.kernel_id!==kernel.id || execution.kernel_generation!==kernel.runtime_generation || publication.kernel_generation!==kernel.runtime_generation || Number(execution.execution_order)!==Number(publication.kernel_order) || execution.source_sha256!==publication.lineage_json?.sourceSha256 || typeof execution.source_code!=='string' || digest(execution.source_code)!==execution.source_sha256)invalid();
+}
+module.exports = { LIMITS, KERNEL_ID, EXECUTION_ID, PUBLICATION_ID, HASH, UUID, digest, kernelError, utc, source, scope, state, result, publicationResult, publicationSource, validatePrivateKernelStatus, validatePrivateKernelExecutionResult };
