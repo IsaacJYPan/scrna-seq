@@ -444,6 +444,18 @@ only a compatible server before saving the address. Automatic in-app updating is
 not configured; distribute each update as a new signed installer and keep the
 application version current before certification.
 
+Use **Execution Targets** in the desktop menu, or **Change server** in the
+workspace, to save named local and HTTPS servers. Each server has separate
+cookies and browser storage, including local servers on different ports.
+Returning to a server preserves its own session. The workspace displays the
+connected server and its current custom R availability. A failed connection
+leaves the previous server open. Existing saved server addresses migrate
+automatically; `TRACEOMICS_DESKTOP_URL` still selects the startup server.
+
+SSH profiles can currently save nonsecret host and service settings for later
+use. Managed SSH authentication and tunneling are not available yet; saving an
+SSH profile does not establish a connection.
+
 ## TLS reverse proxy
 
 The proxy must terminate TLS, replace (not append untrusted values to) all
