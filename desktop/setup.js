@@ -168,8 +168,11 @@ function showSshResult(result) {
       const fingerprint = document.createElement('code'); fingerprint.textContent = entry.fingerprint;
       description.append(fingerprint); label.append(input, description); list.append(label);
     }
-    savedStatus.textContent = 'The host is not trusted yet. Verify its fingerprint before authenticating.';
-  } else savedStatus.textContent = 'SSH authentication verified for ' + result.username + '@' + result.host + '. The project service has not been opened.';
+    savedStatus.textContent = (result.route?.length ? 'Verified jump route: ' + result.route.join(' → ') + '. ' : '')
+      + 'The host is not trusted yet. Verify its fingerprint before authenticating.';
+  } else savedStatus.textContent = 'SSH authentication verified for ' + result.username + '@' + result.host + '. '
+    + (result.stages?.length ? 'Route: ' + result.stages.map(stage => stage.alias).join(' → ') + '. ' : '')
+    + 'The project service has not been opened.';
   savedStatus.hidden = false;
 }
 document.querySelector('#ssh-host-verified').addEventListener('change', () => {

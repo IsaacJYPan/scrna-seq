@@ -9,6 +9,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { Client } = require('pg');
 const config = require('../backend/config');
+const { environmentBytes, summarizeEnvironmentManifest } = require('../backend/rEnvironment');
+const { journalRecord } = require('../backend/liveExecutionJournal');
 const {
   OFFLINE_ACKNOWLEDGEMENT,
   createBackup,
@@ -79,7 +81,26 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
   const managedKey = `projects/proj_restore/artifacts/${managedVersionId}/content.csv`;
   const datasetBytes = Buffer.from('restore-drill-dataset\n');
   const artifactBytes = Buffer.from('gene,score\nMS4A1,1.5\n');
-  for (const [key, bytes] of [[datasetKey, datasetBytes], [artifactKey, artifactBytes], [managedKey, artifactBytes]]) {
+  // These records exercise backup fidelity; their synthetic inventory does not
+  // claim that a scientific runtime executed the fixture.
+  const environment = {
+    schema: 'traceomics.r-environment.v1', profileId: 'scrna-r-4.5-bioconductor-3.22-v1',
+    runtime: { imageReference: `sha256:${'a'.repeat(64)}`, imageDigest: `sha256:${'a'.repeat(64)}`, imageId: `sha256:${'a'.repeat(64)}`,
+      os: 'linux', architecture: 'amd64', distribution: { id: 'ubuntu', version: '24.04' }, snapshotScope: 'container-userspace', kernel: 'worker-host' },
+    r: { version: '4.5.3', platform: 'x86_64-pc-linux-gnu', bioconductor: '3.22' },
+    packages: [{ name: 'base', version: '4.5.3', built: '4.5.3', priority: 'base', source: { kind: 'r-distribution' } }],
+    systemPackages: [{ name: 'libc6', version: '2.39-0ubuntu8.6', architecture: 'amd64' }],
+    lock: { format: 'installed-package-inventory.v1', sourceArchivesIncluded: false },
+  };
+  const environmentReference = summarizeEnvironmentManifest(environment);
+  const manifestBytes = environmentBytes(environment);
+  const environmentKey = 'projects/proj_restore/artifacts/job_restore_r/environment.json';
+  const script = 'print(nrow(obj))\n';
+  const liveEntry = journalRecord({ provenance: { language: 'R', script, operation: 'normalize', languageVersion: '4.5.3',
+    timestamp: '2026-10-08T00:00:00Z', parameters: { method: 'LogNormalize' },
+    execution: { generation: 'b'.repeat(64), order: 1, packages: [{ name: 'Seurat', version: '5.3.0' }] } },
+    live_state: { live_revision: 1 } });
+  for (const [key, bytes] of [[datasetKey, datasetBytes], [artifactKey, artifactBytes], [managedKey, artifactBytes], [environmentKey, manifestBytes]]) {
     const file = path.join(storageRoot, ...key.split('/'));
     await fs.promises.mkdir(path.dirname(file), { recursive: true });
     await fs.promises.writeFile(file, bytes, { flag: 'wx' });
@@ -170,6 +191,33 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
                '{"id":"org.ietf.csv","version":"1"}', 'text/csv',
                $3, $4, $5, 'job_restore')`,
       [managedVersionId, userId, sha256(artifactBytes), artifactBytes.length, managedKey]
+    );
+    await client.query(
+      `INSERT INTO analysis_objects (id, owner_user_id, project_id, dataset_id, object_type, display_name)
+       VALUES ('ao_restore', $1, 'proj_restore', 'ds_restore', 'seurat', 'Restore fixture')`, [userId]
+    );
+    await client.query(
+      `INSERT INTO jobs (id, owner_user_id, project_id, analysis_object_id, job_type, status, parameters_json)
+       VALUES ('job_restore_r', $1, 'proj_restore', 'ao_restore', 'expert.r.v1', 'queued', $2)`,
+      [userId, JSON.stringify({ script, scriptSha256: sha256(script), profileId: environment.profileId, environment: environmentReference })]
+    );
+    await client.query(
+      `INSERT INTO execution_source_versions (id, project_id, owner_user_id, job_id, language, source_code, source_sha256)
+       VALUES ('src_job_restore_r', 'proj_restore', $1, 'job_restore_r', 'R', $2, $3)`, [userId, script, sha256(script)]
+    );
+    await client.query("UPDATE jobs SET status='completed' WHERE id='job_restore_r'");
+    await client.query(
+      `INSERT INTO job_artifacts (id, project_id, job_id, analysis_object_id, created_by_user_id, artifact_type,
+         name, storage_kind, storage_uri, checksum_sha256, size_bytes, status, metadata_json)
+       VALUES ('art_restore_environment', 'proj_restore', 'job_restore_r', 'ao_restore', $1,
+         'expert_r_environment', 'environment.json', 'local_internal', $2, $3, $4, 'available', $5)`,
+      [userId, environmentKey, sha256(manifestBytes), manifestBytes.length, JSON.stringify({ environment: environmentReference })]
+    );
+    await client.query(
+      `INSERT INTO live_execution_records (id, project_id, owner_user_id, analysis_object_id, operation,
+         kernel_generation, kernel_order, live_revision, source_sha256, record_json)
+       VALUES ('lex_restore', 'proj_restore', $1, 'ao_restore', $2, $3, $4, $5, $6, $7::jsonb)`,
+      [userId, liveEntry.operation, liveEntry.generation, liveEntry.order, liveEntry.liveRevision, liveEntry.sourceSha256, JSON.stringify(liveEntry.record)]
     );
     await client.query('COMMIT');
   } catch (error) {

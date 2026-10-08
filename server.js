@@ -1202,7 +1202,7 @@ function handleBoundedRProxyResponse(proxyRes, req, res) {
     }
     chunks.push(chunk);
   });
-  proxyRes.on('end', () => {
+  proxyRes.on('end', async () => {
     if (finished) return;
     finished = true;
     markRProxyAdmissionSettled(req);
@@ -1221,6 +1221,15 @@ function handleBoundedRProxyResponse(proxyRes, req, res) {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.error !== undefined) {
       sendRProxyFailure(res, 502, 'R request failed.');
       return;
+    }
+    if (req.verifiedObjectId && parsed?.provenance?.execution) {
+      try {
+        const recorded = await require('./backend/liveExecutionJournal').recordLiveRExecutionBounded({ db, req, envelope: parsed });
+        if (recorded) parsed.execution_history = recorded;
+      } catch (error) {
+        console.warn('[live-execution-history] persistence failed code=' + String(error?.code || 'UNAVAILABLE').replace(/[^A-Z0-9_]/g, '').slice(0, 80));
+        parsed.execution_history = { status: 'unavailable' };
+      }
     }
     const outgoing = Buffer.from(JSON.stringify(sanitizeRProxyJson(parsed)));
     res.statusCode = upstreamStatus;
@@ -1893,6 +1902,7 @@ app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
+app.use('/api/execution-history', require('./backend/executionHistoryRoutes').executionHistoryRoutes({ db, provider: durableStorage, requireAuth }));
 
 // Publishing a trusted pipeline manifest is a platform capability, not a
 // project role. Authenticate before parsing the bounded body so cookie CSRF
@@ -1969,12 +1979,32 @@ app.get('/api/expert-r/capabilities', async (req, res) => {
     res.json({
       expertREnabled: enabled,
       expertRProfile: enabled ? EXPERT_R_PROFILE : null,
+      expertREnvironment: enabled ? runtime.environment || null : null,
       expertRStatus: expertRStatus({ canExecuteExpertR, runtime,
         revoked: expertRAccessRevoked, demoMode: config.demoMode() }),
     });
   } catch (error) {
     console.error('[ExpertRCapabilities]', error);
     res.status(500).json({ error: 'Expert R access is temporarily unavailable.' });
+  }
+});
+
+app.get('/api/expert-r/environment', async (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  const projectId = req.query.projectId;
+  if (typeof projectId !== 'string' || !/^proj_[A-Za-z0-9_-]{3,128}$/.test(projectId)) {
+    return res.status(400).json({ error: 'Choose a valid project to inspect its R environment.' });
+  }
+  try {
+    await db.requireProjectRole(req.user.id, projectId, ['owner', 'admin', 'analyst']);
+    const capabilities = await db.getExpertRCapabilities(req.user.id, projectId);
+    if (config.demoMode() || !capabilities.canExecuteExpertR) return res.status(403).json({ error: 'R environment access is not available for this project.' });
+    const { getExpertREnvironment } = require('./backend/expertSandboxClient');
+    res.json(await getExpertREnvironment());
+  } catch (error) {
+    if (error.code === 'NOT_FOUND') return res.status(404).json({ error: 'Project not found.' });
+    if (error.code === 'FORBIDDEN') return res.status(403).json({ error: 'Your project role cannot inspect the R environment.' });
+    res.status(503).json({ error: 'The exact R environment is unavailable. Check the private runtime and retry.' });
   }
 });
 
@@ -3262,12 +3292,31 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   }
 
   try {
+    let jobParameters = body.parameters;
+    if (body.jobType === 'expert.r.v1') {
+      await db.requireProjectRole(req.user.id, req.params.projectId, ['owner', 'admin', 'analyst']);
+      const access = await db.getExpertRCapabilities(req.user.id, req.params.projectId);
+      if (!access.canExecuteExpertR) return res.status(403).json({ error: 'Expert R access is not enabled for this account and project.' });
+      if (!require('./backend/expertR').expertRSandboxEnabled()) return res.status(403).json({ error: 'Expert R is disabled for this installation.' });
+      let validated;
+      try { validated = require('./backend/expertR').validateExpertRParams(body.parameters).params; }
+      catch { return res.status(400).json({ error: 'Expert R parameters are invalid. Check the script, input references and environment.' }); }
+      try {
+        const manifest = await require('./backend/expertSandboxClient').getExpertREnvironment();
+        jobParameters = require('./backend/rEnvironment').pinExpertREnvironment(validated, manifest);
+      } catch (error) {
+        const mismatch = error.code === 'R_ENVIRONMENT_MISMATCH' || error.code === 'R_ENVIRONMENT_INVALID';
+        return res.status(mismatch ? 409 : 503).json({ error: mismatch
+          ? 'The selected exact R environment is unavailable. Refresh its recorded environment before submitting.'
+          : 'The exact R environment could not be verified. Check the private runtime and retry.' });
+      }
+    }
     const created = await db.createProjectJob(req.user.id, req.params.projectId, {
       analysisObjectId: body.analysisObjectId,
       resultAnalysisObjectId: body.resultAnalysisObjectId,
       datasetId: body.datasetId,
       jobType: body.jobType,
-      parameters: body.parameters
+      parameters: jobParameters
     });
     res.status(201).json(db.toPublicJob(created));
   } catch (e) {

@@ -2,6 +2,7 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import { getCachedResult, makeCacheKey, saveProvenance, setCachedResult } from './provenance';
 
 vi.mock('./components/Sidebar', () => ({ default: () => null }));
 vi.mock('./components/ProvenanceDrawer', () => ({ default: () => null }));
@@ -14,11 +15,17 @@ vi.mock('./provenance', () => ({
   setCachedResult: vi.fn(),
 }));
 vi.mock('./pages/Workspace', () => ({
-  default: ({ datasetInfo, onSelectAnalysisObject, callApi }) => <div>
-    <output data-testid="live-object">{datasetInfo?.id}:{datasetInfo?.liveState}</output>
-    <button onClick={() => onSelectAnalysisObject('proj_test', 'analysis_b')}>Select other analysis</button>
-    <button onClick={() => callApi('/umap', {}, { operation: 'umap', step: 'umap' })}>Change live analysis</button>
-  </div>,
+  default: function WorkspaceHarness({ datasetInfo, onSelectAnalysisObject, callApi, pipelineState }) {
+    const [result, setResult] = React.useState(null);
+    return <div>
+      <output data-testid="live-object">{datasetInfo?.id}:{datasetInfo?.liveState}</output>
+      <output data-testid="live-completion">{pipelineState.umap ? 'completed' : 'pending'}</output>
+      <output data-testid="execution-outcome">{result ? JSON.stringify(result) : ''}</output>
+      <button onClick={() => onSelectAnalysisObject('proj_test', 'analysis_b')}>Select other analysis</button>
+      <button onClick={() => callApi('/umap', {}, { operation: 'umap', step: 'umap' })}>Change live analysis</button>
+      <button onClick={async () => setResult(await callApi('/umap', {}, { operation: 'umap', step: 'umap', cacheParams: { dims: 10 } }))}>Run and cache live analysis</button>
+    </div>;
+  },
 }));
 
 const user = { id: 7, email: 'researcher@example.org' };
@@ -27,6 +34,9 @@ const dirty = { ...clean, has_unsaved_changes: true, live_revision: 1 };
 
 describe('App live analysis recovery', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    saveProvenance.mockReset(); setCachedResult.mockReset();
+    makeCacheKey.mockReset().mockResolvedValue('live-cache-key'); getCachedResult.mockReset().mockResolvedValue(null);
     localStorage.clear();
     window.electronAPI = {
       restoreSession: vi.fn(async () => user),
@@ -111,6 +121,34 @@ describe('App live analysis recovery', () => {
     });
     expect(await screen.findByText('Unsaved live changes.')).toBeInTheDocument();
     expect(screen.getByTestId('live-object')).toHaveTextContent('analysis_a:attached');
+  });
+
+  it.each(['provenance', 'cache', 'cache-key', 'project-provenance'])('preserves completed R results and live state when the %s persistence write fails', async failure => {
+    const api = window.electronAPI.apiRequest;
+    const unavailable = new Error('Private persistence diagnostic at C:\\private\\database');
+    api.mockImplementation(async path => {
+      if (path === '/session-id') return { sessionId: 'runtime-test' };
+      if (path === '/pipeline-state') return clean;
+      if (path === '/umap') return { provenance: { id: 'prov_completed', operation: 'umap' }, result: { completed: true, n_points: 2 }, live_state: dirty, execution_history: { status: failure === 'project-provenance' ? 'unavailable' : 'recorded' } };
+      return {};
+    });
+    if (failure === 'provenance') saveProvenance.mockRejectedValueOnce(unavailable);
+    if (failure === 'cache') setCachedResult.mockRejectedValueOnce(unavailable);
+    if (failure === 'cache-key') makeCacheKey.mockResolvedValueOnce('live-cache-key').mockRejectedValueOnce(unavailable);
+    if (failure === 'project-provenance') window.electronAPI.createProjectProvenance = vi.fn().mockRejectedValueOnce(unavailable);
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('live-object')).toHaveTextContent('analysis_a:attached'));
+    fireEvent.click(screen.getByRole('button', { name: 'Run and cache live analysis' }));
+    await waitFor(() => expect(screen.getByTestId('execution-outcome')).toHaveTextContent('"completed":true'));
+    expect(screen.getByTestId('execution-outcome')).not.toHaveTextContent('"error"');
+    expect(screen.getByTestId('live-completion')).toHaveTextContent('completed');
+    expect(screen.getByText('Unsaved live changes.')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Do not rerun it just to repair history.');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Private persistence diagnostic');
+    expect(api.mock.calls.filter(([path]) => path === '/umap')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss history notice' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByTestId('execution-outcome')).toHaveTextContent('"completed":true');
   });
 
 });

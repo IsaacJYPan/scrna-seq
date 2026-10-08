@@ -164,6 +164,29 @@ closed. The interface checks authenticated broker capabilities and explains
 missing configuration, an unreachable runtime, incompatible profiles, and
 revoked access; it does not claim readiness from environment variables alone.
 
+The private R screen displays and downloads the exact environment manifest. New
+R submissions and recipe steps pin this manifest by SHA-256; saved recipe snapshots
+keep that pin. Successful runs retain a creator-private copy beside their outputs.
+Replacing the worker image or changing its package inventory stops a pinned run
+with a restoration message. Keep the reviewed image in a registry by immutable
+digest, or export its exact local image with `docker save` and transfer it to the
+replacement worker with `docker load`.
+
+Verify a downloaded manifest on the replacement worker:
+
+```bash
+npm run expert-r:restore-environment -- --manifest environment.json
+# Retrieve the recorded immutable registry digest, then verify:
+npm run expert-r:restore-environment -- --manifest environment.json --pull
+```
+
+`--pull` accepts a recorded registry digest; a local image ID requires the original
+saved image. Verification compares the installed R and system package inventory,
+R/Bioconductor versions, architecture, and image identity. It fails if the original
+image or a dependency is unavailable. It does not install newer packages. The
+manifest covers container userspace and records missing package-origin metadata
+explicitly; host kernels and hardware are outside that snapshot.
+
 Administrators can explicitly grant or revoke an account in either policy:
 
 ```bash
@@ -194,7 +217,8 @@ DATABASE_URL=postgres://... npm run test:expert-r-browser
 The first command probes the containment and resource boundary directly. The
 second drives the production frontend through authenticated import, a durable
 worker claim, the real sandbox, creator-private result publication, an exact
-checksum-verified browser download, terminal source erasure, and a path-free
+checksum-verified browser download, terminal transport-parameter source erasure
+with separate immutable private source retention for new runs, and a path-free
 failed-script explanation. Both commands create and remove disposable resources.
 
 Set `EXPERT_R_MIN_FREE_BYTES` for the shared host's operating reserve;
@@ -458,6 +482,17 @@ choose an identity reference through the native file picker. The application
 stores a file reference and public host trust; keys and passphrases stay with
 OpenSSH. Encrypted identities must be unlocked in a running native SSH agent.
 On Windows, **Unlock with OpenSSH** opens a native OpenSSH credential window.
+
+Native aliases and `ProxyJump` chains are supported with up to four jump hosts.
+Define each host's account, port, and identity in your own OpenSSH configuration;
+the profile can leave account and port blank. The managed check preserves these
+settings and enforces strict host verification separately at every hop. Trust new
+jump hosts in the native OpenSSH client before continuing; the destination's
+first-use fingerprint can then be discovered through the verified chain without
+sending destination credentials. Changing an alias or intermediate configuration
+invalidates a pending trust confirmation. Failures identify the affected hop.
+Temporary route policy files and owned proxy processes are removed on cancellation
+or settings shutdown.
 
 For a new host, compare the displayed SHA-256 fingerprint with an independently
 verified administrator-provided value before trusting it. Changed keys stop

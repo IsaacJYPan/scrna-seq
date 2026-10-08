@@ -97,7 +97,11 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
     await page.screenshot({ path: path.join(output, 'study-design.png') });
 
     await navigate(page, 'UMAP');
+    const umapResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/r/umap' && response.status() === 200);
     await page.getByRole('button', { name: /Run 2D UMAP|Re-compute UMAP/ }).first().click();
+    const umapExecution = await (await umapResponse).json();
+    assert(umapExecution.execution_history?.status === 'recorded' && /^lex_[a-f0-9]{24}$/.test(umapExecution.execution_history.id),
+      'The actual R mutation was not recorded at the server boundary.');
     await page.getByText('Unsaved live changes.', { exact: true }).waitFor({ timeout: 180_000 });
     const dirty = await waitFor(async () => {
       const state = await pipelineState(page, identity.objectId);
@@ -105,6 +109,28 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
     }, 'UMAP did not mark the private live object as changed.');
     assert(dirty.live_revision > dirty.saved_revision, 'The server revision did not advance.');
     checks.push('live UMAP mutation is unsaved');
+
+    const executionDetail = await page.evaluate(async ({ projectId, id }) => {
+      const response = await fetch(`/api/execution-history/${projectId}/${id}`, { credentials: 'include' });
+      if (!response.ok) throw new Error('Authenticated execution evidence was unavailable.');
+      return response.json();
+    }, { projectId: identity.projectId, id: umapExecution.execution_history.id });
+    assert(executionDetail.origin === 'server-live-r' && executionDetail.kernel.available === true
+      && executionDetail.kernel.generation === umapExecution.provenance.execution.generation
+      && executionDetail.kernel.order === umapExecution.provenance.execution.order
+      && executionDetail.kernel.resultLiveRevision === dirty.live_revision,
+    'The saved history did not retain actual R generation, execution order and result revision.');
+    assert(executionDetail.replay.complete === false, 'Live memory was incorrectly presented as a replayable immutable input.');
+    await navigate(page, 'Runs & Results');
+    const executionRegion = page.getByRole('region', { name: 'Execution history', exact: true });
+    await executionRegion.getByLabel('Execution category', { exact: true }).selectOption('live-r');
+    await executionRegion.getByRole('button').filter({ hasText: umapExecution.execution_history.id }).click();
+    await executionRegion.locator('summary').filter({ hasText: 'Kernel generation and order' }).click();
+    await executionRegion.getByText(`Execution order ${executionDetail.kernel.order}`, { exact: true }).waitFor();
+    await executionRegion.getByText('Replay evidence incomplete', { exact: true }).waitFor();
+    await page.screenshot({ path: path.join(output, 'authoritative-live-execution.png'), fullPage: true });
+    checks.push('actual live R mutation retains server-owned history with honest replay evidence');
+    await navigate(page, 'UMAP');
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByText('Unsaved live changes.', { exact: true }).waitFor();

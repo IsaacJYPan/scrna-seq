@@ -3,6 +3,7 @@
 const http = require('http');
 const https = require('https');
 const { EXPERT_R_PROFILE, EXPERT_R_RESOURCE_POLICY_VERSION, expertRSandboxEnabled } = require('./expertR');
+const { validateEnvironmentReference } = require('./rEnvironment');
 
 const DENIED_CAPABILITY = 'expert_r.denied';
 const EXECUTE_CAPABILITY = 'expert_r.execute';
@@ -57,8 +58,13 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500 } = {}) {
             || !/^sha256:[0-9a-f]{64}$/.test(result.sandboxImageDigest || '')) {
           resolve({ state: 'incompatible' }); return;
         }
+        let environment;
+        try {
+          environment = validateEnvironmentReference(result.environment);
+          if (environment.profileId !== result.profileId || environment.imageDigest !== result.sandboxImageDigest) throw new Error('Inconsistent environment');
+        } catch { resolve({ state: 'incompatible' }); return; }
         resolve({ state: 'ready', profileId: result.profileId, imageDigest: result.sandboxImageDigest,
-          resourcePolicyVersion: result.resourcePolicyVersion });
+          resourcePolicyVersion: result.resourcePolicyVersion, environment });
       });
     });
     const deadline = setTimeout(() => { resolve({ state: 'unreachable' }); request.destroy(); }, timeoutMs);

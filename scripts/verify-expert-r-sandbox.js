@@ -20,6 +20,7 @@ const checkpointKey = `projects/${projectId}/checkpoints/${producerJobId}/checkp
 let checkpointChecksumSha256 = null;
 let checkpointSizeBytes = null;
 let brokerProcess = null;
+let exactEnvironment = null;
 const acceptanceJobIds = new Set();
 
 function run(args, options = {}) {
@@ -64,7 +65,7 @@ function job(script, suffix = crypto.randomBytes(12).toString('hex')) {
   const jobId = `job_${suffix}`;
   acceptanceJobIds.add(jobId);
   return {
-    jobId, projectId, profileId, script, checkpointStorageKey: checkpointKey,
+    jobId, projectId, profileId, script, environment: exactEnvironment, checkpointStorageKey: checkpointKey,
     checkpointChecksumSha256,
     checkpointSizeBytes,
     outputStorageKey: `projects/${projectId}/artifacts/${jobId}/expert-r-outputs.tar.gz`,
@@ -137,10 +138,12 @@ async function verifyWorkflowSteps() {
 async function main() {
   let failed = false;
   try {
-    console.log('[expert-r] building the reviewed R image');
-    run(['build', '-f', 'r-backend/Dockerfile', '-t', 'traceomics-r:single-host', 'r-backend']);
+    if (!process.env.EXPERT_R_ACCEPTANCE_IMAGE) {
+      console.log('[expert-r] building the reviewed R image');
+      run(['build', '-f', 'r-backend/Dockerfile', '-t', 'traceomics-r:single-host', 'r-backend']);
+    }
     const inspected = run([
-      'image', 'inspect', 'traceomics-r:single-host',
+      'image', 'inspect', process.env.EXPERT_R_ACCEPTANCE_IMAGE || 'traceomics-r:single-host',
       '--format', '{{.Id}}',
     ], { capture: true });
     const rImage = inspected.stdout.trim();
@@ -206,6 +209,9 @@ async function main() {
       windowsHide: true,
     });
     await waitForHealth();
+    const capabilityResponse = await fetch(`http://127.0.0.1:${port}/capabilities`, { headers:{ Authorization:`Bearer ${token}` } });
+    exactEnvironment = (await capabilityResponse.json()).environment;
+    require('../backend/rEnvironment').validateEnvironmentReference(exactEnvironment);
 
     const unauthorized = await request(job('write_table(data.frame(x=1), "x.csv")'), { auth: '0'.repeat(64) });
     assert(unauthorized.status === 404, 'wrong broker credentials must be indistinguishable from a missing route');

@@ -92,9 +92,13 @@ describe('native OpenSSH configuration and public host identity', () => {
   it('rejects malformed or option-bearing resolved hosts, ports, usernames and aliases', () => {
     for (const text of ['hostname -oProxyCommand=bad\nport 22\nuser researcher\n', 'hostname -v\nport 22\nuser researcher\n',
       'hostname example.org\nport 65536\nuser researcher\n', 'hostname example.org\nport 22\nuser bad\0name\n',
+      'hostname [example.org]\nport 22\nuser researcher\n', 'hostname ::1]\nport 22\nuser researcher\n',
+      'hostname 2001:db8:::1\nport 22\nuser researcher\n', 'hostname example.org\nport 22\nuser bad\tname\n',
       configuration('hostkeyalias invalid alias\n').replace('hostkeyalias none\n', '')]) {
       expect(() => parseSshConfiguration(text)).toThrow(/OpenSSH|host-key alias/);
     }
+    expect(parseSshConfiguration('hostname 2001:db8::42\nport 2222\nuser DOMAIN\\researcher\n')).toMatchObject({ hostname: '2001:db8::42', user: 'DOMAIN\\researcher' });
+    expect(parseSshConfiguration('hostname [::1]\nport 2222\nuser researcher@lab.example.org\n')).toMatchObject({ hostname: '[::1]', user: 'researcher@lab.example.org' });
   });
 
   it('derives SHA256 fingerprints from supported public key bytes and omits malformed scan entries', () => {
@@ -106,9 +110,12 @@ describe('native OpenSSH configuration and public host identity', () => {
   it.each([
     [changedHost.stderr, 'SSH_HOST_CHANGED'], [unknownHost.stderr, 'SSH_HOST_UNKNOWN'],
     ['WARNING: UNPROTECTED PRIVATE KEY FILE!', 'SSH_IDENTITY_UNAVAILABLE'],
+    ['Bad owner or permissions on /native/user/config', 'SSH_CONFIGURATION_INVALID'],
     ['Load key "a native identity": bad permissions', 'SSH_IDENTITY_UNAVAILABLE'],
     ['connect to host example port 22: Connection refused', 'SSH_UNREACHABLE'],
     ['Could not resolve hostname unknown: Name or service not known', 'SSH_UNREACHABLE'],
+    ['kex_exchange_identification: Connection closed by remote host', 'SSH_UNREACHABLE'],
+    ['channel 0: open failed: connect failed: Name does not resolve\nstdio forwarding failed', 'SSH_UNREACHABLE'],
     ['Host key verification failed.', 'SSH_HOST_REJECTED'],
     ['researcher@example: Permission denied (publickey).', 'SSH_AUTHENTICATION_FAILED'],
     ['sign_and_send_pubkey: signing failed: agent refused operation\nPermission denied (publickey).', 'SSH_AGENT_UNAVAILABLE'],
@@ -305,7 +312,7 @@ describe('SSH authentication without opening the project service', () => {
   });
 
   it('requires native host verification for unknown proxy hosts without scanning the destination directly', async () => {
-    const { manager, run } = fixture({ config: configuration().replace('proxyjump none', 'proxyjump lab-gateway') });
+    const { manager, run } = fixture({ config: configuration().replace('proxycommand none', 'proxycommand native-user-owned-proxy') });
     await expect(manager.verify(profile(), 'setup-a')).rejects.toMatchObject({ code: 'SSH_PROXY_HOST_UNKNOWN' });
     expect(run.mock.calls.some(([program]) => program === 'ssh-keyscan')).toBe(false);
   });

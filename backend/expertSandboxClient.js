@@ -3,6 +3,7 @@
 const http = require('http');
 const https = require('https');
 const { isTrustedExpertRSandboxUrl } = require('./expertR');
+const { MAX_ENVIRONMENT_BYTES, validateEnvironmentManifest } = require('./rEnvironment');
 
 const SAFE_SCRIPT_EXPLANATIONS = new Set([
   'The R script exceeded the per-run output storage limit.',
@@ -59,6 +60,9 @@ function createExpertSandboxClient({ baseUrl, token, timeoutMs = 780000 } = {}) 
             { publicSafe: true }
           ));
         }
+        if (response.statusCode === 409 && body?.code === 'R_ENVIRONMENT_MISMATCH') {
+          return reject(codedError('R_ENVIRONMENT_MISMATCH', 'The exact R environment for this run is unavailable. Restore its pinned runtime image and package lock before retrying.', { publicSafe: true }));
+        }
         if (response.statusCode !== 200 || !body || body.ok !== true) {
           return reject(codedError('EXPERT_R_SANDBOX_FAILED', 'Expert R sandbox failed.'));
         }
@@ -66,10 +70,34 @@ function createExpertSandboxClient({ baseUrl, token, timeoutMs = 780000 } = {}) 
       });
     });
     request.on('timeout', () => request.destroy(codedError('EXPERT_R_TIMEOUT', 'Expert R sandbox timed out.')));
-    request.on('error', (error) => reject(error.code && String(error.code).startsWith('EXPERT_R_')
+    request.on('error', (error) => reject(error.code && (String(error.code).startsWith('EXPERT_R_') || String(error.code).startsWith('R_ENVIRONMENT_'))
       ? error : codedError('EXPERT_R_UNAVAILABLE', 'Expert R sandbox is unavailable.')));
     request.end(encoded);
   });
 }
 
-module.exports = { createExpertSandboxClient };
+function getExpertREnvironment({ baseUrl = process.env.EXPERT_R_SANDBOX_URL, token = process.env.EXPERT_R_SANDBOX_TOKEN, timeoutMs = 2000 } = {}) {
+  if (!isTrustedExpertRSandboxUrl(baseUrl) || !/^[0-9a-f]{64}$/.test(String(token || ''))) return Promise.reject(codedError('R_ENVIRONMENT_UNAVAILABLE', 'The exact R environment is unavailable.', { publicSafe: true }));
+  return new Promise((resolve, reject) => {
+    const url = new URL('/environment', baseUrl);
+    const transport = url.protocol === 'https:' ? https : http;
+    const request = transport.get(url, { headers: { Authorization: `Bearer ${token}` } }, response => {
+      let size = 0; const chunks = [];
+      response.on('data', chunk => {
+        size += chunk.length;
+        if (size > MAX_ENVIRONMENT_BYTES) request.destroy(codedError('R_ENVIRONMENT_INVALID', 'The recorded R environment is too large.', { publicSafe: true }));
+        else chunks.push(chunk);
+      });
+      response.on('error', () => reject(codedError('R_ENVIRONMENT_UNAVAILABLE', 'The exact R environment is unavailable.', { publicSafe: true })));
+      response.on('end', () => {
+        if (response.statusCode !== 200) return reject(codedError('R_ENVIRONMENT_UNAVAILABLE', 'The exact R environment is unavailable.', { publicSafe: true }));
+        try { resolve(validateEnvironmentManifest(JSON.parse(Buffer.concat(chunks).toString('utf8')))); }
+        catch { reject(codedError('R_ENVIRONMENT_INVALID', 'The recorded R environment is invalid.', { publicSafe: true })); }
+      });
+    });
+    const deadline = setTimeout(() => request.destroy(codedError('R_ENVIRONMENT_UNAVAILABLE', 'The exact R environment is unavailable.', { publicSafe: true })), timeoutMs);
+    deadline.unref?.(); request.on('close', () => clearTimeout(deadline));
+    request.on('error', error => reject(error.code?.startsWith('R_ENVIRONMENT_') ? error : codedError('R_ENVIRONMENT_UNAVAILABLE', 'The exact R environment is unavailable.', { publicSafe: true })));
+  });
+}
+module.exports = { createExpertSandboxClient, getExpertREnvironment };

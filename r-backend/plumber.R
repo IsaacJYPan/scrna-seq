@@ -45,6 +45,8 @@ runtime_package_available <- local({
 r_runtime_instance_id <- paste0(format(Sys.time(), "%Y%m%d%H%M%S"), "-",
                                 paste0(sample(c(letters, 0:9), 16, replace = TRUE), collapse = ""))
 r_session_id <- r_runtime_instance_id
+r_execution_generation <- digest::digest(r_runtime_instance_id, algo = "sha256", serialize = FALSE)
+r_execution_order <- 0
 cat("[R] Session ID:", r_session_id, "\n")
 
 # Holds the physical Seurat object for stateful processing
@@ -82,16 +84,23 @@ restore_active_session <- function(session = NULL) {
 # ── Helper: generate a provenance envelope ────────────────────────
 make_provenance <- function(result, script_text, operation = "unknown",
                             packages_used = c("Seurat"), parameters = list()) {
+  r_execution_order <<- r_execution_order + 1
+  package_versions <- lapply(packages_used, function(name) {
+    version <- tryCatch(as.character(utils::packageVersion(name)), error = function(error) NULL)
+    list(name = name, version = version)
+  })
   list(
     provenance = list(
       id = paste0("prov-", format(Sys.time(), "%Y%m%d%H%M%S"), "-", sample(1000:9999, 1)),
-      timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+      timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
       language = "R",
       languageVersion = paste0(R.version$major, ".", R.version$minor),
       packages = packages_used,
       script = script_text,
       parameters = parameters,
-      operation = operation
+      operation = operation,
+      execution = list(generation = r_execution_generation, order = r_execution_order,
+                       packages = package_versions)
     ),
     result = result,
     live_state = live_session_revision_state()

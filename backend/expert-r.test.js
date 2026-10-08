@@ -19,6 +19,7 @@ const {
 } = require('./expertSandboxBroker');
 const { expertRHandler } = require('./jobWorker');
 const { createExpertSandboxClient } = require('./expertSandboxClient');
+const { environmentFixture } = require('./_r-environment-test-utils');
 
 describe('Expert R isolated job contract', () => {
   it('allows private RDS artifacts only through the bounded Expert R output bundle', () => {
@@ -194,6 +195,7 @@ describe('Expert R isolated job contract', () => {
   });
 
   it('passes only a trusted checkpoint key to the external sandbox and records bounded outputs', async () => {
+    const environment = environmentFixture('d').reference;
     const script = 'write_table(data.frame(cells=1), "summary.csv")';
     const scriptSha256 = crypto.createHash('sha256').update(script).digest('hex');
     const runExpertSandbox = vi.fn(async () => ({
@@ -206,11 +208,12 @@ describe('Expert R isolated job contract', () => {
       privateInputs: [],
       sandboxImageDigest: `sha256:${'d'.repeat(64)}`,
       resourcePolicyVersion: 'expert-r-sandbox-policy.v3',
+      environment, environmentArtifact: { internalStorageKey:'projects/proj_abc/artifacts/job_def/expert-r-outputs.tar.gz.environment.json',checksumSha256:environment.manifestSha256,sizeBytes:1000 },
     }));
     const ctx = {
       job: {
         id: 'job_def', ownerUserId: 7, projectId: 'proj_abc', analysisObjectId: 'ao_abc',
-        parameters: { profileId: EXPERT_R_PROFILE.id, script, scriptSha256 },
+        parameters: { profileId: EXPERT_R_PROFILE.id, script, scriptSha256, environment },
       },
       heartbeat: vi.fn(), getOwnedAnalysisObject: vi.fn(async () => ({ id: 'ao_abc' })),
       getHydrationCheckpoint: vi.fn(async () => ({
@@ -234,7 +237,9 @@ describe('Expert R isolated job contract', () => {
       checkpointChecksumSha256: 'c'.repeat(64),
       checkpointSizeBytes: 2000,
       outputStorageKey: 'projects/proj_abc/artifacts/job_def/expert-r-outputs.tar.gz',
+      environment,
     }));
+    expect(ctx.completeExpertRResult).toHaveBeenCalledWith(expect.objectContaining({ environmentArtifact:expect.objectContaining({ artifactType:'expert_r_environment',checksumSha256:environment.manifestSha256,metadata:{ environment } }),result:expect.objectContaining({metadata:expect.objectContaining({environment})}) }));
     expect(outcome).toMatchObject({
       resultAnalysisObjectId: 'ao_result',
       result: {
@@ -243,6 +248,11 @@ describe('Expert R isolated job contract', () => {
         summaryArtifactId: 'art_summary',
       },
     });
+    runExpertSandbox.mockResolvedValueOnce({ ...(await runExpertSandbox.mock.results[0].value),environment:environmentFixture('a').reference });
+    ctx.completeExpertRResult.mockClear();ctx.removeDurableObject=vi.fn(async()=>{});
+    await expect(expertRHandler(ctx)).rejects.toMatchObject({code:'EXPERT_R_RESULT_INVALID'});
+    expect(ctx.completeExpertRResult).not.toHaveBeenCalled();
+    expect(ctx.removeDurableObject).toHaveBeenCalledWith('projects/proj_abc/artifacts/job_def/expert-r-outputs.tar.gz.environment.json');
   });
 
   it('cleans a published output bundle after every definite completion failure', async () => {

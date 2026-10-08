@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const config = require('./config');
 const db = require('./pgDatabase');
@@ -7,6 +7,11 @@ const researchExports = require('./researchExports');
 const http = require('http');
 const { EXPERT_R_PROFILE, allocateExpertRInputStorageKey } = require('./expertR');
 const { startServer, createUserWithToken, api } = require('./_http-test-utils');
+const { environmentFixture } = require('./_r-environment-test-utils');
+const { environmentBytes } = require('./rEnvironment');
+const storage = require('./storage');
+const { writeFile } = require('node:fs/promises');
+const environmentFiles = [];
 
 const CONFIGURED = config.hasPostgresConnection();
 const ORIGINAL_ENV = {
@@ -60,11 +65,12 @@ function expertJobBody(objectId, script = 'write_table(data.frame(cells=1), "sum
 beforeAll(async () => {
   if (!CONFIGURED) return;
   broker = http.createServer((req, res) => {
-    if (req.url !== '/capabilities' || req.headers.authorization !== `Bearer ${'a'.repeat(64)}`) {
+    if (!['/capabilities','/environment'].includes(req.url) || req.headers.authorization !== `Bearer ${'a'.repeat(64)}`) {
       res.statusCode = 404; res.end(); return;
     }
+    if (req.url === '/environment') return res.end(JSON.stringify(environmentFixture('f').manifest));
     res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
-      sandboxImageDigest: `sha256:${'f'.repeat(64)}`, resourcePolicyVersion: 'expert-r-sandbox-policy.v3' }));
+      sandboxImageDigest: `sha256:${'f'.repeat(64)}`, resourcePolicyVersion: 'expert-r-sandbox-policy.v3', environment: environmentFixture('f').reference }));
   });
   await new Promise((resolve) => broker.listen(0, '127.0.0.1', resolve));
   enablePrivateExpertR();
@@ -84,6 +90,7 @@ afterAll(async () => {
   if (broker) await new Promise((resolve) => broker.close(resolve));
   await db.close();
 });
+afterEach(async () => { for (const file of environmentFiles.splice(0)) await file.provider.remove(file.key); });
 
 describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
   it('admits private owner and analyst work without individual grants under project-role policy', async () => {
@@ -231,6 +238,7 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
     });
     expect(created.status).toBe(201);
     expect(created.data.parameters).toEqual({
+      environment: environmentFixture('f').reference,
       profileId: EXPERT_R_PROFILE.id,
       inputIds: [],
       scriptSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -239,6 +247,7 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
 
     const stored = await db.query('SELECT parameters_json FROM jobs WHERE id = $1', [created.data.id]);
     expect(JSON.parse(stored.rows[0].parameters_json)).toEqual({
+      environment: environmentFixture('f').reference,
       profileId: EXPERT_R_PROFILE.id,
       script: source,
       inputIds: [],
@@ -335,15 +344,18 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
     );
 
     await db.setExpertRExecutorByEmail(owner.user.email, true);
+    const exactEnvironment = environmentFixture('d');
+    const expertBody = expertJobBody(owner.object.id); expertBody.parameters.environment = exactEnvironment.reference;
     const expertJob = await db.createProjectJob(
       owner.user.id,
       owner.project.id,
-      expertJobBody(owner.object.id)
+      expertBody
     );
     const expertClaim = await db.claimNextJob('private-expert-worker', {
       allowedJobTypes: ['expert.r.v1'], leaseSeconds: 30,
     });
     const provenance = {
+      environment: exactEnvironment.reference,
       packageProfileId: EXPERT_R_PROFILE.id,
       sandboxImageDigest: `sha256:${'d'.repeat(64)}`,
       resourcePolicyVersion: 'expert-r-sandbox-policy.v3',
@@ -356,11 +368,18 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
       },
     };
     const files = [{ name: 'summary.csv', sizeBytes: 10, checksumSha256: 'f'.repeat(64) }];
+    const provider = storage.createLocalStorageProvider();
+    const environmentKey = `projects/${owner.project.id}/artifacts/${expertJob.id}/expert-r-outputs.tar.gz.environment.json`;
+    const exactBytes = environmentBytes(exactEnvironment.manifest);
+    await writeFile(provider.prepareWrite(environmentKey),exactBytes,{ flag:'wx' });
+    environmentFiles.push({ provider,key:environmentKey });
     const completion = await db.completeExpertRResultByWorker(
       expertJob.id,
       'private-expert-worker',
       expertClaim.claimToken,
       {
+        environmentArtifact: { artifactType:'expert_r_environment',storageKind:'local_internal',internalStorageKey:environmentKey,
+          checksumSha256:exactEnvironment.reference.manifestSha256,sizeBytes:exactBytes.length,metadata:{ environment:exactEnvironment.reference } },
         result: {
           objectType: 'generic',
           displayName: 'Private Expert R result',
@@ -437,5 +456,9 @@ describe.skipIf(!CONFIGURED)('Expert R approved-account access', () => {
     await expect(researchExports.authorizeArtifactDownload(
       collaborator.user.id, owner.project.id, completion.bundleArtifact.id
     )).resolves.toMatchObject({ filename: expect.stringMatching(/expert_r_bundle/) });
+    expect(await db.getProjectArtifact(owner.user.id,owner.project.id,completion.environmentArtifact.id)).toBeTruthy();
+    expect(await db.getProjectArtifact(collaborator.user.id,owner.project.id,completion.environmentArtifact.id)).toBeNull();
+    expect((await db.listProjectArtifacts(collaborator.user.id,owner.project.id)).some(row=>row.artifactType==='expert_r_environment')).toBe(false);
+    await expect(researchExports.authorizeArtifactDownload(collaborator.user.id,owner.project.id,completion.environmentArtifact.id)).rejects.toMatchObject({ code:'ARTIFACT_NOT_DOWNLOADABLE' });
   });
 });

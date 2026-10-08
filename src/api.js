@@ -567,6 +567,7 @@ export const electronAPI = {
   listProjectPipelineDefinitions: async (projectId) => req(`/api/projects/${projectId}/pipeline-definitions`),
   getPipelineRegistryCapabilities: async () => req('/api/pipeline-registry/capabilities'),
   getExpertRCapabilities: async (projectId) => req(`/api/expert-r/capabilities${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+  getExpertREnvironment: async (projectId) => req(`/api/expert-r/environment?projectId=${encodeURIComponent(projectId)}`),
   listExpertRInputs: async (projectId) => req(`/api/expert-r/projects/${projectId}/inputs`),
   uploadExpertRInput: async (projectId, file) => {
     const form = new FormData();

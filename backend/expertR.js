@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const path = require('path');
 const { projectStorageFileKey } = require('./storage');
+const { validateEnvironmentReference } = require('./rEnvironment');
 
 const PROFILE = Object.freeze({
   id: 'scrna-r-4.5-bioconductor-3.22-v1',
@@ -15,8 +16,8 @@ const PROFILE = Object.freeze({
     'ComplexHeatmap', 'CellChat', 'NMF', 'presto', 'jsonlite',
   ]),
 });
-const PARAM_NAMES = Object.freeze(['profileId', 'script', 'inputIds']);
-const STORED_PARAM_NAMES = Object.freeze(['profileId', 'script', 'inputIds', 'scriptSha256']);
+const PARAM_NAMES = Object.freeze(['profileId', 'script', 'inputIds', 'environment']);
+const STORED_PARAM_NAMES = Object.freeze([...PARAM_NAMES, 'scriptSha256']);
 const MAX_SCRIPT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 200 * 1024 * 1024;
 const MAX_BUNDLE_BYTES = MAX_OUTPUT_BYTES + (4 * 1024 * 1024);
@@ -61,8 +62,11 @@ function validateExpertRParams(input, { allowStoredHash = false } = {}) {
       && input.scriptSha256 !== scriptSha256) {
     throw codedError('INVALID_PARAMETERS', 'Stored Expert R script provenance is invalid.');
   }
+  const environment = input.environment === undefined ? null : validateEnvironmentReference(input.environment);
+  if (environment && environment.profileId !== PROFILE.id) throw codedError('INVALID_PARAMETERS','The exact R environment does not match the selected profile.');
   return {
-    params: { profileId: PROFILE.id, script: input.script, inputIds: [...inputIds] },
+    params: { profileId: PROFILE.id, script: input.script, inputIds: [...inputIds],
+      ...(environment ? { environment } : {}) },
     scriptSha256,
   };
 }

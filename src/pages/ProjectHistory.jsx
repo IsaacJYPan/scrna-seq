@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import ArtifactInspector from '../components/ArtifactInspector';
+import ExecutionHistory from '../components/ExecutionHistory';
 
 function formatDate(value) {
   if (!value) return 'Unknown';
@@ -934,6 +935,7 @@ export default function ProjectHistory({
         </div>
 
         <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
+        <ExecutionHistory key={`${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />
 
         {selectedObject && selectedObject.liveState !== 'attached' && (
           <section className="rounded-lg border border-primary/20 bg-primary/5 p-5">

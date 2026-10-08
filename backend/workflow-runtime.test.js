@@ -6,9 +6,12 @@ import { packWorkflow } from '../scripts/pack-workflow.mjs';
 
 const db = require('./pgDatabase');
 const storage = require('./storage');
-const { createWorkflowRuntime, digest } = require('./workflowRuntime');
+const { createWorkflowRuntime, compileStep, digest } = require('./workflowRuntime');
 const { createJobWorker } = require('./jobWorker');
 const { EXPERT_R_RESOURCE_POLICY_VERSION } = require('./expertR');
+const { environmentFixture } = require('./_r-environment-test-utils');
+const { environmentBytes } = require('./rEnvironment');
+const exactEnvironment = environmentFixture();
 const configured = Boolean(process.env.DATABASE_URL);
 const environment = ['APP_DEPLOYMENT_MODE', 'EXPERT_R_ENABLED', 'EXPERT_R_SANDBOX_URL', 'EXPERT_R_SANDBOX_TOKEN', 'EXPERT_R_ACCESS_POLICY'];
 let savedEnvironment, directory, provider, runtime, source, user, project, object, instance;
@@ -30,7 +33,7 @@ describe.skipIf(!configured)('workflow runtime', () => {
     delete process.env.EXPERT_R_ACCESS_POLICY;
     await db.resetSchemaForTests();
     provider = storage.createLocalStorageProvider({ root: path.join(directory, Math.random().toString(16).slice(2)) });
-    runtime = createWorkflowRuntime(db, provider);
+    runtime = createWorkflowRuntime(db, provider, { getEnvironment: async () => exactEnvironment.manifest });
     user = await db.createUser('workflow@example.test', 'password123', 'Workflow owner');
     const organization = await db.createOrganizationForUser(user.id, { name: 'Lab' });
     project = await db.createProjectForUser(user.id, { organizationId: organization.id, name: 'Study' });
@@ -54,6 +57,9 @@ describe.skipIf(!configured)('workflow runtime', () => {
   });
 
   async function fakeSandbox(input) {
+    const environmentKey = `${input.outputStorageKey}.environment.json`;
+    const bytes = environmentBytes(exactEnvironment.manifest);
+    await writeFile(provider.prepareWrite(environmentKey), bytes, { flag: 'wx' });
     const workflowFiles = [];
     for (const declaration of Object.values(input.workflowOutputs)) {
       const bytes = declaration.type === 'rds' ? Buffer.from(replacement)
@@ -63,7 +69,8 @@ describe.skipIf(!configured)('workflow runtime', () => {
       await writeFile(provider.prepareWrite(storageKey), bytes, { flag: 'wx' });
       workflowFiles.push({ name: declaration.name, storageKey, sizeBytes: bytes.length, checksumSha256: digest(bytes) });
     }
-    return { saved: true, workflowFiles, scriptSha256: digest(input.script), checkpointChecksumSha256: input.checkpointChecksumSha256, profileId: input.profileId, sandboxImageDigest: `sha256:${'a'.repeat(64)}`, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION };
+    return { saved: true, workflowFiles, scriptSha256: digest(input.script), checkpointChecksumSha256: input.checkpointChecksumSha256, profileId: input.profileId, sandboxImageDigest: `sha256:${'a'.repeat(64)}`, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION,
+      environment: exactEnvironment.reference, environmentArtifact: { internalStorageKey: environmentKey, checksumSha256: digest(bytes), sizeBytes: bytes.length } };
   }
   async function execute(stepId, sandbox = fakeSandbox) {
     instance = await runtime.run(user.id, project.id, instance.id, { requestId: crypto.randomUUID(), stepId });
@@ -109,7 +116,10 @@ describe.skipIf(!configured)('workflow runtime', () => {
     await execute('qc'); await execute('normalize');
     const before = instance.state.results;
     await execute('qc');
-    expect(instance.state.results).toEqual(before);
+    expect(instance.state.results.normalize).toEqual(before.normalize);
+    expect(instance.state.results.qc.outputs).toEqual(before.qc.outputs);
+    expect(instance.state.results.qc.producerKey).toEqual(before.qc.producerKey);
+    expect(instance.state.results.qc.runtime.environment).toEqual(before.qc.runtime.environment);
     expect((await db.query('SELECT COUNT(*)::int AS count FROM workflow_artifacts')).rows[0].count).toBe(4);
   });
   it('pins saved files across resets and restores one consistent workflow', async () => {
@@ -122,6 +132,28 @@ describe.skipIf(!configured)('workflow runtime', () => {
     await runtime.cleanup(user.id, project.id);
     const output = restored.state.results.normalize.outputs.analysis;
     expect((await runtime.artifact(user.id, project.id, output.id)).descriptor_json.sha256).toBe(output.sha256);
+  });
+  it('retains a snapshot environment and refuses execution on a changed worker without replacing it',async()=>{
+    await execute('qc');
+    expect(instance.state.environment).toEqual(exactEnvironment.reference);
+    const saved=await runtime.save(user.id,project.id,instance.id,'Exact environment');
+    await runtime.close(user.id,project.id,instance.id);
+    const changed=createWorkflowRuntime(db,provider,{getEnvironment:async()=>environmentFixture('b').manifest});
+    const restored=await changed.restore(user.id,project.id,saved.id);
+    expect(restored.state.environment).toEqual(exactEnvironment.reference);
+    await expect(changed.run(user.id,project.id,restored.id,{requestId:crypto.randomUUID(),stepId:'qc'})).rejects.toMatchObject({code:'R_ENVIRONMENT_MISMATCH'});
+    expect((await changed.get(user.id,project.id,restored.id)).state.results).toEqual(restored.state.results);
+    expect((await db.query("SELECT COUNT(*)::int AS count FROM jobs WHERE status='queued'")).rows[0].count).toBe(0);
+  });
+  it('atomically retains exact compiled source privately after terminal parameter redaction',async()=>{
+    instance=await runtime.run(user.id,project.id,instance.id,{requestId:crypto.randomUUID(),stepId:'qc'});
+    const jobId=instance.state.active.id;const source=compileStep(instance.package,instance.state).script;
+    const worker=createJobWorker({db,storageProvider:provider,allowedJobTypes:['expert.r.v1'],runExpertSandbox:fakeSandbox,logger:{info(){},warn(){},error(){}}});
+    expect((await worker.runOnce()).status).toBe('completed');
+    const retained=(await db.query('SELECT * FROM execution_source_versions WHERE job_id=$1',[jobId])).rows[0];
+    expect(retained).toMatchObject({id:`src_${jobId}`,owner_user_id:String(user.id),project_id:project.id,language:'R',source_code:source,source_sha256:digest(source)});
+    const params=JSON.parse((await db.query('SELECT parameters_json FROM jobs WHERE id=$1',[jobId])).rows[0].parameters_json);
+    expect(params.script).toBeUndefined();expect(params.environment).toEqual(exactEnvironment.reference);
   });
   it('serializes competing run submissions and makes a retried request idempotent', async () => {
     const request = { requestId: crypto.randomUUID(), stepId: 'qc' };

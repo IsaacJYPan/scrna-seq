@@ -4,6 +4,7 @@ import http from 'node:http';
 const { EXPERT_R_PROFILE, EXPERT_R_RESOURCE_POLICY_VERSION, expertRSandboxEnabled } = require('./expertR');
 const { expertRAccessPolicy, expertRAccessSql, probeExpertRRuntime, expertRStatus } = require('./expertRAccess');
 const { assertExpertRuntimeImage } = require('./expertSandboxBroker');
+const { environmentFixture } = require('./_r-environment-test-utils');
 const servers = [];
 afterEach(async () => {
   for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
@@ -45,6 +46,7 @@ describe('private R access policy and runtime readiness', () => {
       expect(req.url).toBe('/capabilities'); expect(req.headers.authorization).toBe(`Bearer ${'a'.repeat(64)}`);
       res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
         sandboxImageDigest: `sha256:${'b'.repeat(64)}`, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION,
+        environment: environmentFixture('b').reference,
         privatePath: '/operator/secrets' }));
     });
     const runtime = await probeExpertRRuntime(env);

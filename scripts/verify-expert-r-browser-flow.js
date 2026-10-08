@@ -203,10 +203,12 @@ async function main() {
 
   await admin.connect();
   try {
-    console.log('[expert-r-browser] building reviewed R sandbox image');
-    docker(['build', '-f', 'r-backend/Dockerfile', '-t', 'traceomics-r:single-host', 'r-backend']);
+    if (!process.env.EXPERT_R_ACCEPTANCE_IMAGE) {
+      console.log('[expert-r-browser] building reviewed R sandbox image');
+      docker(['build', '-f', 'r-backend/Dockerfile', '-t', 'traceomics-r:single-host', 'r-backend']);
+    }
     const inspected = docker([
-      'image', 'inspect', 'traceomics-r:single-host', '--format', '{{.Id}}',
+      'image', 'inspect', process.env.EXPERT_R_ACCEPTANCE_IMAGE || 'traceomics-r:single-host', '--format', '{{.Id}}',
     ], { capture: true });
     const sandboxImage = inspected.stdout.trim();
     assert(/^sha256:[0-9a-f]{64}$/.test(sandboxImage),
@@ -372,9 +374,21 @@ async function main() {
     await page.getByText('Expert browser project', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
     await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Exact R environment',exact:true }).waitFor();
+    await page.getByRole('button', { name: 'Inspect package lock',exact:true }).click();
+    await page.getByRole('button', { name: 'Download environment manifest',exact:true }).waitFor();
+    const environmentDownload = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Download environment manifest',exact:true }).click();
+    const downloadedEnvironment = await environmentDownload;
+    const retainedManifest = JSON.parse(fs.readFileSync(await downloadedEnvironment.path(),'utf8'));
+    const { summarizeEnvironmentManifest } = require('../backend/rEnvironment');
+    const expectedEnvironment = summarizeEnvironmentManifest(retainedManifest);
+    assert(expectedEnvironment.imageId === sandboxImage,'The UI manifest must identify the actual isolated image');
+    await page.getByText('Installed R package versions and sources',{exact:true}).click();
     const rStatusScreenshots = path.join(ROOT, 'playwright/report/release-acceptance/private-r');
     fs.mkdirSync(rStatusScreenshots, { recursive: true });
     await page.screenshot({ path: path.join(rStatusScreenshots, 'runtime-ready.png'), fullPage: true });
+    console.log('[r-environment-browser] PASS actual package-lock inspection and manifest download',expectedEnvironment.id);
     await page.getByLabel('Choose private input').setInputFiles(inputPath);
     await page.getByRole('button', { name: 'Import file' }).click();
     await page.getByText('covariates.csv', { exact: true }).waitFor({ state: 'visible' });
@@ -401,10 +415,40 @@ write_table(summary_table, "object-summary.csv")
     assert(completedJob.result_analysis_object_id, 'Successful Expert R run did not publish a private result object.');
     assert(!JSON.stringify(completedJob.parameters_json || {}).includes(successScript.trim()),
       'Terminal Expert R job retained source text instead of only its hash.');
+    const completedParameters = typeof completedJob.parameters_json === 'string' ? JSON.parse(completedJob.parameters_json) : completedJob.parameters_json;
+    assert(completedParameters.environment?.id === expectedEnvironment.id,'Completed jobs must preserve their pinned environment reference.');
+    const retainedEnvironment = (await appClient.query("SELECT * FROM job_artifacts WHERE job_id=$1 AND artifact_type='expert_r_environment'",[completedJob.id])).rows;
+    assert(retainedEnvironment.length === 1 && retainedEnvironment[0].checksum_sha256 === expectedEnvironment.manifestSha256,'Successful runs must retain their exact manifest as a verified private artifact.');
+    const exactProvider = require('../backend/storage').createLocalStorageProvider({root:storageRoot});
+    await require('../backend/rEnvironment').readEnvironmentArtifact(exactProvider,{internalStorageKey:retainedEnvironment[0].storage_uri,checksumSha256:retainedEnvironment[0].checksum_sha256,sizeBytes:Number(retainedEnvironment[0].size_bytes)},expectedEnvironment);
+    const secondPort = await unusedPort(); const secondWorkRoot = path.join(tempRoot,'second-worker'); fs.mkdirSync(secondWorkRoot);
+    const secondBroker = spawn(process.execPath,[path.join(ROOT,'backend','expertSandboxBroker.js')],{
+      cwd:ROOT,env:{...commonEnv,EXPERT_R_SANDBOX_IMAGE:sandboxImage,EXPERT_R_SANDBOX_WORK_ROOT:secondWorkRoot,EXPERT_R_SANDBOX_HOST:'127.0.0.1',EXPERT_R_SANDBOX_PORT:String(secondPort),EXPERT_R_MAX_CONCURRENT:'1',EXPERT_R_MEMORY_LIMIT:'2g',EXPERT_R_CPU_LIMIT:'1',EXPERT_R_TIMEOUT_MS:'90000',EXPERT_R_MIN_FREE_BYTES:'268435456'},stdio:['ignore','pipe','pipe'],windowsHide:true });
+    const secondOutput = collectProcessOutput(secondBroker);
+    try {
+      await waitFor(async()=> (await fetch(`http://127.0.0.1:${secondPort}/health`)).ok,90000);
+      const headers={Authorization:`Bearer ${sandboxToken}`,'Content-Type':'application/json'};
+      const secondManifest=await (await fetch(`http://127.0.0.1:${secondPort}/environment`,{headers})).json();
+      assert(summarizeEnvironmentManifest(secondManifest).id === expectedEnvironment.id,'A second independent worker must recreate the same declared environment.');
+      const secondJobId=`job_${crypto.randomBytes(12).toString('hex')}`;jobIds.push(secondJobId);
+      const body={jobId:secondJobId,projectId:project.id,profileId:expectedEnvironment.profileId,environment:expectedEnvironment,script:'write_table(data.frame(cells=ncol(obj)), "second-worker.csv")',checkpointStorageKey:checkpointKey,checkpointChecksumSha256:checkpointChecksum,checkpointSizeBytes:checkpointBytes.length,outputStorageKey:`projects/${project.id}/artifacts/${secondJobId}/expert-r-outputs.tar.gz`};
+      const execution=await fetch(`http://127.0.0.1:${secondPort}/run`,{method:'POST',headers,body:JSON.stringify(body)});const response=await execution.json();
+      assert(execution.status === 200 && response.environment?.id === expectedEnvironment.id,'Second-worker execution must use the exact pinned environment',JSON.stringify(response));
+      await require('../backend/rEnvironment').readEnvironmentArtifact(exactProvider,response.environmentArtifact,expectedEnvironment);
+      const changed=structuredClone(secondManifest);changed.packages.find(pkg=>pkg.name==='Seurat').version='99.0.0';
+      const stale=await fetch(`http://127.0.0.1:${secondPort}/run`,{method:'POST',headers,body:JSON.stringify({...body,environment:summarizeEnvironmentManifest(changed)})});
+      assert(stale.status === 409 && (await stale.json()).code==='R_ENVIRONMENT_MISMATCH','Unavailable exact dependencies must fail before running with a substitute environment.');
+      const { restoreEnvironment }=require('./restore-r-environment');
+      await restoreEnvironment(secondManifest);
+      let unavailable=false;try{await restoreEnvironment({...secondManifest,runtime:{...secondManifest.runtime,imageReference:`sha256:${'0'.repeat(64)}`,imageDigest:`sha256:${'0'.repeat(64)}`,imageId:`sha256:${'0'.repeat(64)}`}});}catch(error){unavailable=/no substitute packages/.test(error.message);}
+      assert(unavailable,'A missing exact image must fail visibly without installing a current replacement.');
+      console.log('[r-environment-browser] PASS private retained manifest, exact second independent worker, restore verification, changed-lock and unavailable-image failures');
+    } catch(error) {throw new Error(`${error.message}\nSecond worker: ${secondOutput()}`);}
+    finally {secondBroker.kill('SIGTERM');await waitForExit(secondBroker).catch(()=>secondBroker.kill('SIGKILL'));}
 
     await page.getByRole('button', { name: /View in Runs & Results/ }).click();
     await page.getByRole('heading', { name: 'Runs & Results' }).waitFor({ state: 'visible' });
-    await page.getByRole('button', { name: 'Refresh' }).click();
+    await page.getByRole('button', { name: 'Refresh',exact:true }).click();
     await page.getByText('Complete', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByText('R analysis output', { exact: true }).waitFor({ state: 'visible' });
     const downloadPromise = page.waitForEvent('download');
@@ -546,7 +590,7 @@ write_table(summary_table, "object-summary.csv")
       'Failed job error retained a private path from R output.');
 
     await page.getByRole('button', { name: /View in Runs & Results/ }).click();
-    await page.getByRole('button', { name: 'Refresh' }).click();
+    await page.getByRole('button', { name: 'Refresh',exact:true }).click();
     await page.getByText('Needs attention', { exact: true }).first().waitFor({ state: 'visible' });
     const historyText = await page.locator('body').innerText();
     assert(historyText.includes('The R script stopped with an error. Check input names, columns, and function arguments.'),

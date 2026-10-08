@@ -4,6 +4,7 @@ const { contract, compileStep, transaction, digest, identifier, authorize, lockE
 const { validateWorkflowOutput } = require('./workflowOutputs');
 const storage = require('./storage');
 const { EXPERT_R_RESOURCE_POLICY_VERSION } = require('./expertR');
+const { assertEnvironmentMatches, readEnvironmentArtifact } = require('./rEnvironment');
 
 function claimLost() { return Object.assign(new Error('The workflow run no longer owns this workspace.'), { code: 'CLAIM_LOST' }); }
 
@@ -31,11 +32,21 @@ async function runWorkflowJob(db, ctx, workerId, claimToken, provider) {
   await ctx.heartbeat();
   const result = await ctx.runExpertSandbox({
     jobId: ctx.job.id, projectId, profileId: instance.package_json.runtime.profileId,
+    ...(ctx.job.parameters.environment ? { environment: ctx.job.parameters.environment } : {}),
     script: compiled.script, checkpointStorageKey: checkpoint.internalStorageKey,
     checkpointChecksumSha256: checkpoint.checksumSha256, checkpointSizeBytes: checkpoint.sizeBytes,
     privateInputs: inputs, outputStorageKey, workflowOutputs: compiled.outputs,
   });
   const files = result.workflowFiles;
+  let environmentArtifact = null;
+  if (ctx.job.parameters.environment) {
+    assertEnvironmentMatches(ctx.job.parameters.environment, run.environment);
+    assertEnvironmentMatches(ctx.job.parameters.environment, result.environment);
+    if (result.environment.imageDigest !== result.sandboxImageDigest
+        || result.environmentArtifact?.internalStorageKey !== `${outputStorageKey}.environment.json`) throw new Error('Invalid workflow environment response.');
+    await readEnvironmentArtifact(provider, result.environmentArtifact, ctx.job.parameters.environment);
+    environmentArtifact = { id: identifier('art'), checksumSha256: result.environmentArtifact.checksumSha256, sizeBytes: result.environmentArtifact.sizeBytes };
+  }
   if (!result.saved || result.scriptSha256 !== digest(compiled.script) || result.checkpointChecksumSha256 !== checkpoint.checksumSha256
       || result.profileId !== instance.package_json.runtime.profileId || result.resourcePolicyVersion !== EXPERT_R_RESOURCE_POLICY_VERSION
       || !/^sha256:[a-f0-9]{64}$/.test(result.sandboxImageDigest || '') || !Array.isArray(files)
@@ -51,7 +62,7 @@ async function runWorkflowJob(db, ctx, workerId, claimToken, provider) {
     await validateWorkflowOutput(provider, key, output);
     outputs[port] = output;
   }
-  const producerKey = digest({ source: instance.package_json.files[instance.package_json.steps.find(step => step.id === run.stepId).entry], parameters: run.parameters, seed: run.seed, image: result.sandboxImageDigest });
+  const producerKey = digest({ source: instance.package_json.files[instance.package_json.steps.find(step => step.id === run.stepId).entry], parameters: run.parameters, seed: run.seed, image: result.sandboxImageDigest, ...(result.environment ? { environment: result.environment.id } : {}) });
   await transaction(db, async client => {
     await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [userId]);
     await lockExecutionAccess(client, userId, projectId);
@@ -61,11 +72,16 @@ async function runWorkflowJob(db, ctx, workerId, claimToken, provider) {
     await authorize(db, userId, projectId, true);
     const state = (await contract).commitWorkflowRun(instance.package_json, current.state_json, {
       id: ctx.job.id, generation: run.generation, outputs, producerKey,
-      runtime: { profileId: result.profileId, imageDigest: result.sandboxImageDigest, resourcePolicyVersion: result.resourcePolicyVersion, scriptSha256: result.scriptSha256 },
+      runtime: { profileId: result.profileId, imageDigest: result.sandboxImageDigest, resourcePolicyVersion: result.resourcePolicyVersion, scriptSha256: result.scriptSha256,
+        ...(environmentArtifact ? { environment: result.environment, environmentArtifact } : {}) },
     });
     for (const [port, output] of Object.entries(outputs)) {
       await client.query('INSERT INTO workflow_artifacts (id,owner_user_id,project_id,job_id,descriptor_json,storage_key) VALUES ($1,$2,$3,$4,$5,$6)', [output.id, userId, projectId, ctx.job.id, output, `${outputStorageKey}-${compiled.outputs[port].name}`]);
     }
+    if (environmentArtifact) await client.query(`INSERT INTO job_artifacts
+      (id,project_id,job_id,created_by_user_id,analysis_object_id,artifact_type,name,mime_type,storage_kind,storage_uri,checksum_sha256,size_bytes,status,metadata_json)
+      VALUES ($1,$2,$3,$4,$5,'expert_r_environment','Exact R environment','application/json','local_internal',$6,$7,$8,'available',$9)`,
+    [environmentArtifact.id,projectId,ctx.job.id,userId,instance.analysis_object_id,result.environmentArtifact.internalStorageKey,environmentArtifact.checksumSha256,environmentArtifact.sizeBytes,JSON.stringify({ environment: result.environment })]);
     await client.query('UPDATE workflow_instances SET state_json=$2,updated_at=now() WHERE id=$1', [instance.id, state]);
     await client.query("UPDATE jobs SET status='completed',completed_at=now(),updated_at=now(),heartbeat_at=now(),claim_token=NULL,lease_expires_at=NULL WHERE id=$1", [ctx.job.id]);
   });

@@ -76,6 +76,7 @@ const {
   MAX_EXPERT_R_BUNDLE_BYTES,
   EXPERT_R_RESOURCE_POLICY_VERSION,
 } = require('./expertR');
+const { assertEnvironmentMatches, MAX_ENVIRONMENT_BYTES } = require('./rEnvironment');
 
 /** Stable, header-safe worker id (`worker_` + hex). One per worker instance. */
 function generateWorkerId() {
@@ -1959,6 +1960,7 @@ async function expertRHandler(ctx) {
   const outputStorageKey = allocateExpertRBundleStorageKey(job.projectId, job.id);
   const sandbox = await ctx.runExpertSandbox({
     jobId: job.id, projectId: job.projectId, profileId: params.profileId,
+    ...(params.environment ? { environment: params.environment } : {}),
     script: params.script, checkpointStorageKey: checkpoint.internalStorageKey,
     checkpointChecksumSha256: checkpoint.checksumSha256,
     checkpointSizeBytes: checkpoint.sizeBytes,
@@ -1972,6 +1974,18 @@ async function expertRHandler(ctx) {
     outputStorageKey,
   });
   const outputFiles = Array.isArray(sandbox?.files) ? sandbox.files : [];
+  const environmentStorageKey = `${outputStorageKey}.environment.json`;
+  let validEnvironment = !params.environment;
+  if (params.environment) {
+    try {
+      assertEnvironmentMatches(params.environment, sandbox?.environment);
+      validEnvironment = sandbox.environment.imageDigest === sandbox.sandboxImageDigest
+        && sandbox.environmentArtifact?.internalStorageKey === environmentStorageKey
+        && sandbox.environmentArtifact.checksumSha256 === params.environment.manifestSha256
+        && Number.isSafeInteger(sandbox.environmentArtifact.sizeBytes)
+        && sandbox.environmentArtifact.sizeBytes > 0 && sandbox.environmentArtifact.sizeBytes <= MAX_ENVIRONMENT_BYTES;
+    } catch { validEnvironment = false; }
+  }
   const validFiles = outputFiles.length === sandbox?.nFiles && outputFiles.every((file) => (
     file && typeof file.name === 'string'
     && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$/.test(file.name)
@@ -1994,9 +2008,10 @@ async function expertRHandler(ctx) {
       && JSON.stringify(sandbox.privateInputs || []) === JSON.stringify(privateInputProvenance)
       && /^sha256:[0-9a-f]{64}$/.test(String(sandbox.sandboxImageDigest || ''))
       && sandbox.resourcePolicyVersion === EXPERT_R_RESOURCE_POLICY_VERSION;
-  if (!validSandbox) {
+  if (!validSandbox || !validEnvironment) {
     if (typeof ctx.removeDurableObject === 'function') {
       try { await ctx.removeDurableObject(outputStorageKey); } catch { /* validation error wins */ }
+      if (params.environment) try { await ctx.removeDurableObject(environmentStorageKey); } catch { /* validation error wins */ }
     }
     throw codedHandlerError('EXPERT_R_RESULT_INVALID', 'Expert R sandbox output is invalid.');
   }
@@ -2006,6 +2021,7 @@ async function expertRHandler(ctx) {
     checksumSha256: file.checksumSha256,
   }));
   const provenance = {
+    ...(params.environment ? { environment: params.environment } : {}),
     packageProfileId: params.profileId,
     sandboxImageDigest: sandbox.sandboxImageDigest,
     resourcePolicyVersion: sandbox.resourcePolicyVersion,
@@ -2021,6 +2037,12 @@ async function expertRHandler(ctx) {
   let completion;
   try {
     completion = await ctx.completeExpertRResult({
+      ...(params.environment ? { environmentArtifact: {
+        artifactType: 'expert_r_environment', name: 'Exact R environment',
+        description: 'Verified package lock and immutable container userspace identity.',
+        storageKind: 'local_internal', mimeType: 'application/json',
+        ...sandbox.environmentArtifact, metadata: { environment: params.environment },
+      } } : {}),
       result: {
         objectType: 'generic',
         displayName: 'Expert R result',
@@ -2061,6 +2083,7 @@ async function expertRHandler(ctx) {
     if (error?.completionMayHaveCommitted !== true
         && typeof ctx.removeDurableObject === 'function') {
       try { await ctx.removeDurableObject(outputStorageKey); } catch { /* original publication error wins */ }
+      if (params.environment) try { await ctx.removeDurableObject(environmentStorageKey); } catch { /* original publication error wins */ }
     }
     throw error;
   }

@@ -67,8 +67,10 @@ exact byte-for-byte copy of the input is rejected even if it uses another allowe
 extension. Those controls provide workload containment and tenant isolation, not
 data-loss prevention against an authorized data owner: R can transform or encode
 input-derived data. Results and output bundles stay creator-private until an
-explicit audited branch publish. Source is removed from terminal job records while
-its hash and input/profile/image/output provenance remain. Approved users can
+explicit audited branch publish. Terminal job transport records remove source;
+new submissions retain an immutable, creator-private source version in execution
+history, including failed and canceled runs. Older jobs whose source was already
+removed remain explicitly hash-only. Approved users can
 privately import up to five selected CSV, TSV, text, JSON, or RDS files through the
 server-controlled picker; those files are owner/project scoped, mounted read-only,
 and addressed in R only by server-generated IDs. Owner-visible script failures use
@@ -78,6 +80,32 @@ are never promoted into the trusted guided-analysis runtime because RDS
 deserialization is an executable-code boundary. Runtime package install is
 unavailable; operators manage access with
 `npm run expert-r-access -- <grant|revoke|status> <email>`.
+
+**Runs & Results → Execution history** brings guided jobs, recipe steps, private
+R submissions, live guided R operations, and imported provenance into one bounded
+view. It shows recorded source, resolved parameters, input/output versions,
+timestamps, status, and environment evidence. Source, parameters, inputs, and
+environment manifests remain creator-private even when a result is shared.
+Tables and figures use the verified artifact inspector; arbitrary RDS files remain
+metadata-only. Missing input versions, legacy source, and incomplete environment
+records are listed as replay gaps rather than treated as reproducible runs.
+
+Live guided operations obtain their execution generation and order from the
+authenticated R service. The server stores that evidence before acknowledging
+history persistence. Loading a checkpoint does not reset process order; restarting
+the R service creates a new generation. These records describe the interactive
+service process, not a persistent private R kernel. A history-write failure keeps
+the completed scientific result and displays an explicit warning.
+
+Private R and executable recipe runs now pin a checksum-addressed environment
+manifest containing the exact R/Bioconductor versions, installed R package versions
+and available source metadata, OS packages, architecture, and immutable runtime
+image. Successful runs retain the manifest as a private artifact; recipe snapshots
+retain the same environment reference. A changed worker environment refuses the
+run before execution. The snapshot covers container userspace, not the host kernel,
+hardware, or downloadable source archives. Restore the original image and verify
+its inventory with `npm run expert-r:restore-environment -- --manifest environment.json`;
+see the deployment guide for exact-image transfer and registry options.
 
 The spatial workflow currently supports one classic 10x Visium Space Ranger ZIP
 containing `filtered_feature_bc_matrix.h5` plus its `spatial/` directory. The

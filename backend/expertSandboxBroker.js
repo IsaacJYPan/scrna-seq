@@ -13,6 +13,8 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const storage = require('./storage');
+const { MAX_ENVIRONMENT_BYTES, environmentBytes, summarizeEnvironmentManifest, assertEnvironmentMatches } = require('./rEnvironment');
+const { rEnvironmentProbeCode, buildEnvironmentManifest } = require('./rEnvironmentProbe');
 const {
   EXPERT_R_PROFILE,
   expertRProfileProbeCode,
@@ -146,6 +148,26 @@ async function assertExpertRuntimeImage(env = process.env, runProcessImpl = runP
   });
   if (!String(result.stdout || '').includes('private-r-profile-ok')) throw new Error('Expert R runtime does not provide the supported package profile.');
   return true;
+}
+
+async function discoverExpertRuntimeEnvironment(env = process.env, runProcessImpl = runProcess) {
+  const image = String(env.EXPERT_R_SANDBOX_IMAGE || '');
+  if (!/^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$/.test(image)) throw new Error('Expert R requires an immutable runtime image.');
+  const inspected = await runProcessImpl('docker', ['image', 'inspect', image, '--format',
+    '{"imageId":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}}}'], { timeoutMs: 30000 });
+  const metadata = JSON.parse(String(inspected.stdout || '').trim());
+  const containerName = `traceomics-expert-environment-${crypto.randomBytes(12).toString('hex')}`;
+  const result = await runProcessImpl('docker', ['run', '--rm', '--name', containerName,
+    '--label', `${CONTAINER_LABEL}=true`, '--network', 'none', '--read-only',
+    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256',
+    '--memory', env.EXPERT_R_MEMORY_LIMIT || '8g', '--cpus', env.EXPERT_R_CPU_LIMIT || '2',
+    '--user', '10001:10001', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=512m',
+    '--entrypoint', 'Rscript', image, '--vanilla', '-e', rEnvironmentProbeCode()], {
+    timeoutMs: 90000,
+    onTimeout: () => runProcessImpl('docker', ['rm', '-f', containerName], { timeoutMs: 30000 }),
+  });
+  if (Buffer.byteLength(String(result.stdout || ''), 'utf8') > MAX_ENVIRONMENT_BYTES) throw new Error('Expert R environment inventory exceeds its size limit.');
+  return buildEnvironmentManifest(JSON.parse(result.stdout), metadata, image);
 }
 
 function workspaceRootHash(workRoot) {
@@ -495,6 +517,8 @@ function createExpertSandboxBroker(env = process.env) {
   let reconcileTimer = null;
   let reconciliation = null;
   let runtimeVerified = false;
+  let environmentManifest = null;
+  let environment = null;
   const timeoutMs = positiveInteger(env.EXPERT_R_TIMEOUT_MS, 600000);
   const cleanupGraceMs = positiveInteger(env.EXPERT_R_CLEANUP_GRACE_MS, 300000);
   const reconcileIntervalMs = positiveInteger(env.EXPERT_R_RECONCILE_INTERVAL_MS, 300000);
@@ -512,7 +536,12 @@ function createExpertSandboxBroker(env = process.env) {
         && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       if (!runtimeVerified) { res.statusCode = 503; return res.end(JSON.stringify({ status: 'unavailable' })); }
       return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
-        sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION }));
+        sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION, environment }));
+    }
+    if (req.method === 'GET' && req.url === '/environment'
+        && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
+      if (!runtimeVerified || !environmentManifest) { res.statusCode = 503; return res.end(JSON.stringify({ error: 'Exact R environment is unavailable.' })); }
+      return res.end(environmentBytes(environmentManifest));
     }
     if (req.method !== 'POST' || req.url !== '/run'
         || !safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
@@ -527,12 +556,20 @@ function createExpertSandboxBroker(env = process.env) {
     let workReservationBytes = 0n;
     let storageReservationBytes = 0n;
     let phase = 'request';
+    let environmentStorageKey = null;
+    let published = false;
     const abortController = new AbortController();
     res.once('close', () => { if (!res.writableEnded) abortController.abort(); });
     try {
       const chunks = []; let bytes = 0;
       for await (const chunk of req) { bytes += chunk.length; if (bytes > 65536) throw new Error('Request too large.'); chunks.push(chunk); }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (!runtimeVerified || !environment) throw Object.assign(new Error('The exact R environment is unavailable.'), { code: 'R_ENVIRONMENT_UNAVAILABLE' });
+      assertEnvironmentMatches(body.environment, environment);
+      try {
+        const inspected = await runProcess('docker', ['image', 'inspect', image, '--format', '{{.Id}}'], { timeoutMs: 15000 });
+        if (String(inspected.stdout || '').trim() !== environment.imageId) throw new Error('Runtime changed');
+      } catch { throw Object.assign(new Error('The pinned runtime image is unavailable.'), { code: 'R_ENVIRONMENT_UNAVAILABLE' }); }
       const validated = validateExpertRParams({ profileId: body.profileId, script: body.script });
       const workflowOutputs = body.workflowOutputs;
       if (workflowOutputs !== undefined) {
@@ -572,7 +609,7 @@ function createExpertSandboxBroker(env = process.env) {
       const privateInputBytes = privateInputs.reduce((sum, input) => sum + input.sizeBytes, 0);
       workReservationBytes = BigInt(body.checkpointSizeBytes)
         + BigInt(privateInputBytes) + BigInt(3 * MAX_ARCHIVE_BYTES);
-      storageReservationBytes = BigInt(MAX_ARCHIVE_BYTES);
+      storageReservationBytes = BigInt(MAX_ARCHIVE_BYTES + MAX_ENVIRONMENT_BYTES);
       // Reservation counters close the two-request admission race: both active
       // runs must fit before either is allowed to start copying. If the broker's
       // work and durable roots share a filesystem, account for both growth
@@ -645,7 +682,7 @@ function createExpertSandboxBroker(env = process.env) {
       });
       phase = 'execute';
       const sandboxWrapper = [
-        'Rscript /app/expert-runner.R',
+        'Rscript --vanilla /app/expert-runner.R',
         'status=$?',
         "printf '%s\\n' \"$status\" > /tmp/traceomics-exit-status",
         'exec tail -f /dev/null',
@@ -697,6 +734,11 @@ function createExpertSandboxBroker(env = process.env) {
       const outputs = await collectOutputs(outputDirectory, {
         forbiddenContentHashes: workflowOutputs ? new Set() : forbiddenContentHashes,
       });
+      const environmentPath = path.join(jobDirectory, 'environment.lock.json');
+      await fsp.writeFile(environmentPath, environmentBytes(environmentManifest), { flag: 'wx', mode: 0o600 });
+      environmentStorageKey = `${body.outputStorageKey}.environment.json`;
+      const storedEnvironment = await provider.putFileFromPath(environmentPath, environmentStorageKey);
+      const environmentArtifact = { internalStorageKey: environmentStorageKey, checksumSha256: storedEnvironment.checksumSha256, sizeBytes: storedEnvironment.sizeBytes };
       if (workflowOutputs) {
         const expected = Object.values(workflowOutputs).map(output => output.name);
         if (outputs.files.length !== expected.length || outputs.files.some(file => !expected.includes(file.relative))) throw new Error('Workflow did not produce exactly its declared outputs.');
@@ -706,10 +748,12 @@ function createExpertSandboxBroker(env = process.env) {
           const stored = await provider.putFileFromPath(path.join(outputDirectory, file.relative), storageKey);
           workflowFiles.push({ name: file.relative, storageKey, sizeBytes: stored.sizeBytes, checksumSha256: stored.checksumSha256 });
         }
+        published = true;
         if (!res.destroyed) res.end(JSON.stringify({
           ok: true, saved: true, workflowFiles, scriptSha256: validated.scriptSha256,
           profileId: EXPERT_R_PROFILE.id, checkpointChecksumSha256,
           sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION,
+          environment, environmentArtifact,
         }));
         return;
       }
@@ -724,6 +768,7 @@ function createExpertSandboxBroker(env = process.env) {
       phase = 'publish';
       await assertFreeSpace(provider.root, archiveStat.size + minFreeBytes);
       const stored = await provider.putFileFromPath(archive, body.outputStorageKey);
+      published = true;
       if (!res.destroyed) res.end(JSON.stringify({
         ok: true, saved: true, checksumSha256: stored.checksumSha256,
         sizeBytes: stored.sizeBytes, nFiles: outputs.files.length, outputBytes: outputs.totalBytes,
@@ -741,6 +786,7 @@ function createExpertSandboxBroker(env = process.env) {
         })),
         sandboxImageDigest,
         resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION,
+        environment, environmentArtifact,
       }));
     } catch (error) {
       const exitCode = Number.isInteger(error?.exitCode) ? error.exitCode : 'none';
@@ -752,6 +798,9 @@ function createExpertSandboxBroker(env = process.env) {
         if (explanation) {
           res.statusCode = 422;
           res.end(JSON.stringify({ error: 'Expert R script failed.', code: 'EXPERT_R_SCRIPT_FAILED', explanation }));
+        } else if (['R_ENVIRONMENT_MISMATCH', 'R_ENVIRONMENT_INVALID', 'R_ENVIRONMENT_UNAVAILABLE'].includes(error?.code)) {
+          res.statusCode = 409;
+          res.end(JSON.stringify({ error: 'The exact R environment for this run is unavailable. Restore its pinned runtime image and package lock before retrying.', code: 'R_ENVIRONMENT_MISMATCH' }));
         } else if (error?.code === 'SANDBOX_STORAGE_PRESSURE') {
           res.statusCode = 503;
           res.end(JSON.stringify({ error: 'Expert R storage capacity is temporarily unavailable.' }));
@@ -760,6 +809,7 @@ function createExpertSandboxBroker(env = process.env) {
         }
       }
     } finally {
+      if (environmentStorageKey && !published) await provider.remove(environmentStorageKey).catch(() => {});
       active -= 1;
       reservedWorkBytes -= workReservationBytes;
       reservedStorageBytes -= storageReservationBytes;
@@ -772,7 +822,10 @@ function createExpertSandboxBroker(env = process.env) {
   });
   server.startReconciliation = async () => {
     await assertExpertRuntimeSecurity(env);
-    if (!runtimeVerified) await assertExpertRuntimeImage(env);
+    if (!runtimeVerified) {
+      environmentManifest = await discoverExpertRuntimeEnvironment(env);
+      environment = summarizeEnvironmentManifest(environmentManifest);
+    }
     await reconcile();
     runtimeVerified = true;
     if (!reconcileTimer) {
@@ -813,5 +866,6 @@ module.exports = {
   validateExpertRuntimeIsolation, reconcileExpertSandboxWorkRoot,
   assertExpertRuntimeSecurity,
   assertExpertRuntimeImage,
+  discoverExpertRuntimeEnvironment,
   writeWorkspaceManifest, workspaceRootHash, WORKSPACE_MANIFEST,
 };

@@ -1,10 +1,14 @@
 'use strict';
 
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { isIP } = require('node:net');
 const { createHash, randomUUID } = require('node:crypto');
 const { normalizeTargetProfile } = require('./desktopConfig.cjs');
+const { MAX_JUMP_HOSTS, jumpSpecifications, createManagedRouteConfiguration,
+  routeDigest, annotateStage, diagnosticStage } = require('./sshRouting.cjs');
 
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
 function systemExecutable(name) {
@@ -66,9 +70,13 @@ function parseSshConfiguration(text) {
     if (match && !Object.hasOwn(settings, match[1].toLowerCase())) settings[match[1].toLowerCase()] = match[2];
   }
   settings.sourceDigest = createHash('sha256').update(String(text)).digest('hex');
+  const host = settings.hostname || '';
+  const validAddress = !/[:[\]]/.test(host) || isIP(host) === 6
+    || (host.startsWith('[') && host.endsWith(']') && isIP(host.slice(1, -1)) === 6);
   if (!/^[A-Za-z0-9_.:[\]-]+$/.test(settings.hostname || '') || settings.hostname.startsWith('-')
+      || !validAddress
       || !Number.isInteger(Number(settings.port)) || Number(settings.port) < 1 || Number(settings.port) > 65535
-      || !settings.user || /[\r\n\0]/.test(settings.user)) {
+      || !settings.user || /\p{Cc}/u.test(settings.user)) {
     throw failure('SSH_CONFIGURATION_INVALID', 'OpenSSH did not resolve a valid host, port, and username. Review your SSH configuration.');
   }
   if (settings.hostkeyalias && !/^[A-Za-z0-9_.:[\]-]+$/.test(settings.hostkeyalias)) {
@@ -102,11 +110,11 @@ function classifySshFailure(result, { hasExplicitIdentity = false } = {}) {
     return failure('SSH_HOST_CHANGED', 'The server host key has changed. Verify the change with its administrator before editing the trusted-host file and retrying.');
   }
   if (/No .* host key is known|No host key is known/i.test(text)) return failure('SSH_HOST_UNKNOWN', 'The SSH host identity needs verification.');
+  if (/Bad owner or permissions on|Bad configuration option|terminating, .* bad configuration options/i.test(text)) {
+    return failure('SSH_CONFIGURATION_INVALID', 'OpenSSH rejected a native configuration file. Review its options, ownership, and permissions, then retry.');
+  }
   if (/bad permissions|UNPROTECTED PRIVATE KEY FILE|Load key .*|identity file .* not accessible/i.test(text)) {
     return failure('SSH_IDENTITY_UNAVAILABLE', 'OpenSSH could not use the selected identity. Check its permissions or unlock it in your native SSH agent.');
-  }
-  if (/could not resolve hostname|connection refused|no route to host|network is unreachable|connection timed out/i.test(text)) {
-    return failure('SSH_UNREACHABLE', 'The SSH host could not be reached. Check its address, port, and network connection.');
   }
   if (/Host key verification failed/i.test(text)) return failure('SSH_HOST_REJECTED', 'OpenSSH rejected the host identity. Review the trusted-host records and SSH configuration.');
   if (/Permission denied|Too many authentication failures|no supported authentication methods/i.test(text)) {
@@ -116,6 +124,9 @@ function classifySshFailure(result, { hasExplicitIdentity = false } = {}) {
       return failure('SSH_AGENT_UNAVAILABLE', 'Your native SSH agent is unavailable. Start or unlock it through OpenSSH, or choose an identity file, and check the configured identity and username.');
     }
     return failure('SSH_AUTHENTICATION_FAILED', 'The server rejected SSH authentication. Load the correct identity into your native SSH agent or choose its identity file, and check your username.');
+  }
+  if (/could not resolve hostname|connection refused|no route to host|network is unreachable|connection timed out|connection reset by|kex_exchange_identification: .*closed|stdio forwarding failed|open failed: connect failed:/i.test(text)) {
+    return failure('SSH_UNREACHABLE', 'The SSH host could not be reached. Check its address, port, and network connection.');
   }
   return failure('SSH_VERIFICATION_FAILED', 'SSH access could not be verified. The server must allow a noninteractive authentication check; review its SSH policy and retry.');
 }
@@ -157,8 +168,11 @@ async function addTrustedHost(filename, host, key, { signal } = {}) {
   } finally { await fs.rm(temporary, { force: true }); await lock.close(); await fs.rm(lockname, { force: true }); }
 }
 
-function createSshConnectionManager({ knownHostsFile, run, now = Date.now } = {}) {
+function createSshConnectionManager({ knownHostsFile, run, now = Date.now, nativeConfigFile } = {}) {
   if (!path.isAbsolute(knownHostsFile || '') || /["\r\n\0]/.test(knownHostsFile)) throw new Error('A private native trusted-host path is required.');
+  // This native-only constructor option also permits disposable acceptance
+  // fixtures. Neither profiles nor renderer IPC can select a configuration file.
+  if (nativeConfigFile && (!path.isAbsolute(nativeConfigFile) || /["\r\n\0]/.test(nativeConfigFile))) throw new Error('A valid native SSH configuration path is required.');
   const native = run ? null : createNativeSshRunner();
   const execute = run || native.run;
   const challenges = new Map(), operations = new Map(), statuses = new Map();
@@ -167,30 +181,47 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now } = {}
       try { if (!(await fs.stat(profile.ssh.identityFile)).isFile()) throw new Error('not a file'); }
       catch { throw failure('SSH_IDENTITY_UNAVAILABLE', 'The selected identity file is unavailable. Choose an existing private-key file through the native picker.'); }
     }
-    const result = await execute('ssh', ['-G', ...sshProfileArgs(profile), profile.ssh.host.replace(/^\[|\]$/g, '')], { signal });
+    const result = await execute('ssh', [...(nativeConfigFile ? ['-F', nativeConfigFile] : []), '-G', ...sshProfileArgs(profile), profile.ssh.host.replace(/^\[|\]$/g, '')], { signal });
     if (result.code !== 0) throw failure('SSH_CONFIGURATION_INVALID', 'OpenSSH could not read this connection’s configuration. Review your system SSH settings.');
     return parseSshConfiguration(result.stdout);
   }
-  async function authenticate(profile, config, signal, appTrust = false) {
-    const result = await execute('ssh', ['-T', '-v', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
+  function configArgs(config) {
+    const filename = config.managedConfigFile || nativeConfigFile;
+    return filename ? ['-F', filename] : [];
+  }
+  async function authenticate(profile, config, signal, appTrust = false, recordStatus = true) {
+    const result = await execute('ssh', [...configArgs(config), '-T', '-v', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes',
       '-oUpdateHostKeys=no', '-oControlMaster=no', '-oControlPath=none', '-oClearAllForwardings=yes',
       '-oForwardAgent=no', '-oForwardX11=no', '-oTunnel=no', '-oPermitLocalCommand=no',
       '-oRequestTTY=no', '-oRemoteCommand=none', '-oConnectTimeout=8',
       '-oConnectionAttempts=1', ...(appTrust ? [`-oUserKnownHostsFile="${knownHostsFile.replace(/\\/g, '/')}"`] : []), ...sshProfileArgs(profile),
       profile.ssh.host.replace(/^\[|\]$/g, ''), 'true'], { signal });
     if (result.code !== 0) {
-      const error = classifySshFailure(result, { hasExplicitIdentity: Boolean(profile.ssh.identityFile) });
-      if (profile.ssh.identityFile && ['SSH_AUTHENTICATION_FAILED', 'SSH_AGENT_EMPTY', 'SSH_IDENTITY_UNAVAILABLE'].includes(error.code)) {
-        const key = await execute('ssh-keygen', ['-y', '-P', '', '-f', profile.ssh.identityFile], { signal });
+      const failedStage = config.routeNodes && diagnosticStage(result.stderr, config.routeNodes);
+      const failedProfile = failedStage?.node.profile || profile;
+      const failedConfig = failedStage?.node.configuration || config;
+      const error = classifySshFailure(result, { hasExplicitIdentity: Boolean(failedProfile.ssh.identityFile) || failedConfig.identitiesonly === 'yes' });
+      // A proxy may fail after its initial check. Diagnose credentials only
+      // for the host named by that native failure, never an unrelated target.
+      if (failedProfile.ssh.identityFile && ['SSH_AUTHENTICATION_FAILED', 'SSH_AGENT_EMPTY', 'SSH_IDENTITY_UNAVAILABLE'].includes(error.code)) {
+        const key = await execute('ssh-keygen', ['-y', '-P', '', '-f', failedProfile.ssh.identityFile], { signal });
         if (key.code !== 0 && /incorrect passphrase|encrypted|passphrase/i.test(key.stderr || '')) {
-          throw failure('SSH_IDENTITY_LOCKED', 'The selected identity is encrypted. Use Unlock with OpenSSH to load it into your native agent, then retry.');
+          const locked = failure('SSH_IDENTITY_LOCKED', 'The selected identity is encrypted. Use Unlock with OpenSSH to load it into your native agent, then retry.');
+          throw failedStage ? annotateStage(locked, failedProfile, failedStage.index) : locked;
         }
       }
-      throw error;
+      if (failedStage?.index != null && error.code === 'SSH_HOST_UNKNOWN') {
+        throw annotateStage(failure('SSH_PROXY_HOST_UNKNOWN', 'Its host identity needs verification through native OpenSSH. Independently verify this jump host and save its key in your native known-host file, then retry.'), failedStage.node.profile, failedStage.index);
+      }
+      throw failedStage ? annotateStage(error, failedStage.node.profile, failedStage.index) : error;
     }
     const status = { state: 'authenticated', profileId: profile.id, host: config.hostname,
       port: Number(config.port), username: config.user, verifiedAt: new Date(now()).toISOString(), applicationConnected: false };
-    statuses.set(profile.id, { profileDigest: createHash('sha256').update(JSON.stringify(profile)).digest('hex'), status }); return status;
+    if (config.route?.length) status.stages = [...config.route, { profile, configuration: config }].map((node, index) => ({
+      kind: index === config.route.length ? 'destination' : 'jump', alias: node.profile.ssh.host,
+      host: node.configuration.hostname, port: Number(node.configuration.port), username: node.configuration.user,
+      state: 'authenticated' }));
+    if (recordStatus) statuses.set(profile.id, { profileDigest: createHash('sha256').update(JSON.stringify(profile)).digest('hex'), status }); return status;
   }
   async function authenticateWithTrust(profile, config, signal) {
     // Preserve native known-host files and their quoting/configuration. Only an
@@ -200,9 +231,11 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now } = {}
     return authenticate(profile, config, signal, true);
   }
   async function discoverHostKeys(profile, config, signal) {
-    const scan = await execute('ssh-keyscan', ['-T', '5', '-p', config.port, '-t', 'ed25519,ecdsa,rsa', config.hostname.replace(/^\[|\]$/g, '')], { signal });
-    const keys = scannedHostKeys(scan.stdout);
-    if (keys.length || !/choose_kex: unsupported KEX method/i.test(scan.stderr || '')) return keys;
+    if (!config.route?.length) {
+      const scan = await execute('ssh-keyscan', ['-T', '5', '-p', config.port, '-t', 'ed25519,ecdsa,rsa', config.hostname.replace(/^\[|\]$/g, '')], { signal });
+      const keys = scannedHostKeys(scan.stdout);
+      if (keys.length || !/choose_kex: unsupported KEX method/i.test(scan.stderr || '')) return keys;
+    }
     // Some Windows OpenSSH clients advertise a keyscan KEX they cannot use.
     // Discover through ssh.exe without offering any authentication, executing
     // a command, or treating the quarantined public key as trusted.
@@ -210,7 +243,7 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now } = {}
     await fs.mkdir(path.dirname(quarantine), { recursive: true, mode: 0o700 });
     try {
       try {
-        await execute('ssh', ['-N', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=accept-new',
+        await execute('ssh', [...configArgs(config), '-N', '-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=accept-new',
           `-oUserKnownHostsFile="${quarantine.replace(/\\/g, '/')}"`, '-oGlobalKnownHostsFile=none',
           '-oKnownHostsCommand=none', '-oHashKnownHosts=no', '-oUpdateHostKeys=no',
           '-oIdentityAgent=none', '-oIdentityFile=none',
@@ -227,6 +260,74 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now } = {}
       return stat?.isFile() && stat.size <= 65536 ? scannedHostKeys(await fs.readFile(quarantine, 'utf8')) : [];
     } finally { await fs.rm(quarantine, { force: true }); }
   }
+  async function resolveRoute(profile, config, signal) {
+    const route = [];
+    async function appendJumps(ownerConfig, ancestors) {
+      for (const [index, spec] of jumpSpecifications(ownerConfig.proxyjump).entries()) {
+        const jumpProfile = normalizeTargetProfile({ id: 'native-jump', name: 'Native SSH jump', kind: 'ssh',
+          ssh: { ...spec, remoteHost: '127.0.0.1', remotePort: 3000 } });
+        if (ancestors.includes(jumpProfile.ssh.host) || route.some(node => node.profile.ssh.host === jumpProfile.ssh.host)) {
+          throw failure('SSH_ROUTE_INVALID', 'The native ProxyJump route repeats an alias or contains a cycle. Give each jump host a distinct SSH alias.');
+        }
+        if (ancestors.length > MAX_JUMP_HOSTS || route.length >= MAX_JUMP_HOSTS) {
+          throw failure('SSH_ROUTE_LIMIT', 'Managed SSH supports up to four jump hosts. Simplify the native ProxyJump route.');
+        }
+        let jumpConfig;
+        try { jumpConfig = await configuration(jumpProfile, signal); }
+        catch (error) { throw annotateStage(error, jumpProfile, route.length); }
+        // OpenSSH's explicit comma-separated route overrides later aliases'
+        // own proxy settings. The first alias may itself require a jump route.
+        if (index === 0) await appendJumps(jumpConfig, [...ancestors, jumpProfile.ssh.host]);
+        if (!route.length && jumpConfig.proxycommand && jumpConfig.proxycommand !== 'none' && !jumpSpecifications(jumpConfig.proxyjump).length) {
+          throw annotateStage(failure('SSH_ROUTE_UNSUPPORTED', 'This jump uses a native ProxyCommand whose additional hosts cannot be verified separately. Configure a native ProxyJump route, then retry.'), jumpProfile, 0);
+        }
+        if (route.length >= MAX_JUMP_HOSTS) throw failure('SSH_ROUTE_LIMIT', 'Managed SSH supports up to four jump hosts. Simplify the native ProxyJump route.');
+        route.push({ profile: jumpProfile, configuration: jumpConfig });
+      }
+    }
+    await appendJumps(config, [profile.ssh.host]);
+    config.route = route;
+    config.routeDigest = routeDigest(route);
+    if (route.length) {
+      config.managedConfigFile = await createManagedRouteConfiguration({ directory: path.dirname(knownHostsFile),
+        profile, configuration: config, route, executable: systemExecutable('ssh'), nativeConfigFile });
+      config.routeNodes = [...route, { profile, configuration: config }];
+      for (const node of route) {
+        node.configuration.managedConfigFile = config.managedConfigFile;
+        node.configuration.routeNodes = config.routeNodes;
+      }
+    }
+    return config;
+  }
+  async function verifyJumpHosts(config, signal) {
+    for (const [index, node] of (config.route || []).entries()) {
+      try { await authenticate(node.profile, node.configuration, signal, false, false); }
+      catch (error) {
+        const reason = error.code === 'SSH_HOST_UNKNOWN'
+          ? failure('SSH_PROXY_HOST_UNKNOWN', 'Its host identity needs verification through native OpenSSH. Independently verify this jump host and save its key in your native known-host file, then retry.') : error;
+        throw annotateStage(reason, node.profile, index);
+      }
+    }
+  }
+  async function withRoute(profile, signal, callback) {
+    const config = await resolveRoute(profile, await configuration(profile, signal), signal);
+    // Settings-window closure can exit Electron before asynchronous cleanup
+    // resumes. Remove this operation's owned, nonsecret policy immediately
+    // on cancellation; retry after the native process exits if it was in use.
+    const removeOnCancel = () => {
+      if (config.managedConfigFile) {
+        try { fsSync.rmSync(config.managedConfigFile, { force: true }); } catch { /* The awaited cleanup retries below. */ }
+      }
+    };
+    signal.addEventListener('abort', removeOnCancel, { once: true });
+    try {
+      if (signal.aborted) { removeOnCancel(); throw failure('SSH_CANCELLED', 'SSH verification was canceled.'); }
+      return await callback(config);
+    } finally {
+      signal.removeEventListener('abort', removeOnCancel);
+      if (config.managedConfigFile) await fs.rm(config.managedConfigFile, { force: true });
+    }
+  }
   async function operation(scope, callback) {
     if (operations.has(scope)) throw failure('SSH_BUSY', 'An SSH check is already in progress. Cancel it or wait, then retry.');
     const controller = new AbortController(); operations.set(scope, controller);
@@ -238,22 +339,23 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now } = {}
       if (profile.kind !== 'ssh') throw failure('SSH_PROFILE_REQUIRED', 'Choose an SSH target.');
       statuses.delete(profile.id);
       for (const [id, challenge] of challenges) if (challenge.scope === scope || challenge.expiresAt < now()) challenges.delete(id);
-      return operation(scope, async signal => {
-        const config = await configuration(profile, signal);
+      return operation(scope, signal => withRoute(profile, signal, async config => {
+        await verifyJumpHosts(config, signal);
         try { return await authenticateWithTrust(profile, config, signal); }
         catch (error) {
           statuses.delete(profile.id);
-          if (error.code !== 'SSH_HOST_UNKNOWN') throw error;
-          if ((config.proxyjump && config.proxyjump !== 'none') || (config.proxycommand && config.proxycommand !== 'none')) {
+          if (error.code !== 'SSH_HOST_UNKNOWN') throw config.route.length ? annotateStage(error, profile, null) : error;
+          if (!config.route.length && config.proxycommand && config.proxycommand !== 'none') {
             throw failure('SSH_PROXY_HOST_UNKNOWN', 'This connection uses your SSH proxy configuration. Verify its hosts through native OpenSSH first, then retry.');
           }
           const keys = await discoverHostKeys(profile, config, signal);
           if (!keys.length) throw failure('SSH_HOST_DISCOVERY_FAILED', 'The SSH server did not provide a supported host key. Check its address and port.');
           const id = randomUUID(); challenges.set(id, { profile, config, keys, scope, expiresAt: now() + 120000 });
           return { state: 'verify-host', profileId: profile.id, challengeId: id, host: config.hostname, port: Number(config.port),
-            username: config.user, fingerprints: keys.map(({ algorithm, fingerprint }) => ({ algorithm, fingerprint })) };
+            username: config.user, ...(config.route.length ? { route: [...config.route.map(node => node.profile.ssh.host), profile.ssh.host] } : {}),
+            fingerprints: keys.map(({ algorithm, fingerprint }) => ({ algorithm, fingerprint })) };
         }
-      });
+      }));
     },
     async confirm(challengeId, fingerprint, scope) {
       const challenge = challenges.get(challengeId);
@@ -261,15 +363,16 @@ function createSshConnectionManager({ knownHostsFile, run, now = Date.now } = {}
       const key = challenge.keys.find(candidate => candidate.fingerprint === fingerprint);
       if (!key) throw failure('SSH_FINGERPRINT_REQUIRED', 'Choose the fingerprint you verified with the server administrator.');
       challenges.delete(challengeId);
-      return operation(scope, async signal => {
-        const config = await configuration(challenge.profile, signal);
+      return operation(scope, signal => withRoute(challenge.profile, signal, async config => {
         if (config.sourceDigest !== challenge.config.sourceDigest || hostLookup(config) !== hostLookup(challenge.config) || config.hostname !== challenge.config.hostname
-            || config.port !== challenge.config.port || config.user !== challenge.config.user) {
+            || config.port !== challenge.config.port || config.user !== challenge.config.user || config.routeDigest !== challenge.config.routeDigest) {
           throw failure('SSH_CONFIGURATION_CHANGED', 'Your SSH configuration changed during host verification. Check SSH access again.');
         }
+        await verifyJumpHosts(config, signal);
         await addTrustedHost(knownHostsFile, hostLookup(config), key, { signal });
-        return authenticateWithTrust(challenge.profile, config, signal);
-      });
+        try { return await authenticateWithTrust(challenge.profile, config, signal); }
+        catch (error) { throw config.route.length ? annotateStage(error, challenge.profile, null) : error; }
+      }));
     },
     status(value) {
       const profile = typeof value === 'string' ? null : normalizeTargetProfile(value);
