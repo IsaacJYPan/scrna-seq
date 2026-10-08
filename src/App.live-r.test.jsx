@@ -6,6 +6,7 @@ import {
   pipelineProbeAction,
   pipelineProbeRetryDelay,
   reconcileRestoredSession,
+  serverUnsavedLiveChanges,
 } from './liveRState';
 
 describe('hasAttachedLiveRObject', () => {
@@ -82,5 +83,27 @@ describe('consumeSavedObjectSelection', () => {
       preserve: false,
       nextExpectedObjectId: null,
     });
+  });
+});
+
+describe('serverUnsavedLiveChanges', () => {
+  it('restores dirty and clean status from the current server session', () => {
+    expect(serverUnsavedLiveChanges({ exists: true, has_unsaved_changes: true })).toBe(true);
+    expect(serverUnsavedLiveChanges({ exists: true, has_unsaved_changes: false })).toBe(false);
+    expect(serverUnsavedLiveChanges({ live_revision: 8, saved_revision: 0 })).toBe(true);
+    expect(serverUnsavedLiveChanges({ live_revision: 0, saved_revision: 0 })).toBe(false);
+    expect(serverUnsavedLiveChanges({ live_revision: 1, saved_revision: null })).toBe(true);
+  });
+
+  it('clears dirty status when the server explicitly reports session loss', () => {
+    expect(serverUnsavedLiveChanges({ exists: false, has_unsaved_changes: true })).toBe(false);
+  });
+
+  it('keeps missing or malformed revision data unknown', () => {
+    expect(serverUnsavedLiveChanges({ exists: true })).toBeNull();
+    expect(serverUnsavedLiveChanges({ live_revision: '1', saved_revision: 0 })).toBeNull();
+    expect(serverUnsavedLiveChanges({ live_revision: -1, saved_revision: 0 })).toBeNull();
+    expect(serverUnsavedLiveChanges({ live_revision: 1, saved_revision: [] })).toBeNull();
+    expect(serverUnsavedLiveChanges()).toBeNull();
   });
 });

@@ -186,6 +186,16 @@ async function main() {
     });
     console.log('[demo] PASS real browser guest checkpoint, UMAP, and exploratory workflow');
     console.log(JSON.stringify(browserAcceptance, null, 2));
+    const { runAnalysisIntegrityAcceptance } = require('./verify-analysis-integrity-ui');
+    const integrityAcceptance = await runAnalysisIntegrityAcceptance({
+      origin: 'http://127.0.0.1:' + webPort,
+      restartInteractiveRuntime: () => {
+        compose(['restart', 'r']);
+        compose(['up', '-d', '--wait', '--wait-timeout', '240', 'r']);
+      },
+    });
+    console.log('[demo] PASS saved/live recovery and biological sample mapping');
+    console.log(JSON.stringify(integrityAcceptance, null, 2));
     compose(['stop', 'worker', 'worker-compute-1', 'worker-compute-2']);
     const beforeRestart = inner('snapshot-persistence');
     compose(['restart', 'postgres', 'r', 'r-compute-1', 'r-compute-2', 'web']);

@@ -52,6 +52,33 @@ global_obj <- NULL
 # Holds the unfiltered starting point for the current object (for non-destructive QC re-runs)
 raw_obj <- NULL
 
+# These revisions belong to the private live session, never the scientific object.
+# A trusted checkpoint load establishes a clean baseline; legacy imports have no baseline.
+live_revision <- 0
+live_saved_revision <- NULL
+
+live_session_revision_state <- function() {
+  list(
+    live_revision = live_revision,
+    saved_revision = live_saved_revision,
+    has_unsaved_changes = !is.null(global_obj) &&
+      (is.null(live_saved_revision) || live_revision != live_saved_revision)
+  )
+}
+
+mark_live_session_changed <- function() {
+  live_revision <<- live_revision + 1
+  invisible(NULL)
+}
+
+restore_active_session <- function(session = NULL) {
+  global_obj <<- session$global
+  raw_obj <<- session$raw
+  live_revision <<- if (is.null(session$live_revision)) 0 else session$live_revision
+  live_saved_revision <<- session$saved_revision
+  invisible(NULL)
+}
+
 # ── Helper: generate a provenance envelope ────────────────────────
 make_provenance <- function(result, script_text, operation = "unknown",
                             packages_used = c("Seurat"), parameters = list()) {
@@ -66,7 +93,8 @@ make_provenance <- function(result, script_text, operation = "unknown",
       parameters = parameters,
       operation = operation
     ),
-    result = result
+    result = result,
+    live_state = live_session_revision_state()
   )
 }
 
@@ -572,6 +600,8 @@ store_active_session <- function(sid, global_value, raw_value) {
   replacement <- list(
     global = global_value,
     raw = raw_value,
+    live_revision = live_revision,
+    saved_revision = live_saved_revision,
     owner = owner,
     size_bytes = size_bytes,
     last_access = next_active_session_access()
@@ -626,8 +656,7 @@ release_job_scoped_active_session <- function(req, sid) {
   if (is.null(sid)) return(invisible(FALSE))
   # The postroute hook must not re-save the just-released globals.
   req$traceomics_session_persist <- FALSE
-  global_obj <<- NULL
-  raw_obj <<- NULL
+  restore_active_session()
   if (exists(sid, envir = active_sessions, inherits = FALSE)) {
     rm(list = sid, envir = active_sessions)
   }
@@ -700,20 +729,13 @@ function(req, res) {
   }
   # Health/readiness calls omit X-Object-ID and never consume live-state cache.
   if (is.null(sid)) {
-    global_obj <<- NULL
-    raw_obj <<- NULL
+    restore_active_session()
     req$traceomics_session_loaded <- TRUE
     return(plumber::forward())
   }
 
   sess <- load_active_session(sid)
-  if (!is.null(sess)) {
-    global_obj <<- sess$global
-    raw_obj <<- sess$raw
-  } else {
-    global_obj <<- NULL
-    raw_obj <<- NULL
-  }
+  restore_active_session(sess)
   req$traceomics_session_loaded <- TRUE
   req$traceomics_session_persist <- TRUE
   plumber::forward()
@@ -1179,6 +1201,7 @@ function(res) {
   tryCatch({
     # Compute percent.mt if not already present
     if (!"percent.mt" %in% colnames(global_obj@meta.data)) {
+      mark_live_session_changed()
       global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^[Mm][Tt]-")
     }
     
@@ -1260,8 +1283,11 @@ function(res, min_cells = 3, min_features = 200) {
 
     # Commit the new object only after all response/provenance work above has
     # succeeded. Each request remains scoped to its server-derived private key.
+    mark_live_session_changed()
     global_obj <<- loaded_obj
+    mark_live_session_changed()
     raw_obj <<- loaded_obj
+    response$live_state <- live_session_revision_state()
     response
   }, error = function(e) { res$status <- 500; list(error = paste("R Error:", e$message))
   })
@@ -1276,8 +1302,11 @@ function(res, path, min_cells = 3, min_features = 200) {
     path <- validate_path(path, "vault")
     if (!dir.exists(path)) stop(paste("Directory not found:", path))
     mat <- Read10X(data.dir = path)
+    mark_live_session_changed()
     global_obj <<- CreateSeuratObject(counts = mat, min.cells = min_cells, min.features = min_features)
+    mark_live_session_changed()
     raw_obj <<- global_obj
+    mark_live_session_changed()
     global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^[Mm][Tt]-")
     nnz <- length(mat@x)
     total_el <- as.numeric(nrow(mat)) * as.numeric(ncol(mat))
@@ -1362,7 +1391,9 @@ function(res, req) {
     # ── Post-merge QC ─────────────────────────────────────────────
     merged[["percent.mt"]] <- PercentageFeatureSet(merged, pattern = "^[Mm][Tt]-")
 
+    mark_live_session_changed()
     global_obj <<- merged
+    mark_live_session_changed()
     raw_obj    <<- merged
 
     # Compute approximate density on the merged counts
@@ -1445,9 +1476,12 @@ function(res, req) {
     if (!file.exists(path)) stop(paste("File not found:", path))
     obj <- readRDS(path)
     if (!inherits(obj, "Seurat")) stop("RDS file does not contain a Seurat object.")
+    mark_live_session_changed()
     global_obj <<- obj
+    mark_live_session_changed()
     raw_obj <<- obj
     if (!"percent.mt" %in% colnames(global_obj@meta.data)) {
+      mark_live_session_changed()
       global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^MT-")
     }
     nnz <- tryCatch(length(GetAssayData(global_obj, layer = "counts")@x), error = function(e) NA)
@@ -1486,11 +1520,14 @@ function(res, path) {
     if (ext == "h5ad") {
       h5seurat_path <- sub("\\.h5ad$", ".h5seurat", path)
       Convert(path, dest = "h5seurat", overwrite = TRUE)
+      mark_live_session_changed()
       global_obj <<- LoadH5Seurat(h5seurat_path)
     } else {
+      mark_live_session_changed()
       global_obj <<- LoadH5Seurat(path)
     }
     if (!"percent.mt" %in% colnames(global_obj@meta.data)) {
+      mark_live_session_changed()
       global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^MT-")
     }
     make_provenance(
@@ -2328,6 +2365,9 @@ function(req, res) {
     pca_dims <- if (has_pca) tryCatch(ncol(Embeddings(global_obj, "pca")), error = function(e) 15) else 15
     list(
       exists = TRUE,
+      live_revision = live_revision,
+      saved_revision = live_saved_revision,
+      has_unsaved_changes = live_session_revision_state()$has_unsaved_changes,
       has_qc = qc_marker || has_normalized || has_pca || has_clusters || has_umap,
       has_normalized = has_normalized,
       has_integrated = "harmony" %in% names(global_obj@reductions),
@@ -2459,11 +2499,15 @@ function(req, res) {
     sid <- validate_internal_state_key(req$HTTP_X_OBJECT_ID)
     prior_global <- global_obj
     prior_raw <- raw_obj
+    prior_revision <- live_revision
+    prior_saved_revision <- live_saved_revision
     prior_cache_keys <- ls(envir = active_sessions, all.names = TRUE)
     prior_cache <- lapply(prior_cache_keys, function(key) active_sessions[[key]])
     names(prior_cache) <- prior_cache_keys
     global_obj <<- loaded_obj
     raw_obj <<- raw_loaded
+    live_revision <<- 0
+    live_saved_revision <<- 0
 
     # Persist this exact private target before publishing the receipt. If receipt
     # publication reports a definite failure, restore the exact prior session so a
@@ -2476,6 +2520,8 @@ function(req, res) {
       error = function(receipt_error) {
         global_obj <<- prior_global
         raw_obj <<- prior_raw
+        live_revision <<- prior_revision
+        live_saved_revision <<- prior_saved_revision
         current_cache_keys <- ls(envir = active_sessions, all.names = TRUE)
         if (length(current_cache_keys) > 0) {
           rm(list = current_cache_keys, envir = active_sessions)
@@ -4822,12 +4868,14 @@ function(res, csv_path, key_column = "barcode", value_columns = "") {
 
     for (col in cols_to_add) {
       vals <- meta_df[cell_barcodes, col]
+      mark_live_session_changed()
       global_obj[[col]] <<- vals
     }
     list(
       message = paste0("Added ", length(cols_to_add), " column(s) to ", n_matched, "/", length(cell_barcodes), " cells."),
       added_columns = cols_to_add,
-      n_cells_matched = n_matched
+      n_cells_matched = n_matched,
+      live_state = live_session_revision_state()
     )
   }, error = function(e) { res$status <- 500; list(error = paste("Add metadata failed:", e$message)) })
 }
@@ -4878,11 +4926,13 @@ function(res, req) {
   tryCatch({
     source_vals <- as.character(global_obj@meta.data[[source_col]])
     mapped_vals <- unname(mapping[match(source_vals, names(mapping))])
+    mark_live_session_changed()
     global_obj[[new_col]] <<- mapped_vals
 
     list(
       message = paste0("Successfully added new metadata column: ", new_col),
-      mapped_cells = sum(!is.na(mapped_vals))
+      mapped_cells = sum(!is.na(mapped_vals)),
+      live_state = live_session_revision_state()
     )
   }, error = function(e) { res$status <- 500; list(error = paste("Add meta mapping failed:", e$message)) })
 }
@@ -4913,7 +4963,9 @@ function(res, req) {
     bundle <- list(global = sub_obj, raw = sub_obj)
     
     # Update active memory immediately to ensure R is in sync with the UI's new target
+    mark_live_session_changed()
     global_obj <<- sub_obj
+    mark_live_session_changed()
     raw_obj    <<- sub_obj
 
     if (!is.null(path) && path != "") {
@@ -5003,10 +5055,14 @@ function(res, req) {
     
     if (inherits(bundle, "Seurat")) {
       # Legacy support: if file is just a Seurat object, use it for both
+      mark_live_session_changed()
       global_obj <<- bundle
+      mark_live_session_changed()
       raw_obj <<- bundle
     } else if (is.list(bundle) && "global" %in% names(bundle)) {
+      mark_live_session_changed()
       global_obj <<- bundle$global
+      mark_live_session_changed()
       raw_obj <<- if ("raw" %in% names(bundle)) bundle$raw else bundle$global
     } else {
       stop("File format not recognized (expected Seurat object or Vault bundle)")
@@ -5124,6 +5180,7 @@ function(res, req) {
     }
     if (is.null(temp_obj@misc$traceomics_pipeline)) temp_obj@misc$traceomics_pipeline <- list()
     temp_obj@misc$traceomics_pipeline$qc <- TRUE
+    mark_live_session_changed()
     global_obj <<- temp_obj
   }, error = function(e) {
     stop("QC Filter Error: Likely no cells matched these thresholds. (", e$message, ")")
@@ -5235,6 +5292,7 @@ function(res, method = "LogNormalize", scale_factor = 10000, nfeatures = 2000,
       "# SCTransform normalization\n",
       "obj <- SCTransform(obj, vars.to.regress = ", regressors_script, ", verbose = FALSE)\n"
     )
+    mark_live_session_changed()
     global_obj <<- SCTransform(
       global_obj,
       vars.to.regress = if (length(vars_to_regress) > 0) vars_to_regress else NULL,
@@ -5256,9 +5314,12 @@ function(res, method = "LogNormalize", scale_factor = 10000, nfeatures = 2000,
         ""
       }
     )
+    mark_live_session_changed()
     global_obj <<- NormalizeData(global_obj, normalization.method = method, scale.factor = scale_factor)
+    mark_live_session_changed()
     global_obj <<- FindVariableFeatures(global_obj, selection.method = "vst", nfeatures = nfeatures)
     if (length(vars_to_regress) > 0) {
+      mark_live_session_changed()
       global_obj <<- ScaleData(
         global_obj,
         features = VariableFeatures(global_obj),
@@ -5381,14 +5442,17 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
       # Ensure PCA exists; compute it if missing
       if (!"pca" %in% names(global_obj@reductions)) {
         cat("[Integrate] PCA not found — running ScaleData + RunPCA before Harmony...\n")
+        mark_live_session_changed()
         global_obj <<- ScaleData(global_obj, features = pca_features, verbose = FALSE)
         set.seed(used_seed)
+        mark_live_session_changed()
         global_obj <<- RunPCA(global_obj, features = pca_features,
                                npcs = pca_components, seed.use = used_seed, verbose = FALSE)
       }
 
       cat("[Integrate] Running Harmony on batch column '", batch_col, "'...\n")
       set.seed(used_seed)
+      mark_live_session_changed()
       global_obj <<- RunHarmony(global_obj, group.by.vars = batch_col, reduction = "pca",
                                  reduction.save = "harmony", verbose = FALSE)
 
@@ -5440,11 +5504,14 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
       anchors  <- FindIntegrationAnchors(object.list = obj_list, anchor.features = features, verbose = FALSE)
 
       # Integrate data
+      mark_live_session_changed()
       global_obj <<- IntegrateData(anchorset = anchors, verbose = FALSE)
 
       # Switch to integrated assay and re-run scaling + PCA
+      mark_live_session_changed()
       DefaultAssay(global_obj) <<- "integrated"
       integrated_pca_features <- head(rownames(global_obj), integration_feature_count)
+      mark_live_session_changed()
       global_obj <<- ScaleData(
         global_obj, features = integrated_pca_features, verbose = FALSE
       )
@@ -5453,6 +5520,7 @@ function(res, method = "harmony", batch_col = "orig.ident", seed = "") {
         50L, length(integrated_pca_features) - 1L, ncol(global_obj) - 1L
       )
       if (integrated_pcs < 2L) stop("Insufficient integrated cells/features for PCA.")
+      mark_live_session_changed()
       global_obj <<- RunPCA(
         global_obj, features = integrated_pca_features, npcs = integrated_pcs,
         seed.use = used_seed, verbose = FALSE
@@ -5559,8 +5627,10 @@ function(res, npcs = 50, seed = "") {
   )
   
   tryCatch({
+    mark_live_session_changed()
     global_obj <<- ScaleData(global_obj, features = pca_features, verbose = FALSE)
     set.seed(used_seed)
+    mark_live_session_changed()
     global_obj <<- RunPCA(
       global_obj, features = pca_features, npcs = npcs,
       seed.use = used_seed, verbose = FALSE
@@ -5674,9 +5744,11 @@ function(res, dims = 15, resolution = 0.8, algorithm = 1, seed = "",
   )
 
   set.seed(used_seed)
+  mark_live_session_changed()
   global_obj <<- FindNeighbors(
     global_obj, reduction = use_reduction, dims = 1:dims, k.param = k_param
   )
+  mark_live_session_changed()
   global_obj <<- FindClusters(
     global_obj, algorithm = algorithm, resolution = resolution,
     n.start = n_start, random.seed = used_seed
@@ -5785,6 +5857,7 @@ function(res, dims = 15, n_components = 2, n_neighbors = 30, min_dist = 0.3, see
     )
 
     set.seed(used_seed)
+    mark_live_session_changed()
     global_obj <<- RunUMAP(global_obj, reduction = use_reduction, dims = 1:dims,
                            n.components = n_components,
                            n.neighbors = n_neighbors, min.dist = min_dist, seed.use = used_seed)
@@ -5865,8 +5938,11 @@ function(res, req) {
       "obj$cell_type <- Idents(obj)\n"
     )
     
+    mark_live_session_changed()
     Idents(global_obj) <<- global_obj$seurat_clusters
+    mark_live_session_changed()
     global_obj <<- RenameIdents(global_obj, new_ids)
+    mark_live_session_changed()
     global_obj$cell_type <<- Idents(global_obj)
     
     make_provenance(
@@ -6975,6 +7051,7 @@ function(res) {
   tryCatch({
     # Compute percent.mt if not already present
     if (!"percent.mt" %in% colnames(global_obj@meta.data)) {
+      mark_live_session_changed()
       global_obj[["percent.mt"]] <<- PercentageFeatureSet(global_obj, pattern = "^MT-")
     }
     
