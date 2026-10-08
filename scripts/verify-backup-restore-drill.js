@@ -75,9 +75,11 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
   const schema = await fs.promises.readFile(path.join(__dirname, '..', 'backend', 'pg', 'schema.sql'), 'utf8');
   const datasetKey = 'projects/proj_restore/datasets/ds_restore/matrix.h5';
   const artifactKey = 'projects/proj_restore/artifacts/job_restore/result.csv';
+  const managedVersionId = 'av_0123456789abcdef01234567';
+  const managedKey = `projects/proj_restore/artifacts/${managedVersionId}/content.csv`;
   const datasetBytes = Buffer.from('restore-drill-dataset\n');
   const artifactBytes = Buffer.from('gene,score\nMS4A1,1.5\n');
-  for (const [key, bytes] of [[datasetKey, datasetBytes], [artifactKey, artifactBytes]]) {
+  for (const [key, bytes] of [[datasetKey, datasetBytes], [artifactKey, artifactBytes], [managedKey, artifactBytes]]) {
     const file = path.join(storageRoot, ...key.split('/'));
     await fs.promises.mkdir(path.dirname(file), { recursive: true });
     await fs.promises.writeFile(file, bytes, { flag: 'wx' });
@@ -157,6 +159,17 @@ async function initializeSourceDatabase(databaseUrl, storageRoot) {
        VALUES ('art_restore', 'proj_restore', 'job_restore', 'ds_restore', $1,
                'deg_markers', 'result.csv', 'local_internal', $2, $3, $4, 'available')`,
       [userId, artifactKey, sha256(artifactBytes), artifactBytes.length]
+    );
+    await client.query(
+      `INSERT INTO managed_artifact_versions
+         (id, artifact_id, project_id, owner_user_id, name, version_number,
+          artifact_type, format_json, mime_type, checksum_sha256, size_bytes,
+          storage_key, source_job_id)
+       VALUES ($1, 'af_0123456789abcdef01234567', 'proj_restore', $2,
+               'Saved marker table', 1, 'table',
+               '{"id":"org.ietf.csv","version":"1"}', 'text/csv',
+               $3, $4, $5, 'job_restore')`,
+      [managedVersionId, userId, sha256(artifactBytes), artifactBytes.length, managedKey]
     );
     await client.query('COMMIT');
   } catch (error) {

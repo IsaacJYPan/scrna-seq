@@ -63,7 +63,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20260915;
+const SCHEMA_CONTRACT_VERSION = 20261008;
 
 let pool = null;
 
@@ -737,7 +737,7 @@ async function resetSchemaForTests() {
       analysis_branches,
       condition_contrast_samples, condition_contrasts,
       analysis_object_sample_bindings, biological_samples, study_conditions,
-      analysis_object_edges, job_artifacts, jobs, analysis_objects,
+      analysis_object_edges, managed_artifact_versions, job_artifacts, jobs, analysis_objects,
       expert_r_private_inputs, datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
       worker_pool_runtime_status, worker_runtime_status, platform_capabilities,
@@ -1477,6 +1477,9 @@ async function listExpiredDemoGuests(limit = 100) {
          SELECT artifact.storage_uri AS storage_key FROM job_artifacts artifact
           WHERE artifact.project_id = project.id AND artifact.storage_uri IS NOT NULL
          UNION
+         SELECT artifact.storage_key FROM managed_artifact_versions artifact
+          WHERE artifact.project_id = project.id
+         UNION
          SELECT dataset.internal_storage_key FROM datasets dataset
           WHERE dataset.project_id = project.id AND dataset.internal_storage_key IS NOT NULL
          UNION
@@ -1531,6 +1534,7 @@ async function deleteExpiredDemoGuest(userId) {
       await client.query('DELETE FROM biological_samples WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM study_conditions WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM analysis_object_edges WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM managed_artifact_versions WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM job_artifacts WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM jobs WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM analysis_objects WHERE project_id = ANY($1::text[])', [projectIds]);

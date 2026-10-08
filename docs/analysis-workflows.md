@@ -1,5 +1,26 @@
 # Analysis workflows
 
+## Inspect exact artifact versions
+
+Open **Runs & Results → Artifact versions** to inspect saved analyses, private
+input files, workflow outputs, or newly imported files. Select a version to see
+its format, size, owner, source run, checksum, and available previews. **Copy
+artifact reference** records its exact identity, project, version, and checksum.
+Viewing a preview verifies the saved bytes and does not create an analysis run.
+
+Private project owners, administrators, and analysts can import CSV/TSV sample
+sheets, tables, JSON, text, PNG/JPEG images, and opaque files. Choose **New version
+of selected artifact** to replace a managed file while retaining earlier
+contents. Imports remain private to their owner; project membership alone does
+not expose another researcher's private files. Public demos disable imports.
+
+Table previews contain at most 100 rows and 100 columns per page, with a 256 KiB
+response budget. Raster previews require at most 5 MiB and 12 million pixels.
+Other supported files expose metadata only. Imports accept up to 25 MiB for
+ordinary files and 200 MiB for RDS, with a per-owner project budget of 200 managed
+versions and 1 GiB. Existing large checkpoints remain in their current storage.
+RDS inspection never deserializes an object in the shared guided-analysis service.
+
 ## Ranked Pathway Enrichment
 
 The Pathway Enrichment tab now launches `enrichment.gsea.v1` for one selected
@@ -28,9 +49,11 @@ and real-R enrichment smoke pass on this worktree. Disposable deployment checks
 cover the real database, workers, browser, and native shell; any announced public
 demo must additionally pass the browser workflow through its final HTTPS host.
 
-Expert R is an opt-in private-deployment feature, disabled in the public demo.
-Both deployment enablement and an operator-granted `expert_r.execute` account
-capability are required. `expert.r.v1` runs a submitted script against one
+Custom R requires the isolated private runtime and remains disabled in the
+public demo. New private-runtime setup uses project-role access for owners,
+administrators, and analysts. Existing approved-account installations can retain
+their operator-granted `expert_r.execute` policy. Explicit operator revocation
+overrides either policy. `expert.r.v1` runs a submitted script against one
 caller-owned checkpoint in a fresh digest-pinned container with
 no network, no project-storage mount, a read-only root, non-root identity, dropped
 capabilities, and CPU/memory/PID/time bounds. The output mount is a 200 MiB tmpfs,
