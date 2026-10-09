@@ -148,8 +148,8 @@ describe('ProjectHistory', () => {
 
     expect(screen.getByText('Runs & Results')).toBeInTheDocument();
     expect(screen.getAllByText(/analysis history/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/reviewed exports/i)).toBeInTheDocument();
-    expect(screen.getByText(/private workspaces/i)).toBeInTheDocument();
+    expect(screen.getByText(/History access does not open another researcher’s private workspace/i)).toBeInTheDocument();
+    expect(screen.getByText(/Inspect or import artifact files/i)).toBeInTheDocument();
 
     expect(await screen.findByText('PBMC preprocessing')).toBeInTheDocument();
     expect(screen.getByText('Saved version')).toBeInTheDocument();

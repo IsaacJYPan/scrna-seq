@@ -25,6 +25,7 @@ const SNAPSHOTS_DIR = SNAPSHOT_PLATFORM === 'linux'
 const REPORT_DIR    = path.join(WORKSPACE, 'playwright', 'report');
 const UPDATE_MODE   = process.argv.includes('--update-snapshots');
 const NO_SNAPSHOT_MODE = process.argv.includes('--no-snapshots');
+const RESPONSIVE_ONLY = process.argv.includes('--responsive-only');
 const MODE_NAME = NO_SNAPSHOT_MODE
   ? 'BROWSER SMOKE (NO SNAPSHOTS)'
   : (UPDATE_MODE ? 'BASELINE UPDATE' : 'REGRESSION CHECK');
@@ -307,7 +308,12 @@ async function checkValidationRecovery(page) {
   };
   const setTheme = async theme => {
     const current = await page.evaluate(() => document.documentElement.getAttribute('data-theme') || 'light');
-    if (current !== theme) await page.getByRole('button', { name: `Switch to ${theme} mode`, exact: true }).click();
+    if (current !== theme) {
+      const toggle = page.getByRole('button', { name: `Switch to ${theme} mode`, exact: true });
+      if (!await toggle.isVisible()) await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click();
+      await toggle.click();
+      if (page.viewportSize().width < 640) await page.keyboard.press('Escape');
+    }
   };
   await page.route(routePattern, handler);
   try {
@@ -365,6 +371,8 @@ async function checkValidationRecovery(page) {
     await page.unroute(routePattern, handler);
     await page.setViewportSize(originalViewport);
     await setTheme(originalTheme);
+    const expand = page.getByRole('button', { name: 'Expand sidebar', exact: true });
+    if (originalViewport.width >= 640 && await expand.isVisible()) await expand.click();
   }
 }
 
@@ -448,6 +456,51 @@ function stopVite() {
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 
+async function checkResponsiveWorkbench(page) {
+  const originalViewport = page.viewportSize();
+  const navigate = async label => {
+    const expand = page.getByRole('button', { name: 'Expand sidebar', exact: true });
+    if (await expand.isVisible()) await expand.click();
+    for (const group of await page.locator('aside button[aria-expanded="false"]').all()) await group.click();
+    await page.locator('aside button').filter({ hasText: label }).first().click();
+    await sleep(600);
+    await page.getByText(/^Opening .+…$/).first().waitFor({ state: 'hidden' });
+  };
+  try {
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await navigate('Cluster');
+      await page.getByRole('heading', { name: 'Clustering', exact: true }).waitFor();
+      const bounds = await page.locator('#cluster-algo, #cluster-res, #cluster-dims').evaluateAll(elements => elements.map(el => {
+        const r = el.getBoundingClientRect(); return { left: r.left, right: r.right, width: r.width };
+      }));
+      assert(`Clustering ${width}px: all primary controls are contained and usable`, bounds.length === 3 && bounds.every(r => r.left >= 0 && r.right <= width && r.width >= 100));
+      await checkOverflow(page, `Clustering ${width}px`);
+      if (width < 640) {
+        const main = await page.locator('main').boundingBox();
+        assert(`Phone ${width}px: navigation does not consume content width`, main.x === 0 && Math.abs(main.width - width) < 1);
+        await page.locator('section[aria-label="Analysis status"] summary').click();
+        const panel = page.locator('section[aria-label="Analysis status"] details[open] > div');
+        await sleep(100);
+        const rect = await panel.boundingBox();
+        assert(`Status ${width}px: open details stay inside viewport gutters`, rect.x >= 15 && rect.x + rect.width <= width - 15);
+        await page.keyboard.press('Escape');
+        assert(`Status ${width}px: Escape closes details`, await panel.isHidden());
+      }
+      await navigate('Lineage');
+      await page.getByRole('button', { name: 'Fit graph to view' }).waitFor();
+      const canvas = await page.getByRole('region', { name: 'Recorded lineage graph' }).boundingBox();
+      assert(`Lineage ${width}px: graph retains a usable canvas`, canvas.width > 200 && canvas.height >= 360);
+      if (width < 640) assert(`Lineage ${width}px: minimap cannot cover nodes`, await page.locator('.react-flow__minimap').count() === 0);
+      await page.getByRole('button', { name: 'Fit graph to view' }).click();
+    }
+    await navigate('Validation');
+    await checkValidationRecovery(page);
+  } finally {
+    await page.setViewportSize(originalViewport);
+  }
+}
+
 async function main() {
   console.log('='.repeat(60));
   console.log('  TraceOmics Visual & UI/UX Test Suite');
@@ -515,7 +568,10 @@ async function main() {
   page.on('requestfailed', req => {
     const url = req.url();
     const err = req.failure()?.errorText || 'unknown';
-    if (!isIgnorableError(err)) {
+    // These read-only requests are deliberately cancelled by their owners on
+    // tab/context changes. Keep real failures and HTTP errors strict.
+    const cancelledRead = err === 'net::ERR_ABORTED' && /\/(reduction-results|execution-history|artifact-versions)([/?]|$)/.test(new URL(url).pathname);
+    if (!cancelledRead && !isIgnorableError(err)) {
       networkFailures.push(`${req.method()} ${url} → ${err}`);
       console.log(`[NETWORK FAIL] ${req.method()} ${url} → ${err}`);
     }
@@ -1317,6 +1373,15 @@ async function main() {
     await sleep(300);
   }
 
+  if (RESPONSIVE_ONLY) {
+    assert('Responsive checks have a loaded analysis', dataLoaded);
+    if (dataLoaded) await checkResponsiveWorkbench(page);
+    await browser.close();
+    stopVite();
+    console.log(`Responsive acceptance: ${PASS} passed, ${FAIL} failed`);
+    process.exit(FAIL ? 1 : 0);
+  }
+
   // ── Test 5: Per-Tab Rendering ──────────────────────────────────────────────
   const allTabs = [
     { id: 'pipeline-manager', label: 'Pipelines',   requiresData: false },
@@ -1428,14 +1493,16 @@ async function main() {
           assert('Study Design: multi-condition contrast is visible',
             await page.getByText('Treated vs control', { exact: true }).count() === 1);
           assert('Study Design: biological replication is represented',
-            await page.getByText('4 registered samples', { exact: true }).count() === 1);
+            await page.getByText(/4 registered samples\./).count() === 1);
         }
 
         if (tab.id === 'expert-r') {
           assert('Advanced analysis: approved Expert R workbench is visible',
-            await page.getByRole('heading', { name: 'Expert R Workbench', exact: true }).count() === 1);
+            await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).count() === 1);
+          await page.locator('summary').filter({ hasText: 'Private input files' }).click();
           assert('Advanced analysis: controlled private input is visible',
-            await page.getByText('sample-annotations.csv', { exact: true }).count() === 1);
+            await page.getByText('sample-annotations.csv', { exact: true }).first().isVisible());
+          await page.locator('summary').filter({ hasText: 'Private input files' }).click();
         }
 
         if (tab.id === 'explore') {

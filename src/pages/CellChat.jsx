@@ -14,6 +14,7 @@ import {
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 const CELLCHAT_JOB_TYPE = 'cellchat.infer.v1';
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
@@ -334,7 +335,7 @@ function StatusBadge({ children, tone = 'slate' }) {
     green: 'bg-success/10 text-success border-success/30',
     amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
     rose: 'bg-danger/10 text-danger border-danger/30',
-    slate: 'bg-slate-800 text-slate-300 border-slate-700',
+    slate: 'bg-background text-textMuted border-border',
   };
   return (
     <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${tones[tone] || tones.slate}`}>
@@ -389,7 +390,7 @@ function InteractionTable({ interactions }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[760px] text-left text-xs">
-        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-background text-[10px] font-bold uppercase tracking-wider text-textMuted">
           <tr>
             <th className="p-3">Source group</th>
             <th className="p-3">Target group</th>
@@ -423,7 +424,7 @@ function PathwayTable({ pathways }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[680px] text-left text-xs">
-        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-background text-[10px] font-bold uppercase tracking-wider text-textMuted">
           <tr>
             <th className="p-3">Signaling pathway</th>
             <th className="p-3">Source group</th>
@@ -739,7 +740,7 @@ export default function CellChat({
       <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
-          <h2 className="mb-2 text-xl font-bold text-white">No saved analysis selected</h2>
+          <h2 className="mb-2 text-xl font-bold text-text">No saved analysis selected</h2>
           <p className="text-sm text-textMuted">Select a saved, clustered analysis before running CellChat inference.</p>
         </div>
       </div>
@@ -747,21 +748,12 @@ export default function CellChat({
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-6 custom-scrollbar">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
-          <div>
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <h2 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white"><MessageSquare size={24} className="text-primary" /> CellChat communication candidates</h2>
-              <StatusBadge tone="slate">recorded run</StatusBadge>
-              <StatusBadge tone="amber">candidate predictions</StatusBadge>
-              <StatusBadge tone="blue">controlled export</StatusBadge>
-            </div>
-            <p className="max-w-3xl text-sm text-textMuted">
-              Uses CellChat&apos;s curated ligand–receptor resource to generate bounded, hypothesis-generating candidate signaling between selected cell groups.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-3">
+    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4">
+        <PageHeader title="CellChat communication candidates" icon={MessageSquare} description={<>
+          Uses CellChat&apos;s curated ligand–receptor resource to generate bounded, hypothesis-generating candidate signaling between selected cell groups.
+        </>} actions={<>
+
             <button onClick={launchJob} disabled={!canLaunch} className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50">
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
               Start CellChat Inference
@@ -772,25 +764,17 @@ export default function CellChat({
                 Refresh
               </button>
             )}
-          </div>
-        </header>
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || 'Selected project'}</div>
-          </div>
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
-            <div className="mt-1 truncate text-text" title={selectedAnalysisName}>{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
-          </div>
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Assay</div>
-            <div className="mt-1 text-sm text-text">RNA (fixed in v1)</div>
-          </div>
-        </div>
+        </>} />
 
-        {isDbBackedObject && ownsPrivateLiveObject && (
+        <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
+          <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Assay</dt><dd className="text-text">RNA (fixed in v1)</dd></div>
+        </dl>
+        {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
+
+        {isDbBackedObject && ownsPrivateLiveObject && unsavedLiveChanges && (
           <div className={`rounded-lg border p-4 text-sm ${unsavedLiveChanges ? 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200' : 'border-primary/20 bg-primary/5 text-textMuted'}`}>
             <p><span className="font-bold text-text">Saved checkpoint used by this run:</span> {selectedAnalysisName}</p>
             {unsavedLiveChanges && (
@@ -851,7 +835,7 @@ export default function CellChat({
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Group labels (required)</span>
-              <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+              <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose grouping</option>
                 {GROUP_BY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
@@ -862,21 +846,21 @@ export default function CellChat({
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Species (required)</span>
-              <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+              <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose species</option>
                 {SPECIES_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Database category (required)</span>
-              <select value={params.databaseCategory} onChange={event => setParam('databaseCategory', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+              <select value={params.databaseCategory} onChange={event => setParam('databaseCategory', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose database category</option>
                 {DATABASE_CATEGORY_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Analysis intent (required)</span>
-              <select value={params.analysisIntent} onChange={event => setParam('analysisIntent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+              <select value={params.analysisIntent} onChange={event => setParam('analysisIntent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Confirm analysis scope</option>
                 {ANALYSIS_INTENT_OPTIONS.map(([value, label]) => <option value={value} key={value} title={label}>{label}</option>)}
               </select>
@@ -888,31 +872,31 @@ export default function CellChat({
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Minimum cells per group</span>
-              <input type="number" min="5" max="200" value={params.minCellsPerGroup} onChange={event => setParam('minCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="5" max="200" value={params.minCellsPerGroup} onChange={event => setParam('minCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Maximum cells per group</span>
-              <input type="number" min="100" max="10000" value={params.maxCellsPerGroup} onChange={event => setParam('maxCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="100" max="10000" value={params.maxCellsPerGroup} onChange={event => setParam('maxCellsPerGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Maximum cells total</span>
-              <input type="number" min="1000" max="10000" value={params.maxTotalCells} onChange={event => setParam('maxTotalCells', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="1000" max="10000" value={params.maxTotalCells} onChange={event => setParam('maxTotalCells', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">p-value cutoff</span>
-              <input type="number" min="0.000001" max="0.1" step="0.01" value={params.pValueCutoff} onChange={event => setParam('pValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="0.000001" max="0.1" step="0.01" value={params.pValueCutoff} onChange={event => setParam('pValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Interactions shown</span>
-              <input type="number" min="5" max="100" value={params.topInteractions} onChange={event => setParam('topInteractions', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="5" max="100" value={params.topInteractions} onChange={event => setParam('topInteractions', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Pathways shown</span>
-              <input type="number" min="5" max="100" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="5" max="100" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
-              <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             </div>
           </details>

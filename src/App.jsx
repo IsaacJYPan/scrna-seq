@@ -973,6 +973,9 @@ export default function App() {
       // 429 "R service is busy" for concurrent ones — an expected, retryable
       // condition, not an app fault. Log those quietly so genuine failures stay
       // visible as console errors.
+      // A departed tab may cancel its read; do not turn that into analysis
+      // failure feedback. The read owner discards this aborted response.
+      if (options.signal?.aborted) return { error: 'Request cancelled.' };
       const msg = String(err?.message || '');
       if (/\bbusy\b|rate limit|too many/i.test(msg)) console.warn('[callApi] transient:', msg);
       else console.error(err);

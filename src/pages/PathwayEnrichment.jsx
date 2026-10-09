@@ -13,6 +13,7 @@ import {
 import { useTabParams } from '../hooks/useTabParams';
 import { hasAttachedLiveRObject } from '../liveRState';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 const ENRICHMENT_JOB_TYPE = 'enrichment.gsea.v1';
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
@@ -147,7 +148,7 @@ function StatusBadge({ children, tone = 'slate' }) {
     green: 'bg-success/10 text-success border-success/30',
     amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
     rose: 'bg-danger/10 text-danger border-danger/30',
-    slate: 'bg-slate-800 text-slate-300 border-slate-700',
+    slate: 'bg-background text-textMuted border-border',
   };
   return (
     <span className={`inline-flex items-center rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${tones[tone] || tones.slate}`}>
@@ -203,7 +204,7 @@ function PathwayTable({ pathways }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[780px] text-left text-xs">
-        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-background text-[10px] font-bold uppercase tracking-wider text-textMuted">
           <tr>
             <th className="p-3">Pathway</th>
             <th className="p-3">Direction in target</th>
@@ -530,7 +531,7 @@ export default function PathwayEnrichment({
       <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
-          <h2 className="mb-2 text-xl font-bold text-white">No saved analysis selected</h2>
+          <h2 className="mb-2 text-xl font-bold text-text">No saved analysis selected</h2>
           <p className="text-sm text-textMuted">Select a saved, clustered analysis before running pathway enrichment.</p>
         </div>
       </div>
@@ -538,20 +539,12 @@ export default function PathwayEnrichment({
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-6 custom-scrollbar">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
-          <div>
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <h2 className="text-2xl font-bold tracking-tight text-white">Pathway Enrichment</h2>
-              <StatusBadge tone="slate">recorded run</StatusBadge>
-              <StatusBadge tone="blue">controlled export</StatusBadge>
-            </div>
-            <p className="max-w-3xl text-sm text-textMuted">
-              Ranks genes from one cluster versus all remaining cells, then tests which Gene Ontology biological processes are concentrated near the top or bottom of that ranked list.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-3">
+    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4">
+        <PageHeader title="Pathway Enrichment" description={<>
+          Ranks genes from one cluster versus all remaining cells, then tests which Gene Ontology biological processes are concentrated near the top or bottom of that ranked list.
+        </>} actions={<>
+
             <button onClick={launchJob} disabled={!canLaunch} className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50">
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
               Start Pathway Enrichment
@@ -562,25 +555,17 @@ export default function PathwayEnrichment({
                 Refresh
               </button>
             )}
-          </div>
-        </header>
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || 'Selected project'}</div>
-          </div>
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
-            <div className="mt-1 truncate text-text" title={selectedAnalysisName}>{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
-          </div>
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Gene sets</div>
-            <div className="mt-1 text-sm text-text">GO Biological Process (fixed in v1)</div>
-          </div>
-        </div>
+        </>} />
 
-        {isDbBackedObject && ownsPrivateLiveObject && (
+        <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
+          <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Gene sets</dt><dd className="text-text">GO Biological Process (fixed in v1)</dd></div>
+        </dl>
+        {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
+
+        {isDbBackedObject && ownsPrivateLiveObject && unsavedLiveChanges && (
           <div className={`rounded-lg border p-4 text-sm ${unsavedLiveChanges ? 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200' : 'border-primary/20 bg-primary/5 text-textMuted'}`}>
             <p><span className="font-bold text-text">Saved checkpoint used by this run:</span> {selectedAnalysisName}</p>
             {unsavedLiveChanges && (
@@ -648,14 +633,14 @@ export default function PathwayEnrichment({
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Group labels</span>
-              <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+              <select value={params.groupBy} onChange={event => setParam('groupBy', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="seurat_clusters">Seurat clusters</option>
                 <option value="ident">Current identities</option>
               </select>
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Assay</span>
-              <select value={params.assay} onChange={event => setParam('assay', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+              <select value={params.assay} onChange={event => setParam('assay', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="RNA">RNA</option>
                 <option value="SCT">SCT</option>
               </select>
@@ -663,12 +648,12 @@ export default function PathwayEnrichment({
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Target cluster or group</span>
               {params.groupBy === 'seurat_clusters' ? (
-                <select value={params.targetGroup} onChange={event => setParam('targetGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" disabled={targetGroupsLoading || targetGroups.length === 0}>
+                <select value={params.targetGroup} onChange={event => setParam('targetGroup', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" disabled={targetGroupsLoading || targetGroups.length === 0}>
                   <option value="">{targetGroupsLoading ? 'Loading clusters…' : targetGroups.length ? 'Choose cluster' : 'No clusters available'}</option>
                   {targetGroups.map(group => <option value={group} key={group}>{group}</option>)}
                 </select>
               ) : (
-                <input value={params.targetGroup} onChange={event => setParam('targetGroup', event.target.value)} maxLength={80} placeholder="For example: 0 or CD8 T cells" className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+                <input value={params.targetGroup} onChange={event => setParam('targetGroup', event.target.value)} maxLength={80} placeholder="For example: 0 or CD8 T cells" className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
               )}
               {params.groupBy === 'seurat_clusters' && !targetGroupsLoading && targetGroups.length === 0 && (
                 <span className="mt-1.5 block text-xs text-amber-900 dark:text-amber-200">No clusters are available in the open saved checkpoint. Save a clustered analysis or choose Current identities.</span>
@@ -676,7 +661,7 @@ export default function PathwayEnrichment({
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Species (required)</span>
-              <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white">
+              <select value={params.species} onChange={event => setParam('species', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text">
                 <option value="">Choose species</option>
                 <option value="human">Human</option>
                 <option value="mouse">Mouse</option>
@@ -689,27 +674,27 @@ export default function PathwayEnrichment({
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Smallest gene set</span>
-              <input type="number" min="10" max="200" value={params.minGeneSetSize} onChange={event => setParam('minGeneSetSize', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="10" max="200" value={params.minGeneSetSize} onChange={event => setParam('minGeneSetSize', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Largest gene set</span>
-              <input type="number" min="50" max="2000" value={params.maxGeneSetSize} onChange={event => setParam('maxGeneSetSize', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="50" max="2000" value={params.maxGeneSetSize} onChange={event => setParam('maxGeneSetSize', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Adjusted p-value cutoff</span>
-              <input type="number" min="0.000001" max="1" step="0.01" value={params.adjustedPValueCutoff} onChange={event => setParam('adjustedPValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="0.000001" max="1" step="0.01" value={params.adjustedPValueCutoff} onChange={event => setParam('adjustedPValueCutoff', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Pathways shown</span>
-              <input type="number" min="5" max="25" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="5" max="25" value={params.topPathways} onChange={event => setParam('topPathways', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Maximum cells per group</span>
-              <input type="number" min="10" max="100000" value={params.maxCellsPerIdent} onChange={event => setParam('maxCellsPerIdent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="10" max="100000" value={params.maxCellsPerIdent} onChange={event => setParam('maxCellsPerIdent', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-textMuted">Random seed</span>
-              <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white" />
+              <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             </div>
           </details>

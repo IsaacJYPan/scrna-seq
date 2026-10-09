@@ -3,6 +3,7 @@ import { Code2, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import REnvironment from '../components/REnvironment';
 import RConsole from '../components/RConsole';
+import PageHeader from '../components/PageHeader';
 
 const STARTER = `# Your saved Seurat analysis is available as obj.
 # Selected private files are listed in input_manifest.
@@ -63,6 +64,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
   const [capability, setCapability] = useState(null);
   const [checkingRuntime, setCheckingRuntime] = useState(false);
   const capabilityRequest = useRef(0);
+  const consoleDetails = useRef(null);
   const policy = capability || deploymentPolicy;
   const profile = policy.expertRProfile;
 
@@ -153,7 +155,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
     return (
       <div className="h-full overflow-y-auto bg-background p-8 text-textMuted">
         <div className="mx-auto max-w-2xl rounded-xl border border-border bg-surface p-6">
-          <h2 className="text-xl font-semibold text-text">Advanced analysis</h2>
+          <PageHeader title="Advanced analysis" icon={Code2} />
           <p className="mt-3 text-sm">
             {ACCESS_MESSAGES[status] || (publicDemo
               ? 'Advanced analysis is intentionally unavailable in the public demo.'
@@ -181,35 +183,63 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
     );
   }
   return (
-    <div className="h-full overflow-y-auto p-6 bg-background text-text">
-      <div className="max-w-5xl mx-auto mb-8">
-        <RConsole projectId={projectId} userId={userId} workspaceId={currentWs?.id || 'default'}
-          objects={objects} preferredObjectId={preferredObjectId} deploymentPolicy={policy} />
-      </div>
+    <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
       <form className="max-w-5xl mx-auto space-y-4" onSubmit={submit}>
-      <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold flex gap-2 items-center"><Code2 size={20} />Expert R Workbench</h2><p className="text-sm text-slate-400 mt-1">Use R for custom exploratory analysis on a private saved analysis.</p></div><button className="btn btn-primary shrink-0" disabled={busy || checkingRuntime || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button></div>
-      {policy.expertRStatus?.state === 'ready' && <div className="flex flex-wrap items-center gap-3"><p role="status" className="text-sm text-textMuted">Isolated R runtime ready · {policy.expertRStatus.accessPolicy === 'project-roles' ? 'Project-role access' : 'Approved-account access'}</p><button type="button" className="btn btn-secondary text-xs" disabled={checkingRuntime} onClick={refreshCapability}>{checkingRuntime ? 'Checking R availability…' : 'Check R availability'}</button></div>}
-      <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm"><div className="flex gap-2 items-center font-medium"><ShieldCheck size={16} />Private analysis workspace</div><p className="text-slate-400 mt-1">Your saved analysis opens in a fresh, time-limited R workspace. It cannot reach the network or files outside this analysis, and uses the packages listed below.</p></div>
-      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm"><p className="font-medium">Your results</p><p className="text-slate-400 mt-1">Create tables and figures to inspect or export. They stay private unless you choose to share them through Analysis Branches.</p></div>
+      <PageHeader title="Advanced analysis" icon={Code2} description="Use R for custom exploratory analysis on a private saved analysis." actions={
+        <button type="button" className="btn btn-secondary" onClick={() => {
+          if (consoleDetails.current) { consoleDetails.current.open = true; consoleDetails.current.scrollIntoView({ block: 'start' }); }
+        }}>Interactive console</button>
+      } />
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
+        <p className="flex items-center gap-2"><ShieldCheck size={18} className="shrink-0 text-success" />Private, isolated runs · results stay private until shared.</p>
+        {policy.expertRStatus?.state === 'ready' && <p role="status" className="text-textMuted">Isolated R runtime ready · {policy.expertRStatus.accessPolicy === 'project-roles' ? 'Project-role access' : 'Approved-account access'}</p>}
+        <button type="button" className="btn btn-secondary text-sm" disabled={checkingRuntime || typeof window.electronAPI?.getExpertRCapabilities !== 'function'} onClick={refreshCapability}>{checkingRuntime ? 'Checking R availability…' : 'Check R availability'}</button>
+      </div>
       {error && <div role="alert" className="text-sm text-red-300">{error}</div>}
       {job && <div className="flex flex-wrap items-center gap-3 text-sm"><span role="status" aria-live="polite" className="text-success">Run submitted. Results will remain private until you choose to share them.</span><button type="button" className="btn btn-secondary text-xs" onClick={() => setActiveTab?.('history')}>View in Runs &amp; Results</button></div>}
-      <REnvironment reference={policy.expertREnvironment} projectId={projectId} />
       <label className="block text-sm">Saved analysis<select className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={objectId} onChange={(event) => setObjectId(event.target.value)} disabled={objects.length === 0}><option value="">Select a saved analysis</option>{objects.map((item) => <option value={item.id} key={item.id}>{item.displayName || item.name || 'Saved analysis'}</option>)}</select></label>
       {objects.length === 0 && <p className="text-sm text-slate-400">No saved analysis you own is available for R work. Open a saved version or create a branch first.</p>}
-      <section className="card p-4 space-y-3" aria-labelledby="expert-r-inputs-title">
+      <details className="card p-3">
+        <summary className="cursor-pointer font-medium">Private input files · {selectedInputIds.length}/5 selected</summary>
+        <div className="mt-4">
+      <section className="space-y-3" aria-labelledby="expert-r-inputs-title">
         <div><h3 id="expert-r-inputs-title" className="font-medium">Private input files</h3><p className="mt-1 text-sm text-slate-400">Import bounded CSV, TSV, TXT, JSON, or RDS files. They stay private to you and are mounted read-only only for selected runs. RDS files remain untrusted and open only inside the isolated Expert R workspace.</p></div>
         <div className="flex flex-wrap items-center gap-2">
-          <input aria-label="Choose private input" type="file" accept=".csv,.tsv,.txt,.json,.rds" onChange={(event) => setInputFile(event.target.files?.[0] || null)} />
+          <input className="min-w-0 max-w-full text-sm" aria-label="Choose private input" type="file" accept=".csv,.tsv,.txt,.json,.rds" onChange={(event) => setInputFile(event.target.files?.[0] || null)} />
           <button type="button" className="btn btn-secondary text-xs" disabled={!inputFile || inputBusy} onClick={uploadInput}>{inputBusy ? 'Importing…' : 'Import file'}</button>
         </div>
         {privateInputs.length > 0 ? <div className="grid gap-2 sm:grid-cols-2">{privateInputs.map((input) => {
           const selected = selectedInputIds.includes(input.id);
-          return <label key={input.id} className="flex items-start gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={selected} disabled={!selected && selectedInputIds.length >= 5} onChange={() => setSelectedInputIds((current) => selected ? current.filter((id) => id !== input.id) : [...current, input.id])} /><span><span className="block text-text">{input.originalFilename}</span><span className="text-xs text-slate-400">{Math.ceil(input.sizeBytes / 1024)} KiB</span></span></label>;
+          return <label key={input.id} className="flex items-start gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={selected} disabled={!selected && selectedInputIds.length >= 5} onChange={() => setSelectedInputIds((current) => selected ? current.filter((id) => id !== input.id) : [...current, input.id])} /><span><span className="block text-text break-all">{input.originalFilename}</span><span className="text-xs text-slate-400">{Math.ceil(input.sizeBytes / 1024)} KiB</span></span></label>;
         })}</div> : <p className="text-sm text-slate-400">No private input files imported yet.</p>}
         <p className="text-xs text-slate-400">Selected for this run: {selectedInputIds.length}/5</p>
       </section>
-      <label className="block text-sm">R script<textarea className="mt-1 min-h-[420px] w-full rounded-lg border border-border bg-surface p-3 font-mono text-xs leading-5 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={script} onChange={(event) => setScript(event.target.value)} spellCheck="false" /></label>
-      <details className="card p-3 text-sm"><summary className="cursor-pointer">Available packages ({profile.packages.length})</summary><p className="text-slate-400 mt-2">{profile.packages.join(', ')}</p></details>
-    </form></div>
+        </div>
+      </details>
+      <section className="card p-4 space-y-3" aria-labelledby="expert-r-script-title">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <label id="expert-r-script-title" htmlFor="expert-r-script" className="font-semibold">R script</label>
+          <button className="btn btn-primary" disabled={busy || checkingRuntime || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button>
+        </div>
+        <p className="text-sm text-textMuted">Runs use the selected saved analysis and {selectedInputIds.length}/5 private input files. Variables reset between runs.</p>
+        {selectedInputIds.length > 0 && <p className="text-sm text-textMuted break-all">Selected inputs: {privateInputs.filter((input) => selectedInputIds.includes(input.id)).map((input) => input.originalFilename).join(', ')}</p>}
+        <textarea id="expert-r-script" className="min-h-[320px] md:min-h-[420px] w-full rounded-lg border border-border bg-background p-3 font-mono text-sm leading-6 text-text shadow-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20" value={script} onChange={(event) => setScript(event.target.value)} spellCheck="false" />
+      </section>
+      <details className="card p-4 text-sm">
+        <summary className="cursor-pointer font-medium">Runtime, packages, and privacy</summary>
+        <div className="mt-4 space-y-4">
+          <p className="text-textMuted">Your saved analysis opens in a fresh, time-limited R workspace. It cannot reach the network or files outside this analysis, and uses the packages listed below. Create tables and figures to inspect or export. They stay private unless you choose to share them through Analysis Branches.</p>
+          <REnvironment reference={policy.expertREnvironment} projectId={projectId} />
+          <p className="text-textMuted">Available packages ({profile.packages.length}): {profile.packages.join(', ')}</p>
+        </div>
+      </details>
+    </form>
+      <details ref={consoleDetails} className="max-w-5xl mx-auto mt-4 card p-4">
+        <summary className="cursor-pointer font-medium">Interactive R console · reuse a private live session</summary>
+        <p className="mt-3 mb-4 text-sm text-textMuted">Use the console for commands that share variables across cells. Its live session is separate from the fresh workspaces created by Run R analysis.</p>
+        <RConsole projectId={projectId} userId={userId} workspaceId={currentWs?.id || 'default'}
+          objects={objects} preferredObjectId={preferredObjectId} deploymentPolicy={policy} />
+      </details>
+    </div>
   );
 }
