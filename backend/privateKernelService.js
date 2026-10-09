@@ -13,6 +13,7 @@ const c = require('./privateKernelContract');
 const { createPrivateKernelPublicationService } = require('./privateKernelPublications');
 const { createPrivateKernelControlService } = require('./privateKernelControls');
 const { effectivePrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
+const { privateKernelTarget, validatePrivateKernelTarget } = require('./executionTargets');
 const ACTIVE = ['starting','ready','running','unknown','stopping'];
 const id = prefix => prefix + '_' + crypto.randomBytes(12).toString('hex');
 const time = value => value == null ? null : new Date(value).toISOString();
@@ -49,6 +50,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     return row;
   }
   function session(row) {
+    row = { ...row, target_json: row.target_json?.id ? validatePrivateKernelTarget(row.target_json) : {} };
     return { id:row.id,projectId:row.project_id,workspaceId:row.workspace_id,analysisObjectId:row.analysis_object_id,status:row.status,generation:row.runtime_generation,restartedFromKernelId:row.restarted_from_kernel_id||null,restart:row.restart_receipt?{requestId:row.restart_receipt.request_id,status:row.restart_receipt.status,replacementKernelId:row.restart_receipt.replacement_kernel_id}:null,environment:row.environment_json,inputs:row.inputs_json,resources:row.resources_json,target:row.target_json,nextOrder:Number(row.next_order),activeExecutionId:row.active_execution_id,createdAt:time(row.created_at),startedAt:time(row.started_at),expiresAt:time(row.expires_at),stoppedAt:time(row.stopped_at),memoryState:['ready','running'].includes(row.status)?'available':['stopped','failed'].includes(row.status)?'lost':'unknown',replay:{complete:false,issues:['Variables and files in kernel memory are unsaved. Selected input versions and ordered source alone do not capture every intermediate value.','Console previews are journal evidence. Explicitly saved outputs retain artifact versions; other variables and files remain unsaved.']}};
   }
   function receipt(row, detail = false) {
@@ -113,6 +115,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
         else if (execution && !['completed','failed'].includes(execution.status) && observed.status!=='executing' && observed.status!=='starting') await finalize(row,execution,{status:'unknown'});
       }
       const status = {ready:'ready',executing:'running',starting:'starting',unknown:'unknown',stopped:'stopped'}[observed.status];
+      if (!row.target_json?.id) observed.target = await privateKernelTarget(db, observed.target);
       await db.query(`UPDATE private_r_kernels SET runtime_generation=COALESCE(runtime_generation,$2),resources_json=CASE WHEN resources_json='{}'::jsonb THEN $3 ELSE resources_json END,target_json=CASE WHEN target_json='{}'::jsonb THEN $4 ELSE target_json END,started_at=COALESCE(started_at,$5),expires_at=CASE WHEN resources_json='{}'::jsonb THEN $6 ELSE expires_at END,status=CASE WHEN status IN ('stopping','stopped','failed') THEN status WHEN status='unknown' AND next_order>0 AND $7='ready' THEN 'unknown' ELSE $7 END,stopped_at=CASE WHEN $7='stopped' THEN COALESCE(stopped_at,NOW()) ELSE stopped_at END,updated_at=NOW() WHERE id=$1 AND next_order=$8 AND (active_execution_id IS NOT DISTINCT FROM $9 OR active_execution_id IS NULL)`,[row.id,observed.generation,observed.resources,observed.target,observed.startedAt,observed.expiresAt,status,Number(row.next_order),row.active_execution_id]);
     } catch (error) {
       if (error.code==='PRIVATE_KERNEL_NOT_FOUND') await stopRow(row);
@@ -164,6 +167,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     try {
       await checked(row);
       const observed=c.state(await client.start({kernelId:row.id,...c.scope(row),environment,inputs:verified.map(({reference:_reference,publicFormat:_publicFormat,...entry})=>entry)}),row);
+      observed.target = await privateKernelTarget(db, observed.target);
       await db.query("UPDATE private_r_kernels SET runtime_generation=$2,status=$3,resources_json=$4,target_json=$5,started_at=$6,expires_at=$7,last_activity_at=NOW(),updated_at=NOW() WHERE id=$1 AND status='starting'",[row.id,observed.generation,observed.status==='ready'?'ready':'unknown',observed.resources,observed.target,observed.startedAt,observed.expiresAt]);
     } catch(error) { await db.query("UPDATE private_r_kernels SET status=$2,updated_at=NOW() WHERE id=$1 AND status='starting'",[row.id,['PRIVATE_KERNEL_UNAVAILABLE','PRIVATE_KERNEL_LIMIT','PRIVATE_KERNEL_ADMISSION_LIMIT','PRIVATE_KERNEL_INVALID','PRIVATE_KERNEL_INPUT_INVALID','PRIVATE_KERNEL_INPUT_INTEGRITY','PRIVATE_KERNEL_CONFLICT','PRIVATE_KERNEL_STOPPED','R_ENVIRONMENT_MISMATCH','ARTIFACT_INTEGRITY_FAILED'].includes(error.code)?'failed':'unknown']); throw error; }
     const current=await owned(userId,projectId,row.id); await checked(current); return session(current);

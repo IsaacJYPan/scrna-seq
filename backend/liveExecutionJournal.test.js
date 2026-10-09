@@ -62,6 +62,15 @@ describe('server-owned live R execution journal', () => {
     expect(db.query).not.toHaveBeenCalled(); expect(db.getAnalysisObjectForUser).not.toHaveBeenCalled();
   });
 
+  it('retains server-owned installation evidence and ignores browser target declarations', async () => {
+    const identity={id:'svc_'+'c'.repeat(32),label:'Lab server'};
+    const db={getAnalysisObjectForUser:async()=>({projectId:'proj_owned'}),getServiceExecutionIdentity:async()=>identity,
+      query:vi.fn(async()=>({rows:[{id:'lex_saved'}]}))};
+    await recordLiveRExecution({db,req:{...context(),body:{target:{id:'foreign'}}},envelope:envelope()});
+    const retained=JSON.parse(db.query.mock.calls[0][1][9]);
+    expect(retained.target).toEqual({kind:'service',...identity,generation:'a'.repeat(64),precision:'recorded-executor',runtimeKind:'guided-r',runtimeGeneration:'a'.repeat(64)});
+  });
+
   it('derives the project from the current owned object and writes no client project identity', async () => {
     const db = { getAnalysisObjectForUser: vi.fn(async () => ({ projectId: 'proj_owned' })), query: vi.fn(async () => ({ rows: [{ id: 'lex_saved' }] })) };
     const req = { ...context(), body: { projectId: 'proj_foreign' } };

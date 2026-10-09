@@ -1,6 +1,7 @@
 'use strict';
 
 const { createHash, randomBytes } = require('node:crypto');
+const { validateExecutionTarget } = require('./executionTargets');
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_SOURCE_BYTES = 32 * 1024;
 
@@ -67,6 +68,11 @@ async function recordLiveRExecution({ db, req, envelope }) {
   if (!entry) return null;
   const object = await db.getAnalysisObjectForUser(req.verifiedObjectId, req.user.id);
   if (!object?.projectId) return null;
+  if (typeof db.getServiceExecutionIdentity === 'function') {
+    const identity = await db.getServiceExecutionIdentity();
+    entry.record.target = validateExecutionTarget({ kind:'service', ...identity, generation:entry.generation,
+      precision:'recorded-executor', runtimeKind:'guided-r', runtimeGeneration:entry.generation });
+  }
   const id = `lex_${randomBytes(12).toString('hex')}`;
   const { rows } = await db.query(
     `INSERT INTO live_execution_records
@@ -86,6 +92,9 @@ async function recordLiveRExecution({ db, req, envelope }) {
     [object.projectId, Number(req.user.id), entry.generation, entry.order]
   );
   const old = existing.rows[0];
+  // A repeated completed operation retains its original target label and legacy
+  // evidence. Never infer a new executor merely from observing it again.
+  if (old?.record_json?.target) entry.record.target = old.record_json.target;
   if (!old || old.source_sha256 !== entry.sourceSha256 || old.analysis_object_id !== req.verifiedObjectId
       || old.operation !== entry.operation || Number(old.live_revision) !== entry.liveRevision
       || JSON.stringify(boundedJson(old.record_json)) !== JSON.stringify(boundedJson(entry.record))) throw recordError();

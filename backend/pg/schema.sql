@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261013, now())
+VALUES ('traceomics.runtime', 20261014, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -481,6 +481,39 @@ CREATE INDEX IF NOT EXISTS idx_jobs_project_result_object ON jobs(project_id, re
 CREATE INDEX IF NOT EXISTS idx_jobs_project_dataset ON jobs(project_id, dataset_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_retry_of_job
   ON jobs(retry_of_job_id) WHERE retry_of_job_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS service_execution_identity (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+  service_id TEXT NOT NULL UNIQUE CHECK(service_id ~ '^svc_[a-f0-9]{32}$')
+);
+CREATE TABLE IF NOT EXISTS job_execution_receipts (
+  dispatch_order BIGINT GENERATED ALWAYS AS IDENTITY,
+  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  dispatch_id TEXT NOT NULL CHECK(dispatch_id ~ '^[a-f0-9]{64}$'),
+  attempt INTEGER NOT NULL CHECK(attempt >= 1),
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  operation TEXT NOT NULL CHECK(operation ~ '^[a-z][a-z0-9_.-]{0,99}$'),
+  target_json JSONB NOT NULL CHECK(octet_length(target_json::text) <= 4096),
+  environment_json JSONB NOT NULL CHECK(octet_length(environment_json::text) <= 8192),
+  dispatch_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY(job_id, dispatch_id)
+);
+ALTER TABLE job_execution_receipts ADD COLUMN IF NOT EXISTS dispatch_order BIGINT GENERATED ALWAYS AS IDENTITY;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_receipts_dispatch_order ON job_execution_receipts(dispatch_order);
+CREATE INDEX IF NOT EXISTS idx_execution_receipts_scope ON job_execution_receipts(project_id,owner_user_id,job_id);
+CREATE OR REPLACE FUNCTION reject_execution_receipt_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'execution receipts are immutable' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_execution_receipt_no_update ON job_execution_receipts;
+CREATE TRIGGER trg_execution_receipt_no_update BEFORE UPDATE ON job_execution_receipts
+  FOR EACH ROW EXECUTE FUNCTION reject_execution_receipt_update();
+DROP TRIGGER IF EXISTS trg_service_identity_no_update ON service_execution_identity;
+CREATE TRIGGER trg_service_identity_no_update BEFORE UPDATE ON service_execution_identity
+  FOR EACH ROW EXECUTE FUNCTION reject_execution_receipt_update();
 
 -- Expert R source is needed only while a request can still execute. Once the
 -- job reaches a terminal state, retain the selected profile and source hash for

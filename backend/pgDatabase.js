@@ -26,6 +26,7 @@ const { validateEnvironmentReference, assertEnvironmentMatches, readEnvironmentA
 const { admitDemoJob } = require('./demoJobAdmission');
 const storage = require('./storage');
 const passwords = require('./passwords');
+const executionTargets = require('./executionTargets');
 const {
   validateSeuratPipelineParams,
   assertSupportedSeuratPipelineDataset,
@@ -64,7 +65,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261013;
+const SCHEMA_CONTRACT_VERSION = 20261014;
 
 let pool = null;
 
@@ -739,7 +740,7 @@ async function resetSchemaForTests() {
       analysis_branches,
       condition_contrast_samples, condition_contrasts,
       analysis_object_sample_bindings, biological_samples, study_conditions,
-      analysis_object_edges, live_execution_records, execution_source_versions, managed_artifact_versions, job_artifacts, jobs, analysis_objects,
+      analysis_object_edges, live_execution_records, execution_source_versions, job_execution_receipts, service_execution_identity, managed_artifact_versions, job_artifacts, jobs, analysis_objects,
       expert_r_private_inputs, datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
       worker_pool_runtime_status, worker_runtime_status, platform_capabilities,
@@ -5396,6 +5397,31 @@ async function heartbeatJob(jobId, workerId, claimToken, opts = {}) {
   return rowToWorkerJob(rows[0]);
 }
 
+async function recordJobExecutionReceiptByWorker(jobId, workerId, claimToken, input, opts = {}) {
+  const wid = requireWorkerId(workerId);
+  const token = requireClaimToken(claimToken);
+  const now = normalizeWorkerNow(opts);
+  const evidence = executionTargets.validateExecutionReceiptInput(input);
+  const client = await (await connect()).connect();
+  try {
+    await client.query('BEGIN');
+    const row = (await client.query('SELECT * FROM jobs WHERE id=$1 FOR UPDATE', [String(jobId)])).rows[0];
+    if (!row) throw codedError('JOB_NOT_FOUND', 'Job not found.');
+    if (!workerHoldsClaim(row, wid, token, now)) throw codedError('CLAIM_LOST', 'This worker no longer holds a valid claim on the job.');
+    const identity = await executionTargets.getServiceExecutionIdentity(client);
+    const target = { kind: 'service', ...identity, generation: executionTargets.executorGeneration(wid),
+      precision: 'recorded-executor', runtimeKind: evidence.runtimeKind, runtimeGeneration: evidence.runtimeGeneration };
+    const dispatchId = crypto.createHash('sha256').update('execution-dispatch:' + token).digest('hex');
+    await client.query(`INSERT INTO job_execution_receipts(job_id,dispatch_id,attempt,owner_user_id,project_id,operation,target_json,environment_json,dispatch_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(job_id,dispatch_id) DO NOTHING`,
+    [row.id,dispatchId,row.attempts,row.owner_user_id,row.project_id,evidence.operation,target,evidence.environment,now]);
+    const retained = (await client.query('SELECT * FROM job_execution_receipts WHERE job_id=$1 AND dispatch_id=$2', [row.id,dispatchId])).rows[0];
+    const result = executionTargets.rowToExecutionReceipt(retained);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+}
+
 /**
  * Persist the point of no safe retry immediately before a receipt-backed R
  * request is dispatched. A worker-process crash closes its HTTP socket but does
@@ -7425,6 +7451,8 @@ module.exports = {
   claimNextJob,
   heartbeatJob,
   markRDispatchStartedByWorker,
+  recordJobExecutionReceiptByWorker,
+  getServiceExecutionIdentity: () => executionTargets.getServiceExecutionIdentity({ query }),
   completeJobByWorker,
   resumeCommittedJobByWorker,
   failJobByWorker,

@@ -95,14 +95,14 @@ describe.skipIf(!process.env.DATABASE_URL)('expired demo publication lifecycle c
   beforeEach(async () => { process.env.APP_DEPLOYMENT_MODE = 'demo'; await db.resetSchemaForTests(); });
   afterAll(async () => { if (savedMode === undefined) delete process.env.APP_DEPLOYMENT_MODE; else process.env.APP_DEPLOYMENT_MODE = savedMode; await db.close(); });
 
-  it('upgrades legacy publication bounds and reapplies schema 20261013 without losing retained history', async () => {
+  it('upgrades legacy publication bounds and reapplies the current schema without losing retained history', async () => {
     const retained = await seedOwner(), before = await historySnapshot(retained.project.id);
     await db.query('ALTER TABLE private_r_publications DROP CONSTRAINT private_r_publications_reserved_bytes_check');
     await db.query('ALTER TABLE private_r_publications ADD CONSTRAINT private_r_publications_reserved_bytes_check CHECK (reserved_bytes BETWEEN 1 AND 20971520)');
     await db.query('ALTER TABLE private_r_publications DROP CONSTRAINT private_r_publications_size_bytes_check');
     await db.query('ALTER TABLE private_r_publications ADD CONSTRAINT private_r_publications_size_bytes_check CHECK (size_bytes BETWEEN 1 AND 20971520)');
     await db.initSchema({ force: true }); await db.initSchema({ force: true });
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261013);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261014);
     const constraints = (await db.query(`SELECT condeferrable,condeferred FROM pg_constraint
       WHERE conrelid='private_r_publications'::regclass AND confrelid='managed_artifact_versions'::regclass AND contype='f'`)).rows;
     expect(constraints).toEqual([{ condeferrable: true, condeferred: true }]);
