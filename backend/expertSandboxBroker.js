@@ -13,6 +13,8 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const storage = require('./storage');
+const { brokerResourceLimits, createBrokerReadinessProbe } = require('./expertRuntimeReadiness');
+const { probeStorageReadiness } = require('./runtimeReadiness');
 const { MAX_ENVIRONMENT_BYTES, environmentBytes, summarizeEnvironmentManifest, assertEnvironmentMatches } = require('./rEnvironment');
 const { rEnvironmentProbeCode, buildEnvironmentManifest } = require('./rEnvironmentProbe');
 const {
@@ -531,9 +533,33 @@ function createExpertSandboxBroker(env = process.env) {
     }).finally(() => { reconciliation = null; });
     return reconciliation;
   };
+  const inspectReadiness = createBrokerReadinessProbe({ image, runProcess, probeStorage: probeStorageReadiness,
+    workRoot, durableRoot: provider.root, minFreeBytes,
+    getReservations: () => ({ work: reservedWorkBytes, durable: reservedStorageBytes }),
+    sameFilesystem: () => pathsShareFilesystem(workRoot, provider.root) });
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET' && req.url === '/health') return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id }));
+    if (req.method === 'GET' && req.url === '/readiness') {
+      if (!safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
+        res.statusCode = 401;
+        return res.end(JSON.stringify({ status: 'unavailable' }));
+      }
+      if (!runtimeVerified) { res.statusCode = 503; return res.end(JSON.stringify({ status: 'unavailable' })); }
+      try {
+        const observation = await inspectReadiness();
+        return res.end(JSON.stringify({ status: 'ok', profileId: EXPERT_R_PROFILE.id,
+          sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION, environment,
+          persistentKernel: privateKernelStatus.state === 'ready' && observation.state === 'ready',
+          persistentKernelPublications: privateKernelStatus.state === 'ready' && observation.state === 'ready' && privateKernelStatus.publications === true,
+          persistentKernelInterrupt: privateKernelStatus.state === 'ready' && observation.state === 'ready' && privateKernelStatus.interrupt === true,
+          readiness: { ...observation, resources: brokerResourceLimits(env, { timeoutMs, maxConcurrent,
+            persistentKernel: privateKernelStatus.state === 'ready' }) } }));
+      } catch {
+        res.statusCode = 503;
+        return res.end(JSON.stringify({ status: 'unavailable' }));
+      }
+    }
     if (req.method === 'GET' && req.url === '/capabilities'
         && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       if (!runtimeVerified) { res.statusCode = 503; return res.end(JSON.stringify({ status: 'unavailable' })); }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import http from 'node:http';
 
 const {
   MIN_EXTERNAL_TOKEN_LENGTH,
@@ -6,7 +7,27 @@ const {
   parseRBackendUrl,
   resolveRRuntimeConfig,
   buildRChildEnv,
+  requestRJson,
 } = require('./rRuntime');
+
+describe('bounded authenticated R probe responses', () => {
+  it.each([401, 403, 503])('retains only HTTP status %s for safe remediation, including non-JSON error bodies', async status => {
+    const server = http.createServer((req, res) => { res.writeHead(status); res.end('<p>/secret/credentials</p>'); });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const promise = requestRJson({ protocol: 'http:', hostname: '127.0.0.1', port: server.address().port, token: 'probe-token' }, '/health');
+      await expect(promise).rejects.toMatchObject({ code: 'R_NOT_READY', httpStatus: status });
+      await promise.catch(error => expect(error.message).not.toContain('/secret/credentials'));
+    } finally { await new Promise(resolve => server.close(resolve)); }
+  });
+  it('rejects an interrupted response without an unhandled response-stream error', async () => {
+    const server = http.createServer((req, res) => { res.writeHead(200, { 'Content-Length': 5000 }); res.write('{"status":"ok",'); setImmediate(() => res.destroy()); });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      await expect(requestRJson({ protocol: 'http:', hostname: '127.0.0.1', port: server.address().port, token: 'probe-token' }, '/health')).rejects.toMatchObject({ code: 'R_UNREACHABLE' });
+    } finally { await new Promise(resolve => server.close(resolve)); }
+  });
+});
 
 describe('R runtime configuration boundary', () => {
   it('accepts loopback/private targets and explicitly allowlisted internal DNS only', () => {

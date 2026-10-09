@@ -34,14 +34,19 @@ function expertRAccessSql(userExpression, projectExpression = null, env = proces
       OR ${roleAccess}))`;
 }
 
-function probeExpertRRuntime(env = process.env, { timeoutMs = 1500 } = {}) {
+function probeExpertRRuntime(env = process.env, { timeoutMs = 1500, readiness = false } = {}) {
   if (!expertRSandboxEnabled(env)) return Promise.resolve({ state: 'not-configured' });
   return new Promise((resolve) => {
-    const url = new URL('/capabilities', env.EXPERT_R_SANDBOX_URL);
+    const url = new URL(readiness ? '/readiness' : '/capabilities', env.EXPERT_R_SANDBOX_URL);
     const transport = url.protocol === 'https:' ? https : http;
     const request = transport.get(url, {
       headers: { Authorization: `Bearer ${env.EXPERT_R_SANDBOX_TOKEN}` },
     }, (response) => {
+      if (readiness && response.statusCode !== 200) {
+        const state = [401, 403].includes(response.statusCode) ? 'authentication-failed'
+          : response.statusCode === 503 ? 'unavailable' : 'incompatible';
+        resolve({ state }); response.destroy(); request.destroy(); return;
+      }
       let size = 0; const chunks = [];
       response.on('data', (chunk) => {
         size += chunk.length;
@@ -63,11 +68,14 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500 } = {}) {
           environment = validateEnvironmentReference(result.environment);
           if (environment.profileId !== result.profileId || environment.imageDigest !== result.sandboxImageDigest) throw new Error('Inconsistent environment');
         } catch { resolve({ state: 'incompatible' }); return; }
-        resolve({ state: 'ready', profileId: result.profileId, imageDigest: result.sandboxImageDigest,
+        resolve({ state: readiness && result.readiness?.state !== 'ready'
+          ? result.readiness?.state === 'unknown' ? 'unknown' : 'unavailable' : 'ready',
+          profileId: result.profileId, imageDigest: result.sandboxImageDigest,
           resourcePolicyVersion: result.resourcePolicyVersion, environment,
           persistentKernel: result.persistentKernel === true,
           persistentKernelInterrupt: result.persistentKernelInterrupt === true,
-          persistentKernelPublications: result.persistentKernelPublications === true });
+          persistentKernelPublications: result.persistentKernelPublications === true,
+          ...(readiness ? { readiness: result.readiness } : {}) });
       });
     });
     const deadline = setTimeout(() => { resolve({ state: 'unreachable' }); request.destroy(); }, timeoutMs);
@@ -75,6 +83,10 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500 } = {}) {
     request.on('close', () => clearTimeout(deadline));
     request.on('error', () => resolve({ state: 'unreachable' }));
   });
+}
+
+function probeExpertRReadiness(env = process.env, { timeoutMs = 1500 } = {}) {
+  return probeExpertRRuntime(env, { timeoutMs, readiness: true });
 }
 
 function expertRStatus({ canExecuteExpertR, runtime, revoked = false, demoMode = false, env = process.env }) {
@@ -87,4 +99,4 @@ function expertRStatus({ canExecuteExpertR, runtime, revoked = false, demoMode =
     setupCommand: 'node scripts/configure-private-r.js --help' };
 }
 
-module.exports = { DENIED_CAPABILITY, WRITE_ROLES, expertRAccessPolicy, expertRAccessSql, probeExpertRRuntime, expertRStatus };
+module.exports = { DENIED_CAPABILITY, WRITE_ROLES, expertRAccessPolicy, expertRAccessSql, probeExpertRRuntime, probeExpertRReadiness, expertRStatus };

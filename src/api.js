@@ -304,6 +304,48 @@ async function req(endpoint, options = {}) {
   return res.json();
 }
 
+async function requestRuntimeReadiness(projectId, { signal } = {}) {
+  const controller = new AbortController();
+  let reader;
+  const abort = () => controller.abort();
+  if (signal?.aborted) throw new DOMException('The readiness check was canceled.', 'AbortError');
+  signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, 8000);
+  try {
+    const query = projectId ? `?${new URLSearchParams({ projectId })}` : '';
+    const response = await fetch(apiUrl(`/api/runtime/readiness${query}`), {
+      credentials: 'include', signal: controller.signal,
+      headers: { Accept: 'application/json', 'X-Client-ID': CLIENT_ID },
+    });
+    if (!response.ok) throw Object.assign(new Error('The server did not confirm readiness.'), { status: response.status });
+    const maxBytes = 32768;
+    if (Number(response.headers?.get('content-length')) > maxBytes) throw new Error('Readiness response exceeds its limit.');
+    if (response.body?.getReader) {
+      reader = response.body.getReader();
+      const chunks = []; let size = 0;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) throw new Error('Readiness response exceeds its limit.');
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(size); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      return JSON.parse(new TextDecoder().decode(bytes));
+    }
+    const value = await response.json();
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > maxBytes) throw new Error('Readiness response exceeds its limit.');
+    return value;
+  } catch (error) {
+    if (controller.signal.aborted && !signal?.aborted) throw Object.assign(new Error('The server readiness check timed out.'), { code: 'READINESS_TIMEOUT' });
+    throw error;
+  } finally {
+    clearTimeout(timer); signal?.removeEventListener('abort', abort);
+    controller.abort(); if (reader) void reader.cancel().catch(() => {});
+  }
+}
+
 async function downloadResponse(endpoint, fallbackFilename) {
   const res = await fetch(apiUrl(endpoint), {
     credentials: 'include',
@@ -872,6 +914,7 @@ export const electronAPI = {
   setTheme: (_theme) => { /* No-op in browser, handled by CSS */ },
 
   // Diagnostics
+  getRuntimeReadiness: requestRuntimeReadiness,
   getComputeRuntimeStatus,
   getRScriptPath: async () => {
     try {
