@@ -86,6 +86,14 @@ playwright/report/
 playwright/snapshots/
 playwright-report/
 test-results/
+playwright/videos/
+playwright/traces/
+
+# Local visual audits and temporary browser verification captures
+/.ui-audit/
+/.validation-check/
+/ui-ux-audit*.md
+/ui-ux-audit-evidence/
 
 # Scratch / temporary R scripts — one-off debugging files
 scratch/
@@ -103,6 +111,9 @@ docs/guide/
 /docs/*roadmap*.md
 /docs/*review*.md
 /docs/*plan*.md
+/docs/*audit*.md
+/docs/*todo*.md
+/docs/*tasks*.md
 !/docs/pipelines.md
 !/docs/workflow-pipelines.md
 /docs/development/
