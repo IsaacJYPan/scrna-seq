@@ -77,6 +77,7 @@ const {
   EXPERT_R_RESOURCE_POLICY_VERSION,
 } = require('./expertR');
 const { assertEnvironmentMatches, MAX_ENVIRONMENT_BYTES } = require('./rEnvironment');
+const { observedRuntimeMetadata } = require('./executionHistoryProjection');
 
 /** Stable, header-safe worker id (`worker_` + hex). One per worker instance. */
 function generateWorkerId() {
@@ -2356,6 +2357,54 @@ function createJobWorker(options = {}) {
       }
 
       let receiptBackedRCompleted = false;
+      let observedREnvironment = null;
+      async function recordExecutionDispatch(operation, runtimeKind) {
+        // Older injected DB mocks have no receipt writer. The production DB
+        // always supplies this claim-fenced writer; a persistence failure stops
+        // the dispatch before any R or sandbox request can leave the worker.
+        if (typeof db.recordJobExecutionReceiptByWorker !== 'function') return;
+        const environment = runtimeKind === 'sandbox-r' && job.parameters?.environment
+          ? { precision: 'pinned-request', reference: job.parameters.environment }
+          : { precision: 'unavailable', reference: null };
+        const receipt = await db.recordJobExecutionReceiptByWorker(
+          jobId, workerId, claimToken,
+          { operation, runtimeKind,
+            runtimeGeneration: runtimeKind === 'guided-r' ? claimAdmission?.rRuntimeInstanceHash || null : null,
+            environment },
+          withNow({}, resolveNowTs())
+        );
+        if (!receipt) throw codedHandlerError(
+          'EXECUTION_RECEIPT_UNAVAILABLE',
+          'The analysis execution target could not be recorded safely.'
+        );
+      }
+      async function runClaimedRBridge(bridgeArgs) {
+        const recordedCallR = async request => {
+          await recordExecutionDispatch(bridgeArgs.operation, 'guided-r');
+          return resolvedCallR(request);
+        };
+        Object.assign(recordedCallR, resolvedCallR);
+        const descriptor = await rBridge.runRBridgeOperation({
+          ...bridgeArgs,
+          callR: recordedCallR,
+          markRDispatchStarted: typeof db.markRDispatchStartedByWorker === 'function'
+            ? () => db.markRDispatchStartedByWorker(
+              jobId, workerId, claimToken, withNow({}, resolveNowTs())
+            )
+            : undefined,
+        });
+        if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)
+            && bridgeArgs.operation !== 'r.checkpoint.hydrate.v1') receiptBackedRCompleted = true;
+        observedREnvironment = observedRuntimeMetadata([descriptor, { environmentObserved: observedREnvironment }]);
+        if (descriptor.metadata && observedREnvironment) {
+          return { ...descriptor, metadata: { ...descriptor.metadata, environmentObserved: observedREnvironment } };
+        }
+        return descriptor;
+      }
+      const runClaimedSandbox = typeof runExpertSandbox === 'function' ? async input => {
+        await recordExecutionDispatch(jobType, 'sandbox-r');
+        return runExpertSandbox(input);
+      } : undefined;
       const makeClaimContext = (overrides = {}) => ({
         job,
         workerId,
@@ -2398,19 +2447,7 @@ function createJobWorker(options = {}) {
           jobId, workerId, claimToken, input, withNow({}, resolveNowTs())
         ),
         removeDurableObject: (key) => storageProvider.remove(key),
-        runRBridgeOperation: async (bridgeArgs) => {
-          const descriptor = await rBridge.runRBridgeOperation({
-            ...bridgeArgs,
-            markRDispatchStarted: typeof db.markRDispatchStartedByWorker === 'function'
-              ? () => db.markRDispatchStartedByWorker(
-                jobId, workerId, claimToken, withNow({}, resolveNowTs())
-              )
-              : undefined,
-          });
-          if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)
-              && bridgeArgs.operation !== 'r.checkpoint.hydrate.v1') receiptBackedRCompleted = true;
-          return descriptor;
-        },
+        runRBridgeOperation: runClaimedRBridge,
         callR: resolvedCallR,
         getOwnedAnalysisObject: () => db.getOwnedAnalysisObjectForJobByWorker(
           jobId, workerId, claimToken, withNow({}, resolveNowTs())
@@ -2443,7 +2480,7 @@ function createJobWorker(options = {}) {
         ),
         allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
         logger: log,
-        runExpertSandbox: typeof runExpertSandbox === 'function' ? runExpertSandbox : undefined,
+        runExpertSandbox: runClaimedSandbox,
         runWorkflow: workflowCtx => require('./workflowWorker').runWorkflowJob(db, workflowCtx, workerId, claimToken, storageProvider),
         recoveringCompletionReceipt: false,
         ...overrides,
@@ -2728,19 +2765,7 @@ function createJobWorker(options = {}) {
       // swallowed here and surfaces at the guarded completion after R returns.
       // The surrounding claimed-lifecycle timer also covers recovery hashing and
       // durable publication before/after this bridge call.
-      runRBridgeOperation: async (bridgeArgs) => {
-        const descriptor = await rBridge.runRBridgeOperation({
-          ...bridgeArgs,
-          markRDispatchStarted: typeof db.markRDispatchStartedByWorker === 'function'
-            ? () => db.markRDispatchStartedByWorker(
-              jobId, workerId, claimToken, withNow({}, resolveNowTs())
-            )
-            : undefined,
-        });
-        if (COMPLETION_RECEIPT_JOB_TYPES.has(jobType)
-            && bridgeArgs.operation !== 'r.checkpoint.hydrate.v1') receiptBackedRCompleted = true;
-        return descriptor;
-      },
+      runRBridgeOperation: runClaimedRBridge,
       callR: resolvedCallR,
       // Claim-authorized resource resolvers derive every id from the trusted job
       // row and validate this worker's live lease/token. They deliberately do not
@@ -2788,7 +2813,7 @@ function createJobWorker(options = {}) {
         ),
       allocateAnalysisObjectId: () => db.generateAnalysisObjectId(),
       logger: log,
-      runExpertSandbox: typeof runExpertSandbox === 'function' ? runExpertSandbox : undefined,
+      runExpertSandbox: runClaimedSandbox,
       runWorkflow: workflowCtx => require('./workflowWorker').runWorkflowJob(db, workflowCtx, workerId, claimToken, storageProvider),
     };
 

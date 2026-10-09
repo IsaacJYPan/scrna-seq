@@ -26,6 +26,7 @@
 const path = require('path');
 const rRuntime = require('./rRuntime');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
+const { serviceLabel } = require('./executionTargets');
 
 const ALLOWED_NODE_ENVS = new Set(['development', 'test', 'production']);
 const ALLOWED_DEPLOYMENT_MODES = new Set(['private', 'byoc', 'shared-private', 'demo', 'public']);
@@ -499,6 +500,7 @@ function summary() {
 function validateProductionConfig(options = {}) {
   const role = options.role || 'web';
   const errors = validateCookieConfig();
+  try { serviceLabel(); } catch { errors.push('EXECUTION_SERVICE_LABEL must contain 1–80 letters, numbers, spaces, or basic display punctuation.'); }
   if (!ALLOWED_NODE_ENVS.has(nodeEnv())) {
     errors.push('NODE_ENV must be development, test, or production.');
   }

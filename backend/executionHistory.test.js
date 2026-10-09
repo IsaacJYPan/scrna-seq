@@ -6,6 +6,7 @@ import path from 'node:path';
 const db = require('./pgDatabase'); const storage = require('./storage');
 const { createExecutionHistoryService } = require('./executionHistory');
 const { seedExecutionHistory, seedRetainedExpertSource, sha } = require('./_executionHistoryFixtures');
+const { executorGeneration } = require('./executionTargets');
 const configured = Boolean(process.env.DATABASE_URL);
 let directory, savedRoot, provider, service, http, server, owner, viewer, outsider, project, fixtures;
 describe.skipIf(!configured)('execution history through actual authenticated HTTP/PostgreSQL/storage', () => {
@@ -27,6 +28,84 @@ describe.skipIf(!configured)('execution history through actual authenticated HTT
   afterAll(async () => { vi.restoreAllMocks(); if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } await db.close(); if (savedRoot === undefined) delete process.env.STORAGE_ROOT; else process.env.STORAGE_ROOT = savedRoot; if (directory) await rm(directory, { recursive: true, force: true }); });
   const base = () => `/api/execution-history/${project.id}`;
   const get = (suffix = '', token = owner.token) => http.api(server, base() + suffix, { token });
+
+  it('reads immutable dispatch target evidence without inferring the current worker or browser connection', async () => {
+    await db.query("UPDATE jobs SET status='queued',attempts=0,completed_at=NULL WHERE id=$1", [fixtures.guided.id]);
+    const claimed = await db.claimNextJob('worker_original_executor', { now: '2030-01-01 00:00:00', leaseSeconds: 30 });
+    const receipt = await db.recordJobExecutionReceiptByWorker(claimed.id, claimed.workerId, claimed.claimToken,
+      { operation: 'r.deg.find_markers.v1', runtimeKind: 'guided-r', runtimeGeneration: 'd'.repeat(64) }, { now: '2030-01-01 00:00:01' });
+    await db.completeJobByWorker(claimed.id, claimed.workerId, claimed.claimToken, { now: '2030-01-01 00:00:02' });
+    await db.query('UPDATE jobs SET worker_id=$2 WHERE id=$1', [claimed.id, 'worker_later_observer']);
+    const detail = (await get('/' + claimed.id)).data;
+    expect(detail.target).toMatchObject({ id: receipt.target.id, generation: executorGeneration('worker_original_executor'),
+      precision: 'recorded-executor', runtimeKind: 'guided-r', runtimeGeneration: 'd'.repeat(64) });
+    expect(detail.executionAttempts).toEqual([receipt]);
+    expect(detail.replay.issues.map(item => item.code)).not.toContain('physical-target-not-recorded');
+    for (const privateText of ['worker_original_executor', 'worker_later_observer', claimed.claimToken]) expect(JSON.stringify(detail)).not.toContain(privateText);
+    expect((await get('/' + claimed.id, viewer.token)).status).toBe(404);
+    const legacy = (await get('/' + fixtures.expert.id)).data;
+    expect(legacy.target).toMatchObject({ kind: 'unknown', id: null, precision: 'unavailable' });
+    expect(legacy.executionAttempts).toEqual([]);
+  });
+
+  it('keeps separate actual dispatches even when releasing a claim refunds its attempt counter', async () => {
+    const job = await db.createProjectJob(owner.user.id, project.id, { jobType: 'generic' });
+    const input = { operation: 'r.runtime.check', runtimeKind: 'guided-r', runtimeGeneration: null };
+    const first = await db.claimNextJob('worker_first_dispatch', { now: '2030-01-01 00:00:00', leaseSeconds: 30 });
+    const firstReceipt = await db.recordJobExecutionReceiptByWorker(job.id, first.workerId, first.claimToken, input, { now: '2030-01-01 00:00:00' });
+    await db.releaseJob(job.id, first.workerId, first.claimToken, { now: '2030-01-01 00:00:00' });
+    const second = await db.claimNextJob('worker_second_dispatch', { now: '2030-01-01 00:00:00', leaseSeconds: 30 });
+    const secondReceipt = await db.recordJobExecutionReceiptByWorker(job.id, second.workerId, second.claimToken, input, { now: '2030-01-01 00:00:00' });
+    const detail = (await get('/' + job.id)).data;
+    expect(detail.executionAttempts).toEqual([firstReceipt, secondReceipt]);
+    expect(detail.executionAttempts.map(item => item.attempt)).toEqual([1, 1]);
+    expect(firstReceipt.dispatchId).not.toBe(secondReceipt.dispatchId);
+    expect(firstReceipt.dispatchAt).toBe(secondReceipt.dispatchAt);
+    expect(detail.target.generation).toBe(executorGeneration('worker_second_dispatch'));
+  });
+
+  it('projects returned runtime observations while distinguishing unverified provenance declarations', async () => {
+    await db.query('UPDATE job_artifacts SET metadata_json=$2 WHERE id=$1', [fixtures.result.id,
+      { environmentObserved: { rVersion: '4.5.1', packages: [{ name: 'Seurat', version: '5.3.0' },
+        { name: 'secret-package', version: 'C:/private/package' }] }, resolvedParams: { dims: 10 } }]);
+    const observed = (await get('/' + fixtures.guided.id)).data.environment;
+    expect(observed).toMatchObject({ precision: 'observed-metadata', observed: { rVersion: '4.5.1', packages: [{ name: 'Seurat', version: '5.3.0' }] } });
+    await db.query('DELETE FROM job_artifacts WHERE job_id=$1', [fixtures.guided.id]);
+    const declared = (await get('/' + fixtures.guided.id)).data.environment;
+    expect(declared).toMatchObject({ precision: 'declared-metadata', observed: { rVersion: '4.5.1' } });
+    expect(declared.note).toContain('do not verify');
+  });
+
+  it('withholds inconsistent newest target evidence instead of substituting an earlier executor', async () => {
+    const target = { kind: 'service', id: 'svc_' + 'a'.repeat(32), label: 'Recorded analysis server',
+      generation: 'b'.repeat(64), precision: 'recorded-executor', runtimeKind: 'guided-r', runtimeGeneration: null };
+    for (const [dispatch, evidence] of [['c'.repeat(64), target], ['d'.repeat(64), { ...target, id: 'https://private:secret@example.test', workerId: 'private-worker', storagePath: 'C:/private/input.rds' }]]) {
+      await db.query(`INSERT INTO job_execution_receipts(job_id,dispatch_id,attempt,owner_user_id,project_id,operation,target_json,environment_json,dispatch_at)
+        VALUES($1,$2,1,$3,$4,'r.runtime.check',$5,$6,NOW())`,
+      [fixtures.guided.id, dispatch, owner.user.id, project.id, evidence, { precision: 'unavailable', reference: null }]);
+    }
+    const detail = (await get('/' + fixtures.guided.id)).data;
+    expect(detail.target).toMatchObject({ kind: 'unknown', id: null, precision: 'unavailable' });
+    expect(detail.executionAttempts).toHaveLength(1);
+    expect(detail.executionAttempts[0].target).toEqual(target);
+    expect(detail.replay.issues.map(item => item.code)).toContain('execution-target-inconsistent');
+    for (const value of ['private:secret', 'private-worker', 'C:/private']) expect(JSON.stringify(detail)).not.toContain(value);
+  });
+
+  it('retains a pinned dispatch request without treating mutable job parameters as verified environment evidence', async () => {
+    const target = { kind: 'service', id: 'svc_' + 'a'.repeat(32), label: 'Recorded analysis server',
+      generation: 'b'.repeat(64), precision: 'recorded-executor', runtimeKind: 'sandbox-r', runtimeGeneration: null };
+    await db.query(`INSERT INTO job_execution_receipts(job_id,dispatch_id,attempt,owner_user_id,project_id,operation,target_json,environment_json,dispatch_at)
+      VALUES($1,$2,1,$3,$4,'expert.r.v1',$5,$6,NOW())`,
+    [fixtures.expert.id, 'c'.repeat(64), owner.user.id, project.id, target,
+      { precision: 'pinned-request', reference: fixtures.environment.reference }]);
+    await db.query('DELETE FROM job_artifacts WHERE job_id=$1', [fixtures.expert.id]);
+    await db.query("UPDATE jobs SET status='failed',parameters_json='{}'::jsonb WHERE id=$1", [fixtures.expert.id]);
+    const detail = (await get('/' + fixtures.expert.id)).data;
+    expect(detail.environment).toMatchObject({ precision: 'pinned-request', reference: fixtures.environment.reference, manifestAvailable: false });
+    expect(detail.replay.issues.map(item => item.code)).toContain('environment-request-not-verified');
+    expect((await get('/' + fixtures.expert.id + '/environment')).status).toBe(404);
+  });
 
   it('retains confirmed interruption and restart lineage privately without treating ordinary R errors as interruption',async()=>{
     const oldId='pk_'+ '1'.repeat(24),newId='pk_'+ '2'.repeat(24),generation='3'.repeat(64);

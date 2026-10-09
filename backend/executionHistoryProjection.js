@@ -11,6 +11,33 @@ function parse(value, fallback = {}) { if (typeof value !== 'string') return val
 function timestamp(value) { const date = new Date(value); return value != null && Number.isFinite(date.getTime()) ? date.toISOString() : null; }
 function safeText(value, maximum = 160) { return typeof value === 'string' && value.length <= maximum && !sensitiveText.test(value) ? value : null; }
 function safeId(value) { return typeof value === 'string' && ID.test(value) ? value : null; }
+function observedRuntimeMetadata(values) {
+  const version = value => typeof value === 'string' && /^[A-Za-z0-9.+-]{1,80}$/.test(value) ? value : null;
+  const packageNames = { seurat: 'Seurat', seuratVersion: 'Seurat', annotationDbi: 'AnnotationDbi', goDb: 'GO.db',
+    clusterProfiler: 'clusterProfiler', fgsea: 'fgsea',
+    cellchat: 'CellChat', cellChat: 'CellChat', edgeR: 'edgeR', limma: 'limma' };
+  let rVersion = null; const packages = new Map();
+  for (const value of values.slice(0, 128)) {
+    if (!value || typeof value !== 'object') continue;
+    const candidates = [value.environmentObserved, value.loaded, value.summary, value.runtime, value];
+    for (const item of candidates) {
+      if (!item || typeof item !== 'object') continue;
+      const r = item.rVersion || item.packageVersions?.r;
+      if (!rVersion && typeof r === 'string' && /^\d+\.\d+\.\d+(?:[.+-][A-Za-z0-9.-]+)?$/.test(r) && r.length <= 80) rVersion = r;
+      for (const [key, name] of Object.entries(packageNames)) {
+        const number = version(item.packageVersions?.[key] || item[key]);
+        if (number && packages.size < 100 && !packages.has(name)) packages.set(name, number);
+      }
+      if (item === value.environmentObserved && Array.isArray(item.packages)) {
+        for (const entry of item.packages.slice(0, 100)) {
+          if (typeof entry?.name === 'string' && /^[A-Za-z][A-Za-z0-9.]{0,79}$/.test(entry.name)
+              && version(entry.version) && packages.size < 100 && !packages.has(entry.name)) packages.set(entry.name, entry.version);
+        }
+      }
+    }
+  }
+  return rVersion || packages.size ? { rVersion, packages: [...packages].map(([name, number]) => ({ name, version: number })) } : null;
+}
 function boundedJSON(value) {
   let changed = false;
   function visit(item, depth) {
@@ -50,4 +77,4 @@ function summary(row, kind, owns, ownerName) {
   return { id: row.id, projectId: row.project_id, kind, operation: safeText(row.operation || row.job_type) || 'Recorded operation', status: ['queued', 'running', 'completed', 'failed', 'canceled'].includes(row.status) ? row.status : kind === 'provenance' ? 'recorded' : 'completed', createdAt: timestamp(row.created_at), startedAt: timestamp(row.started_at), completedAt: timestamp(row.completed_at), owner: { id: String(row.owner_user_id ?? row.created_by_user_id), displayName: safeText(ownerName) || 'Project researcher' }, detailAvailable: owns };
 }
 
-module.exports = { LIMITS, HEX, ID, digest, parse, timestamp, safeText, safeId, boundedJSON, sourceRecord, reference, jobKind, summary };
+module.exports = { LIMITS, HEX, ID, digest, parse, timestamp, safeText, safeId, boundedJSON, sourceRecord, reference, jobKind, summary, observedRuntimeMetadata };

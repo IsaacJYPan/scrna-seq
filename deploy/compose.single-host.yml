@@ -45,6 +45,7 @@ x-db-runtime-environment: &db-runtime-environment
   PGDATABASE: ${POSTGRES_DB:?Set POSTGRES_DB}
   DATABASE_SCHEMA_MANAGED_EXTERNALLY: "true"
   APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:?Set APP_DEPLOYMENT_MODE to private, byoc, or shared-private}
+  EXECUTION_SERVICE_LABEL: ${EXECUTION_SERVICE_LABEL:-Analysis server}
 
 x-db-admin-environment: &db-admin-environment
   PGHOST: 127.0.0.1

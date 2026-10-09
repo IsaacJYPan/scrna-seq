@@ -3,6 +3,7 @@
 const projection = require('./executionHistoryProjection');
 const { LIMITS, HEX, ID, parse, timestamp, safeText, safeId, boundedJSON, sourceRecord, reference, jobKind, summary } = projection;
 const storage = require('./storage');
+const executionTargets = require('./executionTargets');
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const KINDS = new Set(['all', 'guided', 'workflow', 'expert-r', 'live-r', 'r-console', 'provenance']);
 function historyError(code, message, status = 400) { return Object.assign(new Error(message), { code, status }); }
@@ -58,8 +59,9 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
     if (provenance.rows[0]) return { kind: 'provenance', row: provenance.rows[0] };
     throw missing();
   }
-  async function environmentEvidence(metadata, issues) {
-    const value = metadata.find(item => item.environment)?.environment;
+  async function environmentEvidence(metadata, issues, provenance = null, parameters = {}) {
+    const evidenceMetadata = [...metadata, parameters];
+    const value = evidenceMetadata.find(item => item.environment)?.environment;
     if (value) {
       try {
         const validated = require('./rEnvironment').validateEnvironmentReference(value);
@@ -68,9 +70,19 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
         return { precision: 'pinned-reference', reference: validated, manifestReference, manifestAvailable: Boolean(manifestReference), observed: null, note: 'Pinned container userspace environment; inspect its retained manifest to verify exact bytes. Host kernel and hardware are outside this snapshot.' };
       } catch { addGap(issues, 'environment-inconsistent', 'The retained environment reference is unavailable or inconsistent.'); }
     }
-    const image = metadata.find(item => HEX.test(String(item.sandboxImageDigest || '').replace(/^sha256:/, '')));
-    const profileId = metadata.map(item => item.packageProfileId || item.profileId).find(value => safeId(value));
+    const image = evidenceMetadata.find(item => HEX.test(String(item.sandboxImageDigest || '').replace(/^sha256:/, '')));
+    const profileId = evidenceMetadata.map(item => item.packageProfileId || item.profileId).find(value => safeId(value));
     addGap(issues, 'environment-not-pinned', 'An exact R/package/system environment manifest was not retained for this execution.');
+    const observed = projection.observedRuntimeMetadata(metadata);
+    if (observed) return { precision: 'observed-metadata', reference: null, manifestAvailable: false, observed,
+      note: 'Runtime versions were returned during this worker run. They are bounded observations, not an exact restorable environment snapshot.' };
+    if (provenance && typeof provenance.language_version === 'string' && /^\d+\.\d+\.\d+$/.test(provenance.language_version)) {
+      const packages = parse(provenance.packages, []);
+      return { precision: 'declared-metadata', reference: null, manifestAvailable: false,
+        observed: { rVersion: provenance.language_version, packages: Array.isArray(packages) ? packages.slice(0, 100)
+          .filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9.]{0,79}$/.test(name)).map(name => ({ name, version: null })) : [] },
+        note: 'Versions and package names were supplied through provenance metadata. They do not verify the worker environment.' };
+    }
     return { precision: image ? 'recorded-image' : profileId ? 'declared-profile' : 'unavailable', reference: null, manifestAvailable: false, observed: { profileId: profileId || null, imageDigest: image ? image.sandboxImageDigest : null }, note: 'Recorded profiles or image identifiers alone do not provide a complete environment manifest.' };
   }
   function output(row, projectId) {
@@ -126,7 +138,10 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
       if(!outputs.length)addGap(issues,'console-previews-not-artifacts','Bounded console previews are retained in the private command journal. No artifact versions have been explicitly published from this command.');
       if(saved.length>LIMITS.outputs)addGap(issues,'output-inspection-bounded','Only the first 64 explicitly saved output versions are included.');
       if(row.status==='unknown')addGap(issues,'completion-unknown','The runtime connection ended without a confirmed terminal result. This command is not rerun automatically.');
-      detail={...summary({...row,operation:'Free R console command'},'r-console',true,ownerName),status:row.status,...(consoleOutcome(row)?{outcome:consoleOutcome(row)}:{}),origin:'server-private-r-console',source:{...sourceRecord(row.source_code,row.source_sha256),versionId:row.id},inputs,parameters:{precision:'source-defined',values:{},seed:null},environment,target:{...row.target_json,precision:'recorded-service-generation'},timestamps:{createdAt:timestamp(row.created_at),recordedAt:timestamp(row.created_at),startedAt:timestamp(row.started_at),completedAt:timestamp(row.completed_at)},outputs,kernel:{available:true,id:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),restartedFromKernelId:row.restarted_from_kernel_id||null,scope:'Creator-private persistent R kernel; command order is local to this generation.'}};
+      let target;
+      try { target={...executionTargets.validatePrivateKernelTarget(row.target_json),precision:'recorded-service-generation'}; }
+      catch { target={kind:'unknown',id:null,precision:'unavailable'};addGap(issues,'physical-target-not-recorded','The private kernel execution target was not retained or is inconsistent. Current connection settings are not substituted.'); }
+      detail={...summary({...row,operation:'Free R console command'},'r-console',true,ownerName),status:row.status,...(consoleOutcome(row)?{outcome:consoleOutcome(row)}:{}),origin:'server-private-r-console',source:{...sourceRecord(row.source_code,row.source_sha256),versionId:row.id},inputs,parameters:{precision:'source-defined',values:{},seed:null},environment,target,timestamps:{createdAt:timestamp(row.created_at),recordedAt:timestamp(row.created_at),startedAt:timestamp(row.started_at),completedAt:timestamp(row.completed_at)},outputs,kernel:{available:true,id:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),restartedFromKernelId:row.restarted_from_kernel_id||null,scope:'Creator-private persistent R kernel; command order is local to this generation.'}};
     } else if (origin !== 'job') {
       const journal = origin === 'live-r'; const data = journal ? parse(row.record_json) : {};
       const parameters = boundedJSON(journal ? data.parameters : parse(row.parameters));
@@ -137,16 +152,25 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
       addGap(issues, 'environment-not-pinned', 'Observed R/package metadata is not a restorable OS/runtime snapshot.');
       if (!journal) addGap(issues, 'imported-provenance', 'This provenance was supplied through the project metadata API; it is not a server-verified execution journal.');
       const kernel = journal && HEX.test(row.kernel_generation) && Number.isSafeInteger(Number(row.kernel_order)) && Number(row.kernel_order) > 0 ? { available: true, generation: row.kernel_generation, order: Number(row.kernel_order), resultLiveRevision: row.live_revision == null ? null : Number(row.live_revision), scope: 'Guided interactive R process; order is global within that process.' } : { available: false, reason: 'Kernel generation and execution order were not retained.' };
-      detail = { ...summary(row, origin, true, ownerName), origin: journal ? 'server-live-r' : 'imported-provenance', source, inputs: [identityInput(row.analysis_object_id, 'Live analysis object', 'Live memory identity; consumed bytes unavailable')], parameters: { precision: journal ? 'recorded-resolved' : 'imported-declared', values: parameters.value, seed: null }, environment: { precision: 'observed-metadata', reference: null, manifestAvailable: false, observed: { rVersion: safeText(environmentData?.rVersion), packages }, note: 'Package names without versions are marked unknown.' }, target: { kind: journal ? 'service' : 'unknown', id: journal ? 'interactive-r' : null, precision: journal ? 'service-process' : 'unavailable' }, timestamps: { createdAt: timestamp(row.created_at), recordedAt: timestamp(journal ? data.timestamp : row.timestamp), startedAt: null, completedAt: null }, outputs: [], kernel };
+      let target={kind:'unknown',id:null,precision:'unavailable'};
+      if(journal) {
+        try { target=executionTargets.validateExecutionTarget(data.target); }
+        catch {
+          if(data.target?.kind==='service'&&data.target.id==='interactive-r'&&data.target.precision==='service-process')target={kind:'service',id:'interactive-r',precision:'service-process'};
+          addGap(issues,'physical-target-not-recorded','The installation/executor identity was not retained for this interactive execution. Current connection settings are not substituted.');
+        }
+      }
+      detail = { ...summary(row, origin, true, ownerName), origin: journal ? 'server-live-r' : 'imported-provenance', source, inputs: [identityInput(row.analysis_object_id, 'Live analysis object', 'Live memory identity; consumed bytes unavailable')], parameters: { precision: journal ? 'recorded-resolved' : 'imported-declared', values: parameters.value, seed: null }, environment: { precision: 'observed-metadata', reference: null, manifestAvailable: false, observed: { rVersion: safeText(environmentData?.rVersion), packages }, note: 'Package names without versions are marked unknown.' }, target, timestamps: { createdAt: timestamp(row.created_at), recordedAt:timestamp(journal ? data.timestamp : row.timestamp), startedAt: null, completedAt: null }, outputs: [], kernel };
       if (parameters.redacted) addGap(issues, 'parameters-redacted', 'Private or oversized parameter details were omitted.');
       addGap(issues, 'outputs-not-published', 'This record does not retain independently inspectable output artifact versions.');
     } else {
-      const [links, artifactRows, provenanceRows, workflowRows, sourceRows] = await Promise.all([
+      const [links, artifactRows, provenanceRows, workflowRows, sourceRows, receiptRows] = await Promise.all([
         db.query('SELECT * FROM workflow_runs WHERE job_id=$1', [row.id]),
         db.query('SELECT * FROM job_artifacts WHERE job_id=$1 AND project_id=$2 AND created_by_user_id=$3 ORDER BY created_at,id LIMIT $4', [row.id, projectId, userId, LIMITS.outputs + 1]),
         db.query('SELECT * FROM provenance WHERE job_id=$1 AND project_id=$2 AND created_by_user_id=$3 ORDER BY created_at,id LIMIT $4', [row.id, projectId, userId, LIMITS.provenance + 1]),
         db.query('SELECT id,descriptor_json FROM workflow_artifacts WHERE job_id=$1 AND project_id=$2 AND owner_user_id=$3 ORDER BY created_at,id LIMIT $4', [row.id, projectId, userId, LIMITS.outputs + 1]),
         db.query('SELECT id,language,source_code,source_sha256,created_at FROM execution_source_versions WHERE job_id=$1 AND project_id=$2 AND owner_user_id=$3', [row.id, projectId, userId]),
+        db.query('SELECT dispatch_id,attempt,operation,dispatch_at,target_json,environment_json FROM job_execution_receipts WHERE job_id=$1 AND project_id=$2 AND owner_user_id=$3 ORDER BY dispatch_order DESC LIMIT $4', [row.id, projectId, userId, 33]),
       ]);
       const link = links.rows[0]; const kind = jobKind(row, link, true);
       const artifacts = artifactRows.rows.slice(0, LIMITS.outputs); const metadata = artifacts.map(item => parse(item.metadata_json));
@@ -180,9 +204,26 @@ function createExecutionHistoryService(db, provider = storage.createLocalStorage
         if (params.scriptSha256 && params.scriptSha256 !== retainedSource.source_sha256) { exact.code = null; exact.precision = 'inconsistent'; exact.note = 'The private source version does not match the job’s recorded source checksum.'; }
         source = exact;
       }
-      const environment = await environmentEvidence([...metadata, params], issues);
-      addGap(issues, 'physical-target-not-recorded', 'The installation/worker target identity was not retained; this view identifies only the project service.');
-      detail = { ...summary(row, kind, true, ownerName), origin: 'durable-job', source, inputs, parameters, environment, target: { kind: 'service', id: 'project-service', precision: 'service-only', note: 'The physical worker and local/remote target identity were not retained in legacy jobs.' }, timestamps: { createdAt: timestamp(row.created_at), recordedAt: null, startedAt: timestamp(row.started_at), completedAt: timestamp(row.completed_at || row.canceled_at) }, outputs: outputs.slice(0, LIMITS.outputs), kernel: { available: false, reason: 'One-shot legacy jobs do not retain a persistent kernel generation or command order.' }, retryOf: safeId(row.retry_of_job_id) };
+      let environment = await environmentEvidence(metadata, issues, provenance, params);
+      const executionAttempts = [];
+      for (const receipt of receiptRows.rows.slice(0, 32)) {
+        try { executionAttempts.push(executionTargets.rowToExecutionReceipt(receipt)); }
+        catch { addGap(issues, 'execution-target-inconsistent', 'A retained execution target receipt is inconsistent and cannot be presented as verified evidence.'); }
+      }
+      const latestReceipt = executionAttempts.find(receipt => receipt.dispatchId === receiptRows.rows[0]?.dispatch_id);
+      if (!latestReceipt) addGap(issues, 'physical-target-not-recorded', 'The installation/worker target identity was not retained for this execution. Current connection settings are not substituted.');
+      if (receiptRows.rows.length > 32) addGap(issues, 'execution-attempt-inspection-bounded', 'Only the latest 32 execution dispatch receipts are included.');
+      if (latestReceipt?.environment.precision === 'pinned-request' && !environment.manifestAvailable) {
+        environment = { precision: 'pinned-request', reference: latestReceipt.environment.reference,
+          manifestAvailable: false, manifestReference: null, observed: null,
+          note: 'This exact environment was requested before dispatch. A verified result environment manifest was not retained.' };
+        addGap(issues, 'environment-request-not-verified', 'A pinned request records the expected environment; it does not prove that execution completed in that environment.');
+      }
+      detail = { ...summary(row, kind, true, ownerName), origin: 'durable-job', source, inputs, parameters, environment,
+        target: latestReceipt ? { ...latestReceipt.target, note: 'Retained service and executor identity at dispatch. The runtime generation is an authenticated admission observation before dispatch. It does not identify a physical host or prove which R process completed the request.' }
+          : { kind: 'unknown', id: null, precision: 'unavailable', note: 'An execution target was not retained. Current connection settings do not identify this historical execution.' },
+        executionAttempts: executionAttempts.reverse(),
+        timestamps: { createdAt: timestamp(row.created_at), recordedAt: latestReceipt?.dispatchAt || null, startedAt: timestamp(row.started_at), completedAt: timestamp(row.completed_at || row.canceled_at) }, outputs: outputs.slice(0, LIMITS.outputs), kernel: { available: false, reason: 'One-shot jobs do not retain a persistent kernel generation or command order.' }, retryOf: safeId(row.retry_of_job_id) };
       if (outputs.length > LIMITS.outputs || artifactRows.rows.length > LIMITS.outputs || workflowRows.rows.length > LIMITS.outputs) addGap(issues, 'output-inspection-bounded', 'Only the first 64 output descriptors are included in this bounded view.');
       if (provenanceRows.rows.length > 1) addGap(issues, 'multiple-provenance-records', 'Several provenance records exist; retained source is from the first chronological owner record.');
       if (kind === 'guided' && source.code) addGap(issues, 'source-provenance-unverified', 'Retained provenance source is user-supplied metadata; the exact platform implementation revision was not recorded.');
