@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
+import DetailsPopover from './DetailsPopover';
 
 const R_STATUS = {
-  ready: 'R available',
-  'not-configured': 'R setup required',
-  unreachable: 'R unavailable',
-  incompatible: 'R update required',
-  'access-required': 'R access required',
-  'access-revoked': 'R access revoked',
+  ready: 'Custom R available',
+  'not-configured': 'Custom R setup required',
+  unreachable: 'Custom R unavailable',
+  incompatible: 'Custom R update required',
+  'access-required': 'Custom R access required',
+  'access-revoked': 'Custom R access revoked',
   'demo-disabled': 'Guided demo',
 };
 
@@ -26,7 +27,7 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {} }) {
       setTarget(value);
     }) : null;
     shell.getCurrentTarget().then(value => {
-      if (active && !receivedStatus && value?.status === 'connected') {
+      if (active && !receivedStatus && value && typeof value === 'object') {
         targetId = value.id || null;
         setTarget(value);
       }
@@ -38,20 +39,26 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {} }) {
 
   const endpoint = target?.endpoint || window.location.origin;
   const runtime = R_STATUS[deploymentPolicy.expertRStatus?.state]
-    || (deploymentPolicy.demoMode ? 'Guided demo' : deploymentPolicy.expertREnabled ? 'R available' : 'R status unavailable');
-  return <div aria-label="Execution target" className="shrink-0 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-border bg-surface px-4 py-2 text-xs text-text">
-    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-      <span className="font-medium">Server: {target?.name || endpoint}</span>
-      {target && <span className="max-w-full truncate text-textMuted" title={endpoint}>{endpoint}</span>}
-      <span className="text-textMuted" title="Availability of custom R on this server">{runtime}</span>
-      {target?.sshTunnel && <span role="status" className={target.sshTunnel.state === 'connected' ? 'text-textMuted' : 'text-amber-300'}>
-        {target.sshTunnel.state === 'connected' ? 'SSH tunnel connected' : 'SSH tunnel disconnected · reconnect through server settings'}
+    || (deploymentPolicy.demoMode ? 'Guided demo' : deploymentPolicy.expertREnabled ? 'Custom R available' : 'Custom R status unavailable');
+  const disconnected = target?.sshTunnel?.state && target.sshTunnel.state !== 'connected';
+  return <div aria-label="Execution target" className="shrink-0 h-12 flex items-center justify-between gap-3 border-b border-border bg-surface px-4 text-xs text-text">
+    <div className="min-w-0 flex-1">
+      <span className="block truncate text-textMuted" title="Availability of custom R on this server">{runtime}</span>
+      {target?.sshTunnel && <span role="status" className={`block truncate ${disconnected ? 'text-amber-800 dark:text-amber-200' : 'text-textMuted'}`}>
+        {disconnected ? 'SSH tunnel disconnected' : 'SSH tunnel connected'}
       </span>}
-      {error && <span role="status">{error}</span>}
+      {error && <span role="status" className="block truncate" title={error}>Connection needs attention</span>}
     </div>
-    {typeof shell?.openTargetSettings === 'function' && <button type="button" className="shrink-0 font-medium underline" onClick={() => {
+    <DetailsPopover label="Connection details" className="shrink-0">
+      <p className="font-medium break-words">Server: {target?.name || endpoint}</p>
+      {target && <p className="mt-1 break-all text-textMuted">{endpoint}</p>}
+      <p className="mt-3">{runtime}. This describes custom R access; standard analysis tools have their own prerequisites.</p>
+      {disconnected && <p className="mt-3 text-amber-800 dark:text-amber-200">SSH tunnel disconnected. Reconnect through server settings.</p>}
+      {error && <p role="alert" className="mt-3">{error}</p>}
+      {typeof shell?.openTargetSettings === 'function' && <button type="button" className="btn btn-secondary mt-3" onClick={() => {
       setError('');
       shell.openTargetSettings().catch(() => setError('Server settings could not be opened. Try the desktop connection menu.'));
-    }}>Change server</button>}
+      }}>Change server</button>}
+    </DetailsPopover>
   </div>;
 }

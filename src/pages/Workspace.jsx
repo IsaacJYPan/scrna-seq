@@ -1845,7 +1845,7 @@ export default function Workspace({
       {/* Header */}
       <div className="px-4 pt-5 pb-4 flex justify-between items-end border-b border-border bg-slate-800/10 sm:px-8 sm:pt-6">
         <div className="min-w-0">
-          <h2 className="text-xl font-black text-text tracking-tight flex min-w-0 items-center gap-2 sm:text-2xl sm:tracking-tighter sm:gap-3">
+          <h2 className="page-title min-w-0">
             <span className="truncate">{currentWs.name}</span>
             {currentWs.type === 'personal'
               ? <Lock size={16} className="text-slate-400" />
@@ -1854,8 +1854,8 @@ export default function Workspace({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-8">
-        <div className="max-w-5xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-6">
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
+        <div className="max-w-5xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-6">
           <WorkbenchOverview
             activeProject={activeProject}
             selectedObject={selectedObject}
@@ -1890,7 +1890,7 @@ export default function Workspace({
                   { label: 'Density',            value: Number.isFinite(displayObject.density) ? `${displayObject.density}%` : 'Unavailable', info: 'Percentage of non-zero entries in the sparse matrix. This value is unavailable when it was not recorded with an older saved version.', icon: ScatterChart },
                   { label: 'Branch',             value: currentWs.activeBranch.toUpperCase(),                 info: 'Current analytical provenance branch.', icon: FolderTree },
                 ].map((stat, i) => (
-                  <div key={i} className="card min-w-0 p-3 sm:p-6 bg-surface/50 border-border/50 relative flex flex-col justify-center items-center min-h-[130px]">
+                  <div key={i} className="card min-w-0 p-3 sm:p-4 bg-surface/50 border-border/50 relative flex flex-col justify-center items-center">
                     <div className="absolute top-2 right-2">
                       <div className="group/info relative">
                         <Info size={12} className="text-slate-400 cursor-help" />
@@ -1899,7 +1899,7 @@ export default function Workspace({
                         </div>
                       </div>
                     </div>
-                    <stat.icon size={24} className="text-slate-500/50 mb-2" />
+                    <stat.icon size={18} className="text-textMuted mb-1" />
                     <div className="text-xl sm:text-2xl font-black text-text mb-1 tracking-tighter text-center break-all">{stat.value}</div>
                     <div className="text-[10px] font-bold text-text uppercase tracking-widest text-center">{stat.label}</div>
                   </div>
@@ -1993,7 +1993,7 @@ export default function Workspace({
           </div>
 
           {/* Objects List */}
-          <div className="pt-6">
+          <div className="pt-2">
             <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
               <h3 className="text-lg font-bold text-text flex items-center gap-3">
                 Saved analyses{' '}
@@ -2001,14 +2001,14 @@ export default function Workspace({
                   {activeProjectObjects.length}
                 </span>
               </h3>
-              <button
+              {activeProjectObjects.length > 0 && <button
                 onClick={() => setShowLoadModal(true)}
                 disabled={!!loadingId || !activeProjectId || !canWriteProject}
                 title={!canWriteProject && activeProjectId ? 'Your project role is read-only.' : undefined}
                 className="btn btn-primary flex items-center gap-2 px-5 text-sm shadow-lg shadow-primary/20"
               >
                 <FileUp size={16} /> Add analysis
-              </button>
+              </button>}
             </div>
 
             <div className="grid grid-cols-1 gap-3">

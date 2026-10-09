@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Clock3, GitBranch, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Clock3, GitBranch, Loader2, Maximize2, RefreshCw, ShieldCheck } from 'lucide-react';
 import {
   Background, Controls, MiniMap, Position, ReactFlow, Handle,
   useEdgesState, useNodesState,
@@ -7,6 +7,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
 import { formatAnalysisObjectDisplayName } from '../backendWorkspaceModel';
+import PageHeader from '../components/PageHeader';
 
 const NODE_WIDTH = 250;
 const NODE_HEIGHT = 92;
@@ -113,7 +114,7 @@ function LineageNode({ data }) {
           <p className="truncate text-sm font-bold text-text">{data.label}</p>
         </div>
       </div>
-      <div className="mt-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-textMuted">
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold uppercase tracking-wide text-textMuted">
         <span>Saved analysis</span>
         <span className="normal-case tracking-normal" title={`Recorded analysis ID: ${data.id}`}>
           {data.recordedDate || `ID …${String(data.id).slice(-6)}`}
@@ -196,6 +197,46 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const requestRef = useRef(0);
+  const canvasRef = useRef(null);
+  const manualViewportRef = useRef(false);
+  const [flow, setFlow] = useState(null);
+  const [showMinimap, setShowMinimap] = useState(false);
+  const fitGraph = useCallback(() => {
+    manualViewportRef.current = false;
+    flow?.fitView({ padding: 0.18, maxZoom: 1, duration: 0 });
+  }, [flow]);
+
+  useEffect(() => {
+    manualViewportRef.current = false;
+  }, [projectId, objectId]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !flow || typeof ResizeObserver === 'undefined') return;
+    let frame;
+    let previousSize;
+    const observer = new ResizeObserver(entries => {
+      const { width, height } = entries[0].contentRect;
+      if (width < 1 || height < 1) return;
+      setShowMinimap(width >= 700 && height >= 440);
+      if (previousSize && Math.abs(width - previousSize.width) < 2 && Math.abs(height - previousSize.height) < 2) return;
+      previousSize = { width, height };
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (!manualViewportRef.current) flow.fitView({ padding: 0.18, maxZoom: 1, duration: 0 });
+      });
+    });
+    observer.observe(canvas);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [flow]);
+
+  // Selection, theme changes and collaborator refreshes preserve deliberate pan
+  // and zoom. New graph content is fitted only while automatic fitting is active.
+  useEffect(() => {
+    if (!flow || manualViewportRef.current || nodes.length === 0) return;
+    const frame = requestAnimationFrame(() => flow.fitView({ padding: 0.18, maxZoom: 1, duration: 0 }));
+    return () => cancelAnimationFrame(frame);
+  }, [flow, graph, nodes.length]);
 
   const loadLineage = useCallback(async () => {
     const requestId = ++requestRef.current;
@@ -286,7 +327,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
         type: 'smoothstep',
         animated: false,
         label: describeRelationship(edge).label,
-        labelStyle: { fill: theme === 'dark' ? '#e2e8f0' : '#0f172a', fontSize: 10, fontWeight: 700 },
+        labelStyle: { fill: theme === 'dark' ? '#e2e8f0' : '#0f172a', fontSize: 12, fontWeight: 600 },
         labelBgStyle: { fill: theme === 'dark' ? '#0f172a' : '#f8fafc', fillOpacity: 0.88 },
         style: { stroke: '#3b82f6', strokeWidth: 2 },
       }));
@@ -323,20 +364,16 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <header className="flex shrink-0 flex-wrap items-start justify-between gap-4 border-b border-border bg-surface/60 px-6 py-5">
-        <div>
-          <h2 className="flex items-center gap-2 text-2xl font-black tracking-tight text-text"><GitBranch size={24} className="text-primary" /> Lineage</h2>
-          <p className="mt-1 max-w-3xl text-sm text-textMuted">Recorded relationships for the selected saved analysis. This view is read-only.</p>
-          <p className="mt-2 flex items-center gap-1.5 text-xs text-textMuted" aria-live="polite">
-            <Clock3 size={13} aria-hidden="true" />
-            {isFreshForSelection ? 'Current view loaded. Refresh to check for collaborator changes.' : 'Refresh to check for collaborator changes.'}
-          </p>
-        </div>
-        <button onClick={loadLineage} disabled={loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
-          {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-          Refresh
-        </button>
-      </header>
+      <PageHeader title="Lineage" icon={GitBranch} className="shrink-0 border-b border-border bg-surface/60 px-4 py-5 sm:px-6"
+        description="Recorded relationships for the selected saved analysis. This view is read-only."
+        actions={<button onClick={loadLineage} disabled={loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+          {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} Refresh
+        </button>}>
+        <p className="flex items-center gap-1.5 text-xs text-textMuted" aria-live="polite">
+          <Clock3 size={13} aria-hidden="true" />
+          {isFreshForSelection ? 'Current view loaded. Refresh to check for collaborator changes.' : 'Refresh to check for collaborator changes.'}
+        </p>
+      </PageHeader>
 
       {failed ? (
         <div className="m-6 flex max-w-2xl items-start gap-3 rounded-xl border border-danger/30 bg-danger/10 p-4 text-danger">
@@ -346,15 +383,15 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
       ) : loading && !graph ? (
         <div className="flex flex-1 items-center justify-center"><Loader2 size={34} className="animate-spin text-primary" aria-label="Loading lineage" /></div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:overflow-hidden">
           {graph?.truncated && (
             <div className="mx-6 mt-5 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-amber-900 dark:text-amber-100" role="status">
               <AlertTriangle size={20} className="mt-0.5 shrink-0" />
               <div><p className="font-bold">Lineage view is bounded</p><p className="mt-1 text-sm">This graph reached its safe display limit. It may not include every recorded relationship.</p></div>
             </div>
           )}
-          <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12">
-          <section className="relative min-h-[340px] border-b border-border bg-slate-100 dark:bg-slate-950/40 lg:col-span-8 lg:border-b-0 lg:border-r">
+          <div className="grid grid-cols-1 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
+          <section ref={canvasRef} aria-label="Recorded lineage graph" className="relative h-[440px] min-h-[440px] border-b border-border bg-slate-100 dark:bg-slate-950/40 lg:col-span-8 lg:h-full lg:min-h-[360px] lg:border-b-0 lg:border-r">
             {graphNodes.length === 0 ? (
               <div className="flex h-full min-h-[340px] items-center justify-center p-8 text-center">
                 <div><GitBranch size={38} className="mx-auto text-textMuted" aria-hidden="true" /><p className="mt-3 font-bold text-text">This is a root analysis</p><p className="mt-1 text-sm text-textMuted">No parent or child relationships have been recorded yet.</p></div>
@@ -362,15 +399,19 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
             ) : (
               <ReactFlow
                 nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
-                onNodeClick={onNodeClick} nodeTypes={nodeTypes} fitView proOptions={{ hideAttribution: true }}
+                onNodeClick={onNodeClick} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
+                onInit={setFlow} onMoveStart={(event) => { if (event) manualViewportRef.current = true; }}
+                nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false}
+                proOptions={{ hideAttribution: true }}
               >
                 <Background color={theme === 'dark' ? '#334155' : '#d8e0ea'} gap={16} />
-                <Controls className="border border-border bg-surface fill-slate-400" />
-                <MiniMap nodeColor="#3b82f6" maskColor="rgba(15, 23, 42, 0.7)" className="border border-border bg-surface" />
+                <Controls showFitView={false} showInteractive={false} onZoomIn={() => { manualViewportRef.current = true; }} onZoomOut={() => { manualViewportRef.current = true; }} className="border border-border bg-surface fill-slate-400" />
+                {showMinimap && <MiniMap nodeColor="#3b82f6" maskColor="rgba(15, 23, 42, 0.7)" style={{ width: 124, height: 80 }} className="border border-border bg-surface" />}
               </ReactFlow>
             )}
+            {graphNodes.length > 0 && <button type="button" onClick={fitGraph} className="absolute right-3 top-3 z-10 flex min-h-11 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm font-semibold text-text shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"><Maximize2 size={16} aria-hidden="true" />Fit graph to view</button>}
           </section>
-          <aside className="min-h-0 overflow-y-auto bg-surface p-6 custom-scrollbar lg:col-span-4">
+          <aside className="min-h-0 bg-surface p-4 custom-scrollbar sm:p-6 lg:col-span-4 lg:overflow-y-auto">
             {selectedNode ? (
               <div className="space-y-5">
                 <div>

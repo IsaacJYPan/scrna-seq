@@ -229,7 +229,7 @@ describe('Sidebar component', () => {
     fireEvent.click(screen.getByRole('button', { name: /Collapse sidebar/i }));
 
     const expandButton = screen.getByRole('button', { name: /Expand sidebar/i });
-    expect(expandButton).toHaveClass('w-12');
+    expect(expandButton).toHaveClass('w-11');
     expect(expandButton).not.toHaveClass('absolute');
 
     fireEvent.click(expandButton);
@@ -359,4 +359,40 @@ describe('Sidebar component', () => {
       });
     }
   });
+  it('lets groups collapse while retaining the active destination when it changes', () => {
+    const view = render(<Sidebar {...baseProps} activeTab="workspace" selectedObjects={[{ id: 'ao_1' }]} />);
+    const explore = screen.getByRole('button', { name: 'Explore', exact: true });
+    fireEvent.click(explore);
+    expect(explore).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: 'Heatmap' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Analysis workspace/ })).toBeInTheDocument();
+    view.rerender(<Sidebar {...baseProps} activeTab="heatmap" selectedObjects={[{ id: 'ao_1' }]} />);
+    expect(explore).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'Heatmap' })).toHaveAttribute('aria-current', 'page');
+    fireEvent.click(explore);
+    expect(explore).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps phone account, theme and logout reachable in the navigation drawer', () => {
+    const previousWidth = window.innerWidth;
+    window.innerWidth = 390;
+    const setTheme = vi.fn();
+    const onLogout = vi.fn();
+    const setActiveTab = vi.fn();
+    try {
+      render(<div><Sidebar {...baseProps} activeTab="workspace" user={{ email: 'owner@example.org' }} setTheme={setTheme} onLogout={onLogout} setActiveTab={setActiveTab} /><main>Page</main></div>);
+      expect(screen.queryByRole('button', { name: 'Account security' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Expand sidebar' }));
+      expect(screen.getByRole('dialog', { name: 'Workspace navigation' })).toHaveAttribute('aria-modal', 'true');
+      fireEvent.click(screen.getByRole('button', { name: 'Switch to light mode' }));
+      expect(setTheme).toHaveBeenCalledWith('light');
+      fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
+      expect(onLogout).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByRole('button', { name: 'Account security' }));
+      expect(setActiveTab).toHaveBeenCalledWith('account');
+      expect(screen.getByRole('main').inert).not.toBe(true);
+      expect(screen.getByRole('button', { name: 'Expand sidebar' })).toHaveFocus();
+    } finally { window.innerWidth = previousWidth; }
+  });
+
 });

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import PageHeader from '../components/PageHeader';
 import {
   ImageIcon, Trash2, Filter, Check, X,
   BookImage, Loader2, LayoutGrid, Rows3, RefreshCw
@@ -194,22 +195,13 @@ export default function Publication({ userEmail, isActive = true }) {
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-hidden">
       {/* Header */}
-      <div className="px-8 pt-6 pb-4 border-b border-border flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <BookImage size={24} className="text-primary" />
-          <div>
-            <h2 className="text-2xl font-bold text-text tracking-tight">Figure Gallery</h2>
-            <p className="text-textMuted text-sm">
-              {figures.length} figure{figures.length !== 1 ? 's' : ''} saved. Figures remain in this private gallery.
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader title="Figure Gallery" icon={BookImage} description={<>{figures.length} figure{figures.length !== 1 ? 's' : ''} saved. Figures remain in this private gallery.</>} className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" actions={<>
           {/* Refresh */}
           <button
             onClick={loadFigures}
             disabled={loading}
-            className="p-2 text-textMuted hover:text-primary border border-border hover:border-primary/50 rounded-lg transition-colors"
+            className="btn btn-secondary"
+            aria-label="Refresh gallery"
             title="Refresh gallery"
           >
             <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
@@ -218,24 +210,25 @@ export default function Publication({ userEmail, isActive = true }) {
           <div className="flex bg-surface border border-border rounded-lg p-0.5">
             <button
               onClick={() => setViewMode('grid')}
-              className={`p-1.5 rounded transition-colors ${viewMode === 'grid' ? 'bg-primary text-white' : 'text-textMuted hover:text-text'}`}
+              className={`min-h-10 min-w-10 rounded transition-colors ${viewMode === 'grid' ? 'bg-primary text-white' : 'text-textMuted hover:text-text'}`}
+              aria-label="Grid view" aria-pressed={viewMode === 'grid'}
               title="Grid view"
             >
               <LayoutGrid size={16} />
             </button>
             <button
               onClick={() => setViewMode('list')}
-              className={`p-1.5 rounded transition-colors ${viewMode === 'list' ? 'bg-primary text-white' : 'text-textMuted hover:text-text'}`}
+              className={`min-h-10 min-w-10 rounded transition-colors ${viewMode === 'list' ? 'bg-primary text-white' : 'text-textMuted hover:text-text'}`}
+              aria-label="List view" aria-pressed={viewMode === 'list'}
               title="List view"
             >
               <Rows3 size={16} />
             </button>
           </div>
-        </div>
-      </div>
+        </>} />
 
       {/* Filter bar */}
-      <div className="px-8 py-3 border-b border-border/50 flex items-center gap-2 flex-wrap shrink-0 bg-surface/40">
+      <div className="px-4 sm:px-8 py-3 border-b border-border/50 flex items-center gap-2 flex-wrap shrink-0 bg-surface/40">
         <Filter size={14} className="text-textMuted" />
         <span className="text-xs text-textMuted mr-1">Filter:</span>
         {['All', ...ALL_TYPES].map(type => (

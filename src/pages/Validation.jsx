@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Database, Table, Info, CheckCircle, Activity, Clipboard as ClipboardList, RefreshCw, AlertTriangle } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 export default function Validation({ callApi, datasetInfo, currentWs: _currentWs }) {
   const [loading, setLoading] = useState(false);
@@ -46,20 +47,14 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
 
   return (
     <div className="h-full w-full flex flex-col bg-background p-4 sm:p-6 lg:p-8 overflow-y-auto custom-scrollbar">
-      <div className="shrink-0 flex flex-col sm:flex-row sm:justify-between items-start sm:items-center gap-4 mb-8 border-b border-border pb-6">
-        <div className="min-w-0">
-           <h2 className="text-3xl font-black text-white mb-2 tracking-tighter">Validation</h2>
-           <p className="text-slate-400 text-lg">Review key measurements from the selected analysis.</p>
-        </div>
-        <button 
+      <PageHeader title="Validation" description="Review key measurements from the selected analysis." className="mb-6 border-b border-border pb-5" actions={<button
           onClick={performSanityCheck}
           disabled={loading}
-          className="btn btn-primary w-full sm:w-auto shrink-0 whitespace-nowrap px-4 sm:px-8 py-3 sm:py-4 font-bold flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95"
+          className="btn btn-primary shrink-0 whitespace-nowrap"
         >
-          {loading ? <RefreshCw className="animate-spin" size={22} /> : <ClipboardList size={22} />}
+          {loading ? <RefreshCw className="animate-spin" size={18} /> : <ClipboardList size={18} />}
           {loading ? (metrics ? 'Refreshing Metrics…' : 'Validating…') : (metrics ? 'Refresh Metrics' : 'Run Validation')}
-        </button>
-      </div>
+        </button>} />
 
       {error && (
         <div role="alert" className="shrink-0 rounded-xl border p-4 mb-6 bg-danger/10 border-danger text-danger flex items-start gap-3">
@@ -165,8 +160,8 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
         </div>
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center  select-none pointer-events-none">
-           <ClipboardList size={128} className="mb-8" />
-            <p className="text-2xl font-black text-slate-300 tracking-tighter">Click "Run Validation" to inspect this analysis</p>
+           <ClipboardList size={48} className="mb-4 text-textMuted" />
+            <p className="text-base font-medium text-textMuted text-center">Run validation to inspect measurements and preprocessing progress.</p>
         </div>
       )}
     </div>

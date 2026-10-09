@@ -4,6 +4,7 @@ import Plot from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 // Shared dark-themed hover template style
 const hoverStyle = {
@@ -351,15 +352,10 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
   return (
     <div className="h-full w-full p-4 sm:p-6 lg:p-8 overflow-y-auto bg-background custom-scrollbar">
       {/* Header */}
-      <div className="flex flex-col gap-4 mb-8 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">Quality Control</h2>
-          <p className="text-textMuted">Set filtering thresholds and inspect cell quality distributions.</p>
-        </div>
-        <div className="flex w-full flex-col items-stretch gap-3 sm:flex-row sm:items-center lg:w-auto">
+      <PageHeader title="Quality Control" description="Set filtering thresholds and inspect cell quality distributions." className="mb-6" actions={<>
           {result && (
             <button
-              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center justify-center gap-2 transition"
+              className="btn btn-secondary"
               onClick={() => openProvenance(result.provenance.id)}
             ><FileText size={15} /> View recorded analysis</button>
           )}
@@ -373,8 +369,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             {!filtering && !result && !pipelineState?.qc && <SlidersHorizontal size={18} />}
             {filtering ? 'Applying...' : (result || pipelineState?.qc) ? 'Re-run QC Filters' : 'Apply QC Filters'}
           </button>
-        </div>
-      </div>
+        </>} />
 
       {!canMutate && (
         <div role="note" className="card p-4 mb-6 border-primary/30 bg-primary/5 text-sm text-textMuted">

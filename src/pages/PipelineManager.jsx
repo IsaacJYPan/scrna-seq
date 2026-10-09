@@ -13,6 +13,7 @@ import {
   validatePipelineManifest,
 } from '../pipelines/pipelineRegistry';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 function parseApiError(error) {
   const raw = error?.message || String(error || 'Request failed.');
@@ -247,22 +248,10 @@ export default function PipelineManager({
   return (
     <div className="h-full w-full overflow-y-auto bg-background p-4 custom-scrollbar sm:p-8">
       <div className="mx-auto max-w-6xl space-y-8">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
-          <div>
-            <h2 className="flex items-center gap-3 text-2xl font-black tracking-tight text-text">
-              <Layers size={24} className="text-primary" />
-              Pipelines
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm text-textMuted">
-              Browse shared pipelines, inspect their steps, and choose one for your project.
-            </p>
-
-          </div>
-          <button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+        <PageHeader title="Pipelines" icon={Layers} description="Browse shared pipelines, inspect their steps, and choose one for your project." className="border-b border-border pb-5" actions={<button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Refresh
-          </button>
-        </header>
+          </button>} />
 
         {!activeProjectId ? (
           <div className="rounded-lg border border-dashed border-border p-6 text-center">

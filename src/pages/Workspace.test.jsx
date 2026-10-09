@@ -72,7 +72,7 @@ describe('Workspace backend-backed project/object UI', () => {
     expect(screen.getByText(/Create a project before loading a saved analysis/i)).toBeInTheDocument();
     expect(screen.queryByText('Default Project')).not.toBeInTheDocument();
     expect(screen.queryByText('proj-default')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Add analysis/i })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Add analysis/i })).not.toBeInTheDocument();
   });
 
   it('keeps analysis creation controls read-only for project viewers', () => {
@@ -84,7 +84,7 @@ describe('Workspace backend-backed project/object UI', () => {
       },
     });
 
-    expect(screen.getAllByRole('button', { name: /Add analysis/i })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /Add analysis/i })).toHaveLength(1);
     for (const button of screen.getAllByRole('button', { name: /Add analysis/i })) {
       expect(button).toBeDisabled();
       fireEvent.click(button);

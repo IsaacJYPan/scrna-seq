@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Plot from '../components/Plot';
 import { BarChart3, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 const JOB_TYPE = 'explore.summarize.v1';
 const TERMINAL = new Set(['completed', 'failed', 'canceled']);
@@ -138,14 +139,9 @@ export default function ExploratoryAnalysis({
   };
 
   return (
-    <div className="h-full overflow-y-auto p-6 bg-background text-text">
+    <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
       <div className="mx-auto max-w-6xl space-y-5">
-        <div>
-          <h2 className="flex items-center gap-2 text-2xl font-bold"><BarChart3 size={24} /> Exploratory Analysis</h2>
-          <p className="mt-1 text-sm text-textMuted">
-            Run guided recipes against a saved analysis. Outputs are aggregate summaries suitable for inspection and supplemental-figure drafting; no arbitrary code is accepted.
-          </p>
-        </div>
+        <PageHeader title="Exploratory Analysis" icon={BarChart3} description="Run guided recipes against a saved analysis. Outputs are aggregate summaries suitable for inspection and supplemental-figure drafting; no arbitrary code is accepted." />
 
         {!canLaunch && (
           <div role="note" className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-sm text-textMuted">
