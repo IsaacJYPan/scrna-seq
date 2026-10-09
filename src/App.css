@@ -77,7 +77,8 @@
     box-shadow: none;
   }
   .btn-primary:hover {
-    background-color: #0077ed;
+    /* White text stays above 4.5:1 through the transition and at rest. */
+    background-color: #006edb;
     color: #ffffff !important;
     box-shadow: none;
   }
