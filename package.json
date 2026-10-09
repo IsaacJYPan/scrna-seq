@@ -68,6 +68,8 @@
     "test:private-r-kernel": "node scripts/verify-private-r-kernel.js",
     "test:private-r-console-browser": "npm run build && node scripts/verify-private-r-console-ui.js",
     "test:runtime-readiness-browser": "npm run build && node scripts/verify-runtime-readiness-ui.js",
+    "test:large-r-artifacts-browser": "npm run build && node scripts/verify-large-r-artifacts-ui.js",
+    "test:large-r-artifacts": "node scripts/verify-large-r-artifacts.js",
     "test:demo-compose": "node scripts/verify-compose-demo.js",
     "test:demo-browser": "node scripts/verify-public-demo-ui.js",
     "test:frontend": "vitest run src/",
