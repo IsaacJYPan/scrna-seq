@@ -181,8 +181,12 @@ execution.
 
 The console can explicitly save a global R binding as RDS, a data frame as full
 CSV, or a completed preview PNG as an immutable, creator-private managed artifact
-version. Object/table exports stream at most 20 MiB per file through the broker;
-the current bound does not provide large-object export support. Serialization
+version. With a pinned image containing the streamed-publication bridge,
+object/table exports flow through a bounded pipe to private broker disk and then
+durable storage. The default output ceiling is 512 MiB per save; admission can
+lower it to the remaining managed quota. RDS uses version-3 serialization without
+compression; full CSV tables use the same bounded stream. The browser receives
+metadata and bounded previews rather than the complete object. Serialization
 shares command ordering and exclusivity with ordinary R execution. The server
 reserves storage capacity before export, verifies actual saved bytes, and commits
 the version and source/input/environment lineage together. Pending or unconfirmed
@@ -190,6 +194,49 @@ saves retain quota reservations. Completed versions survive stopping or restorin
 the session; unsaved R memory does not. Backups include publication receipts and
 managed output files, and restore marks unfinished saves unconfirmed without
 rerunning them.
+
+The default selected-input limits are 512 MiB per version and 1 GiB total, with
+a 5 GiB managed artifact quota per researcher/project and 200 retained versions.
+These are configurable ceilings, not a measured guarantee that every dataset
+fits in R's memory. A streamed 224 MiB RDS save and exact-version reopening are
+covered by `test:large-r-artifacts-browser`; realistic biological dataset sizing
+still requires measurements on the provisioned server.
+
+Apply the following policy to both the web service and sandbox broker. The
+supported Compose deployment forwards the same values to both automatically.
+Admission uses the lower verified service/broker input and output ceilings;
+disk reserve and transfer time report the actual broker controls.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PRIVATE_R_MAX_OUTPUT_BYTES` | `536870912` | Maximum named RDS/CSV save, further bounded by remaining quota. |
+| `PRIVATE_R_MAX_INPUT_FILE_BYTES` | `536870912` | Maximum selected saved version for a private session. |
+| `PRIVATE_R_MAX_INPUT_TOTAL_BYTES` | `1073741824` | Total selected input bytes staged for one session. |
+| `PRIVATE_R_MANAGED_QUOTA_BYTES` | `5368709120` | Saved versions plus outstanding reservations for one researcher/project. |
+| `PRIVATE_R_DISK_RESERVE_BYTES` | `1073741824` | Free-space floor after shared runtime reservations. |
+| `PRIVATE_R_TRANSFER_TIMEOUT_SECONDS` | `900` | Bounded private publication stream lifetime. |
+
+Byte values must be positive integers no greater than 64 GiB; total input must
+cover the per-file input ceiling. Transfer time must be 1–3600 seconds. Malformed
+production configuration fails startup. Existing runtime memory, CPU, command,
+idle, and lifetime controls continue to apply. Named saves reserve staging and
+durable-copy capacity, including concurrent one-shot work on shared filesystems.
+Arbitrary unsaved scratch files remain in a hard-bounded 200 MiB tmpfs; this
+feature does not provide a general writable host-directory mount. Standalone
+private-input and artifact uploads retain their separate 200 MiB ceiling.
+
+The maximum save bytes and effective policy are retained with each admission.
+Lowering a quota blocks new reservations while preserving earlier versions and
+already admitted saves. Interrupted, oversized, or unverified streams cannot
+publish partial versions. A lost response is inspected through its existing
+receipt, without repeating serialization. Older pinned images retain their
+original 20 MiB output and 200/250 MiB input limits until updated.
+
+This release requires database schema contract `20261013`. Apply
+`npm run init:postgres` with the migration owner's database credentials before
+starting the upgraded services. The idempotent migration expands publication
+bounds and requires every completed size to fit its retained reservation;
+existing versions, source receipts and restart links remain intact.
 
 Interrupt targets the exact active command and session generation. The broker
 confirms both R's matching terminal reply and its idle state before permitting
@@ -267,6 +314,7 @@ DATABASE_URL=postgres://... npm run test:expert-r-browser
 # For persistent sessions, use the reviewed immutable local kernel image:
 EXPERT_R_SANDBOX_IMAGE=sha256:YOUR_IMAGE_ID npm run test:private-r-kernel
 EXPERT_R_SANDBOX_IMAGE=sha256:YOUR_IMAGE_ID npm run test:private-r-console-browser
+EXPERT_R_SANDBOX_IMAGE=sha256:YOUR_IMAGE_ID npm run test:large-r-artifacts-browser
 ```
 
 The first command probes the containment and resource boundary directly. The
