@@ -77,6 +77,26 @@ const demoModel = renderDemoCompose();
 const demoServices = demoModel.services || {};
 const demoFreeTierModel = renderDemoFreeTierCompose();
 const demoFreeTierServices = demoFreeTierModel.services || {};
+const importSource = path.resolve(root, '..', 'server-data-import-fixture');
+const importRoots = JSON.stringify([{ id: 'study', label: 'Study input', path: '/server-data/study', grants: [{ projectId: 'proj_study123', ownerUserId: 1 }] }]);
+const importRendered = spawnSync('docker', ['compose', '--env-file', envFile, '-f', composeFile,
+  '-f', path.join(root, 'deploy', 'compose.server-data.yml'), 'config', '--format', 'json'], {
+  cwd: root, encoding: 'utf8', windowsHide: true, maxBuffer: 2 * 1024 * 1024,
+  env: { ...process.env, SERVER_DATA_IMPORT_SOURCE: importSource, SERVER_DATA_IMPORT_ROOTS: importRoots },
+});
+assert.equal(importRendered.status, 0, 'Docker Compose must render opt-in server data imports');
+const importServices = JSON.parse(importRendered.stdout).services;
+assert.equal(importServices.web.environment.SERVER_DATA_IMPORT_ROOTS, importRoots);
+const importMount = importServices.web.volumes.find(volume => volume.target === '/server-data');
+assert(importMount && importMount.type === 'bind' && importMount.read_only === true, 'Original server data must have one read-only web bind');
+assert.notEqual(importMount.bind?.create_host_path, true, 'A missing operator source must never be created automatically');
+assert(fs.readFileSync(path.join(root, 'deploy', 'compose.server-data.yml'), 'utf8').includes('create_host_path: false'));
+for (const [name, service] of Object.entries(importServices)) {
+  if (name === 'web') continue;
+  assert(!(service.volumes || []).some(volume => volume.target === '/server-data'), `${name} must not mount original server inputs`);
+  assert(!Object.hasOwn(service.environment || {}, 'SERVER_DATA_IMPORT_ROOTS'), `${name} must not receive server input grants`);
+}
+assert(!(services.web.volumes || []).some(volume => volume.target === '/server-data'), 'Default deployment must leave server imports disabled');
 assert.equal(demoServices.web.environment?.APP_DEPLOYMENT_MODE, 'demo');
 assert.equal(demoServices.web.environment?.EXPERT_R_ENABLED, 'false');
 assert.equal(demoServices.web.environment?.MAX_UPLOAD_BYTES, '1');

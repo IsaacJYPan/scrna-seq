@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261013`. Apply
+This release requires database schema contract `20261015`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. The idempotent migration expands publication
 bounds and requires every completed size to fit its retained reservation;
@@ -552,6 +552,103 @@ and worker container health checks will report the compute outage separately.
 During graceful shutdown, readiness changes to HTTP 503 before the listener is
 closed. Concurrent readiness probes are coalesced and briefly cached, but these
 operational endpoints should still be restricted at the proxy.
+
+## Optional server-resident data imports
+
+This feature lets researchers snapshot files already on the selected analysis
+server into private artifact versions, then inspect or select them as inputs to
+private R. Server-side copies avoid a download/upload round trip through a laptop.
+The original source stays read-only, and its later modification does not alter an
+existing saved version. Imports are disabled by default and unavailable in public
+or demo deployments.
+
+Choose an existing dedicated data directory outside the application checkout,
+managed storage, vault, home directories, and credential/system directories.
+On Linux, the web container's `APP_UID:APP_GID` must be able to read files and
+traverse their ordinary parent directories. Sources must be regular files;
+symbolic links and files with multiple hard links are rejected. Do not mount the
+host filesystem, a home directory, or a credentials directory as an import source.
+
+Access requires both current project membership and an exact account/project
+grant in the operator's root configuration. Being a project administrator does
+not grant access to other accounts' private imports or arbitrary host paths.
+Resolve the provisioned account's numeric ID and the project's actual ID from
+the deployment database; do not substitute an email, display name, or organization
+ID. The account-administration CLI reports the account ID when provisioning it.
+An operator can also inspect existing memberships with this read-only inventory:
+
+```bash
+docker compose \
+  --env-file /etc/traceomics/traceomics.env \
+  -f deploy/compose.single-host.yml \
+  exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+    SELECT u.id AS account_id,u.email,p.id AS project_id,p.name AS project_name,pm.role
+    FROM project_members pm JOIN users u ON u.id=pm.user_id
+    JOIN projects p ON p.id=pm.project_id ORDER BY p.id,u.id;
+  "'
+```
+
+For example, if the dedicated host parent is `/srv/traceomics-import`, its study
+folder is `/srv/traceomics-import/study-a`, and the reviewed account/project IDs
+are `1` and `proj_replace_me`, set the following in the operator-only environment
+file. Replace those example IDs with the inventory results before enabling it:
+
+```dotenv
+SERVER_DATA_IMPORT_SOURCE=/srv/traceomics-import
+SERVER_DATA_IMPORT_ROOTS='[{"id":"study-a","label":"Study A data","path":"/server-data/study-a","grants":[{"projectId":"proj_replace_me","ownerUserId":1}]}]'
+```
+
+The JSON `path` is the container path. Add a separate grant for each intended
+account/project pair; `ownerUserId` must be a JSON number. Roots need distinct
+IDs and dedicated, non-overlapping directories. Users see only root labels and
+relative filenames, never absolute host paths.
+
+Enable the explicit overlay for the web service:
+
+```bash
+docker compose \
+  --env-file /etc/traceomics/traceomics.env \
+  -f deploy/compose.single-host.yml -f deploy/compose.server-data.yml \
+  config --quiet
+
+docker compose \
+  --env-file /etc/traceomics/traceomics.env \
+  -f deploy/compose.single-host.yml -f deploy/compose.server-data.yml \
+  up -d web
+```
+
+Keep both Compose files in subsequent commands for this installation. The overlay
+adds one read-only bind at `/server-data` to web only; R runtimes, workers, the
+sandbox broker, and operations containers receive no original data mount. A missing
+host source fails instead of creating a directory. The base deployment remains
+unchanged when the overlay is omitted. Remove grants to revoke new source access;
+saved private snapshots remain retained under their existing artifact permissions.
+
+For a directly managed local web service, set `SERVER_DATA_IMPORT_ROOTS` to actual
+absolute directories on that host and restart it. Compose source paths are not
+needed outside containers. The browser and desktop client use the service currently
+open in the workspace; SSH connection settings do not grant data-folder access.
+
+Server imports use `PRIVATE_R_MAX_INPUT_FILE_BYTES` (512 MiB default), the shared
+`PRIVATE_R_MANAGED_QUOTA_BYTES` budget (5 GiB per account/project), and 200 managed
+versions. Pending imports and private R saves reserve quota. Admission checks
+durable disk space and the configured `PRIVATE_R_DISK_RESERVE_BYTES`, then bounds
+the snapshot by `PRIVATE_R_TRANSFER_TIMEOUT_SECONDS` (900 seconds default). At most
+two imports per account and four across the installation are active. Directory
+responses contain at most 100 entries and examine at most 10,000 entries; arrange
+larger sources into smaller subdirectories. Existing browser-preview and private-R
+memory/input limits continue to apply.
+
+After enabling access, verify **Runs & Results → Inspect or import artifact files
+→ Browse server data** with the intended account. Import a file and check the
+saved checksum, relative source, server label, and optional sample details. Refresh
+the private R console to select the exact new input version. Imported RDS files
+remain isolated private inputs and are never deserialized by the shared guided R
+service. An accepted import continues through client disconnect; **Check server
+import status** inspects its original request without submitting it again. A web
+process restart or expired deadline leaves unfinished requests failed or pending
+until expiry; sources are never automatically replayed. User workflow details are
+in [analysis-workflows.md](analysis-workflows.md#import-data-already-on-the-selected-server).
 
 ## Windows desktop application
 

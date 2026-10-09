@@ -92,3 +92,14 @@ it('renders text as inert content and loads raster images through their verified
   fireEvent.error(image);
   expect(await screen.findByRole('alert')).toHaveTextContent('integrity check failed'); expect(screen.queryByRole('img')).not.toBeInTheDocument();
 });
+
+it('shows retained server provenance and sample descriptions without exposing host paths', async () => {
+  const sourceImport = { importId: 'request', rootId: 'lab-data', rootLabel: 'Lab data', relativePath: 'study/cells.rds', serviceId: 'service', serviceLabel: 'Lab analysis server', importedAt: '2026-10-08T01:00:00Z', sampleMetadata: { sampleId: 'sample-A', condition: 'treatment', species: 'human' } };
+  getArtifactVersion.mockResolvedValue({ ...version, sourceImport });
+  render(<ArtifactInspector {...props} />); await select();
+  fireEvent.click(await screen.findByText('Server source and sample details'));
+  expect(screen.getByText('Lab data')).toBeVisible(); expect(screen.getByText('study/cells.rds')).toBeVisible();
+  expect(screen.getByText('Lab analysis server')).toBeVisible();
+  expect(screen.getByText('sample-A')).toBeVisible(); expect(screen.getByText('treatment')).toBeVisible();
+  expect(screen.getByText('human')).toBeVisible();
+});
