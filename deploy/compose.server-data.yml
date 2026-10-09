@@ -1,0 +1,15 @@
+# Opt-in server-resident data importer. Use together with compose.single-host.yml.
+# Grant dedicated subdirectories in SERVER_DATA_IMPORT_ROOTS using exact
+# project/account IDs. Only web reads the original source; R and workers consume
+# verified private snapshots from the existing durable artifact storage.
+services:
+  web:
+    environment:
+      SERVER_DATA_IMPORT_ROOTS: ${SERVER_DATA_IMPORT_ROOTS:?Set SERVER_DATA_IMPORT_ROOTS to the authorized root JSON}
+    volumes:
+      - type: bind
+        source: ${SERVER_DATA_IMPORT_SOURCE:?Set SERVER_DATA_IMPORT_SOURCE to an existing dedicated absolute host directory}
+        target: /server-data
+        read_only: true
+        bind:
+          create_host_path: false

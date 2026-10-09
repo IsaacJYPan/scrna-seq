@@ -4,6 +4,7 @@ import {
   previewArtifactVersion,
 } from '../artifacts/artifactApi';
 import { artifactBytesLabel as bytesLabel } from '../artifacts/privateRArtifactPolicy';
+import ServerDataImporter from './ServerDataImporter';
 
 export default function ArtifactInspector({ projectId, canWrite = false, userId }) {
   const [items, setItems] = useState([]);
@@ -102,6 +103,7 @@ export default function ArtifactInspector({ projectId, canWrite = false, userId 
       </div>
       <p className="text-xs text-textMuted">Imports stay private. Replacing a managed file saves a new version and retains earlier contents. RDS files open only in an appropriate private runtime.</p>
     </form>}
+    {canWrite && <ServerDataImporter projectId={projectId} userId={userId} onImported={async version => { await refresh(); if (projectRef.current === projectId) await inspect(version); }} />}
     {error && <p role="alert" className="text-danger text-sm">{error}</p>}
     <div className="grid gap-4 lg:grid-cols-[minmax(220px,1fr)_minmax(0,2fr)]">
       <div className="space-y-2 max-h-[600px] overflow-y-auto" aria-label="Available artifact versions">{items.map(item => <button key={item.versionId} type="button" className={`w-full rounded-lg border p-3 text-left ${selected?.versionId === item.versionId ? 'border-primary bg-primary/5' : 'border-border bg-surface'}`} onClick={() => inspect(item)}>
@@ -123,6 +125,7 @@ export default function ArtifactInspector({ projectId, canWrite = false, userId 
           <dt className="text-textMuted">SHA-256</dt><dd className="break-all font-mono text-xs">{selected.sha256}</dd>
           <dt className="text-textMuted">Previews</dt><dd>{selected.previews.join(', ') || 'Metadata only'}</dd>
         </dl>
+        {selected.sourceImport && <details className="text-xs"><summary>Server source and sample details</summary><dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1"><dt className="text-textMuted">Server</dt><dd>{selected.sourceImport.serviceLabel}</dd><dt className="text-textMuted">Data root</dt><dd>{selected.sourceImport.rootLabel}</dd><dt className="text-textMuted">Source file</dt><dd className="break-all">{selected.sourceImport.relativePath}</dd><dt className="text-textMuted">Saved</dt><dd>{new Date(selected.sourceImport.importedAt).toLocaleString()}</dd><dt className="text-textMuted">Server import</dt><dd className="break-all">{selected.sourceImport.importId}</dd>{Object.entries(selected.sourceImport.sampleMetadata || {}).map(([key, value]) => <React.Fragment key={key}><dt className="text-textMuted">{{ sampleId: 'Sample ID', condition: 'Condition', tissue: 'Tissue', species: 'Species', replicate: 'Replicate' }[key] || key}</dt><dd className="break-all">{value}</dd></React.Fragment>)}</dl></details>}
         <button type="button" className="btn btn-secondary text-xs" onClick={async () => {
           try { await navigator.clipboard.writeText(JSON.stringify(selected.reference)); setCopied(true); }
           catch { setError('Reference could not be copied. Select it in the details below.'); }

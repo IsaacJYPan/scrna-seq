@@ -18,8 +18,50 @@ Table previews contain at most 100 rows and 100 columns per page, with a 256 KiB
 response budget. Raster previews require at most 5 MiB and 12 million pixels.
 Other supported files expose metadata only. Imports accept up to 25 MiB for
 ordinary files and 200 MiB for RDS, with a per-owner project budget of 200 managed
-versions and 1 GiB. Existing large checkpoints remain in their current storage.
+versions and a configurable 5 GiB default. Existing large checkpoints remain in their current storage.
 RDS inspection never deserializes an object in the shared guided-analysis service.
+
+## Import data already on the selected server
+
+In **Runs & Results**, open **Inspect or import artifact files**, then choose
+**Browse server data**. Select an **Authorized data root**, browse its folders,
+and select one file. Only folders granted to your account and project appear.
+The same workflow works with a local analysis server or a server reached through
+SSH; it uses the server currently open in the app.
+
+Give the artifact a useful name and choose **Sample sheet (CSV/TSV)** when
+appropriate. **Sample details (optional)** retains a sample ID, condition, tissue,
+species, or replicate description beside the saved version. These annotations
+describe the input; they do not change its contents or create a Study Design.
+Choose **Import selected server file** to create an immutable private snapshot.
+The server copies and verifies the complete file without downloading it to your
+laptop or uploading it through the browser. Progress reports copied bytes and
+the import deadline. The saved version retains its checksum, source server,
+authorized folder label, relative filename, and sample description. Changes to
+the original file do not change an existing snapshot.
+
+Server imports support RDS objects, CSV/TSV tables, JSON, TXT, PNG, and JPEG files.
+Archives and raw dataset directories require their separate import workflow. The default server
+import ceiling is 512 MiB per file, with a shared 5 GiB managed artifact quota and
+200 versions per researcher/project. Outstanding imports and R saves reserve
+quota. Operators can adjust these limits; the picker shows the current policy.
+Empty, changed, linked, hidden, or unauthorized source files are rejected. Large
+directories require smaller subfolders when they exceed the bounded listing.
+
+For free R, refresh **Private R console → Refresh status**, select the exact saved
+input version, and start a new session. Use `read_input("VERSION_ID")` to reopen
+RDS, CSV, TSV, JSON, or text inputs; use `input_path("VERSION_ID")` with an
+appropriate R package for other selected files. Full RDS contents are read inside the isolated private
+runtime; the laptop receives metadata and bounded previews. Importing an RDS file
+does not load it into the shared guided-analysis service.
+
+If the connection disappears, new imports are blocked. After reconnecting to the
+same server, choose **Check server import status** to inspect the retained request.
+An accepted snapshot can finish while the client is disconnected. The app never
+automatically submits that import again. If the server process stops or the
+deadline expires, inspect the failed request, refresh the source folder, and start
+a new import explicitly. Public demos disable this feature; a private deployment
+with no authorized data roots shows an empty picker until an operator grants one.
 
 ## Ranked Pathway Enrichment
 
@@ -99,7 +141,8 @@ Use **Save a private artifact version** to retain an existing global R binding a
 an RDS object or a data frame as a complete CSV. Enter its exact binding name,
 such as `obj` or `markers`, rather than an R expression. Object and table saves
 add an ordered serialization command to the private source journal. The initial
-per-file limit is 20 MiB; CSV output includes every row even when the console or
+per-file limit is 512 MiB with the current streamed-publication runtime; older
+images retain their 20 MiB ceiling. CSV output includes every row even when the console or
 browser preview shows fewer. CSV saves data columns without R row names or other
 attributes; add important row identifiers as a column, or save the data frame as
 an RDS object to preserve its R attributes. Tables that exceed browser column or cell budgets
