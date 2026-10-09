@@ -288,6 +288,86 @@ function isIgnorableError(msg) {
 
 // ── Performance Timing ─────────────────────────────────────────────────────────
 // ── Accessibility Audit ────────────────────────────────────────────────────────
+async function checkValidationRecovery(page) {
+  const originalViewport = page.viewportSize();
+  const originalTheme = await page.evaluate(() => document.documentElement.getAttribute('data-theme') || 'light');
+  const routePattern = '**/validate*';
+  const measurements = {
+    cell_count: 2700, feature_count: 13714, median_genes: 1950,
+    median_counts: 4750, mito_mean: '1.75%', sparsity: '97.41%',
+    pca_top_variance: '24%', n_clusters: 8, pipeline_steps: 6,
+    has_normalized: true, has_pca: true, has_clusters: true, has_umap: true,
+  };
+  let response = { result: measurements };
+  let finishRetry;
+  let retryPending = false;
+  const handler = async route => {
+    if (retryPending) await new Promise(resolve => { finishRetry = resolve; });
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(response) });
+  };
+  const setTheme = async theme => {
+    const current = await page.evaluate(() => document.documentElement.getAttribute('data-theme') || 'light');
+    if (current !== theme) await page.getByRole('button', { name: `Switch to ${theme} mode`, exact: true }).click();
+  };
+  await page.route(routePattern, handler);
+  try {
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      for (const theme of ['light', 'dark']) {
+        await setTheme(theme);
+        const label = `Validation ${width}px ${theme}`;
+        response = { result: measurements };
+        await page.getByRole('button', { name: /^(Run Validation|Refresh Metrics)$/ }).click();
+        await page.getByRole('button', { name: 'Refresh Metrics', exact: true }).waitFor();
+
+        // A controlled application error exercises the real callApi path without
+        // polluting the suite's unexpected HTTP/console-failure audit.
+        response = { error: 'R service is busy. Wait a moment and try again.' };
+        await page.getByRole('button', { name: 'Refresh Metrics', exact: true }).click();
+        const alert = page.getByRole('alert');
+        await alert.waitFor();
+        assert(`${label}: explains retained measurements`, (await alert.innerText()).includes('This refresh did not update them.'));
+        assert(`${label}: retains previous values`, await page.getByText('2,700', { exact: true }).filter({ visible: true }).count() === 2);
+        const contained = await alert.evaluate(el => {
+          const bounds = el.getBoundingClientRect();
+          return [...el.querySelectorAll('p,button,svg')].every(child => {
+            const box = child.getBoundingClientRect();
+            return box.top >= bounds.top && box.bottom <= bounds.bottom + 1
+              && box.left >= bounds.left && box.right <= bounds.right + 1;
+          }) && el.scrollHeight <= el.clientHeight + 1;
+        });
+        assert(`${label}: full error, icon, retained-state copy, and retry fit inside alert`, contained);
+        await page.screenshot({ path: path.join(REPORT_DIR, `validation-error-${width}-${theme}.png`) });
+
+        response = { result: { ...measurements, cell_count: 2800 } };
+        retryPending = true;
+        finishRetry = null;
+        const retryButton = page.getByRole('button', { name: 'Retry validation', exact: true });
+        await retryButton.focus();
+        assert(`${label}: retry is keyboard reachable`, await retryButton.evaluate(el => el === document.activeElement));
+        await page.keyboard.press('Enter');
+        await page.getByRole('status').filter({ hasText: 'Previously validated values remain visible below.' }).waitFor();
+        assert(`${label}: blocks duplicate refresh while retry is pending`, await page.getByRole('button', { name: 'Refreshing Metrics…', exact: true }).isDisabled());
+        assert(`${label}: preserves values during retry`, await page.getByText('2,700', { exact: true }).filter({ visible: true }).count() === 2);
+        // Waiting for the status also gives the intercepted request time to start.
+        const retryDeadline = Date.now() + 5000;
+        while (!finishRetry && Date.now() < retryDeadline) await sleep(10);
+        if (!finishRetry) throw new Error(`${label}: retry did not reach the validation endpoint`);
+        finishRetry();
+        retryPending = false;
+        await page.getByRole('button', { name: 'Refresh Metrics', exact: true }).waitFor();
+        assert(`${label}: successful retry replaces values`, await page.getByText('2,800', { exact: true }).filter({ visible: true }).count() === 2);
+        assert(`${label}: clears failure feedback on success`, await page.getByRole('alert').count() === 0);
+      }
+    }
+  } finally {
+    finishRetry?.();
+    await page.unroute(routePattern, handler);
+    await page.setViewportSize(originalViewport);
+    await setTheme(originalTheme);
+  }
+}
+
 async function runA11yAudit(page, context) {
   try {
     const { AxeBuilder } = require('@axe-core/playwright');
@@ -1384,6 +1464,7 @@ async function main() {
 
         // 4. A11Y audit
         await runA11yAudit(page, tab.label);
+        if (tab.id === 'validation') await checkValidationRecovery(page);
       }
 
       allResults.push({ tab: tab.label, crashed, consoleErrorsAtTime: consoleErrors.length });

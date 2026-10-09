@@ -20,25 +20,22 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
   const performSanityCheck = async () => {
     setLoading(true);
     setError(null);
-    const data = await callApi('/validate', {}, {
-      operation: 'validation',
-      useCache: false
-    });
-    
-    if (!data) {
-      setError(publicErrorMessage(null, 'Validation could not be completed. Try again.'));
-      setLoading(false);
-      return;
-    }
-    if (data.error) {
-      setError(publicErrorMessage(data.error, 'Validation could not be completed. Try again.'));
-      setLoading(false);
-      return;
-    }
-    if (data.result) {
+    try {
+      const data = await callApi('/validate', {}, {
+        operation: 'validation',
+        useCache: false
+      });
+
+      if (data?.error || !data?.result) {
+        setError(publicErrorMessage(data?.error, 'Validation could not be completed. Try again.'));
+        return;
+      }
       setMetrics(data.result);
+    } catch (err) {
+      setError(publicErrorMessage(err, 'Validation could not be completed. Try again.'));
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const pipelineCheck = (has) => (
@@ -49,7 +46,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
 
   return (
     <div className="h-full w-full flex flex-col bg-background p-4 sm:p-6 lg:p-8 overflow-y-auto custom-scrollbar">
-      <div className="flex flex-col sm:flex-row sm:justify-between items-start sm:items-center gap-4 mb-8 border-b border-border pb-6">
+      <div className="shrink-0 flex flex-col sm:flex-row sm:justify-between items-start sm:items-center gap-4 mb-8 border-b border-border pb-6">
         <div className="min-w-0">
            <h2 className="text-3xl font-black text-white mb-2 tracking-tighter">Validation</h2>
            <p className="text-slate-400 text-lg">Review key measurements from the selected analysis.</p>
@@ -60,19 +57,35 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
           className="btn btn-primary w-full sm:w-auto shrink-0 whitespace-nowrap px-4 sm:px-8 py-3 sm:py-4 font-bold flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95"
         >
           {loading ? <RefreshCw className="animate-spin" size={22} /> : <ClipboardList size={22} />}
-          {metrics ? 'Refresh Metrics' : 'Run Validation'}
+          {loading ? (metrics ? 'Refreshing Metrics…' : 'Validating…') : (metrics ? 'Refresh Metrics' : 'Run Validation')}
         </button>
       </div>
 
       {error && (
-        <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger flex items-center gap-3">
-          <AlertTriangle size={18} />
-          <span className="text-sm font-medium">{error}</span>
+        <div role="alert" className="shrink-0 rounded-xl border p-4 mb-6 bg-danger/10 border-danger text-danger flex items-start gap-3">
+          <AlertTriangle size={18} className="shrink-0 mt-0.5" aria-hidden="true" />
+          <div className="min-w-0 flex-1 flex flex-col sm:flex-row sm:items-start gap-3">
+            <div className="min-w-0 flex-1 text-sm">
+              <p className="font-medium break-words">{error}</p>
+              {metrics && (
+                <p className="mt-1">Showing measurements from the last successful validation. This refresh did not update them.</p>
+              )}
+            </div>
+            <button onClick={performSanityCheck} disabled={loading} className="btn btn-secondary shrink-0 self-start whitespace-nowrap">
+              Retry validation
+            </button>
+          </div>
         </div>
       )}
 
+      {loading && (
+        <p role="status" className="shrink-0 text-sm text-textMuted mb-6">
+          {metrics ? 'Refreshing measurements. Previously validated values remain visible below.' : 'Validating the selected analysis…'}
+        </p>
+      )}
+
       {metrics ? (
-        <div className="space-y-10 animate-in fade-in slide-in-from-bottom-6 duration-500">
+        <div aria-busy={loading} className="shrink-0 space-y-10 animate-in fade-in slide-in-from-bottom-6 duration-500">
            {/* Top summary cards */}
            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6">
               {[
