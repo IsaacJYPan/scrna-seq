@@ -26,6 +26,7 @@ const REPORT_DIR    = path.join(WORKSPACE, 'playwright', 'report');
 const UPDATE_MODE   = process.argv.includes('--update-snapshots');
 const NO_SNAPSHOT_MODE = process.argv.includes('--no-snapshots');
 const RESPONSIVE_ONLY = process.argv.includes('--responsive-only');
+const PRODUCTION_PREVIEW = process.argv.includes('--production');
 const MODE_NAME = NO_SNAPSHOT_MODE
   ? 'BROWSER SMOKE (NO SNAPSHOTS)'
   : (UPDATE_MODE ? 'BASELINE UPDATE' : 'REGRESSION CHECK');
@@ -75,6 +76,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // over the primary button's white foreground.
 async function primaryButtonHoverContrast(button) {
   await button.hover();
+  await button.evaluate(async el => {
+    // Flush the hover style and sample its final appearance, including a
+    // running background-color transition, rather than its previous frame.
+    window.getComputedStyle(el).backgroundColor;
+    const transitions = el.getAnimations().filter(animation =>
+      animation.constructor.name === 'CSSTransition');
+    let deadline;
+    try {
+      await Promise.race([
+        Promise.all(transitions.map(animation => animation.finished.catch(() => {}))),
+        new Promise(resolve => { deadline = setTimeout(resolve, 750); }),
+      ]);
+    } finally { clearTimeout(deadline); }
+  });
   return button.evaluate(el => {
     const parseRgb = value => (value.match(/\d+(?:\.\d+)?/g) || []).slice(0, 3).map(Number);
     const relativeLuminance = ([red, green, blue]) => {
@@ -107,6 +122,9 @@ async function checkPrimaryButtonHover(page, name) {
     return;
   }
   const { foreground, background, contrast } = await primaryButtonHoverContrast(button);
+  const theme = await page.evaluate(() => document.documentElement.getAttribute('data-theme') || 'light');
+  const reportName = name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  await page.screenshot({ path: path.join(REPORT_DIR, `primary_hover_${theme}_${reportName}.png`), animations: 'disabled', caret: 'hide' });
   assert(
     `Primary action ${name} keeps readable text on hover`,
     foreground !== background && contrast >= 4.5,
@@ -409,8 +427,9 @@ async function runA11yAudit(page, context) {
 let viteProc = null;
 
 async function startVite() {
-  info(`Starting Vite dev server on port ${VITE_PORT}...`);
-  viteProc = spawn(process.execPath, [VITE_CLI, '--port', String(VITE_PORT), '--strictPort'], {
+  const serverName = PRODUCTION_PREVIEW ? 'production preview' : 'dev server';
+  info(`Starting Vite ${serverName} on port ${VITE_PORT}...`);
+  viteProc = spawn(process.execPath, [VITE_CLI, ...(PRODUCTION_PREVIEW ? ['preview'] : []), '--port', String(VITE_PORT), '--strictPort'], {
     cwd: WORKSPACE,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -444,13 +463,13 @@ async function startVite() {
 
   // Additional wait to ensure fully ready
   await sleep(2000);
-  info('Vite dev server started.');
+  info(`Vite ${serverName} started.`);
 }
 
 function stopVite() {
   if (viteProc && !viteProc.killed) {
     viteProc.kill('SIGTERM');
-    info('Vite dev server stopped.');
+    info('Vite server stopped.');
   }
 }
 
@@ -511,7 +530,7 @@ async function main() {
   console.log(`  Timestamp : ${new Date().toISOString()}\n`);
 
   // ── Start Vite ─────────────────────────────────────────────────────────────
-  section('SETUP: Starting Vite dev server');
+  section(PRODUCTION_PREVIEW ? 'SETUP: Starting production preview' : 'SETUP: Starting Vite dev server');
   await startVite();
 
   // ── Launch Browser ─────────────────────────────────────────────────────────
