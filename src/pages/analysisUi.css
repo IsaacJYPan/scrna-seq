@@ -1,0 +1,16 @@
+.analysis-parameter-card { container-type: inline-size; }
+.analysis-parameter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem; }
+.analysis-advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; }
+.analysis-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 1rem; }
+.analysis-parameter-grid > *, .analysis-advanced-grid > * { min-width: 0; }
+.analysis-resolution-row { display: flex; align-items: center; min-height: 42px; gap: .75rem; }
+.analysis-resolution-row input { min-width: 0; width: 100%; flex: 1; }
+.analysis-resolution-row output { flex: 0 0 3rem; text-align: right; }
+@container (max-width: 620px) { .analysis-parameter-grid { grid-template-columns: 1fr; } }
+@container (max-width: 390px) { .analysis-advanced-grid { grid-template-columns: 1fr; } }
+.gene-browser { container-type: inline-size; }
+.gene-chip { min-height: 32px; padding: .375rem .625rem; font-size: 12px; line-height: 18px; }
+.gene-category { min-height: 36px; }
+@media (pointer: coarse) { .gene-chip, .gene-category { min-height: 44px; } }
+.gene-browser-body { max-height: 100%; }
+@media (max-width: 1023px) { .gene-browser-body { max-height: 180px; } }

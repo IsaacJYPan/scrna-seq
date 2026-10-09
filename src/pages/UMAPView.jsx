@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import React, { useState, useCallback, useEffect } from 'react';
 import { Layers, ListFilter, AlertTriangle, ImageDown, FileText } from 'lucide-react';
 import Plot, { supportsWebGL } from '../components/Plot';
@@ -237,9 +238,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     uirevision: 'true',
     margin: { l: 50, r: 20, t: 10, b: 50 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    font: { color: plotText },
-    xaxis: { title: { text: 'UMAP 1' }, showgrid: false, zeroline: false, constrain: 'domain' },
-    yaxis: { title: { text: 'UMAP 2' }, showgrid: false, zeroline: false, scaleanchor: 'x', scaleratio: 1 },
+    font: { color: plotText, size: 12 },
+    xaxis: { title: { text: 'UMAP 1' }, automargin: true, showgrid: false, zeroline: false, constrain: 'domain' },
+    yaxis: { title: { text: 'UMAP 2' }, automargin: true, showgrid: false, zeroline: false, scaleanchor: 'x', scaleratio: 1 },
     showlegend: false,
     hovermode: 'closest'
   }), [plotText]);
@@ -291,13 +292,8 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
 
   return (
     <div className="h-full w-full flex flex-col bg-background p-4 sm:p-6 overflow-y-auto custom-scrollbar">
-      <div className="flex shrink-0 flex-wrap gap-y-3 justify-between items-center mb-6">
-        <div>
-          <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">UMAP Embedding</h2>
-          <p className="text-textMuted">Uniform Manifold Approximation and Projection for visualization.</p>
-        </div>
-        <div className="flex flex-wrap gap-3">
-          {result && !settingsChanged && currentReductionComponents.current === nComponents && activeTraces.length > 0 && <button
+      <PageHeader title="UMAP Embedding" description="Uniform Manifold Approximation and Projection for visualization." className="mb-6" actions={<>
+{result && !settingsChanged && currentReductionComponents.current === nComponents && activeTraces.length > 0 && <button
               className="text-blue-500 dark:text-blue-400 border border-blue-500/50 hover:bg-blue-500/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
               onClick={() => setSavePanelOpen(true)}
             ><ImageDown size={15} /> Save Figure</button>}
@@ -320,8 +316,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               ? 'Re-compute UMAP'
               : `Run ${nComponents}D UMAP`}
           </button>
-        </div>
-      </div>
+        </>} />
 
       {deploymentPolicy?.demoMode && isPbmcTutorial && (
         <p role="note" className="text-sm text-textMuted mb-4">

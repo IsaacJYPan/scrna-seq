@@ -1,3 +1,5 @@
+import { usePlotGeometry, categoryTickAngle, categoryPlotWidth } from '../hooks/usePlotGeometry';
+import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect } from 'react';
 import Plot from '../components/Plot';
 import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
@@ -6,6 +8,7 @@ import { publicErrorMessage } from '../publicError';
 
 // Removed API constant
 export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme, deploymentPolicy }) {
+  const chart = usePlotGeometry();
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [dotData, setDotData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -80,6 +83,9 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     );
   }
 
+  const plottedGenes = dotData?.genes == null ? [] : Array.isArray(dotData.genes) ? dotData.genes : [dotData.genes];
+  const selectionChanged = dotData && (genes.length !== plottedGenes.length || genes.some((gene, index) => gene !== plottedGenes[index]));
+
   // Build Plotly bubble chart from dot plot data
   const traces = [];
   if (dotData) {
@@ -138,8 +144,9 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         ],
         showscale: true,
         colorbar: {
-          title: { text: 'Avg Expr', side: 'right', font: { color: colorbarText } },
+          title: { text: 'Avg Expr', side: 'top', font: { color: colorbarText } },
           thickness: 15,
+          orientation: 'h', yref: 'container', y: 0.015, xref: 'container', x: 0.5, xanchor: 'center', yanchor: 'bottom',
           len: 0.6,
           tickfont: { color: colorbarText }
         },
@@ -159,12 +166,12 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     autosize: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-    font: { color: plotText, size: 11, family: 'Inter, system-ui' },
-    margin: { l: 100, r: 80, t: 30, b: 80 },
+    font: { color: plotText, size: 12, family: 'Inter, system-ui' },
+    margin: { l: 58, r: 12, t: 24, b: 120 },
     xaxis: { 
       title: { text: 'Cluster ID', font: { size: 13, color: axisTitle }, standoff: 20 },
       type: 'category',
-      tickangle: -45, 
+      tickangle: categoryTickAngle(dotData?.clusters || [], Math.max(chart.width, categoryPlotWidth(dotData?.genes, dotData?.clusters)) - 100),
       gridcolor: plotGrid,
       zeroline: false
     },
@@ -179,12 +186,8 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
-      <div className="px-4 sm:px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-3 items-start justify-between shrink-0">
-        <div>
-          <h2 className="text-2xl font-bold text-text tracking-tight">Dot Plot</h2>
-          <p className="text-textMuted text-sm">Bubble size = % cells expressing gene; color = average expression.</p>
-        </div>
-        <div className="flex min-w-0 flex-col gap-2 items-start sm:items-end">
+      <PageHeader title="Dot Plot" description="Bubble size represents the percentage of cells expressing a gene; color represents average expression." className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" actions={
+<div className="flex min-w-0 flex-col gap-2 items-start sm:items-end">
           <div className="relative flex flex-wrap items-center gap-2">
             <div className="relative">
               <input
@@ -221,15 +224,17 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
           {genes.length > 0 && (
             <div className="flex flex-wrap gap-1.5 justify-end max-w-xs">
               {genes.map(g => (
-                <span key={g} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 border border-primary/30 text-primary text-xs font-medium">
+                <button type="button" key={g} onClick={() => removeGene(g)} aria-label={`Remove ${g}`} className="inline-flex items-center min-h-8 gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-primary text-xs font-medium">
                   {g}
-                  <button onClick={() => removeGene(g)} aria-label={`Remove ${g}`} className="text-primary/60 hover:text-danger">×</button>
-                </span>
+                  <span aria-hidden="true" className="text-primary/60">×</span>
+                </button>
               ))}
             </div>
           )}
         </div>
-      </div>
+      } />
+
+      {selectionChanged && <p role="status" className="mx-4 sm:mx-8 mt-3 text-sm text-textMuted">Showing the last plotted gene set. Click Plot to apply your current selection.</p>}
 
       {error && (
         <div className="mx-8 mt-4 p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger text-sm flex items-center gap-2 shrink-0">
@@ -237,7 +242,9 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         </div>
       )}
 
-      <div className="flex-1 min-h-60 min-w-0 p-3 sm:p-6 overflow-hidden">
+      {dotData && categoryPlotWidth(dotData.genes, dotData.clusters) > chart.width - 48 && <p role="note" className="mx-4 sm:mx-6 mt-3 text-xs text-textMuted">Scroll horizontally to inspect all clusters; hover a cell for its values.</p>}
+
+      <div ref={chart.ref} className="min-w-0 p-3 sm:p-6 overflow-x-auto shrink-0" style={{ height: Math.max(380, Math.min(1000, (Array.isArray(dotData?.genes) ? dotData.genes.length : dotData?.genes ? 1 : 3) * 28 + (chart.compact ? 180 : 120))) }}>
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center text-slate-400">
@@ -250,7 +257,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
             data={traces}
             layout={layout}
             config={{ responsive: true, displayModeBar: true, displaylogo: false }}
-            style={{ width: '100%', height: '100%' }}
+            style={{ width: '100%', minWidth: categoryPlotWidth(dotData?.genes, dotData?.clusters), height: '100%' }}
             useResizeHandler
           />
         ) : (
@@ -267,7 +274,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         isOpen={savePanelOpen}
         onClose={() => setSavePanelOpen(false)}
         plotType="DotPlot"
-        baseParams={{ features: genes, groupBy: 'seurat_clusters' }}
+        baseParams={{ features: plottedGenes, groupBy: 'seurat_clusters' }}
         userEmail={userEmail || ''}
         objectId={objectId || ''}
         deploymentPolicy={deploymentPolicy}

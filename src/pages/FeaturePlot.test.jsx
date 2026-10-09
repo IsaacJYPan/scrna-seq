@@ -51,3 +51,14 @@ it('keeps the chart palette readable when its local dark mode is selected', asyn
   expect(plot).toHaveAttribute('data-paper-background', '#ffffff');
   expect(plot).toHaveAttribute('data-axis-text', '#475569');
 });
+
+it('keeps page context and navigates to UMAP while enforcing the prerequisite', () => {
+  const callApi = vi.fn();
+  const onNavigateToUmap = vi.fn();
+  render(<FeaturePlot datasetInfo={{ id: 'ao_1' }} pipelineState={{ umap: false }} callApi={callApi} onNavigateToUmap={onNavigateToUmap} />);
+  expect(screen.getByRole('heading', { name: 'Feature Plot' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Go to UMAP' }));
+  expect(onNavigateToUmap).toHaveBeenCalledOnce();
+  expect(callApi).not.toHaveBeenCalled();
+  expect(screen.queryByTestId('plot-stub')).not.toBeInTheDocument();
+});

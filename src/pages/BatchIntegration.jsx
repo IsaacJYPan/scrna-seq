@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect, useCallback } from 'react';
 import { Layers, AlertTriangle, CheckCircle2, RefreshCw, Zap, GitMerge, FileText } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
@@ -149,21 +150,9 @@ export default function BatchIntegration({
   const isComplete = !!result;
 
   return (
-    <div className="h-full w-full flex flex-col bg-background p-6 overflow-y-auto custom-scrollbar">
+    <div className="h-full w-full flex flex-col bg-background p-4 sm:p-6 overflow-y-auto custom-scrollbar">
       {/* Header */}
-      <div className="flex justify-between items-start mb-6">
-        <div>
-          <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Batch Integration</h2>
-          <p className="text-textMuted text-sm">
-            Correct technical variation across samples, donors, or sequencing runs.
-            {pipelineState?.integrate && (
-              <span className="ml-2 inline-flex items-center gap-1 text-success text-xs font-bold">
-                <CheckCircle2 size={12} /> Integrated
-              </span>
-            )}
-          </p>
-        </div>
-        <div className="flex gap-3">
+      <PageHeader title="Batch Integration" description="Correct technical variation across samples, donors, or sequencing runs." className="mb-6" actions={<>
           {result && (
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
@@ -184,8 +173,9 @@ export default function BatchIntegration({
             }
             {running ? 'Integrating...' : isComplete ? 'Re-Integrate' : 'Run Integration'}
           </button>
-        </div>
-      </div>
+        </>} >
+        {pipelineState?.integrate && <span className="inline-flex items-center gap-1 text-success text-xs font-bold"><CheckCircle2 size={12} /> Integrated</span>}
+      </PageHeader>
 
       {/* Error banner */}
       {error && (
@@ -358,7 +348,7 @@ export default function BatchIntegration({
               </div>
 
               {/* Stats grid */}
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="card p-4 bg-black/20 text-center">
                   <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Method</div>
                   <div className="text-lg font-bold text-white">{(result.result?.method || '').toUpperCase()}</div>

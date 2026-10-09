@@ -1,3 +1,7 @@
+import { publicErrorMessage } from '../publicError';
+import { usePlotGeometry } from '../hooks/usePlotGeometry';
+import './analysisUi.css';
+import PageHeader from '../components/PageHeader';
 import React, { useState } from 'react';
 import { Search, BarChart3, Play, Layers, ChevronDown, ChevronRight, ImageDown } from 'lucide-react';
 import Plot from '../components/Plot';
@@ -68,7 +72,9 @@ function formatFeaturePlot(data, theme) {
   }];
 }
 
-export default function GeneViewer({ datasetInfo, pipelineState, userEmail, objectId, callApi, theme, deploymentPolicy }) {
+export default function GeneViewer({ datasetInfo, pipelineState, userEmail, objectId, callApi, theme, deploymentPolicy, onNavigateToUmap }) {
+  const chart = usePlotGeometry();
+  const [browserOpen, setBrowserOpen] = useState(false);
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeGene, setActiveGene] = useState(null);
@@ -87,7 +93,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
       <div className="h-full flex items-center justify-center p-8 bg-background">
         <div className="text-center max-w-sm">
           <BarChart3 size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
-          <h2 className="text-xl font-bold text-white mb-2">No Dataset Loaded</h2>
+          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
         </div>
       </div>
     );
@@ -99,7 +105,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
     try {
       const data = await callApi(`/gene-expression?gene=${encodeURIComponent(gene)}`, {}, { useCache: false });
       if (data.error) {
-        setError(data.error);
+        setError(publicErrorMessage(data.error, 'Gene expression could not be loaded. Check the gene symbol and try again.'));
       } else {
         setGeneData(data);
         setActiveGene(gene);
@@ -144,11 +150,11 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
   const hasUmap = hasUmapResult(pipelineState);
 
   return (
-    <div className="h-full w-full flex flex-col md:flex-row bg-background overflow-hidden">
+    <div className="h-full w-full flex flex-col lg:flex-row bg-background overflow-hidden">
       {/* Gene browser sidebar */}
-      <div className="w-full md:w-72 max-h-[38vh] md:max-h-none border-b md:border-b-0 md:border-r border-border flex flex-col bg-surface flex-shrink-0">
+      <div className="gene-browser w-full lg:w-64 border-b lg:border-b-0 lg:border-r border-border flex flex-col bg-surface flex-shrink-0">
         <div className="p-4 border-b border-border">
-          <h3 className="text-sm font-bold text-white mb-3">Gene Browser</h3>
+          <div className="flex items-center justify-between mb-3"><h3 className="text-sm font-bold text-text">Gene Browser</h3><button type="button" className="lg:hidden text-sm text-primary min-h-10 px-2" aria-expanded={browserOpen} aria-controls="gene-category-browser" onClick={() => setBrowserOpen(open => !open)}>{browserOpen ? 'Hide categories' : 'Browse categories'}</button></div>
           <form onSubmit={handleSearch} className="relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -157,7 +163,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
               value={query}
               onChange={e => handleQueryChange(e.target.value)}
               placeholder="Search gene (CD3E, LYZ...)"
-              className="w-full bg-background border border-border rounded-lg py-2 pl-9 pr-3 text-xs text-white focus:outline-none focus:border-primary placeholder:text-slate-400"
+              className="w-full bg-background border border-border rounded-lg py-2 pl-9 pr-3 text-sm text-text focus:outline-none focus:border-primary placeholder:text-slate-400"
             />
             {suggestions.length > 0 && (
               <div className="absolute top-full mt-1 left-0 right-0 bg-slate-800 border border-border rounded-lg overflow-hidden z-20 shadow-xl">
@@ -174,12 +180,12 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
           </form>
         </div>
 
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
+        <div id="gene-category-browser" className={`gene-browser-body flex-1 overflow-y-auto custom-scrollbar p-2 ${browserOpen ? 'block' : 'hidden lg:block'}`}>
           {Object.entries(GENE_CATEGORIES).map(([cat, genes]) => (
             <div key={cat} className="mb-1">
               <button
                 onClick={() => toggleCategory(cat)}
-                className="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-bold text-slate-400 hover:text-white rounded hover:bg-white/5 transition-colors"
+                aria-expanded={!!expandedCats[cat]} className="gene-category w-full flex items-center gap-2 px-2 py-1.5 text-xs font-bold text-slate-400 hover:text-text rounded hover:bg-white/5 transition-colors"
               >
                 {expandedCats[cat] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 <span className="uppercase tracking-wider">{cat}</span>
@@ -191,10 +197,10 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
                     <button
                       key={g}
                       onClick={() => selectGene(g)}
-                      className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider transition-all border
+                      aria-pressed={activeGene === g} className={`gene-chip rounded font-bold uppercase tracking-wider transition-all border
                         ${activeGene === g 
                           ? 'bg-primary/20 border-primary text-primary' 
-                          : 'bg-slate-800 border-border text-slate-400 hover:border-slate-600 hover:text-slate-300'}`}
+                          : 'bg-surface border-border text-textMuted hover:border-primary hover:text-text'}`}
                     >{g}</button>
                   ))}
                 </div>
@@ -204,29 +210,25 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
         </div>
 
         <div className="p-3 border-t border-border text-[10px] text-slate-400 text-center">
-          {allGenes.length} genes available
+          {allGenes.length} suggested markers · search any dataset gene
         </div>
       </div>
 
       {/* Main plot area */}
       <div className="flex-1 min-w-0 flex flex-col p-4 sm:p-6 overflow-y-auto custom-scrollbar">
-        <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
-          <div className="min-w-0 flex-1 basis-72">
-            <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Gene Expression Viewer</h2>
-            <p className="text-textMuted text-sm">Visualize per-cluster expression profiles via VlnPlot and FeaturePlot.</p>
-          </div>
+        <PageHeader title="Gene Expression Viewer" description="Compare expression across cell groups or inspect expression on UMAP." className="mb-6" actions={<>
           {activeGene && (
             <div className="flex flex-wrap shrink-0 items-center gap-2 sm:gap-3 max-w-full">
-              <div className="flex flex-wrap shrink-0 bg-slate-800 rounded-lg p-1 border border-border">
+              <div className="flex flex-wrap shrink-0 bg-surface rounded-lg p-1 border border-border">
                 <button 
                   onClick={() => setViewMode('violin')}
-                  className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'violin' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                  className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'violin' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-text'}`}
                 >
                   <BarChart3 size={14} /> VlnPlot
                 </button>
                 <button 
                   onClick={() => setViewMode('feature')}
-                  className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'feature' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                  className={`px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${viewMode === 'feature' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-text'}`}
                 >
                   <Layers size={14} /> FeaturePlot
                 </button>
@@ -239,7 +241,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
               </button>
             </div>
           )}
-        </div>
+        </>} />
 
         {loading ? (
           <div className="flex-1 flex flex-col items-center justify-center space-y-4">
@@ -255,7 +257,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
             <div className="text-center text-danger max-w-sm">
               <Play className="mx-auto mb-4 opacity-50 rotate-90" size={48} />
               <p className="font-bold">{error}</p>
-              <p className="text-sm opacity-70 mt-2">Try another gene or ensure the pipeline is complete up to UMAP.</p>
+              <p className="text-sm opacity-70 mt-2">Check that the symbol exists in this dataset and that the analysis session is available. UMAP is required only for the feature view.</p>
             </div>
           </div>
         ) : !activeGene ? (
@@ -263,23 +265,23 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
             <div className="text-center">
               <BarChart3 size={64} className="mx-auto mb-4" />
               <p className="text-xl font-black text-slate-300 tracking-tight">Select a gene to visualize</p>
-              <p className="text-sm text-slate-400 mt-2">Browse categories on the left or search by symbol.</p>
+              <p className="text-sm text-slate-400 mt-2">Search by gene symbol or browse marker categories.</p>
             </div>
           </div>
         ) : viewMode === 'feature' && !hasUmap ? (
           <div className="flex-1 rounded-lg border border-border bg-surface/40">
-            <UmapPrerequisiteNotice compact />
+            <UmapPrerequisiteNotice compact onNavigateToUmap={onNavigateToUmap} />
           </div>
         ) : (
           <div className="flex-1">
-            <div className="card p-6 bg-slate-800/40">
+            <div className="card p-3 sm:p-6 bg-surface">
               <div className="flex items-center gap-3 mb-4">
                 <span className="text-[10px] font-black text-primary uppercase tracking-[.2em]">
                   {viewMode === 'violin' ? 'Violin Plot' : 'Feature Plot'}
                 </span>
-                <span className="text-lg font-black text-white">{activeGene}</span>
+                <span className="text-lg font-black text-text">{activeGene}</span>
               </div>
-              <div className="w-full h-[480px]">
+              <div ref={chart.ref} className="w-full h-[340px] sm:h-[440px]">
                 <Plot 
                   preferSvg={viewMode === 'feature'}
                   data={viewMode === 'violin' ? formatViolinData(geneData) : formatFeaturePlot(geneData, theme)}
@@ -287,16 +289,16 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
                     autosize: true,
                     paper_bgcolor: 'transparent',
                     plot_bgcolor: 'transparent',
-                    font: { color: plotText },
-                    margin: { l: 60, r: 20, t: 20, b: 60 },
+                    font: { color: plotText, size: 12 },
+                    margin: { l: 48, r: viewMode === 'feature' ? 64 : 12, t: 20, b: 64 },
                     hoverlabel: hoverStyle,
                     ...(viewMode === 'violin' ? {
-                      xaxis: { gridcolor: plotGrid, title: 'Clusters' },
-                      yaxis: { title: 'Expression Level', gridcolor: plotGrid },
+                      xaxis: { gridcolor: plotGrid, title: { text: 'Cluster' }, automargin: true },
+                      yaxis: { title: { text: 'Expression' }, automargin: true, gridcolor: plotGrid },
                       showlegend: false
                     } : {
-                      xaxis: { title: 'UMAP1', showgrid: false, zeroline: false },
-                      yaxis: { title: 'UMAP2', showgrid: false, zeroline: false },
+                      xaxis: { title: { text: 'UMAP 1' }, automargin: true, showgrid: false, zeroline: false },
+                      yaxis: { title: { text: 'UMAP 2' }, automargin: true, showgrid: false, zeroline: false },
                       showlegend: false
                     })
                   }}

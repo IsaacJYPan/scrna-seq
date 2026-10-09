@@ -1,0 +1,23 @@
+import React from 'react';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { expect, it, vi } from 'vitest';
+const { plotSpy, saveSpy } = vi.hoisted(() => ({ plotSpy: vi.fn(), saveSpy: vi.fn() }));
+vi.mock('../components/Plot', () => ({ default: props => { plotSpy(props); return <div data-testid="dot-result" />; } }));
+vi.mock('../components/FigureSavePanel', () => ({ default: props => { saveSpy(props); return null; } }));
+import DotPlot from './DotPlot';
+it('handles a single-gene response and exports the plotted data even when the pending selection changes', async () => {
+  const callApi = vi.fn(async () => ({ genes: 'CD3E', clusters: ['0', '1'], avg_expr: [1, 2], pct_expr: [0.5, 1] }));
+  render(<DotPlot datasetInfo={{ id: 'ao_dot' }} pipelineState={{ cluster: true }} callApi={callApi} theme="light" />);
+  const input = screen.getByRole('textbox', { name: 'Add gene to dot plot' });
+  fireEvent.change(input, { target: { value: 'CD3E' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Plot', exact: true }));
+  await screen.findByTestId('dot-result');
+  expect(plotSpy.mock.calls.at(-1)[0].data[0]).toEqual(expect.objectContaining({ x: ['0', '1'], y: ['CD3E', 'CD3E'], marker: expect.objectContaining({ color: [1, 2], size: [14, 28] }) }));
+  fireEvent.change(input, { target: { value: 'MS4A1' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add', exact: true }));
+  expect(screen.getByRole('status')).toHaveTextContent('last plotted gene set');
+  fireEvent.click(screen.getByRole('button', { name: 'Save Figure' }));
+  expect(saveSpy.mock.calls.at(-1)[0].baseParams.features).toEqual(['CD3E']);
+  expect(callApi).toHaveBeenCalledTimes(1);
+});

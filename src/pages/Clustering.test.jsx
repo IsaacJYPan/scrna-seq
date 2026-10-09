@@ -1,0 +1,31 @@
+import React from 'react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, expect, it, vi } from 'vitest';
+vi.mock('../components/Plot', () => ({ default: () => <div /> }));
+import Clustering from './Clustering';
+beforeEach(() => localStorage.clear());
+const props = { datasetInfo: { cells: 100 }, pipelineState: { pca: true }, userEmail: 'cluster@test.local', objectId: 'ao_cluster', sessionReady: false, openProvenance: vi.fn() };
+it('keeps parameter editing manual and sends the selected values with provenance/cache context', async () => {
+  const callApi = vi.fn(async () => ({ result: { n_clusters: 2, cluster_names: ['0', '1'], cluster_sizes: [60, 40] }, provenance: { id: 'cluster-result' } }));
+  render(<Clustering {...props} pcaProvId="pca-source" callApi={callApi} />);
+  fireEvent.change(screen.getByLabelText('Algorithm'), { target: { value: '4' } });
+  fireEvent.change(screen.getByLabelText('Resolution'), { target: { value: '0.75' } });
+  fireEvent.change(screen.getByLabelText('PC Dimensions'), { target: { value: '12' } });
+  expect(callApi).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Run Clustering' }));
+  await waitFor(() => expect(callApi).toHaveBeenCalledOnce());
+  expect(callApi.mock.calls[0][0]).toContain('dims=12&resolution=0.75&algorithm=4');
+  expect(callApi.mock.calls[0][2]).toEqual(expect.objectContaining({ parentIds: ['pca-source'], onlyIfCached: false, useCache: true, cacheParams: expect.objectContaining({ dims: 12, resolution: 0.75, algorithm: 4 }) }));
+});
+it('blocks incomplete or out-of-range numeric parameters instead of submitting NaN', () => {
+  const callApi = vi.fn();
+  render(<Clustering {...props} callApi={callApi} />);
+  const dims = screen.getByLabelText('PC Dimensions');
+  fireEvent.change(dims, { target: { value: '' } });
+  expect(screen.getByRole('alert')).toHaveTextContent('PC Dimensions');
+  expect(screen.getByRole('button', { name: 'Run Clustering' })).toBeDisabled();
+  fireEvent.change(dims, { target: { value: '12' } });
+  fireEvent.change(screen.getByLabelText('Number of Starts'), { target: { value: '0' } });
+  expect(screen.getByRole('button', { name: 'Run Clustering' })).toBeDisabled();
+  expect(callApi).not.toHaveBeenCalled();
+});
