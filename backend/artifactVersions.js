@@ -4,11 +4,12 @@ const crypto = require('node:crypto');
 const storage = require('./storage');
 const previews = require('./artifactPreviews');
 const { DOWNLOADABLE_ARTIFACT_TYPES, authorizeArtifactDownload } = require('./researchExports');
+const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const analysisContract = import('../shared/analysisModel.mjs');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
-const QUOTA = Object.freeze({ versions: 200, bytes: 1024 * 1024 * 1024 });
+const QUOTA = Object.freeze({ versions: 200, bytes: 5 * 1024 * 1024 * 1024 });
 const VERSION_PATTERN = /^(?:av|art|eri)_[a-f0-9]{16,40}$/;
 const id = prefix => `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
 const canonicalTime = value => new Date(value).toISOString();
@@ -242,13 +243,31 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     }
   }
 
-  async function assertCapacity(connection, userId, projectId, bytes, excludePublicationId = null) {
+  async function capacity(connection, userId, projectId, excludePublicationId = null) {
     const usage = (await connection.query(`SELECT COUNT(*)::int AS count,COALESCE(SUM(bytes),0)::bigint AS bytes FROM (
       SELECT size_bytes AS bytes FROM managed_artifact_versions WHERE project_id=$1 AND owner_user_id=$2
       UNION ALL SELECT reserved_bytes AS bytes FROM private_r_publications WHERE project_id=$1 AND owner_user_id=$2
         AND status IN ('reserved','running','unknown') AND ($3::text IS NULL OR id<>$3)
     ) usage`, [projectId, userId, excludePublicationId])).rows[0];
-    if (usage.count >= QUOTA.versions || Number(usage.bytes) + bytes > QUOTA.bytes) throw artifactError('ARTIFACT_STORAGE_LIMIT', 'Your managed artifact storage is full. Unconfirmed saves reserve space until their completion is resolved.', 409);
+    const availableBytes = Math.max(0, getPrivateRArtifactPolicy().managedQuotaBytes - Number(usage.bytes));
+    return { count: Number(usage.count), availableBytes };
+  }
+  function full() {
+    throw artifactError('ARTIFACT_STORAGE_LIMIT', 'Your managed artifact storage is full. Unconfirmed saves reserve space until their completion is resolved.', 409);
+  }
+  async function assertCapacity(connection, userId, projectId, bytes, excludePublicationId = null) {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw artifactError('INVALID_ARTIFACT_FILE', 'The saved artifact size is invalid.');
+    const usage = await capacity(connection, userId, projectId, excludePublicationId);
+    if (usage.count >= QUOTA.versions || bytes > usage.availableBytes) full();
+  }
+  async function reserveProducedCapacity(connection, userId, projectId, maximumBytes) {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) throw artifactError('INVALID_ARTIFACT_FILE', 'The saved artifact size limit is invalid.');
+    // Serialize producers and imports under the same project lock. The caller
+    // retains this exact maximum in its publication row before releasing it.
+    await connection.query('SELECT id FROM projects WHERE id=$1 FOR UPDATE', [projectId]);
+    const usage = await capacity(connection, userId, projectId);
+    if (usage.count >= QUOTA.versions || usage.availableBytes < 1) full();
+    return Math.min(maximumBytes, usage.availableBytes);
   }
   async function planProduced(connection, userId, projectId, { type, formatId, previousVersionId }) {
     await connection.query('SELECT id FROM projects WHERE id=$1 FOR UPDATE', [projectId]);
@@ -263,7 +282,15 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
   async function registerProduced(connection, userId, projectId, value) {
     const plan = await planProduced(connection, userId, projectId, { type: value.type, formatId: value.format.id, previousVersionId: value.previousVersionId });
     if (value.previousVersionId && plan.artifactId !== value.artifactId) throw artifactError('ARTIFACT_VERSION_CHANGED','The previous version no longer matches this artifact.',409);
-    await assertCapacity(connection, userId, projectId, value.sizeBytes, value.publicationId);
+    if (value.publicationId) {
+      const reservation = (await connection.query(`SELECT reserved_bytes FROM private_r_publications
+        WHERE id=$1 AND project_id=$2 AND owner_user_id=$3 AND storage_key=$4 AND version_id=$5
+          AND status IN ('reserved','running','unknown') FOR UPDATE`,
+      [value.publicationId,projectId,userId,value.key,value.versionId])).rows[0];
+      if (!reservation || !Number.isSafeInteger(value.sizeBytes) || value.sizeBytes < 1 || value.sizeBytes > Number(reservation.reserved_bytes)) throw artifactError('INVALID_ARTIFACT_FILE','The saved artifact exceeds its retained storage reservation.');
+      // This quota was admitted before serialization. A later quota reduction
+      // blocks new writes without revoking this exact outstanding reservation.
+    } else await assertCapacity(connection, userId, projectId, value.sizeBytes);
     (await analysisContract).validateArtifactFormat(value.format);
     if (!/^av_[a-f0-9]{24}$/.test(value.versionId) || !/^af_[a-f0-9]{24}$/.test(value.artifactId) || !validBytes({checksum:value.checksumSha256,size:value.sizeBytes,key:value.key}) || !storage.isProjectStorageKey(value.key,{projectId,kind:'artifacts'})) throw artifactError('INVALID_ARTIFACT_FILE','The saved artifact evidence is invalid.');
     const next = (await connection.query('SELECT COALESCE(MAX(version_number),0)+1 AS version FROM managed_artifact_versions WHERE artifact_id=$1', [value.artifactId])).rows[0];
@@ -273,7 +300,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       [value.versionId,value.artifactId,projectId,userId,safeName(value.name),Number(next.version),value.previousVersionId||null,value.type,value.format,value.mimeType,value.checksumSha256,value.sizeBytes,value.key,value.publicationId,value.provenance]);
     return inserted.rows[0];
   }
-  return { list, get, preview, importFile, resolveVerified, assertCapacity, planProduced, registerProduced };
+  return { list, get, preview, importFile, resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

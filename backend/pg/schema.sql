@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261012, now())
+VALUES ('traceomics.runtime', 20261013, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -971,9 +971,9 @@ CREATE TABLE IF NOT EXISTS private_r_publications (
   version_id TEXT NOT NULL UNIQUE CHECK (version_id ~ '^av_[a-f0-9]{24}$'),
   previous_version_id TEXT REFERENCES managed_artifact_versions(id) DEFERRABLE INITIALLY DEFERRED,
   storage_key TEXT NOT NULL CHECK (length(storage_key) BETWEEN 1 AND 2048),
-  reserved_bytes BIGINT NOT NULL CHECK (reserved_bytes BETWEEN 1 AND 20971520),
+  reserved_bytes BIGINT NOT NULL CHECK (reserved_bytes BETWEEN 1 AND 68719476736),
   checksum_sha256 TEXT CHECK (checksum_sha256 ~ '^[a-f0-9]{64}$'),
-  size_bytes BIGINT CHECK (size_bytes BETWEEN 1 AND 20971520),
+  size_bytes BIGINT CHECK (size_bytes BETWEEN 1 AND 68719476736 AND size_bytes <= reserved_bytes),
   lineage_json JSONB NOT NULL CHECK (octet_length(lineage_json::text) <= 196608),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -983,6 +983,15 @@ CREATE TABLE IF NOT EXISTS private_r_publications (
          (publication_type IN ('object','table') AND binding_name IS NOT NULL AND figure_index IS NULL)),
   CHECK (status <> 'completed' OR (checksum_sha256 IS NOT NULL AND size_bytes IS NOT NULL AND completed_at IS NOT NULL))
 );
+-- Upgrade the original 20 MiB limits while retaining every immutable admission
+-- reservation. A completed file must fit the exact reservation, even if the
+-- operator changes the limits before its receipt is recovered.
+ALTER TABLE private_r_publications DROP CONSTRAINT IF EXISTS private_r_publications_reserved_bytes_check;
+ALTER TABLE private_r_publications ADD CONSTRAINT private_r_publications_reserved_bytes_check
+  CHECK (reserved_bytes BETWEEN 1 AND 68719476736);
+ALTER TABLE private_r_publications DROP CONSTRAINT IF EXISTS private_r_publications_size_bytes_check;
+ALTER TABLE private_r_publications ADD CONSTRAINT private_r_publications_size_bytes_check
+  CHECK (size_bytes BETWEEN 1 AND 68719476736 AND size_bytes <= reserved_bytes);
 CREATE INDEX IF NOT EXISTS idx_private_publications_owner
   ON private_r_publications(project_id,owner_user_id,created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_private_publications_pending

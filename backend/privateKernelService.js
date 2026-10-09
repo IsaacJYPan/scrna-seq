@@ -12,6 +12,7 @@ const { createPrivateKernelClient } = require('./privateKernelClient');
 const c = require('./privateKernelContract');
 const { createPrivateKernelPublicationService } = require('./privateKernelPublications');
 const { createPrivateKernelControlService } = require('./privateKernelControls');
+const { effectivePrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const ACTIVE = ['starting','ready','running','unknown','stopping'];
 const id = prefix => prefix + '_' + crypto.randomBytes(12).toString('hex');
 const time = value => value == null ? null : new Date(value).toISOString();
@@ -22,6 +23,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
   const getEnvironment = options.getEnvironment || getExpertREnvironment;
   const artifacts = createArtifactVersionService(db, provider);
   const now = options.now || Date.now;
+  const probe = options.probeCapabilities || require('./expertRAccess').probeExpertRRuntime;
   const maxOwner = options.maxOwner || 1; const maxActive = options.maxActive || 2;
   async function transaction(callback) {
     const connection = await (await db.connect()).connect();
@@ -139,10 +141,11 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     const manifest=validateEnvironmentManifest(await getEnvironment()); const environment=summarizeEnvironmentManifest(manifest); assertEnvironmentMatches(input.environment,environment);
     const selections=[...input.inputs];
     if(input.analysisObjectId) { const checkpoint=await db.getLoadableCheckpointForAnalysisObject(projectId,input.analysisObjectId,userId); selections.unshift({artifactId:checkpoint.checkpointArtifactId,versionId:checkpoint.checkpointArtifactId,projectId:String(projectId),sha256:checkpoint.checksumSha256}); }
-    const verified=[]; let total=0;
+    const verified=[]; let total=0; const artifactPolicy=selections.length?effectivePrivateRArtifactPolicy(await probe()):null;
+    if(selections.length&&!artifactPolicy)throw c.kernelError('PRIVATE_KERNEL_UNAVAILABLE','The private R input policy could not be verified. Refresh server readiness before starting a session.',503);
     for(let index=0;index<selections.length;index++) {
       const opened=await artifacts.resolveVerified(userId,projectId,selections[index],{purpose:'execution'});
-      try { const version=opened.version; total+=version.sizeBytes; if(version.sizeBytes>200*1024*1024||total>c.LIMITS.inputBytes) throw c.kernelError('PRIVATE_KERNEL_INPUT_LIMIT','Selected private R inputs exceed the bounded session input size.',413);
+      try { const version=opened.version; total+=version.sizeBytes; if(version.sizeBytes>artifactPolicy.maxInputFileBytes||total>artifactPolicy.maxInputTotalBytes) throw c.kernelError('PRIVATE_KERNEL_INPUT_LIMIT','Selected private R inputs exceed the configured file or total session input size. Choose fewer inputs or ask the server administrator to adjust the private R limits.',413);
         verified.push({id:version.versionId,versionId:version.versionId,type:version.type,format:formats[version.format.id]||'bin',name:version.name,internalStorageKey:opened.internalStorageKey,checksumSha256:version.sha256,sizeBytes:version.sizeBytes,role:input.analysisObjectId&&index===0?'checkpoint':'input',reference:version.reference,publicFormat:version.format});
       } finally { await opened.handle.close(); }
     }
@@ -197,8 +200,8 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     await checked(await owned(userId,projectId,kernelId)); return execution(userId,projectId,kernelId,started.id);
   }
   async function stop(userId,projectId,kernelId) { const row=await owned(userId,projectId,kernelId); await checked(row); const result=await stopRow(row); await access(userId,projectId); return session(result); }
-  const publications=createPrivateKernelPublicationService({db,provider,client,artifacts,transaction,access,lockedAccess,owned,checked,probe:options.probeCapabilities||require('./expertRAccess').probeExpertRRuntime});
-  const controls=createPrivateKernelControlService({db,client,artifacts,transaction,access,lockedAccess,owned,checked,stopRow,session,receipt,finalize,reconcile,publications,getEnvironment,now,maxOwner,maxActive,id,probe:options.probeCapabilities||require('./expertRAccess').probeExpertRRuntime});
+  const publications=createPrivateKernelPublicationService({db,provider,client,artifacts,transaction,access,lockedAccess,owned,checked,probe});
+  const controls=createPrivateKernelControlService({db,client,artifacts,transaction,access,lockedAccess,owned,checked,stopRow,session,receipt,finalize,reconcile,publications,getEnvironment,now,maxOwner,maxActive,id,probe});
   return {list,start,get,execute,execution,executions,stop,interrupt:controls.interrupt,restart:controls.restart,restartStatus:controls.restartStatus,publish:publications.publish,publications:publications.list};
 }
 module.exports={createPrivateKernelService};

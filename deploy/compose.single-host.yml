@@ -25,7 +25,16 @@ x-operations-image: &operations-image
       APP_UID: ${APP_UID:-10001}
       APP_GID: ${APP_GID:-10001}
 
+x-private-r-artifact-policy: &private-r-artifact-policy
+  PRIVATE_R_MAX_OUTPUT_BYTES: ${PRIVATE_R_MAX_OUTPUT_BYTES:-536870912}
+  PRIVATE_R_MAX_INPUT_FILE_BYTES: ${PRIVATE_R_MAX_INPUT_FILE_BYTES:-536870912}
+  PRIVATE_R_MAX_INPUT_TOTAL_BYTES: ${PRIVATE_R_MAX_INPUT_TOTAL_BYTES:-1073741824}
+  PRIVATE_R_MANAGED_QUOTA_BYTES: ${PRIVATE_R_MANAGED_QUOTA_BYTES:-5368709120}
+  PRIVATE_R_DISK_RESERVE_BYTES: ${PRIVATE_R_DISK_RESERVE_BYTES:-1073741824}
+  PRIVATE_R_TRANSFER_TIMEOUT_SECONDS: ${PRIVATE_R_TRANSFER_TIMEOUT_SECONDS:-900}
+
 x-db-runtime-environment: &db-runtime-environment
+  <<: *private-r-artifact-policy
   # PostgreSQL shares the private namespace as well. Keeping its client address
   # on loopback avoids weakening the production certificate-authentication rule
   # for non-loopback database connections.
@@ -388,6 +397,7 @@ services:
       STORAGE_ROOT: /app/storage-volume/data
       EXPERT_R_SANDBOX_TOKEN: ${EXPERT_R_SANDBOX_TOKEN:-disabled}
       EXPERT_R_SANDBOX_IMAGE: ${EXPERT_R_SANDBOX_IMAGE:-disabled}
+      <<: *private-r-artifact-policy
       EXPERT_R_SANDBOX_WORK_ROOT: ${EXPERT_R_SANDBOX_HOST_WORK_ROOT:-/var/lib/traceomics-expert}
       EXPERT_R_SANDBOX_HOST: 127.0.0.1
       EXPERT_R_SANDBOX_PORT: "8090"

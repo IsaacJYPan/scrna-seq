@@ -2009,9 +2009,10 @@ app.get('/api/expert-r/capabilities', async (req, res) => {
     if (projectId !== undefined && (typeof projectId !== 'string' || !/^proj_[A-Za-z0-9_-]{3,128}$/.test(projectId))) {
       return res.status(400).json({ error: 'Choose a valid project to check R access.' });
     }
-    const { canExecuteExpertR, expertRAccessRevoked } = await db.getExpertRCapabilities(req.user.id, projectId || null);
     const { probeExpertRRuntime, expertRStatus } = require('./backend/expertRAccess');
+    const { effectivePrivateRArtifactPolicy } = require('./backend/privateRArtifactPolicy');
     const runtime = config.demoMode() ? { state: 'not-configured' } : await probeExpertRRuntime();
+    const { canExecuteExpertR, expertRAccessRevoked } = await db.getExpertRCapabilities(req.user.id, projectId || null);
     const enabled = !config.demoMode() && runtime.state === 'ready' && canExecuteExpertR;
     res.json({
       expertREnabled: enabled,
@@ -2020,6 +2021,8 @@ app.get('/api/expert-r/capabilities', async (req, res) => {
       persistentKernel: enabled && runtime.persistentKernel === true,
       persistentKernelInterrupt: enabled && runtime.persistentKernelInterrupt === true,
       persistentKernelPublications: enabled && runtime.persistentKernelPublications === true,
+      persistentKernelStreamedPublications: enabled && runtime.persistentKernelStreamedPublications === true,
+      expertRArtifactPolicy: enabled ? effectivePrivateRArtifactPolicy(runtime) : null,
       expertRStatus: expertRStatus({ canExecuteExpertR, runtime,
         revoked: expertRAccessRevoked, demoMode: config.demoMode() }),
     });

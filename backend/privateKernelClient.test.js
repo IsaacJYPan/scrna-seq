@@ -8,6 +8,26 @@ it('preserves known definitive runtime rejections and sanitizes their private di
 it('handles malformed, inherited-code and oversized replies as unconfirmed without retrying',async()=>{for(const body of ['<html>private','{"ok":false,"code":"constructor"}',JSON.stringify({ok:true,data:'x'.repeat(1048576)})]){let count=0;const config=await fixture((_request,response)=>{count++;response.end(body);});await expect(createPrivateKernelClient(config).start({})).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});expect(count).toBe(1);}});
 it('keeps one scientific dispatch on timeout and sends only trusted identity plus bounded source over the broker channel',async()=>{let count=0,received;const config=await fixture(async(request,response)=>{count++;const chunks=[];for await(const chunk of request)chunks.push(chunk);received=JSON.parse(Buffer.concat(chunks).toString());expect(request.headers.authorization).toBe('Bearer '+'a'.repeat(64));void response;});const client=createPrivateKernelClient({...config,timeoutMs:30});await expect(client.execute({ownerUserId:1,projectId:'project',workspaceId:'workspace',generation:'b'.repeat(64)},'pk_'+'a'.repeat(24),{executionId:'pex_'+'c'.repeat(24),order:1,source:'n <- 3'})).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});expect(count).toBe(1);expect(received).toMatchObject({source:'n <- 3',order:1,generation:'b'.repeat(64)});});
 it('keeps receipt refresh separate from serialization and sanitizes a definitive missing-publication response',async()=>{const requests=[];const config=await fixture(async(request,response)=>{const chunks=[];for await(const chunk of request)chunks.push(chunk);requests.push({path:request.url,body:JSON.parse(Buffer.concat(chunks).toString())});response.writeHead(404,{'Content-Type':'application/json'});response.end(JSON.stringify({ok:false,code:'PRIVATE_KERNEL_PUBLICATION_NOT_FOUND',message:'C:/private/path credential'}));});const kernel='pk_'+'a'.repeat(24),publicationId='pub_'+'b'.repeat(24),scope={generation:'c'.repeat(64),ownerUserId:1,projectId:'project',workspaceId:'workspace'};await expect(createPrivateKernelClient(config).exportStatus(scope,kernel,{publicationId})).rejects.toMatchObject({code:'PRIVATE_KERNEL_PUBLICATION_NOT_FOUND',status:404});expect(requests).toEqual([{path:'/kernels/'+kernel+'/export-status',body:{...scope,publicationId}}]);expect(requests[0].body.source).toBeUndefined();});
+it('allows bounded publication transfer time without extending independent control deadlines or redispatching',async()=>{
+  const requests=[];
+  const config=await fixture(async(request,response)=>{
+    requests.push(request.url);request.resume();
+    await new Promise(resolve=>setTimeout(resolve,80));
+    response.end(JSON.stringify({ok:true,status:'completed'}));
+  });
+  const client=createPrivateKernelClient({...config,timeoutMs:30,controlTimeoutMs:30,exportTimeoutMs:250}),kernel='pk_'+'a'.repeat(24);
+  await expect(client.export({},kernel,{publicationId:'pub_'+'b'.repeat(24)})).resolves.toMatchObject({status:'completed'});
+  await expect(client.inspect({},kernel)).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});
+  expect(requests).toEqual(['/kernels/'+kernel+'/export','/kernels/'+kernel+'/inspect']);
+});
+it('uses a retained broker transfer budget without sending it as scientific input',async()=>{
+  const bodies=[];
+  const config=await fixture(async(request,response)=>{const chunks=[];for await(const chunk of request)chunks.push(chunk);bodies.push(JSON.parse(Buffer.concat(chunks).toString()));await new Promise(resolve=>setTimeout(resolve,50));response.end(JSON.stringify({ok:true,status:'completed'}));});
+  const client=createPrivateKernelClient({...config,exportTimeoutMs:20}),kernel='pk_'+'a'.repeat(24),input={publicationId:'pub_'+'b'.repeat(24)};
+  await expect(client.export({},kernel,input,{transferTimeoutSeconds:120})).resolves.toMatchObject({status:'completed'});
+  await expect(client.export({},kernel,input,{transferTimeoutSeconds:3601})).rejects.toMatchObject({code:'PRIVATE_KERNEL_REQUEST_INVALID'});
+  expect(bodies).toEqual([input]);
+});
 it('sends a separate bounded exact-target interrupt while a scientific response is still pending',async()=>{
   const requests=[];let release,entered;const pending=new Promise(resolve=>{entered=resolve;});
   const config=await fixture(async(request,response)=>{const chunks=[];for await(const chunk of request)chunks.push(chunk);const body=JSON.parse(Buffer.concat(chunks).toString());requests.push({path:request.url,body});if(request.url.endsWith('/execute')){entered();await new Promise(resolve=>{release=resolve;});response.end(JSON.stringify({ok:true,status:'unknown'}));}else{response.end(JSON.stringify({ok:true,status:'ready'}));}});

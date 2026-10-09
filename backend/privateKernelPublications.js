@@ -4,7 +4,9 @@ const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
 const storage = require('./storage');
 const c = require('./privateKernelContract');
-const {generatePrivateKernelExportSource,MAX_PRIVATE_KERNEL_EXPORT_BYTES} = require('./privateKernelExports');
+const {generatePrivateKernelExportSource} = require('./privateKernelExports');
+const {effectivePrivateRArtifactPolicy,validatePrivateRArtifactPolicy} = require('./privateRArtifactPolicy');
+const LEGACY_PUBLICATION_BYTES = 20 * 1024 * 1024;
 const specs = {object:{type:'object',formatId:'org.r-project.rds',extension:'rds',mime:'application/octet-stream'},table:{type:'table',formatId:'org.ietf.csv',extension:'csv',mime:'text/csv'},figure:{type:'image',formatId:'org.w3.png',extension:'png',mime:'image/png'}};
 const id = prefix => prefix+'_'+crypto.randomBytes(12).toString('hex');
 const time = value => value ? new Date(value).toISOString() : null;
@@ -22,7 +24,7 @@ function createPrivateKernelPublicationService({db,provider,client,artifacts,tra
   async function readAccess(userId,projectId,kernelId) {await db.requireProjectRole(userId,projectId,['owner','admin','analyst','viewer']);return owned(userId,projectId,kernelId);}
   async function rowById(publicationId) {return (await db.query('SELECT * FROM private_r_publications WHERE id=$1',[publicationId])).rows[0];}
   function receipt(row) {
-    return {id:row.id,status:row.status,type:row.publication_type,name:row.name,kernelId:row.kernel_id,generation:row.kernel_generation,sourceExecutionId:row.source_execution_id,order:Number(row.kernel_order),sourceSha256:row.lineage_json.sourceSha256,createdAt:time(row.created_at),completedAt:time(row.completed_at),lineage:row.lineage_json,...(row.status==='unknown'?{message:'Save completion is unconfirmed. Refresh this receipt; its serialization command will not run again.'}:row.status==='failed'?{message:'This save did not produce a verified artifact version. Its source and execution receipt remain available.'}:{})};
+    return {id:row.id,status:row.status,type:row.publication_type,name:row.name,maximumBytes:Number(row.reserved_bytes),kernelId:row.kernel_id,generation:row.kernel_generation,sourceExecutionId:row.source_execution_id,order:Number(row.kernel_order),sourceSha256:row.lineage_json.sourceSha256,createdAt:time(row.created_at),completedAt:time(row.completed_at),lineage:row.lineage_json,...(row.status==='unknown'?{message:'Save completion is unconfirmed. Refresh this receipt; its serialization command will not run again.'}:row.status==='failed'?{message:'This save did not produce a verified artifact version within its reserved capacity. Earlier saved versions and its source and execution receipt remain available.'}:{})};
   }
   async function present(row) {return {publication:receipt(row),version:row.status==='completed'?await artifacts.get(row.owner_user_id,row.project_id,row.version_id):null};}
   async function lineage(connection,kernel,execution) {
@@ -126,9 +128,10 @@ function createPrivateKernelPublicationService({db,provider,client,artifacts,tra
   async function publish(userId,projectId,kernelId,raw) {
     const value=input(raw);let kernel=await owned(userId,projectId,kernelId);await checked(kernel);const hash=c.digest(value);
     const known=(await db.query('SELECT id FROM private_r_publications WHERE kernel_id=$1 AND request_id=$2',[kernelId,value.requestId])).rows[0];
+    let capabilities;
     if(!known&&value.type!=='figure'){
-      const capabilities=await probe();
-      if(capabilities.state!=='ready'||capabilities.persistentKernelPublications!==true)throw error('PRIVATE_KERNEL_PUBLICATION_UNAVAILABLE','Named R output saves are unavailable in this runtime. Existing console commands remain available.',503);
+      capabilities=await probe();
+      if(capabilities.state!=='ready'||capabilities.persistentKernel!==true||capabilities.persistentKernelPublications!==true)throw error('PRIVATE_KERNEL_PUBLICATION_UNAVAILABLE','Named R output saves are unavailable in this runtime. Existing console commands remain available.',503);
     }
     const reserved=await transaction(async connection=>{
       await lockedAccess(connection,userId,projectId);const spec=specs[value.type];
@@ -137,23 +140,31 @@ function createPrivateKernelPublicationService({db,provider,client,artifacts,tra
       const previous=(await connection.query('SELECT * FROM private_r_publications WHERE kernel_id=$1 AND request_id=$2',[kernelId,value.requestId])).rows[0];
       if(previous){if(previous.request_sha256!==hash)throw error('PRIVATE_KERNEL_REQUEST_CONFLICT','This save request already refers to different output settings.',409);return {pub:previous,repeated:true};}
       if(!kernel.runtime_generation)throw error('PRIVATE_KERNEL_PUBLICATION_INVALID','This session has no confirmed R generation.');
-      const publicationId=id('pub'),versionId=id('av');let execution,figure;
+      const publicationId=id('pub'),versionId=id('av');let execution,figure,bytes,artifactPolicy,stream=false;
       if(value.type==='figure') {
         execution=(await connection.query("SELECT * FROM private_r_executions WHERE id=$1 AND kernel_id=$2 AND owner_user_id=$3 AND status='completed'",[value.executionId,kernelId,userId])).rows[0];
         if(!execution || execution.kernel_generation!==kernel.runtime_generation || !execution.result_json)throw error('PRIVATE_KERNEL_PUBLICATION_INVALID','The selected completed figure is unavailable.');
         figure=c.result(execution.result_json,kernel,execution).figures[value.figureIndex];if(!figure)throw error('PRIVATE_KERNEL_PUBLICATION_INVALID','The selected completed figure is unavailable.');
+        bytes=Buffer.from(figure.data,'base64').length;await artifacts.assertCapacity(connection,userId,projectId,bytes);
       } else {
         if(kernel.status!=='ready'||kernel.active_execution_id||kernel.active_control_id||Date.parse(kernel.expires_at)<=Date.now())throw error('PRIVATE_KERNEL_BUSY','The session must be ready before saving a named R binding.',409);
         if(Number(kernel.next_order)>=c.LIMITS.executions)throw error('PRIVATE_KERNEL_ORDER_LIMIT','Start a new session after 500 commands.',409);
-        const source=generatePrivateKernelExportSource({publicationId,generation:kernel.runtime_generation,type:value.type,binding:value.binding});
+        let brokerPolicy;try{brokerPolicy=validatePrivateRArtifactPolicy(capabilities.privateRArtifactPolicy);}catch{/* An older adapter retains its original serialization bounds. */}
+        stream=capabilities.persistentKernelStreamedPublications===true&&Boolean(brokerPolicy);
+        // Older adapters keep their original 20 MiB command. Only a verified
+        // streamed adapter accepts a quota-bound larger serialization command.
+        artifactPolicy=effectivePrivateRArtifactPolicy(capabilities);
+        bytes=await artifacts.reserveProducedCapacity(connection,userId,projectId,artifactPolicy.maxOutputBytes);
+        if(!stream&&bytes<LEGACY_PUBLICATION_BYTES)throw error('ARTIFACT_STORAGE_LIMIT','The configured limit or remaining managed artifact storage cannot reserve an output on this older R runtime. Free storage or update the server runtime.',409);
+        const source=generatePrivateKernelExportSource({publicationId,generation:kernel.runtime_generation,type:value.type,binding:value.binding,...(stream?{stream:true,maxBytes:bytes}:{})});
         execution=(await connection.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,'reserved',$8,$9) RETURNING *`,[id('pex'),kernelId,projectId,userId,crypto.randomUUID(),kernel.runtime_generation,Number(kernel.next_order)+1,source,c.digest(source)])).rows[0];
       }
-      const bytes=figure?Buffer.from(figure.data,'base64').length:MAX_PRIVATE_KERNEL_EXPORT_BYTES;await artifacts.assertCapacity(connection,userId,projectId,bytes);
       const provenance=await lineage(connection,kernel,execution);
+      if(stream)provenance.artifactPolicy=artifactPolicy;
       const key=storage.projectStorageFileKey(projectId,'artifacts',versionId,'content.'+spec.extension);
       const pub=(await connection.query(`INSERT INTO private_r_publications(id,kernel_id,project_id,owner_user_id,request_id,request_sha256,status,publication_type,name,binding_name,source_execution_id,kernel_generation,kernel_order,figure_index,artifact_id,version_id,previous_version_id,storage_key,reserved_bytes,lineage_json) VALUES($1,$2,$3,$4,$5,$6,'reserved',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,[publicationId,kernelId,projectId,userId,value.requestId,hash,value.type,value.name,value.binding||null,execution.id,kernel.runtime_generation,execution.execution_order,value.figureIndex??null,plan.artifactId,versionId,value.previousVersionId,key,bytes,provenance])).rows[0];
       if(!figure)await connection.query("UPDATE private_r_kernels SET status='running',next_order=$2,active_execution_id=$3,last_activity_at=NOW(),updated_at=NOW() WHERE id=$1",[kernelId,execution.execution_order,execution.id]);
-      return {pub,execution,figure};
+      return {pub,execution,figure,stream};
     });
     const pub=reserved.pub;
     if(reserved.repeated){await recover(pub,kernel);await db.requireProjectRole(userId,projectId,['owner','admin','analyst','viewer']);return present(await rowById(pub.id));}
@@ -173,7 +184,9 @@ function createPrivateKernelPublicationService({db,provider,client,artifacts,tra
       await db.query("UPDATE private_r_executions SET status='running',started_at=NOW(),updated_at=NOW() WHERE id=$1 AND status='reserved'",[reserved.execution.id]);
       try {
         await checked(await owned(userId,projectId,kernelId));
-        await applyExport(pub,kernel,await client.export(c.scope(kernel),kernelId,{publicationId:pub.id,type:value.type,binding:value.binding,executionId:reserved.execution.id,order:Number(reserved.execution.execution_order),source:reserved.execution.source_code,internalStorageKey:pub.storage_key}));
+        const runtimeOptions=reserved.stream?{transferTimeoutSeconds:pub.lineage_json.artifactPolicy.transferTimeoutSeconds}:undefined;
+        const result=await client.export(c.scope(kernel),kernelId,{publicationId:pub.id,type:value.type,binding:value.binding,executionId:reserved.execution.id,order:Number(reserved.execution.execution_order),source:reserved.execution.source_code,internalStorageKey:pub.storage_key,...(reserved.stream?{stream:true,maxBytes:Number(pub.reserved_bytes)}:{})},runtimeOptions);
+        await applyExport(pub,kernel,result);
       } catch(failure) {
         const current=await rowById(pub.id);
         if(['PRIVATE_KERNEL_PUBLICATION_INVALID','PRIVATE_KERNEL_INVALID','PRIVATE_KERNEL_STOPPED','PRIVATE_KERNEL_ORDER_INVALID','PRIVATE_KERNEL_BUSY'].includes(failure.code)){await fail(pub,kernel);throw failure;}

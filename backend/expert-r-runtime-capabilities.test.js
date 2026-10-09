@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import http from 'node:http';
-const { probeExpertRRuntime } = require('./expertRAccess');
+const { probeExpertRRuntime, expertRStatus } = require('./expertRAccess');
 const { EXPERT_R_RESOURCE_POLICY_VERSION } = require('./expertR');
 const { environmentFixture } = require('./_r-environment-test-utils');
+const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 
-describe.each(['persistentKernelPublications','persistentKernelInterrupt'])('independent private R capability %s', field => {
+it.each([{ canExecuteExpertR: false }, { canExecuteExpertR: true, revoked: true },
+  { canExecuteExpertR: true, demoMode: true }])('withholds exact environment and artifact limits when execution is denied %j', access => {
+  const runtime = { state: 'ready', environment: environmentFixture().reference,
+    privateRArtifactPolicy: getPrivateRArtifactPolicy({}), persistentKernel: true };
+  expect(expertRStatus({ ...access, runtime }).runtime).toEqual({ state: 'ready' });
+  expect(expertRStatus({ canExecuteExpertR: true, runtime }).runtime).toEqual(runtime);
+});
+
+describe.each(['persistentKernelPublications','persistentKernelInterrupt','persistentKernelStreamedPublications'])('independent private R capability %s', field => {
   it.each([
     [undefined, false], [false, false], ['true', false], [true, true],
   ])('keeps existing persistent R available while checking support %s', async (advertised, supported) => {

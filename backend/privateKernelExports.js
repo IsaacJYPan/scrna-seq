@@ -8,6 +8,7 @@ const { pipeline } = require('node:stream/promises');
 const storage = require('./storage');
 
 const MAX_PRIVATE_KERNEL_EXPORT_BYTES = 20 * 1024 * 1024;
+const MAX_STREAM_BYTES = 64 * 1024 ** 3;
 const PUBLICATION_ID = /^pub_[0-9a-f]{24}$/;
 const GENERATION = /^[0-9a-f]{64}$/;
 function failure(code, message) { return Object.assign(new Error(message), { code, publicSafeHandlerError: true }); }
@@ -19,19 +20,32 @@ function validateSourceOptions({ publicationId, generation, type, binding } = {}
   }
   return { publicationId, generation, type, binding };
 }
+function streamOptions(spec) {
+  if (spec.stream === undefined && spec.maxBytes === undefined) return null;
+  if (spec.stream !== true || !Number.isSafeInteger(spec.maxBytes) || spec.maxBytes < 1 || spec.maxBytes > MAX_STREAM_BYTES) {
+    throw failure('PRIVATE_KERNEL_PUBLICATION_INVALID', 'The saved-output byte reservation is invalid.');
+  }
+  return { stream: true, maxBytes: spec.maxBytes };
+}
 function exportFilename(spec) {
   const value = validateSourceOptions(spec);
-  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex') + (value.type === 'object' ? '.rds' : '.csv');
+  return crypto.createHash('sha256').update(JSON.stringify({ ...value, ...(streamOptions(spec) || {}) })).digest('hex') + (value.type === 'object' ? '.rds' : '.csv');
 }
 function generatePrivateKernelExportSource(spec) {
-  const value = validateSourceOptions(spec), filename = exportFilename(value);
+  const value = validateSourceOptions(spec), streaming = streamOptions(spec), filename = exportFilename(spec);
+  if (streaming) {
+    const serialize = value.type === 'object'
+      ? 'base::saveRDS(value, file = connection, compress = FALSE, version = 3L)'
+      : 'if (!base::is.data.frame(value)) base::stop("Table publication requires a data frame."); utils::write.csv(value, file = connection, row.names = FALSE, fileEncoding = "UTF-8", na = "NA")';
+    return `base::local({\n  value <- base::get(${JSON.stringify(value.binding)}, envir = base::globalenv(), inherits = FALSE)\n  reserved_bytes <- ${streaming.maxBytes}\n  connection <- base::fifo(${JSON.stringify('/work/export/' + filename)}, open = "wb", blocking = TRUE)\n  base::on.exit(base::close(connection), add = TRUE)\n  ${serialize}\n  base::invisible(NULL)\n})`;
+  }
   const serialize = value.type === 'object'
     ? 'base::saveRDS(value, file = destination, compress = "gzip", version = 3L)'
     : 'if (!base::is.data.frame(value)) base::stop("Table publication requires a data frame."); utils::write.csv(value, file = destination, row.names = FALSE, fileEncoding = "UTF-8", na = "NA")';
   return `base::local({\n  value <- base::get(${JSON.stringify(value.binding)}, envir = base::globalenv(), inherits = FALSE)\n  destination <- ${JSON.stringify('/work/export/' + filename)}\n  ${serialize}\n  size <- base::file.info(destination)$size\n  if (base::is.na(size) || size > ${MAX_PRIVATE_KERNEL_EXPORT_BYTES}L) { base::unlink(destination); base::stop("Saved output exceeds the 20 MiB publication limit.") }\n  base::invisible(NULL)\n})`;
 }
 function validatePrivateKernelExportRequest(spec, { projectId, generation } = {}) {
-  const value = validateSourceOptions({ ...spec, generation });
+  const value = { ...validateSourceOptions({ ...spec, generation }), ...(streamOptions(spec) || {}) };
   if (!storage.isProjectStorageKey(spec.internalStorageKey, { projectId, kind: 'artifacts' })
       || spec.source !== generatePrivateKernelExportSource(value)) {
     throw failure('PRIVATE_KERNEL_PUBLICATION_INVALID', 'The saved-output command or destination is invalid.');

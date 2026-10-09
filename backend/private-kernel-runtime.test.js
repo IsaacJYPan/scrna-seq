@@ -16,6 +16,11 @@ const kernelId=`pk_${'a'.repeat(24)}`;
 const secondId=`pk_${'b'.repeat(24)}`;
 const executionId=`pex_${'1'.repeat(24)}`;
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};}
+function streamRequest(status,{maxBytes=64*1024**2,order=1}={}) {
+  const value={publicationId:'pub_'+ 'e'.repeat(24),generation:status.generation,type:'object',binding:'large_object',stream:true,maxBytes,
+    executionId:'pex_'+ 'd'.repeat(24),order,internalStorageKey:'projects/project1/artifacts/av_stream/content.rds'};
+  return {...value,source:generatePrivateKernelExportSource(value)};
+}
 async function fixture(options={}) {
   const directory=await mkdtemp(path.join(os.tmpdir(),'private-kernel-test-'));directories.push(directory);
   const {manifest,reference}=environmentFixture();let now=Date.now(),requests=0,controls=0;
@@ -24,7 +29,7 @@ async function fixture(options={}) {
   const commands=async(_command,args)=>{
     calls.push(args);
     if(args[0]==='image')return{stdout:reference.imageId};
-    if(args[0]==='run') {if(options.unsupported)throw new Error('no adapter');return{stdout:JSON.stringify({ok:true,protocol:'jupyter',adapter:1,...(options.publications===false?{}:{publications:true}),...(options.interrupts===false?{}:{interrupt:true})})};}
+    if(args[0]==='run') {if(options.unsupported)throw new Error('no adapter');return{stdout:JSON.stringify({ok:true,protocol:'jupyter',adapter:1,...(options.publications===false?{}:{publications:true}),...(options.streamedPublications===false?{}:{streamedPublications:true}),...(options.interrupts===false?{}:{interrupt:true})})};}
     if(args[0]==='create') {
       const labels={};for(let i=0;i<args.length;i++){if(args[i]==='--label'){const equal=args[i+1].indexOf('=');labels[args[i+1].slice(0,equal)]=args[i+1].slice(equal+1);}}
       const value={id:crypto.randomBytes(32).toString('hex'),labels};containers.set(args[args.indexOf('--name')+1],value);return{stdout:value.id};
@@ -46,13 +51,84 @@ async function fixture(options={}) {
   };
   const env={NODE_ENV:'test',PRIVATE_R_KERNEL_ENABLED:'true',EXPERT_R_SANDBOX_IMAGE:reference.imageId,EXPERT_R_SANDBOX_WORK_ROOT:path.join(directory,'work'),...options.env};
   const admittedProvider=options.mutateDuringStage?{...provider,async openVerifiedRead(key,expected){const opened=await provider.openVerifiedRead(key,expected);await options.mutateDuringStage(provider,key);return opened;}}:provider;
-  const runtime=createPrivateKernelRuntime({env,provider:options.provider||(options.wrapProvider?options.wrapProvider(admittedProvider):admittedProvider),environmentManifest:manifest,runProcessImpl:commands,spawnImpl,transportFactory,extractFileImpl:options.extractFileImpl,clock:()=>now,maxRetiredIds:options.maxRetiredIds,maxTombstones:options.maxTombstones});
+  const runtime=createPrivateKernelRuntime({env,provider:options.provider||(options.wrapProvider?options.wrapProvider(admittedProvider):admittedProvider),environmentManifest:manifest,runProcessImpl:commands,spawnImpl,transportFactory,extractFileImpl:options.extractFileImpl,streamFileImpl:options.streamFileImpl,reserveDiskImpl:options.reserveDiskImpl,clock:()=>now,maxRetiredIds:options.maxRetiredIds,maxTombstones:options.maxTombstones});
   runtimes.push(runtime);
   const start=(id=kernelId,extra={})=>runtime.start({...scope,kernelId:id,environment:reference,inputs:[],...extra});
   const restart=()=>{const restarted=createPrivateKernelRuntime({env,provider,environmentManifest:manifest,runProcessImpl:commands,spawnImpl,transportFactory,clock:()=>now});runtimes.push(restarted);return restarted;};
   return{runtime,start,reference,directory,calls,containers,provider,transports,restart,requests:()=>requests,controls:()=>controls,advance:ms=>now+=ms};
 }
 describe('persistent private R runtime ownership and lifecycle',()=>{
+  it('publishes only a verified disk stream paired with a matching successful R command',async()=>{
+    const bytes=Buffer.from('streamed RDS fixture'),reservations=[];let descriptor;
+    const f=await fixture({reserveDiskImpl:async(work,durable)=>{const held={work,durable,released:false};reservations.push(held);return()=>{held.released=true;};},
+      streamFileImpl:async options=>{descriptor=options;await writeFile(options.destination,bytes);return{complete:Promise.resolve({filePath:options.destination,sizeBytes:bytes.length,checksumSha256:crypto.createHash('sha256').update(bytes).digest('hex')}),finish(){},cancel(){}};}});
+    expect((await f.runtime.initialize()).streamedPublications).toBe(true);const started=await f.start();const request=streamRequest(started),exact={...scope,generation:started.generation};
+    const saved=await f.runtime.export(exact,kernelId,request);expect(saved.status).toBe('completed');expect(saved.file.sizeBytes).toBe(bytes.length);
+    expect(await readFile(f.provider.resolveKey(saved.file.internalStorageKey))).toEqual(bytes);
+    expect(descriptor).toMatchObject({maxBytes:request.maxBytes,containerId:expect.stringMatching(/^[a-f0-9]{64}$/),timeoutMs:900000});
+    expect(reservations).toMatchObject([{work:0,durable:0,released:false},{work:request.maxBytes,durable:request.maxBytes,released:true}]);
+    expect((await f.runtime.export(exact,kernelId,request)).file).toEqual(saved.file);expect(f.requests()).toBe(1);
+    await f.runtime.stop(exact,kernelId);expect(reservations[0].released).toBe(true);
+  });
+  it('reports disk admission failures before running source and retains the ready kernel',async()=>{
+    const f=await fixture({reserveDiskImpl:async(_work,durable)=>{if(durable)throw Object.assign(new Error('Free private disk space.'),{code:'PRIVATE_KERNEL_STORAGE_PRESSURE',publicSafeHandlerError:true});return()=>{};}});
+    await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation};
+    const result=await f.runtime.export(exact,kernelId,streamRequest(started));
+    expect(result.status).toBe('failed');expect(result.result.error).toMatchObject({code:'PRIVATE_KERNEL_STORAGE_PRESSURE',message:expect.stringMatching(/source was not executed/)});
+    expect(f.requests()).toBe(0);expect((await f.runtime.inspect(exact,kernelId)).status).toBe('ready');
+    expect((await f.runtime.execute(exact,kernelId,{executionId,order:2,source:'cat(42)'})).status).toBe('completed');
+  });
+  it('fails closed if a successful R command cannot be paired with a verified stream',async()=>{
+    const failed=Promise.reject(Object.assign(new Error('unverified bytes'),{code:'PRIVATE_KERNEL_PUBLICATION_UNAVAILABLE',publicSafeHandlerError:true}));failed.catch(()=>{});
+    const f=await fixture({streamFileImpl:async()=>({complete:failed,finish(){},cancel(){}})});
+    await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation},request=streamRequest(started);
+    const result=await f.runtime.export(exact,kernelId,request);expect(result.status).toBe('unknown');expect(result.file).toBeUndefined();expect(f.containers.size).toBe(0);
+    await expect(f.provider.inspect(request.internalStorageKey)).rejects.toThrow();expect((await f.runtime.export(exact,kernelId,request)).status).toBe('unknown');expect(f.requests()).toBe(1);
+  });
+  it('keeps a known failed R serialization usable and releases its stream reservation',async()=>{
+    const releases=[],failed=Promise.reject(new Error('aborted'));failed.catch(()=>{});
+    const f=await fixture({result:(id)=>({ok:true,event:'execution',executionId:id,status:'failed',stdout:'',warnings:[],error:{code:'R_ERROR',message:'Missing binding'},tables:[],figures:[],truncated:false}),
+      reserveDiskImpl:async(_work,durable)=>()=>{releases.push(durable);},streamFileImpl:async()=>({complete:failed,finish(){},cancel(){}})});
+    await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation};
+    const result=await f.runtime.export(exact,kernelId,streamRequest(started));expect(result.status).toBe('failed');expect(result.file).toBeUndefined();expect(releases).toEqual([64*1024**2]);
+    expect((await f.runtime.inspect(exact,kernelId)).status).toBe('ready');
+  });
+  it('hard-bounds a source file that grows after its initial verified open',async()=>{
+    const f=await fixture({mutateDuringStage:async(provider,key)=>writeFile(provider.resolveKey(key),Buffer.alloc(131072,65))});
+    const key='projects/project1/artifacts/art1/table.csv',bytes=Buffer.from('a,b\n1,2\n');
+    const target=f.provider.resolveKey(key);await mkdir(path.dirname(target),{recursive:true});await writeFile(target,bytes);
+    await f.runtime.initialize();
+    await expect(f.start(kernelId,{inputs:[{id:'art1',versionId:'av1',type:'table',format:'csv',name:'table.csv',role:'input',internalStorageKey:key,
+      checksumSha256:crypto.createHash('sha256').update(bytes).digest('hex'),sizeBytes:bytes.length}]})).rejects.toMatchObject({code:'PRIVATE_KERNEL_INPUT_INVALID',message:expect.stringMatching(/byte reservation/)});
+    expect(f.calls.some(args=>args[0]==='create')).toBe(false);expect(f.containers.size).toBe(0);
+    await expect(readFile(path.join(f.directory,'work','kernels',kernelId,'input','input-0.csv'))).rejects.toMatchObject({code:'ENOENT'});
+  });
+  it('stops an owned kernel when a failed R command leaves reader cleanup unconfirmed',async()=>{
+    const failed=Promise.reject(Object.assign(new Error('unconfirmed reader'),{code:'PRIVATE_KERNEL_STREAM_CLEANUP_UNCONFIRMED',publicSafeHandlerError:true}));failed.catch(()=>{});
+    const f=await fixture({result:id=>({ok:true,event:'execution',executionId:id,status:'failed',stdout:'',warnings:[],error:{code:'R_ERROR',message:'R failed'},tables:[],figures:[],truncated:false}),
+      streamFileImpl:async()=>({complete:failed,finish(){},cancel(){}})});
+    await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation};
+    const result=await f.runtime.export(exact,kernelId,streamRequest(started));expect(result.status).toBe('unknown');expect(result.file).toBeUndefined();
+    expect(f.containers.size).toBe(0);expect((await f.runtime.inspect(exact,kernelId)).status).toBe('unknown');
+  });
+  it('stops an owned producer promptly when the independent output transfer deadline expires',async()=>{
+    const command=deferred(),failed=Promise.reject(Object.assign(new Error('transfer expired'),{code:'PRIVATE_KERNEL_TRANSFER_TIMEOUT',publicSafeHandlerError:true}));failed.catch(()=>{});
+    const f=await fixture({result:()=>command.promise,streamFileImpl:async()=>({complete:failed,finish(){},cancel(){}})});
+    await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation};
+    const result=await f.runtime.export(exact,kernelId,streamRequest(started));expect(result.status).toBe('unknown');expect(f.containers.size).toBe(0);
+    expect((await f.runtime.inspect(exact,kernelId)).status).toBe('unknown');
+  });
+  it('treats an unconfirmed reader startup as lost even before source dispatch',async()=>{
+    const f=await fixture({streamFileImpl:async()=>{throw Object.assign(new Error('reader not confirmed'),{code:'PRIVATE_KERNEL_STREAM_CLEANUP_UNCONFIRMED',publicSafeHandlerError:true});}});
+    await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation};
+    const result=await f.runtime.export(exact,kernelId,streamRequest(started));expect(result.status).toBe('unknown');expect(f.requests()).toBe(0);expect(f.containers.size).toBe(0);
+  });
+  it('restricts fresh streamed saves to configured limits and retains the old adapter fallback',async()=>{
+    const bounded=await fixture({env:{PRIVATE_R_MAX_OUTPUT_BYTES:'1024'}});await bounded.runtime.initialize();const started=await bounded.start();
+    await expect(bounded.runtime.export({...scope,generation:started.generation},kernelId,streamRequest(started,{maxBytes:1025}))).rejects.toMatchObject({code:'PRIVATE_KERNEL_PUBLICATION_LIMIT'});expect(bounded.requests()).toBe(0);
+    const legacy=await fixture({streamedPublications:false});expect((await legacy.runtime.initialize()).streamedPublications).toBe(false);const old=await legacy.start();
+    await expect(legacy.runtime.export({...scope,generation:old.generation},kernelId,streamRequest(old,{maxBytes:1024}))).rejects.toMatchObject({code:'PRIVATE_KERNEL_PUBLICATION_LIMIT'});
+  });
   it('independently probes transport and retains exact image, limits and owned resources',async()=>{
     const f=await fixture();await f.runtime.initialize();const status=await f.start();
     expect(status).toMatchObject({ok:true,kernelId,status:'ready',environment:f.reference,resources:{memoryBytes:8*1024**3,cpuLimit:2,pidsLimit:256,idleTimeoutSeconds:900,maxLifetimeSeconds:14400}});

@@ -9,10 +9,13 @@ const fsp = fs.promises;
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { pipeline } = require('node:stream/promises');
+const { Transform } = require('node:stream');
 const storage = require('./storage');
 const { validateEnvironmentManifest, summarizeEnvironmentManifest, assertEnvironmentMatches } = require('./rEnvironment');
 const { validatePrivateKernelExportRequest, extractPrivateKernelFile, PRIVATE_KERNEL_PUBLICATION_ID_RE,
   MAX_PRIVATE_KERNEL_EXPORT_BYTES } = require('./privateKernelExports');
+const { startPrivateKernelStream } = require('./privateKernelStream');
+const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 
 const KERNEL_ID = /^pk_[0-9a-f]{16,64}$/;
 const GENERATION = /^[0-9a-f]{64}$/;
@@ -58,7 +61,7 @@ function resourcePolicy(env) {
   return { resources, memory, executionSeconds:numberOption(env.PRIVATE_R_KERNEL_EXECUTION_SECONDS,300,1,600),
     maxActive:numberOption(env.PRIVATE_R_KERNEL_MAX_ACTIVE,2,1,32), maxOwner:numberOption(env.PRIVATE_R_KERNEL_MAX_PER_OWNER,1,1,4) };
 }
-function validateInputs(raw, projectId) {
+function validateInputs(raw, projectId, artifactPolicy = { maxInputFileBytes: MAX_INPUT_BYTES, maxInputTotalBytes: MAX_STAGED_BYTES }) {
   if (!Array.isArray(raw) || raw.length > 6) throw failure('PRIVATE_KERNEL_INPUT_INVALID','Select at most five files and one analysis checkpoint.');
   const ids = new Set(); let checkpoints = 0; let total = 0;
   const inputs = raw.map(input => {
@@ -67,7 +70,7 @@ function validateInputs(raw, projectId) {
         || !['checkpoint','input'].includes(input.role) || !/^[a-z][a-z0-9_-]{0,39}$/.test(input.type || '')
         || !/^[a-z][a-z0-9_-]{0,19}$/.test(input.format || '')
         || !/^[0-9a-f]{64}$/.test(input.checksumSha256 || '') || !Number.isSafeInteger(input.sizeBytes)
-        || input.sizeBytes < 0 || input.sizeBytes > MAX_INPUT_BYTES
+        || input.sizeBytes < 0 || input.sizeBytes > artifactPolicy.maxInputFileBytes
         || !storage.isProjectStorageKey(input.internalStorageKey,{projectId})) {
       throw failure('PRIVATE_KERNEL_INPUT_INVALID','A selected input version is invalid or exceeds its size limit.');
     }
@@ -76,7 +79,7 @@ function validateInputs(raw, projectId) {
     return { id:input.id, versionId:input.versionId, type:input.type, format:input.format, name:input.name,
       internalStorageKey:input.internalStorageKey,checksumSha256:input.checksumSha256,sizeBytes:input.sizeBytes,role:input.role };
   });
-  if (checkpoints > 1 || raw.length-checkpoints > 5 || total > MAX_STAGED_BYTES) throw failure('PRIVATE_KERNEL_INPUT_INVALID','The selected input collection exceeds the private kernel limit.');
+  if (checkpoints > 1 || raw.length-checkpoints > 5 || total > artifactPolicy.maxInputTotalBytes) throw failure('PRIVATE_KERNEL_INPUT_INVALID','The selected input collection exceeds the private kernel limit.');
   return inputs;
 }
 
@@ -150,8 +153,9 @@ function createTransport(child,{onLost,startTimeoutMs=120000,controlTimeoutMs=15
 function createPrivateKernelRuntime({env=process.env,provider=storage.createLocalStorageProvider(),environmentManifest,
   runProcessImpl=runCommand,spawnImpl=spawn,clock=Date.now,transportFactory=createTransport,
   extractFileImpl=extractPrivateKernelFile,
+  streamFileImpl=startPrivateKernelStream, reserveDiskImpl,
   maxRetiredIds=MAX_RETIRED_IDS,maxTombstones=MAX_TOMBSTONES}={}) {
-  const policy=resourcePolicy(env), manifest=validateEnvironmentManifest(environmentManifest);
+  const policy=resourcePolicy(env), artifactPolicy=getPrivateRArtifactPolicy(env), manifest=validateEnvironmentManifest(environmentManifest);
   const environment=summarizeEnvironmentManifest(manifest), image=String(env.EXPERT_R_SANDBOX_IMAGE||'');
   if(image!==manifest.runtime.imageReference)throw failure('R_ENVIRONMENT_MISMATCH','The private kernel image differs from the pinned environment.');
   const workRoot=path.resolve(env.EXPERT_R_SANDBOX_WORK_ROOT||path.join(storage.storageRoot(),'expert-r-sandbox'));
@@ -159,7 +163,23 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   const endedRoot=path.join(kernelRoot,'ended');
   const rootHash=crypto.createHash('sha256').update(kernelRoot).digest('hex');
   const managerId=crypto.randomBytes(32).toString('hex');
-  const records=new Map(),retiredIds=new Set();let initialized=false,publications=false,interrupts=false,closed=false,timer=null,lastMetadataSweep=0;
+  const records=new Map(),retiredIds=new Set();let initialized=false,publications=false,streamedPublications=false,interrupts=false,closed=false,timer=null,lastMetadataSweep=0;
+  let reservedWorkBytes=0n, reservedStorageBytes=0n;
+  async function reserveDisk(workBytes, durableBytes) {
+    if(reserveDiskImpl)return reserveDiskImpl(workBytes,durableBytes,artifactPolicy.diskReserveBytes);
+    const work=BigInt(workBytes),durable=BigInt(durableBytes);reservedWorkBytes+=work;reservedStorageBytes+=durable;
+    let released=false;
+    const release=()=>{if(released)return;released=true;reservedWorkBytes-=work;reservedStorageBytes-=durable;};
+    try {
+      const [workStat,storageStat]=await Promise.all([fsp.stat(workRoot,{bigint:true}),fsp.stat(provider.root,{bigint:true})]);
+      const shared=workStat.dev===storageStat.dev;
+      const requiredWork=reservedWorkBytes+(shared?reservedStorageBytes:0n)+BigInt(artifactPolicy.diskReserveBytes);
+      const free=async(root,required)=>{const stat=await fsp.statfs(root,{bigint:true});if(stat.bavail*stat.bsize<required)throw failure('PRIVATE_KERNEL_STORAGE_PRESSURE','Private R disk capacity is temporarily unavailable. Free disk space before retrying.');};
+      await free(workRoot,requiredWork);
+      if(!shared)await free(provider.root,reservedStorageBytes+BigInt(artifactPolicy.diskReserveBytes));
+      return release;
+    }catch(error){release();if(error.publicSafeHandlerError)throw error;throw failure('PRIVATE_KERNEL_STORAGE_PRESSURE','Private R disk capacity could not be verified.');}
+  }
   const target={kind:'service',id:'private-r-kernel',generation:managerId};
   const docker=(args,options)=>runProcessImpl('docker',args,options);
   function retire(record) {
@@ -237,6 +257,9 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     const stat=await fsp.lstat(record.directory).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
     if(stat?.isSymbolicLink())throw failure('PRIVATE_KERNEL_OWNERSHIP_INVALID','The private workspace could not be safely removed.');
     if(stat)await fsp.rm(record.directory,{recursive:true,force:true});
+    record.releaseInputs?.();record.releaseInputs=null;
+    for(const key of record.failedOutputCleanup||[]) {await provider.remove(key);record.failedOutputCleanup.delete(key);}
+    for(const release of record.cleanupReservations||[])release();record.cleanupReservations=[];
   }
   async function terminate(record,reason='stopped') {
     record.stopRequested=true;
@@ -285,10 +308,11 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     }
   }
   async function initialize() {
-    if(initialized)return {supported:true,publications,interrupt:interrupts,environment};
+    if(initialized)return {supported:true,publications,streamedPublications,interrupt:interrupts,environment};
     if(env.PRIVATE_R_KERNEL_ENABLED!=='true')throw failure('PRIVATE_KERNEL_DISABLED','Persistent private R kernels are not enabled on this installation.');
     if(closed)throw failure('PRIVATE_KERNEL_UNAVAILABLE','The private kernel broker has stopped.');
     await fsp.mkdir(kernelRoot,{recursive:true,mode:0o700});
+    await fsp.mkdir(provider.root,{recursive:true,mode:0o700});
     if((await fsp.lstat(kernelRoot)).isSymbolicLink())throw failure('PRIVATE_KERNEL_CONFIG_INVALID','The private kernel work root must be a real directory.');
     await fsp.mkdir(endedRoot,{mode:0o700}).catch(error=>{if(error.code!=='EEXIST')throw error;});
     if((await fsp.lstat(endedRoot)).isSymbolicLink())throw failure('PRIVATE_KERNEL_CONFIG_INVALID','The private kernel lifecycle root must be a real directory.');
@@ -308,10 +332,11 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     let value;try{value=JSON.parse(probe.stdout);}catch{}
     if(!value?.ok||value.protocol!=='jupyter'||value.adapter!==1)throw failure('PRIVATE_KERNEL_UNSUPPORTED','This pinned R image does not provide the persistent Jupyter kernel adapter.');
     publications=value.publications===true;
+    streamedPublications=publications&&value.streamedPublications===true;
     interrupts=value.interrupt===true;
     await reconcile();initialized=true;
     timer=setInterval(()=>{void sweep().catch(()=>{});},1000);timer.unref?.();
-    return {supported:true,publications,interrupt:interrupts,environment};
+    return {supported:true,publications,streamedPublications,interrupt:interrupts,environment};
   }
   async function stage(record) {
     record.directory=path.join(kernelRoot,record.kernelId);await fsp.mkdir(record.directory,{mode:0o700});
@@ -321,7 +346,11 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     for(const [index,input] of record.inputs.entries()) {
       const filename=`input-${index}.${input.format}`;const destination=path.join(inputDirectory,filename);
       const opened=await provider.openVerifiedRead(input.internalStorageKey,{checksumSha256:input.checksumSha256,sizeBytes:input.sizeBytes});
-      try{await pipeline(opened.handle.createReadStream({autoClose:false}),fs.createWriteStream(destination,{flags:'wx',mode:0o444}));}
+      let copiedBytes=0;
+      const guard=new Transform({transform(chunk,_encoding,done){copiedBytes+=chunk.length;
+        if(copiedBytes>input.sizeBytes)done(failure('PRIVATE_KERNEL_INPUT_INVALID','The selected input exceeded its exact staged byte reservation.'));
+        else done(null,chunk);}});
+      try{await pipeline(opened.handle.createReadStream({autoClose:false}),guard,fs.createWriteStream(destination,{flags:'wx',mode:0o444}));}
       finally{await opened.handle.close();}
       // Verify the private copy too, closing the race between source verification
       // and copying a concurrently modified backing file.
@@ -338,7 +367,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   async function start(spec) {
     const scope=validateScope(spec);if(!KERNEL_ID.test(spec.kernelId||''))throw failure('PRIVATE_KERNEL_INVALID','The private kernel ID is invalid.');
     assertEnvironmentMatches(spec.environment,environment);
-    const inputs=validateInputs(spec.inputs||[],scope.projectId);
+    const inputs=validateInputs(spec.inputs||[],scope.projectId,streamedPublications?artifactPolicy:undefined);
     const fingerprint=crypto.createHash('sha256').update(JSON.stringify({scope,inputs,environment:spec.environment})).digest('hex');
     const existing=records.get(spec.kernelId);
     if(existing){requireRecord(scope,spec.kernelId);if(existing.stopRequested||existing.status==='stopped'||existing.status==='unknown')throw failure('PRIVATE_KERNEL_STOPPED','This kernel generation has ended. Start a new workspace kernel.');if(existing.fingerprint!==fingerprint)throw failure('PRIVATE_KERNEL_CONFLICT','This kernel ID already belongs to another input snapshot.');await existing.creation;return publicRecord(existing);}
@@ -360,6 +389,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     record.creation=(async()=>{
       try{
         retire(record);
+        record.releaseInputs=await reserveDisk(inputs.reduce((sum,input)=>sum+input.sizeBytes,0),0);
         const inputDirectory=await stage(record);
         if(record.stopRequested)throw failure('PRIVATE_KERNEL_STOPPED','This private R kernel was stopped during startup.');
         record.containerName=`traceomics-kernel-${record.kernelId}-${record.generation.slice(0,12)}`;
@@ -401,8 +431,8 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     return {ok:true,kernelId:record.kernelId,generation:record.generation,publicationId:entry.publication.publicationId,
       executionId,order:entry.order,status:entry.status,...(entry.result?{result:entry.result}:{}),...(entry.file?{file:entry.file}:{})};
   }
-  async function saveOutput(record,spec,evidence) {
-    if(!evidence||!Number.isSafeInteger(evidence.sizeBytes)||evidence.sizeBytes<0||evidence.sizeBytes>MAX_PRIVATE_KERNEL_EXPORT_BYTES
+  async function saveOutput(record,spec,evidence,streamedFile) {
+    if(!evidence||!Number.isSafeInteger(evidence.sizeBytes)||evidence.sizeBytes<1||evidence.sizeBytes>(spec.stream?spec.maxBytes:MAX_PRIVATE_KERNEL_EXPORT_BYTES)
         ||!GENERATION.test(evidence.checksumSha256||''))throw failure('PRIVATE_KERNEL_PUBLICATION_UNAVAILABLE','The isolated output evidence is invalid.');
     const inspected=await inspectContainer(record.containerName);
     if(!inspected||inspected.id!==record.containerId||inspected.labels[`${LABEL}.manager`]!==managerId
@@ -410,12 +440,12 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
         ||inspected.labels[`${LABEL}.root`]!==rootHash||inspected.labels[LABEL]!=='true') {
       throw failure('PRIVATE_KERNEL_OWNERSHIP_INVALID','The private kernel container ownership could not be verified.');
     }
-    const temporary=path.join(record.directory,`${crypto.randomBytes(16).toString('hex')}.export`);
-    const aborted=new AbortController();record.publicationAbort=aborted;
+    const temporary=streamedFile?.filePath||path.join(record.directory,`${crypto.randomBytes(16).toString('hex')}.export`);
+    const aborted=record.publicationAbort||new AbortController();record.publicationAbort=aborted;
     let published=false;
     try {
       if(record.stopRequested)throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
-      await extractFileImpl({containerId:record.containerId,filename:spec.filename,destination:temporary,expected:evidence,
+      if(!streamedFile)await extractFileImpl({containerId:record.containerId,filename:spec.filename,destination:temporary,expected:evidence,
         spawnImpl,signal:aborted.signal});
       if(record.stopRequested||record.status!=='executing')throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
       const stored=await provider.putFileFromPath(temporary,spec.internalStorageKey);published=true;
@@ -426,7 +456,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
       return {type:spec.type,format:spec.type==='object'?'rds':'csv',internalStorageKey:spec.internalStorageKey,
         checksumSha256:stored.checksumSha256,sizeBytes:stored.sizeBytes};
     } catch(error) {
-      if(published)await provider.remove(spec.internalStorageKey).catch(()=>{});
+      if(published)await provider.remove(spec.internalStorageKey).catch(()=>{(record.failedOutputCleanup||=new Set()).add(spec.internalStorageKey);});
       throw error;
     } finally {
       if(record.publicationAbort===aborted)record.publicationAbort=null;
@@ -442,34 +472,83 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
         ||(publication&&JSON.stringify(prior.publication)!==JSON.stringify(publication)))throw failure('PRIVATE_KERNEL_CONFLICT','The execution ID already belongs to a different command.');
       return publication?publicationReceipt(record,executionId,prior):prior.result||{ok:true,kernelId,generation:record.generation,executionId,order,status:prior.status};}
     if(record.status==='executing'||record.controlPending)throw failure('PRIVATE_KERNEL_BUSY','Wait for the current R command or control request to finish.');
-    if(record.status!=='ready')throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel is unavailable; its unsaved variables are lost.');
+    if(record.stopRequested||record.status!=='ready')throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel is unavailable; its unsaved variables are lost.');
     if(order!==(record.lastExecution?.order||0)+1)throw failure('PRIVATE_KERNEL_ORDER_INVALID','The R execution order does not match this kernel generation.');
     if(record.executions.size>=MAX_EXECUTIONS)throw failure('PRIVATE_KERNEL_LIFETIME_LIMIT','This kernel has reached its command limit. Start a new kernel.');
+    if(publication?.stream&&(!streamedPublications||publication.maxBytes>artifactPolicy.maxOutputBytes))throw failure('PRIVATE_KERNEL_PUBLICATION_LIMIT','The requested saved-output limit is unavailable in this runtime.');
     const startedAt=utc(clock()), entry={order,hash,status:'executing',...(publication?{publication}:{})};record.executions.set(executionId,entry);
     let resolveCompletion;entry.completion=new Promise(resolve=>{resolveCompletion=resolve;});
     record.status='executing';record.lastExecution={id:executionId,order,status:'executing'};record.lastActivity=clock();
+    let reader,streamedFile,releaseOutput,temporary,sourceStarted=false;
     try{
-      const value=await record.transport.request(executionId,source,policy.executionSeconds,publication?{filename:publication.filename}:undefined);
-      const evidence=value.exportFile;delete value.exportFile;
+      if(publication?.stream) {
+        releaseOutput=await reserveDisk(publication.maxBytes,publication.maxBytes);
+        temporary=path.join(record.directory,`${crypto.randomBytes(16).toString('hex')}.export`);
+        const abort=new AbortController();record.publicationAbort=abort;
+        reader=await streamFileImpl({containerId:record.containerId,filename:publication.filename,destination:temporary,maxBytes:publication.maxBytes,
+          spawnImpl,signal:abort.signal,timeoutMs:artifactPolicy.transferTimeoutSeconds*1000});
+        if(record.stopRequested)throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
+      }
+      sourceStarted=true;
+      const requested=record.transport.request(executionId,source,policy.executionSeconds,publication?{filename:publication.filename,...(publication.stream?{stream:true}: {})}:undefined);
+      const streamFailure=reader?.complete.then(()=>new Promise(()=>{}),async error=>{
+        // A broken FIFO commonly yields an immediate R write error. Give that
+        // matching terminal reply a short bound; an expired transfer or an
+        // unconfirmed reader must stop its owned producer without waiting for
+        // a possibly blocked scientific command's full execution allowance.
+        if(['PRIVATE_KERNEL_TRANSFER_TIMEOUT','PRIVATE_KERNEL_STREAM_CLEANUP_UNCONFIRMED'].includes(error.code))throw error;
+        let deadline;
+        try{return await Promise.race([requested,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(error),2000);})]);}
+        finally{clearTimeout(deadline);}
+      });
+      const value=await (streamFailure?Promise.race([requested,streamFailure]):requested);
+      let evidence=value.exportFile;delete value.exportFile;
+      if(reader) {
+        if(value.status==='completed')reader.finish();else reader.cancel();
+        try{streamedFile=await reader.complete;evidence=streamedFile;}
+        catch(error){if(value.status==='completed'||error.code==='PRIVATE_KERNEL_STREAM_CLEANUP_UNCONFIRMED')throw error;}
+        if(value.status==='failed'&&value.interrupted!==true&&reader.error?.code==='PRIVATE_KERNEL_PUBLICATION_LIMIT') {
+          value.error={code:'PRIVATE_KERNEL_PUBLICATION_LIMIT',message:`The saved output exceeds its ${publication.maxBytes}-byte reservation. Earlier saved versions remain available.`};
+        }
+      }
       const result={...value,ok:true,kernelId,generation:record.generation,executionId,order,startedAt,completedAt:utc(clock())};delete result.event;
       const {validatePrivateKernelExecutionResult}=require('./privateKernelContract');
       const validated=validatePrivateKernelExecutionResult(result,{kernelId,generation:record.generation,executionId,order});
       if(record.stopRequested||['stopped','unknown'].includes(record.status))throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
       if(publication&&validated.status==='completed') {
-        record.pendingPublication=saveOutput(record,publication,evidence);
+        record.pendingPublication=saveOutput(record,publication,evidence,streamedFile);
         try{entry.file=await record.pendingPublication;}finally{record.pendingPublication=null;}
       }
+      if(record.stopRequested||['stopped','unknown'].includes(record.status))throw failure('PRIVATE_KERNEL_STOPPED','The private R kernel was stopped.');
       // Retain one rich result only. Older IDs retain a receipt, preventing rerun,
       // while their durable results are held by the application's journal.
       for(const previous of record.executions.values())delete previous.result;
       entry.status=validated.status;entry.result=validated;
       record.status='ready';record.lastActivity=clock();record.lastExecution={id:executionId,order,status:validated.status,result:validated};
       return publication?publicationReceipt(record,executionId,entry):validated;
-    }catch{
+    }catch(error){
+      if(entry.file&&publication) {
+        await provider.remove(publication.internalStorageKey).catch(()=>{(record.failedOutputCleanup||=new Set()).add(publication.internalStorageKey);});
+        delete entry.file;
+      }
+      if(!sourceStarted&&!record.stopRequested&&record.status==='executing'&&error.publicSafeHandlerError&&error.code!=='PRIVATE_KERNEL_STREAM_CLEANUP_UNCONFIRMED') {
+        const result={ok:true,kernelId,generation:record.generation,executionId,order,status:'failed',startedAt,completedAt:utc(clock()),
+          stdout:'',warnings:[],tables:[],figures:[],truncated:false,error:{code:error.code,message:`R source was not executed. ${error.message}`}};
+        entry.status='failed';entry.result=result;record.status='ready';record.lastActivity=clock();record.lastExecution={id:executionId,order,status:'failed',result};
+        return publicationReceipt(record,executionId,entry);
+      }
       entry.status='unknown';record.lastExecution={id:executionId,order,status:'unknown'};
       await lost(record);
       return publication?publicationReceipt(record,executionId,entry):{ok:true,kernelId,generation:record.generation,executionId,order,status:'unknown'};
-    }finally{resolveCompletion();delete entry.completion;}
+    }finally{
+      reader?.cancel();if(reader)await reader.complete.catch(()=>{});
+      if(temporary)await fsp.unlink(temporary).catch(()=>{});
+      if(releaseOutput) {
+        const exists=temporary&&await fsp.lstat(temporary).then(()=>true,error=>error.code!=='ENOENT');
+        if(!exists&&!record.failedOutputCleanup?.has(publication.internalStorageKey))releaseOutput();else(record.cleanupReservations||=[]).push(releaseOutput);
+      }
+      record.publicationAbort=null;resolveCompletion();delete entry.completion;
+    }
   }
   async function execute(scope,kernelId,spec) {return executeOperation(scope,kernelId,spec);}
   async function interrupt(scope,kernelId,{executionId,order,requestId}={}) {
@@ -556,6 +635,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   async function sweep(){
     for(const record of records.values()) {
       await expire(record);
+      if(record.endedAt&&record.containerRemoved&&record.cleanupReservations?.length)await removeDirectory(record);
       if(record.endedAt&&clock()-record.endedAt>=TOMBSTONE_TTL_MS&&(!record.containerName||record.containerRemoved))records.delete(record.kernelId);
     }
     if(clock()-lastMetadataSweep>=30000) {

@@ -6,6 +6,7 @@ import {randomUUID} from 'node:crypto';
 const {startKernelFixtureBroker}=require('./_privateKernelFixtures');
 const {createArtifactVersionService}=require('./artifactVersions');
 const db=require('./pgDatabase');
+const policyKeys=['PRIVATE_R_MAX_INPUT_FILE_BYTES','PRIVATE_R_MAX_INPUT_TOTAL_BYTES'];
 let broker,http,server,directory,provider,owner,analyst,project,savedEnv;
 describe.skipIf(!process.env.DATABASE_URL)('authenticated private R interruption and restart receipts',()=>{
   beforeAll(async()=>{
@@ -14,11 +15,11 @@ describe.skipIf(!process.env.DATABASE_URL)('authenticated private R interruption
     provider={...require('./storage').createLocalStorageProvider()};http=require('./_http-test-utils');server=await http.startServer();
   });
   beforeEach(async()=>{
-    vi.restoreAllMocks();await db.resetSchemaForTests();broker.sessions.clear();broker.calls.length=0;for(const key of Object.keys(broker.hooks))delete broker.hooks[key];
+    vi.restoreAllMocks();for(const key of policyKeys){if(savedEnv[key]===undefined)delete process.env[key];else process.env[key]=savedEnv[key];}await db.resetSchemaForTests();broker.sessions.clear();broker.calls.length=0;for(const key of Object.keys(broker.hooks))delete broker.hooks[key];
     owner=await http.createUserWithToken({email:'control-owner@example.test'});analyst=await http.createUserWithToken({email:'control-analyst@example.test'});
     const organization=await db.createOrganizationForUser(owner.user.id,{name:'Kernel control lab'});project=await db.createProjectForUser(owner.user.id,{organizationId:organization.id,name:'Control study'});await db.addProjectMemberByEmail(project.id,analyst.user.email,'analyst',{userId:owner.user.id});
   });
-  afterAll(async()=>{vi.restoreAllMocks();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(broker)await broker.close();await db.close();if(directory)await rm(directory,{recursive:true,force:true});for(const key of ['STORAGE_ROOT','APP_DEPLOYMENT_MODE','EXPERT_R_ENABLED','EXPERT_R_ACCESS_POLICY','EXPERT_R_SANDBOX_URL','EXPERT_R_SANDBOX_TOKEN']){if(savedEnv[key]===undefined)delete process.env[key];else process.env[key]=savedEnv[key];}});
+  afterAll(async()=>{vi.restoreAllMocks();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(broker)await broker.close();await db.close();if(directory)await rm(directory,{recursive:true,force:true});for(const key of ['STORAGE_ROOT','APP_DEPLOYMENT_MODE','EXPERT_R_ENABLED','EXPERT_R_ACCESS_POLICY','EXPERT_R_SANDBOX_URL','EXPERT_R_SANDBOX_TOKEN',...policyKeys]){if(savedEnv[key]===undefined)delete process.env[key];else process.env[key]=savedEnv[key];}});
   const request=(suffix='',options={})=>http.api(server,'/api/private-r-kernels/'+project.id+suffix,{token:owner.token,...options});
   const startInput=(inputs=[])=>({requestId:randomUUID(),workspaceId:'controls_workspace',environment:broker.reference,inputs});
   async function start(input=startInput()){const response=await request('',{method:'POST',body:input});expect(response.status).toBe(200);return response.data;}
@@ -149,5 +150,12 @@ describe.skipIf(!process.env.DATABASE_URL)('authenticated private R interruption
   it('protects restart receipts and parent links from changes and rejects request identifier reuse',async()=>{
     const input=startInput(),kernel=await start(input);expect((await restart(kernel,{requestId:input.requestId,generation:kernel.generation})).status).toBe(409);const result=await restart(kernel);expect(result.data.status).toBe('completed');
     await expect(db.query('UPDATE private_r_kernels SET restarted_from_kernel_id=NULL WHERE id=$1',[result.data.session.id])).rejects.toMatchObject({code:'55000'});await expect(db.query("UPDATE private_r_kernel_restarts SET replacement_kernel_id=$2 WHERE id=$1",[result.data.id,'pk_'+'f'.repeat(24)])).rejects.toMatchObject({code:'55000'});await expect(db.query("UPDATE private_r_kernel_restarts SET status='unknown' WHERE id=$1",[result.data.id])).rejects.toMatchObject({code:'55000'});
+  });
+  it('checks reduced input limits before stopping a running session for restart and preserves its earlier evidence',async()=>{
+    const selected=await file(),kernel=await start(startInput([selected.reference])),entry=(await command(kernel,'n <- 7')).data;
+    process.env.PRIVATE_R_MAX_INPUT_FILE_BYTES='1';process.env.PRIVATE_R_MAX_INPUT_TOTAL_BYTES='2';
+    const result=await restart(kernel);expect(result.status).toBe(413);expect(result.data).toMatchObject({code:'PRIVATE_KERNEL_INPUT_LIMIT',error:expect.stringContaining('not stopped')});
+    expect(broker.sessions.get(kernel.id).status).toBe('ready');expect(broker.calls.filter(call=>call.path.endsWith('/stop'))).toHaveLength(0);expect((await db.query('SELECT id FROM private_r_kernel_restarts')).rows).toEqual([]);
+    expect((await request('/'+kernel.id+'/executions/'+entry.id)).data).toMatchObject({status:'completed',source:'n <- 7'});
   });
 });

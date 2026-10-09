@@ -1,28 +1,29 @@
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from 'vitest';
-import {mkdtemp,rm,writeFile,readFile} from 'node:fs/promises';
+import {mkdtemp,rm,writeFile,readFile,open} from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 const db=require('./pgDatabase');
 const {startKernelFixtureBroker,png}=require('./_privateKernelFixtures');
 const {createArtifactVersionService}=require('./artifactVersions');
 const {createPrivateKernelService}=require('./privateKernelService');
 const {createPrivateKernelClient}=require('./privateKernelClient');
 const c=require('./privateKernelContract');
+const policyKeys=['PRIVATE_R_MAX_OUTPUT_BYTES','PRIVATE_R_MAX_INPUT_FILE_BYTES','PRIVATE_R_MAX_INPUT_TOTAL_BYTES','PRIVATE_R_MANAGED_QUOTA_BYTES'];
 let broker,http,server,directory,provider,owner,analyst,viewer,project,settings;
 describe.skipIf(!process.env.DATABASE_URL)('creator-private durable console saves through HTTP/PostgreSQL/storage',()=>{
   beforeAll(async()=>{
     settings={...process.env};directory=await mkdtemp(path.join(os.tmpdir(),'traceomics-publications-'));broker=await startKernelFixtureBroker();
-    Object.assign(process.env,{STORAGE_ROOT:directory,APP_DEPLOYMENT_MODE:'private',EXPERT_R_ENABLED:'true',EXPERT_R_ACCESS_POLICY:'project-roles',EXPERT_R_SANDBOX_URL:broker.url,EXPERT_R_SANDBOX_TOKEN:broker.token});
+    Object.assign(process.env,{STORAGE_ROOT:directory,APP_DEPLOYMENT_MODE:'private',EXPERT_R_ENABLED:'true',EXPERT_R_ACCESS_POLICY:'project-roles',EXPERT_R_SANDBOX_URL:broker.url,EXPERT_R_SANDBOX_TOKEN:broker.token,PRIVATE_R_MANAGED_QUOTA_BYTES:String(1024**3)});
     provider={...require('./storage').createLocalStorageProvider()};http=require('./_http-test-utils');server=await http.startServer();
   });
   beforeEach(async()=>{
-    vi.restoreAllMocks();await db.resetSchemaForTests();broker.sessions.clear();broker.calls.length=0;for(const key of Object.keys(broker.hooks))delete broker.hooks[key];
+    vi.restoreAllMocks();for(const key of policyKeys){if(settings[key]===undefined)delete process.env[key];else process.env[key]=settings[key];}process.env.PRIVATE_R_MANAGED_QUOTA_BYTES=String(1024**3);await db.resetSchemaForTests();broker.sessions.clear();broker.calls.length=0;for(const key of Object.keys(broker.hooks))delete broker.hooks[key];
     owner=await http.createUserWithToken({email:'save-owner@example.test'});analyst=await http.createUserWithToken({email:'save-analyst@example.test'});viewer=await http.createUserWithToken({email:'save-viewer@example.test'});
     const organization=await db.createOrganizationForUser(owner.user.id,{name:'Save lab'});project=await db.createProjectForUser(owner.user.id,{organizationId:organization.id,name:'Save study'});
     await db.addProjectMemberByEmail(project.id,analyst.user.email,'analyst',{userId:owner.user.id});await db.addProjectMemberByEmail(project.id,viewer.user.email,'viewer',{userId:owner.user.id});
   });
-  afterAll(async()=>{vi.restoreAllMocks();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(broker)await broker.close();await db.close();if(directory)await rm(directory,{recursive:true,force:true});for(const key of ['STORAGE_ROOT','APP_DEPLOYMENT_MODE','EXPERT_R_ENABLED','EXPERT_R_ACCESS_POLICY','EXPERT_R_SANDBOX_URL','EXPERT_R_SANDBOX_TOKEN']){if(settings[key]===undefined)delete process.env[key];else process.env[key]=settings[key];}});
+  afterAll(async()=>{vi.restoreAllMocks();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(broker)await broker.close();await db.close();if(directory)await rm(directory,{recursive:true,force:true});for(const key of ['STORAGE_ROOT','APP_DEPLOYMENT_MODE','EXPERT_R_ENABLED','EXPERT_R_ACCESS_POLICY','EXPERT_R_SANDBOX_URL','EXPERT_R_SANDBOX_TOKEN',...policyKeys]){if(settings[key]===undefined)delete process.env[key];else process.env[key]=settings[key];}});
   const base=()=>'/api/private-r-kernels/'+project.id;
   const api=(suffix='',options={})=>http.api(server,base()+suffix,{token:owner.token,...options});
   async function start(inputs=[]){const response=await api('',{method:'POST',body:{requestId:randomUUID(),workspaceId:'save_workspace',environment:broker.reference,inputs}});expect(response.status).toBe(200);return response.data;}
@@ -142,4 +143,36 @@ describe.skipIf(!process.env.DATABASE_URL)('creator-private durable console save
     await api('/'+kernel.id+'/stop',{method:'POST',body:{}});const evidence=(await listing(kernel)).data.items[0];expect(evidence.status).toBe('failed');expect(evidence.version).toBeNull();await expect(readFile(provider.resolveKey(pub.storage_key))).rejects.toThrow();expect((await db.query('SELECT status FROM private_r_executions WHERE id=$1',[pub.source_execution_id])).rows[0].status).toBe('unknown');
     await expect(createArtifactVersionService(db,provider).assertCapacity(db,owner.user.id,project.id,1024*1024*1024)).resolves.toBeUndefined();expect(broker.calls.filter(call=>call.path.endsWith('/export'))).toHaveLength(1);
   });
+  it('binds a streamed save to remaining quota and honors its reservation when limits are reduced during serialization',async()=>{
+    const kernel=await start(),first=await save(kernel);broker.hooks.streamedPublicationsEnabled=true;
+    const maximumBytes=32768;process.env.PRIVATE_R_MAX_OUTPUT_BYTES=String(64*1024*1024);process.env.PRIVATE_R_MANAGED_QUOTA_BYTES=String(first.data.version.sizeBytes+maximumBytes);
+    broker.hooks.beforeExportStorage=async(_session,input)=>{
+      expect(input).toMatchObject({stream:true,maxBytes:maximumBytes});const pub=(await db.query('SELECT * FROM private_r_publications WHERE id=$1',[input.publicationId])).rows[0];expect(Number(pub.reserved_bytes)).toBe(maximumBytes);
+      await expect(createArtifactVersionService(db,provider).assertCapacity(db,owner.user.id,project.id,1)).rejects.toMatchObject({code:'ARTIFACT_STORAGE_LIMIT'});
+      process.env.PRIVATE_R_MAX_OUTPUT_BYTES='1';process.env.PRIVATE_R_MANAGED_QUOTA_BYTES='1';
+    };
+    const saved=await save(kernel,{previousVersionId:first.data.version.versionId});expect(saved.status).toBe(200);expect(saved.data).toMatchObject({publication:{status:'completed',maximumBytes,lineage:{artifactPolicy:{maxOutputBytes:64*1024*1024,managedQuotaBytes:first.data.version.sizeBytes+maximumBytes,transferTimeoutSeconds:900}}},version:{versionNumber:2}});
+    expect((await save(kernel)).data.code).toBe('ARTIFACT_STORAGE_LIMIT');expect(broker.calls.filter(call=>call.path.endsWith('/export'))).toHaveLength(2);
+    expect((await http.api(server,'/api/artifact-versions/'+project.id+'/'+first.data.version.versionId,{token:owner.token})).status).toBe(200);expect(await readFile(provider.resolveKey((await versionRow(first.data.version.versionId)).storage_key),'utf8')).toBe('Opaque fixture RDS bytes');
+  });
+  it('recovers a disconnected streamed save using its original reservation after both limits and quota are reduced',async()=>{
+    const kernel=await start();broker.hooks.streamedPublicationsEnabled=true;process.env.PRIVATE_R_MAX_OUTPUT_BYTES=String(1024*1024);broker.hooks.beforeExportResponse=(_session,_receipt,request)=>request.socket.destroy();
+    const requestId=randomUUID(),saved=await save(kernel,{requestId});expect(saved.data.publication).toMatchObject({status:'unknown',maximumBytes:1024*1024});
+    delete broker.hooks.beforeExportResponse;process.env.PRIVATE_R_MAX_OUTPUT_BYTES='1';process.env.PRIVATE_R_MANAGED_QUOTA_BYTES='1';
+    const refreshed=await listing(kernel);expect(refreshed.data.items[0]).toMatchObject({status:'completed',maximumBytes:1024*1024,version:{versionId:expect.stringMatching(/^av_/)} });
+    expect((await save(kernel,{requestId})).data.version.versionId).toBe(refreshed.data.items[0].version.versionId);expect(broker.calls.filter(call=>call.path.endsWith('/export'))).toHaveLength(1);
+  });
+  it('streams and verifies a saved object above 200 MiB, then admits its exact version into a fresh session without large response bodies',async()=>{
+    broker.hooks.streamedPublicationsEnabled=true;const kernel=await start(),sizeBytes=201*1024*1024+13;let checksumSha256;
+    broker.hooks.exportFile=async(input,_session,store)=>{
+      const handle=await open(store.prepareWrite(input.internalStorageKey),'wx',0o600),hash=createHash('sha256'),chunk=Buffer.alloc(65536,0x5a);
+      try{for(let remaining=sizeBytes;remaining>0;){const bytes=chunk.subarray(0,Math.min(chunk.length,remaining));await handle.writeFile(bytes);hash.update(bytes);remaining-=bytes.length;}await handle.sync();}finally{await handle.close();}
+      checksumSha256=hash.digest('hex');return {sizeBytes,checksumSha256};
+    };
+    const saved=await save(kernel);expect(saved.status).toBe(200);expect(saved.data).toMatchObject({publication:{status:'completed'},version:{sizeBytes,sha256:checksumSha256}});expect(Buffer.byteLength(JSON.stringify(saved.data))).toBeLessThan(65536);
+    expect((await http.api(server,'/api/artifact-versions/'+project.id+'/'+saved.data.version.versionId+'/preview',{token:owner.token})).data).toMatchObject({integrityVerified:true,preview:{family:'metadata'}});
+    await api('/'+kernel.id+'/stop',{method:'POST',body:{}});const fresh=await start([saved.data.version.reference]);expect(fresh.generation).not.toBe(kernel.generation);expect(fresh.inputs[0]).toMatchObject({sizeBytes,checksumSha256});
+    expect(broker.calls.filter(call=>call.path==='/kernels/start').at(-1).input.inputs[0]).toMatchObject({sizeBytes,checksumSha256});
+    await expect(db.query('UPDATE private_r_publications SET reserved_bytes=reserved_bytes+1 WHERE id=$1',[saved.data.publication.id])).rejects.toThrow();
+  },60000);
 });

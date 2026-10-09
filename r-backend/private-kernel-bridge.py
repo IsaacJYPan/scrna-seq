@@ -288,7 +288,7 @@ def main():
         spec = KernelSpecManager().get_kernel_spec('ir')
         if not spec.argv or 'IRkernel::main' not in ' '.join(spec.argv):
             raise RuntimeError('The installed R kernelspec is incompatible.')
-        emit({'ok': True, 'protocol': 'jupyter', 'adapter': 1, 'publications': True, 'interrupt': True})
+        emit({'ok': True, 'protocol': 'jupyter', 'adapter': 1, 'publications': True, 'streamedPublications': True, 'interrupt': True})
         return
     os.umask(0o077)
     os.mkdir('/work/export', mode=0o700)
@@ -330,15 +330,25 @@ def main():
                     if not isinstance(publication, dict) or not re.fullmatch(r'[0-9a-f]{64}\.(rds|csv)', publication.get('filename', '')):
                         raise ValueError('Invalid publication.')
                     directory = export_directory()
-                    try:
-                        os.stat(publication['filename'], dir_fd=directory, follow_symlinks=False)
-                    except FileNotFoundError:
-                        pass
+                    if publication.get('stream') is True:
+                        entry = os.stat(publication['filename'], dir_fd=directory, follow_symlinks=False)
+                        if not stat.S_ISFIFO(entry.st_mode) or entry.st_nlink != 1:
+                            raise ValueError('Invalid publication stream.')
                     else:
-                        raise ValueError('Publication output already exists.')
+                        try:
+                            os.stat(publication['filename'], dir_fd=directory, follow_symlinks=False)
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            raise ValueError('Publication output already exists.')
                 control = ExecutionControl(reader, manager, request['executionId'])
                 result = execute(client, request['source'], min(600, max(1, int(request.get('timeoutSeconds', 300)))), manager.is_alive, control)
-                if publication is not None and result['status'] == 'completed':
+                if publication is not None and publication.get('stream') is True:
+                    # The broker owns the FIFO reader and records exact bytes
+                    # on private disk. It commits them only after this ordered
+                    # Jupyter command has a matching terminal reply and idle.
+                    pass
+                elif publication is not None and result['status'] == 'completed':
                     result['exportFile'] = export_evidence(directory, publication['filename'])
                 elif publication is not None:
                     # A failed/interrupted serialization may have created a
