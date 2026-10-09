@@ -83,6 +83,8 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
   const account = { email: 'tunnel-' + crypto.randomBytes(5).toString('hex') + '@example.invalid',
     password: 'River-tunnel-' + crypto.randomBytes(12).toString('hex') };
   let databaseStarted = false, web, fakeR, ingress;
+  let compatibilityOverride = null;
+  let runtimeHealth = { value: { status: 'ok' }, status: 200 };
   let stopped = false;
   fs.mkdirSync(privateDirectory, { recursive: true });
   const stop = async () => {
@@ -126,11 +128,15 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
       '-CAcreateserial', '-days', '2', '-sha256', '-extfile', extensionsPath, '-out', certificatePath]);
     const appPort = await reservePort();
     fakeR = http.createServer((req, res) => {
-      res.writeHead(req.url === '/health' ? 200 : 404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(req.url === '/health' ? { status: 'ok' } : { error: 'Unavailable in this acceptance fixture.' }));
+      res.writeHead(req.url === '/health' ? runtimeHealth.status : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(req.url === '/health' ? runtimeHealth.value : { error: 'Unavailable in this acceptance fixture.' }));
     });
     const rPort = await listen(fakeR);
     ingress = https.createServer({ key: fs.readFileSync(privateKeyPath), cert: fs.readFileSync(certificatePath) }, (req, res) => {
+      if (req.url === '/api/service/compatibility' && compatibilityOverride) {
+        res.writeHead(compatibilityOverride.status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(compatibilityOverride.value)); return;
+      }
       const headers = { ...req.headers, 'x-forwarded-proto': 'https', 'x-forwarded-for': '127.0.0.1',
         'x-forwarded-host': req.headers.host };
       const upstream = http.request({ hostname: '127.0.0.1', port: appPort, method: req.method,
@@ -187,6 +193,10 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
     }
     return { endpoint, httpsPort: selectedHttpsPort, caCertificatePath, certificatePath, privateKeyPath,
       account, project, databaseUrl, storageRoot: env.STORAGE_ROOT, stop,
+      setCompatibilityResponse(value, status = 200) {
+        compatibilityOverride = value == null ? null : { value, status };
+      },
+      setRuntimeHealth(value, status = 200) { runtimeHealth = { value, status }; },
       setTlsCertificate({ certificatePath: nextCertificate, privateKeyPath: nextKey }) {
         ingress.setSecureContext({ cert: fs.readFileSync(nextCertificate), key: fs.readFileSync(nextKey) });
       } };

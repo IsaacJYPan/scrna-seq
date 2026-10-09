@@ -1378,7 +1378,7 @@ export default function App() {
       />
       <main className="flex-1 flex flex-col relative overflow-hidden min-h-0 min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
-        <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} />
+        <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} userId={user?.id} projectId={activeProjectIdForPipeline} />
         {historyPersistenceNotice && (
           <div role="alert" className="mx-4 mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-text">
             {historyPersistenceNotice}

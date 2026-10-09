@@ -212,6 +212,10 @@ function requestRJson(runtime, requestPath, options = {}) {
         });
         res.on('end', () => {
           if (settled) return;
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            finish(Object.assign(new Error('R readiness check failed.'), { code: 'R_NOT_READY', httpStatus: res.statusCode }));
+            return;
+          }
           let body;
           try {
             body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -219,12 +223,9 @@ function requestRJson(runtime, requestPath, options = {}) {
             finish(Object.assign(new Error('R readiness response was invalid.'), { code: 'R_INVALID_RESPONSE' }));
             return;
           }
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            finish(Object.assign(new Error('R readiness check failed.'), { code: 'R_NOT_READY' }));
-            return;
-          }
           finish(null, body);
         });
+        res.on('error', () => finish(Object.assign(new Error('R readiness response was interrupted.'), { code: 'R_UNREACHABLE' })));
       });
     } catch {
       finish(Object.assign(new Error('R runtime is unreachable.'), { code: 'R_UNREACHABLE' }));

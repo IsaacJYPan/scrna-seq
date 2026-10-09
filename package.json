@@ -67,6 +67,7 @@
     "test:expert-r-browser": "npm run build && node scripts/verify-expert-r-browser-flow.js",
     "test:private-r-kernel": "node scripts/verify-private-r-kernel.js",
     "test:private-r-console-browser": "npm run build && node scripts/verify-private-r-console-ui.js",
+    "test:runtime-readiness-browser": "npm run build && node scripts/verify-runtime-readiness-ui.js",
     "test:demo-compose": "node scripts/verify-compose-demo.js",
     "test:demo-browser": "node scripts/verify-public-demo-ui.js",
     "test:frontend": "vitest run src/",

@@ -28,6 +28,8 @@ const storage = require('./backend/storage');
 const { validateStoredDataset } = require('./backend/datasetValidation');
 const rRuntime = require('./backend/rRuntime');
 const { createWebHealthController } = require('./backend/webHealth');
+const { createRuntimeReadinessController, SERVICE_COMPATIBILITY } = require('./backend/runtimeReadiness');
+const { probeExpertRReadiness } = require('./backend/expertRAccess');
 const { shutdownWebRuntime } = require('./backend/webShutdown');
 const { startTopologyLockWatchdog } = require('./backend/webTopologyWatchdog');
 const {
@@ -92,6 +94,10 @@ const webHealth = createWebHealthController({
   probeR: () => probeRHealth(500),
   getTopologyLock: () => webTopologyLock,
 });
+const runtimeReadiness = createRuntimeReadinessController({ rRuntime: R_RUNTIME_CONFIG, db,
+  storageRoot: DB_DIR, vaultRoot: VAULT_DIR,
+  probePrivateR: () => probeExpertRReadiness(),
+  workerMode: () => process.env.ENABLE_JOB_WORKER === 'true' ? 'embedded' : 'standalone' });
 
 let appDatabaseReady = null;
 function initAppDatabase() {
@@ -1326,6 +1332,10 @@ app.get('/readyz', async (req, res) => {
 
 // Public, non-secret UI policy. Keep this ahead of database initialization so
 // the login page can accurately hide registration during a database outage.
+app.get('/api/service/compatibility', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(SERVICE_COMPATIBILITY);
+});
 app.get('/api/auth/policy', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const legacyUiEnabled = !config.isProduction();
@@ -1555,6 +1565,32 @@ app.post('/api/auth/logout', async (req, res) => {
 // backend detects; it does not let browser clients choose an executable path.
 app.use('/api/runtime', express.json());
 app.use('/api/runtime', requireAuth);
+app.get('/api/runtime/readiness', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const projectId = req.query.projectId;
+  if (projectId !== undefined && (typeof projectId !== 'string' || !/^proj_[A-Za-z0-9_-]{3,128}$/.test(projectId))) {
+    return res.status(400).json({ error: 'A valid project id is required.' });
+  }
+  try {
+    // Entitlement and membership are deliberately outside the shared probe
+    // cache. A fresh request must reflect revocation or a changed project role.
+    if (projectId && !(await db.getProjectForUser(projectId, req.user.id))) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+    return res.json(await runtimeReadiness.inspect({ resolveAccess: async () => {
+      const access = await db.getExpertRCapabilities(req.user.id, projectId || null);
+      if (projectId && !(await db.getProjectForUser(projectId, req.user.id))) {
+        throw Object.assign(new Error('Project not found.'), { code: 'READINESS_PROJECT_NOT_FOUND' });
+      }
+      return { canExecuteExpertR: access.canExecuteExpertR,
+        revoked: access.expertRAccessRevoked, demoMode: config.demoMode() };
+    } }));
+  } catch (error) {
+    if (error?.code === 'READINESS_PROJECT_NOT_FOUND') return res.status(404).json({ error: 'Project not found.' });
+    console.error('[Runtime] Readiness observation unavailable.');
+    return res.status(503).json({ error: 'Server readiness could not be checked.' });
+  }
+});
 app.get('/api/runtime/diagnostics', async (req, res) => {
   try {
     const diagnostics = await buildRuntimeDiagnostics();
