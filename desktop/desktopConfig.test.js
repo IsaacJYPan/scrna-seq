@@ -41,11 +41,11 @@ describe('desktop server configuration', () => {
     expect(isAllowedNavigation('https://untrusted.example.org', 'https://analysis.example.org')).toBe(false);
   });
 
-  it('verifies a TraceOmics policy response before accepting a server', async () => {
+  it('verifies a TraceOmics compatibility descriptor before accepting a server', async () => {
     const fetchImpl = async (url, options) => {
-      expect(url.toString()).toBe('https://analysis.example.org/api/auth/policy');
-      expect(options).toMatchObject({ method: 'GET' });
-      return { ok: true, json: async () => ({ registrationEnabled: false }) };
+      expect(url.toString()).toBe('https://analysis.example.org/api/service/compatibility');
+      expect(options).toMatchObject({ method: 'GET', credentials: 'omit', redirect: 'error' });
+      return { ok: true, json: async () => ({ product: 'TraceOmics', serviceApiVersion: 1, minimumClientApiVersion: 1 }) };
     };
     await expect(verifyServerConnection('https://analysis.example.org', { fetchImpl }))
       .resolves.toBe('https://analysis.example.org');

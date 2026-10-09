@@ -60,11 +60,12 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
   function saveSettings(profile, selected = null) { fs.writeFileSync(path.join(userData, 'desktop-settings.json'), JSON.stringify({ schemaVersion: 1, selectedProfileId: selected, profiles: [profile] })); }
   const profile = { id: 'tunneled-lab', name: 'Tunneled lab', kind: 'ssh',
     ssh: { host: aliases[1], remoteHost: '127.0.0.1', remotePort: 8443 } };
-  async function launch({ trustFixtureCa = true, forcePortConflict = false } = {}) {
+  async function launch({ trustFixtureCa = true, forcePortConflict = false, direct = false } = {}) {
     const launcher = path.join(privateDirectory, 'native-launcher.cjs');
     const ca = service.caCertificatePath;
     fs.writeFileSync(launcher, [
-      "const fs=require('node:fs'); const {X509Certificate}=require('node:crypto'); const {session}=require('electron');",
+      "const fs=require('node:fs'); const {X509Certificate}=require('node:crypto'); const {app,session}=require('electron');",
+      ...(direct ? ['app.commandLine.appendSwitch("host-resolver-rules","MAP analysis.tunnel.test 127.0.0.1");'] : []),
       'const connection=require(' + JSON.stringify(path.join(root, 'desktop/sshConnection.cjs')) + '); const original=connection.createSshConnectionManager;',
       'connection.createSshConnectionManager=options=>original({...options,nativeConfigFile:' + JSON.stringify(nativeConfigFile) + '});',
       'const transport=require(' + JSON.stringify(path.join(root, 'desktop/sshTunnel.cjs')) + '); const openTunnel=transport.createSshTunnel;',
@@ -83,7 +84,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     application = await electron.launch({ args: [launcher, '--user-data-dir=' + userData], env: { ...process.env, TRACEOMICS_DESKTOP_URL: '' }, timeout: 60000 });
     application.process().stderr.on('data', chunk => fs.appendFileSync(path.join(output, 'electron-diagnostics.txt'), chunk.toString().split(privateDirectory).join('[private fixture]')));
     const setup = await application.firstWindow(); await setup.getByRole('heading', { name: 'Choose your research server', exact: true }).waitFor();
-    await setup.locator('#saved-target').selectOption(profile.id); return setup;
+    await setup.locator('#saved-target').selectOption(direct ? 'direct-lab' : profile.id); return setup;
   }
   async function connect(setup) {
     const waiting = application.waitForEvent('window'); await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click();
@@ -122,8 +123,29 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
       ' User ' + accounts[index], ' IdentityFile ' + quoted(identities[index]), ' HostKeyAlias tunnel-pin-' + index, ...(index ? [' ProxyJump ' + aliases[0]] : []),
     ])].join('\n') + '\n');
     const nativeHash = digest(nativeConfigFile), trustHash = digest(nativeKnownHosts), includeHash = digest(includedFile);
+    const directProfile = { id: 'direct-lab', name: 'Direct lab', kind: 'https', endpoint: service.endpoint };
+    saveSettings(directProfile);
+    let setup = await launch({ trustFixtureCa: false, direct: true });
+    await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
+    await setup.getByRole('alert').filter({ hasText: /certificate was rejected/i }).waitFor();
+    await application.close(); application = null;
+    setup = await launch({ direct: true });
+    const openingDirect = application.waitForEvent('window');
+    await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
+    const directWorkspace = await openingDirect;
+    await directWorkspace.getByRole('button', { name: 'Open Workbench', exact: true }).waitFor();
+    const directTarget = await directWorkspace.evaluate(() => window.desktopShell.getCurrentTarget());
+    assert(directTarget.kind === 'https' && directTarget.status === 'connected'
+      && directTarget.serviceCompatibility?.product === 'TraceOmics' && !directTarget.sshTunnel && !directTarget.capabilities,
+    'Actual direct HTTPS did not retain verified compatibility separately from SSH and compute capability.');
+    assert(new URL(directWorkspace.url()).origin === service.endpoint
+      && (await directWorkspace.evaluate(async () => (await fetch('/api/runtime/readiness')).status)) === 401,
+    'Direct HTTPS rewrote the original browser authority or disclosed authenticated readiness.');
+    await directWorkspace.screenshot({ path: path.join(output, 'direct-https-compatible-login.png') });
+    await application.close(); application = null;
+    checks.push('actual direct HTTPS uses the isolated Chromium transport, rejects an untrusted certificate, verifies the public service API and opens sign-in without claiming compute readiness');
     saveSettings(profile);
-    let setup = await launch({ trustFixtureCa: false });
+    setup = await launch({ trustFixtureCa: false });
     await failedConnect(setup, /certificate was rejected/i);
     await setup.screenshot({ path: path.join(output, 'native-untrusted-certificate-rejected.png'), fullPage: true });
     assert(!(await isListening(extraLocalPort)) && !(await isListening(extraDynamicPort)), 'Inherited native forwarding opened another service.');
@@ -133,16 +155,27 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     assert(await application.evaluate(() => globalThis.__fixturePortConflictRetried), 'A real native local-forward conflict did not safely allocate another port.');
     checks.push('a real occupied local port fails native forwarding and retries with a fresh app-owned loopback port');
     await workspace.getByRole('button', { name: 'Open Workbench', exact: true }).waitFor();
+    const preloginReadiness = await workspace.evaluate(async () => {
+      const response = await fetch('/api/runtime/readiness'); return { status: response.status, data: await response.json() };
+    });
+    assert(preloginReadiness.status === 401 && !preloginReadiness.data.guided && !preloginReadiness.data.storage,
+      'Prelogin SSH application connectivity disclosed authenticated runtime readiness.');
     await workspace.getByLabel('Email', { exact: true }).fill(service.account.email);
     await workspace.getByLabel('Password', { exact: true }).fill(service.account.password);
     await workspace.getByRole('button', { name: 'Open Workbench', exact: true }).click();
     const indicator = workspace.locator('[aria-label="Execution target"]');
-    await indicator.getByText('Server: Tunneled lab', { exact: true }).waitFor({ timeout: 30000 });
+    const connectionSummary = indicator.locator('summary').filter({ hasText: 'Connection details' });
+    await connectionSummary.click();
+    const connectionPanelId = await connectionSummary.getAttribute('aria-controls');
+    const connectionPanel = workspace.locator('[id=' + JSON.stringify(connectionPanelId) + ']');
+    await connectionPanel.getByText('Server: Tunneled lab', { exact: true }).waitFor({ timeout: 30000 });
     await indicator.getByText('SSH tunnel connected', { exact: true }).waitFor();
-    assert(await indicator.getByText(service.endpoint, { exact: true }).isVisible(), 'The original HTTPS endpoint is missing.');
+    assert(await connectionPanel.getByText(service.endpoint, { exact: true }).isVisible(), 'The original HTTPS endpoint is missing.');
     assert(new URL(workspace.url()).origin === service.endpoint, 'The native tunnel rewrote the browser origin.');
     const target = await workspace.evaluate(() => window.desktopShell.getCurrentTarget());
     assert(target.status === 'connected' && target.sshTunnel.state === 'connected' && target.sshAuthentication.host === names[1] && target.sshAuthentication.applicationConnected === true, 'A real verified application tunnel was not reported accurately.');
+    assert(target.serviceCompatibility?.product === 'TraceOmics' && !target.capabilities,
+      'The connected native target did not retain verified API compatibility separately from compute readiness.');
     assert(!identities.some(file => JSON.stringify(target).includes(file)), 'The remote page saw a native identity path.');
     const cookies = await application.evaluate(async ({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => window.webContents.getURL().startsWith('https:')).webContents.session.cookies.get({}));
     const sessionCookie = cookies.find(cookie => cookie.httpOnly);
@@ -151,9 +184,41 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     assert(auth.status === 200 && !auth.visible.includes(sessionCookie.value), 'Authentication did not use an inaccessible HttpOnly cookie.');
     const projects = await workspace.evaluate(async () => { const response = await fetch('/api/projects'); return { status: response.status, data: await response.json() }; });
     assert(projects.status === 200 && JSON.stringify(projects.data).includes(service.project.id), 'The production project API did not authorize the real PG-backed account.');
+    const readiness = await workspace.evaluate(async () => {
+      const response = await fetch('/api/runtime/readiness'); return { status: response.status, data: await response.json() };
+    });
+    assert(readiness.status === 200 && readiness.data.schema === 'traceomics.runtime-readiness.v1'
+      && readiness.data.service.state === 'ready' && readiness.data.guided.state !== 'ready'
+      && readiness.data.guided.packages.every(pkg => pkg.state === 'unknown')
+      && readiness.data.workers.state === 'unknown' && readiness.data.privateR.environment === null,
+    'Real authenticated readiness fabricated packages, worker liveness or private environment access.');
+    await connectionPanel.getByRole('button', { name: 'Check server readiness', exact: true }).click();
+    const readinessDialog = workspace.getByRole('dialog', { name: 'Server readiness', exact: true });
+    await readinessDialog.getByText('This server supports the current application.', { exact: false }).waitFor();
+    await readinessDialog.getByRole('heading', { name: 'Queued analysis worker', exact: true }).waitFor();
+    assert(await readinessDialog.getByText('No current queued-worker observation is available.', { exact: false }).isVisible(),
+      'The native readiness dialog hides the missing durable-worker observation.');
+    assert(!String(await readinessDialog.textContent()).includes(service.storageRoot), 'Readiness leaked a raw server storage path.');
+    await workspace.screenshot({ path: path.join(output, 'authenticated-native-server-readiness.png') });
+    service.setRuntimeHealth({ status: 'ok', r_version: '4.5.2', packages: {
+      Seurat: false, dplyr: true, plumber: true, jsonlite: true, ggplot2: true,
+    } });
+    await waitFor(async () => workspace.evaluate(async () => {
+      const response = await fetch('/api/runtime/readiness');
+      return response.ok && (await response.json()).guided.state === 'missing-packages';
+    }), 'Authenticated readiness did not renew a controlled missing-package observation.', 15000);
+    await readinessDialog.getByRole('button', { name: 'Check again', exact: true }).click();
+    await readinessDialog.getByText('Required packages missing', { exact: true }).waitFor();
+    await readinessDialog.locator('summary').filter({ hasText: 'Required and optional packages' }).click();
+    await readinessDialog.getByText('Seurat: Missing', { exact: true }).waitFor();
+    await workspace.screenshot({ path: path.join(output, 'native-readiness-missing-package.png') });
+    service.setRuntimeHealth({ status: 'ok' });
+    await readinessDialog.getByRole('button', { name: 'Close server readiness', exact: true }).click();
     await workspace.screenshot({ path: path.join(output, 'authenticated-production-workspace.png') });
     checks.push('real production Express/PG login and project access work through distinct native SSH identities while original HTTPS origin, SNI and Secure/HttpOnly/Lax cookies remain intact');
     checks.push('actual React execution-target indicator reports the verified HTTPS application tunnel without exposing native credential references');
+    checks.push('prelogin compatibility exposes no compute details; authenticated HTTPS/PG readiness and its actual React dialog report unknown packages/worker honestly and conceal inaccessible private environments');
+    checks.push('a controlled guided-service missing-package observation renews after the cache bound and the actual native dialog reports Seurat missing separately from transport and application authentication');
     const denied = await workspace.evaluate(async () => { try { await window.desktopShell.disconnectTarget(); return false; } catch { return true; } });
     assert(denied, 'A remote renderer could manage the native tunnel.');
     assert(await workspace.evaluate(async () => { try { await fetch('https://other.tunnel.test/api/auth/policy'); return false; } catch { return true; } }), 'The session proxy permitted another authority.');
@@ -169,7 +234,21 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     assert(csrf === 403, 'Production CSRF/origin validation accepted a foreign origin through the tunnel.');
     checks.push('actual production cookie-auth mutation rejects a foreign origin through the same TLS/SSH transport');
     await workspace.evaluate(() => localStorage.setItem('tunnel-selected-project', 'original-project-selection'));
-    setup = await openSettings(workspace); await setup.locator('#server-url').fill(service.endpoint.replace('analysis.tunnel.test', 'wrong.tunnel.test'));
+    setup = await openSettings(workspace);
+    const savedBeforeApiFailure = fs.readFileSync(path.join(userData, 'desktop-settings.json'), 'utf8');
+    service.setCompatibilityResponse({ product: 'TraceOmics', serviceApiVersion: 2, minimumClientApiVersion: 2 });
+    await failedConnect(setup, /service API is incompatible/i);
+    assert(fs.readFileSync(path.join(userData, 'desktop-settings.json'), 'utf8') === savedBeforeApiFailure
+      && (await workspace.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200,
+    'A freshly incompatible same-target API displaced the old authenticated SSH workspace.');
+    service.setCompatibilityResponse({ error: 'Legacy application.' }, 404);
+    await failedConnect(setup, /does not publish a TraceOmics compatibility descriptor/i);
+    assert((await workspace.evaluate(() => window.desktopShell.getCurrentTarget())).status === 'connected',
+      'A missing same-target API descriptor tore down an existing verified tunnel.');
+    service.setCompatibilityResponse(null);
+    await setup.screenshot({ path: path.join(output, 'incompatible-api-preserves-workspace.png'), fullPage: true });
+    checks.push('same-target native SSH reconnect rechecks the public API and rejects incompatible/legacy service responses while preserving authenticated work and saved connection settings');
+    await setup.locator('#server-url').fill(service.endpoint.replace('analysis.tunnel.test', 'wrong.tunnel.test'));
     await failedConnect(setup, /certificate was rejected|could not reach/i);
     assert(await application.evaluate(() => globalThis.__fixtureCertificateRejections.some(rejection => rejection.hostname === 'wrong.tunnel.test' && !rejection.hostMatches)), 'Wrong-host rejection did not come from strict TLS hostname validation.');
     assert(await workspace.evaluate(() => localStorage.getItem('tunnel-selected-project')) === 'original-project-selection', 'A failed certificate switch destroyed the current workspace.');
@@ -210,7 +289,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     checks.push('returning to the original resolved service restores only its own authenticated session and workspace selection');
     setup = await openSettings(restored); const closedPort = await application.evaluate(() => globalThis.__fixtureTunnelPort);
     await setup.getByRole('button', { name: 'Disconnect SSH tunnel', exact: true }).click();
-    await restored.locator('[aria-label="Execution target"]').getByText('SSH tunnel disconnected · reconnect through server settings', { exact: true }).waitFor();
+    await restored.locator('[aria-label="Execution target"]').getByText('SSH tunnel disconnected', { exact: true }).waitFor();
     await waitFor(async () => !(await isListening(closedPort)), 'Explicit native disconnect left its owned forward listening.');
     assert((await restored.evaluate(() => window.desktopShell.getCurrentTarget())).sshAuthentication.applicationConnected === false, 'Disconnect kept authenticated application connectivity in metadata.');
     const reconnecting = application.waitForEvent('window'); await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); const reconnected = await reconnecting;
@@ -218,7 +297,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     assert(await reconnected.evaluate(() => localStorage.getItem('tunnel-selected-project')) === 'original-project-selection', 'Native reconnect lost the original service selection.');
     checks.push('explicit native disconnect removes only the owned forward and an explicit reconnect restores the same isolated authenticated workspace');
     await command('docker', ['stop', names[1]]); started.delete(names[1]);
-    await reconnected.locator('[aria-label="Execution target"]').getByText('SSH tunnel disconnected · reconnect through server settings', { exact: true }).waitFor({ timeout: 20000 });
+    await reconnected.locator('[aria-label="Execution target"]').getByText('SSH tunnel disconnected', { exact: true }).waitFor({ timeout: 20000 });
     assert((await reconnected.evaluate(() => window.desktopShell.getCurrentTarget())).status === 'disconnected', 'Native transport loss still claimed application connectivity.');
     assert(await reconnected.evaluate(async () => { try { await fetch('/api/auth/session'); return false; } catch { return true; } }), 'Transport loss silently used a direct or local service.');
     await reconnected.screenshot({ path: path.join(output, 'native-tunnel-loss-workspace.png') });

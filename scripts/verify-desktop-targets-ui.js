@@ -72,10 +72,14 @@ createRoot(document.getElementById('root')).render(<Workspace />);
 
 async function assertTargetIndicator({ page, name, endpoint, rStatus, application, artifactDirectory } = {}) {
   const indicator = page.locator('[aria-label="Execution target"]');
-  await indicator.getByText('Server: ' + name, { exact: true }).waitFor();
-  assert(await indicator.getByText(endpoint, { exact: true }).isVisible(), 'The indicator omits the connected service endpoint.');
+  const summary = indicator.locator('summary').filter({ hasText: 'Connection details' });
+  if ((await indicator.locator('details').getAttribute('open')) === null) await summary.click();
+  const panelId = await summary.getAttribute('aria-controls');
+  const panel = page.locator('[id=' + JSON.stringify(panelId) + ']');
+  await panel.getByText('Server: ' + name, { exact: true }).waitFor();
+  assert(await panel.getByText(endpoint, { exact: true }).isVisible(), 'The indicator omits the connected service endpoint.');
   if (rStatus) await indicator.getByText(rStatus, { exact: true }).waitFor();
-  assert(await indicator.getByRole('button', { name: 'Change server', exact: true }).isVisible(),
+  assert(await panel.getByRole('button', { name: 'Change server', exact: true }).isVisible(),
     'The desktop indicator does not expose native target settings.');
   if (artifactDirectory) await page.screenshot({ path: path.join(artifactDirectory,
     'execution-target-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '.png') });
@@ -83,8 +87,14 @@ async function assertTargetIndicator({ page, name, endpoint, rStatus, applicatio
 }
 async function startFixture(name, compatible = true, frontendDirectory) {
   const requests = [];
+  let descriptor = compatible ? { product: 'TraceOmics', serviceApiVersion: 1, minimumClientApiVersion: 1 }
+    : { product: 'UnrelatedSite', serviceApiVersion: 1, minimumClientApiVersion: 1 };
   const server = http.createServer((request, response) => {
     requests.push({ path: request.url, cookie: request.headers.cookie || '' });
+    if (request.url === '/api/service/compatibility') {
+      response.writeHead(descriptor == null ? 404 : 200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      response.end(JSON.stringify(descriptor || { error: 'Legacy service.' })); return;
+    }
     if (request.url === '/api/auth/policy') {
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify(compatible ? { registrationEnabled: false } : { differentApplication: true }));
@@ -113,7 +123,8 @@ async function startFixture(name, compatible = true, frontendDirectory) {
     response.end(fs.readFileSync(file));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  return { server, requests, origin: `http://127.0.0.1:${server.address().port}` };
+  return { server, requests, origin: `http://127.0.0.1:${server.address().port}`,
+    setCompatibility(value) { descriptor = value; } };
 }
 async function launch(userData, serverUrl = '') {
   return electron.launch({ args: [root, `--user-data-dir=${userData}`],
@@ -171,7 +182,7 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
     assert(migrated.schemaVersion === 1 && migrated.profiles.length === 1 && migrated.profiles[0].endpoint === first.origin,
       'Legacy direct URL settings did not migrate.');
     checks.push('legacy URL opens and migrates to a named local target');
-    await assertTargetIndicator({ page, name: 'Saved server', endpoint: first.origin, rStatus: 'R access required' });
+    await assertTargetIndicator({ page, name: 'Saved server', endpoint: first.origin, rStatus: 'Custom R access required' });
     await page.getByRole('button', { name: 'Remember this workspace', exact: true }).click();
     await page.getByText('ServiceA-project', { exact: true }).waitFor();
     const denied = await page.evaluate(async () => {
@@ -191,7 +202,7 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
     checks.push('remote renderer cannot alter native connection settings');
 
     let setup = await assertTargetIndicator({ page, name: 'Saved server', endpoint: first.origin,
-      rStatus: 'R available', application, artifactDirectory: output });
+      rStatus: 'Custom R available', application, artifactDirectory: output });
     page = await connect(application, setup, { name: 'Second workstation', origin: second.origin });
     await page.getByRole('heading', { name: 'ServiceB', exact: true }).waitFor();
     const isolated = await browserState(page);
@@ -199,6 +210,8 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
       'Loopback target switch reused another service cookie or object selection.');
     assert(isolated.target.name === 'Second workstation' && isolated.target.endpoint === second.origin,
       'Current target metadata names the wrong project service.');
+    assert(isolated.target.serviceCompatibility?.product === 'TraceOmics' && !isolated.target.capabilities,
+      'The native target fabricated compute capability from a compatible public descriptor.');
     assert(second.requests.filter(request => request.path === '/').every(request => request.cookie === ''),
       'The first request sent credentials from another loopback service.');
     await page.getByRole('button', { name: 'Remember this workspace', exact: true }).click();
@@ -206,12 +219,23 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
     checks.push('different loopback ports isolate cookies, localStorage, and IndexedDB');
 
     setup = await assertTargetIndicator({ page, name: 'Second workstation', endpoint: second.origin,
-      rStatus: 'R access revoked', application, artifactDirectory: output });
+      rStatus: 'Custom R access revoked', application, artifactDirectory: output });
     assert(first.requests.some(request => request.path === '/api/expert-r/capabilities' && request.cookie.includes('session=ServiceA'))
       && second.requests.some(request => request.path === '/api/expert-r/capabilities' && request.cookie.includes('session=ServiceB')),
     'The React workspace did not request authenticated R capabilities on each service.');
     checks.push('actual React indicator follows native service metadata and authenticated R access');
     const beforeFailure = fs.readFileSync(settingsFile, 'utf8');
+    second.setCompatibility({ product: 'TraceOmics', serviceApiVersion: 2, minimumClientApiVersion: 2 });
+    await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
+    await setup.getByRole('alert').filter({ hasText: 'service API is incompatible' }).waitFor();
+    assert(fs.readFileSync(settingsFile, 'utf8') === beforeFailure && (await browserState(page)).cookie === 'session=ServiceB',
+      'An incompatible same-service reconnect replaced the current authenticated workspace.');
+    second.setCompatibility(null);
+    await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
+    await setup.getByRole('alert').filter({ hasText: 'does not publish a TraceOmics compatibility descriptor' }).waitFor();
+    assert((await browserState(page)).target.status === 'connected', 'A missing compatibility descriptor displaced the current connection.');
+    second.setCompatibility({ product: 'TraceOmics', serviceApiVersion: 1, minimumClientApiVersion: 1 });
+    checks.push('same-service reconnect freshly rejects incompatible and legacy APIs while preserving the authenticated workspace');
     await setup.getByLabel('Server address', { exact: true }).fill(incompatible.origin);
     await setup.getByRole('button', { name: 'Save and connect', exact: true }).click();
     await setup.getByRole('alert').filter({ hasText: 'not a compatible TraceOmics server' }).waitFor();
@@ -261,7 +285,11 @@ async function runDesktopTargetAcceptance({ artifactDirectory } = {}) {
     const preserved = await browserState(page);
     assert(preserved.cookie === 'session=ServiceA' && preserved.projectId === 'ServiceA-project' && preserved.objectId === 'ServiceA-object',
       'Returning to a service did not restore its own isolated credentials and selections.');
-    await assertTargetIndicator({ page, name: 'Saved server', endpoint: first.origin, rStatus: 'R available' });
+    await assertTargetIndicator({ page, name: 'Saved server', endpoint: first.origin, rStatus: 'Custom R available' });
+    assert(first.requests.filter(request => request.path === '/api/service/compatibility').every(request => request.cookie === '')
+      && second.requests.filter(request => request.path === '/api/service/compatibility').every(request => request.cookie === ''),
+    'Public compatibility checks leaked a persisted account cookie.');
+    checks.push('public API compatibility checks omit persisted account credentials on initial connection and reconnect');
     checks.push('returning to a service restores only its own persisted workspace');
     await page.screenshot({ path: path.join(output, 'service-a-restored.png') });
     await application.close(); application = null;
