@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ExecutionHistory from './ExecutionHistory';
 import { getExecutionEnvironment, getExecutionHistory, listExecutionHistory } from '../executions/executionHistoryApi';
 import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifactApi';
@@ -11,8 +11,42 @@ const item = { id: 'job_one', operation: 'expert.r.v1', kind: 'expert-r', status
 const output = { name: 'Gene scores', versionId: 'art_one', sha256: 'a'.repeat(64), precision: 'recorded-version', basis: 'Retained output', inspectable: true, reference: { projectId: 'project', versionId: 'art_one', sha256: 'a'.repeat(64) } };
 const detail = { ...item, origin: 'durable-job', source: { versionId: 'src_job_one', precision: 'exact-retained', sha256: 'b'.repeat(64), code: '<script>inert content</script>' }, parameters: { precision: 'recorded-resolved', values: { threshold: 2 }, seed: 42 }, inputs: [], outputs: [output], environment: { precision: 'pinned-reference', reference: { id: 'renv_one' }, manifestAvailable: true, note: 'Container userspace snapshot.' }, target: { id: 'project-service', precision: 'service-only' }, timestamps: { createdAt: item.createdAt }, kernel: { available: false, reason: 'One-shot job; persistent kernel order unavailable.' }, replay: { complete: false, issues: [{ code: 'input-missing', message: 'Exact input bytes unavailable.' }] } };
 const props = { projectId: 'project', userId: 1 };
+afterEach(() => { delete window.desktopShell; });
 beforeEach(() => { vi.resetAllMocks(); listExecutionHistory.mockResolvedValue({ items: [item], nextCursor: null }); getExecutionHistory.mockResolvedValue(detail); getArtifactVersion.mockResolvedValue({ projectId: 'project', sha256: output.sha256 }); previewArtifactVersion.mockResolvedValue({ version: { versionId: output.versionId, sha256: output.sha256 }, preview: { family: 'table', columns: ['gene'], rows: [['GENE_A']] } }); });
 const select = async () => { fireEvent.click(await screen.findByRole('button', { name: /job_one/ })); await screen.findByText('Replay evidence incomplete'); };
+
+it('displays service-retained target and dispatch evidence independently of the current connection label', async () => {
+  let notify;
+  const native={id:'lab',name:'My laptop profile',serviceIdentity:'native-selected',status:'connected',sshTunnel:{state:'connected'}};
+  window.desktopShell={getCurrentTarget:async()=>native,onTargetStatus:listener=>{notify=listener;return()=>{};}};
+  const retained={kind:'service',id:'svc_'+'a'.repeat(32),label:'Research compute',generation:'b'.repeat(64),precision:'recorded-executor',runtimeKind:'sandbox-r'};
+  getExecutionHistory.mockResolvedValue({...detail,target:retained,executionAttempts:[{dispatchId:'c'.repeat(64),attempt:1,operation:'expert.r.v1',dispatchAt:item.createdAt,target:retained,environment:{precision:'pinned-request',reference:detail.environment.reference}}]});
+  render(<ExecutionHistory {...props}/>);await select();
+  expect(screen.getAllByText('Research compute · svc_'+'a'.repeat(32))).toHaveLength(2);
+  expect(screen.queryByText('My laptop profile')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText('Retained dispatches · 1'));
+  expect(screen.getByText('Dispatch '+'c'.repeat(64))).toBeVisible();
+  act(()=>notify({...native,status:'disconnected',sshTunnel:{state:'disconnected'}}));
+  expect(screen.getByText('<script>inert content</script>')).toBeInTheDocument();
+  expect(screen.getByText(/Previously loaded evidence remains visible/)).toBeVisible();
+  const opened=getExecutionHistory.mock.calls.length;
+  fireEvent.click(screen.getByRole('button',{name:/job_one/}));
+  expect(getExecutionHistory).toHaveBeenCalledTimes(opened);
+  expect(screen.getAllByText('Research compute · svc_'+'a'.repeat(32))).toHaveLength(2);
+});
+
+it('clears private history and rejects stale details when the signed-in user changes', async () => {
+  let finish;
+  getExecutionHistory.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  const view=render(<ExecutionHistory {...props}/>);
+  fireEvent.click(await screen.findByRole('button',{name:/job_one/}));
+  const signal=getExecutionHistory.mock.calls[0][2];
+  listExecutionHistory.mockResolvedValueOnce({items:[],nextCursor:null});
+  view.rerender(<ExecutionHistory {...props} userId={2}/>);
+  expect(signal.aborted).toBe(true);
+  await act(async()=>finish(detail));
+  expect(screen.queryByText('<script>inert content</script>')).not.toBeInTheDocument();
+});
 
 it('distinguishes confirmed interrupted commands and identifies a new session without implying restored unsaved memory',async()=>{
   listExecutionHistory.mockResolvedValue({items:[{...item,kind:'r-console',status:'failed',outcome:'interrupted'}],nextCursor:null});

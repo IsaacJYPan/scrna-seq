@@ -44,7 +44,8 @@ async function secureFixtureDirectory(directory, output) {
   ].join('\n'));
   await command(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper, directory]);
 }
-async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
+async function runDesktopTunnelAcceptance({ artifactDirectory,
+  serviceFactory = createDesktopTunnelServiceFixture, exerciseWorkspace } = {}) {
   const output = path.resolve(artifactDirectory || path.join(root, 'playwright', 'report', 'desktop-tunnel-' + new Date().toISOString().replace(/[:.]/g, '-')));
   assert(output.startsWith(path.join(root, 'playwright', 'report') + path.sep), 'Reports must stay in ignored workspace storage.'); fs.mkdirSync(output, { recursive: true });
   const privateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-tunnel-'));
@@ -93,7 +94,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
   async function openSettings(page) { const waiting = application.waitForEvent('window'); await page.evaluate(() => window.desktopShell.openTargetSettings()); const setup = await waiting; await setup.locator('#saved-target').selectOption(profile.id); return setup; }
   async function failedConnect(setup, expression) { await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); await setup.getByRole('alert').filter({ hasText: expression }).waitFor({ timeout: 30000 }); }
   try {
-    service = await createDesktopTunnelServiceFixture({ artifactDirectory: output }); profile.endpoint = service.endpoint;
+    service = await serviceFactory({ artifactDirectory: output }); profile.endpoint = service.endpoint;
     fs.writeFileSync(path.join(output, 'Dockerfile'), [
       'FROM alpine:3.21', 'RUN apk add --no-cache openssh-server socat && for account in gatekeeper researcher; do adduser -D "$account"; echo "$account:disabled-fixture-password" | chpasswd; done',
       'COPY sshd_config /fixture/sshd_config',
@@ -151,7 +152,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     assert(!(await isListening(extraLocalPort)) && !(await isListening(extraDynamicPort)), 'Inherited native forwarding opened another service.');
     await application.close(); application = null;
     checks.push('actual Chromium rejects a disposable untrusted certificate without any production trust bypass; native forwarding rules stay inactive');
-    setup = await launch({ forcePortConflict: true }); const workspace = await connect(setup);
+    setup = await launch({ forcePortConflict: true }); let workspace = await connect(setup);
     assert(await application.evaluate(() => globalThis.__fixturePortConflictRetried), 'A real native local-forward conflict did not safely allocate another port.');
     checks.push('a real occupied local port fails native forwarding and retries with a fresh app-owned loopback port');
     await workspace.getByRole('button', { name: 'Open Workbench', exact: true }).waitFor();
@@ -184,6 +185,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     assert(auth.status === 200 && !auth.visible.includes(sessionCookie.value), 'Authentication did not use an inaccessible HttpOnly cookie.');
     const projects = await workspace.evaluate(async () => { const response = await fetch('/api/projects'); return { status: response.status, data: await response.json() }; });
     assert(projects.status === 200 && JSON.stringify(projects.data).includes(service.project.id), 'The production project API did not authorize the real PG-backed account.');
+    if (!exerciseWorkspace) {
     const readiness = await workspace.evaluate(async () => {
       const response = await fetch('/api/runtime/readiness'); return { status: response.status, data: await response.json() };
     });
@@ -214,11 +216,12 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     await workspace.screenshot({ path: path.join(output, 'native-readiness-missing-package.png') });
     service.setRuntimeHealth({ status: 'ok' });
     await readinessDialog.getByRole('button', { name: 'Close server readiness', exact: true }).click();
+    checks.push('prelogin compatibility exposes no compute details; authenticated HTTPS/PG readiness and its actual React dialog report unknown packages/worker honestly and conceal inaccessible private environments');
+    checks.push('a controlled guided-service missing-package observation renews after the cache bound and the actual native dialog reports Seurat missing separately from transport and application authentication');
+    }
     await workspace.screenshot({ path: path.join(output, 'authenticated-production-workspace.png') });
     checks.push('real production Express/PG login and project access work through distinct native SSH identities while original HTTPS origin, SNI and Secure/HttpOnly/Lax cookies remain intact');
     checks.push('actual React execution-target indicator reports the verified HTTPS application tunnel without exposing native credential references');
-    checks.push('prelogin compatibility exposes no compute details; authenticated HTTPS/PG readiness and its actual React dialog report unknown packages/worker honestly and conceal inaccessible private environments');
-    checks.push('a controlled guided-service missing-package observation renews after the cache bound and the actual native dialog reports Seurat missing separately from transport and application authentication');
     const denied = await workspace.evaluate(async () => { try { await window.desktopShell.disconnectTarget(); return false; } catch { return true; } });
     assert(denied, 'A remote renderer could manage the native tunnel.');
     assert(await workspace.evaluate(async () => { try { await fetch('https://other.tunnel.test/api/auth/policy'); return false; } catch { return true; } }), 'The session proxy permitted another authority.');
@@ -233,6 +236,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory } = {}) {
     });
     assert(csrf === 403, 'Production CSRF/origin validation accepted a foreign origin through the tunnel.');
     checks.push('actual production cookie-auth mutation rejects a foreign origin through the same TLS/SSH transport');
+    if (exerciseWorkspace) workspace = await exerciseWorkspace({ workspace, application, service, openSettings, connect }) || workspace;
     await workspace.evaluate(() => localStorage.setItem('tunnel-selected-project', 'original-project-selection'));
     setup = await openSettings(workspace);
     const savedBeforeApiFailure = fs.readFileSync(path.join(userData, 'desktop-settings.json'), 'utf8');

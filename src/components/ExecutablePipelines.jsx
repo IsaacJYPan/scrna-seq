@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import useExecutionTarget from '../runtime/useExecutionTarget';
 import { Download, Play, Trash2, Upload } from 'lucide-react';
 import {
   installPipeline,
@@ -37,6 +38,7 @@ export default function ExecutablePipelines({
   onSubmitted,
   setActiveTab,
 }) {
+  const { blocked } = useExecutionTarget();
   const storageKey = userEmail ? `traceomics:pipelines:${userEmail}` : null;
   const [library, setLibrary] = useState(() => readInstalled(storageKey));
   const [pending, setPending] = useState(null);
@@ -100,6 +102,7 @@ export default function ExecutablePipelines({
   };
   const run = async (pipeline) => {
     if (
+      blocked ||
       busy ||
       !enabled ||
       !ownsObject ||
@@ -249,6 +252,7 @@ export default function ExecutablePipelines({
                 type="button"
                 onClick={() => run(pipeline)}
                 disabled={
+                  blocked ||
                   busy ||
                   !enabled ||
                   !ownsObject ||

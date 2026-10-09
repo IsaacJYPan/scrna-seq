@@ -1,6 +1,6 @@
 import React from 'react';
 import {act,fireEvent,render,screen,waitFor,within} from '@testing-library/react';
-import {beforeEach,expect,it,vi} from 'vitest';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import RConsole from './RConsole';
 import * as api from '../executions/privateKernelApi';
 import {listArtifactVersions,getArtifactVersion,previewArtifactVersion} from '../artifacts/artifactApi';
@@ -10,12 +10,37 @@ const environment={rVersion:'4.5.3',manifestSha256:'a'.repeat(64)};
 const kernel={id:'pk_one',status:'ready',generation:'b'.repeat(64),environment,inputs:[],resources:{cpuLimit:1,memoryBytes:1024**3,idleTimeoutSeconds:900},target:{id:'private-r-kernel'},memoryState:'available'};
 const entry={id:'pex_one',order:1,status:'completed',source:'n <- 3',sourceSha256:'c'.repeat(64),completionKnown:true,result:{stdout:'[1] 3\n',warnings:['R warning'],error:null,tables:[{name:'Cells',columns:['count','condition'],rows:[[3,'<script>inert</script>']]}],figures:[{mimeType:'image/png',data:'YWJj',sha256:'d'.repeat(64)}]}};
 const props={projectId:'project_one',userId:1,workspaceId:'workspace_one',deploymentPolicy:{expertREnabled:true,persistentKernel:true,expertREnvironment:environment},objects:[]};
+afterEach(()=>{delete window.desktopShell;});
 const publishingProps={...props,deploymentPolicy:{...props.deploymentPolicy,persistentKernelPublications:true}};
 const controlProps={...publishingProps,deploymentPolicy:{...publishingProps.deploymentPolicy,persistentKernelInterrupt:true}};
 const savedVersion={versionId:'av_saved',artifactId:'art_saved',name:'Saved cells',versionNumber:1,format:{id:'org.r-project.rds',version:'1'},sha256:'e'.repeat(64),ownerId:'1',canReplace:true,reference:{artifactId:'art_saved',versionId:'av_saved',projectId:'project_one',sha256:'e'.repeat(64)},provenance:{sourceExecutionId:'pex_save',environment}};
 const publication={id:'pub_one',status:'completed',type:'object',name:'Saved cells',kernelId:'pk_one',generation:kernel.generation,sourceExecutionId:'pex_save',order:2,sourceSha256:'f'.repeat(64),lineage:{environment,inputs:[],sourceVersions:[{id:'pex_one',order:1,sha256:entry.sourceSha256,status:'completed'}],replay:{complete:false,issues:['Untracked intermediate state']}}};
 beforeEach(()=>{vi.resetAllMocks();api.listPrivateRKernels.mockResolvedValue({items:[]});api.startPrivateRKernel.mockResolvedValue(kernel);api.getPrivateRKernel.mockResolvedValue(kernel);api.executePrivateRKernel.mockResolvedValue(entry);api.listPrivateRExecutions.mockResolvedValue({items:[entry]});api.getPrivateRExecution.mockResolvedValue(entry);api.stopPrivateRKernel.mockResolvedValue({...kernel,status:'stopped',memoryState:'lost'});api.listPrivateRPublications.mockResolvedValue({items:[]});api.publishPrivateROutput.mockResolvedValue({publication,version:savedVersion});listArtifactVersions.mockResolvedValue({items:[]});getArtifactVersion.mockResolvedValue(savedVersion);previewArtifactVersion.mockResolvedValue({integrityVerified:true,preview:{family:'metadata',message:'Open only in a suitable private R runtime.'}});});
 async function start(){await waitFor(()=>expect(api.listPrivateRKernels).toHaveBeenCalled());fireEvent.click(screen.getByRole('button',{name:'Start private session'}));await screen.findByText('Session ready · unsaved memory available');}
+it('blocks remote commands and saves after tunnel loss while retaining confirmed output and editable source',async()=>{
+  let notify;
+  const target={id:'lab',serviceIdentity:'selected-lab',name:'Laptop connection label',status:'connected',sshTunnel:{state:'connected'}};
+  window.desktopShell={getCurrentTarget:async()=>target,onTargetStatus:listener=>{notify=listener;return()=>{};}};
+  api.startPrivateRKernel.mockResolvedValue({...kernel,target:{...kernel.target,serviceId:'svc_'+'e'.repeat(32),serviceLabel:'Research compute',runtimeKind:'private-r'}});
+  render(<RConsole {...publishingProps}/>);
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Start private session'})).toBeEnabled());await start();
+  expect(screen.getByText('Research compute · svc_'+'e'.repeat(32))).toBeVisible();
+  fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));await screen.findByLabelText('R stdout');
+  const commands=api.executePrivateRKernel.mock.calls.length;
+  act(()=>notify({...target,status:'disconnected',sshTunnel:{state:'disconnected'}}));
+  expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();
+  expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();
+  expect(screen.getByRole('button',{name:'Stop session'})).toBeDisabled();
+  expect(screen.getByLabelText('R stdout')).toHaveTextContent('[1] 3');
+  fireEvent.change(screen.getByLabelText('R console source'),{target:{value:'inspect_later <- 42'}});
+  expect(screen.getByLabelText('R console source')).toHaveValue('inspect_later <- 42');
+  fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));
+  expect(api.executePrivateRKernel).toHaveBeenCalledTimes(commands);
+  expect(api.publishPrivateROutput).not.toHaveBeenCalled();
+  act(()=>notify(target));
+  expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled();
+  expect(api.executePrivateRKernel).toHaveBeenCalledTimes(commands);
+});
 it('starts empty R with exact environment and no pipeline and renders bounded inert source/output/table/PNG',async()=>{
   render(<RConsole {...props}/>);await start();expect(api.startPrivateRKernel).toHaveBeenCalledWith('project_one',expect.objectContaining({workspaceId:'workspace_one',analysisObjectId:null,environment,inputs:[],requestId:expect.any(String)}));
   fireEvent.change(screen.getByLabelText('R console source'),{target:{value:'n <- 3'}});fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));await screen.findByRole('cell',{name:'<script>inert</script>'});expect(document.querySelector('script')).toBeNull();expect(screen.getByLabelText('R stdout')).toHaveTextContent('[1] 3');expect(screen.getByRole('img',{name:'R figure 1'})).toHaveAttribute('src','data:image/png;base64,YWJj');expect(screen.getByText(/not published scientific artifact versions/)).toBeVisible();

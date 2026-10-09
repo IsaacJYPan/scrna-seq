@@ -1,6 +1,7 @@
 // src/api.js
 // Replaces the window.electronAPI object with standard fetch calls to our Express server.
 import { publicErrorMessage } from './publicError';
+import { withExecutionTarget } from './runtime/executionTarget';
 
 // API base URL is configured via Vite env (VITE_API_BASE_URL).
 // When unset, fall back to same-origin relative requests (empty base),
@@ -237,6 +238,7 @@ function pickFiles({ accept = '', directory = false, multiple = false } = {}) {
 }
 
 async function uploadSingleFile(file) {
+  return withExecutionTarget(async () => {
   const form = new FormData();
   form.append('file', file, file.name);
   const headers = {};
@@ -245,9 +247,11 @@ async function uploadSingleFile(file) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data.path;
+  }, { mutation: true });
 }
 
 async function uploadDirectory(files) {
+  return withExecutionTarget(async () => {
   const form = new FormData();
   files.forEach((file) => {
     form.append('files', file, file.name);
@@ -259,6 +263,7 @@ async function uploadDirectory(files) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data.path;
+  }, { mutation: true });
 }
 
 async function pickAndUploadFile(kind = '') {
@@ -283,6 +288,7 @@ function formatRequestError(error) {
 }
 
 async function req(endpoint, options = {}) {
+  return withExecutionTarget(async () => {
   options.headers = options.headers || {};
   options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
   options.headers['X-Client-ID'] = CLIENT_ID;
@@ -302,6 +308,7 @@ async function req(endpoint, options = {}) {
     throw error;
   }
   return res.json();
+  }, { mutation: Boolean(options.method && options.method !== 'GET') });
 }
 
 async function requestRuntimeReadiness(projectId, { signal } = {}) {
@@ -409,6 +416,7 @@ export const electronAPI = {
   // R Plumber Proxy
   apiRequest: async (endpoint, options = {}) => {
     try {
+      return await withExecutionTarget(async () => {
       options.headers = options.headers || {};
       options.headers['X-Client-ID'] = CLIENT_ID;
       options.headers['X-TraceOmics-CSRF'] = '1';
@@ -429,8 +437,9 @@ export const electronAPI = {
       }
       
       return data;
+      }, { mutation: Boolean(options.method && options.method !== 'GET') });
     } catch (e) {
-      return { error: publicErrorMessage(e) };
+      return { error: publicErrorMessage(e), ...(e.code ? { code: e.code } : {}) };
     }
   },
 
@@ -641,6 +650,7 @@ export const electronAPI = {
   getExpertREnvironment: async (projectId) => req(`/api/expert-r/environment?projectId=${encodeURIComponent(projectId)}`),
   listExpertRInputs: async (projectId) => req(`/api/expert-r/projects/${projectId}/inputs`),
   uploadExpertRInput: async (projectId, file) => {
+    return withExecutionTarget(async () => {
     const form = new FormData();
     form.append('file', file, file.name);
     const res = await fetch(apiUrl(`/api/expert-r/projects/${projectId}/inputs`), {
@@ -649,6 +659,7 @@ export const electronAPI = {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || res.statusText);
     return data;
+    }, { mutation: true });
   },
   publishPipelineRegistryDefinition: async (manifest) =>
     req('/api/pipeline-registry/definitions', { method: 'POST', body: JSON.stringify({ manifest }) }),
@@ -658,6 +669,7 @@ export const electronAPI = {
   // Multipart dataset upload: the server chooses the storage location and records
   // sha256/size. `metadata` (if given) is sent as a JSON string form field.
   uploadDataset: async (projectId, file, metadata = {}, fileType) => {
+    return withExecutionTarget(async () => {
     const form = new FormData();
     form.append('file', file, file.name);
     if (fileType) form.append('fileType', fileType);
@@ -667,6 +679,7 @@ export const electronAPI = {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || res.statusText);
     return data;
+    }, { mutation: true });
   },
 
   // Project-scoped analysis objects & jobs (project metadata/history; ids/owner/

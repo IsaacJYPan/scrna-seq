@@ -1,3 +1,5 @@
+import { TARGET_CHANGED_MESSAGE, TARGET_CHECKING_MESSAGE, TARGET_DISCONNECTED_MESSAGE, TARGET_UNCONFIRMED_MESSAGE } from './runtime/executionTarget';
+
 const DEFAULT_PUBLIC_ERROR = 'We could not complete this request. Please review the settings and try again.';
 
 const UNSAFE_ERROR_DETAIL = /(?:[A-Za-z]:[\\/]|(?:https?|file):\/\/|\/__private_vault__\/|\bvault\/|\bstorage_?(?:uri|key)\b|\b(?:claim_?token|state_?key)\b|\b(?:rscript|plumber|postgres|docker|compose|node_modules)\b|\b(?:traceback|stack trace|execution halted|internal server|exception)\b|\b(?:job|art|ao|proj|br|rev|aud|com)_[A-Za-z0-9_-]+\b|\buser-\d+:obj-)/i;
@@ -41,6 +43,7 @@ export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
 
   if (EXPERT_R_OWNER_MESSAGES.has(message)) return message;
   if (CELLCHAT_OWNER_MESSAGES.has(message)) return message;
+  if ([TARGET_CHANGED_MESSAGE, TARGET_CHECKING_MESSAGE, TARGET_DISCONNECTED_MESSAGE, TARGET_UNCONFIRMED_MESSAGE].includes(message)) return message;
 
   if (/^(?:R service|Analysis compute) is busy\b/i.test(message)) {
     return 'Analysis compute is busy. Wait a moment and try again.';
