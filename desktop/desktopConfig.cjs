@@ -3,6 +3,7 @@
 const { createHash, randomUUID } = require('node:crypto');
 const { isIP } = require('node:net');
 const path = require('node:path');
+const { checkServiceCompatibility } = require('./serviceCompatibility.cjs');
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
@@ -42,62 +43,14 @@ function isAllowedNavigation(targetUrl, serverUrl) {
   }
 }
 
-async function verifyServerConnection(serverUrl, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+async function verifyServerConnection(serverUrl, options = {}) {
   const normalized = normalizeServerUrl(serverUrl);
-  const policyUrl = new URL('/api/auth/policy', normalized);
-  const controller = new AbortController();
-  let reader, timer;
-  const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error('The TraceOmics connection check timed out. Check the server and retry.'));
-    }, timeoutMs);
-  });
-  async function verify() {
-    let response;
-    try {
-      response = await fetchImpl(policyUrl, {
-        method: 'GET', redirect: 'error', headers: { Accept: 'application/json' }, signal: controller.signal,
-      });
-    } catch (error) {
-      if (error.code === 'DESKTOP_TLS_REJECTED') throw error;
-      throw new Error('TraceOmics could not reach that server. Check the address, network connection, and server status.');
-    }
+  await checkServiceCompatibility(normalized, options);
+  return normalized;
+}
 
-    if (!response.ok) {
-      throw new Error('That server did not accept the TraceOmics connection check.');
-    }
-    let policy;
-    try {
-      const limit = 16 * 1024;
-      if (Number(response.headers?.get('content-length')) > limit) throw new Error('response limit');
-      if (response.body?.getReader) {
-        reader = response.body.getReader();
-        const chunks = []; let size = 0;
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          if (size > limit) throw new Error('response limit');
-          chunks.push(Buffer.from(value));
-        }
-        policy = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      } else {
-        // Lightweight fetch doubles can still provide json(); native responses
-        // use the streamed byte bound above.
-        policy = await response.json();
-        if (Buffer.byteLength(JSON.stringify(policy), 'utf8') > limit) throw new Error('response limit');
-      }
-    } catch {
-      throw new Error('That address did not return a valid TraceOmics response.');
-    }
-    if (!policy || typeof policy.registrationEnabled !== 'boolean') {
-      throw new Error('That address is not a compatible TraceOmics server.');
-    }
-    return normalized;
-  }
-  try { return await Promise.race([verify(), deadline]); }
-  finally { clearTimeout(timer); controller.abort(); if (reader) void reader.cancel().catch(() => {}); }
+async function verifyServiceCompatibility(serverUrl, options = {}) {
+  return checkServiceCompatibility(normalizeServerUrl(serverUrl), options);
 }
 
 function requireAllowedFields(value, allowed) {
@@ -213,6 +166,6 @@ function normalizeTargetSettings(value) {
   return { schemaVersion: 1, selectedProfileId, profiles };
 }
 
-module.exports = { isAllowedNavigation, normalizeServerUrl, verifyServerConnection,
+module.exports = { isAllowedNavigation, normalizeServerUrl, verifyServerConnection, verifyServiceCompatibility,
   normalizeTargetProfile, normalizeTargetSettings, profileForServerUrl,
   targetServiceIdentity, targetSessionPartition };

@@ -86,8 +86,8 @@ describe('execution target profiles', () => {
     } })).rejects.toThrow(/could not reach/);
   });
 
-  it('rejects a native policy response over 16 KiB before accepting the service', async () => {
-    const body = JSON.stringify({ registrationEnabled: false, details: 'oversized-private-diagnostic'.repeat(1024) });
+  it('rejects a native compatibility response over 1 KiB before accepting the service', async () => {
+    const body = JSON.stringify({ product: 'TraceOmics', serviceApiVersion: 1, minimumClientApiVersion: 1, details: 'oversized-private-diagnostic'.repeat(1024) });
     const pending = verifyServerConnection('https://analysis.example.org', {
       fetchImpl: async () => new Response(body, { headers: { 'Content-Type': 'application/json' } }),
     });
@@ -98,7 +98,7 @@ describe('execution target profiles', () => {
   it('retains the connection deadline while reading a trickling response body', async () => {
     const encoder = new TextEncoder();
     let stopped = false, timer;
-    const chunks = ['{"registrationEnabled":', 'false', '}'];
+    const chunks = ['{"product":"TraceOmics",', '"serviceApiVersion":1,', '"minimumClientApiVersion":1}'];
     const cancel = vi.fn(() => { stopped = true; clearTimeout(timer); });
     const body = new ReadableStream({
       async pull(controller) {
@@ -121,7 +121,7 @@ describe('execution target profiles', () => {
     const pending = verifyServerConnection('https://analysis.example.org', {
       fetchImpl: async () => new Response('private-service-error{bad-json'),
     });
-    await expect(pending).rejects.toThrow(/valid TraceOmics response/);
+    await expect(pending).rejects.toThrow(/valid TraceOmics compatibility response/);
     await expect(pending).rejects.not.toThrow(/private-service-error/);
   });
 });

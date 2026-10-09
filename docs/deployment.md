@@ -518,8 +518,11 @@ SHA-256 before uploading the installer and checksum sidecar.
 The installed application is a sandboxed Electron client for the same HTTPS
 deployment; it does not bundle or start Postgres, R, or Docker. Operators can
 embed the first server URL with `TRACEOMICS_DESKTOP_URL` at build time, or users
-can enter it on the setup screen. The client checks `/api/auth/policy` and accepts
-only a compatible server before saving the address. Automatic in-app updating is
+can enter it on the setup screen. The client checks the bounded public
+`/api/service/compatibility` descriptor through the selected connection before
+saving the address. The descriptor contains the product and supported service
+and client API versions, without runtime or account details. Services that lack
+this endpoint require an update. Automatic in-app updating is
 not configured; distribute each update as a new signed installer and keep the
 application version current before certification.
 
@@ -530,6 +533,25 @@ Returning to a server preserves its own session. The workspace displays the
 connected server and its current custom R availability. A failed connection
 leaves the previous server open. Existing saved server addresses migrate
 automatically; `TRACEOMICS_DESKTOP_URL` still selects the startup server.
+
+After signing in, open **Connection details → Check server readiness** to inspect
+the selected server. The report distinguishes guided R and its packages, observed
+queued-worker availability, the exact custom R environment, configured resource
+ceilings, and writable storage with observed free space. External schedulers are
+currently unsupported. **Check again** refreshes the observations; an explicit
+stale notice appears when their short lifetime expires. These checks do not start
+scientific work, reserve capacity, or establish that a particular dataset fits.
+Execution checks access and admission again.
+
+The authenticated `/api/runtime/readiness?projectId=...` response checks current
+membership and R execution access on every request. Shared dependency probes are
+bounded and briefly cached, while private environment, resource and storage
+details are withheld when execution access is absent or revoked. Raw host paths,
+credentials, worker identities and service errors are excluded. Missing packages,
+service authentication failures, storage pressure and unavailable workers include
+specific remediation in the report. Transport and certificate failures remain in
+the connection workflow, which preserves the previous workspace when a candidate
+server fails verification.
 
 SSH profiles can verify access through the system OpenSSH client, agent, and
 configuration. Leave username or port blank to use the configured values, or

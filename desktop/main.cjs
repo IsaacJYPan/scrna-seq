@@ -8,7 +8,7 @@ const { createSshConnectionManager } = require('./sshConnection.cjs');
 const { createSshTunnel, createHttpsConnectProxy, disposeOwnedTunnels } = require('./sshTunnel.cjs');
 const { unlockNativeIdentity } = require('./sshCredentials.cjs');
 const packageMetadata = require('../package.json');
-const { isAllowedNavigation, normalizeServerUrl, verifyServerConnection,
+const { isAllowedNavigation, normalizeServerUrl, verifyServiceCompatibility,
   normalizeTargetProfile, normalizeTargetSettings, profileForServerUrl,
   targetServiceIdentity, targetSessionPartition } = require('./desktopConfig.cjs');
 
@@ -62,7 +62,7 @@ function targetSummary(profile, status = 'connected', runtime = null) {
   if (runtime) status = runtime.state;
   return { id: profile.id, name: profile.name, kind: profile.kind,
     endpoint: profile.endpoint || null, serviceIdentity: runtime?.serviceIdentity || targetServiceIdentity(profile), status,
-    capabilities: status === 'connected' ? { projectService: true } : null,
+    serviceCompatibility: runtime?.compatibility || null,
     ...(profile.kind === 'ssh' ? { sshAuthentication: runtime?.authentication || sshManager?.status(profile) || null,
       ...(runtime ? { sshTunnel: { state: runtime.state, connectedAt: runtime.tunnel?.connectedAt || null, message: runtime.message || null } } : {}) } : {}) };
 }
@@ -174,7 +174,7 @@ async function disposeRuntime(runtime, message = null) {
   const firstDisposal = !runtime.disposed;
   runtime.disposed = true; runtime.state = 'disconnected';
   if (message) runtime.message = message;
-  runtime.authentication = { ...runtime.authentication, applicationConnected: false };
+  if (runtime.authentication) runtime.authentication = { ...runtime.authentication, applicationConnected: false };
   if (firstDisposal) {
     runtime.session?.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (_details, callback) => callback({ cancel: true }));
     publishTargetStatus(runtime);
@@ -184,12 +184,48 @@ async function disposeRuntime(runtime, message = null) {
   await Promise.allSettled([runtime.proxy?.dispose(), runtime.tunnel?.dispose(),
     firstDisposal ? runtime.session?.closeAllConnections() : undefined, runtime.lease?.dispose()]);
 }
+async function verifyRuntimeCompatibility(profile, runtime, signal) {
+  const compatibility = await verifyServiceCompatibility(profile.endpoint, { signal, fetchImpl: async (url, options) => {
+    try { return await runtime.session.fetch(String(url), options); }
+    catch (error) {
+      if (/ERR_CERT_|certificate/i.test(error.message)) throw Object.assign(new Error('The HTTPS certificate was rejected. Use the original certificate hostname and a valid certificate trusted by this computer.'), { code: 'DESKTOP_TLS_REJECTED' });
+      throw error;
+    }
+  } });
+  if (runtime.disposed || signal.aborted) throw new Error(runtime.message || 'The connection was canceled.');
+  runtime.compatibility = compatibility;
+}
+function installRequestBoundary(profile, runtime) {
+  const endpoint = new URL(profile.endpoint);
+  const protocols = endpoint.protocol === 'https:' ? ['https:', 'wss:'] : ['http:', 'ws:'];
+  runtime.session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+    let allowed = false;
+    try { const url = new URL(details.url); allowed = !runtime.disposed && protocols.includes(url.protocol)
+      && url.host === endpoint.host; } catch { /* Keep malformed requests inside the boundary. */ }
+    callback({ cancel: !allowed });
+  });
+}
+async function prepareDirectRuntime(profile, signal) {
+  const partition = targetSessionPartition(profile);
+  if (connectedRuntime?.state === 'connected' && connectedRuntime.partition === partition) {
+    await verifyRuntimeCompatibility(profile, connectedRuntime, signal); return connectedRuntime;
+  }
+  const runtime = { partition, serviceIdentity: targetServiceIdentity(profile), state: 'connecting', disposed: false,
+    session: session.fromPartition(partition) };
+  try {
+    installRequestBoundary(profile, runtime);
+    await runtime.session.closeAllConnections();
+    await runtime.session.setProxy({ mode: 'direct' });
+    await verifyRuntimeCompatibility(profile, runtime, signal);
+    runtime.state = 'connected'; return runtime;
+  } catch (error) { await disposeRuntime(runtime); throw error; }
+}
 async function prepareRuntime(profile, scope, signal) {
   const lease = await sshManager.prepareLease(profile, scope);
   const runtime = { lease, partition: targetSessionPartition(profile, lease.status),
     serviceIdentity: targetServiceIdentity(profile, lease.status), authentication: lease.status, state: 'connecting', disposed: false };
   if (connectedRuntime?.state === 'connected' && connectedRuntime.partition === runtime.partition) {
-    await lease.dispose(); return connectedRuntime;
+    await lease.dispose(); await verifyRuntimeCompatibility(profile, connectedRuntime, signal); return connectedRuntime;
   }
   try {
     runtime.tunnel = await createSshTunnel(lease, { signal, onLost: error => { void disposeRuntime(runtime, error.message); } });
@@ -197,21 +233,10 @@ async function prepareRuntime(profile, scope, signal) {
     runtime.proxy = await createHttpsConnectProxy({ endpoint: profile.endpoint, forwardPort: runtime.tunnel.port });
     if (runtime.disposed || signal.aborted) throw new Error('SSH connection was canceled.');
     runtime.session = session.fromPartition(runtime.partition);
-    runtime.session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
-      let allowed = false;
-      try { const url = new URL(details.url); allowed = !runtime.disposed && ['https:', 'wss:'].includes(url.protocol)
-        && url.host === new URL(profile.endpoint).host; } catch { /* Keep malformed requests inside the boundary. */ }
-      callback({ cancel: !allowed });
-    });
+    installRequestBoundary(profile, runtime);
     await runtime.session.closeAllConnections();
     await runtime.session.setProxy({ mode: 'fixed_servers', proxyRules: '127.0.0.1:' + runtime.proxy.port, proxyBypassRules: '<-loopback>' });
-    await verifyServerConnection(profile.endpoint, { fetchImpl: async (url, options) => {
-      try { return await runtime.session.fetch(String(url), options); }
-      catch (error) {
-        if (/ERR_CERT_|certificate/i.test(error.message)) throw Object.assign(new Error('The HTTPS certificate was rejected. Use the original certificate hostname and a valid certificate trusted by this computer.'), { code: 'DESKTOP_TLS_REJECTED' });
-        throw error;
-      }
-    } });
+    await verifyRuntimeCompatibility(profile, runtime, signal);
     if (runtime.disposed || signal.aborted) throw new Error(runtime.message || 'SSH connection was canceled.');
     runtime.state = 'connected'; runtime.authentication = { ...runtime.authentication, applicationConnected: true }; return runtime;
   } catch (error) { await disposeRuntime(runtime); throw error; }
@@ -222,7 +247,7 @@ async function connectProfile(profile, nextSettings = settings, scope = 'startup
   let runtime = null, candidate = null;
   try {
     if (profile.kind === 'ssh') runtime = await prepareRuntime(profile, scope, controller.signal);
-    else await verifyServerConnection(profile.endpoint);
+    else runtime = await prepareDirectRuntime(profile, controller.signal);
     if (controller.signal.aborted) throw new Error('The connection was canceled.');
     if (runtime && runtime === connectedRuntime) {
       await writeTargetSettings({ ...nextSettings, selectedProfileId: profile.id });
@@ -389,8 +414,10 @@ app.whenReady().then(async () => {
       if (selected?.kind === 'ssh' && !selected.endpoint) { await showSetup(); return; }
       await openProfile(settings.selectedProfileId); return;
     }
-  } catch {
-    settingsWarning = 'The selected target could not be connected. Check its settings or choose another target.';
+  } catch (error) {
+    settingsWarning = ['DESKTOP_TLS_REJECTED', 'DESKTOP_SERVICE_UPGRADE_REQUIRED', 'DESKTOP_SERVICE_INVALID',
+      'DESKTOP_SERVICE_REJECTED', 'DESKTOP_SERVICE_TIMEOUT', 'DESKTOP_SERVICE_UNREACHABLE'].includes(error?.code)
+      ? error.message : 'The selected target could not be connected. Check its settings or choose another target.';
   }
   await showSetup();
 }).finally(() => { starting = false; });
