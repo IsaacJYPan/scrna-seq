@@ -78,6 +78,28 @@ async function freePort() {
   const port = server.address().port;
   await new Promise(resolve => server.close(resolve)); return port;
 }
+async function readableContrast(locator) {
+  return locator.evaluate(element => {
+    const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const components = color => {
+      context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1);
+      return [...context.getImageData(0, 0, 1, 1).data].map(value => value / 255);
+    };
+    let background = [1, 1, 1]; const ancestors = [];
+    for (let current = element; current; current = current.parentElement) ancestors.push(current);
+    for (const current of ancestors.reverse()) {
+      const color = components(getComputedStyle(current).backgroundColor);
+      background = background.map((value, index) => color[index] * color[3] + value * (1 - color[3]));
+    }
+    const color = components(getComputedStyle(element).color);
+    const foreground = background.map((value, index) => color[index] * color[3] + value * (1 - color[3]));
+    const luminance = rgb => rgb.map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+      .reduce((value, channel, index) => value + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    const first = luminance(foreground), second = luminance(background);
+    return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+  });
+}
 async function main() {
   const image = process.env.EXPERT_R_SANDBOX_IMAGE;
   assert(/^(?:[^\s@]+@)?sha256:[a-f0-9]{64}$/.test(image || ''),
@@ -105,6 +127,7 @@ async function main() {
       headers: { Authorization: 'Bearer ' + token } }).then(response => response.json());
     assert(capability.persistentKernel === true, 'The exact image did not pass the independent persistent-kernel probe.');
     assert(capability.persistentKernelPublications === true, 'The exact image did not pass the independent output-publication probe.');
+    assert(capability.persistentKernelInterrupt === true, 'The exact image did not pass the independent interrupt probe.');
     const certificate = new crypto.X509Certificate(fs.readFileSync(service.certificatePath));
     const authority = new crypto.X509Certificate(fs.readFileSync(service.caCertificatePath));
     assert(certificate.verify(authority.publicKey) && certificate.checkHost(new URL(service.endpoint).hostname),
@@ -126,6 +149,7 @@ async function main() {
     const darkMode = page.getByRole('button', { name: 'Switch to dark mode', exact: true });
     if (await darkMode.isVisible()) await darkMode.click();
     const consoleUi = page.getByRole('region', { name: 'Private R console', exact: true });
+    await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
     await consoleUi.getByRole('button', { name: 'Start private session', exact: true }).waitFor();
     await consoleUi.getByRole('button', { name: 'Start private session', exact: true }).click();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor({ timeout: 125_000 });
@@ -149,6 +173,7 @@ async function main() {
     check('Free R cells preserve variables and render actual bounded tables and PNG plots.');
     await page.reload();
     await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor();
     await run('cat(private_value)', 3);
     assert((await output.getByLabel('R stdout').innerText()).includes('41'), 'Reload silently restarted the kernel.');
@@ -163,10 +188,12 @@ async function main() {
     await run('warning("Review this R warning"); cat(private_value)', 5);
     assert((await output.getByLabel('R warnings').innerText()).includes('Review this R warning'),
       'The actual R warning was not displayed.');
+    assert(await readableContrast(output.getByLabel('R warnings')) >= 4.5, 'The actual dark-mode R warning has insufficient text contrast.');
     await editor.fill('stop("Review this R error")');
     await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).click();
     await output.getByText('Command 6 · failed', { exact: true }).waitFor({ timeout: 125_000 });
     assert((await output.getByRole('alert').innerText()).includes('Review this R error'), 'The actual R error was not displayed.');
+    assert(await readableContrast(output.getByRole('alert')) >= 4.5, 'The actual dark-mode R error has insufficient text contrast.');
     await run('cat(private_value)', 7);
     assert((await output.getByLabel('R stdout').innerText()).includes('41'), 'An R error erased earlier private variables.');
     check('Actionable R warnings and errors render in the console while earlier variables remain usable.');
@@ -181,6 +208,80 @@ async function main() {
     catch (error) { immutable = error.code === '55000'; }
     assert(immutable, 'Postgres allowed retained private command source to be rewritten.');
     check('Postgres retains immutable creator-private source hashes and ordered generation receipts.');
+    const firstKernelId = journal[0].kernel_id;
+    const commandPost = () => page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname.endsWith('/executions'), { timeout: 125_000 });
+    async function waitForRunning(kernelId) {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        const row = (await database.query("SELECT active_execution_id FROM private_r_kernels WHERE id=$1 AND status='running'", [kernelId])).rows[0];
+        if (row?.active_execution_id) return row.active_execution_id;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      throw new Error('The genuine R command did not enter its reserved running state.');
+    }
+    await editor.fill('interrupt_mutation <- 1L; display_table(data.frame(partial=1L), name="Interrupted partial table"); plot(1:3); repeat { interrupt_mutation <- interrupt_mutation + 1L; Sys.sleep(0.1) }');
+    const interruptedPost = commandPost();
+    await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).click();
+    const interruptedId = await waitForRunning(firstKernelId);
+    await new Promise(resolve => setTimeout(resolve, 750));
+    await consoleUi.getByRole('button', { name: 'Interrupt R command', exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(directory, 'running-r-interrupt-controls.png') });
+    assert(await consoleUi.getByRole('button', { name: 'Interrupt R command', exact: true }).isEnabled(), 'A pending R HTTP command blocked its independent interrupt control.');
+    assert(await consoleUi.getByRole('button', { name: 'Refresh session status', exact: true }).isEnabled(), 'A pending R command blocked explicit status inspection.');
+    const interruptPost = page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname.endsWith('/interrupt'), { timeout: 30_000 });
+    await consoleUi.getByRole('button', { name: 'Interrupt R command', exact: true }).click();
+    const interruptedResponse = await interruptPost; const interrupted = await interruptedResponse.json();
+    assert(interruptedResponse.ok() && interrupted.idleConfirmed === true && interrupted.outcome === 'interrupted'
+      && interrupted.session.id === firstKernelId && interrupted.session.generation === journal[0].kernel_generation
+      && interrupted.execution.id === interruptedId && interrupted.execution.status === 'failed'
+      && interrupted.execution.interrupted === true && interrupted.execution.result.error.code === 'PRIVATE_KERNEL_INTERRUPTED'
+      && interrupted.execution.result.tables.length === 0 && interrupted.execution.result.figures.length === 0,
+    'An actual interruption did not retain its exact generation receipt and confirm idle without publishing partial previews.');
+    const originalInterruptedResponse = await interruptedPost;
+    assert(originalInterruptedResponse.ok(), 'The original execution response did not reconcile its interrupted command.');
+    await output.getByText('Command 8 · interrupted', { exact: true }).waitFor();
+    assert(await output.getByRole('table').count() === 0 && await output.getByRole('img').count() === 0
+      && await output.getByRole('button', { name: /^Save figure/ }).count() === 0,
+    'Interrupted partial tables or figures were displayed or offered for publication.');
+    await output.screenshot({ path: path.join(directory, 'confirmed-r-interruption.png') });
+    await run('stopifnot(private_value==41L, exists("interrupt_mutation"), interrupt_mutation>=1L); cat("Earlier value:",private_value,"changed value:",interrupt_mutation)', 9);
+    assert((await output.getByLabel('R stdout').innerText()).includes('Earlier value: 41 changed value:'), 'A confirmed interrupt erased prior private memory or failed to make the next command usable.');
+    check('An independent UI interrupt stops a genuine long R loop, confirms idle, retains the exact interrupted source receipt, drops partial tables/PNG, and keeps earlier and already-mutated variables usable.');
+    await editor.fill('restart_volatile <- 77L; repeat { Sys.sleep(0.1) }');
+    const discardedPost = commandPost();
+    await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).click();
+    await waitForRunning(firstKernelId);
+    await consoleUi.getByRole('button', { name: 'Restart session', exact: true }).click();
+    await consoleUi.getByText(/Restart discards unsaved variables and files, reloads the original selected input versions/).waitFor();
+    const restartPost = page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname.endsWith('/restart'), { timeout: 125_000 });
+    await consoleUi.getByRole('button', { name: 'Restart and discard unsaved memory', exact: true }).click();
+    const restartResponse = await restartPost; const restarted = await restartResponse.json();
+    assert(restartResponse.ok() && restarted.status === 'completed' && restarted.previousKernelId === firstKernelId
+      && restarted.session.id !== firstKernelId && restarted.session.generation !== journal[0].kernel_generation
+      && restarted.session.restartedFromKernelId === firstKernelId && restarted.session.status === 'ready',
+    'Explicit restart did not create a linked independent ready generation.');
+    await discardedPost;
+    await consoleUi.getByText(/Restart created a fresh session from the original selected input versions/).waitFor();
+    await run('stopifnot(!exists("private_value"), !exists("interrupt_mutation"), !exists("restart_volatile")); cat("Fresh restart has no discarded globals")', 1);
+    const restartOldRows = (await database.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 ORDER BY execution_order', [firstKernelId])).rows;
+    assert(restartOldRows.length === 10 && restartOldRows[7].result_json.interrupted === true
+      && restartOldRows[7].source_sha256 === crypto.createHash('sha256').update(restartOldRows[7].source_code).digest('hex'),
+    'Restart rewrote or replayed the earlier interrupted journal.');
+    await consoleUi.getByRole('button', { name: 'Inspect previous session', exact: true }).click();
+    await consoleUi.getByRole('button', { name: 'Previous command 8 · interrupted', exact: true }).click();
+    await output.getByText('Command 8 · interrupted', { exact: true }).waitFor();
+    await consoleUi.getByRole('region', { name: 'Previous R session evidence', exact: true }).screenshot({ path: path.join(directory, 'restarted-r-journal-evidence.png') });
+    await page.reload();
+    await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
+    await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
+    await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor();
+    await run('stopifnot(!exists("private_value")); cat("Reload retained fresh generation")', 2);
+    const freshRows = (await database.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 ORDER BY execution_order', [restarted.session.id])).rows;
+    assert(freshRows.length === 2 && freshRows.every(row => row.kernel_generation === restarted.session.generation), 'Reload replayed old cells or changed the replacement generation.');
+    check('Explicit restart during a long R command discards old globals, creates a linked fresh generation, retains the old journal for inspection, and reloads without replaying earlier cells.');
     await consoleUi.getByRole('button', { name: 'Stop session', exact: true }).click();
     await consoleUi.getByRole('button', { name: 'Stop and discard unsaved memory', exact: true }).click();
     await consoleUi.getByText('Session stopped · unsaved memory lost', { exact: true }).waitFor();
@@ -327,6 +428,40 @@ cat("Loaded cells:", ncol(obj), "features:", nrow(obj))`, 1);
     'Saving a retained completed figure after stopping changed its exact source or PNG bytes.');
     published.push(stoppedPlot);
     check('A completed journal figure can be explicitly saved after its kernel stops, without running R or changing the exact retained PNG.');
+    await consoleUi.getByRole('button', { name: 'Restart session', exact: true }).click();
+    const savedRestartPost = page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname.endsWith('/restart'), { timeout: 125_000 });
+    await consoleUi.getByRole('button', { name: 'Restart and discard unsaved memory', exact: true }).click();
+    const savedRestartResponse = await savedRestartPost; const savedRestart = await savedRestartResponse.json();
+    assert(savedRestartResponse.ok() && savedRestart.status === 'completed' && savedRestart.previousKernelId === savedKernel.id
+      && savedRestart.session.id !== savedKernel.id && savedRestart.session.generation !== savedKernel.runtime_generation
+      && savedRestart.session.environment.manifestSha256 === savedKernel.environment_json.manifestSha256
+      && savedRestart.session.inputs.length === 2 && savedRestart.session.inputs.every(input => savedKernel.inputs_json.some(original =>
+        original.versionId === input.versionId && original.checksumSha256 === input.checksumSha256 && original.role === input.role)),
+    'Restart changed its originally pinned checkpoint, CSV, or environment instead of reloading exact original inputs.');
+    await run(`stopifnot(inherits(obj,"Seurat"), ncol(obj)==12L, nrow(obj)==20L,
+  !exists("control_obj"), !exists("condition_counts"), !exists("selected_metadata"))
+original_metadata <- read_input(${JSON.stringify(selectedAnalysis.versionId)})
+stopifnot(nrow(original_metadata)==12L)
+cat("Original checkpoint restored:",ncol(obj),"cells; original input rows:",nrow(original_metadata))`, 1);
+    assert((await output.getByLabel('R stdout').innerText()).includes('Original checkpoint restored: 12 cells; original input rows: 12'),
+      'A fresh restart did not restore the original checkpoint and CSV without replaying old analysis cells.');
+    await consoleUi.getByRole('button', { name: 'Inspect previous session', exact: true }).click();
+    await consoleUi.getByRole('button', { name: 'Inspect previous Condition counts · v1', exact: true }).click();
+    await tablePreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    assert(await tablePreview.getByRole('cell', { name: '6', exact: true }).count() === 2, 'Restart changed the earlier immutable saved table.');
+    await consoleUi.getByRole('button', { name: 'Inspect previous Control cells · v1', exact: true }).click();
+    await tablePreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    await consoleUi.getByRole('button', { name: 'Inspect previous Condition plot · v1', exact: true }).click();
+    await tablePreview.getByRole('img', { name: 'Saved figure Condition plot', exact: true }).evaluate(element => element.decode());
+    await consoleUi.getByRole('region', { name: 'Previous R session evidence', exact: true }).screenshot({ path: path.join(directory, 'restarted-original-inputs-retained-outputs.png') });
+    const preservedSavedRows = (await database.query('SELECT id,checksum_sha256 FROM managed_artifact_versions WHERE id=ANY($1::text[])', [published.map(value => value.version.versionId)])).rows;
+    assert(preservedSavedRows.length === published.length && preservedSavedRows.every(row => published.some(value =>
+      value.version.versionId === row.id && value.version.sha256 === row.checksum_sha256)), 'Restart erased or changed a saved RDS, CSV, or PNG version.');
+    check('Restart reloads the original exact saved Seurat checkpoint and CSV environment, drops earlier analysis globals without replay, and preserves inspectable linked RDS/CSV/PNG artifacts.');
+    await consoleUi.getByRole('button', { name: 'Stop session', exact: true }).click();
+    await consoleUi.getByRole('button', { name: 'Stop and discard unsaved memory', exact: true }).click();
+    await consoleUi.getByText('Session stopped · unsaved memory lost', { exact: true }).waitFor();
     await consoleUi.getByLabel('Initial saved analysis', { exact: true }).selectOption('');
     await consoleUi.getByRole('checkbox', { name: 'Use cell-metadata.csv', exact: true }).uncheck();
     await consoleUi.getByRole('checkbox', { name: 'Use Control cells · v1', exact: true }).check();
@@ -363,6 +498,7 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
     const expandSidebar = page.getByRole('button', { name: 'Expand sidebar', exact: true });
     if (await expandSidebar.isVisible()) await expandSidebar.click();
     await page.getByRole('button', { name: /^Runs & Results(?:,|$)/ }).click();
+    await page.getByText('Inspect or import artifact files', { exact: true }).click();
     const inspector = page.getByRole('region', { name: 'Artifact versions', exact: true });
     await inspector.getByRole('button', { name: /^Condition plot · v1/ }).click();
     await inspector.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
@@ -374,6 +510,10 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
       const response = await fetch(url, { credentials: 'include', headers: { 'X-Traceomics-Csrf': '1' } });
       return { status: response.status, value: await response.json() };
     }, endpoint);
+    const apiPost = async (target, endpoint, input) => target.evaluate(async ({ url, body }) => {
+      const response = await fetch(url, { method: 'POST', credentials: 'include', headers: { 'X-Traceomics-Csrf': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return { status: response.status, value: await response.json() };
+    }, { url: endpoint, body: input });
     const owner = (await database.query('SELECT * FROM users WHERE email=$1', [service.account.email])).rows[0];
     const projectRow = (await database.query('SELECT * FROM projects WHERE id=$1', [service.project.id])).rows[0];
     const otherProjectId = 'proj_' + crypto.randomBytes(12).toString('hex');
@@ -381,6 +521,8 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
     await database.query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,'owner')", [otherProjectId, owner.id]);
     const wrongProject = await apiGet(page, '/api/artifact-versions/' + otherProjectId + '/' + revisedObject.version.versionId + '/preview');
     assert(wrongProject.status === 404, 'A saved private version was accessible through another project.');
+    const wrongProjectRestart = await apiPost(page, '/api/private-r-kernels/' + otherProjectId + '/' + savedKernel.id + '/restart', { requestId: crypto.randomUUID(), generation: savedKernel.runtime_generation });
+    assert(wrongProjectRestart.status === 404, 'A private restart could be targeted through another project.');
     const colleagueEmail = 'colleague-' + crypto.randomBytes(8).toString('hex') + '@example.invalid';
     // The disposable colleague receives the fixture's password hash and salt.
     // No production account or credential is modified or persisted in reports.
@@ -396,11 +538,16 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
     const privateVersion = await apiGet(otherPage, '/api/artifact-versions/' + service.project.id + '/' + revisedObject.version.versionId + '/preview');
     const privateJournal = await apiGet(otherPage, '/api/private-r-kernels/' + service.project.id + '/' + savedKernel.id + '/publications');
     const colleagueVersions = await apiGet(otherPage, '/api/artifact-versions/' + service.project.id);
+    const privateInterrupt = await apiPost(otherPage, '/api/private-r-kernels/' + service.project.id + '/' + savedKernel.id + '/interrupt', { requestId: crypto.randomUUID(), generation: savedKernel.runtime_generation, executionId: savedCommands[0].id });
+    const privateRestart = await apiPost(otherPage, '/api/private-r-kernels/' + service.project.id + '/' + savedKernel.id + '/restart', { requestId: crypto.randomUUID(), generation: savedKernel.runtime_generation });
+    const privateRestartReceipt = await apiGet(otherPage, '/api/private-r-kernels/' + service.project.id + '/' + savedKernel.id + '/restart');
     assert(privateVersion.status === 404 && privateJournal.status === 404
+      && privateInterrupt.status === 404 && privateRestart.status === 404 && privateRestartReceipt.status === 404
       && colleagueVersions.status === 200 && !colleagueVersions.value.items.some(item => published.some(value => value.version.versionId === item.versionId)),
     'Project analyst membership exposed another creator\'s private R outputs or publication history.');
     await otherContext.close();
     check('Actual authenticated APIs reject wrong-project versions and keep saved artifacts/publication history private from another authorized project analyst.');
+    check('Another authorized project analyst cannot interrupt, restart, or read the creator-private restart receipt; wrong-project restart targets also fail.');
     try {
       fs.writeFileSync(savedTablePath, 'condition,cells\ncontrol,999\n');
       const changed = await apiGet(page, '/api/artifact-versions/' + service.project.id + '/' + table.version.versionId + '/preview');
@@ -416,6 +563,8 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
     await database.query('DELETE FROM project_members WHERE project_id=$1 AND user_id=$2', [service.project.id, owner.id]);
     const revoked = await apiGet(page, '/api/artifact-versions/' + service.project.id + '/' + plot.version.versionId + '/preview');
     assert([403,404].includes(revoked.status), 'Revoked membership retained access to a saved output.');
+    const revokedRestart = await apiGet(page, '/api/private-r-kernels/' + service.project.id + '/' + savedKernel.id + '/restart');
+    assert([403,404].includes(revokedRestart.status), 'Revoked project membership retained private restart-receipt access.');
     await inspector.getByRole('button', { name: 'Refresh artifacts', exact: true }).click();
     await inspector.getByRole('alert').waitFor();
     assert(await inspector.getByRole('table').count() === 0 && await inspector.getByRole('img').count() === 0,

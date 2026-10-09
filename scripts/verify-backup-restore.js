@@ -271,7 +271,7 @@ async function kernelRows(postgresConfig) {
   const client=new Client(postgresConfig);await client.connect();
   try {
     const records={};
-    for(const table of ['private_r_kernels','private_r_executions','private_r_publications']) {
+    for(const table of ['private_r_kernels','private_r_executions','private_r_publications','private_r_kernel_restarts']) {
       const exists=(await client.query('SELECT to_regclass($1) AS name',['public.'+table])).rows[0]?.name;
       records[table]=exists?(await client.query(`SELECT to_jsonb(record)::text AS value FROM public.${table} AS record ORDER BY id`)).rows.map(row=>JSON.parse(row.value)):null;
     }
@@ -279,8 +279,8 @@ async function kernelRows(postgresConfig) {
   } finally {await client.end();}
 }
 function verifyPrivateKernelRowsDelta(sourceRecords,restoredRecords) {
-  const counts={stoppedKernels:0,unknownExecutions:0,unknownPublications:0};
-  for(const table of ['private_r_kernels','private_r_executions','private_r_publications']) {
+  const counts={stoppedKernels:0,unknownExecutions:0,unknownPublications:0,unknownRestarts:0};
+  for(const table of ['private_r_kernels','private_r_executions','private_r_publications','private_r_kernel_restarts']) {
     const sources=sourceRecords[table],restored=restoredRecords[table];
     if(sources==null&&restored==null)continue;
     if(!Array.isArray(sources)||!Array.isArray(restored)||sources.length!==restored.length)throw new Error('Restore changed private R journal tables or record counts.');
@@ -288,12 +288,12 @@ function verifyPrivateKernelRowsDelta(sourceRecords,restoredRecords) {
     for(let index=0;index<sources.length;index++) {
       const source=sources[index],target=restored[index];
       if(source.id!==target.id)throw new Error('Restore changed private R record identities.');
-      const active=(kernel?['starting','ready','running','unknown','stopping']:['reserved','running']).includes(source.status);
+      const active=(kernel?['starting','ready','running','unknown','stopping']:table==='private_r_kernel_restarts'?['stopping','starting']:['reserved','running']).includes(source.status);
       if(!active){if(JSON.stringify(source)!==JSON.stringify(target))throw new Error('Restore changed terminal private R source or result evidence.');continue;}
-      if(target.status!==(kernel?'stopped':'unknown')||!Number.isFinite(Date.parse(target.updated_at))||kernel&&(!Number.isFinite(Date.parse(target.stopped_at))||target.active_execution_id!==null))throw new Error('Restored private R memory or command completion was not safely invalidated.');
-      const normalized={...target,status:source.status,updated_at:source.updated_at,...(kernel?{active_execution_id:source.active_execution_id,stopped_at:source.stopped_at}:{})};
+      if(target.status!==(kernel?'stopped':'unknown')||!Number.isFinite(Date.parse(target.updated_at))||kernel&&(!Number.isFinite(Date.parse(target.stopped_at))||target.active_execution_id!==null||Object.hasOwn(source,'active_control_id')&&target.active_control_id!==null))throw new Error('Restored private R memory or command completion was not safely invalidated.');
+      const normalized={...target,status:source.status,updated_at:source.updated_at,...(kernel?{active_execution_id:source.active_execution_id,...(Object.hasOwn(source,'active_control_id')?{active_control_id:source.active_control_id}:{}),stopped_at:source.stopped_at}:{})};
       if(JSON.stringify(source)!==JSON.stringify(normalized))throw new Error('Restore changed private R fields outside explicit memory/completion invalidation.');
-      counts[kernel?'stoppedKernels':table==='private_r_publications'?'unknownPublications':'unknownExecutions']++;
+      counts[kernel?'stoppedKernels':table==='private_r_publications'?'unknownPublications':table==='private_r_kernel_restarts'?'unknownRestarts':'unknownExecutions']++;
     }
   }
   return counts;
@@ -331,7 +331,7 @@ async function main(argv = process.argv.slice(2)) {
 
   if (process.env.SOURCE_DATABASE_URL) {
     const sourceConfig = { connectionString: process.env.SOURCE_DATABASE_URL };
-    const excludedTables=['jobs','private_r_kernels','private_r_executions','private_r_publications'];
+    const excludedTables=['jobs','private_r_kernels','private_r_executions','private_r_publications','private_r_kernel_restarts'];
     const sourceFingerprint = await databaseFingerprint(sourceConfig, { excludedTables });
     const restoredFingerprint = await databaseFingerprint(config.postgresConfig(), { excludedTables });
     if (JSON.stringify(sourceFingerprint) !== JSON.stringify(restoredFingerprint)) {
@@ -340,7 +340,7 @@ async function main(argv = process.argv.slice(2)) {
     const canceledJobs = await verifyRestoredJobSecurityDelta(sourceConfig, config.postgresConfig());
     const kernels=await verifyRestoredKernelSecurityDelta(sourceConfig,config.postgresConfig());
     console.log('[verify-restore] security-finalized active jobs=%d', canceledJobs);
-    console.log('[verify-restore] invalidated volatile sessions=%d unconfirmed commands=%d unfinished saves=%d',kernels.stoppedKernels,kernels.unknownExecutions,kernels.unknownPublications);
+    console.log('[verify-restore] invalidated volatile sessions=%d unconfirmed commands=%d unfinished saves=%d unfinished restarts=%d',kernels.stoppedKernels,kernels.unknownExecutions,kernels.unknownPublications,kernels.unknownRestarts);
   }
 
   console.log(

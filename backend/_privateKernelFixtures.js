@@ -12,7 +12,7 @@ async function startKernelFixtureBroker() {
     if(req.headers.authorization!=='Bearer '+token){res.writeHead(403);res.end('{}');return;}
     res.setHeader('Content-Type','application/json');
     if(req.url==='/environment'){res.end(JSON.stringify(manifest));return;}
-    if(req.url==='/capabilities'){res.end(JSON.stringify({status:'ok',profileId:reference.profileId,resourcePolicyVersion:EXPERT_R_RESOURCE_POLICY_VERSION,sandboxImageDigest:reference.imageDigest,environment:reference,persistentKernel:true,persistentKernelPublications:hooks.publicationsEnabled!==false}));return;}
+    if(req.url==='/capabilities'){res.end(JSON.stringify({status:'ok',profileId:reference.profileId,resourcePolicyVersion:EXPERT_R_RESOURCE_POLICY_VERSION,sandboxImageDigest:reference.imageDigest,environment:reference,persistentKernel:true,persistentKernelInterrupt:hooks.interruptEnabled!==false,persistentKernelPublications:hooks.publicationsEnabled!==false}));return;}
     const chunks=[];for await(const chunk of req)chunks.push(chunk);let input;try{input=JSON.parse(Buffer.concat(chunks).toString());}catch{res.writeHead(400);res.end('{}');return;}
     calls.push({path:req.url,input});const kernelId=input.kernelId||req.url.split('/')[2];let session=sessions.get(kernelId);
     const send=value=>res.end(JSON.stringify(value));const failure=(code,status=409)=>{res.writeHead(status);send({ok:false,code,message:'Private fixture rejection'});};
@@ -22,26 +22,39 @@ async function startKernelFixtureBroker() {
     }
     if(!session){if(req.url.endsWith('/stop')){session={kernelId,generation:input.generation||crypto.randomBytes(32).toString('hex'),status:'stopped',ownerUserId:String(input.ownerUserId),projectId:input.projectId,workspaceId:input.workspaceId};sessions.set(kernelId,session);send({ok:true,kernelId,generation:session.generation,status:'stopped'});return;}failure('PRIVATE_KERNEL_NOT_FOUND',404);return;}
     if(session.ownerUserId!==String(input.ownerUserId)||session.projectId!==input.projectId||session.workspaceId!==input.workspaceId||input.generation&&input.generation!==session.generation){failure('PRIVATE_KERNEL_NOT_FOUND',404);return;}
-    if(req.url.endsWith('/stop')){session.status='stopped';await hooks.beforeStopResponse?.(session,req);if(req.socket.destroyed)return;send({ok:true,kernelId,generation:session.generation,status:'stopped',stoppedAt:new Date().toISOString()});return;}
+    if(req.url.endsWith('/stop')){session.status='stopped';if(session.releaseExecution){session.controlledResult={ok:true,kernelId,generation:session.generation,executionId:session.lastExecution.id,order:session.lastExecution.order,status:'unknown'};session.releaseExecution();}await hooks.beforeStopResponse?.(session,req);if(req.socket.destroyed)return;send({ok:true,kernelId,generation:session.generation,status:'stopped',stoppedAt:new Date().toISOString()});return;}
     if(req.url.endsWith('/inspect')){send(descriptor(session));return;}
+    if(req.url.endsWith('/interrupt')){
+      const latest=session.lastExecution;
+      if(!input.generation || !latest || latest.id!==input.executionId || latest.order!==input.order || !/^[a-f0-9-]{36}$/i.test(input.requestId||'')){failure('PRIVATE_KERNEL_INTERRUPT_INVALID');return;}
+      if(hooks.interruptEnabled===false){failure('PRIVATE_KERNEL_INTERRUPT_UNAVAILABLE',503);return;}
+      let result=latest.result,outcome='already-completed';
+      if(session.status==='executing') {
+        result={ok:true,kernelId,generation:session.generation,executionId:input.executionId,order:input.order,status:'failed',stdout:'',warnings:[],error:{code:'PRIVATE_KERNEL_INTERRUPTED',message:'The command was interrupted.'},interrupted:true,tables:[],figures:[],truncated:false,startedAt:latest.startedAt||new Date().toISOString(),completedAt:new Date().toISOString()};
+        session.lastExecution={id:input.executionId,order:input.order,status:'failed',result};session.controlledResult=result;session.status='ready';outcome='interrupted';session.releaseExecution?.();
+      }
+      const response={ok:true,kernelId,generation:session.generation,executionId:input.executionId,order:input.order,outcome,status:session.status,idleConfirmed:session.status==='ready',...(result?{execution:result}:{})};
+      await hooks.beforeInterruptResponse?.(session,response,req);if(req.socket.destroyed)return;send(response);return;
+    }
     if(req.url.endsWith('/export-status')){const receipt=session.exports?.get(input.publicationId);if(!receipt){failure('PRIVATE_KERNEL_PUBLICATION_NOT_FOUND',404);return;}await hooks.beforeExportStatus?.(receipt,input);send(receipt);return;}
     if(req.url.endsWith('/export')){
       if(session.status==='stopped'){failure('PRIVATE_KERNEL_STOPPED');return;}if(session.status!=='ready'){failure('PRIVATE_KERNEL_BUSY');return;}
       if(input.order!==session.order+1){failure('PRIVATE_KERNEL_ORDER_INVALID');return;}
       const {validatePrivateKernelExportRequest}=require('./privateKernelExports');
       try{validatePrivateKernelExportRequest(input,{projectId:session.projectId,generation:session.generation});}catch{failure('PRIVATE_KERNEL_PUBLICATION_INVALID',400);return;}
-      session.exports ||= new Map();session.order=input.order;session.status='executing';const startedAt=new Date().toISOString();
+      session.exports ||= new Map();session.order=input.order;session.status='executing';const startedAt=new Date().toISOString();session.lastExecution={id:input.executionId,order:input.order,status:'executing',startedAt};session.controlledResult=null;
       const identity={ok:true,kernelId,generation:session.generation,publicationId:input.publicationId,executionId:input.executionId,order:input.order};session.exports.set(input.publicationId,{...identity,status:'executing'});
       await hooks.beforeExportStorage?.(session,input);
-      const failed=input.binding==='missing_fixture';
-      const result={ok:true,kernelId,generation:session.generation,executionId:input.executionId,order:input.order,status:failed?'failed':'completed',stdout:'',warnings:[],error:failed?{message:'Fixture binding unavailable'}:null,tables:[],figures:[],truncated:false,startedAt,completedAt:new Date().toISOString()};
+      const failed=input.binding==='missing_fixture'||session.controlledResult?.status==='failed';
+      const result=session.controlledResult||{ok:true,kernelId,generation:session.generation,executionId:input.executionId,order:input.order,status:failed?'failed':'completed',stdout:'',warnings:[],error:failed?{message:'Fixture binding unavailable'}:null,tables:[],figures:[],truncated:false,startedAt,completedAt:new Date().toISOString()};
       let file;
       if(!failed){const bytes=await hooks.exportBytes?.(input,session)||Buffer.from(input.type==='table'?'sample,condition\nS1,treated\n':'Opaque fixture RDS bytes');const storage=require('./storage');const provider=storage.createLocalStorageProvider();await require('node:fs/promises').writeFile(provider.prepareWrite(input.internalStorageKey),bytes,{flag:'wx',mode:0o600});file={type:input.type,format:input.type==='table'?'csv':'rds',internalStorageKey:input.internalStorageKey,checksumSha256:crypto.createHash('sha256').update(bytes).digest('hex'),sizeBytes:bytes.length};}
       const receipt={...identity,status:result.status,result,...(file?{file}:{})};session.exports.set(input.publicationId,receipt);session.status='ready';session.lastExecution={id:input.executionId,order:input.order,status:result.status,result};await hooks.beforeExportResponse?.(session,receipt,req);if(req.socket.destroyed)return;send(receipt);return;
     }
     if(req.url.endsWith('/execute')){
       if(session.status==='stopped'){failure('PRIVATE_KERNEL_STOPPED');return;}if(input.order!==session.order+1){failure('PRIVATE_KERNEL_ORDER_INVALID');return;}
-      session.order=input.order;session.status='executing';const startedAt=new Date().toISOString();session.lastExecution={id:input.executionId,order:input.order,status:'executing'};
+      session.order=input.order;session.status='executing';const startedAt=new Date().toISOString();session.lastExecution={id:input.executionId,order:input.order,status:'executing',startedAt};session.controlledResult=null;
+      if(input.source==='interrupt_fixture'){await new Promise(resolve=>{session.releaseExecution=resolve;hooks.beforeExecutePending?.(session,input);});if(session.controlledResult){await hooks.beforeExecuteResponse?.(session,session.controlledResult);send(session.controlledResult);return;}}
       if(input.source==='disconnect_fixture'){session.status='unknown';req.socket.destroy();return;}
       if(input.source==='delay_fixture')await new Promise(resolve=>setTimeout(resolve,100));
       const assignment=/n\s*<-\s*(\d+)/.exec(input.source);if(assignment)session.n=Number(assignment[1]);if(input.source.trim()==='n + 1')session.n+=1;

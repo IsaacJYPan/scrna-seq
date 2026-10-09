@@ -14,6 +14,15 @@ const props = { projectId: 'project', userId: 1 };
 beforeEach(() => { vi.resetAllMocks(); listExecutionHistory.mockResolvedValue({ items: [item], nextCursor: null }); getExecutionHistory.mockResolvedValue(detail); getArtifactVersion.mockResolvedValue({ projectId: 'project', sha256: output.sha256 }); previewArtifactVersion.mockResolvedValue({ version: { versionId: output.versionId, sha256: output.sha256 }, preview: { family: 'table', columns: ['gene'], rows: [['GENE_A']] } }); });
 const select = async () => { fireEvent.click(await screen.findByRole('button', { name: /job_one/ })); await screen.findByText('Replay evidence incomplete'); };
 
+it('distinguishes confirmed interrupted commands and identifies a new session without implying restored unsaved memory',async()=>{
+  listExecutionHistory.mockResolvedValue({items:[{...item,kind:'r-console',status:'failed',outcome:'interrupted'}],nextCursor:null});
+  getExecutionHistory.mockResolvedValue({...detail,kind:'r-console',status:'failed',outcome:'interrupted',kernel:{available:true,generation:'c'.repeat(64),order:1,restartedFromKernelId:'pk_original',scope:'Private R generation.'}});
+  render(<ExecutionHistory {...props}/>);await select();
+  expect(screen.getByRole('heading',{name:'expert.r.v1 · interrupted'})).toBeVisible();
+  expect(screen.getByText('Restarted from pk_original · earlier unsaved memory was discarded')).toBeInTheDocument();
+  expect(screen.getByText('<script>inert content</script>')).toBeInTheDocument();
+});
+
 it('shows retained source versions, resolved parameters and honest replay/kernel gaps as inert text', async () => {
   render(<ExecutionHistory {...props} />); await select();
   expect(screen.getByText('Private source version src_job_one')).toBeInTheDocument(); expect(screen.getByText('<script>inert content</script>')).toBeInTheDocument(); expect(document.querySelector('script')).toBeNull();

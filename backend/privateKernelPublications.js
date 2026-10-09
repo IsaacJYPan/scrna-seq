@@ -143,7 +143,7 @@ function createPrivateKernelPublicationService({db,provider,client,artifacts,tra
         if(!execution || execution.kernel_generation!==kernel.runtime_generation || !execution.result_json)throw error('PRIVATE_KERNEL_PUBLICATION_INVALID','The selected completed figure is unavailable.');
         figure=c.result(execution.result_json,kernel,execution).figures[value.figureIndex];if(!figure)throw error('PRIVATE_KERNEL_PUBLICATION_INVALID','The selected completed figure is unavailable.');
       } else {
-        if(kernel.status!=='ready'||kernel.active_execution_id||Date.parse(kernel.expires_at)<=Date.now())throw error('PRIVATE_KERNEL_BUSY','The session must be ready before saving a named R binding.',409);
+        if(kernel.status!=='ready'||kernel.active_execution_id||kernel.active_control_id||Date.parse(kernel.expires_at)<=Date.now())throw error('PRIVATE_KERNEL_BUSY','The session must be ready before saving a named R binding.',409);
         if(Number(kernel.next_order)>=c.LIMITS.executions)throw error('PRIVATE_KERNEL_ORDER_LIMIT','Start a new session after 500 commands.',409);
         const source=generatePrivateKernelExportSource({publicationId,generation:kernel.runtime_generation,type:value.type,binding:value.binding});
         execution=(await connection.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,'reserved',$8,$9) RETURNING *`,[id('pex'),kernelId,projectId,userId,crypto.randomUUID(),kernel.runtime_generation,Number(kernel.next_order)+1,source,c.digest(source)])).rows[0];

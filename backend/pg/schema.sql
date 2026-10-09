@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261011, now())
+VALUES ('traceomics.runtime', 20261012, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -849,6 +849,49 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_private_kernel_workspace_active
   ON private_r_kernels(project_id,owner_user_id,workspace_id)
   WHERE status IN ('starting','ready','running','unknown','stopping');
 
+ALTER TABLE private_r_kernels ADD COLUMN IF NOT EXISTS restarted_from_kernel_id TEXT;
+ALTER TABLE private_r_kernels ADD COLUMN IF NOT EXISTS active_control_id UUID;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='private_r_kernel_restart_parent_fk') THEN
+    ALTER TABLE private_r_kernels ADD CONSTRAINT private_r_kernel_restart_parent_fk
+      FOREIGN KEY(restarted_from_kernel_id) REFERENCES private_r_kernels(id) DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_private_kernel_restart_parent
+  ON private_r_kernels(restarted_from_kernel_id) WHERE restarted_from_kernel_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS private_r_kernel_restarts (
+  id TEXT PRIMARY KEY CHECK (id ~ '^prst_[a-f0-9]{24}$'),
+  kernel_id TEXT NOT NULL UNIQUE REFERENCES private_r_kernels(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK (request_sha256 ~ '^[a-f0-9]{64}$'),
+  kernel_generation TEXT NOT NULL CHECK (kernel_generation ~ '^[a-f0-9]{64}$'),
+  replacement_kernel_id TEXT NOT NULL UNIQUE CHECK (replacement_kernel_id ~ '^pk_[a-f0-9]{24}$'),
+  status TEXT NOT NULL CHECK (status IN ('stopping','starting','completed','failed','unknown')),
+  failure_code TEXT CHECK (failure_code ~ '^[A-Z0-9_]{1,80}$'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(project_id,owner_user_id,request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_private_kernel_restart_owner ON private_r_kernel_restarts(project_id,owner_user_id,created_at DESC,id DESC);
+CREATE OR REPLACE FUNCTION reject_private_kernel_restart_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.kernel_id,NEW.project_id,NEW.owner_user_id,NEW.request_id,NEW.request_sha256,NEW.kernel_generation,NEW.replacement_kernel_id,NEW.created_at)
+     IS DISTINCT FROM ROW(OLD.id,OLD.kernel_id,OLD.project_id,OLD.owner_user_id,OLD.request_id,OLD.request_sha256,OLD.kernel_generation,OLD.replacement_kernel_id,OLD.created_at)
+  THEN RAISE EXCEPTION 'private kernel restart identity is immutable' USING ERRCODE='55000'; END IF;
+  IF OLD.status IN ('completed','failed') AND ROW(NEW.status,NEW.failure_code,NEW.completed_at)
+     IS DISTINCT FROM ROW(OLD.status,OLD.failure_code,OLD.completed_at)
+  THEN RAISE EXCEPTION 'completed private kernel restart receipt is immutable' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS trg_private_kernel_restart_no_update ON private_r_kernel_restarts;
+CREATE TRIGGER trg_private_kernel_restart_no_update BEFORE UPDATE ON private_r_kernel_restarts
+  FOR EACH ROW EXECUTE FUNCTION reject_private_kernel_restart_update();
+
 CREATE TABLE IF NOT EXISTS private_r_executions (
   id TEXT PRIMARY KEY CHECK (id ~ '^pex_[a-f0-9]{24}$'),
   kernel_id TEXT NOT NULL REFERENCES private_r_kernels(id) ON DELETE CASCADE,
@@ -896,10 +939,10 @@ CREATE OR REPLACE FUNCTION reject_private_kernel_identity_update()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF ROW(NEW.id,NEW.project_id,NEW.owner_user_id,NEW.workspace_id,NEW.request_id,NEW.start_sha256,
-         NEW.environment_json,NEW.environment_manifest_json,NEW.inputs_json,NEW.created_at)
+         NEW.environment_json,NEW.environment_manifest_json,NEW.inputs_json,NEW.created_at,NEW.restarted_from_kernel_id)
     IS DISTINCT FROM
      ROW(OLD.id,OLD.project_id,OLD.owner_user_id,OLD.workspace_id,OLD.request_id,OLD.start_sha256,
-         OLD.environment_json,OLD.environment_manifest_json,OLD.inputs_json,OLD.created_at)
+         OLD.environment_json,OLD.environment_manifest_json,OLD.inputs_json,OLD.created_at,OLD.restarted_from_kernel_id)
     OR (OLD.runtime_generation IS NOT NULL AND NEW.runtime_generation IS DISTINCT FROM OLD.runtime_generation)
   THEN RAISE EXCEPTION 'private kernel identity and inputs are immutable' USING ERRCODE='55000'; END IF;
   RETURN NEW;

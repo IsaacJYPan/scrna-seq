@@ -588,6 +588,9 @@ export const electronAPI = {
   },
   getPrivateRExecution: async (projectId, kernelId, executionId) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/executions/${encodeURIComponent(executionId)}`),
   stopPrivateRKernel: async (projectId, kernelId) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/stop`, { method: 'POST' }),
+  interruptPrivateRKernel: async (projectId, kernelId, input) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/interrupt`, { method: 'POST', body: JSON.stringify(input) }),
+  restartPrivateRKernel: async (projectId, kernelId, input) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/restart`, { method: 'POST', body: JSON.stringify(input) }),
+  getPrivateRRestart: async (projectId, kernelId) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/restart`),
   publishPrivateROutput: async (projectId, kernelId, input) => req(`/api/private-r-kernels/${encodeURIComponent(projectId)}/${encodeURIComponent(kernelId)}/publications`, { method: 'POST', body: JSON.stringify(input) }),
   listPrivateRPublications: async (projectId, kernelId, { limit, before } = {}) => {
     const qs = new URLSearchParams(Object.entries({ limit, before }).filter(([, value]) => value != null)).toString();

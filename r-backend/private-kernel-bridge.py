@@ -25,6 +25,72 @@ DIAGNOSTIC_BYTES = 8192
 FIGURE_BYTES = 262144
 RESPONSE_BYTES = 1048576
 EXPORT_BYTES = 20 * 1024 * 1024
+REQUEST_BYTES = SOURCE_BYTES * 6 + 4096
+CONTROL_SECONDS = 10
+
+
+class RequestReader:
+    """Read framing directly so buffered stdin cannot hide a queued control."""
+    def __init__(self):
+        self.buffer = b''
+
+    def next(self, timeout=0):
+        if b'\n' not in self.buffer:
+            readable, _, _ = select.select([sys.stdin], [], [], timeout)
+            if not readable:
+                return None
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                raise EOFError('Private kernel broker disconnected.')
+            self.buffer += chunk
+            if len(self.buffer) > REQUEST_BYTES:
+                raise ValueError('Kernel request exceeds its limit.')
+            if b'\n' not in self.buffer:
+                return None
+        raw, self.buffer = self.buffer.split(b'\n', 1)
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError('Invalid private kernel request.')
+        return value
+
+
+def valid_control(request, execution_id):
+    return (request.get('action') == 'interrupt' and request.get('executionId') == execution_id
+            and isinstance(request.get('controlId'), str)
+            and re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}', request['controlId']))
+
+
+class ExecutionControl:
+    def __init__(self, reader, manager, execution_id):
+        self.reader = reader
+        self.manager = manager
+        self.execution_id = execution_id
+        self.request = None
+        self.received_at = None
+        self.signaled = False
+
+    def poll(self, busy, idle, reply):
+        request = self.reader.next()
+        if request is not None:
+            if self.request is not None or not valid_control(request, self.execution_id):
+                raise ValueError('Invalid active private kernel control.')
+            self.request = request
+            self.received_at = time.monotonic()
+        if self.request is None:
+            return
+        # A shell reply or idle means evaluation has already ended. Never send
+        # a late signal that could interrupt the next command or kernel loop.
+        if busy and not idle and reply is None and not self.signaled:
+            self.manager.interrupt_kernel()
+            self.signaled = True
+        if time.monotonic() - self.received_at >= CONTROL_SECONDS and (not idle or reply is None):
+            raise TimeoutError('Private R interruption could not be confirmed.')
+
+    def emit_receipt(self, result):
+        if self.request is not None:
+            emit({'ok': True, 'event': 'control', 'controlId': self.request['controlId'],
+                  'executionId': self.execution_id, 'idleConfirmed': True,
+                  'outcome': 'interrupted' if result.get('interrupted') is True else 'already-completed'})
 
 
 def export_directory():
@@ -117,11 +183,12 @@ def safe_figure(encoded):
             'sha256': hashlib.sha256(raw).hexdigest()}
 
 
-def execute(client, source, timeout, is_alive=lambda: True):
+def execute(client, source, timeout, is_alive=lambda: True, control=None):
     request_id = client.execute(source, silent=False, store_history=True, allow_stdin=False, stop_on_error=True)
     deadline = time.monotonic() + timeout
     result = {'status': 'completed', 'stdout': '', 'warnings': [], 'error': None, 'tables': [], 'figures': [], 'truncated': False}
     idle = False
+    busy = False
     reply = None
     warning_bytes = 0
     while not idle or reply is None:
@@ -129,6 +196,8 @@ def execute(client, source, timeout, is_alive=lambda: True):
             raise RuntimeError('The private R kernel process has stopped.')
         if time.monotonic() >= deadline:
             raise TimeoutError('Private kernel execution exceeded its time limit.')
+        if control is not None:
+            control.poll(busy, idle, reply)
         try:
             message = client.get_iopub_msg(timeout=0.05)
         except queue.Empty:
@@ -138,6 +207,8 @@ def execute(client, source, timeout, is_alive=lambda: True):
             content = message['content']
             if kind == 'status' and content.get('execution_state') == 'idle':
                 idle = True
+            elif kind == 'status' and content.get('execution_state') == 'busy':
+                busy = True
             elif kind == 'stream':
                 text = content.get('text', '')
                 if content.get('name') == 'stderr':
@@ -185,7 +256,17 @@ def execute(client, source, timeout, is_alive=lambda: True):
                 reply = shell['content']
         except queue.Empty:
             pass
-    if reply.get('status') != 'ok' and result['error'] is None:
+    # IRkernel explicitly emits execute_reply(status="abort") when its
+    # interrupt handler unwinds evaluation. A requested signal alone is not
+    # evidence: user code can catch it, complete normally, or stay busy.
+    if control is not None and control.signaled and reply.get('status') == 'abort':
+        result['status'] = 'failed'
+        result['interrupted'] = True
+        result['error'] = {'message': 'R execution was interrupted. Earlier variables remain available; this command may have changed them before interruption.',
+                           'code': 'PRIVATE_KERNEL_INTERRUPTED'}
+        result['tables'] = []
+        result['figures'] = []
+    elif reply.get('status') != 'ok' and result['error'] is None:
         text, clipped = bounded(reply.get('evalue', 'R execution did not complete.'), DIAGNOSTIC_BYTES)
         result['error'] = {'message': text, 'code': 'R_ERROR'}
         result['status'] = 'failed'; result['truncated'] = result['truncated'] or clipped
@@ -207,7 +288,7 @@ def main():
         spec = KernelSpecManager().get_kernel_spec('ir')
         if not spec.argv or 'IRkernel::main' not in ' '.join(spec.argv):
             raise RuntimeError('The installed R kernelspec is incompatible.')
-        emit({'ok': True, 'protocol': 'jupyter', 'adapter': 1, 'publications': True})
+        emit({'ok': True, 'protocol': 'jupyter', 'adapter': 1, 'publications': True, 'interrupt': True})
         return
     os.umask(0o077)
     os.mkdir('/work/export', mode=0o700)
@@ -223,21 +304,23 @@ def main():
         if initialized['status'] != 'completed':
             raise RuntimeError('Selected kernel inputs could not be loaded.')
         emit({'ok': True, 'event': 'ready', 'protocol': 'jupyter', 'adapter': 1})
+        reader = RequestReader()
+        last_execution = None
         while True:
-            readable, _, _ = select.select([sys.stdin], [], [], 1)
             if not manager.is_alive():
                 raise RuntimeError('The private R kernel process has stopped.')
-            if not readable:
+            request = reader.next(1)
+            if request is None:
                 continue
-            raw = sys.stdin.buffer.readline(SOURCE_BYTES * 6 + 4096)
-            if not raw:
-                break
-            if not raw.endswith(b'\n'):
-                raise ValueError('Kernel request exceeds its limit.')
-            request = json.loads(raw)
             if request.get('action') == 'stop':
                 emit({'ok': True, 'event': 'stopped'})
                 break
+            if request.get('action') == 'interrupt':
+                if not valid_control(request, last_execution):
+                    raise ValueError('Invalid completed private kernel control.')
+                emit({'ok': True, 'event': 'control', 'controlId': request['controlId'], 'executionId': last_execution,
+                      'idleConfirmed': True, 'outcome': 'already-completed'})
+                continue
             if request.get('action') != 'execute' or not isinstance(request.get('source'), str) or len(request['source'].encode('utf-8')) > SOURCE_BYTES:
                 raise ValueError('Invalid private kernel request.')
             publication = request.get('publication')
@@ -253,13 +336,23 @@ def main():
                         pass
                     else:
                         raise ValueError('Publication output already exists.')
-                result = execute(client, request['source'], min(600, max(1, int(request.get('timeoutSeconds', 300)))), manager.is_alive)
+                control = ExecutionControl(reader, manager, request['executionId'])
+                result = execute(client, request['source'], min(600, max(1, int(request.get('timeoutSeconds', 300)))), manager.is_alive, control)
                 if publication is not None and result['status'] == 'completed':
                     result['exportFile'] = export_evidence(directory, publication['filename'])
+                elif publication is not None:
+                    # A failed/interrupted serialization may have created a
+                    # partial file. Remove only its pinned-directory entry.
+                    try:
+                        os.unlink(publication['filename'], dir_fd=directory)
+                    except FileNotFoundError:
+                        pass
             finally:
                 if directory is not None:
                     os.close(directory)
             emit({'ok': True, 'event': 'execution', 'executionId': request['executionId'], **result})
+            last_execution = request['executionId']
+            control.emit_receipt(result)
     finally:
         if manager.has_kernel:
             manager.shutdown_kernel(now=True)

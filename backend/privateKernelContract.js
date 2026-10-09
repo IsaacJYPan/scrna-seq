@@ -54,7 +54,18 @@ function result(raw, expected, execution) {
     if (!bytes.length || bytes.length > LIMITS.imageBytes || digest(bytes) !== figure.sha256 || dimensions.width !== figure.width || dimensions.height !== figure.height || !dimensions.width || !dimensions.height || dimensions.width > 8192 || dimensions.height > 8192 || dimensions.width * dimensions.height > LIMITS.imagePixels) invalid();
     return { mimeType: 'image/png', data: figure.data, width: dimensions.width, height: dimensions.height, sha256: figure.sha256 };
   });
-  return { ...identity, executionId: execution.id, order: raw.order, status: raw.status, stdout, warnings, error, tables, figures, truncated: raw.truncated === true, startedAt: utc(raw.startedAt), completedAt: utc(raw.completedAt) };
+  if (raw.interrupted !== undefined && raw.interrupted !== true || raw.interrupted === true && (raw.status !== 'failed' || error?.code !== 'PRIVATE_KERNEL_INTERRUPTED' || tables.length || figures.length) || error?.code === 'PRIVATE_KERNEL_INTERRUPTED' && raw.interrupted !== true) invalid();
+  return { ...identity, executionId: execution.id, order: raw.order, status: raw.status, stdout, warnings, error, tables, figures, truncated: raw.truncated === true, ...(raw.interrupted === true ? { interrupted: true } : {}), startedAt: utc(raw.startedAt), completedAt: utc(raw.completedAt) };
+}
+function interruptResult(raw, kernel, execution) {
+  const identity = identities(raw, kernel);
+  if (raw.executionId !== execution.id || raw.order !== Number(execution.execution_order) || !['idle','already-completed','interrupted','unconfirmed'].includes(raw.outcome) || !['ready','executing','unknown','stopped'].includes(raw.status) || typeof raw.idleConfirmed !== 'boolean') invalid();
+  const output = raw.execution ? result(raw.execution, kernel, execution) : null;
+  if (raw.idleConfirmed && (raw.status !== 'ready' || !output || !['completed','failed'].includes(output.status))) invalid();
+  if (raw.outcome === 'interrupted' && (!raw.idleConfirmed || output?.status !== 'failed' || output.error?.code !== 'PRIVATE_KERNEL_INTERRUPTED' || output.interrupted !== true)) invalid();
+  if (['idle','already-completed'].includes(raw.outcome) && !raw.idleConfirmed) invalid();
+  if (raw.outcome === 'unconfirmed' && raw.idleConfirmed) invalid();
+  return {...identity, executionId:execution.id, order:Number(execution.execution_order), outcome:raw.outcome, status:raw.status, idleConfirmed:raw.idleConfirmed, execution:output};
 }
 function validatePrivateKernelStatus(raw, expected = {}) {
   return state(raw, { id: expected.kernelId || raw?.kernelId, runtime_generation: expected.generation, environment_json: expected.environment || raw?.environment });
@@ -79,4 +90,4 @@ function publicationResult(raw, kernel, publication, execution) {
 function publicationSource(kernel,publication,execution) {
   if(!execution || execution.id!==publication.source_execution_id || execution.kernel_id!==kernel.id || execution.kernel_generation!==kernel.runtime_generation || publication.kernel_generation!==kernel.runtime_generation || Number(execution.execution_order)!==Number(publication.kernel_order) || execution.source_sha256!==publication.lineage_json?.sourceSha256 || typeof execution.source_code!=='string' || digest(execution.source_code)!==execution.source_sha256)invalid();
 }
-module.exports = { LIMITS, KERNEL_ID, EXECUTION_ID, PUBLICATION_ID, HASH, UUID, digest, kernelError, utc, source, scope, state, result, publicationResult, publicationSource, validatePrivateKernelStatus, validatePrivateKernelExecutionResult };
+module.exports = { LIMITS, KERNEL_ID, EXECUTION_ID, PUBLICATION_ID, HASH, UUID, digest, kernelError, utc, source, scope, state, result, interruptResult, publicationResult, publicationSource, validatePrivateKernelStatus, validatePrivateKernelExecutionResult };

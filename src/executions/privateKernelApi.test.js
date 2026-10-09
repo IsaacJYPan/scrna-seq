@@ -19,3 +19,11 @@ it('refreshes publication receipts without a new export and never retries an unk
   expect(fetch).toHaveBeenCalledTimes(1);fetch.mockResolvedValueOnce({ok:true,json:async()=>({items:[]})});await api.listPrivateRPublications('project','kernel',{limit:12,before:'pub previous'});
   expect(fetch.mock.lastCall[0]).toBe('/api/private-r-kernels/project/kernel/publications?limit=12&before=pub+previous');expect(fetch.mock.lastCall[1].method).toBe('GET');expect(fetch).toHaveBeenCalledTimes(2);
 });
+it('binds explicit interrupt and restart requests to their encoded kernel and exact generation without transport retries',async()=>{
+  fetch.mockResolvedValue({ok:true,json:async()=>({outcome:'interrupted',idleConfirmed:true})});const signal=new AbortController().signal;
+  const input={requestId:'control-request',generation:'a'.repeat(64),executionRequestId:'pending-source-request'};await api.interruptPrivateRKernel('project one','kernel one',input,signal);
+  expect(fetch).toHaveBeenLastCalledWith('/api/private-r-kernels/project%20one/kernel%20one/interrupt',expect.objectContaining({method:'POST',credentials:'include',signal,headers:{'X-Traceomics-Csrf':'1','Content-Type':'application/json'},body:JSON.stringify(input)}));
+  const restart={requestId:'retained-restart',generation:'a'.repeat(64)};fetch.mockRejectedValueOnce(new Error('Disconnected restart.'));await expect(api.restartPrivateRKernel('project','kernel',restart)).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});expect(fetch).toHaveBeenCalledTimes(2);
+  fetch.mockResolvedValueOnce({ok:true,json:async()=>({status:'completed'})});await api.restartPrivateRKernel('project','kernel',restart);expect(fetch).toHaveBeenLastCalledWith('/api/private-r-kernels/project/kernel/restart',expect.objectContaining({method:'POST',body:JSON.stringify(restart)}));expect(fetch).toHaveBeenCalledTimes(3);
+  await api.getPrivateRRestart('project one','kernel one',signal);expect(fetch).toHaveBeenLastCalledWith('/api/private-r-kernels/project%20one/kernel%20one/restart',expect.objectContaining({method:'GET',credentials:'include',signal,body:undefined}));
+});
