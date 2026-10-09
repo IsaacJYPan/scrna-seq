@@ -1,3 +1,5 @@
+import { usePlotGeometry } from '../hooks/usePlotGeometry';
+import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect } from 'react';
 import Plot from '../components/Plot';
 import { AlertTriangle, Palette, Sun, Moon, ImageDown } from 'lucide-react';
@@ -36,7 +38,8 @@ const DARK_CHART_PALETTE = {
   hoverBorder: '#34445d',
 };
 
-export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, deploymentPolicy, theme = 'light' }) {
+export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, deploymentPolicy, onNavigateToUmap, theme = 'light' }) {
+  const chart = usePlotGeometry();
   const [savePanelOpen, setSavePanelOpen] = useState(false);
   const [gene, setGene] = useState('');
   const [geneInput, setGeneInput] = useState('');
@@ -106,7 +109,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
   }
 
   if (!hasUmap) {
-    return <UmapPrerequisiteNotice />;
+    return <div className="h-full overflow-y-auto bg-background"><PageHeader title="Feature Plot" description="Visualize gene expression overlaid on UMAP coordinates." className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" /><UmapPrerequisiteNotice onNavigateToUmap={onNavigateToUmap} /></div>;
   }
 
   const colorscale = lightMode ? LIGHT_COLORSCALE : DARK_COLORSCALE;
@@ -126,8 +129,9 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       reversescale,
       showscale: true,
       colorbar: {
-        title: { text: gene, side: 'right' },
+        title: { text: gene, side: 'top' },
         thickness: 14,
+        orientation: 'h', yref: 'container', y: 0.015, xref: 'container', x: 0.5, xanchor: 'center', yanchor: 'bottom',
         len: 0.6,
         tickfont: { color: palette.mutedText },
         titlefont: { color: palette.text },
@@ -143,7 +147,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
     plot_bgcolor: palette.background,
     font: {
       color: palette.text,
-      size: 11,
+      size: 12,
       family: 'Inter, system-ui',
     },
     hoverlabel: {
@@ -151,9 +155,9 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       bordercolor: palette.hoverBorder,
       font: { color: palette.text, family: 'Inter, system-ui' },
     },
-    margin: { l: 50, r: 60, t: 30, b: 50 },
+    margin: { l: 44, r: 12, t: 24, b: 120 },
     xaxis: {
-      title: 'UMAP 1',
+      title: { text: 'UMAP 1', font: { size: 12, color: palette.text } },
       titlefont: { color: palette.text },
       tickfont: { color: palette.mutedText },
       gridcolor: palette.grid,
@@ -161,7 +165,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       zeroline: false,
     },
     yaxis: {
-      title: 'UMAP 2',
+      title: { text: 'UMAP 2', font: { size: 12, color: palette.text } },
       titlefont: { color: palette.text },
       tickfont: { color: palette.mutedText },
       gridcolor: palette.grid,
@@ -173,13 +177,8 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
-      <div className="px-4 sm:px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-4 items-center justify-between shrink-0">
-        <div>
-          <h2 className="text-2xl font-bold text-text tracking-tight">Feature Plot</h2>
-          <p className="text-textMuted text-sm">Visualize gene expression overlaid on UMAP coordinates.</p>
-        </div>
-
-        <div className="relative flex flex-wrap min-w-0 items-center gap-2">
+      <PageHeader title="Feature Plot" description="Visualize gene expression overlaid on UMAP coordinates." className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" actions={
+<div className="relative flex flex-wrap min-w-0 items-center gap-2">
           {/* Light / Dark toggle */}
           <button
             onClick={() => setLightMode(m => !m)}
@@ -229,7 +228,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
             </button>
           )}
         </div>
-      </div>
+      } />
 
       {error && (
         <div className="mx-8 mt-4 p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger text-sm flex items-center gap-2 shrink-0">
@@ -237,7 +236,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
         </div>
       )}
 
-      <div className="flex-1 min-h-60 min-w-0 p-3 sm:p-6 overflow-hidden">
+      <div ref={chart.ref} className="flex-1 min-h-[380px] min-w-0 p-3 sm:p-6 overflow-hidden">
         {plotData ? (
           <Plot
             preferSvg

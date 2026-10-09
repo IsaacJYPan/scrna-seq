@@ -1,3 +1,5 @@
+import './analysisUi.css';
+import PageHeader from '../components/PageHeader';
 import React, { useState } from 'react';
 import { BarChart3, AlertTriangle, FileText } from 'lucide-react';
 import Plot from '../components/Plot';
@@ -91,11 +93,11 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
   const plotGrid = isDark ? '#334155' : '#d8e0ea';
   const elbowLayout = {
     autosize: true,
-    margin: { l: 60, r: 20, t: 10, b: 50 },
+    margin: { l: 48, r: 12, t: 10, b: 48 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-    font: { color: plotText, size: 11 },
-    xaxis: { title: { text: 'Principal Component' }, gridcolor: plotGrid, zeroline: false },
-    yaxis: { title: { text: 'Standard Deviation' }, gridcolor: plotGrid, zeroline: false },
+    font: { color: plotText, size: 12 },
+    xaxis: { title: { text: 'Principal Component' }, automargin: true, gridcolor: plotGrid, zeroline: false },
+    yaxis: { title: { text: 'Standard Deviation' }, automargin: true, gridcolor: plotGrid, zeroline: false },
     showlegend: false
   };
 
@@ -106,13 +108,8 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
   ];
 
   return (
-    <div className="h-full w-full p-8 overflow-y-auto bg-background custom-scrollbar">
-      <div className="flex flex-wrap gap-y-3 justify-between items-center mb-8">
-        <div>
-          <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">Principal Component Analysis</h2>
-          <p className="text-textMuted">Scale data and compute PCA for dimensionality reduction.</p>
-        </div>
-        <div className="flex items-center gap-3">
+    <div className="h-full w-full p-4 sm:p-8 overflow-y-auto bg-background custom-scrollbar">
+      <PageHeader title="Principal Component Analysis" description="Scale data and compute PCA for dimensionality reduction." className="mb-6" actions={<>
           {result?.provenance?.id && (
             <button
               className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center gap-2 transition"
@@ -127,8 +124,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
             {running && <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>}
             {result ? 'Re-compute PCA' : 'Run PCA'}
           </button>
-        </div>
-      </div>
+        </>} />
 
       {error && (
         <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger flex items-center gap-3">
@@ -155,7 +151,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
 
       {/* Parameters */}
       {!result && !running && (
-        <div className="card p-6 mb-8 border-l-4 border-l-primary">
+        <div className="card p-3 sm:p-6 mb-8 border-l-4 border-l-primary">
           <h3 className="font-bold flex items-center gap-2 text-text mb-5">
             <BarChart3 size={18} className="text-primary" /> PCA Parameters
           </h3>
@@ -177,7 +173,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
               aria-invalid={Boolean(pcaValidationError)}
             />
-            <p className="text-[10px] text-textMuted mt-1">Standard: 50. Use elbow plot to determine how many to keep downstream.</p>
+            <p className="text-xs text-textMuted mt-1">Standard: 50. Use elbow plot to determine how many to keep downstream.</p>
           </div>
         </div>
       )}
@@ -196,23 +192,23 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
       {result && (
         <div className="space-y-6">
           {/* Summary stats */}
-          <div className="grid grid-cols-3 gap-4">
+          <div className="analysis-metrics">
             <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Components</div>
+              <div className="text-xs text-textMuted uppercase font-bold mb-1">Components</div>
               <div className="text-2xl font-black text-text">{stdevs.length}</div>
             </div>
             <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-[10px] text-textMuted uppercase font-bold mb-1">Top PC Stdev</div>
+              <div className="text-xs text-textMuted uppercase font-bold mb-1">Top PC Stdev</div>
               <div className="text-2xl font-black text-primary">{stdevs[0]?.toFixed(2) || '—'}</div>
             </div>
             <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-[10px] text-textMuted uppercase font-bold mb-1">PC10 Stdev</div>
+              <div className="text-xs text-textMuted uppercase font-bold mb-1">PC10 Stdev</div>
               <div className="text-2xl font-black text-slate-400">{stdevs[9]?.toFixed(2) || '—'}</div>
             </div>
           </div>
 
           {/* View tabs */}
-          <div className="flex bg-black/5 dark:bg-slate-800 rounded-lg p-1 border border-border w-fit">
+          <div className="flex flex-wrap bg-black/5 dark:bg-slate-800 rounded-lg p-1 border border-border w-fit max-w-full">
             {viewTabs.map(tab => (
               <button
                 key={tab.id}
@@ -225,9 +221,9 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
           </div>
 
           {activeView === 'elbow' && (
-            <div className="card p-6">
+            <div className="card p-3 sm:p-6">
               <h3 className="font-semibold text-text mb-4">Elbow Plot — Variance per PC</h3>
-              <div className="h-[400px]">
+              <div className="h-[320px] sm:h-[400px]">
                 <Plot
                   preferSvg
                   data={elbowData}
@@ -244,9 +240,9 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
           )}
 
           {activeView === 'embedding' && (
-            <div className="card p-6">
+            <div className="card p-3 sm:p-6">
               <h3 className="font-semibold text-text mb-4">Existing PCA coordinates</h3>
-              <div className="h-[400px]">
+              <div className="h-[320px] sm:h-[400px]">
                 <Plot preferSvg useResizeHandler className="w-full h-full"
                   data={result.result.trace_data.map(trace => ({ ...trace, type: 'scatter', mode: 'markers',
                     marker: { size: 4 }, hovertemplate: '%{x:.2f}, %{y:.2f}<extra>%{fullData.name}</extra>' }))}

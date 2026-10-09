@@ -16,6 +16,30 @@ it('uses the shared UMAP prerequisite instead of rendering blank FeaturePlot axe
   fireEvent.click(await screen.findByRole('button', { name: /FeaturePlot/i }));
 
   expect(screen.getByText('UMAP Required')).toBeInTheDocument();
-  expect(screen.getByText(/Run the UMAP step in Core Preprocessing/i)).toBeInTheDocument();
+  expect(screen.getByText(/Run UMAP in the Standard scRNA-seq workflow/i)).toBeInTheDocument();
   expect(screen.queryByTestId('plot-stub')).not.toBeInTheDocument();
+});
+
+it('offers UMAP navigation without losing the selected gene or requesting a computation', async () => {
+  const onNavigateToUmap = vi.fn();
+  const callApi = vi.fn(async () => ({ gene: 'CD3E', expression: [1, 2], clusters: ['0', '1'] }));
+  render(<GeneViewer datasetInfo={{ id: 'ao_1' }} pipelineState={{ umap: false }} callApi={callApi} onNavigateToUmap={onNavigateToUmap} />);
+  fireEvent.click(screen.getByRole('button', { name: 'CD3E' }));
+  fireEvent.click(await screen.findByRole('button', { name: /FeaturePlot/i }));
+  fireEvent.click(screen.getByRole('button', { name: 'Go to UMAP' }));
+  expect(onNavigateToUmap).toHaveBeenCalledOnce();
+  expect(screen.getByRole('textbox', { name: 'Search gene by symbol' })).toHaveValue('CD3E');
+  expect(callApi).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: /VlnPlot/i }));
+  expect(screen.getByTestId('plot-stub')).toBeInTheDocument();
+});
+
+it('can collapse and reopen marker browsing without clearing the search', () => {
+  render(<GeneViewer datasetInfo={{ id: 'ao_1' }} pipelineState={{}} callApi={vi.fn()} />);
+  const search = screen.getByRole('textbox', { name: 'Search gene by symbol' });
+  fireEvent.change(search, { target: { value: 'LYZ' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Browse categories' }));
+  expect(screen.getByRole('button', { name: 'Hide categories' })).toHaveAttribute('aria-expanded', 'true');
+  fireEvent.click(screen.getByRole('button', { name: 'Hide categories' }));
+  expect(search).toHaveValue('LYZ');
 });

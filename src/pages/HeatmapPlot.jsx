@@ -1,3 +1,5 @@
+import { usePlotGeometry, categoryTickAngle, categoryPlotWidth } from '../hooks/usePlotGeometry';
+import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect, useCallback } from 'react';
 import Plot from '../components/Plot';
 import { Grid3x3, AlertTriangle, ImageDown } from 'lucide-react';
@@ -10,6 +12,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [topN, setTopN] = useState(5);
+  const chart = usePlotGeometry();
   const [savePanelOpen, setSavePanelOpen] = useState(false);
 
   const hasDeg = pipelineState?.cluster;
@@ -62,7 +65,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
     y: heatmapData.genes,
     colorscale: 'Viridis',
     hovertemplate: '<b>Gene:</b> %{y}<br><b>Cluster:</b> %{x}<br><b>Avg Expr:</b> %{z:.3f}<extra></extra>',
-    colorbar: { thickness: 14, len: 0.8, title: { text: 'Avg Expr', side: 'right' } },
+    colorbar: { thickness: 14, orientation: 'h', yref: 'container', y: 0.015, xref: 'container', x: 0.5, xanchor: 'center', yanchor: 'bottom', len: 0.7, title: { text: 'Avg Expr', side: 'top' } },
   }] : [];
 
   const isDark = theme === 'dark';
@@ -72,20 +75,16 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
     autosize: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-    font: { color: plotText, size: 10, family: 'Inter, system-ui' },
-    margin: { l: 100, r: 60, t: 30, b: 80 },
-    xaxis: { title: 'Cluster', type: 'category', tickangle: -45, gridcolor: plotGrid },
-    yaxis: { title: 'Gene', automargin: true, gridcolor: plotGrid },
+    font: { color: plotText, size: 12, family: 'Inter, system-ui' },
+    margin: { l: 58, r: 12, t: 24, b: 120 },
+    xaxis: { title: { text: 'Cluster' }, automargin: true, type: 'category', tickangle: categoryTickAngle(heatmapData?.clusters || [], Math.max(chart.width, categoryPlotWidth(heatmapData?.genes, heatmapData?.clusters)) - 100), gridcolor: plotGrid },
+    yaxis: { title: { text: 'Gene' }, automargin: true, gridcolor: plotGrid },
   };
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
-      <div className="px-4 sm:px-8 pt-6 pb-4 border-b border-border flex flex-wrap gap-4 items-center justify-between shrink-0">
-        <div>
-          <h2 className="text-2xl font-bold text-text tracking-tight">Marker Heatmap</h2>
-          <p className="text-textMuted text-sm">Average expression of top marker genes per cluster.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
+      <PageHeader title="Marker Heatmap" description="Average expression of top marker genes per cluster." className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" actions={
+<div className="flex flex-wrap items-center gap-3">
           <label htmlFor="heatmap-top-n" className="text-xs text-textMuted font-bold uppercase tracking-wide">Top N per cluster</label>
           <input
             id="heatmap-top-n"
@@ -104,7 +103,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
             </button>
           )}
         </div>
-      </div>
+      } />
 
       {error && (
         <div className="mx-8 mt-4 p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger text-sm flex items-center gap-2 shrink-0">
@@ -112,7 +111,9 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
         </div>
       )}
 
-      <div className="flex-1 min-h-60 min-w-0 p-3 sm:p-6 overflow-hidden">
+      {heatmapData && categoryPlotWidth(heatmapData.genes, heatmapData.clusters) > chart.width - 48 && <p role="note" className="mx-4 sm:mx-6 mt-3 text-xs text-textMuted">Scroll horizontally to inspect all clusters; hover a cell for its values.</p>}
+
+      <div ref={chart.ref} className="min-w-0 p-3 sm:p-6 overflow-x-auto shrink-0" style={{ height: Math.max(380, Math.min(1000, (Array.isArray(heatmapData?.genes) ? heatmapData.genes.length : heatmapData?.genes ? 1 : 3) * 28 + (chart.compact ? 180 : 120))) }}>
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center text-slate-400">
@@ -125,7 +126,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
             data={trace}
             layout={layout}
             config={{ responsive: true, displayModeBar: true, displaylogo: false }}
-            style={{ width: '100%', height: '100%' }}
+            style={{ width: '100%', minWidth: categoryPlotWidth(heatmapData?.genes, heatmapData?.clusters), height: '100%' }}
             useResizeHandler
           />
         ) : (
