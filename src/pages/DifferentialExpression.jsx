@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 const DEG_JOB_TYPE = 'deg.find_markers.v1';
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled']);
@@ -119,7 +120,7 @@ function badgeClass(tone = 'slate') {
     green: 'bg-success/10 text-success border-success/30',
     amber: 'bg-amber-500/10 text-amber-900 dark:text-amber-200 border-amber-500/30',
     rose: 'bg-danger/10 text-danger border-danger/30',
-    slate: 'bg-slate-800 text-slate-300 border-slate-700',
+    slate: 'bg-background text-textMuted border-border',
   };
   return tones[tone] || tones.slate;
 }
@@ -191,7 +192,7 @@ function TopMarkersTable({ markers }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[680px] text-left text-xs">
-        <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
+        <thead className="bg-background text-[10px] font-bold uppercase tracking-wider text-textMuted">
           <tr>
             <th className="p-3">Group</th>
             <th className="p-3">Gene</th>
@@ -444,7 +445,7 @@ export default function DifferentialExpression({
       <div className="flex h-full items-center justify-center bg-background p-8 text-center">
         <div className="max-w-sm">
           <FileText size={48} className="mx-auto mb-4 text-slate-400 opacity-50" />
-          <h2 className="mb-2 text-xl font-bold text-white">No Dataset Loaded</h2>
+          <h2 className="mb-2 text-xl font-bold text-text">No Dataset Loaded</h2>
           <p className="text-sm text-textMuted">Load or select a saved analysis before running marker analysis.</p>
         </div>
       </div>
@@ -452,20 +453,12 @@ export default function DifferentialExpression({
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-6 custom-scrollbar">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
-          <div>
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <h2 className="text-2xl font-bold tracking-tight text-white">Markers / Differential Expression</h2>
-              <StatusBadge tone="slate">recorded run</StatusBadge>
-              <StatusBadge tone="blue">controlled export</StatusBadge>
-            </div>
-            <p className="max-w-3xl text-sm text-textMuted">
-              Run marker analysis with approved settings and review its saved scientific summary. Authorized result tables can be exported from Runs &amp; Results.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-3">
+    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4">
+        <PageHeader title="Markers / Differential Expression" description={<>
+          Run marker analysis with approved settings and review its saved scientific summary. Authorized result tables can be exported from Runs &amp; Results.
+        </>} actions={<>
+
             <button
               onClick={launchDegJob}
               disabled={!canLaunch}
@@ -484,25 +477,17 @@ export default function DifferentialExpression({
                 Refresh
               </button>
             )}
-          </div>
-        </header>
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-            <div className="mt-1 truncate font-bold text-text">{activeProject?.name || 'Selected project'}</div>
-          </div>
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Saved analysis</div>
-            <div className="mt-1 truncate text-text" title={selectedAnalysisName}>{selectedObjectId ? selectedAnalysisName : 'None selected'}</div>
-          </div>
-          <div className="rounded-lg border border-border bg-surface/60 p-4">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Private analysis workspace</div>
-            <div className="mt-1 text-sm text-text">Available only to the analysis owner</div>
-          </div>
-        </div>
+        </>} />
 
-        {isDbBackedObject && ownsPrivateLiveObject && (
+        <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
+          <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
+          <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Private analysis workspace</dt><dd className="text-text">Available only to the analysis owner</dd></div>
+        </dl>
+        {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
+
+        {isDbBackedObject && ownsPrivateLiveObject && unsavedLiveChanges && (
           <div className={`rounded-lg border p-4 text-sm ${unsavedLiveChanges ? 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200' : 'border-primary/20 bg-primary/5 text-textMuted'}`}>
             <p><span className="font-bold text-text">Saved checkpoint used by this run:</span> {selectedAnalysisName}</p>
             {unsavedLiveChanges && (
@@ -578,7 +563,7 @@ export default function DifferentialExpression({
               <select
                 value={params.groupBy}
                 onChange={event => setParam('groupBy', event.target.value)}
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text focus:border-primary focus:outline-none"
               >
                 <option value="seurat_clusters">seurat_clusters</option>
                 <option value="ident">Current identities</option>
@@ -590,7 +575,7 @@ export default function DifferentialExpression({
               <select
                 value={params.assay}
                 onChange={event => setParam('assay', event.target.value)}
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text focus:border-primary focus:outline-none"
               >
                 <option value="RNA">RNA</option>
                 <option value="SCT">SCT</option>
@@ -606,7 +591,7 @@ export default function DifferentialExpression({
                 step="0.01"
                 value={params.minPct}
                 onChange={event => setParam('minPct', event.target.value)}
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text focus:border-primary focus:outline-none"
               />
             </label>
 
@@ -619,7 +604,7 @@ export default function DifferentialExpression({
                 step="0.05"
                 value={params.logfcThreshold}
                 onChange={event => setParam('logfcThreshold', event.target.value)}
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text focus:border-primary focus:outline-none"
               />
             </label>
 
@@ -632,7 +617,7 @@ export default function DifferentialExpression({
                 step="1"
                 value={params.topMarkersPerCluster}
                 onChange={event => setParam('topMarkersPerCluster', event.target.value)}
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white focus:border-primary focus:outline-none"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text focus:border-primary focus:outline-none"
               />
             </label>
 
@@ -646,7 +631,7 @@ export default function DifferentialExpression({
                 value={params.maxCellsPerIdent}
                 onChange={event => setParam('maxCellsPerIdent', event.target.value)}
                 placeholder="No cap"
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white placeholder:text-slate-500 focus:border-primary focus:outline-none"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text placeholder:text-slate-500 focus:border-primary focus:outline-none"
               />
             </label>
 
@@ -660,7 +645,7 @@ export default function DifferentialExpression({
                 value={params.randomSeed}
                 onChange={event => setParam('randomSeed', event.target.value)}
                 placeholder="None"
-                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-white placeholder:text-slate-500 focus:border-primary focus:outline-none"
+                className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text placeholder:text-slate-500 focus:border-primary focus:outline-none"
               />
             </label>
 

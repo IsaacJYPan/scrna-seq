@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import StudyDesign from './StudyDesign';
 
@@ -191,6 +191,62 @@ describe('StudyDesign', () => {
     expect(run).toBeDisabled();
     fireEvent.click(run);
     expect(window.electronAPI.createProjectJob).not.toHaveBeenCalled();
+  });
+
+  it('shows the biological replicates and their condition, donor, batch, and mappings without opening selectors', async () => {
+    window.electronAPI.listStudyConditions.mockResolvedValue([{ id: 'treated', name: 'Treated' }]);
+    window.electronAPI.listBiologicalSamples.mockResolvedValue([{
+      id: 'sample_1', name: 'Treated donor one', conditionId: 'treated', donorCode: 'D1', batch: 'Run A', modality: 'scrna',
+    }, { id: 'sample_2', name: 'Spatial sample', conditionName: 'Control', modality: 'spatial' }]);
+    window.electronAPI.listAnalysisObjectSampleBindings.mockResolvedValue([{
+      id: 'binding_1', sampleName: 'Treated donor one', cellMetadataColumn: 'sample_id', cellMetadataValue: 'T1',
+    }]);
+    render(<StudyDesign currentWs={workspace} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />);
+    const table = await screen.findByRole('table');
+    const sampleRow = within(table).getByRole('row', { name: /Treated donor one/ });
+    expect(sampleRow).toHaveTextContent('Treated');
+    expect(sampleRow).toHaveTextContent('D1');
+    expect(sampleRow).toHaveTextContent('Run A');
+    expect(sampleRow).toHaveTextContent('Single-cell RNA');
+    expect(within(table).getByRole('row', { name: /Spatial sample/ })).toHaveTextContent('Spatial (metadata only)');
+    expect(screen.getByLabelText('Current sample mappings')).toHaveTextContent('sample_id = T1');
+  });
+
+  it('opens the compact add-sample form and submits the same explicit replicate metadata', async () => {
+    window.electronAPI.listStudyConditions.mockResolvedValue([{ id: 'treated', name: 'Treated' }]);
+    window.electronAPI.listBiologicalSamples.mockResolvedValue([{ id: 'existing', name: 'Existing sample', conditionName: 'Treated' }]);
+    window.electronAPI.createBiologicalSample = vi.fn(async () => ({}));
+    render(<StudyDesign currentWs={workspace} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />);
+    await screen.findByRole('table');
+    const disclosure = screen.getByText('Add a biological sample').closest('details');
+    expect(disclosure).not.toHaveAttribute('open');
+    fireEvent.click(screen.getByText('Add a biological sample'));
+    fireEvent.change(screen.getByLabelText('Sample name'), { target: { value: 'New donor' } });
+    fireEvent.change(screen.getByLabelText('Condition', { selector: 'select' }), { target: { value: 'treated' } });
+    fireEvent.change(screen.getByLabelText('Donor code'), { target: { value: 'D2' } });
+    fireEvent.change(screen.getByLabelText('Batch'), { target: { value: 'Run B' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add sample' }));
+    await waitFor(() => expect(window.electronAPI.createBiologicalSample).toHaveBeenCalledWith('proj_private_1', {
+      name: 'New donor', conditionId: 'treated', donorCode: 'D2', batch: 'Run B', modality: 'scrna',
+    }));
+  });
+
+  it('does not label previous-version mappings as current while another version is loading', async () => {
+    window.electronAPI.listAnalysisObjectSampleBindings.mockResolvedValueOnce([{
+      id: 'binding_1', sampleName: 'Original sample', cellMetadataColumn: 'sample_id', cellMetadataValue: 'Old value',
+    }]);
+    render(<StudyDesign currentWs={{ ...workspace, objects: [
+      ...workspace.objects, { id: 'ao_other', projectId: 'proj_private_1', displayName: 'Other version' },
+    ] }} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }} />);
+    await waitFor(() => expect(screen.getByLabelText('Current sample mappings')).toHaveTextContent('Old value'));
+    let finish;
+    window.electronAPI.listAnalysisObjectSampleBindings.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.change(screen.getByLabelText('Saved version'), { target: { value: 'ao_other' } });
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    expect(screen.getByLabelText('Current sample mappings')).not.toHaveTextContent('Old value');
+    expect(screen.getByLabelText('Current sample mappings')).toHaveTextContent('Loading mappings');
+    finish([]);
+    await waitFor(() => expect(screen.getByLabelText('Current sample mappings')).toHaveTextContent('No samples mapped yet'));
   });
 
 });

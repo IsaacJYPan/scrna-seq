@@ -190,4 +190,23 @@ describe('ExpertR', () => {
     });
     expect(await screen.findByText('derived.rds')).toBeInTheDocument();
   });
+  it('retains selected private inputs across disclosure changes and includes them in the editor run', async () => {
+    window.electronAPI.listExpertRInputs = vi.fn(async () => [
+      { id: 'input_a', originalFilename: 'metadata.csv', sizeBytes: 100 },
+      { id: 'input_b', originalFilename: 'lookup.tsv', sizeBytes: 100 },
+    ]);
+    render(<ExpertR currentWs={currentWs} datasetInfo={{ id: 'ao_private_1', projectId: 'proj_private_1' }}
+      userId={7} deploymentPolicy={{ expertREnabled: true, expertRProfile: { id: 'expert.r.v1', packages: ['Seurat'] } }} />);
+    fireEvent.click(screen.getByText('Private input files · 0/5 selected'));
+    const input = await screen.findByRole('checkbox', { name: /metadata.csv/ });
+    fireEvent.click(input);
+    fireEvent.click(screen.getByText('Private input files · 1/5 selected'));
+    fireEvent.change(screen.getByRole('textbox', { name: 'R script' }), { target: { value: 'write_table(data.frame(n=1), "test.csv")' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run R analysis' }));
+    await waitFor(() => expect(window.electronAPI.createProjectJob).toHaveBeenCalledWith('proj_private_1', expect.objectContaining({
+      parameters: expect.objectContaining({ inputIds: ['input_a'], script: 'write_table(data.frame(n=1), "test.csv")' }),
+    })));
+    expect(screen.getByText('Private input files · 1/5 selected').closest('details')).not.toHaveAttribute('open');
+  });
+
 });

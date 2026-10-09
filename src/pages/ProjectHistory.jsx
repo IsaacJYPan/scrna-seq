@@ -6,6 +6,7 @@ import {
 import { publicErrorMessage } from '../publicError';
 import ArtifactInspector from '../components/ArtifactInspector';
 import ExecutionHistory from '../components/ExecutionHistory';
+import PageHeader from '../components/PageHeader';
 
 function formatDate(value) {
   if (!value) return 'Unknown';
@@ -879,7 +880,7 @@ export default function ProjectHistory({
 
   if (!activeProjectId) {
     return (
-      <div className="h-full w-full overflow-y-auto bg-background p-8 custom-scrollbar">
+      <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
         <div className="mx-auto max-w-5xl">
           <EmptyState title="Select a project">
             Analysis runs, saved results, provenance, figures, and lineage are scoped to a project.
@@ -890,23 +891,9 @@ export default function ProjectHistory({
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-8 custom-scrollbar">
-      <div className="mx-auto max-w-6xl space-y-8">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
-          <div>
-            <h2 className="flex items-center gap-3 text-2xl font-black tracking-tight text-text">
-              <Briefcase size={24} className="text-primary" />
-              Runs & Results
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm text-textMuted">
-              Review recorded analysis runs, saved results, and branches. Creating a branch preserves its source version and lineage while giving each researcher a private analysis workspace.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <StatusBadge tone="green">analysis history</StatusBadge>
-              <StatusBadge tone="blue">reviewed exports</StatusBadge>
-              <StatusBadge tone="blue">private workspaces</StatusBadge>
-            </div>
-          </div>
+    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
+      <div className="mx-auto max-w-6xl space-y-5">
+        <PageHeader title="Runs & Results" icon={Briefcase} description="Review recorded analysis history, saved results, and reproducible branches." actions={
           <button
             onClick={loadHistory}
             disabled={historyState.loading}
@@ -915,7 +902,8 @@ export default function ProjectHistory({
             {historyState.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Refresh
           </button>
-        </header>
+
+        } />
 
         <div className="rounded-lg border border-border bg-surface/40 p-4">
           <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
@@ -928,14 +916,18 @@ export default function ProjectHistory({
               <div className="mt-1 text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
             </div>
             <div>
-              <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Access model</div>
-              <div className="mt-1 text-text">Project history and authorized artifact versions</div>
+              <div className="text-xs text-textMuted">Visibility</div>
+              <div className="mt-1 text-text">History access does not open another researcher’s private workspace.</div>
             </div>
           </div>
         </div>
 
-        <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
         <ExecutionHistory key={`${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />
+        <details className="rounded-lg border border-border bg-surface/40 p-4">
+          <summary className="cursor-pointer font-medium text-text">Inspect or import artifact files</summary>
+          <p className="mt-2 mb-4 text-sm text-textMuted">Imports stay private. Inspect exact saved versions or add a file without changing earlier contents.</p>
+          <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
+        </details>
 
         {selectedObject && selectedObject.liveState !== 'attached' && (
           <section className="rounded-lg border border-primary/20 bg-primary/5 p-5">
