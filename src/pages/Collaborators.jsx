@@ -4,6 +4,7 @@ import {
   UserPlus, Users,
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 const ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const ROLE_HELP = {
@@ -230,29 +231,18 @@ function CollaboratorsProject({ currentWs, userId, refreshProjects, activeProjec
   }
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-background p-8 custom-scrollbar">
+    <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-8 custom-scrollbar">
       <div className="mx-auto max-w-5xl space-y-7">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-6">
-          <div>
-            <div className="flex items-center gap-3">
-              <Users size={28} className="text-primary" />
-              <div>
-                <h2 className="text-2xl font-black tracking-tight text-text">Collaborators</h2>
-                <p className="mt-1 text-sm text-textMuted">
-                  Manage access to <span className="font-bold text-text">{activeProject?.name || 'the selected project'}</span>.
-                </p>
-              </div>
-            </div>
+        <PageHeader title="Collaborators" icon={Users} className="border-b border-border pb-5"
+          description={<>Manage access to <span className="font-bold text-text">{activeProject?.name || 'the selected project'}</span>.</>}
+          actions={<button onClick={loadMembers} disabled={interactionBlocked} className="btn btn-secondary">
+            {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />} Refresh
+          </button>}>
             <div className="mt-3 flex flex-wrap gap-2">
               <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${roleBadge(actorRole)}`}>Your role: {actorRole || 'unknown'}</span>
               <span className="rounded border border-border px-2 py-0.5 text-[10px] font-bold uppercase text-textMuted">{memberCountText}</span>
             </div>
-          </div>
-          <button onClick={loadMembers} disabled={interactionBlocked} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
-            {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-            Refresh
-          </button>
-        </header>
+        </PageHeader>
 
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
           <div className="mb-1 flex items-center gap-2 font-bold text-text">

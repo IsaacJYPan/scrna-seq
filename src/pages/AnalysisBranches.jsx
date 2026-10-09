@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, GitBranch, GitCompare, History, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
+import PageHeader from '../components/PageHeader';
 
 function messageFor(error, fallback) {
   return publicErrorMessage(error, fallback);
@@ -164,17 +165,11 @@ export default function AnalysisBranches({ currentWs, datasetInfo, userId, setAc
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-background p-6">
+    <div className="h-full overflow-y-auto bg-background p-4 sm:p-6">
       <div className="max-w-6xl mx-auto space-y-5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-black text-text flex items-center gap-2"><GitBranch size={24} /> Analysis Branches</h2>
-            <p className="text-sm text-textMuted mt-1">Your private branches and project-shared branches appear here with their saved-analysis head and review state.</p>
-          </div>
-          <button className="btn btn-secondary text-sm" onClick={refresh} disabled={loading || !!busy}>
+        <PageHeader title="Analysis Branches" icon={GitBranch} description="Your private branches and project-shared branches appear here with their saved-analysis head and review state." actions={<button className="btn btn-secondary text-sm" onClick={refresh} disabled={loading || !!busy}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : ''} /> Refresh
-          </button>
-        </div>
+          </button>} />
 
         {error && <div className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
 

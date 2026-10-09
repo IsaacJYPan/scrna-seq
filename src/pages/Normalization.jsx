@@ -1,6 +1,7 @@
 import { AlertTriangle, ChevronRight, FileText, Settings, Sparkles } from 'lucide-react';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
+import PageHeader from '../components/PageHeader';
 
 export default function Normalization({ callApi, datasetInfo, currentProvId: _currentProvId, qcProvId, openProvenance, pipelineState, rSessionId, sessionReady, userEmail, objectId }) {
   // Persisted parameters
@@ -58,15 +59,10 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
 
   return (
     <div className="h-full w-full p-4 sm:p-6 lg:p-8 overflow-y-auto bg-background custom-scrollbar">
-      <div className="flex flex-col gap-4 mb-8 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-text mb-1 tracking-tight">Normalization</h2>
-          <p className="text-textMuted">Normalize counts and identify highly variable features.</p>
-        </div>
-        <div className="flex w-full flex-col items-stretch gap-3 sm:flex-row sm:items-center lg:w-auto">
+      <PageHeader title="Normalization" description="Normalize counts and identify highly variable features." className="mb-6" actions={<>
           {result && (
             <button
-              className="text-primary border border-primary/50 hover:bg-primary/10 px-3 py-2 rounded text-sm flex items-center justify-center gap-2 transition"
+              className="btn btn-secondary"
               onClick={() => openProvenance(result.provenance.id)}
             ><FileText size={15} /> View recorded analysis</button>
           )}
@@ -79,8 +75,7 @@ export default function Normalization({ callApi, datasetInfo, currentProvId: _cu
             {!running && result && <Sparkles size={16} />}
             {result ? 'Normalization Complete' : 'Run Normalization'}
           </button>
-        </div>
-      </div>
+        </>} />
 
       {error && (
         <div className="card p-4 mb-6 bg-danger/10 border-danger text-danger flex items-center gap-3">

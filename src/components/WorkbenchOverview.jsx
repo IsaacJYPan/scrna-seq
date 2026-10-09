@@ -9,7 +9,6 @@ export default function WorkbenchOverview({
   activeProjectObjects,
   pipelineState,
   setActiveTab,
-  setShowLoadModal,
   onReloadPbmcDemo,
 }) {
   const hasProject = !!activeProject;
@@ -35,8 +34,8 @@ export default function WorkbenchOverview({
     if (canWriteProject) {
       nextAction =
         'Load the PBMC demo or use an approved workflow to add a dataset to this project.';
-      actionLabel = 'Load analysis';
-      action = () => setShowLoadModal(true);
+      // The Saved analyses empty state owns the single primary add action.
+      actionLabel = 'Add analysis';
     } else {
       nextAction =
         'This project is read-only for your role. You can inspect saved analyses, results, and lineage when they are available.';
@@ -75,7 +74,7 @@ export default function WorkbenchOverview({
 
   return (
     <section
-      className="rounded-xl border border-border bg-surface/60 p-5"
+      className="rounded-xl border border-border bg-surface/60 p-4"
       aria-label="Current analysis"
     >
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -102,7 +101,7 @@ export default function WorkbenchOverview({
           </button>
         )}
       </div>
-      <p className="mt-4 border-t border-border pt-4 text-sm leading-relaxed text-text">
+      <p className="mt-3 text-sm leading-relaxed text-text">
         {nextAction}
       </p>
       {hasObject && (

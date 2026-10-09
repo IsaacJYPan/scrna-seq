@@ -53,6 +53,20 @@
 @layer components {
   .btn {
     @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-semibold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
+    min-height: 40px;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+  .page-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 1rem 1.5rem; flex-shrink: 0; }
+  .page-header-content { flex: 1 1 20rem; min-width: 0; }
+  .page-title { display: flex; align-items: center; gap: 0.625rem; font-size: 1.5rem; line-height: 2rem; font-weight: 700; letter-spacing: -0.025em; color: var(--color-text); overflow-wrap: anywhere; }
+  .page-description { margin-top: 0.375rem; font-size: 0.875rem; line-height: 1.5rem; color: var(--color-textMuted); }
+  .page-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; max-width: 100%; flex: 0 1 auto; }
+  .page-header-actions > button { white-space: nowrap; }
+  .page-header-actions svg { flex-shrink: 0; }
+  @media (max-width: 639px) {
+    .btn { min-height: 44px; }
+    .page-header-content { flex-basis: 100%; }
   }
   .btn-primary {
     @apply bg-primary text-white focus-visible:ring-primary;
