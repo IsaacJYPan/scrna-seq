@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261014, now())
+VALUES ('traceomics.runtime', 20261015, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1063,3 +1063,65 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_managed_artifact_version_immutable ON managed_artifact_versions;
 CREATE TRIGGER trg_managed_artifact_version_immutable BEFORE UPDATE ON managed_artifact_versions
   FOR EACH ROW EXECUTE FUNCTION enforce_managed_artifact_version_immutable();
+
+-- Server-side snapshots retain admission and identity independently of the
+-- connection that requested them. No process resumes an old mutable source.
+CREATE TABLE IF NOT EXISTS server_data_imports (
+  id TEXT PRIMARY KEY CHECK (id ~ '^sdi_[a-f0-9]{24}$'),
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK (request_sha256 ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL CHECK (status IN ('reserved','running','completed','failed','unknown')),
+  root_id TEXT NOT NULL CHECK (root_id ~ '^[a-z][a-z0-9-]{0,63}$'),
+  relative_path TEXT NOT NULL CHECK (length(relative_path) BETWEEN 1 AND 1024),
+  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
+  artifact_type TEXT NOT NULL CHECK (artifact_type IN ('auto','sample-sheet')),
+  previous_version_id TEXT REFERENCES managed_artifact_versions(id),
+  version_id TEXT NOT NULL UNIQUE CHECK (version_id ~ '^av_[a-f0-9]{24}$'),
+  artifact_id TEXT NOT NULL CHECK (artifact_id ~ '^af_[a-f0-9]{24}$'),
+  storage_key TEXT NOT NULL UNIQUE CHECK (length(storage_key) BETWEEN 1 AND 2048),
+  source_identity_json JSONB NOT NULL CHECK (octet_length(source_identity_json::text) <= 4096),
+  source_metadata_json JSONB NOT NULL CHECK (octet_length(source_metadata_json::text) <= 4096),
+  reserved_bytes BIGINT NOT NULL CHECK (reserved_bytes BETWEEN 1 AND 68719476736),
+  bytes_copied BIGINT NOT NULL DEFAULT 0 CHECK (bytes_copied BETWEEN 0 AND reserved_bytes),
+  process_id TEXT NOT NULL CHECK (process_id ~ '^[a-f0-9]{64}$'),
+  expires_at TIMESTAMPTZ NOT NULL,
+  error_code TEXT CHECK (error_code ~ '^[A-Z0-9_]{1,80}$'),
+  error_message TEXT CHECK (length(error_message) <= 1000),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  UNIQUE(project_id,owner_user_id,request_id),
+  CHECK (expires_at > created_at),
+  CHECK (status <> 'completed' OR (bytes_copied = reserved_bytes AND completed_at IS NOT NULL)),
+  CHECK (status <> 'failed' OR (error_code IS NOT NULL AND error_message IS NOT NULL AND completed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_server_data_import_owner
+  ON server_data_imports(project_id,owner_user_id,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_server_data_import_active
+  ON server_data_imports(status,expires_at) WHERE status IN ('reserved','running','unknown');
+CREATE OR REPLACE FUNCTION enforce_server_data_import_identity() RETURNS TRIGGER AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.project_id,NEW.owner_user_id,NEW.request_id,NEW.request_sha256,
+         NEW.root_id,NEW.relative_path,NEW.name,NEW.artifact_type,NEW.previous_version_id,
+         NEW.version_id,NEW.artifact_id,NEW.storage_key,NEW.source_identity_json,
+         NEW.source_metadata_json,NEW.reserved_bytes,NEW.process_id,NEW.expires_at,NEW.created_at)
+     IS DISTINCT FROM
+     ROW(OLD.id,OLD.project_id,OLD.owner_user_id,OLD.request_id,OLD.request_sha256,
+         OLD.root_id,OLD.relative_path,OLD.name,OLD.artifact_type,OLD.previous_version_id,
+         OLD.version_id,OLD.artifact_id,OLD.storage_key,OLD.source_identity_json,
+         OLD.source_metadata_json,OLD.reserved_bytes,OLD.process_id,OLD.expires_at,OLD.created_at)
+  THEN RAISE EXCEPTION 'Server data import identity is immutable' USING ERRCODE='55000'; END IF;
+  IF NEW.bytes_copied < OLD.bytes_copied
+  THEN RAISE EXCEPTION 'Server data import progress cannot decrease' USING ERRCODE='55000'; END IF;
+  IF OLD.status IN ('completed','failed') AND
+     ROW(NEW.status,NEW.bytes_copied,NEW.error_code,NEW.error_message,NEW.completed_at)
+     IS DISTINCT FROM ROW(OLD.status,OLD.bytes_copied,OLD.error_code,OLD.error_message,OLD.completed_at)
+  THEN RAISE EXCEPTION 'Terminal server data import evidence is immutable' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_server_data_import_identity ON server_data_imports;
+CREATE TRIGGER trg_server_data_import_identity BEFORE UPDATE ON server_data_imports
+  FOR EACH ROW EXECUTE FUNCTION enforce_server_data_import_identity();

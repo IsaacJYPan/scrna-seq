@@ -65,7 +65,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261014;
+const SCHEMA_CONTRACT_VERSION = 20261015;
 
 let pool = null;
 
@@ -730,7 +730,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
-      private_r_publications, private_r_executions, private_r_kernel_restarts, private_r_kernels,
+      server_data_imports, private_r_publications, private_r_executions, private_r_kernel_restarts, private_r_kernels,
       workflow_snapshots, workflow_artifacts, workflow_runs, workflow_instances,
       app_schema_contract,
       project_pipeline_selections, pipeline_definitions,
@@ -1524,6 +1524,7 @@ async function deleteExpiredDemoGuest(userId) {
     const projectIds = projectRows.rows.map((row) => row.id);
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
+      await client.query('DELETE FROM server_data_imports WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM managed_artifact_versions WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM private_r_publications WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM private_r_executions WHERE project_id = ANY($1::text[])', [projectIds]);

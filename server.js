@@ -1938,6 +1938,7 @@ app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
+app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/execution-history', require('./backend/executionHistoryRoutes').executionHistoryRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/private-r-kernels', require('./backend/privateKernelRoutes').privateKernelRoutes({ db, provider: durableStorage, requireAuth }));
 

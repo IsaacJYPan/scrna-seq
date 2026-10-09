@@ -28,6 +28,31 @@ function safeFilename(value) {
   return safeName(filename, 'artifact.bin');
 }
 
+function serverImportProvenance(value) {
+  const controls = text => [...text].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+  if (!value || value.kind !== 'server-import' || !/^sdi_[a-f0-9]{24}$/.test(value.importId)
+      || !/^[a-z][a-z0-9-]{0,63}$/.test(value.rootId) || typeof value.rootLabel !== 'string'
+      || !value.rootLabel.trim() || value.rootLabel.length > 80 || controls(value.rootLabel)
+      || !/^svc_[a-f0-9]{32}$/.test(value.serviceId) || typeof value.serviceLabel !== 'string'
+      || !value.serviceLabel.trim() || value.serviceLabel.length > 80 || controls(value.serviceLabel)
+      || !/^[a-f0-9]{64}$/.test(value.sourceSha256) || typeof value.importedAt !== 'string'
+      || !Number.isFinite(Date.parse(value.importedAt))) return null;
+  try { require('./serverDataImportConfig').relativeSelection(value.relativePath); } catch { return null; }
+  let sampleMetadata;
+  if (value.sampleMetadata !== undefined) {
+    if (!value.sampleMetadata || typeof value.sampleMetadata !== 'object' || Array.isArray(value.sampleMetadata)) return null;
+    sampleMetadata = {};
+    for (const [key, text] of Object.entries(value.sampleMetadata)) {
+      if (!['sampleId','condition','tissue','species','replicate'].includes(key) || typeof text !== 'string'
+          || !text.trim() || text.length > 120 || controls(text)) return null;
+      sampleMetadata[key] = text;
+    }
+  }
+  return { importId: value.importId, rootId: value.rootId, rootLabel: value.rootLabel,
+    relativePath: value.relativePath, serviceId: value.serviceId, serviceLabel: value.serviceLabel,
+    sha256: value.sourceSha256, importedAt: canonicalTime(value.importedAt), ...(sampleMetadata ? { sampleMetadata } : {}) };
+}
+
 function createArtifactVersionService(db, provider = storage.createLocalStorageProvider()) {
   async function display(row, ownerName) {
     if (!ownerName) ownerName = (await db.query('SELECT display_name FROM users WHERE id=$1', [row.ownerId])).rows[0]?.display_name || 'Researcher';
@@ -39,6 +64,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       previews: previews.previewCapabilities(row.type, row.format, row.size),
     };
     (await analysisContract).validateArtifactVersion(record);
+    const sourceImport = serverImportProvenance(row.provenance);
     return {
       ...record, name: row.name, versionNumber: row.versionNumber || null,
       previousVersionId: row.previousVersionId || null,
@@ -48,6 +74,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       previewBudget: { responseBytes: previews.PREVIEW_LIMITS.bytes, imageBytes: previews.PREVIEW_LIMITS.imageBytes, maximumRows: previews.PREVIEW_LIMITS.rows },
       canReplace: row.sourceKind === 'managed-file',
       ...(row.sourcePublicationId ? { sourcePublicationId: row.sourcePublicationId, provenance: row.provenance } : {}),
+      ...(sourceImport ? { sourceImport } : {}),
     };
   }
   function managed(row) {
@@ -248,6 +275,8 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       SELECT size_bytes AS bytes FROM managed_artifact_versions WHERE project_id=$1 AND owner_user_id=$2
       UNION ALL SELECT reserved_bytes AS bytes FROM private_r_publications WHERE project_id=$1 AND owner_user_id=$2
         AND status IN ('reserved','running','unknown') AND ($3::text IS NULL OR id<>$3)
+      UNION ALL SELECT reserved_bytes AS bytes FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2
+        AND status IN ('reserved','running','unknown')
     ) usage`, [projectId, userId, excludePublicationId])).rows[0];
     const availableBytes = Math.max(0, getPrivateRArtifactPolicy().managedQuotaBytes - Number(usage.bytes));
     return { count: Number(usage.count), availableBytes };
@@ -290,6 +319,22 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       if (!reservation || !Number.isSafeInteger(value.sizeBytes) || value.sizeBytes < 1 || value.sizeBytes > Number(reservation.reserved_bytes)) throw artifactError('INVALID_ARTIFACT_FILE','The saved artifact exceeds its retained storage reservation.');
       // This quota was admitted before serialization. A later quota reduction
       // blocks new writes without revoking this exact outstanding reservation.
+    } else if (value.importId) {
+      const reservation = (await connection.query(`SELECT * FROM server_data_imports
+        WHERE id=$1 AND project_id=$2 AND owner_user_id=$3 AND storage_key=$4 AND version_id=$5
+          AND artifact_id=$6 AND status='running' AND expires_at>NOW() FOR UPDATE`,
+      [value.importId,projectId,userId,value.key,value.versionId,value.artifactId])).rows[0];
+      const source = serverImportProvenance(value.provenance);
+      if (!reservation || !source || source.importId !== reservation.id
+          || source.rootId !== reservation.root_id || source.rootLabel !== reservation.source_metadata_json.root.label
+          || source.relativePath !== reservation.relative_path || source.serviceId !== reservation.source_metadata_json.serviceId
+          || source.serviceLabel !== reservation.source_metadata_json.serviceLabel
+          || source.sha256 !== value.checksumSha256 || value.name !== reservation.name
+          || (value.previousVersionId || null) !== reservation.previous_version_id
+          || JSON.stringify(source.sampleMetadata || {}) !== JSON.stringify(reservation.source_metadata_json.sampleMetadata || {})
+          || !Number.isSafeInteger(value.sizeBytes) || value.sizeBytes < 1 || value.sizeBytes !== Number(reservation.reserved_bytes)) {
+        throw artifactError('INVALID_ARTIFACT_FILE','The imported artifact does not match its retained snapshot reservation.');
+      }
     } else await assertCapacity(connection, userId, projectId, value.sizeBytes);
     (await analysisContract).validateArtifactFormat(value.format);
     if (!/^av_[a-f0-9]{24}$/.test(value.versionId) || !/^af_[a-f0-9]{24}$/.test(value.artifactId) || !validBytes({checksum:value.checksumSha256,size:value.sizeBytes,key:value.key}) || !storage.isProjectStorageKey(value.key,{projectId,kind:'artifacts'})) throw artifactError('INVALID_ARTIFACT_FILE','The saved artifact evidence is invalid.');
