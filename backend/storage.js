@@ -307,6 +307,83 @@ function createLocalStorageProvider(options = {}) {
     }
   }
 
+  // Snapshot an already authorized handle without resolving the source path
+  // again. The caller owns the handle and its directory authorization checks.
+  async function putFileFromHandle(source, key, options = {}) {
+    const maximum = options.maxBytes;
+    if (!source || typeof source.read !== 'function' || !Number.isSafeInteger(maximum) || maximum < 1 || maximum > 64 * 1024 ** 3) {
+      throw storageError('INVALID_STORAGE_SOURCE', 'A bounded source file handle is required.');
+    }
+    const initial = await source.stat();
+    const expected = options.expectedStat || initial;
+    const matches = stat => stat.isFile() && ['dev','ino','size','mtimeMs','ctimeMs'].every(field => stat[field] === expected[field]);
+    if (!matches(initial) || !Number.isSafeInteger(initial.size) || initial.size < 1 || initial.size > maximum) {
+      throw storageError('STORAGE_SOURCE_CHANGED', 'The selected source file changed or exceeds its snapshot limit.');
+    }
+    const destination = prepareWrite(key);
+    if (fs.existsSync(destination)) throw storageError('STORAGE_OBJECT_EXISTS', 'Durable storage object already exists.');
+    // A fixed, exclusive partial name permits cleanup after process loss. A
+    // separate operation owns each destination key; no other writer may reuse it.
+    const partial = `${destination}.import-partial`;
+    let output, linked = false, ownedPartial = false;
+    const checkAbort = () => {
+      if (options.signal?.aborted) throw storageError('STORAGE_SNAPSHOT_ABORTED', 'The server snapshot was interrupted.');
+    };
+    try {
+      checkAbort();
+      const noFollow = Number.isInteger(fs.constants.O_NOFOLLOW) ? fs.constants.O_NOFOLLOW : 0;
+      output = await fs.promises.open(partial, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
+      ownedPartial = true;
+      const buffer = Buffer.allocUnsafe(1024 * 1024), hash = crypto.createHash('sha256');
+      let position = 0;
+      while (position < initial.size) {
+        checkAbort();
+        const length = Math.min(buffer.length, initial.size - position);
+        const { bytesRead } = await source.read(buffer, 0, length, position);
+        if (!bytesRead) throw storageError('STORAGE_SOURCE_CHANGED', 'The selected source file changed during its snapshot.');
+        hash.update(buffer.subarray(0, bytesRead));
+        let written = 0;
+        while (written < bytesRead) {
+          checkAbort();
+          const result = await output.write(buffer, written, bytesRead - written, position + written);
+          if (!result.bytesWritten) throw storageError('STORAGE_WRITE_FAILED', 'The server could not write its snapshot.');
+          written += result.bytesWritten;
+        }
+        position += bytesRead;
+        if (options.onProgress) await options.onProgress(position, initial.size);
+      }
+      // Growth and same-size changes are rejected, including restored mtime.
+      const extra = await source.read(buffer, 0, 1, initial.size);
+      if (extra.bytesRead || !matches(await source.stat())) throw storageError('STORAGE_SOURCE_CHANGED', 'The selected source file changed during its snapshot.');
+      if (options.validateSource) await options.validateSource();
+      checkAbort();
+      await output.sync();
+      if ((await output.stat()).size !== initial.size) throw storageError('STORAGE_WRITE_FAILED', 'The server snapshot has an invalid size.');
+      await output.close(); output = null;
+      // Linking instead of rename cannot replace an existing immutable version.
+      await fs.promises.link(partial, destination); linked = true;
+      await fs.promises.unlink(partial); ownedPartial = false;
+      checkAbort();
+      return { key, sizeBytes: initial.size, checksumSha256: hash.digest('hex') };
+    } catch (error) {
+      if (linked) try { await fs.promises.unlink(destination); } catch { /* owned destination only */ }
+      throw error;
+    } finally {
+      if (output) await output.close().catch(() => {});
+      if (ownedPartial) await fs.promises.unlink(partial).catch(() => {});
+    }
+  }
+
+  async function removeImportSnapshot(key) {
+    const destination = prepareWrite(key);
+    // Only server-created operation keys may call this cleanup. Never traverse
+    // a symlink even when a process died before closing its partial file.
+    for (const target of [destination, `${destination}.import-partial`]) {
+      try { assertOrdinaryPathEntry(target); await fs.promises.unlink(target); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+  }
+
   async function inspect(key, expected = {}) {
     const absolutePath = resolveKey(key);
     const opened = await openSafeDescendantFile(
@@ -494,6 +571,8 @@ function createLocalStorageProvider(options = {}) {
     resolveKey,
     prepareWrite,
     putFileFromPath,
+    putFileFromHandle,
+    removeImportSnapshot,
     inspect,
     openVerifiedRead,
     copyVerified,

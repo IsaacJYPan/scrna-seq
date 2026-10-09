@@ -114,12 +114,18 @@ function imageDimensions(bytes, format) {
 }
 
 async function inspectImportedFile(filename, artifactType) {
-  const spec = fileFormat(filename.originalFilename, artifactType);
   const handle = await fs.open(filename.path, 'r');
   try {
     const stat = await handle.stat();
-    if (!stat.isFile()) throw previewError('Select a regular file.');
-    const maximum = spec.type === 'object' ? 200 * 1024 * 1024 : 25 * 1024 * 1024;
+    return await inspectImportedHandle({ handle, stat, originalFilename: filename.originalFilename }, artifactType);
+  } finally { await handle.close(); }
+}
+
+async function inspectImportedHandle({ handle, stat, originalFilename }, artifactType, options = {}) {
+    const spec = fileFormat(originalFilename, artifactType);
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) throw previewError('Select a regular file with a valid size.');
+    const maximum = options.maxBytes ?? (spec.type === 'object' ? 200 * 1024 * 1024 : 25 * 1024 * 1024);
+    if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 64 * 1024 ** 3) throw previewError('The artifact inspection limit is invalid.');
     if (stat.size > maximum) throw previewError(`This artifact exceeds the ${maximum / (1024 * 1024)} MiB import limit.`, 413);
     const metadata = {};
     if (spec.preview === 'image') {
@@ -135,7 +141,6 @@ async function inspectImportedFile(filename, artifactType) {
       metadata['org.traceomics.preview:validation'] = 'bounded-preview-only';
     }
     return { ...spec, metadata, sizeBytes: stat.size };
-  } finally { await handle.close(); }
 }
 
 function previewCapabilities(type, format, sizeBytes) {
@@ -174,4 +179,4 @@ async function buildPreview(opened, artifact, options = {}) {
   return result;
 }
 
-module.exports = { PREVIEW_LIMITS, fileFormat, parseDelimited, imageDimensions, inspectImportedFile, previewCapabilities, buildPreview };
+module.exports = { PREVIEW_LIMITS, fileFormat, parseDelimited, imageDimensions, inspectImportedFile, inspectImportedHandle, previewCapabilities, buildPreview };

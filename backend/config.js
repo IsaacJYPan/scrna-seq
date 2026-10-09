@@ -501,6 +501,10 @@ function validateProductionConfig(options = {}) {
   const role = options.role || 'web';
   const errors = validateCookieConfig();
   try { serviceLabel(); } catch { errors.push('EXECUTION_SERVICE_LABEL must contain 1–80 letters, numbers, spaces, or basic display punctuation.'); }
+  try {
+    const roots = require('./serverDataImportConfig').serverDataImportRoots();
+    if (roots.length && ['demo', 'public'].includes(deploymentMode())) errors.push('SERVER_DATA_IMPORT_ROOTS must be empty in public or demo deployments.');
+  } catch { errors.push('SERVER_DATA_IMPORT_ROOTS must contain distinct, dedicated absolute data directories with exact project and account grants.'); }
   if (!ALLOWED_NODE_ENVS.has(nodeEnv())) {
     errors.push('NODE_ENV must be development, test, or production.');
   }
