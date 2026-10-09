@@ -39,6 +39,19 @@ describe('private R publication source and identity',()=>{
     for(const altered of [{publicationId:'../../output'},{binding:'a\nstop(1)'},{binding:'α'.repeat(129)},{type:'figure'},{source:valid.source+';system("x")'},
       {internalStorageKey:'projects/project2/artifacts/av_1/content.csv'}])expect(()=>validatePrivateKernelExportRequest({...valid,...altered},{projectId:'project1',generation})).toThrow();
   });
+  it('binds a large streamed reservation to the exact FIFO source and filename without R integer overflow',()=>{
+    const streamed={...spec,stream:true,maxBytes:3*1024**3};
+    const source=generatePrivateKernelExportSource(streamed);
+    expect(source).toContain('reserved_bytes <- 3221225472');expect(source).not.toContain('3221225472L');
+    expect(source).toContain('base::fifo');expect(source).toContain('base::on.exit(base::close(connection)');
+    expect(source).not.toContain('file.info');expect(exportFilename(streamed)).not.toBe(exportFilename(spec));
+    expect(exportFilename({...streamed,maxBytes:streamed.maxBytes-1})).not.toBe(exportFilename(streamed));
+    const object=generatePrivateKernelExportSource({...streamed,type:'object'});expect(object).toContain('compress = FALSE');
+    for(const change of [{maxBytes:0},{maxBytes:64*1024**3+1},{stream:false},{stream:undefined}])expect(()=>generatePrivateKernelExportSource({...streamed,...change})).toThrow();
+    const request={...streamed,source,internalStorageKey:'projects/project1/artifacts/av_1/content.csv'};
+    expect(validatePrivateKernelExportRequest(request,{projectId:'project1',generation})).toMatchObject({stream:true,maxBytes:3*1024**3});
+    expect(()=>validatePrivateKernelExportRequest({...request,maxBytes:request.maxBytes-1},{projectId:'project1',generation})).toThrow();
+  });
 });
 describe('one-file isolated descriptor extraction',()=>{
   const bytes=Buffer.from('cell,count\na,2\nb,3\n');

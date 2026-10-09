@@ -9,6 +9,7 @@ const {createArtifactVersionService}=require('./artifactVersions');
 const {createPrivateKernelClient}=require('./privateKernelClient');
 const db=require('./pgDatabase');
 const configured=Boolean(process.env.DATABASE_URL);
+const policyKeys=['PRIVATE_R_MAX_INPUT_FILE_BYTES','PRIVATE_R_MAX_INPUT_TOTAL_BYTES'];
 let broker,http,server,directory,provider,owner,analyst,viewer,outsider,project,savedEnv;
 describe.skipIf(!configured)('private R session service through authenticated HTTP/PostgreSQL/storage',()=>{
   beforeAll(async()=>{
@@ -17,12 +18,12 @@ describe.skipIf(!configured)('private R session service through authenticated HT
     provider={...require('./storage').createLocalStorageProvider()};http=require('./_http-test-utils');server=await http.startServer();
   });
   beforeEach(async()=>{
-    vi.restoreAllMocks();await db.resetSchemaForTests();broker.sessions.clear();broker.calls.length=0;delete broker.hooks.beforeStartResponse;delete broker.hooks.beforeExecuteResponse;delete broker.hooks.beforeStopResponse;
+    vi.restoreAllMocks();for(const key of policyKeys){if(savedEnv[key]===undefined)delete process.env[key];else process.env[key]=savedEnv[key];}await db.resetSchemaForTests();broker.sessions.clear();broker.calls.length=0;for(const key of Object.keys(broker.hooks))delete broker.hooks[key];
     owner=await http.createUserWithToken({email:'kernel-owner@example.test'});analyst=await http.createUserWithToken({email:'kernel-analyst@example.test'});viewer=await http.createUserWithToken({email:'kernel-viewer@example.test'});outsider=await http.createUserWithToken({email:'kernel-outsider@example.test'});
     const organization=await db.createOrganizationForUser(owner.user.id,{name:'Private kernel lab'});project=await db.createProjectForUser(owner.user.id,{organizationId:organization.id,name:'Kernel study'});
     await db.addProjectMemberByEmail(project.id,analyst.user.email,'analyst',{userId:owner.user.id});await db.addProjectMemberByEmail(project.id,viewer.user.email,'viewer',{userId:owner.user.id});
   });
-  afterAll(async()=>{vi.restoreAllMocks();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(broker)await broker.close();await db.close();if(directory)await rm(directory,{recursive:true,force:true});for(const key of ['STORAGE_ROOT','APP_DEPLOYMENT_MODE','EXPERT_R_ENABLED','EXPERT_R_ACCESS_POLICY','EXPERT_R_SANDBOX_URL','EXPERT_R_SANDBOX_TOKEN']){if(savedEnv[key]===undefined)delete process.env[key];else process.env[key]=savedEnv[key];}});
+  afterAll(async()=>{vi.restoreAllMocks();if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}if(broker)await broker.close();await db.close();if(directory)await rm(directory,{recursive:true,force:true});for(const key of ['STORAGE_ROOT','APP_DEPLOYMENT_MODE','EXPERT_R_ENABLED','EXPERT_R_ACCESS_POLICY','EXPERT_R_SANDBOX_URL','EXPERT_R_SANDBOX_TOKEN',...policyKeys]){if(savedEnv[key]===undefined)delete process.env[key];else process.env[key]=savedEnv[key];}});
   const base=()=>'/api/private-r-kernels/'+project.id;
   const request=(suffix='',options={})=>http.api(server,base()+suffix,{token:owner.token,...options});
   const startInput=()=>({requestId:randomUUID(),workspaceId:'workspace_one',environment:broker.reference,inputs:[]});
@@ -48,6 +49,13 @@ describe.skipIf(!configured)('private R session service through authenticated HT
     const native=broker.calls.find(call=>call.path==='/kernels/start').input.inputs[0];expect(native).toMatchObject({checksumSha256:version.sha256,format:'csv',role:'input'});expect(native.internalStorageKey).toBeTruthy();expect(JSON.stringify(kernel)).not.toContain(native.internalStorageKey);
     await request('/'+kernel.id+'/stop',{method:'POST',body:{}});const row=(await db.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1',[version.versionId])).rows[0];await writeFile(provider.resolveKey(row.storage_key),'sample,condition\nS2,changed\n');
     const failed=await request('',{method:'POST',body:{...startInput(),inputs:[version.reference]}});expect(failed.status).toBe(409);expect(failed.data.code).toBe('ARTIFACT_INTEGRITY_FAILED');expect(broker.calls.filter(call=>call.path==='/kernels/start')).toHaveLength(1);
+  });
+  it('enforces configured per-file and total input limits before reserving or dispatching a session',async()=>{
+    const first=await file('first.rds',Buffer.alloc(60)),second=await file('second.rds',Buffer.alloc(60)),oversized=await file('oversized.rds',Buffer.alloc(81)),exact=await file('exact.rds',Buffer.alloc(80));
+    broker.hooks.streamedPublicationsEnabled=true;process.env.PRIVATE_R_MAX_INPUT_FILE_BYTES='80';process.env.PRIVATE_R_MAX_INPUT_TOTAL_BYTES='100';
+    for(const inputs of [[first.reference,second.reference],[oversized.reference]]){const rejected=await request('',{method:'POST',body:{...startInput(),inputs}});expect(rejected.status).toBe(413);expect(rejected.data.code).toBe('PRIVATE_KERNEL_INPUT_LIMIT');}
+    expect((await db.query('SELECT id FROM private_r_kernels')).rows).toHaveLength(0);expect(broker.calls.filter(call=>call.path==='/kernels/start')).toHaveLength(0);
+    const admitted=await start({...startInput(),inputs:[exact.reference]});expect(admitted.inputs[0].sizeBytes).toBe(80);
   });
   it('rechecks membership after checksum verification and declines admission if it was revoked',async()=>{
     const version=await file();const original=provider.openVerifiedRead.bind(provider);vi.spyOn(provider,'openVerifiedRead').mockImplementationOnce(async(...args)=>{const opened=await original(...args);await db.query('DELETE FROM project_members WHERE project_id=$1 AND user_id=$2',[project.id,owner.user.id]);return opened;});

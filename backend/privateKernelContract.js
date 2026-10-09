@@ -3,7 +3,7 @@
 const { createHash } = require('node:crypto');
 const { imageDimensions } = require('./artifactPreviews');
 const { validateEnvironmentReference, assertEnvironmentMatches } = require('./rEnvironment');
-const LIMITS = Object.freeze({ sourceBytes: 32768, resultBytes: 1048576, stdoutBytes: 65536, diagnosticBytes: 8192, tables: 2, rows: 100, columns: 30, cellCharacters: 2000, figures: 4, imageBytes: 262144, imagePixels: 12000000, executions: 500, inputs: 5, inputBytes: 250 * 1024 * 1024 });
+const LIMITS = Object.freeze({ sourceBytes: 32768, resultBytes: 1048576, stdoutBytes: 65536, diagnosticBytes: 8192, tables: 2, rows: 100, columns: 30, cellCharacters: 2000, figures: 4, imageBytes: 262144, imagePixels: 12000000, executions: 500, inputs: 5 });
 const KERNEL_ID = /^pk_[a-f0-9]{24}$/;
 const EXECUTION_ID = /^pex_[a-f0-9]{24}$/;
 const PUBLICATION_ID = /^pub_[a-f0-9]{24}$/;
@@ -81,7 +81,10 @@ function publicationResult(raw, kernel, publication, execution) {
   if (output && output.status!==raw.status) invalid();
   if (raw.status==='completed') {
     const file=raw.file;
-    if (!file || file.type!==publication.publication_type || file.format!==(file.type==='object'?'rds':'csv') || file.internalStorageKey!==publication.storage_key || !HASH.test(file.checksumSha256||'') || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes<1 || file.sizeBytes>20*1024*1024) invalid();
+    // A retained reservation binds this save, including receipt recovery after
+    // an administrator changes limits. Never substitute a new global ceiling.
+    const reservedBytes=Number(publication.reserved_bytes);
+    if (!Number.isSafeInteger(reservedBytes) || reservedBytes<1 || !file || file.type!==publication.publication_type || file.format!==(file.type==='object'?'rds':'csv') || file.internalStorageKey!==publication.storage_key || !HASH.test(file.checksumSha256||'') || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes<1 || file.sizeBytes>reservedBytes) invalid();
     return {...identity,publicationId:publication.id,executionId:execution.id,order:Number(execution.execution_order),status:raw.status,result:output,file:{type:file.type,format:file.format,internalStorageKey:file.internalStorageKey,checksumSha256:file.checksumSha256,sizeBytes:file.sizeBytes}};
   }
   if (raw.file) invalid();

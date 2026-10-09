@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const storage = require('./storage');
+const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const { brokerResourceLimits, createBrokerReadinessProbe } = require('./expertRuntimeReadiness');
 const { probeStorageReadiness } = require('./runtimeReadiness');
 const { MAX_ENVIRONMENT_BYTES, environmentBytes, summarizeEnvironmentManifest, assertEnvironmentMatches } = require('./rEnvironment');
@@ -512,10 +513,26 @@ function createExpertSandboxBroker(env = process.env) {
   const maxConcurrent = Number.isInteger(configuredConcurrent) && configuredConcurrent >= 1
     ? Math.min(2, configuredConcurrent) : 2;
   const minFreeBytes = positiveInteger(env.EXPERT_R_MIN_FREE_BYTES, DEFAULT_MIN_FREE_BYTES);
+  const configuredArtifactPolicy = getPrivateRArtifactPolicy(env);
+  const actualDiskReserveBytes = Math.max(configuredArtifactPolicy.diskReserveBytes,minFreeBytes);
+  if(actualDiskReserveBytes>64*1024**3)throw Object.assign(new Error('The private R disk reserve exceeds its supported policy bound.'),{code:'PRIVATE_R_POLICY_INVALID'});
+  const privateRArtifactPolicy = {...configuredArtifactPolicy,diskReserveBytes:actualDiskReserveBytes};
   let active = 0;
   let reservedWorkBytes = 0n;
   let reservedStorageBytes = 0n;
   const activeWorkspaces = new Set();
+  async function reserveKernelDisk(workBytes,durableBytes,diskReserveBytes) {
+    const work=BigInt(workBytes),durable=BigInt(durableBytes);
+    reservedWorkBytes+=work;reservedStorageBytes+=durable;
+    let released=false;
+    const release=()=>{if(released)return;released=true;reservedWorkBytes-=work;reservedStorageBytes-=durable;};
+    try {
+      const reserve=BigInt(Math.max(minFreeBytes,diskReserveBytes));
+      if(await pathsShareFilesystem(workRoot,provider.root))await assertFreeSpace(workRoot,reservedWorkBytes+reservedStorageBytes+reserve);
+      else {await assertFreeSpace(workRoot,reservedWorkBytes+reserve);await assertFreeSpace(provider.root,reservedStorageBytes+reserve);}
+      return release;
+    }catch{release();throw Object.assign(new Error('Private R disk capacity is temporarily unavailable. Free disk space before retrying.'),{code:'PRIVATE_KERNEL_STORAGE_PRESSURE',publicSafeHandlerError:true});}
+  }
   let reconcileTimer = null;
   let reconciliation = null;
   let runtimeVerified = false;
@@ -552,6 +569,8 @@ function createExpertSandboxBroker(env = process.env) {
           sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION, environment,
           persistentKernel: privateKernelStatus.state === 'ready' && observation.state === 'ready',
           persistentKernelPublications: privateKernelStatus.state === 'ready' && observation.state === 'ready' && privateKernelStatus.publications === true,
+          persistentKernelStreamedPublications: privateKernelStatus.state === 'ready' && observation.state === 'ready' && privateKernelStatus.streamedPublications === true,
+          privateRArtifactPolicy,
           persistentKernelInterrupt: privateKernelStatus.state === 'ready' && observation.state === 'ready' && privateKernelStatus.interrupt === true,
           readiness: { ...observation, resources: brokerResourceLimits(env, { timeoutMs, maxConcurrent,
             persistentKernel: privateKernelStatus.state === 'ready' }) } }));
@@ -567,6 +586,8 @@ function createExpertSandboxBroker(env = process.env) {
         sandboxImageDigest, resourcePolicyVersion: EXPERT_R_RESOURCE_POLICY_VERSION, environment,
         persistentKernel: privateKernelStatus.state === 'ready',
         persistentKernelPublications: privateKernelStatus.state === 'ready' && privateKernelStatus.publications === true,
+        persistentKernelStreamedPublications: privateKernelStatus.state === 'ready' && privateKernelStatus.streamedPublications === true,
+        privateRArtifactPolicy,
         persistentKernelInterrupt: privateKernelStatus.state === 'ready' && privateKernelStatus.interrupt === true,
         privateKernelStatus }));
     }
@@ -898,9 +919,9 @@ function createExpertSandboxBroker(env = process.env) {
     if (env.PRIVATE_R_KERNEL_ENABLED === 'true' && !kernelRuntime) {
       try {
         const { createPrivateKernelRuntime } = require('./privateKernelRuntime');
-        kernelRuntime = createPrivateKernelRuntime({ env, provider, environmentManifest });
+        kernelRuntime = createPrivateKernelRuntime({ env, provider, environmentManifest, reserveDiskImpl:reserveKernelDisk });
         const initialized = await kernelRuntime.initialize();
-        privateKernelStatus = { state: 'ready', publications: initialized.publications === true, interrupt: initialized.interrupt === true };
+        privateKernelStatus = { state: 'ready', publications: initialized.publications === true, streamedPublications: initialized.streamedPublications === true, interrupt: initialized.interrupt === true };
       } catch (error) {
         await kernelRuntime?.close().catch(() => {});
         kernelRuntime = null;

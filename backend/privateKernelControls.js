@@ -3,6 +3,7 @@
 const c = require('./privateKernelContract');
 const {validateEnvironmentManifest,summarizeEnvironmentManifest,assertEnvironmentMatches} = require('./rEnvironment');
 const {probeExpertRRuntime} = require('./expertRAccess');
+const {effectivePrivateRArtifactPolicy} = require('./privateRArtifactPolicy');
 const formats = {'org.r-project.rds':'rds','org.traceomics.seurat-checkpoint':'rds','org.ietf.csv':'csv','org.iana.tsv':'tsv','org.ietf.json':'json','org.ietf.text':'txt','org.w3.png':'png'};
 const active = ['starting','ready','running','unknown','stopping'];
 const failure = (code,message,status=409) => c.kernelError(code,message,status);
@@ -104,13 +105,14 @@ function createPrivateKernelControlService({db,client,artifacts,transaction,acce
   async function verifiedSnapshot(userId,projectId,kernel) {
     const manifest=validateEnvironmentManifest(await getEnvironment());
     assertEnvironmentMatches(kernel.environment_json,summarizeEnvironmentManifest(manifest));
-    const verified=[];let total=0;
+    const verified=[];let total=0;const artifactPolicy=kernel.inputs_json.length?effectivePrivateRArtifactPolicy(await probe()):null;
+    if(kernel.inputs_json.length&&!artifactPolicy)throw failure('PRIVATE_KERNEL_UNAVAILABLE','The private R input policy could not be verified. The existing session was not stopped.',503);
     for(const selection of kernel.inputs_json) {
       const opened=await artifacts.resolveVerified(userId,projectId,selection.reference,{purpose:'execution'});
       try {
         const version=opened.version;total+=version.sizeBytes;
         if(version.versionId!==selection.versionId || version.sha256!==selection.checksumSha256 || version.sizeBytes!==Number(selection.sizeBytes))throw failure('PRIVATE_KERNEL_INPUT_INTEGRITY','An original input version changed. The session was not restarted.');
-        if(version.sizeBytes>200*1024*1024 || total>c.LIMITS.inputBytes)throw failure('PRIVATE_KERNEL_INPUT_LIMIT','The original private R inputs exceed the bounded session input size.',413);
+        if(version.sizeBytes>artifactPolicy.maxInputFileBytes || total>artifactPolicy.maxInputTotalBytes)throw failure('PRIVATE_KERNEL_INPUT_LIMIT','The original private R inputs exceed the current configured file or total session input size. The existing session was not stopped.',413);
         verified.push({id:selection.id,versionId:version.versionId,type:version.type,format:formats[version.format.id]||'bin',name:version.name,internalStorageKey:opened.internalStorageKey,checksumSha256:version.sha256,sizeBytes:version.sizeBytes,role:selection.role});
       } finally {await opened.handle.close();}
     }

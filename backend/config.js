@@ -25,6 +25,7 @@
 
 const path = require('path');
 const rRuntime = require('./rRuntime');
+const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 
 const ALLOWED_NODE_ENVS = new Set(['development', 'test', 'production']);
 const ALLOWED_DEPLOYMENT_MODES = new Set(['private', 'byoc', 'shared-private', 'demo', 'public']);
@@ -511,6 +512,8 @@ function validateProductionConfig(options = {}) {
     errors.push('SESSION_EPOCH must be exactly 32 lowercase hexadecimal characters.');
   }
   if (!isProduction()) return errors;
+
+  try { getPrivateRArtifactPolicy(); } catch (error) { errors.push(error.message); }
 
   if (deploymentMode() === 'unknown') {
     errors.push('APP_DEPLOYMENT_MODE must be private, byoc, shared-private, demo, or public in production.');

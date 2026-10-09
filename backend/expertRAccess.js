@@ -4,6 +4,7 @@ const http = require('http');
 const https = require('https');
 const { EXPERT_R_PROFILE, EXPERT_R_RESOURCE_POLICY_VERSION, expertRSandboxEnabled } = require('./expertR');
 const { validateEnvironmentReference } = require('./rEnvironment');
+const { validatePrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 
 const DENIED_CAPABILITY = 'expert_r.denied';
 const EXECUTE_CAPABILITY = 'expert_r.execute';
@@ -68,6 +69,8 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500, readiness = 
           environment = validateEnvironmentReference(result.environment);
           if (environment.profileId !== result.profileId || environment.imageDigest !== result.sandboxImageDigest) throw new Error('Inconsistent environment');
         } catch { resolve({ state: 'incompatible' }); return; }
+        let privateRArtifactPolicy;
+        try { privateRArtifactPolicy = validatePrivateRArtifactPolicy(result.privateRArtifactPolicy); } catch { /* Legacy bounds remain available. */ }
         resolve({ state: readiness && result.readiness?.state !== 'ready'
           ? result.readiness?.state === 'unknown' ? 'unknown' : 'unavailable' : 'ready',
           profileId: result.profileId, imageDigest: result.sandboxImageDigest,
@@ -75,6 +78,8 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500, readiness = 
           persistentKernel: result.persistentKernel === true,
           persistentKernelInterrupt: result.persistentKernelInterrupt === true,
           persistentKernelPublications: result.persistentKernelPublications === true,
+          persistentKernelStreamedPublications: result.persistentKernelStreamedPublications === true,
+          ...(privateRArtifactPolicy ? { privateRArtifactPolicy } : {}),
           ...(readiness ? { readiness: result.readiness } : {}) });
       });
     });
@@ -95,7 +100,7 @@ function expertRStatus({ canExecuteExpertR, runtime, revoked = false, demoMode =
   else if (revoked) state = 'access-revoked';
   else if (state === 'ready' && !canExecuteExpertR) state = 'access-required';
   return { state, accessPolicy: expertRAccessPolicy(env), canExecute: canExecuteExpertR === true,
-    runtime: runtime.state === 'ready' ? runtime : { state: runtime.state },
+    runtime: state === 'ready' && canExecuteExpertR === true ? runtime : { state: runtime.state },
     setupCommand: 'node scripts/configure-private-r.js --help' };
 }
 

@@ -27,7 +27,9 @@ const KEYS = [
   'TRUST_PROXY_HOPS', 'WEB_SHUTDOWN_TIMEOUT_MS', 'WEB_DRAIN_DELAY_MS'
   , 'APP_DEPLOYMENT_MODE', 'DEMO_GUEST_TTL_SECONDS', 'DEMO_TEMPLATE_PROJECT_ID',
   'EXPERT_R_ENABLED', 'EXPERT_R_SANDBOX_URL', 'EXPERT_R_SANDBOX_TOKEN',
-  'DATABASE_SCHEMA_MANAGED_EXTERNALLY', 'DEMO_MAX_GLOBAL_HEAVY_JOBS'
+  'DATABASE_SCHEMA_MANAGED_EXTERNALLY', 'DEMO_MAX_GLOBAL_HEAVY_JOBS',
+  'PRIVATE_R_MAX_OUTPUT_BYTES', 'PRIVATE_R_MAX_INPUT_FILE_BYTES', 'PRIVATE_R_MAX_INPUT_TOTAL_BYTES',
+  'PRIVATE_R_MANAGED_QUOTA_BYTES', 'PRIVATE_R_DISK_RESERVE_BYTES', 'PRIVATE_R_TRANSFER_TIMEOUT_SECONDS'
 ];
 
 function setValidProduction(overrides = {}) {
@@ -391,5 +393,15 @@ describe('summary() secret hygiene', () => {
     expect(s.hasRApiToken).toBe(true);
     expect(serialized).not.toContain('top-secret-value');
     expect(serialized).not.toContain('password');
+  });
+});
+
+describe('production private R artifact policy', () => {
+  it('fails startup on malformed or inconsistent limits before admitting scientific work', () => {
+    setValidProduction({ PRIVATE_R_MAX_OUTPUT_BYTES: 'unlimited' });
+    expect(config.validateProductionConfig().join(' ')).toContain('PRIVATE_R_MAX_OUTPUT_BYTES');
+    process.env.PRIVATE_R_MAX_OUTPUT_BYTES = String(512 * 1024 ** 2);
+    process.env.PRIVATE_R_MAX_INPUT_TOTAL_BYTES = '1';
+    expect(config.validateProductionConfig().join(' ')).toContain('PRIVATE_R_MAX_INPUT_TOTAL_BYTES');
   });
 });

@@ -136,6 +136,12 @@ assert.equal(expertBroker.network_mode, 'service:namespace-anchor', 'Expert R br
 assert.equal(expertBroker.environment?.EXPERT_R_SANDBOX_HOST, '127.0.0.1', 'Expert R broker must bind only to private loopback');
 assert.equal(expertBroker.environment?.EXPERT_R_RUNTIME_ISOLATION, 'dedicated-rootless');
 assert.equal(expertBroker.environment?.DOCKER_HOST, 'unix:///run/expert-runtime/docker.sock');
+for (const name of ['PRIVATE_R_MAX_OUTPUT_BYTES', 'PRIVATE_R_MAX_INPUT_FILE_BYTES', 'PRIVATE_R_MAX_INPUT_TOTAL_BYTES',
+  'PRIVATE_R_MANAGED_QUOTA_BYTES', 'PRIVATE_R_DISK_RESERVE_BYTES', 'PRIVATE_R_TRANSFER_TIMEOUT_SECONDS']) {
+  assert.equal(expertBroker.environment?.[name], services.web.environment?.[name], `${name} must reach both admission and execution services`);
+  assert(Number.isSafeInteger(Number(expertBroker.environment?.[name])) && Number(expertBroker.environment[name]) > 0,
+    `${name} must have an explicit bounded default`);
+}
 assert(!(expertBroker.volumes || []).some((mount) => mount.source === '/var/run/docker.sock'), 'Expert R broker must not receive the system Docker socket');
 assert((expertBroker.volumes || []).some((mount) => mount.source === '/run/user/10001/docker.sock'
   && mount.target === '/run/expert-runtime/docker.sock'), 'Expert R broker requires its dedicated rootless runtime socket');
