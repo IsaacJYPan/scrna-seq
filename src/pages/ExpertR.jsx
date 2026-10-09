@@ -4,6 +4,8 @@ import { publicErrorMessage } from '../publicError';
 import REnvironment from '../components/REnvironment';
 import RConsole from '../components/RConsole';
 import PageHeader from '../components/PageHeader';
+import useExecutionTarget from '../runtime/useExecutionTarget';
+import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
 
 const STARTER = `# Your saved Seurat analysis is available as obj.
 # Selected private files are listed in input_manifest.
@@ -41,6 +43,7 @@ const ACCESS_MESSAGES = {
 };
 
 export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {}, userId, setActiveTab, onExpertRSubmitted }) {
+  const { blocked } = useExecutionTarget();
   const projectId = datasetInfo?.projectId || currentWs?.selectedProjectId || currentWs?.projects?.[0]?.id || null;
   const objects = useMemo(() => {
     const ownerId = Number(userId);
@@ -136,7 +139,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
 
   const submit = async (event) => {
     event.preventDefault();
-    if (!policy.expertREnabled || !profile || checkingRuntime) return;
+    if (blocked || !policy.expertREnabled || !profile || checkingRuntime) return;
     setBusy(true); setError('');
     try {
       const created = await window.electronAPI.createProjectJob(projectId, {
@@ -185,6 +188,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
   return (
     <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
       <form className="max-w-5xl mx-auto space-y-4" onSubmit={submit}>
+      {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Submitted work is not rerun automatically.</p>}
       <PageHeader title="Advanced analysis" icon={Code2} description="Use R for custom exploratory analysis on a private saved analysis." actions={
         <button type="button" className="btn btn-secondary" onClick={() => {
           if (consoleDetails.current) { consoleDetails.current.open = true; consoleDetails.current.scrollIntoView({ block: 'start' }); }
@@ -206,7 +210,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
         <div><h3 id="expert-r-inputs-title" className="font-medium">Private input files</h3><p className="mt-1 text-sm text-slate-400">Import bounded CSV, TSV, TXT, JSON, or RDS files. They stay private to you and are mounted read-only only for selected runs. RDS files remain untrusted and open only inside the isolated Expert R workspace.</p></div>
         <div className="flex flex-wrap items-center gap-2">
           <input className="min-w-0 max-w-full text-sm" aria-label="Choose private input" type="file" accept=".csv,.tsv,.txt,.json,.rds" onChange={(event) => setInputFile(event.target.files?.[0] || null)} />
-          <button type="button" className="btn btn-secondary text-xs" disabled={!inputFile || inputBusy} onClick={uploadInput}>{inputBusy ? 'Importing…' : 'Import file'}</button>
+          <button type="button" className="btn btn-secondary text-xs" disabled={blocked || !inputFile || inputBusy} onClick={uploadInput}>{inputBusy ? 'Importing…' : 'Import file'}</button>
         </div>
         {privateInputs.length > 0 ? <div className="grid gap-2 sm:grid-cols-2">{privateInputs.map((input) => {
           const selected = selectedInputIds.includes(input.id);
@@ -219,7 +223,7 @@ export default function ExpertR({ currentWs, datasetInfo, deploymentPolicy = {},
       <section className="card p-4 space-y-3" aria-labelledby="expert-r-script-title">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <label id="expert-r-script-title" htmlFor="expert-r-script" className="font-semibold">R script</label>
-          <button className="btn btn-primary" disabled={busy || checkingRuntime || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button>
+          <button className="btn btn-primary" disabled={blocked || busy || checkingRuntime || !objectId || !script.trim()}>{busy ? 'Starting…' : 'Run R analysis'}</button>
         </div>
         <p className="text-sm text-textMuted">Runs use the selected saved analysis and {selectedInputIds.length}/5 private input files. Variables reset between runs.</p>
         {selectedInputIds.length > 0 && <p className="text-sm text-textMuted break-all">Selected inputs: {privateInputs.filter((input) => selectedInputIds.includes(input.id)).map((input) => input.originalFilename).join(', ')}</p>}

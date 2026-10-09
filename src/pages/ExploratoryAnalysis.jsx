@@ -3,6 +3,8 @@ import Plot from '../components/Plot';
 import { BarChart3, Loader2, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
+import useExecutionTarget from '../runtime/useExecutionTarget';
+import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
 
 const JOB_TYPE = 'explore.summarize.v1';
 const TERMINAL = new Set(['completed', 'failed', 'canceled']);
@@ -66,6 +68,7 @@ export default function ExploratoryAnalysis({
   userId,
   theme = 'light',
 }) {
+  const { blocked } = useExecutionTarget();
   const [recipe, setRecipe] = useState('overview');
   const [features, setFeatures] = useState('MS4A1, CD3D, LST1');
   const [groupBy, setGroupBy] = useState('seurat_clusters');
@@ -110,13 +113,14 @@ export default function ExploratoryAnalysis({
   }, [projectId]);
 
   useEffect(() => {
-    if (!job?.id || TERMINAL.has(job.status)) return undefined;
+    if (blocked || !job?.id || TERMINAL.has(job.status)) return undefined;
     const timer = window.setInterval(() => refresh(job.id).catch(() => {}), 2000);
     return () => window.clearInterval(timer);
-  }, [job?.id, job?.status, refresh]);
+  }, [job?.id, job?.status, refresh, blocked]);
 
   const launch = async () => {
     setError('');
+    if (blocked) return setError(TARGET_DISCONNECTED_MESSAGE);
     if (!userEmail || !projectId || !analysisObjectId) return setError('Select a saved analysis first.');
     if (!canWrite) return setError('Your project role cannot start analyses.');
     if (!ownsObject) return setError('Create a branch from this saved version in your private analysis workspace before exploring it.');
@@ -142,6 +146,7 @@ export default function ExploratoryAnalysis({
     <div className="h-full overflow-y-auto p-4 sm:p-6 bg-background text-text">
       <div className="mx-auto max-w-6xl space-y-5">
         <PageHeader title="Exploratory Analysis" icon={BarChart3} description="Run guided recipes against a saved analysis. Outputs are aggregate summaries suitable for inspection and supplemental-figure drafting; no arbitrary code is accepted." />
+        {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Previously loaded summaries remain available.</p>}
 
         {!canLaunch && (
           <div role="note" className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-sm text-textMuted">
@@ -150,7 +155,7 @@ export default function ExploratoryAnalysis({
               : 'This is a read-only project view. Your role can inspect recorded results but cannot start a new analysis.'}
           </div>
         )}
-        <fieldset disabled={!canLaunch || busy} className="grid gap-4 rounded-xl border border-border bg-surface p-4 md:grid-cols-3 disabled:opacity-60">
+        <fieldset disabled={blocked || !canLaunch || busy} className="grid gap-4 rounded-xl border border-border bg-surface p-4 md:grid-cols-3 disabled:opacity-60">
           <label className="text-sm font-medium">Recipe
             <select className="input mt-1 w-full" value={recipe} onChange={event => setRecipe(event.target.value)}>
               <option value="overview">Dataset overview</option>
@@ -173,7 +178,7 @@ export default function ExploratoryAnalysis({
             <input className="input mt-1 w-full" value={metadataField} onChange={event => setMetadataField(event.target.value)} />
           </label>}
           <div className="flex items-end">
-            <button type="button" className="btn btn-primary flex items-center gap-2" onClick={launch} disabled={busy || !canLaunch}>
+            <button type="button" className="btn btn-primary flex items-center gap-2" onClick={launch} disabled={blocked || busy || !canLaunch}>
               {busy ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />} Run recipe
             </button>
           </div>

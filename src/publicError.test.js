@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PUBLIC_ERROR, isTransientComputeBusy, publicErrorMessage } from './publicError';
+import { TARGET_CHANGED_MESSAGE, TARGET_CHECKING_MESSAGE, TARGET_DISCONNECTED_MESSAGE, TARGET_UNCONFIRMED_MESSAGE } from './runtime/executionTarget';
 
 describe('publicErrorMessage', () => {
+  it('preserves fixed reconnect and unconfirmed-execution instructions', () => {
+    for (const message of [TARGET_CHANGED_MESSAGE,TARGET_CHECKING_MESSAGE,TARGET_DISCONNECTED_MESSAGE,TARGET_UNCONFIRMED_MESSAGE]) expect(publicErrorMessage(message)).toBe(message);
+  });
   it('preserves short actionable scientific and access feedback', () => {
     expect(publicErrorMessage('No cells matched these filters.')).toBe('No cells matched these filters.');
     expect(publicErrorMessage('Select a saved analysis before continuing.')).toBe('Select a saved analysis before continuing.');

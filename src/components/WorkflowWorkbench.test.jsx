@@ -36,7 +36,23 @@ beforeEach(() => {
     return instance;
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { delete window.desktopShell; vi.restoreAllMocks(); });
+
+it('blocks recipe execution during tunnel loss and retains results and local parameter drafts', async () => {
+  let notify;
+  const target={id:'lab',status:'connected',serviceIdentity:'selected-lab',sshTunnel:{state:'connected'}};
+  window.desktopShell={getCurrentTarget:async()=>target,onTargetStatus:listener=>{notify=listener;return()=>{};}};
+  render(<Workbench/>);
+  await screen.findByText('80');
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Run Quality Control'})).toBeEnabled());
+  act(()=>notify({...target,sshTunnel:{state:'disconnected'}}));
+  expect(screen.getByRole('button',{name:'Run Quality Control'})).toBeDisabled();
+  expect(screen.getByText('80')).toBeVisible();
+  fireEvent.change(screen.getByLabelText('Minimum features'),{target:{value:'20'}});
+  expect(screen.getByLabelText('Minimum features')).toHaveValue(20);
+  fireEvent.click(screen.getByRole('button',{name:'Run Quality Control'}));
+  expect(requests.some(request=>request.method==='POST')).toBe(false);
+});
 
 it('keeps applied output when a draft changes and submits settings only on Run', async () => {
   render(<Workbench />);

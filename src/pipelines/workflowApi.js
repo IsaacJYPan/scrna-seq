@@ -1,3 +1,5 @@
+import { withExecutionTarget } from '../runtime/executionTarget';
+
 const base = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 
 export function mergeWorkflowUpdate(current, incoming, replace = false) {
@@ -14,6 +16,7 @@ export function workflowUrl(projectId, suffix) {
   return `${base}/api/workflows/${encodeURIComponent(projectId)}/${suffix}`;
 }
 export async function workflowRequest(projectId, suffix, method = 'GET', body, signal) {
+  return withExecutionTarget(async () => {
   const response = await fetch(workflowUrl(projectId, suffix), {
     method, credentials: 'include', signal,
     headers: { 'Content-Type': 'application/json', 'X-Traceomics-Csrf': '1' },
@@ -22,4 +25,5 @@ export async function workflowRequest(projectId, suffix, method = 'GET', body, s
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || 'The workflow request failed.');
   return value;
+  }, { mutation: method !== 'GET' });
 }

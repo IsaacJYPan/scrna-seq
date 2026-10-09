@@ -4,6 +4,8 @@ import { invalidatedWorkflowSteps, workflowAvailability } from '../../shared/wor
 import { workflowParameters } from '../../shared/workflowPackage.mjs';
 import { workflowRequest, workflowUrl } from '../pipelines/workflowApi';
 import { useWorkflowRequest } from '../pipelines/useWorkflowRequest';
+import useExecutionTarget from '../runtime/useExecutionTarget';
+import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
 
 const inputClassName = 'w-full rounded-md border border-border bg-background px-3 py-2 text-text';
 
@@ -104,6 +106,7 @@ function StepPanel({ step, instance, projectId, update, enabled, request }) {
 }
 
 export default function WorkflowWorkbench({ instance, projectId, activeTab, onUpdate, onExit, enabled }) {
+  const { blocked } = useExecutionTarget();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [name, setName] = useState('');
@@ -121,9 +124,9 @@ export default function WorkflowWorkbench({ instance, projectId, activeTab, onUp
       } catch (error) { if (error.name !== 'AbortError') setError(error.message); }
       if (active) timer = setTimeout(refresh, 2000);
     };
-    refresh();
+    if (!blocked) refresh();
     return () => { active = false; clearTimeout(timer); };
-  }, [request, instance.id, onUpdate]);
+  }, [request, instance.id, onUpdate, blocked]);
   useEffect(() => {
     const controller = new AbortController();
     workflowRequest(projectId, 'snapshots', 'GET', undefined, controller.signal).then(setSnapshots).catch(error => { if (error.name !== 'AbortError') setError(error.message); });
@@ -136,6 +139,7 @@ export default function WorkflowWorkbench({ instance, projectId, activeTab, onUp
   return <div className="mx-auto max-w-6xl space-y-6 p-6 text-text">
     <div className="flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-2xl font-semibold">{instance.package.name}</h1><p className="text-sm text-textMuted">{instance.package.version} · Working results are temporary until saved.</p></div><button className="btn btn-secondary" onClick={onExit}>Back to Pipelines</button></div>
     {error && <p role="alert" className="text-danger">{error}</p>}
+    {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Retained results stay visible; no recipe step is rerun automatically.</p>}
     {instance.state.error && <p role="alert" className="text-danger">{instance.state.error}</p>}
     {notice && <p role="status">{notice}</p>}
     <div className="flex flex-wrap items-end gap-3">
@@ -169,6 +173,6 @@ export default function WorkflowWorkbench({ instance, projectId, activeTab, onUp
         }}>Delete</button>
       </li>)}</ul>
     </details>
-    {[tab.step, ...tab.plots].map(id => <StepPanel key={`${instance.id}:${restoration}:${id}`} step={instance.package.steps.find(step => step.id === id)} instance={instance} projectId={projectId} update={onUpdate} enabled={enabled} request={request} />)}
+    {[tab.step, ...tab.plots].map(id => <StepPanel key={`${instance.id}:${restoration}:${id}`} step={instance.package.steps.find(step => step.id === id)} instance={instance} projectId={projectId} update={onUpdate} enabled={enabled && !blocked} request={request} />)}
   </div>;
 }

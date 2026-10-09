@@ -1,7 +1,9 @@
 import { apiUrl } from '../api';
+import { withExecutionTarget } from '../runtime/executionTarget';
 
 const base = projectId => `/api/artifact-versions/${encodeURIComponent(projectId)}`;
 async function request(path, options = {}) {
+  return withExecutionTarget(async () => {
   let response;
   try {
     response = await fetch(apiUrl(path), { credentials: 'include', ...options, headers: { 'X-Traceomics-Csrf': '1', ...(options.headers || {}) } });
@@ -16,6 +18,7 @@ async function request(path, options = {}) {
   const message = typeof value?.error === 'string' && value.error.length <= 500 ? value.error : 'Artifact inspection failed.';
   if (!response.ok) throw Object.assign(new Error(message), { status: response.status, code: value?.code });
   return value;
+  }, { mutation: Boolean(options.method && options.method !== 'GET') });
 }
 export function listArtifactVersions(projectId, { signal, before, limit = 50 } = {}) {
   const query = new URLSearchParams({ limit: String(limit), ...(before ? { before } : {}) });

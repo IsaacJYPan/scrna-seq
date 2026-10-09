@@ -71,7 +71,7 @@ async function seed(env, account) {
 }
 
 async function createDesktopTunnelServiceFixture({ artifactDirectory,
-  hostname = 'analysis.tunnel.test', httpsPort = 0, webEnvironment = {} } = {}) {
+  hostname = 'analysis.tunnel.test', httpsPort = 0, webEnvironment = {}, configureEnvironment } = {}) {
   const reportRoot = path.join(root, 'playwright', 'report') + path.sep;
   const output = path.resolve(artifactDirectory || '');
   if (!output.startsWith(reportRoot) || !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/i.test(hostname)) {
@@ -170,6 +170,7 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
       R_API_TOKEN: crypto.randomBytes(32).toString('hex'), ENABLE_JOB_WORKER: 'false',
       WEB_DRAIN_DELAY_MS: '20', WEB_SHUTDOWN_TIMEOUT_MS: '10000',
       DATABASE_SCHEMA_MANAGED_EXTERNALLY: 'true' };
+    if (configureEnvironment) Object.assign(env, await configureEnvironment({ env, privateDirectory }));
     const project = await seed({ ...env, NODE_ENV: 'test', DATABASE_SCHEMA_MANAGED_EXTERNALLY: 'false' }, account);
     web = spawn(process.execPath, [path.join(root, 'server.js')], { cwd: root, env, shell: false,
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });

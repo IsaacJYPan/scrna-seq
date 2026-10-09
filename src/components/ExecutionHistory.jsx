@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getExecutionEnvironment, getExecutionHistory, listExecutionHistory } from '../executions/executionHistoryApi';
 import { artifactImageUrl, getArtifactVersion, previewArtifactVersion } from '../artifacts/artifactApi';
+import ExecutionTargetEvidence from './ExecutionTargetEvidence';
+import useExecutionTarget from '../runtime/useExecutionTarget';
+import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
 
 const kinds = { all: 'All executions', guided: 'Guided jobs', workflow: 'Recipe steps', 'expert-r': 'Expert R jobs', 'live-r': 'Live R changes', 'r-console':'Private R console', provenance: 'Imported provenance' };
 const date = value => value ? new Date(value).toLocaleString() : 'Not recorded';
@@ -16,11 +19,13 @@ function ArtifactRows({ items, onInspect }) {
 }
 
 export default function ExecutionHistory({ projectId, userId }) {
+  const connection = useExecutionTarget();
+  const scope = `${projectId}:${userId}:${connection.identity}`;
   const [kind, setKind] = useState('all'); const [items, setItems] = useState([]); const [cursor, setCursor] = useState(null);
   const [selected, setSelected] = useState(null); const [detail, setDetail] = useState(null); const [error, setError] = useState('');
   const [loading, setLoading] = useState(false); const [opening, setOpening] = useState(false);
   const [inspection, setInspection] = useState(null); const [manifest, setManifest] = useState(null); const [inspecting, setInspecting] = useState(false);
-  const listRequest = useRef(null); const detailRequest = useRef(null); const inspectionRequest = useRef(null); const project = useRef(projectId); project.current = projectId;
+  const listRequest = useRef(null); const detailRequest = useRef(null); const inspectionRequest = useRef(null); const project = useRef(scope); project.current = scope;
   const clearPrivateDetails = () => { setDetail(null); setSelected(null); setInspection(null); setManifest(null); };
   const refresh = useCallback(async before => {
     if (!projectId) return;
@@ -28,22 +33,23 @@ export default function ExecutionHistory({ projectId, userId }) {
     setLoading(true); setError('');
     try {
       const result = await listExecutionHistory(projectId, { before, kind, signal: controller.signal });
-      if (controller.signal.aborted || project.current !== projectId) return;
+      if (controller.signal.aborted || project.current !== scope) return;
       setItems(current => before ? [...current, ...result.items.filter(item => !current.some(old => old.id === item.id))] : result.items); setCursor(result.nextCursor);
     } catch (failure) { if (!controller.signal.aborted) { setError(failure.message); if ([403, 404].includes(failure.status)) { setItems([]); setCursor(null); clearPrivateDetails(); } } }
     finally { if (!controller.signal.aborted) setLoading(false); }
-  }, [projectId, kind]);
+  }, [projectId, kind, scope]);
   useEffect(() => {
     setItems([]); setCursor(null); clearPrivateDetails(); setError(''); setOpening(false); setInspecting(false); refresh();
     return () => { listRequest.current?.abort(); detailRequest.current?.abort(); inspectionRequest.current?.abort(); };
   }, [refresh]);
   const open = async item => {
+    if (connection.blocked) { setError(TARGET_DISCONNECTED_MESSAGE); return; }
     detailRequest.current?.abort(); inspectionRequest.current?.abort(); const controller = new AbortController(); detailRequest.current = controller;
     setSelected(item); setDetail(null); setInspection(null); setManifest(null); setError(''); setOpening(true); setInspecting(false);
     if (!item.detailAvailable) { setOpening(false); return; }
     try {
       const result = await getExecutionHistory(projectId, item.id, controller.signal);
-      if (!controller.signal.aborted && project.current === projectId) setDetail(result);
+      if (!controller.signal.aborted && project.current === scope) setDetail(result);
     } catch (failure) { if (!controller.signal.aborted) { setError(failure.message); if ([403, 404].includes(failure.status)) clearPrivateDetails(); } }
     finally { if (!controller.signal.aborted) setOpening(false); }
   };
@@ -55,20 +61,21 @@ export default function ExecutionHistory({ projectId, userId }) {
       if (current.sha256 !== artifact.reference.sha256 || current.projectId !== artifact.reference.projectId) throw new Error('The saved artifact reference no longer matches this execution.');
       const result = await previewArtifactVersion(projectId, artifact.reference.versionId, { signal: controller.signal, limit: 10 });
       if (result.version.sha256 !== artifact.reference.sha256) throw new Error('The saved artifact reference no longer matches this execution.');
-      if (!controller.signal.aborted && project.current === projectId) setInspection({ ...result, name: artifact.name });
+      if (!controller.signal.aborted && project.current === scope) setInspection({ ...result, name: artifact.name });
     } catch (failure) { if (!controller.signal.aborted) { setError(failure.message); if ([403, 404].includes(failure.status)) clearPrivateDetails(); } }
     finally { if (!controller.signal.aborted) setInspecting(false); }
   };
   const inspectEnvironment = async () => {
     inspectionRequest.current?.abort(); const controller = new AbortController(); inspectionRequest.current = controller;
     setInspection(null); setManifest(null); setInspecting(true); setError('');
-    try { const result = await getExecutionEnvironment(projectId, detail.id, controller.signal); if (!controller.signal.aborted && project.current === projectId) setManifest(result); }
+    try { const result = await getExecutionEnvironment(projectId, detail.id, controller.signal); if (!controller.signal.aborted && project.current === scope) setManifest(result); }
     catch (failure) { if (!controller.signal.aborted) { setError(failure.message); if ([403, 404].includes(failure.status)) clearPrivateDetails(); } }
     finally { if (!controller.signal.aborted) setInspecting(false); }
   };
   if (!projectId) return null;
   const preview = inspection?.preview;
   return <section aria-label="Execution history" className="rounded-xl border border-border bg-surface/50 p-5 space-y-4">
+    {connection.blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Previously loaded evidence remains visible. Reconnect and refresh to inspect current status.</p>}
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-lg font-semibold">Execution history</h3><p className="text-sm text-textMuted">Review recorded inputs, methods, environments, and results. Missing replay evidence is shown explicitly.</p></div><button className="btn btn-secondary text-sm" disabled={loading} onClick={() => refresh()}>{loading ? 'Refreshing executions…' : 'Refresh executions'}</button></div>
     <label className="text-sm">Execution category<select aria-label="Execution category" className="input ml-2" value={kind} onChange={event => setKind(event.target.value)}>{Object.entries(kinds).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
     {error && <p role="alert" className="text-danger text-sm">{error}</p>}
@@ -83,6 +90,8 @@ export default function ExecutionHistory({ projectId, userId }) {
           <h4 className="font-semibold break-words">{detail.operation} · {detail.outcome||detail.status}</h4>
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs"><dt>Record</dt><dd className="break-all">{detail.id}</dd><dt>Evidence</dt><dd>{precision(detail.origin)}</dd><dt>Queued/recorded</dt><dd>{date(detail.timestamps.createdAt)}</dd><dt>R event time</dt><dd>{date(detail.timestamps.recordedAt)}</dd><dt>Started</dt><dd>{date(detail.timestamps.startedAt)}</dd><dt>Finished</dt><dd>{date(detail.timestamps.completedAt)}</dd><dt>Target</dt><dd>{detail.target.id || 'Not recorded'} · {precision(detail.target.precision)}</dd></dl>
           {detail.target.note && <p className="text-xs text-textMuted">{detail.target.note}</p>}
+          <ExecutionTargetEvidence target={detail.target}/>
+          {detail.executionAttempts?.length > 0 && <details className="text-xs"><summary>Retained dispatches · {detail.executionAttempts.length}</summary><ul className="space-y-3 mt-2">{detail.executionAttempts.map(attempt => <li key={attempt.dispatchId} className="space-y-2"><p>Attempt {attempt.attempt} · {date(attempt.dispatchAt)} · {attempt.operation}</p><p className="break-all font-mono">Dispatch {attempt.dispatchId}</p><ExecutionTargetEvidence target={attempt.target}/><p>Environment · {precision(attempt.environment?.precision)}</p>{attempt.environment?.reference && <pre className="whitespace-pre-wrap break-all">{JSON.stringify(attempt.environment.reference, null, 2)}</pre>}</li>)}</ul></details>}
           <div className="rounded border border-amber-500/30 p-3 text-xs"><p className="font-medium">Replay evidence incomplete</p><ul className="list-disc pl-4 mt-2 space-y-1">{detail.replay.issues.map(issue => <li key={issue.code}>{issue.message}</li>)}</ul></div>
           <details className="text-xs"><summary>Executed source · {precision(detail.source.precision)}</summary><div className="mt-2 space-y-2">{detail.source.versionId && <p className="break-all">Private source version {detail.source.versionId}</p>}{detail.source.sha256 && <p className="break-all font-mono">SHA-256 {detail.source.sha256}</p>}{detail.source.package && <p className="break-all">Recipe {detail.source.package.id}@{detail.source.package.version} · step {detail.source.package.stepId} · package SHA-256 {detail.source.package.sha256}</p>}{detail.source.note && <p className="text-textMuted">{detail.source.note}</p>}{detail.source.code && <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border p-3">{detail.source.code}</pre>}</div></details>
           <details className="text-xs"><summary>Parameters · {precision(detail.parameters.precision)}</summary><pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify({ values: detail.parameters.values, seed: detail.parameters.seed }, null, 2)}</pre></details>
