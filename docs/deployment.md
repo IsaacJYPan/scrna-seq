@@ -158,9 +158,10 @@ contains a credential and must remain private.
 
 New setup also selects `PRIVATE_R_KERNEL_ENABLED=true`. With the current pinned
 R image, the broker independently verifies IRkernel and the reference Jupyter
-client before advertising persistent sessions. Named object/table export support
-is probed separately: images with the older kernel adapter can still run console
-commands while output saving remains unavailable. Older images can continue
+client before advertising persistent sessions. Named object/table export and
+cooperative interruption support are probed independently. Images with older
+kernel adapters can still run console commands while their unsupported controls
+remain unavailable. Older images can continue
 one-shot R; the console reports missing kernel support separately. Existing
 installations can enable the flag in their private environment file and rebuild
 and pin the current R image. No kernel connection file or port is published.
@@ -188,7 +189,24 @@ the version and source/input/environment lineage together. Pending or unconfirme
 saves retain quota reservations. Completed versions survive stopping or restoring
 the session; unsaved R memory does not. Backups include publication receipts and
 managed output files, and restore marks unfinished saves unconfirmed without
-rerunning them. Cooperative interruption and restart remain separate work.
+rerunning them.
+
+Interrupt targets the exact active command and session generation. The broker
+confirms both R's matching terminal reply and its idle state before permitting
+another command. Interrupted commands retain their exact source and a distinct
+history outcome; partial tables and figures cannot be saved. R may already have
+changed variables before interruption, so inspect working memory before continuing.
+If interruption cannot be confirmed, the runtime stops the owned container and
+reports the session as unconfirmed until inspected. It never assumes that a
+signal canceled a command or automatically reruns source.
+
+Restart explicitly discards unsaved working memory. The server confirms the old
+runtime is stopped and verifies the original exact input versions and environment
+before creating a fresh session and generation. It reloads those inputs without
+replaying earlier commands. The old journal, saved versions, restart receipt, and
+link to the replacement remain available. Repeating the same restart request
+inspects its recorded result instead of starting another session. Restore marks
+unfinished restart receipts unconfirmed; it does not resume them automatically.
 
 New setup selects `EXPERT_R_ACCESS_POLICY=project-roles`: project owners, admins,
 and analysts can run their own saved analyses without an individual operator

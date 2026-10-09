@@ -11,6 +11,7 @@ const { validateEnvironmentManifest, summarizeEnvironmentManifest, validateEnvir
 const { createPrivateKernelClient } = require('./privateKernelClient');
 const c = require('./privateKernelContract');
 const { createPrivateKernelPublicationService } = require('./privateKernelPublications');
+const { createPrivateKernelControlService } = require('./privateKernelControls');
 const ACTIVE = ['starting','ready','running','unknown','stopping'];
 const id = prefix => prefix + '_' + crypto.randomBytes(12).toString('hex');
 const time = value => value == null ? null : new Date(value).toISOString();
@@ -41,13 +42,15 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
   async function owned(userId, projectId, kernelId) {
     if (!c.KERNEL_ID.test(kernelId || '')) throw missing();
     const row = (await db.query('SELECT * FROM private_r_kernels WHERE id=$1 AND project_id=$2 AND owner_user_id=$3',[kernelId,projectId,userId])).rows[0];
-    if (!row) throw missing(); return row;
+    if (!row) throw missing();
+    row.restart_receipt=(await db.query('SELECT request_id,status,replacement_kernel_id FROM private_r_kernel_restarts WHERE kernel_id=$1',[kernelId])).rows[0]||null;
+    return row;
   }
   function session(row) {
-    return { id:row.id,projectId:row.project_id,workspaceId:row.workspace_id,analysisObjectId:row.analysis_object_id,status:row.status,generation:row.runtime_generation,environment:row.environment_json,inputs:row.inputs_json,resources:row.resources_json,target:row.target_json,nextOrder:Number(row.next_order),activeExecutionId:row.active_execution_id,createdAt:time(row.created_at),startedAt:time(row.started_at),expiresAt:time(row.expires_at),stoppedAt:time(row.stopped_at),memoryState:['ready','running'].includes(row.status)?'available':['stopped','failed'].includes(row.status)?'lost':'unknown',replay:{complete:false,issues:['Variables and files in kernel memory are unsaved. Selected input versions and ordered source alone do not capture every intermediate value.','Console previews are journal evidence. Explicitly saved outputs retain artifact versions; other variables and files remain unsaved.']}};
+    return { id:row.id,projectId:row.project_id,workspaceId:row.workspace_id,analysisObjectId:row.analysis_object_id,status:row.status,generation:row.runtime_generation,restartedFromKernelId:row.restarted_from_kernel_id||null,restart:row.restart_receipt?{requestId:row.restart_receipt.request_id,status:row.restart_receipt.status,replacementKernelId:row.restart_receipt.replacement_kernel_id}:null,environment:row.environment_json,inputs:row.inputs_json,resources:row.resources_json,target:row.target_json,nextOrder:Number(row.next_order),activeExecutionId:row.active_execution_id,createdAt:time(row.created_at),startedAt:time(row.started_at),expiresAt:time(row.expires_at),stoppedAt:time(row.stopped_at),memoryState:['ready','running'].includes(row.status)?'available':['stopped','failed'].includes(row.status)?'lost':'unknown',replay:{complete:false,issues:['Variables and files in kernel memory are unsaved. Selected input versions and ordered source alone do not capture every intermediate value.','Console previews are journal evidence. Explicitly saved outputs retain artifact versions; other variables and files remain unsaved.']}};
   }
   function receipt(row, detail = false) {
-    return { id:row.id,kernelId:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),status:row.status,sourceSha256:row.source_sha256,createdAt:time(row.created_at),startedAt:time(row.started_at),completedAt:time(row.completed_at),...(detail?{source:row.source_code,result:row.result_json}:{}),completionKnown:['completed','failed'].includes(row.status) };
+    return { id:row.id,kernelId:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),status:row.status,sourceSha256:row.source_sha256,createdAt:time(row.created_at),startedAt:time(row.started_at),completedAt:time(row.completed_at),...(row.status==='failed'&&row.result_json?.interrupted===true&&row.result_json.error?.code==='PRIVATE_KERNEL_INTERRUPTED'?{interrupted:true}:{}),...(detail?{source:row.source_code,result:row.result_json}:{}),completionKnown:['completed','failed'].includes(row.status) };
   }
   async function stopRow(row) {
     if (!ACTIVE.includes(row.status)) return row;
@@ -58,7 +61,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     try { const response = await client.stop(c.scope(row),row.id); stopped = response?.ok === true && response.kernelId === row.id && response.status === 'stopped' && (!row.runtime_generation || response.generation === row.runtime_generation); } catch { /* An unconfirmed stop must not imply recovered memory. */ }
     await transaction(async connection => {
       await connection.query("UPDATE private_r_executions SET status='unknown',updated_at=NOW() WHERE kernel_id=$1 AND status IN ('reserved','running')",[row.id]);
-      await connection.query(`UPDATE private_r_kernels SET status=$2,active_execution_id=NULL,stopped_at=CASE WHEN $2='stopped' THEN NOW() ELSE stopped_at END,updated_at=NOW() WHERE id=$1 AND status=ANY($3::text[])`,[row.id,stopped?'stopped':'unknown',ACTIVE]);
+      await connection.query(`UPDATE private_r_kernels SET status=$2,active_execution_id=NULL,active_control_id=NULL,stopped_at=CASE WHEN $2='stopped' THEN NOW() ELSE stopped_at END,updated_at=NOW() WHERE id=$1 AND status=ANY($3::text[])`,[row.id,stopped?'stopped':'unknown',ACTIVE]);
     });
     if(stopped)await publications.afterStop(row);
     return owned(row.owner_user_id,row.project_id,row.id);
@@ -70,7 +73,10 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     await transaction(async connection => {
       const current = (await connection.query('SELECT * FROM private_r_executions WHERE id=$1 FOR UPDATE',[execution.id])).rows[0];
       if (!current) return;
-      if(['completed','failed'].includes(current.status)) {await connection.query("UPDATE private_r_kernels SET status=CASE WHEN status IN ('stopping','stopped','failed') THEN status ELSE 'ready' END,active_execution_id=NULL,updated_at=NOW() WHERE id=$1 AND active_execution_id=$2 AND runtime_generation=$3",[row.id,execution.id,row.runtime_generation]);return;}
+      if(['completed','failed'].includes(current.status)) {
+        if(['completed','failed'].includes(result.status))await connection.query("UPDATE private_r_kernels SET status=CASE WHEN status IN ('stopping','stopped','failed') THEN status ELSE 'ready' END,active_execution_id=NULL,updated_at=NOW() WHERE id=$1 AND runtime_generation=$3 AND next_order=$4 AND (active_execution_id=$2 OR active_execution_id IS NULL)",[row.id,execution.id,row.runtime_generation,Number(execution.execution_order)]);
+        return;
+      }
       const terminal = ['completed','failed'].includes(result.status);
       await connection.query('UPDATE private_r_executions SET status=$2,result_json=$3,started_at=COALESCE($4,started_at),completed_at=$5,updated_at=NOW() WHERE id=$1',[execution.id,terminal?result.status:result.status==='executing'?'running':'unknown',terminal?result:null,result.startedAt||null,result.completedAt||null]);
       await connection.query(`UPDATE private_r_kernels SET status=CASE WHEN status IN ('stopping','stopped','failed') THEN status ELSE $2 END,active_execution_id=CASE WHEN status IN ('stopping','stopped','failed') OR $3 THEN NULL ELSE active_execution_id END,last_activity_at=NOW(),updated_at=NOW() WHERE id=$1 AND runtime_generation=$4`,[row.id,terminal?'ready':result.status==='executing'?'running':'unknown',terminal,row.runtime_generation]);
@@ -78,15 +84,30 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
   }
   async function reconcile(row) {
     if (!ACTIVE.includes(row.status)) return row;
+    if(row.status==='starting'&&row.restarted_from_kernel_id) {
+      const pending=(await db.query("SELECT updated_at FROM private_r_kernel_restarts WHERE replacement_kernel_id=$1 AND status='starting'",[row.id])).rows[0];
+      if(pending&&now()-Date.parse(pending.updated_at)<150000)return row;
+    }
     if (Date.parse(row.expires_at)<=now()) return stopRow(row);
     const publishing = await publications.reconcileActive(row);
     if (publishing) return publishing;
     try {
       const observed = c.state(await client.inspect(c.scope(row),row.id),row);
+      if(row.active_control_id&&observed.status==='ready') {
+        const latest=observed.lastExecution?.result||observed.lastExecution;
+        const entry=latest?.executionId?(await db.query('SELECT * FROM private_r_executions WHERE id=$1 AND kernel_id=$2 AND owner_user_id=$3',[latest.executionId,row.id,row.owner_user_id])).rows[0]:null;
+        if(entry&&Number(entry.execution_order)===Number(row.next_order)) {
+          const confirmed=c.result(latest,row,entry);
+          if(['completed','failed'].includes(confirmed.status)) {
+            await finalize(row,entry,confirmed);
+            await db.query('UPDATE private_r_kernels SET active_control_id=NULL,updated_at=NOW() WHERE id=$1 AND active_control_id=$2 AND runtime_generation=$3 AND next_order=$4',[row.id,row.active_control_id,row.runtime_generation,Number(row.next_order)]);
+          }
+        }
+      }
       if (row.active_execution_id) {
         const execution = (await db.query('SELECT * FROM private_r_executions WHERE id=$1 AND kernel_id=$2',[row.active_execution_id,row.id])).rows[0];
         const latest=observed.lastExecution?.result || observed.lastExecution;
-        if (execution && latest?.executionId === execution.id && latest.stdout !== undefined) await finalize(row,execution,c.result(latest,row,execution));
+        if (execution && latest?.executionId === execution.id && latest.stdout !== undefined && ['ready','stopped'].includes(observed.status)) await finalize(row,execution,c.result(latest,row,execution));
         else if (execution && !['completed','failed'].includes(execution.status) && observed.status!=='executing' && observed.status!=='starting') await finalize(row,execution,{status:'unknown'});
       }
       const status = {ready:'ready',executing:'running',starting:'starting',unknown:'unknown',stopped:'stopped'}[observed.status];
@@ -102,7 +123,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     try { await access(userId,projectId); } catch(error) { const rows=(await db.query('SELECT * FROM private_r_kernels WHERE project_id=$1 AND owner_user_id=$2 AND status=ANY($3::text[]) LIMIT 4',[projectId,userId,ACTIVE])).rows; for(const row of rows) await stopRow(row); throw error; }
     const limit=Number(options.limit??10); if(!Number.isSafeInteger(limit)||limit<1||limit>10||options.workspaceId!==undefined&&!/^[A-Za-z0-9_-]{1,120}$/.test(options.workspaceId)) throw c.kernelError('PRIVATE_KERNEL_PAGE_INVALID','Select 1–10 sessions and a valid workspace.');
     const rows=(await db.query(`SELECT * FROM private_r_kernels WHERE project_id=$1 AND owner_user_id=$2${options.workspaceId?' AND workspace_id=$4':''} ORDER BY created_at DESC,id DESC LIMIT $3`,[projectId,userId,limit,...(options.workspaceId?[options.workspaceId]:[])])).rows;
-    const items=[]; for(const row of rows) items.push(session(await reconcile(row))); await access(userId,projectId); return {items};
+    const items=[]; for(const row of rows) {const current=await reconcile(row);if(!current.restart_receipt)current.restart_receipt=(await db.query('SELECT request_id,status,replacement_kernel_id FROM private_r_kernel_restarts WHERE kernel_id=$1',[row.id])).rows[0]||null;items.push(session(current));} await access(userId,projectId); return {items};
   }
   function startInput(input) {
     if(!input||Object.keys(input).some(key=>!['requestId','workspaceId','analysisObjectId','environment','inputs'].includes(key))||!c.UUID.test(input.requestId||'')||!/^[A-Za-z0-9_-]{1,120}$/.test(input.workspaceId||'')||input.analysisObjectId!=null&&(!/^[A-Za-z0-9_-]{1,120}$/.test(input.analysisObjectId))||!Array.isArray(input.inputs)||input.inputs.length>c.LIMITS.inputs) throw c.kernelError('PRIVATE_KERNEL_REQUEST_INVALID','Select a workspace, exact environment, and at most five input versions.');
@@ -163,7 +184,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
       await lockedAccess(connection,userId,projectId); row=(await connection.query('SELECT * FROM private_r_kernels WHERE id=$1 FOR UPDATE',[kernelId])).rows[0];
       const prior=(await connection.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 AND request_id=$2',[kernelId,input.requestId])).rows[0];
       if(prior) { if(prior.source_sha256!==hash) throw c.kernelError('PRIVATE_KERNEL_REQUEST_CONFLICT','This command request already refers to different R source.',409); return {entry:prior,repeated:true}; }
-      if(row.status!=='ready'||row.active_execution_id||Date.parse(row.expires_at)<=now()) throw c.kernelError('PRIVATE_KERNEL_NOT_READY','The session is busy, expired, or its completion is unknown. Inspect its status before continuing.',409);
+      if(row.status!=='ready'||row.active_execution_id||row.active_control_id||Date.parse(row.expires_at)<=now()) throw c.kernelError('PRIVATE_KERNEL_NOT_READY','The session is busy, expired, or its completion is unknown. Inspect its status before continuing.',409);
       if(Number(row.next_order)>=c.LIMITS.executions) throw c.kernelError('PRIVATE_KERNEL_JOURNAL_LIMIT','This session reached its retained-command limit. Start a new session.',409);
       const entry=(await connection.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,'reserved',$8,$9) RETURNING *`,[id('pex'),kernelId,projectId,userId,input.requestId,row.runtime_generation,Number(row.next_order)+1,code,hash])).rows[0];
       await connection.query("UPDATE private_r_kernels SET status='running',next_order=$2,active_execution_id=$3,last_activity_at=NOW(),updated_at=NOW() WHERE id=$1",[kernelId,entry.execution_order,entry.id]); return {entry};
@@ -177,6 +198,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
   }
   async function stop(userId,projectId,kernelId) { const row=await owned(userId,projectId,kernelId); await checked(row); const result=await stopRow(row); await access(userId,projectId); return session(result); }
   const publications=createPrivateKernelPublicationService({db,provider,client,artifacts,transaction,access,lockedAccess,owned,checked,probe:options.probeCapabilities||require('./expertRAccess').probeExpertRRuntime});
-  return {list,start,get,execute,execution,executions,stop,publish:publications.publish,publications:publications.list};
+  const controls=createPrivateKernelControlService({db,client,artifacts,transaction,access,lockedAccess,owned,checked,stopRow,session,receipt,finalize,reconcile,publications,getEnvironment,now,maxOwner,maxActive,id,probe:options.probeCapabilities||require('./expertRAccess').probeExpertRRuntime});
+  return {list,start,get,execute,execution,executions,stop,interrupt:controls.interrupt,restart:controls.restart,restartStatus:controls.restartStatus,publish:publications.publish,publications:publications.list};
 }
 module.exports={createPrivateKernelService};

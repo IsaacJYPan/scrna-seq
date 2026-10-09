@@ -66,6 +66,7 @@ function probeExpertRRuntime(env = process.env, { timeoutMs = 1500 } = {}) {
         resolve({ state: 'ready', profileId: result.profileId, imageDigest: result.sandboxImageDigest,
           resourcePolicyVersion: result.resourcePolicyVersion, environment,
           persistentKernel: result.persistentKernel === true,
+          persistentKernelInterrupt: result.persistentKernelInterrupt === true,
           persistentKernelPublications: result.persistentKernelPublications === true });
       });
     });

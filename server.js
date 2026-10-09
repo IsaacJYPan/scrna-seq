@@ -1982,6 +1982,7 @@ app.get('/api/expert-r/capabilities', async (req, res) => {
       expertRProfile: enabled ? EXPERT_R_PROFILE : null,
       expertREnvironment: enabled ? runtime.environment || null : null,
       persistentKernel: enabled && runtime.persistentKernel === true,
+      persistentKernelInterrupt: enabled && runtime.persistentKernelInterrupt === true,
       persistentKernelPublications: enabled && runtime.persistentKernelPublications === true,
       expertRStatus: expertRStatus({ canExecuteExpertR, runtime,
         revoked: expertRAccessRevoked, demoMode: config.demoMode() }),

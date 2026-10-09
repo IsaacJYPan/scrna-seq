@@ -10,6 +10,9 @@ function privateKernelRoutes({db,provider,requireAuth,serviceOptions}) {
   router.post('/:projectId',route(req=>service.start(req.user.id,req.params.projectId,req.body)));
   router.get('/:projectId/:kernelId',route(req=>service.get(req.user.id,req.params.projectId,req.params.kernelId)));
   router.post('/:projectId/:kernelId/stop',route(req=>service.stop(req.user.id,req.params.projectId,req.params.kernelId)));
+  router.post('/:projectId/:kernelId/interrupt',route(req=>service.interrupt(req.user.id,req.params.projectId,req.params.kernelId,req.body)));
+  router.post('/:projectId/:kernelId/restart',route(req=>service.restart(req.user.id,req.params.projectId,req.params.kernelId,req.body)));
+  router.get('/:projectId/:kernelId/restart',route(req=>service.restartStatus(req.user.id,req.params.projectId,req.params.kernelId)));
   router.post('/:projectId/:kernelId/executions',route(req=>service.execute(req.user.id,req.params.projectId,req.params.kernelId,req.body)));
   router.get('/:projectId/:kernelId/executions',route(req=>service.executions(req.user.id,req.params.projectId,req.params.kernelId,req.query)));
   router.get('/:projectId/:kernelId/executions/:executionId',route(req=>service.execution(req.user.id,req.params.projectId,req.params.kernelId,req.params.executionId)));

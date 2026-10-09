@@ -134,17 +134,22 @@ async function finalizeRestoredSecurityState(postgresConfig = config.postgresCon
              locked_at = NULL
        WHERE status IN ('queued', 'running')
     `);
-    let stoppedKernels=0,unknownExecutions=0,unknownPublications=0;
+    let stoppedKernels=0,unknownExecutions=0,unknownPublications=0,unknownRestarts=0;
     // Older backups predate private sessions. Restoring them must not require
     // creating new tables or pretend that volatile runtime memory was saved.
     const kernels=await client.query("SELECT to_regclass('public.private_r_kernels') AS name");
     const executions=await client.query("SELECT to_regclass('public.private_r_executions') AS name");
     const publications=await client.query("SELECT to_regclass('public.private_r_publications') AS name");
+    const restarts=await client.query("SELECT to_regclass('public.private_r_kernel_restarts') AS name");
+    if(restarts.rows[0]?.name) unknownRestarts=Number((await client.query("UPDATE private_r_kernel_restarts SET status='unknown',updated_at=NOW() WHERE status IN ('stopping','starting')")).rowCount||0);
     if(publications.rows[0]?.name) unknownPublications=Number((await client.query("UPDATE private_r_publications SET status='unknown',updated_at=NOW() WHERE status IN ('reserved','running')")).rowCount||0);
     if(executions.rows[0]?.name) unknownExecutions=Number((await client.query("UPDATE private_r_executions SET status='unknown',updated_at=NOW() WHERE status IN ('reserved','running')")).rowCount||0);
-    if(kernels.rows[0]?.name) stoppedKernels=Number((await client.query("UPDATE private_r_kernels SET status='stopped',active_execution_id=NULL,stopped_at=NOW(),updated_at=NOW() WHERE status IN ('starting','ready','running','unknown','stopping')")).rowCount||0);
+    if(kernels.rows[0]?.name) {
+      const controlColumn=(await client.query("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='private_r_kernels' AND column_name='active_control_id'")).rows.length>0;
+      stoppedKernels=Number((await client.query(`UPDATE private_r_kernels SET status='stopped',active_execution_id=NULL,${controlColumn?'active_control_id=NULL,':''}stopped_at=NOW(),updated_at=NOW() WHERE status IN ('starting','ready','running','unknown','stopping')`)).rowCount||0);
+    }
     await client.query('COMMIT');
-    return { canceledJobs: Number(canceled.rowCount || 0),stoppedKernels,unknownExecutions,unknownPublications };
+    return { canceledJobs: Number(canceled.rowCount || 0),stoppedKernels,unknownExecutions,unknownPublications,unknownRestarts };
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { /* original error wins */ }
     throw error;

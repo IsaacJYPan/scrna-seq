@@ -53,11 +53,21 @@ async function seedHistory(userId, projectId) {
       versions.push(versionId); publications.push(publicationId); executions.push(executionId);
     }
     const auditId = id('audit');
+    const replacementKernelId = id('pk'), restartId = id('prst'), restartRequestId = randomUUID();
+    await connection.query(`INSERT INTO private_r_kernels
+      (id,project_id,owner_user_id,workspace_id,request_id,start_sha256,status,runtime_generation,
+       environment_json,environment_manifest_json,inputs_json,expires_at,restarted_from_kernel_id,stopped_at)
+      VALUES($1,$2,$3,'cleanup-fixture',$4,$5,'stopped',$6,$7,$8,'[]',NOW()+INTERVAL '1 hour',$9,NOW())`,
+    [replacementKernelId,projectId,userId,restartRequestId,hash('replacement snapshot'),hash(randomUUID()),reference,manifest,kernelId]);
+    await connection.query(`INSERT INTO private_r_kernel_restarts
+      (id,kernel_id,project_id,owner_user_id,request_id,request_sha256,kernel_generation,replacement_kernel_id,status,completed_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,'completed',NOW())`,
+    [restartId,kernelId,projectId,userId,restartRequestId,hash('restart snapshot'),generation,replacementKernelId]);
     await connection.query(`INSERT INTO project_audit_events
       (id,project_id,actor_user_id,action,target_type,target_id)
       VALUES($1,$2,$3,'analysis.created','artifact',$4)`, [auditId, projectId, userId, artifactId]);
     await connection.query('COMMIT');
-    return { kernelId, artifactId, versions, publications, executions, auditId };
+    return { kernelId, replacementKernelId, restartId, artifactId, versions, publications, executions, auditId };
   } catch (error) {
     await connection.query('ROLLBACK'); throw error;
   } finally { connection.release(); }
@@ -75,7 +85,7 @@ async function seedGuest() {
 }
 async function historySnapshot(projectId) {
   const snapshot = {};
-  for (const table of ['private_r_kernels', 'private_r_executions', 'private_r_publications', 'managed_artifact_versions', 'project_audit_events']) {
+  for (const table of ['private_r_kernels', 'private_r_kernel_restarts', 'private_r_executions', 'private_r_publications', 'managed_artifact_versions', 'project_audit_events']) {
     snapshot[table] = (await db.query(`SELECT row_to_json(record) AS record FROM ${table} record WHERE project_id=$1 ORDER BY id`, [projectId])).rows.map(row => row.record);
   }
   return snapshot;
@@ -85,13 +95,14 @@ describe.skipIf(!process.env.DATABASE_URL)('expired demo publication lifecycle c
   beforeEach(async () => { process.env.APP_DEPLOYMENT_MODE = 'demo'; await db.resetSchemaForTests(); });
   afterAll(async () => { if (savedMode === undefined) delete process.env.APP_DEPLOYMENT_MODE; else process.env.APP_DEPLOYMENT_MODE = savedMode; await db.close(); });
 
-  it('reapplies schema 20261011 without losing retained versions or changing the deferred cleanup constraint', async () => {
+  it('reapplies schema 20261012 without losing retained versions, restart links or deferred cleanup constraints', async () => {
     const retained = await seedOwner(), before = await historySnapshot(retained.project.id);
     await db.initSchema({ force: true }); await db.initSchema({ force: true });
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261011);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261012);
     const constraints = (await db.query(`SELECT condeferrable,condeferred FROM pg_constraint
       WHERE conrelid='private_r_publications'::regclass AND confrelid='managed_artifact_versions'::regclass AND contype='f'`)).rows;
     expect(constraints).toEqual([{ condeferrable: true, condeferred: true }]);
+    expect((await db.query("SELECT condeferrable,condeferred FROM pg_constraint WHERE conname='private_r_kernel_restart_parent_fk'")).rows).toEqual([{condeferrable:true,condeferred:true}]);
     expect(await historySnapshot(retained.project.id)).toEqual(before);
   });
 

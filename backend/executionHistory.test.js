@@ -28,6 +28,22 @@ describe.skipIf(!configured)('execution history through actual authenticated HTT
   const base = () => `/api/execution-history/${project.id}`;
   const get = (suffix = '', token = owner.token) => http.api(server, base() + suffix, { token });
 
+  it('retains confirmed interruption and restart lineage privately without treating ordinary R errors as interruption',async()=>{
+    const oldId='pk_'+ '1'.repeat(24),newId='pk_'+ '2'.repeat(24),generation='3'.repeat(64);
+    for(const [kernelId,requestId,previous] of [[oldId,'11111111-1111-4111-8111-111111111111',null],[newId,'22222222-2222-4222-8222-222222222222',oldId]])await db.query(`INSERT INTO private_r_kernels(id,project_id,owner_user_id,workspace_id,request_id,start_sha256,status,runtime_generation,environment_json,environment_manifest_json,inputs_json,next_order,expires_at,restarted_from_kernel_id)VALUES($1,$2,$3,'history-controls',$4,$5,'stopped',$6,$7,$8,'[]',2,NOW(),$9)`,[kernelId,project.id,owner.user.id,requestId,sha('selected exact input'),generation,fixtures.environment.reference,fixtures.environment.manifest,previous]);
+    const ids=['pex_'+ '4'.repeat(24),'pex_'+ '5'.repeat(24)];
+    for(let index=0;index<2;index++){
+      const source=index?'stop("Interrupted by user")':'repeat { Sys.sleep(1) }';
+      const result={ok:true,kernelId:newId,generation,executionId:ids[index],order:index+1,status:'failed',interrupted:index===0,stdout:'',warnings:[],error:{code:index?'R_ERROR':'PRIVATE_KERNEL_INTERRUPTED',message:'Interrupted by user'},tables:[],figures:[],truncated:false,startedAt:'2026-10-08T00:00:00Z',completedAt:'2026-10-08T00:00:01Z'};
+      await db.query(`INSERT INTO private_r_executions(id,kernel_id,project_id,owner_user_id,request_id,kernel_generation,execution_order,status,source_code,source_sha256,result_json,started_at,completed_at)VALUES($1,$2,$3,$4,$5,$6,$7,'failed',$8,$9,$10,NOW(),NOW())`,[ids[index],newId,project.id,owner.user.id,index?'33333333-3333-4333-8333-333333333333':'44444444-4444-4444-8444-444444444444',generation,index+1,source,sha(source),result]);
+    }
+    const listed=(await get('?kind=r-console')).data.items;
+    expect(listed.find(item=>item.id===ids[0])).toMatchObject({status:'failed',outcome:'interrupted'});
+    expect(listed.find(item=>item.id===ids[1])).not.toHaveProperty('outcome');
+    expect((await get('/'+ids[0])).data).toMatchObject({status:'failed',outcome:'interrupted',source:{code:'repeat { Sys.sleep(1) }'},kernel:{id:newId,generation,restartedFromKernelId:oldId},outputs:[]});
+    expect((await get('?kind=r-console',viewer.token)).data.items).toEqual([]);expect((await get('/'+ids[0],viewer.token)).status).toBe(404);
+  });
+
   it('requires current project membership for listing and every private detail/manifest', async () => {
     expect((await get('', null)).status).toBe(401);
     expect((await get('', outsider.token)).status).toBe(404);

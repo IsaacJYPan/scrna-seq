@@ -18,13 +18,13 @@ const executionId=`pex_${'1'.repeat(24)}`;
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};}
 async function fixture(options={}) {
   const directory=await mkdtemp(path.join(os.tmpdir(),'private-kernel-test-'));directories.push(directory);
-  const {manifest,reference}=environmentFixture();let now=Date.now(),requests=0;
+  const {manifest,reference}=environmentFixture();let now=Date.now(),requests=0,controls=0;
   const calls=[],containers=new Map(),transports=[];
   const provider=createLocalStorageProvider({root:path.join(directory,'storage')});
   const commands=async(_command,args)=>{
     calls.push(args);
     if(args[0]==='image')return{stdout:reference.imageId};
-    if(args[0]==='run') {if(options.unsupported)throw new Error('no adapter');return{stdout:JSON.stringify({ok:true,protocol:'jupyter',adapter:1,...(options.publications===false?{}:{publications:true})})};}
+    if(args[0]==='run') {if(options.unsupported)throw new Error('no adapter');return{stdout:JSON.stringify({ok:true,protocol:'jupyter',adapter:1,...(options.publications===false?{}:{publications:true}),...(options.interrupts===false?{}:{interrupt:true})})};}
     if(args[0]==='create') {
       const labels={};for(let i=0;i<args.length;i++){if(args[i]==='--label'){const equal=args[i+1].indexOf('=');labels[args[i+1].slice(0,equal)]=args[i+1].slice(equal+1);}}
       const value={id:crypto.randomBytes(32).toString('hex'),labels};containers.set(args[args.indexOf('--name')+1],value);return{stdout:value.id};
@@ -41,6 +41,7 @@ async function fixture(options={}) {
     let closed=false;
     const transport={ready:options.ready?.promise||Promise.resolve({ok:true}),
       async request(id,source,_timeout,publication){requests++;return options.result?options.result(id,source,publication):{ok:true,event:'execution',executionId:id,status:'completed',stdout:`run ${requests}`,warnings:[],error:null,tables:[],figures:[],truncated:false};},
+      async interrupt(controlId,id){controls++;return options.interrupt?options.interrupt(controlId,id):{ok:true,event:'control',controlId,executionId:id,idleConfirmed:true,outcome:'already-completed'};},
       close(){if(closed)return;closed=true;onLost();options.ready?.reject(new Error('closed'));},lose:onLost};transports.push(transport);return transport;
   };
   const env={NODE_ENV:'test',PRIVATE_R_KERNEL_ENABLED:'true',EXPERT_R_SANDBOX_IMAGE:reference.imageId,EXPERT_R_SANDBOX_WORK_ROOT:path.join(directory,'work'),...options.env};
@@ -49,7 +50,7 @@ async function fixture(options={}) {
   runtimes.push(runtime);
   const start=(id=kernelId,extra={})=>runtime.start({...scope,kernelId:id,environment:reference,inputs:[],...extra});
   const restart=()=>{const restarted=createPrivateKernelRuntime({env,provider,environmentManifest:manifest,runProcessImpl:commands,spawnImpl,transportFactory,clock:()=>now});runtimes.push(restarted);return restarted;};
-  return{runtime,start,reference,directory,calls,containers,provider,transports,restart,requests:()=>requests,advance:ms=>now+=ms};
+  return{runtime,start,reference,directory,calls,containers,provider,transports,restart,requests:()=>requests,controls:()=>controls,advance:ms=>now+=ms};
 }
 describe('persistent private R runtime ownership and lifecycle',()=>{
   it('independently probes transport and retains exact image, limits and owned resources',async()=>{
@@ -168,6 +169,82 @@ describe('private execution order and transport',()=>{
   });
 });
 
+describe('independent cooperative private R controls',()=>{
+  const terminal=(id,extra={})=>({ok:true,event:'execution',executionId:id,status:'completed',stdout:'earlier value',warnings:[],error:null,tables:[],figures:[],truncated:false,...extra});
+  const command={executionId,order:1,source:'Sys.sleep(60)'};
+  const request={executionId,order:1,requestId:'12345678-1234-4123-8123-123456789abc'};
+  const waitForRequest=async f=>{while(!f.requests())await new Promise(resolve=>setTimeout(resolve,2));};
+  it('interrupts only the exact active command, confirms terminal+idle and permits next source without rerunning',async()=>{
+    const pending=deferred();const f=await fixture({result:id=>id===executionId?pending.promise:terminal(id),interrupt:async(controlId,id)=>{
+      pending.resolve(terminal(id,{status:'failed',interrupted:true,error:{code:'PRIVATE_KERNEL_INTERRUPTED',message:'R execution was interrupted.'}}));
+      return {ok:true,event:'control',controlId,executionId:id,idleConfirmed:true,outcome:'interrupted'};
+    }});await f.runtime.initialize();const started=await f.start(),scoped={...scope,generation:started.generation};
+    const execution=f.runtime.execute(scoped,kernelId,command);await waitForRequest(f);
+    const [first,second]=await Promise.all([f.runtime.interrupt(scoped,kernelId,request),f.runtime.interrupt(scoped,kernelId,{...request,requestId:crypto.randomUUID()})]);
+    expect(first).toEqual(second);expect(first).toMatchObject({outcome:'interrupted',status:'ready',idleConfirmed:true,execution:{executionId,order:1,status:'failed',interrupted:true,error:{code:'PRIVATE_KERNEL_INTERRUPTED'}}});
+    expect(await execution).toEqual(first.execution);expect(f.controls()).toBe(1);expect(f.requests()).toBe(1);
+    expect(await f.runtime.interrupt(scoped,kernelId,request)).toEqual(first);expect(f.controls()).toBe(1);
+    expect((await f.runtime.execute(scoped,kernelId,{executionId:'pex_next',order:2,source:'cat(earlier_value)'})).status).toBe('completed');
+    const old=await f.runtime.interrupt(scoped,kernelId,request);expect(old.execution).toBeUndefined();expect(f.controls()).toBe(1);
+  });
+  it('rejects wrong scope, missing generation, stale order and stale command before signaling',async()=>{
+    const pending=deferred();const f=await fixture({result:()=>pending.promise});await f.runtime.initialize();const started=await f.start(),scoped={...scope,generation:started.generation};
+    const execution=f.runtime.execute(scoped,kernelId,command);await waitForRequest(f);
+    for(const changed of [{ownerUserId:2},{projectId:'project2'},{workspaceId:'workspace2'},{generation:'f'.repeat(64)}])await expect(f.runtime.interrupt({...scoped,...changed},kernelId,request)).rejects.toMatchObject({code:'PRIVATE_KERNEL_NOT_FOUND'});
+    await expect(f.runtime.interrupt(scope,kernelId,request)).rejects.toMatchObject({code:'PRIVATE_KERNEL_CONTROL_INVALID'});
+    for(const changed of [{order:2},{executionId:'pex_stale'},{requestId:'invalid'}])await expect(f.runtime.interrupt(scoped,kernelId,{...request,...changed})).rejects.toMatchObject({code:'PRIVATE_KERNEL_CONTROL_INVALID'});
+    expect(f.controls()).toBe(0);pending.resolve(terminal(executionId));await execution;
+    expect(await f.runtime.interrupt(scoped,kernelId,request)).toMatchObject({outcome:'already-completed',idleConfirmed:true,execution:{status:'completed'}});expect(f.controls()).toBe(0);
+    await f.runtime.execute(scoped,kernelId,{executionId:'pex_next',order:2,source:'next'});
+    await expect(f.runtime.interrupt(scoped,kernelId,request)).rejects.toMatchObject({code:'PRIVATE_KERNEL_CONTROL_INVALID'});
+  });
+  it('keeps old persistent images available while independently rejecting interrupt support',async()=>{
+    const f=await fixture({interrupts:false});expect(await f.runtime.initialize()).toMatchObject({supported:true,publications:true,interrupt:false});const started=await f.start();
+    await expect(f.runtime.interrupt({...scope,generation:started.generation},kernelId,request)).rejects.toMatchObject({code:'PRIVATE_KERNEL_INTERRUPT_UNSUPPORTED'});expect(f.controls()).toBe(0);
+    expect((await f.runtime.execute(scope,kernelId,{...command,source:'1'})).status).toBe('completed');
+  });
+  it('natural completion racing an interrupt returns the exact completed result',async()=>{
+    const pending=deferred();const f=await fixture({result:()=>pending.promise,interrupt:async(controlId,id)=>{pending.resolve(terminal(id));return {ok:true,event:'control',controlId,executionId:id,idleConfirmed:true,outcome:'already-completed'};}});
+    await f.runtime.initialize();const started=await f.start(),scoped={...scope,generation:started.generation};const execution=f.runtime.execute(scoped,kernelId,command);await waitForRequest(f);
+    const reply=await f.runtime.interrupt(scoped,kernelId,request);expect(reply).toMatchObject({outcome:'already-completed',status:'ready',idleConfirmed:true});expect(reply.execution).toEqual(await execution);
+  });
+  it('reports executing and blocks new source until a pending control settles after natural completion',async()=>{
+    const pending=deferred(),control=deferred();const f=await fixture({result:()=>pending.promise,interrupt:async()=>{pending.resolve(terminal(executionId));return control.promise;}});
+    await f.runtime.initialize();const started=await f.start(),scoped={...scope,generation:started.generation};const execution=f.runtime.execute(scoped,kernelId,command);await waitForRequest(f);
+    const interrupting=f.runtime.interrupt(scoped,kernelId,request);while(!f.controls())await new Promise(resolve=>setTimeout(resolve,2));await execution;
+    expect((await f.runtime.inspect(scoped,kernelId)).status).toBe('executing');await expect(f.runtime.execute(scoped,kernelId,{executionId:'pex_next',order:2,source:'next'})).rejects.toMatchObject({code:'PRIVATE_KERNEL_BUSY'});
+    control.resolve({ok:true,event:'control',controlId:request.requestId,executionId,idleConfirmed:true,outcome:'already-completed'});
+    expect(await interrupting).toMatchObject({outcome:'already-completed',status:'ready',idleConfirmed:true});expect((await f.runtime.inspect(scoped,kernelId)).status).toBe('ready');
+  });
+  it('unconfirmed or contradictory control cannot return ready and destroys owned unsaved state',async()=>{
+    for(const interrupted of [false,true]){
+      const pending=deferred();const f=await fixture({result:()=>pending.promise,interrupt:async(controlId,id)=>{pending.resolve(terminal(id));return {ok:true,event:'control',controlId,executionId:id,idleConfirmed:interrupted,outcome:'interrupted'};}});
+      await f.runtime.initialize();const started=await f.start(),scoped={...scope,generation:started.generation};const execution=f.runtime.execute(scoped,kernelId,command);await waitForRequest(f);
+      const reply=await f.runtime.interrupt(scoped,kernelId,request);await execution;expect(reply).toMatchObject({outcome:'unconfirmed',status:'unknown',idleConfirmed:false});expect(f.containers.size).toBe(0);
+      await expect(f.runtime.execute(scoped,kernelId,{executionId:'pex_next',order:2,source:'1'})).rejects.toMatchObject({code:'PRIVATE_KERNEL_STOPPED'});expect(f.requests()).toBe(1);
+    }
+  });
+  it('stop racing control cannot resurrect ready or assert a confirmed interruption',async()=>{
+    const pending=deferred(),control=deferred();const f=await fixture({result:()=>pending.promise,interrupt:()=>control.promise});await f.runtime.initialize();const started=await f.start(),scoped={...scope,generation:started.generation};
+    const execution=f.runtime.execute(scoped,kernelId,command);await waitForRequest(f);const interrupting=f.runtime.interrupt(scoped,kernelId,request);while(!f.controls())await new Promise(resolve=>setTimeout(resolve,2));
+    const stopping=f.runtime.stop(scoped,kernelId);pending.resolve(terminal(executionId));control.resolve({ok:true,idleConfirmed:true,outcome:'already-completed'});
+    await stopping;expect(await execution).toMatchObject({status:'unknown'});expect(await interrupting).toMatchObject({outcome:'unconfirmed',idleConfirmed:false});expect((await f.runtime.inspect(scoped,kernelId)).status).toBe('stopped');expect(f.containers.size).toBe(0);
+  });
+  it('multiplexes a bounded control response without consuming the pending execution receipt',async()=>{
+    const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.stdin=new PassThrough();child.kill=()=>{};const requests=[];child.stdin.on('data',chunk=>requests.push(JSON.parse(chunk.toString())));
+    const transport=createTransport(child,{startTimeoutMs:1000,controlTimeoutMs:1000});child.stdout.write('{"ok":true,"event":"ready"}\n');await transport.ready;
+    const executing=transport.request(executionId,'Sys.sleep(60)',60),controlling=transport.interrupt(request.requestId,executionId);expect(requests.map(value=>value.action)).toEqual(['execute','interrupt']);
+    child.stdout.write(JSON.stringify(terminal(executionId))+'\n'+JSON.stringify({ok:true,event:'control',executionId,controlId:request.requestId,idleConfirmed:true,outcome:'already-completed'})+'\n');
+    expect(await executing).toMatchObject({executionId,status:'completed'});expect(await controlling).toMatchObject({idleConfirmed:true});transport.close();
+  });
+  it('control timeout rejects both pending paths with transport loss instead of leaving an active command',async()=>{
+    const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.stdin=new PassThrough();child.kill=()=>{};let losses=0;
+    const transport=createTransport(child,{onLost:()=>losses++,startTimeoutMs:1000,controlTimeoutMs:10});child.stdout.write('{"ok":true,"event":"ready"}\n');await transport.ready;
+    const executing=expect(transport.request(executionId,'immune',60)).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_FAILED'}),controlling=expect(transport.interrupt(request.requestId,executionId)).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_FAILED'});
+    await Promise.all([executing,controlling]);expect(losses).toBe(1);
+  });
+});
+
 describe('private output publication receipts and handoff',()=>{
   const bytes=Buffer.from('cell,count\na,2\nb,3\n'),evidence={sizeBytes:bytes.length,checksumSha256:crypto.createHash('sha256').update(bytes).digest('hex')};
   const publicationId=`pub_${'c'.repeat(24)}`,key='projects/project1/artifacts/av_export/content.csv';
@@ -210,6 +287,25 @@ describe('private output publication receipts and handoff',()=>{
     const f=await exportFixture({result:id=>({ok:true,event:'execution',executionId:id,status:'failed',stdout:'',warnings:[],error:{message:'Table publication requires a data frame.',code:'R_ERROR'},tables:[],figures:[],truncated:false})});
     const result=await f.runtime.export(f.scoped,kernelId,f.command);expect(result).toMatchObject({status:'failed',result:{status:'failed'}});expect(result.file).toBeUndefined();
     await expect(readFile(f.provider.resolveKey(key))).rejects.toMatchObject({code:'ENOENT'});expect((await f.runtime.inspect(f.scoped,kernelId)).status).toBe('ready');
+  });
+  it('interrupts serialization with an exact failed receipt and no partial artifact bytes',async()=>{
+    const pending=deferred();const f=await exportFixture({result:()=>pending.promise,interrupt:async(controlId,id)=>{
+      pending.resolve({ok:true,event:'execution',executionId:id,status:'failed',interrupted:true,stdout:'',warnings:[],error:{code:'PRIVATE_KERNEL_INTERRUPTED',message:'R execution was interrupted.'},tables:[],figures:[],truncated:false});
+      return {ok:true,event:'control',controlId,executionId:id,idleConfirmed:true,outcome:'interrupted'};
+    }});const saving=f.runtime.export(f.scoped,kernelId,f.command);while(!f.requests())await new Promise(resolve=>setTimeout(resolve,2));
+    const interrupted=await f.runtime.interrupt(f.scoped,kernelId,{executionId,order:1,requestId:crypto.randomUUID()});
+    expect(interrupted).toMatchObject({outcome:'interrupted',status:'ready',idleConfirmed:true,execution:{interrupted:true,status:'failed'}});
+    const result=await saving;expect(result).toMatchObject({status:'failed',result:interrupted.execution});expect(result.file).toBeUndefined();await expect(readFile(f.provider.resolveKey(key))).rejects.toMatchObject({code:'ENOENT'});
+    expect((await f.runtime.exportStatus(f.scoped,kernelId,{publicationId})).status).toBe('failed');expect(f.requests()).toBe(1);
+  });
+  it('waits for publication byte handoff before returning a naturally completed interrupt receipt',async()=>{
+    const handoff=deferred();let writing=false;
+    const f=await exportFixture({wrapProvider:provider=>({...provider,async putFileFromPath(source,key){writing=true;await handoff.promise;return provider.putFileFromPath(source,key);}})});
+    const saving=f.runtime.export(f.scoped,kernelId,f.command);while(!writing)await new Promise(resolve=>setTimeout(resolve,2));
+    let settled=false;const interrupting=f.runtime.interrupt(f.scoped,kernelId,{executionId,order:1,requestId:crypto.randomUUID()}).then(value=>{settled=true;return value;});
+    while(!f.controls())await new Promise(resolve=>setTimeout(resolve,2));await new Promise(resolve=>setTimeout(resolve,5));expect(settled).toBe(false);expect((await f.runtime.inspect(f.scoped,kernelId)).status).toBe('executing');
+    await expect(f.runtime.execute(f.scoped,kernelId,{executionId:'pex_other',order:2,source:'1'})).rejects.toMatchObject({code:'PRIVATE_KERNEL_BUSY'});
+    handoff.resolve();expect(await interrupting).toMatchObject({outcome:'already-completed',status:'ready',idleConfirmed:true,execution:{status:'completed'}});expect((await saving).file).toMatchObject(evidence);
   });
   it('holds execution admission through transfer and confirms no late file after a stop/write race',async()=>{
     const handoff=deferred();let writing=false;

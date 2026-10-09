@@ -30,7 +30,7 @@ async function main(){
   await fs.writeFile(path.join(directory,'environment.json'),environmentBytes(manifest));
   const provider=createLocalStorageProvider({root:path.join(directory,'storage')});
   const runtime=createPrivateKernelRuntime({env,provider,environmentManifest:manifest});runtimes.push(runtime);
-  const supported=await runtime.initialize();assert.equal(supported.publications,true);check('reference Jupyter adapter and publications are available in the exact pinned environment');
+  const supported=await runtime.initialize();assert.equal(supported.publications,true);assert.equal(supported.interrupt,true);check('reference Jupyter adapter, publications and independent interruption are available in the exact pinned environment');
   const scope={ownerUserId:1101,projectId:'private_kernel_acceptance',workspaceId:'workspace1'};
   const kernelId=id('pk_');const started=await runtime.start({...scope,kernelId,environment,inputs:[]});
   validatePrivateKernelStatus(started,{kernelId,environment});check('actual private kernel starts with generation, resources and lifetime');
@@ -40,6 +40,23 @@ async function main(){
   const first=await runtime.execute(executionScope,kernelId,{executionId:firstId,order:++order,source});assert.equal(first.status,'completed');
   const repeated=await runtime.execute(executionScope,kernelId,{executionId:firstId,order,source});assert.deepEqual(repeated,first);
   const persisted=await execute('cat(private_value + 1L)');assert.equal(persisted.status,'completed');assert.match(persisted.stdout,/42/);check('variables persist and repeated execution receipts do not rerun source');
+  const interruptId=id('pex_'),interruptOrder=++order;
+  const running=runtime.execute(executionScope,kernelId,{executionId:interruptId,order:interruptOrder,source:'display_table(data.frame(partial=1)); plot(1:3); Sys.sleep(100); private_value <- 999'});
+  await sleep(500);
+  const controlRequest={executionId:interruptId,order:interruptOrder,requestId:crypto.randomUUID()};
+  for(const changed of [{ownerUserId:1102},{workspaceId:'workspace_other'},{generation:'f'.repeat(64)}])await assert.rejects(runtime.interrupt({...executionScope,...changed},kernelId,controlRequest),{code:'PRIVATE_KERNEL_NOT_FOUND'});
+  await assert.rejects(runtime.interrupt(executionScope,kernelId,{...controlRequest,order:interruptOrder+1}),{code:'PRIVATE_KERNEL_CONTROL_INVALID'});
+  const [interruptedOnce,interruptedTwice]=await Promise.all([runtime.interrupt(executionScope,kernelId,controlRequest),runtime.interrupt(executionScope,kernelId,{...controlRequest,requestId:crypto.randomUUID()})]);
+  assert.deepEqual(interruptedTwice,interruptedOnce);assert.equal(interruptedOnce.outcome,'interrupted',JSON.stringify(interruptedOnce));assert.equal(interruptedOnce.idleConfirmed,true);assert.equal(interruptedOnce.status,'ready');
+  const interruptedExecution=await running;assert.deepEqual(interruptedOnce.execution,interruptedExecution);assert.equal(interruptedExecution.error.code,'PRIVATE_KERNEL_INTERRUPTED');assert.equal(interruptedExecution.interrupted,true);assert.deepEqual(interruptedExecution.tables,[]);assert.deepEqual(interruptedExecution.figures,[]);
+  assert.deepEqual(await runtime.interrupt(executionScope,kernelId,controlRequest),interruptedOnce);
+  const retainedAfterInterrupt=await execute('cat(private_value)');assert.equal(retainedAfterInterrupt.status,'completed');assert.match(retainedAfterInterrupt.stdout,/41/);
+  check('actual long R command interrupts once with terminal+idle evidence, drops partial rich outputs and preserves earlier variables');
+  const caughtId=id('pex_'),caughtOrder=++order;
+  const catchesSignal=runtime.execute(executionScope,kernelId,{executionId:caughtId,order:caughtOrder,source:'tryCatch(Sys.sleep(100), interrupt=function(e) cat("caught signal")); cat(" normal completion")'});await sleep(500);
+  const caught=await runtime.interrupt(executionScope,kernelId,{executionId:caughtId,order:caughtOrder,requestId:crypto.randomUUID()});
+  assert.equal(caught.outcome,'already-completed',JSON.stringify(caught));assert.equal(caught.idleConfirmed,true);assert.equal((await catchesSignal).status,'completed');assert.match(caught.execution.stdout,/caught signal.*normal completion/s);assert.equal(caught.execution.interrupted,undefined);
+  check('R code that catches its signal is recorded as natural completion without fabricated interrupted evidence');
   await execute('assign("complete table ` α", data.frame(cell=paste0("cell",seq_len(125)),count=seq_len(125)),envir=.GlobalEnv); full_object <- list(table=get("complete table ` α"), note="snapshot")');
   function publication(scoped,type,binding,nextOrder) {
     const publicationId=id('pub_'),version=id('av_'),spec={publicationId,type,binding,executionId:id('pex_'),order:nextOrder,
@@ -106,7 +123,11 @@ async function main(){
   const killed=await runtime.execute({...scope,generation:dead.generation},deadId,{executionId:id('pex_'),order:1,source:'system(sprintf("kill -KILL %d", Sys.getpid()))'});assert.equal(killed.status,'unknown');assert.equal((await runtime.inspect(scope,deadId)).status,'unknown');await assert.rejects(runtime.start({...scope,kernelId:deadId,environment,inputs:[]}),{code:'PRIVATE_KERNEL_STOPPED'});check('a dead R subprocess loses memory and never silently restarts or reruns its generation');
   const slowId=id('pk_'),slow=await runtime.start({...scope,kernelId:slowId,environment,inputs:[]}),slowScope={...scope,generation:slow.generation};
   await runtime.execute(slowScope,slowId,{executionId:id('pex_'),order:1,source:'makeActiveBinding("slow_value", function(value) { Sys.sleep(100); data.frame(count=1L) }, .GlobalEnv)'});
-  const slowSpec=publication(slowScope,'table','slow_value',2),pendingSave=runtime.export(slowScope,slowId,slowSpec);await sleep(500);await runtime.stop(slowScope,slowId);
+  const interruptedSpec=publication(slowScope,'table','slow_value',2),interruptedSave=runtime.export(slowScope,slowId,interruptedSpec);await sleep(500);
+  const interruptedSaving=await runtime.interrupt(slowScope,slowId,{executionId:interruptedSpec.executionId,order:2,requestId:crypto.randomUUID()});
+  assert.equal(interruptedSaving.outcome,'interrupted',JSON.stringify(interruptedSaving));assert.equal(interruptedSaving.status,'ready');assert.equal((await interruptedSave).status,'failed');assert.equal((await runtime.exportStatus(slowScope,slowId,{publicationId:interruptedSpec.publicationId})).file,undefined);await assert.rejects(provider.inspect(interruptedSpec.internalStorageKey));
+  check('interrupt during actual serialization has a failed ordered receipt and no partial saved artifact');
+  const slowSpec=publication(slowScope,'table','slow_value',3),pendingSave=runtime.export(slowScope,slowId,slowSpec);await sleep(500);await runtime.stop(slowScope,slowId);
   const interrupted=await pendingSave;assert.equal(interrupted.status,'unknown');assert.equal(interrupted.file,undefined);
   assert.equal((await runtime.exportStatus(slowScope,slowId,{publicationId:slowSpec.publicationId})).status,'unknown');assert.equal((await runtime.export(slowScope,slowId,slowSpec)).status,'unknown');
   await assert.rejects(provider.inspect(slowSpec.internalStorageKey));check('stop during publication records unknown completion with no file and never reruns serialization');
@@ -115,6 +136,17 @@ async function main(){
   const unsafeSpec=publication(unsafeScope,'table','value',2),unsafeResult=await runtime.export(unsafeScope,unsafeId,unsafeSpec);
   assert.equal(unsafeResult.status,'unknown');assert.equal(unsafeResult.file,undefined);await assert.rejects(provider.inspect(unsafeSpec.internalStorageKey));
   check('a replaced export-directory symlink is rejected without following a container path or publishing bytes');
+  const immuneId=id('pk_'),immune=await runtime.start({...scope,kernelId:immuneId,environment,inputs:[]}),immuneScope={...scope,generation:immune.generation},immuneExecution=id('pex_');
+  const immuneRun=runtime.execute(immuneScope,immuneId,{executionId:immuneExecution,order:1,source:'repeat { tryCatch(Sys.sleep(100), interrupt=function(e) invisible(NULL)) }'});await sleep(500);
+  const unconfirmed=await runtime.interrupt(immuneScope,immuneId,{executionId:immuneExecution,order:1,requestId:crypto.randomUUID()});
+  assert.equal(unconfirmed.outcome,'unconfirmed',JSON.stringify(unconfirmed));assert.equal(unconfirmed.idleConfirmed,false);assert.equal(unconfirmed.status,'unknown');assert.equal((await immuneRun).status,'unknown');
+  await assert.rejects(runtime.execute(immuneScope,immuneId,{executionId:id('pex_'),order:2,source:'1'}),{code:'PRIVATE_KERNEL_STOPPED'});
+  check('an interrupt-immune R command is bounded, loses its generation and requires explicit fresh restart without a rerun');
+  const stopRaceId=id('pk_'),stopRace=await runtime.start({...scope,kernelId:stopRaceId,environment,inputs:[]}),stopRaceScope={...scope,generation:stopRace.generation},stopRaceExecution=id('pex_');
+  const racingRun=runtime.execute(stopRaceScope,stopRaceId,{executionId:stopRaceExecution,order:1,source:'Sys.sleep(100)'});await sleep(500);
+  const racingControl=runtime.interrupt(stopRaceScope,stopRaceId,{executionId:stopRaceExecution,order:1,requestId:crypto.randomUUID()}),racingStop=runtime.stop(stopRaceScope,stopRaceId);
+  await racingStop;await racingControl;await racingRun;assert.equal((await runtime.inspect(stopRaceScope,stopRaceId)).status,'stopped');
+  check('actual stop/control race removes its owned process and never resurrects ready');
   await runtime.close();
 
   const quotaEnv={...env,EXPERT_R_SANDBOX_WORK_ROOT:path.join(directory,'quota-work'),PRIVATE_R_KERNEL_IDLE_SECONDS:'2',PRIVATE_R_KERNEL_LIFETIME_SECONDS:'40'};
