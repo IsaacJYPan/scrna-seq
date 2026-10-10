@@ -27,6 +27,7 @@ const { admitDemoJob } = require('./demoJobAdmission');
 const storage = require('./storage');
 const passwords = require('./passwords');
 const executionTargets = require('./executionTargets');
+const { submissionRequestId, projectSubmissionHash } = require('./submissionIdentity');
 const {
   validateSeuratPipelineParams,
   assertSupportedSeuratPipelineDataset,
@@ -65,7 +66,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261015;
+const SCHEMA_CONTRACT_VERSION = 20261016;
 
 let pool = null;
 
@@ -740,7 +741,7 @@ async function resetSchemaForTests() {
       analysis_branches,
       condition_contrast_samples, condition_contrasts,
       analysis_object_sample_bindings, biological_samples, study_conditions,
-      analysis_object_edges, live_execution_records, execution_source_versions, job_execution_receipts, service_execution_identity, managed_artifact_versions, job_artifacts, jobs, analysis_objects,
+      analysis_object_edges, live_execution_records, execution_source_versions, project_job_submissions, job_execution_receipts, service_execution_identity, managed_artifact_versions, job_artifacts, jobs, analysis_objects,
       expert_r_private_inputs, datasets, project_members, projects, organization_members,
       organizations, figure_collection, results_cache, provenance,
       worker_pool_runtime_status, worker_runtime_status, platform_capabilities,
@@ -3257,7 +3258,7 @@ function rowToJob(row) {
 // database.js rowToJob's omission).
 function toPublicJob(job) {
   if (!job) return null;
-  const { claimToken, workerId, ...rest } = job; // eslint-disable-line no-unused-vars
+  const { claimToken, workerId, submissionCreated, ...rest } = job; // eslint-disable-line no-unused-vars
   const { projectLogs, safeError } = require('./runMonitoring');
   if (Array.isArray(rest.logs)) rest.logs = projectLogs(rest.logs).items;
   if (rest.error) rest.error = safeError(rest.error);
@@ -3393,10 +3394,56 @@ async function getProjectJobRow(jobId, projectId) {
   return rowToJob(rows[0]);
 }
 
-async function createProjectJobInternal(userId, projectId, input = {}, retryOfJobId = null) {
+function submissionFromRow(row) {
+  return { schema: 'traceomics.job-submission.v1', requestId: row.request_id,
+    requestHash: row.request_hash, jobId: row.job_id, projectId: row.project_id,
+    createdAt: new Date(row.submission_created_at).toISOString() };
+}
+async function projectSubmissionRow(userId, projectId, requestId, execute = query, minimal = false) {
+  const columns = minimal ? 'j.id,j.project_id,j.job_type,j.analysis_object_id,j.status,j.attempts,j.created_at,j.updated_at,j.started_at,j.completed_at,j.canceled_at' : 'j.*';
+  return (await execute(`SELECT ${columns},r.request_id,r.request_hash,r.job_id,
+    r.created_at AS submission_created_at FROM project_job_submissions r
+    JOIN jobs j ON j.id=r.job_id AND j.project_id=r.project_id AND j.owner_user_id=r.owner_user_id
+    WHERE r.project_id=$1 AND r.owner_user_id=$2 AND r.request_id=$3`,
+  [String(projectId), Number(userId), requestId])).rows[0] || null;
+}
+function retainedSubmissionJob(row, requestHash) {
+  if (row.request_hash !== requestHash) throw codedError('SUBMISSION_REQUEST_CONFLICT',
+    'This submission request already identifies different analysis inputs or settings. Inspect the original run before starting new work.');
+  return { ...rowToJob(row), submission: submissionFromRow(row), submissionCreated: false };
+}
+async function resolveProjectJobSubmission(userId, projectId, input = {}) {
+  const requestId = submissionRequestId(input.requestId, true);
+  if (!requestId) return null;
+  await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  const requestHash = projectSubmissionHash(input);
+  const row = await projectSubmissionRow(userId, projectId, requestId);
+  await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
+  return row ? retainedSubmissionJob(row, requestHash) : null;
+}
+async function getProjectJobSubmission(userId, projectId, rawRequestId) {
+  const requestId = submissionRequestId(rawRequestId);
+  await requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
+  const row = await projectSubmissionRow(userId, projectId, requestId, query, true);
+  await requireProjectRole(userId, projectId, PROJECT_JOB_READ_ROLES);
+  if (!row) return null;
+  return { ...submissionFromRow(row), job: { id: row.id, jobType: row.job_type,
+    analysisObjectId: row.analysis_object_id, status: row.status, attempts: Number(row.attempts),
+    createdAt: toCanonicalTs(row.created_at), startedAt: toCanonicalTs(row.started_at),
+    finishedAt: toCanonicalTs(row.completed_at || row.canceled_at || (row.status === 'failed' ? row.updated_at : null)) } };
+}
+async function createProjectJobInternal(userId, projectId, input = {}, retryOfJobId = null, originalRequestHash = null) {
   const membership = await requireProjectRole(userId, projectId, PROJECT_JOB_WRITE_ROLES);
   const owner = membership.userId;
   const pid = String(projectId);
+  const requestId = submissionRequestId(input.requestId, true);
+  const requestHash = requestId ? originalRequestHash || projectSubmissionHash(input) : null;
+  if (requestHash && !/^[a-f0-9]{64}$/.test(requestHash)) throw codedError('INVALID_SUBMISSION_REQUEST', 'Invalid submission request hash.');
+  if (requestId) {
+    const existing = await projectSubmissionRow(owner, pid, requestId);
+    await requireProjectRole(owner, pid, PROJECT_JOB_WRITE_ROLES);
+    if (existing) return retainedSubmissionJob(existing, requestHash);
+  }
   const jobType = typeof input.jobType === 'string' ? input.jobType.trim() : '';
   if (!ALLOWED_JOB_TYPES.has(jobType)) {
     throw codedError('INVALID_JOB_TYPE',
@@ -3599,15 +3646,34 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
       [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
         jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
     );
-    return rowToJob(rows[0]);
-  });
+    const job = rowToJob(rows[0]);
+    if (requestId) {
+      const receipt = await client.query(`INSERT INTO project_job_submissions
+        (project_id,owner_user_id,request_id,request_hash,job_id) VALUES($1,$2,$3,$4,$5)
+        RETURNING *,created_at AS submission_created_at`, [pid,Number(owner),requestId,requestHash,job.id]);
+      Object.assign(job, { submission: submissionFromRow(receipt.rows[0]), submissionCreated: true });
+    }
+    return job;
+  }, requestId ? { before: async client => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`project-submission:${owner}:${pid}:${requestId}`]);
+    const member = (await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [pid,Number(owner)])).rows[0];
+    if (!member || !PROJECT_JOB_WRITE_ROLES.includes(member.role)) throw codedError('FORBIDDEN', 'Permission to submit project jobs is no longer available.');
+    const existing = await projectSubmissionRow(owner, pid, requestId, client.query.bind(client));
+    if (existing) return retainedSubmissionJob(existing, requestHash);
+    if (jobType === 'expert.r.v1') {
+      await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [Number(owner)]);
+      const access = await client.query(`SELECT 1 WHERE ${expertRAccessSql('$1', '$2')}`, [Number(owner),pid]);
+      if (!access.rows[0] || !expertRSandboxEnabled() || config.demoMode()) throw codedError('FORBIDDEN', 'Expert R access is not approved for this account.');
+    }
+    return null;
+  } } : {});
 }
 
-async function createProjectJob(userId, projectId, input = {}) {
+async function createProjectJob(userId, projectId, input = {}, originalRequestHash = null) {
   if (input.retryOfJobId !== undefined || input.retry_of_job_id !== undefined) {
     throw codedError('INVALID_PARAMETERS', 'Job retry linkage is server-managed.');
   }
-  return createProjectJobInternal(userId, projectId, input, null);
+  return createProjectJobInternal(userId, projectId, input, null, originalRequestHash);
 }
 
 async function retryProjectJob(userId, projectId, jobId) {
@@ -7444,6 +7510,8 @@ module.exports = {
   listJobsForUser,
   listPrivateJobsForUser,
   createProjectJob,
+  resolveProjectJobSubmission,
+  getProjectJobSubmission,
   retryProjectJob,
   listProjectJobs,
   getProjectJob,

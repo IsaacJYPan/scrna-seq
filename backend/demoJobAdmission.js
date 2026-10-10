@@ -9,14 +9,19 @@ const HEAVY_TYPES = Object.freeze([
 
 // Serialize the quota check and insertion, including retries. A route-level
 // count alone races when two guests submit at the same time.
-async function admitDemoJob(pool, owner, jobType, insert) {
-  if (!config.demoMode() || !HEAVY_TYPES.includes(jobType)) return insert(null);
+async function admitDemoJob(pool, owner, jobType, insert, options = {}) {
+  const demoHeavy = config.demoMode() && HEAVY_TYPES.includes(jobType);
+  if (!demoHeavy && !options.before) return insert(null);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [0x5343524e, 530]);
-    const guest = await client.query('SELECT is_demo_guest FROM users WHERE id = $1', [Number(owner)]);
-    if (guest.rows[0]?.is_demo_guest) {
+    // An existing submission consumes no new capacity. Resolve it inside the
+    // same transaction used to publish a new job and its immutable receipt.
+    const existing = options.before ? await options.before(client) : null;
+    if (existing) { await client.query('COMMIT'); return existing; }
+    if (demoHeavy) await client.query('SELECT pg_advisory_xact_lock($1, $2)', [0x5343524e, 530]);
+    const guest = demoHeavy ? await client.query('SELECT is_demo_guest FROM users WHERE id = $1', [Number(owner)]) : null;
+    if (guest?.rows[0]?.is_demo_guest) {
       const { rows } = await client.query(`SELECT
         COUNT(*) FILTER (WHERE owner_user_id = $1)::int AS guest_active,
         COUNT(*)::int AS global_active

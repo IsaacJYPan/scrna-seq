@@ -1494,6 +1494,16 @@ app.get('/api/auth/session', requireAuth, (req, res) => {
   res.json({ user: publicAuthUser(req.user) });
 });
 
+app.get('/api/auth/installation', requireAuth, async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const identity = await require('./backend/executionTargets').getServiceExecutionIdentity(db);
+    res.json({ schema: 'traceomics.installation.v1', installationId: identity.id, userId: Number(req.user.id) });
+  } catch {
+    res.status(503).json({ error: 'The authenticated installation identity is unavailable. Check the service before submitting work.' });
+  }
+});
+
 app.post('/api/auth/change-password', passwordChangeRateLimiter, authJson, requireAuth, async (req, res) => {
   if (req.user.isDemoGuest) return res.status(403).json({ error: 'Demo accounts cannot change credentials.' });
   const validated = validatePasswordChangeBody(req.body || {}, req.user);
@@ -2550,6 +2560,7 @@ function sendProjectResourceError(res, e, context) {
     case 'ANALYSIS_OBJECT_NOT_FOUND':
     case 'RESULT_OBJECT_NOT_FOUND':
     case 'JOB_NOT_FOUND':
+    case 'SUBMISSION_NOT_FOUND':
     case 'PROVENANCE_NOT_FOUND':
     case 'FIGURE_NOT_FOUND':
     case 'PIPELINE_NOT_FOUND':
@@ -2562,6 +2573,7 @@ function sendProjectResourceError(res, e, context) {
       return res.status(403).json({ error: e.message });
     case 'JOB_NOT_CANCELABLE':
     case 'JOB_NOT_RETRYABLE':
+    case 'SUBMISSION_REQUEST_CONFLICT':
     case 'BRANCH_NAME_EXISTS':
     case 'BRANCH_ARCHIVED':
     case 'BRANCH_VERSION_CONFLICT':
@@ -2576,6 +2588,7 @@ function sendProjectResourceError(res, e, context) {
     case 'INVALID_METADATA':
     case 'INVALID_JOB_TYPE':
     case 'INVALID_PARAMETERS':
+    case 'INVALID_SUBMISSION_REQUEST':
     case 'UNKNOWN_PARAMETER':
     case 'INVALID_PARAMETER':
     case 'INVALID_PACKAGES':
@@ -3191,6 +3204,17 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   }
   if (rejectProjectResourceFields(req, res)) return;
 
+  // A repeated accepted request is a read of the original submission, even
+  // after its inputs or runtime have changed. It never dispatches another run.
+  let submissionHash = null;
+  if (body.requestId !== undefined) {
+    try {
+      const existing = await db.resolveProjectJobSubmission(req.user.id, req.params.projectId, body);
+      if (existing) { res.setHeader('Cache-Control', 'no-store'); return res.status(200).json(db.toPublicJob(existing)); }
+      submissionHash = require('./backend/submissionIdentity').projectSubmissionHash(body);
+    } catch (error) { return sendProjectResourceError(res, error, 'ProjectJobSubmission'); }
+  }
+
   if (body.analysisObjectId !== undefined && body.analysisObjectId !== null &&
       !isValidAnalysisObjectIdFormat(body.analysisObjectId)) {
     return res.status(400).json({ error: 'Malformed analysis object ID.' });
@@ -3317,7 +3341,7 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
       'condition.pseudobulk_de.v1',
       'spatial.seurat.v1',
     ];
-    if (heavyTypes.includes(body.jobType)) {
+    if (heavyTypes.includes(body.jobType) && body.requestId === undefined) {
       const { rows } = await db.query(
         `SELECT
            COUNT(*) FILTER (WHERE owner_user_id = $1)::int AS guest_active,
@@ -3363,12 +3387,23 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
       resultAnalysisObjectId: body.resultAnalysisObjectId,
       datasetId: body.datasetId,
       jobType: body.jobType,
-      parameters: jobParameters
-    });
-    res.status(201).json(db.toPublicJob(created));
+      parameters: jobParameters,
+      ...(body.requestId === undefined ? {} : { requestId: body.requestId }),
+    }, submissionHash);
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(created.submissionCreated === false ? 200 : 201).json(db.toPublicJob(created));
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
   }
+});
+
+app.get('/api/projects/:projectId/job-submissions/:requestId', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const receipt = await db.getProjectJobSubmission(req.user.id, req.params.projectId, req.params.requestId);
+    if (!receipt) return res.status(404).json({ error: 'Submission receipt not found.' });
+    res.json(receipt);
+  } catch (error) { sendProjectResourceError(res, error, 'ProjectJobSubmission'); }
 });
 
 app.get('/api/projects/:projectId/jobs', async (req, res) => {

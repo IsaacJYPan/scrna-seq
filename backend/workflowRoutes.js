@@ -9,7 +9,7 @@ function workflowRoutes({ db, provider, requireAuth }) {
   let lastCleanup = 0;
   router.use(requireAuth, express.json({ limit: '2mb' }));
   router.use((req, res, next) => {
-    if (Date.now() - lastCleanup > 60 * 60 * 1000) {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && Date.now() - lastCleanup > 60 * 60 * 1000) {
       lastCleanup = Date.now();
       runtime.expire().catch(() => { lastCleanup = 0; });
     }
@@ -40,6 +40,10 @@ function workflowRoutes({ db, provider, requireAuth }) {
   router.post('/:projectId/snapshots/:snapshotId/open', route(async (req, res) => res.json(await runtime.restore(req.user.id, req.params.projectId, req.params.snapshotId))));
   router.delete('/:projectId/snapshots/:snapshotId', route(async (req, res) => { await runtime.removeSnapshot(req.user.id, req.params.projectId, req.params.snapshotId); res.json({ ok: true }); }));
   router.get('/:projectId/instances/:instanceId', route(async (req, res) => res.json(await runtime.get(req.user.id, req.params.projectId, req.params.instanceId))));
+  router.get('/:projectId/instances/:instanceId/submissions/:requestId', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json(await runtime.submission(req.user.id, req.params.projectId, req.params.instanceId, req.params.requestId));
+  }));
   router.post('/:projectId/instances/:instanceId/run', route(async (req, res) => res.json(await runtime.run(req.user.id, req.params.projectId, req.params.instanceId, req.body))));
   router.post('/:projectId/instances/:instanceId/cancel', route(async (req, res) => res.json(await runtime.cancel(req.user.id, req.params.projectId, req.params.instanceId))));
   router.post('/:projectId/instances/:instanceId/save', route(async (req, res) => res.json(await runtime.save(req.user.id, req.params.projectId, req.params.instanceId, req.body.name))));

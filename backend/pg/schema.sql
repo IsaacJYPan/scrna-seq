@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261015, now())
+VALUES ('traceomics.runtime', 20261016, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -486,6 +486,15 @@ CREATE TABLE IF NOT EXISTS service_execution_identity (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
   service_id TEXT NOT NULL UNIQUE CHECK(service_id ~ '^svc_[a-f0-9]{32}$')
 );
+CREATE TABLE IF NOT EXISTS project_job_submissions (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  request_id UUID NOT NULL,
+  request_hash TEXT NOT NULL CHECK(request_hash ~ '^[a-f0-9]{64}$'),
+  job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id, owner_user_id, request_id)
+);
 CREATE TABLE IF NOT EXISTS job_execution_receipts (
   dispatch_order BIGINT GENERATED ALWAYS AS IDENTITY,
   job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -513,6 +522,10 @@ CREATE TRIGGER trg_execution_receipt_no_update BEFORE UPDATE ON job_execution_re
   FOR EACH ROW EXECUTE FUNCTION reject_execution_receipt_update();
 DROP TRIGGER IF EXISTS trg_service_identity_no_update ON service_execution_identity;
 CREATE TRIGGER trg_service_identity_no_update BEFORE UPDATE ON service_execution_identity
+  FOR EACH ROW EXECUTE FUNCTION reject_execution_receipt_update();
+
+DROP TRIGGER IF EXISTS trg_project_submission_no_update ON project_job_submissions;
+CREATE TRIGGER trg_project_submission_no_update BEFORE UPDATE ON project_job_submissions
   FOR EACH ROW EXECUTE FUNCTION reject_execution_receipt_update();
 
 -- Expert R source is needed only while a request can still execute. Once the
@@ -827,6 +840,26 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   UNIQUE(instance_id, request_id)
 );
 ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS output_names_json JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS request_hash TEXT CHECK(request_hash ~ '^[a-f0-9]{64}$');
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS request_json JSONB CHECK(octet_length(request_json::text) <= 65536);
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS original_instance_id TEXT;
+DROP TRIGGER IF EXISTS trg_workflow_submission_no_update ON workflow_runs;
+UPDATE workflow_runs SET original_instance_id=instance_id WHERE original_instance_id IS NULL AND instance_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_original_submission ON workflow_runs(original_instance_id,request_id)
+  WHERE original_instance_id IS NOT NULL;
+CREATE OR REPLACE FUNCTION protect_workflow_submission_identity()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF (NEW.request_id,NEW.job_id,NEW.step_id,NEW.request_hash,NEW.request_json,NEW.original_instance_id)
+     IS DISTINCT FROM (OLD.request_id,OLD.job_id,OLD.step_id,OLD.request_hash,OLD.request_json,OLD.original_instance_id) THEN
+    RAISE EXCEPTION 'workflow submission receipts are immutable' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_workflow_submission_no_update ON workflow_runs;
+CREATE TRIGGER trg_workflow_submission_no_update BEFORE UPDATE ON workflow_runs
+  FOR EACH ROW EXECUTE FUNCTION protect_workflow_submission_identity();
 CREATE TABLE IF NOT EXISTS workflow_artifacts (
   id TEXT PRIMARY KEY,
   owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

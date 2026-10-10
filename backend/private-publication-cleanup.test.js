@@ -102,7 +102,7 @@ describe.skipIf(!process.env.DATABASE_URL)('expired demo publication lifecycle c
     await db.query('ALTER TABLE private_r_publications DROP CONSTRAINT private_r_publications_size_bytes_check');
     await db.query('ALTER TABLE private_r_publications ADD CONSTRAINT private_r_publications_size_bytes_check CHECK (size_bytes BETWEEN 1 AND 20971520)');
     await db.initSchema({ force: true }); await db.initSchema({ force: true });
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261015);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261016);
     const constraints = (await db.query(`SELECT condeferrable,condeferred FROM pg_constraint
       WHERE conrelid='private_r_publications'::regclass AND confrelid='managed_artifact_versions'::regclass AND contype='f'`)).rows;
     expect(constraints).toEqual([{ condeferrable: true, condeferred: true }]);
