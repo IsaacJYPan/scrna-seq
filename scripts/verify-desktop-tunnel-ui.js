@@ -61,7 +61,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
   function saveSettings(profile, selected = null) { fs.writeFileSync(path.join(userData, 'desktop-settings.json'), JSON.stringify({ schemaVersion: 1, selectedProfileId: selected, profiles: [profile] })); }
   const profile = { id: 'tunneled-lab', name: 'Tunneled lab', kind: 'ssh',
     ssh: { host: aliases[1], remoteHost: '127.0.0.1', remotePort: 8443 } };
-  async function launch({ trustFixtureCa = true, forcePortConflict = false, direct = false } = {}) {
+  async function launch({ trustFixtureCa = true, forcePortConflict = false, direct = false, restoreSelected = false } = {}) {
     const launcher = path.join(privateDirectory, 'native-launcher.cjs');
     const ca = service.caCertificatePath;
     fs.writeFileSync(launcher, [
@@ -84,7 +84,13 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     ].join('\n'));
     application = await electron.launch({ args: [launcher, '--user-data-dir=' + userData], env: { ...process.env, TRACEOMICS_DESKTOP_URL: '' }, timeout: 60000 });
     application.process().stderr.on('data', chunk => fs.appendFileSync(path.join(output, 'electron-diagnostics.txt'), chunk.toString().split(privateDirectory).join('[private fixture]')));
-    const setup = await application.firstWindow(); await setup.getByRole('heading', { name: 'Choose your research server', exact: true }).waitFor();
+    const setup = await application.firstWindow();
+    if (restoreSelected) {
+      await setup.waitForURL(service.endpoint + '**', { timeout: 30_000 });
+      await setup.locator('[aria-label="Execution target"]').getByText('SSH tunnel connected', { exact: true }).waitFor({ timeout: 30_000 });
+      return setup;
+    }
+    await setup.getByRole('heading', { name: 'Choose your research server', exact: true }).waitFor();
     await setup.locator('#saved-target').selectOption(direct ? 'direct-lab' : profile.id); return setup;
   }
   async function connect(setup) {
@@ -92,6 +98,48 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     const page = await waiting; await page.waitForURL(service.endpoint + '**', { timeout: 30000 }); return page;
   }
   async function openSettings(page) { const waiting = application.waitForEvent('window'); await page.evaluate(() => window.desktopShell.openTargetSettings()); const setup = await waiting; await setup.locator('#saved-target').selectOption(profile.id); return setup; }
+  async function restartWorkspace() {
+    const previousPort = await application.evaluate(() => globalThis.__fixtureTunnelPort);
+    await application.close(); application = null;
+    await waitFor(async () => !(await isListening(previousPort)), 'Closing the complete desktop app left its native forward listening.');
+    await waitFor(async () => !fs.readdirSync(userData).some(name => name.startsWith('.ssh-route-') || name.startsWith('.ssh-policy-')),
+      'Closing the complete desktop app left an owned SSH policy snapshot behind.');
+    const workspace = await launch({ restoreSelected: true });
+    assert((await workspace.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200,
+      'Reopening the complete desktop app did not restore the authenticated target partition.');
+    return { workspace, application };
+  }
+  async function createPeerWorkspace(page) {
+    // Production desktop opens one work window. This disposable second
+    // renderer shares that real SSH/TLS session to certify the browser ledger.
+    // Its preload copies only the already-verified readonly target descriptor;
+    // it cannot invoke native connection controls or change production policy.
+    const target = await page.evaluate(() => window.desktopShell.getCurrentTarget());
+    const preload = path.join(privateDirectory, 'readonly-peer-preload.cjs');
+    fs.writeFileSync(preload, "const {contextBridge}=require('electron');contextBridge.exposeInMainWorld('desktopShell',Object.freeze({getCurrentTarget:async()=>("
+      + JSON.stringify(target) + '),onTargetStatus:()=>()=>{}}));\n');
+    const nativeWindow = await application.browserWindow(page);
+    const opening = application.waitForEvent('window');
+    try {
+      const sourceId = await nativeWindow.evaluate(source => source.id);
+      await application.evaluate(({ BrowserWindow }, { sourceId, preload, endpoint }) => {
+        const source = BrowserWindow.fromId(sourceId);
+        const peer = new BrowserWindow({ width: 1440, height: 960, show: false,
+          webPreferences: { session: source.webContents.session,
+            contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false, preload } });
+        if (peer.webContents.session !== source.webContents.session) {
+          peer.destroy(); throw new Error('The disposable peer did not share the original native session.');
+        }
+        void peer.loadURL(endpoint);
+      }, { sourceId, preload, endpoint: service.endpoint });
+    } finally { await nativeWindow.dispose(); }
+    const peer = await opening;
+    await peer.waitForURL(service.endpoint + '**', { timeout: 30_000 });
+    await peer.locator('[aria-label="Execution target"]').getByText('SSH tunnel connected', { exact: true }).waitFor({ timeout: 30_000 });
+    assert((await peer.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200,
+      'The disposable peer did not share the actual authenticated HTTPS target partition.');
+    return peer;
+  }
   async function failedConnect(setup, expression) { await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); await setup.getByRole('alert').filter({ hasText: expression }).waitFor({ timeout: 30000 }); }
   try {
     service = await serviceFactory({ artifactDirectory: output }); profile.endpoint = service.endpoint;
@@ -236,7 +284,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     });
     assert(csrf === 403, 'Production CSRF/origin validation accepted a foreign origin through the tunnel.');
     checks.push('actual production cookie-auth mutation rejects a foreign origin through the same TLS/SSH transport');
-    if (exerciseWorkspace) workspace = await exerciseWorkspace({ workspace, application, service, openSettings, connect }) || workspace;
+    if (exerciseWorkspace) workspace = await exerciseWorkspace({ workspace, application, service, openSettings, connect, restartWorkspace, createPeerWorkspace }) || workspace;
     await workspace.evaluate(() => localStorage.setItem('tunnel-selected-project', 'original-project-selection'));
     setup = await openSettings(workspace);
     const savedBeforeApiFailure = fs.readFileSync(path.join(userData, 'desktop-settings.json'), 'utf8');

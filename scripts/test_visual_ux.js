@@ -746,6 +746,10 @@ async function main() {
   await page.route('**/api/artifact-versions/*', async route => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], nextCursor: null }) });
   });
+  await page.route('**/api/auth/installation', async route => {
+    await route.fulfill({ status: 200, contentType: 'application/json', headers: corsHeaders,
+      body: JSON.stringify({ schema: 'traceomics.installation.v1', installationId: `svc_${'a'.repeat(32)}`, userId: 1 }) });
+  });
   await page.route('**/api/execution-history/*', async route => {
     await route.fulfill({ status: 200, contentType: 'application/json', headers: corsHeaders,
       body: JSON.stringify({ items: [], nextCursor: null }) });

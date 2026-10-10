@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PUBLIC_ERROR, isTransientComputeBusy, publicErrorMessage } from './publicError';
 import { TARGET_CHANGED_MESSAGE, TARGET_CHECKING_MESSAGE, TARGET_DISCONNECTED_MESSAGE, TARGET_UNCONFIRMED_MESSAGE } from './runtime/executionTarget';
+import { SUBMISSION_RECOVERY_MESSAGES } from './executions/submissionRecoveryMessages';
 
 describe('publicErrorMessage', () => {
+  it('preserves only the fixed safe submission-recovery instructions', () => {
+    for (const message of Object.values(SUBMISSION_RECOVERY_MESSAGES)) expect(publicErrorMessage(new Error(message))).toBe(message);
+    expect(publicErrorMessage('An earlier submission has not been confirmed: /__private_vault__/source.R')).toBe(DEFAULT_PUBLIC_ERROR);
+    expect(publicErrorMessage({ code: 'SUBMISSION_UNCONFIRMED', message: 'Private server diagnostic' })).toBe(DEFAULT_PUBLIC_ERROR);
+  });
   it('preserves fixed reconnect and unconfirmed-execution instructions', () => {
     for (const message of [TARGET_CHANGED_MESSAGE,TARGET_CHECKING_MESSAGE,TARGET_DISCONNECTED_MESSAGE,TARGET_UNCONFIRMED_MESSAGE]) expect(publicErrorMessage(message)).toBe(message);
   });

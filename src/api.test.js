@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { clearSubmissionRecovery, getSubmissionRecoverySnapshot } from './executions/submissionRecovery';
 import {
   electronAPI,
   apiUrl,
@@ -280,8 +281,16 @@ describe('buildCheckpointSaveJobPayload', () => {
 
 describe('API Client (electronAPI)', () => {
   const originalFetch = global.fetch;
+  const mockProjectJob = job => global.fetch.mockImplementation(async (url, options) => {
+    if (url === '/api/auth/installation') return { ok: true, json: async () => ({ schema: 'traceomics.installation.v1', installationId: `svc_${'a'.repeat(32)}`, userId: 1 }) };
+    const body = JSON.parse(options.body);
+    expect(body.requestId).toMatch(/^[a-f0-9-]{36}$/);
+    expect(getSubmissionRecoverySnapshot().records).toEqual(expect.arrayContaining([expect.objectContaining({ requestId: body.requestId, state: 'pending' })]));
+    return { ok: true, status: 201, json: async () => ({ ...job, submission: { schema: 'traceomics.job-submission.v1', requestId: body.requestId, projectId: 'proj_1', requestHash: 'b'.repeat(64), jobId: job.id } }) };
+  });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await clearSubmissionRecovery();
     global.fetch = vi.fn();
     if (typeof localStorage !== 'undefined') {
       localStorage.clear();
@@ -694,12 +703,7 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates durable DEG jobs through the project job API wrapper', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_abc123', jobType: 'deg.find_markers.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_abc123', jobType: 'deg.find_markers.v1', status: 'queued' });
 
     const result = await electronAPI.createDegFindMarkersJob('proj_1', 'ao_abc123', {
       groupBy: 'seurat_clusters',
@@ -709,11 +713,12 @@ describe('API Client (electronAPI)', () => {
     });
 
     expect(result.id).toBe('job_abc123');
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    const [url, options] = global.fetch.mock.calls[0];
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'deg.find_markers.v1',
       analysisObjectId: 'ao_abc123',
       parameters: {
@@ -725,12 +730,7 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates durable ranked pathway-enrichment jobs through the project job API wrapper', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_enrich123', jobType: 'enrichment.gsea.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_enrich123', jobType: 'enrichment.gsea.v1', status: 'queued' });
 
     const result = await electronAPI.createEnrichmentGseaJob('proj_1', 'ao_abc123', {
       groupBy: 'seurat_clusters',
@@ -746,10 +746,11 @@ describe('API Client (electronAPI)', () => {
     });
 
     expect(result.id).toBe('job_enrich123');
-    const [url, options] = global.fetch.mock.calls[0];
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'enrichment.gsea.v1',
       analysisObjectId: 'ao_abc123',
       parameters: {
@@ -767,12 +768,7 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates fixed durable CellChat inference jobs through the project job API wrapper', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_cellchat123', jobType: 'cellchat.infer.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_cellchat123', jobType: 'cellchat.infer.v1', status: 'queued' });
 
     const result = await electronAPI.createCellChatInferenceJob('proj_1', 'ao_abc123', {
       groupBy: 'ident',
@@ -792,10 +788,11 @@ describe('API Client (electronAPI)', () => {
     });
 
     expect(result.id).toBe('job_cellchat123');
-    const [url, options] = global.fetch.mock.calls[0];
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'cellchat.infer.v1',
       analysisObjectId: 'ao_abc123',
       parameters: {
@@ -816,12 +813,7 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates durable Seurat pipeline jobs through the project job API wrapper', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_pipeline123', jobType: 'seurat.pipeline.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_pipeline123', jobType: 'seurat.pipeline.v1', status: 'queued' });
 
     const result = await electronAPI.createSeuratPipelineJob('proj_1', {
       datasetId: 'ds_abc123',
@@ -834,11 +826,12 @@ describe('API Client (electronAPI)', () => {
     });
 
     expect(result.id).toBe('job_pipeline123');
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    const [url, options] = global.fetch.mock.calls[0];
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'seurat.pipeline.v1',
       datasetId: 'ds_abc123',
       analysisObjectId: 'ao_input123',
@@ -850,12 +843,7 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates spatial Seurat jobs with the same fixed parameter allowlist', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_spatial123', jobType: 'spatial.seurat.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_spatial123', jobType: 'spatial.seurat.v1', status: 'queued' });
 
     await electronAPI.createSpatialSeuratPipelineJob('proj_1', {
       datasetId: 'ds_spatial123',
@@ -863,9 +851,10 @@ describe('API Client (electronAPI)', () => {
       params: { normalizationMethod: 'SCTransform', clusterResolution: 0.6, storageUri: 'private.rds' },
     });
 
-    const [url, options] = global.fetch.mock.calls[0];
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'spatial.seurat.v1',
       datasetId: 'ds_spatial123',
       analysisObjectId: 'ao_spatial_input',
@@ -874,20 +863,16 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates checkpoint forks through the fixed project job API wrapper', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_fork123', jobType: 'checkpoint.fork.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_fork123', jobType: 'checkpoint.fork.v1', status: 'queued' });
 
     const result = await electronAPI.createCheckpointForkJob('proj_1', 'ao_source123');
 
     expect(result.id).toBe('job_fork123');
-    const [url, options] = global.fetch.mock.calls[0];
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'checkpoint.fork.v1',
       analysisObjectId: 'ao_source123',
       parameters: {},
@@ -912,20 +897,16 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates owner-only checkpoint saves through the fixed project job API wrapper', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_save123', jobType: 'checkpoint.save.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_save123', jobType: 'checkpoint.save.v1', status: 'queued' });
 
     const result = await electronAPI.createCheckpointSaveJob('proj_1', 'ao_owner123');
 
     expect(result.id).toBe('job_save123');
-    const [url, options] = global.fetch.mock.calls[0];
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'checkpoint.save.v1',
       analysisObjectId: 'ao_owner123',
       parameters: {},
@@ -933,20 +914,16 @@ describe('API Client (electronAPI)', () => {
   });
 
   it('creates owner-only checkpoint reattach jobs through the fixed project job API wrapper', async () => {
-    global.fetch.mockResolvedValue({
-      ok: true,
-      status: 201,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ id: 'job_attach123', jobType: 'checkpoint.load.v1', status: 'queued' }),
-    });
+    mockProjectJob({ id: 'job_attach123', jobType: 'checkpoint.load.v1', status: 'queued' });
 
     const result = await electronAPI.createCheckpointLoadJob('proj_1', 'ao_owner123');
 
     expect(result.id).toBe('job_attach123');
-    const [url, options] = global.fetch.mock.calls[0];
+    const [url, options] = global.fetch.mock.calls[1];
     expect(url).toBe('/api/projects/proj_1/jobs');
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({
+      requestId: expect.any(String),
       jobType: 'checkpoint.load.v1',
       analysisObjectId: 'ao_owner123',
       parameters: {},

@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getRunMonitoring, listRunMonitoring } from '../executions/runMonitoringApi';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import ExecutionTargetEvidence from './ExecutionTargetEvidence';
+import useSubmissionRecovery from '../executions/useSubmissionRecovery';
+import { clearProjectSubmissionRecovery, clearSubmissionRecovery, selectRecoveredRun } from '../executions/submissionRecovery';
 
 const activeStatuses = new Set(['queued', 'running', 'reserved']);
 const stateLabels = { queued: 'Waiting for compute', running: 'Running', reserved: 'Preparing', completed: 'Complete', failed: 'Needs attention', canceled: 'Canceled', unknown: 'Unconfirmed' };
@@ -71,10 +73,12 @@ function WorkerObservation({ worker }) {
 
 export default function RunMonitor({ projectId, userId }) {
   const connection = useExecutionTarget();
-  const scope = `${projectId}:${userId}:${connection.identity}`;
+  const recovery = useSubmissionRecovery(userId);
+  const scope = `${projectId}:${userId}:${connection.identity}:${recovery.ready ? recovery.scope.installationId : ''}`;
   const current = useRef(null); current.current = { scope, epoch: connection.epoch, blocked: connection.blocked };
   const [items, setItems] = useState([]); const [cursor, setCursor] = useState(null);
   const [selected, setSelected] = useState(null); const selectedRef = useRef(null);
+  const recoveredSelectionRef = useRef(null);
   const [detail, setDetail] = useState(null); const [dataScope, setDataScope] = useState(scope);
   const [loading, setLoading] = useState(false); const [checking, setChecking] = useState(false);
   const [stale, setStale] = useState(false); const [error, setError] = useState('');
@@ -97,9 +101,13 @@ export default function RunMonitor({ projectId, userId }) {
   const contextMatches = useCallback(context => current.current.scope === context.scope && current.current.epoch === context.epoch && !current.current.blocked, []);
   const showFailure = useCallback(failure => {
     setError(failure.message);
-    if ([401, 403, 404].includes(failure.status)) clearPrivate();
+    if ([401, 403, 404].includes(failure.status)) {
+      clearPrivate();
+      if (failure.status === 401) clearSubmissionRecovery({ preserveOwner: true });
+      else if (failure.status === 403) clearProjectSubmissionRecovery(projectId);
+    }
     else setStale(true);
-  }, [clearPrivate]);
+  }, [clearPrivate, projectId]);
 
   const readDetail = useCallback(async (id, skipIfPending = false) => {
     if (!projectId || !id || current.current.blocked || (skipIfPending && detailRequest.current)) return;
@@ -137,6 +145,10 @@ export default function RunMonitor({ projectId, userId }) {
     clearPrivate(); setDataScope(scope); setError('');
     return () => { listRequest.current?.abort(); detailRequest.current?.abort(); };
   }, [scope, clearPrivate]);
+  const accessLossSequence = recovery.accessLoss?.projectId === projectId ? recovery.accessLoss.sequence : null;
+  useEffect(() => {
+    if (accessLossSequence) clearPrivate();
+  }, [accessLossSequence, clearPrivate]);
   useEffect(() => {
     if (connection.blocked) {
       listRequest.current?.abort(); detailRequest.current?.abort(); setLoading(false); setChecking(false);
@@ -146,6 +158,15 @@ export default function RunMonitor({ projectId, userId }) {
     if (selectedRef.current) readDetail(selectedRef.current);
     return () => { listRequest.current?.abort(); detailRequest.current?.abort(); };
   }, [connection.blocked, connection.epoch, scope, readList, readDetail]);
+  const recoveredRunId = recovery.selection?.projectId === projectId ? recovery.selection.runId : null;
+  useEffect(() => {
+    const previous = recoveredSelectionRef.current;
+    recoveredSelectionRef.current = recoveredRunId;
+    if (previous && !recoveredRunId && selectedRef.current === previous) { clearPrivate(); return; }
+    if (!recoveredRunId || connection.blocked || selectedRef.current === recoveredRunId) return;
+    selectedRef.current = recoveredRunId; setSelected(recoveredRunId); setDetail(null); setError(''); setStale(false);
+    readDetail(recoveredRunId);
+  }, [recoveredRunId, scope, connection.blocked, readDetail, clearPrivate]);
   useEffect(() => {
     if (connection.blocked || !selected || !activeStatuses.has(visibleDetail?.status)) return undefined;
     let stopped = false;
@@ -174,6 +195,7 @@ export default function RunMonitor({ projectId, userId }) {
 
   const select = item => {
     if (connection.blocked) return;
+    selectRecoveredRun(projectId, item.id);
     selectedRef.current = item.id; setSelected(item.id); setDetail(null); setError(''); setStale(false);
     readDetail(item.id);
   };

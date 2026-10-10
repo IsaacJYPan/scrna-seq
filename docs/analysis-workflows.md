@@ -1,5 +1,38 @@
 # Analysis workflows
 
+## Recover an accepted analysis submission
+
+Analysis jobs and recipe steps retain a small submission identifier on this
+computer before work is submitted. The server commits a receipt with the accepted
+run. Reusing that identifier returns the original run; different inputs or settings
+under the same identifier are rejected. A new intentional run receives a new
+identifier.
+
+After reconnecting or reopening the app, saved identifiers are checked against the
+authenticated installation, account and project using read-only requests. Open
+**Project → Runs & Results → Saved submissions** to choose **Check receipt** or
+**Open exact run**. The monitor opens that specific run, including an older run
+when more recent work exists. Recovery never repeats a scientific submission.
+Closing the desktop client does not cancel accepted server work.
+
+If a response was lost, the app blocks further submissions in that project until
+the earlier request is checked. An unavailable or missing receipt does not prove
+that no work is running. Inspect existing runs before choosing **Forget unconfirmed
+request**; forgetting permits a new submission and can therefore duplicate work.
+The app does not resubmit the forgotten request automatically.
+
+At most 24 saved identifiers and one monitoring selection are retained locally.
+They contain IDs, hashes and timestamps, without scientific source, settings,
+results, credentials or server paths. Switching accounts or installations prevents
+old identifiers from being used in the new scope. Logout clears them. Recovery
+requires writable browser storage, the Web Locks API in a secure browser context
+and a server with submission-receipt support. Open windows coordinate their
+saved identifiers before admitting work, so an unresolved submission in another
+window also blocks a new submission in that project.
+Earlier runs without receipts remain available in execution history. Private R
+session journal and editor recovery after a full app restart remain separate work;
+saved artifacts and ended-session memory are not interchangeable.
+
 ## Monitor work on the selected server
 
 Open **Project → Runs & Results → Run monitoring** and select one of your analysis
