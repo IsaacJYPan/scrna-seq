@@ -1,5 +1,34 @@
 # Analysis workflows
 
+## Monitor work on the selected server
+
+Open **Project → Runs & Results → Run monitoring** and select one of your analysis
+jobs or private R commands. Runs & Results remains available while a custom recipe
+is selected. The panel shows the retained server state, execution target,
+queue and run elapsed time, available run notes, and resource observations.
+Active selected records refresh every five seconds. **Refresh monitoring** checks
+the list and the same selected record; these requests never start another run.
+
+Progress and remaining time are explicitly unknown when the runtime does not
+report them. Where the isolated R runtime can sample the selected container, CPU
+and memory usage include their observation time and scope. Container CPU usage
+can exceed 100% across multiple CPUs. Configured resource limits describe an
+allowance, separately from measured usage. Guided R usage or unavailable samples
+are labeled unreported; the app does not substitute whole-server measurements.
+The worker lease, last heartbeat, and lease expiry describe the worker's last
+confirmed liveness; they do not measure scientific progress.
+Run notes are private to the run owner, bounded, and scrubbed of transport secrets
+and private paths.
+
+The connection status is separate from computation status. If the SSH tunnel or
+service cannot be checked, the last confirmed run state and elapsed time remain
+visible, with their observation time. Reconnect to the same server to inspect the
+same durable run. Monitoring does not cancel, retry, or replay work. A terminal
+record stops automatic polling, and changing accounts, projects, or servers
+clears the previous private observations. Active observations older than ten
+seconds are labeled last confirmed, including when a background tab returns to
+the foreground. Stored container samples are distinguished from current usage.
+
 ## Inspect exact artifact versions
 
 Open **Runs & Results → Artifact versions** to inspect saved analyses, private

@@ -6,6 +6,7 @@ import {
 import { publicErrorMessage } from '../publicError';
 import ArtifactInspector from '../components/ArtifactInspector';
 import ExecutionHistory from '../components/ExecutionHistory';
+import RunMonitor from '../components/RunMonitor';
 import PageHeader from '../components/PageHeader';
 
 function formatDate(value) {
@@ -922,6 +923,7 @@ export default function ProjectHistory({
           </div>
         </div>
 
+        <RunMonitor key={`monitor:${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />
         <ExecutionHistory key={`${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />
         <details className="rounded-lg border border-border bg-surface/40 p-4">
           <summary className="cursor-pointer font-medium text-text">Inspect or import artifact files</summary>

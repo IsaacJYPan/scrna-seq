@@ -130,6 +130,52 @@ describe('Sidebar component', () => {
     expect(screen.queryByRole('button', { name: /Diagnostics/i })).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['default pipeline', null, null],
+    ['custom pipeline', { schemaVersion: 1, id: 'custom-recipe', name: 'Custom Recipe', tabs: [
+      { id: 'inspect', label: 'Inspect object', moduleKey: 'inspectObject' },
+      { id: 'history', label: 'Runs & Results', moduleKey: 'projectHistory' },
+    ] }, null],
+    ['active workflow', null, { package: { name: 'Custom workflow', tabs: [{ id: 'counts', label: 'Cell counts', step: 'counts' }],
+      steps: [{ id: 'counts', label: 'Cell counts', inputs: {}, outputs: {} }] }, state: { results: {}, active: null } }],
+  ])('keeps one project Runs & Results destination for a %s without a selected analysis', (_context, activePipeline, activeWorkflow) => {
+    const setActiveTab = vi.fn();
+    const { container } = render(<Sidebar {...baseProps} activeTab="workspace" setActiveTab={setActiveTab}
+      workspaces={[{ ...mockWorkspaces[0], selectedProjectId: 'proj_1', projects: [{ id: 'proj_1' }] }]}
+      selectedObjects={[]} activePipeline={activePipeline} activeWorkflow={activeWorkflow} />);
+    const history = screen.getAllByRole('button', { name: 'Runs & Results', exact: true });
+    expect(history).toHaveLength(1);
+    expect(history[0]).not.toBeDisabled();
+    expect(history[0]).toHaveAttribute('data-destination', 'history');
+    expect(container.querySelector('#navigation-group-project')).toContainElement(history[0]);
+    fireEvent.click(history[0]);
+    expect(setActiveTab).toHaveBeenCalledWith('history');
+    if (activeWorkflow) expect(screen.getByRole('button', { name: 'Cell counts', exact: true })).toBeVisible();
+  });
+
+  it('requires a project to open Runs & Results', () => {
+    const setActiveTab = vi.fn();
+    render(<Sidebar {...baseProps} activeTab="workspace" selectedObjects={[]} setActiveTab={setActiveTab} />);
+    const history = screen.getByRole('button', { name: 'Runs & Results', exact: true });
+    expect(history).toBeDisabled();
+    fireEvent.click(history);
+    expect(setActiveTab).not.toHaveBeenCalled();
+  });
+
+  it('reopens the project group when Runs & Results becomes the current page', () => {
+    const props = { ...baseProps, workspaces: [{ ...mockWorkspaces[0], selectedProjectId: 'proj_1' }], selectedObjects: [] };
+    const view = render(<Sidebar {...props} activeTab="workspace" />);
+    const project = screen.getByRole('button', { name: 'Project', exact: true });
+    fireEvent.click(project);
+    expect(project).toHaveAttribute('aria-expanded', 'false');
+    view.rerender(<Sidebar {...props} activeTab="history" />);
+    const history = screen.getByRole('button', { name: 'Runs & Results', exact: true });
+    expect(history).toHaveAttribute('aria-current', 'page');
+    expect(project).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(project);
+    expect(project).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('disables the legacy live integration action under the production policy', () => {
     render(
       <Sidebar

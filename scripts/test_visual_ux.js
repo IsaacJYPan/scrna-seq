@@ -589,7 +589,7 @@ async function main() {
     const err = req.failure()?.errorText || 'unknown';
     // These read-only requests are deliberately cancelled by their owners on
     // tab/context changes. Keep real failures and HTTP errors strict.
-    const cancelledRead = err === 'net::ERR_ABORTED' && /\/(reduction-results|execution-history|artifact-versions)([/?]|$)/.test(new URL(url).pathname);
+    const cancelledRead = err === 'net::ERR_ABORTED' && /\/(reduction-results|execution-history|artifact-versions|run-monitoring)([/?]|$)/.test(new URL(url).pathname);
     if (!cancelledRead && !isIgnorableError(err)) {
       networkFailures.push(`${req.method()} ${url} → ${err}`);
       console.log(`[NETWORK FAIL] ${req.method()} ${url} → ${err}`);
@@ -749,6 +749,13 @@ async function main() {
   await page.route('**/api/execution-history/*', async route => {
     await route.fulfill({ status: 200, contentType: 'application/json', headers: corsHeaders,
       body: JSON.stringify({ items: [], nextCursor: null }) });
+  });
+  await page.route('**/api/run-monitoring/*', async route => {
+    const pathParts = new URL(route.request().url()).pathname.split('/').filter(Boolean);
+    const isList = route.request().method() === 'GET' && pathParts.length === 3;
+    await route.fulfill({ status: isList ? 200 : 404, contentType: 'application/json', headers: corsHeaders,
+      body: JSON.stringify(isList ? { schema: 'traceomics.run-monitoring.v1', checkedAt: new Date().toISOString(),
+        staleAfterMs: 10000, items: [], nextCursor: null } : { error: 'Run not found.' }) });
   });
   await page.route('**/api/expert-r/projects/*/inputs*', async route => {
     await route.fulfill({

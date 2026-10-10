@@ -8,7 +8,7 @@ import { workflowTabAvailability } from '../../shared/workflowState.mjs';
 
 const PRIMARY_DESTINATION_IDS = new Set([
   'workspace', 'pipeline-manager', 'branches', 'study-design', 'expert-r',
-  'team', 'lineage', 'publication', 'validation',
+  'team', 'history', 'lineage', 'publication', 'validation',
 ]);
 
 function researcherLabel(value) {
@@ -140,9 +140,8 @@ export default function Sidebar({
   const currentWorkspace = workspaces[activeWsIndex];
   const hasData = selectedObjects.length > 0;
   const hasProject = !!currentWorkspace?.selectedProjectId || (currentWorkspace?.projects || []).length > 0;
-  // Advanced analysis is a project-scoped, capability-gated workbench. Keep its
-  // single entry in the Project section rather than duplicating it in a selected
-  // workflow's generated navigation.
+  // Project destinations remain available when a selected workflow replaces
+  // the generated analysis navigation.
   const pipelineSections = (activeWorkflow ? [{ id: 'workflow', label: activeWorkflow.package.name,
     items: activeWorkflow.package.tabs.map(tab => {
       const availability = workflowTabAvailability(activeWorkflow.package, activeWorkflow.state, tab);
@@ -270,8 +269,9 @@ export default function Sidebar({
           <NavButton {...navProps} item={{ id: 'workspace', label: 'Analysis workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
         </div>
         <div ref={navigationScrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-3 custom-scrollbar" style={{ scrollbarGutter: 'stable' }}>
-          <NavSection id="project" label="Project" active={['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team'].includes(activeTab)} open={!closedGroups.has('project') || ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team'].includes(activeTab)} onToggle={() => toggleGroup('project', ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team'].includes(activeTab))}>
+          <NavSection id="project" label="Project" active={['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'history'].includes(activeTab)} open={!closedGroups.has('project') || ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'history'].includes(activeTab)} onToggle={() => toggleGroup('project', ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'history'].includes(activeTab))}>
             <NavButton {...navProps} item={{ id: 'pipeline-manager', label: 'Pipelines', icon: LayoutPanelTop, status: hasProject ? 'Project selection' : 'Select project' }} disabled={!hasProject} />
+            <NavButton {...navProps} item={{ id: 'history', label: 'Runs & Results', icon: LayoutPanelTop }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'branches', label: 'Analysis Branches', icon: GitBranch, status: hasProject ? 'Private drafts & review' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'study-design', label: 'Study Design', icon: Microscope, status: hasProject ? 'Samples & contrasts' : 'Select project' }} disabled={!hasProject} />
             <NavButton {...navProps} item={{ id: 'expert-r', label: 'Advanced analysis', icon: Wrench, status: deploymentPolicy.expertREnabled ? 'Available' : deploymentPolicy.demoMode ? 'Unavailable in public demo' : 'R setup & availability' }} disabled={!hasProject || deploymentPolicy.demoMode === true || deploymentPolicy.expertRStatus?.state === 'demo-disabled'} />
