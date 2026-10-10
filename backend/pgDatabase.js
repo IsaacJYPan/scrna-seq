@@ -3258,6 +3258,9 @@ function rowToJob(row) {
 function toPublicJob(job) {
   if (!job) return null;
   const { claimToken, workerId, ...rest } = job; // eslint-disable-line no-unused-vars
+  const { projectLogs, safeError } = require('./runMonitoring');
+  if (Array.isArray(rest.logs)) rest.logs = projectLogs(rest.logs).items;
+  if (rest.error) rest.error = safeError(rest.error);
   if (rest.jobType === 'expert.r.v1' && rest.parameters && typeof rest.parameters.script === 'string') {
     rest.parameters = {
       profileId: rest.parameters.profileId,

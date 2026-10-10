@@ -521,6 +521,9 @@ function createExpertSandboxBroker(env = process.env) {
   let reservedWorkBytes = 0n;
   let reservedStorageBytes = 0n;
   const activeWorkspaces = new Set();
+  const monitoredRuns = new Map();
+  let observationProbes=0;
+  const observeContainer=require('./containerObservation').createContainerObserver({runProcess});
   async function reserveKernelDisk(workBytes,durableBytes,diskReserveBytes) {
     const work=BigInt(workBytes),durable=BigInt(durableBytes);
     reservedWorkBytes+=work;reservedStorageBytes+=durable;
@@ -596,7 +599,36 @@ function createExpertSandboxBroker(env = process.env) {
       if (!runtimeVerified || !environmentManifest) { res.statusCode = 503; return res.end(JSON.stringify({ error: 'Exact R environment is unavailable.' })); }
       return res.end(environmentBytes(environmentManifest));
     }
-    const kernelRoute = /^\/kernels\/(start|pk_[a-f0-9]{24}\/(?:inspect|execute|interrupt|export|export-status|stop))$/.exec(req.url || '');
+    if(req.method==='POST'&&req.url==='/observe'&&safeEqual(String(req.headers.authorization||'').replace(/^Bearer /,''),token)) {
+      try {
+        const chunks=[];let bytes=0;
+        for await(const chunk of req){bytes+=chunk.length;if(bytes>1024)throw new Error('Invalid observation scope');chunks.push(chunk);}
+        const scope=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if(!scope||Object.keys(scope).some(key=>!['jobId','projectId','ownerUserId','dispatchId'].includes(key))
+            ||!/^job_[a-f0-9]+$/.test(scope.jobId||'')||!/^proj_[A-Za-z0-9_-]{3,128}$/.test(scope.projectId||'')
+            ||!Number.isSafeInteger(scope.ownerUserId)||scope.ownerUserId<1||!/^[a-f0-9]{64}$/.test(scope.dispatchId||''))throw new Error('Invalid observation scope');
+        const record=monitoredRuns.get(scope.dispatchId);
+        let observation=require('./containerObservation').unavailable();
+        if(record?.containerId&&observationProbes<4&&['jobId','projectId','ownerUserId','dispatchId'].every(key=>record.scope[key]===scope[key])) {
+          observationProbes++;
+          try {
+            const inspected=await runProcess('docker',['inspect',record.containerId,'--format','{"id":{{json .Id}},"labels":{{json .Config.Labels}}}'],{timeoutMs:1000});
+            if(Buffer.byteLength(inspected.stdout||'')>4096)throw new Error('Invalid container observation');
+            const container=JSON.parse(inspected.stdout);
+            if(container.id===record.containerId&&container.labels?.[CONTAINER_LABEL]==='true'
+                &&container.labels[`${CONTAINER_LABEL}.dispatch`]===scope.dispatchId
+                &&container.labels[`${CONTAINER_LABEL}.work-root`]===workspaceRootHash(workRoot)) {
+              observation=await observeContainer(record.containerId,record.limits);
+              if(monitoredRuns.get(scope.dispatchId)!==record)observation=require('./containerObservation').unavailable();
+            }
+          } finally {
+            observationProbes--;
+          }
+        }
+        return res.end(JSON.stringify({ok:true,...scope,observation}));
+      } catch {res.statusCode=404;return res.end(JSON.stringify({error:'Observation unavailable.'}));}
+    }
+    const kernelRoute = /^\/kernels\/(start|pk_[a-f0-9]{24}\/(?:inspect|observe|execute|interrupt|export|export-status|stop))$/.exec(req.url || '');
     if (req.method === 'POST' && kernelRoute
         && safeEqual(String(req.headers.authorization || '').replace(/^Bearer /, ''), token)) {
       if (!runtimeVerified || privateKernelStatus.state !== 'ready' || !kernelRuntime) {
@@ -643,6 +675,7 @@ function createExpertSandboxBroker(env = process.env) {
     active += 1;
     let jobDirectory = null;
     let containerName = null;
+    let monitoring = null;
     let workReservationBytes = 0n;
     let storageReservationBytes = 0n;
     let phase = 'request';
@@ -691,6 +724,13 @@ function createExpertSandboxBroker(env = process.env) {
       if (!/^job_[0-9a-f]+$/.test(body.jobId) || !storage.isProjectStorageKey(body.checkpointStorageKey, { projectId: body.projectId, kind: 'checkpoints' })
           || !storage.isProjectStorageKey(body.outputStorageKey, { projectId: body.projectId, kind: 'artifacts' })
           || !Number.isSafeInteger(body.checkpointSizeBytes) || body.checkpointSizeBytes < 0) throw new Error('Invalid sandbox job scope.');
+      if(body.monitoring!==undefined) {
+        const scope=body.monitoring;
+        if(!scope||Object.keys(scope).some(key=>!['jobId','projectId','ownerUserId','dispatchId'].includes(key))||scope.jobId!==body.jobId||scope.projectId!==body.projectId
+            ||!Number.isSafeInteger(scope.ownerUserId)||scope.ownerUserId<1||!/^[a-f0-9]{64}$/.test(scope.dispatchId||'')||monitoredRuns.has(scope.dispatchId))throw new Error('Invalid monitoring scope');
+        monitoring={scope:{...scope},containerId:null,limits:brokerResourceLimits(env,{timeoutMs,maxConcurrent,persistentKernel:false}).oneShot};
+        monitoredRuns.set(scope.dispatchId,monitoring);
+      }
       jobDirectory = path.join(workRoot, `${body.jobId}-${crypto.randomBytes(12).toString('hex')}`);
       phase = 'prepare-directories';
       const inputDirectory = path.join(jobDirectory, 'input'); const outputDirectory = path.join(jobDirectory, 'output');
@@ -777,9 +817,10 @@ function createExpertSandboxBroker(env = process.env) {
         "printf '%s\\n' \"$status\" > /tmp/traceomics-exit-status",
         'exec tail -f /dev/null',
       ].join('; ');
-      await runProcess('docker', [
+      const createdContainer=await runProcess('docker', [
         'run', '-d', '--name', containerName, '--network', 'none', '--read-only',
         '--label', `${CONTAINER_LABEL}=true`,
+        ...(monitoring?['--label',`${CONTAINER_LABEL}.dispatch=${monitoring.scope.dispatchId}`]:[]),
         '--label', `${CONTAINER_LABEL}.workspace=${path.basename(jobDirectory)}`,
         '--label', `${CONTAINER_LABEL}.work-root=${workspaceRootHash(workRoot)}`,
         '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256',
@@ -789,6 +830,9 @@ function createExpertSandboxBroker(env = process.env) {
         '--tmpfs', `/work/output:rw,noexec,nosuid,nodev,size=${MAX_OUTPUT_BYTES},nr_inodes=${OUTPUT_TMPFS_INODES},mode=1777`,
         '--entrypoint', '/bin/sh', image, '-c', sandboxWrapper,
       ], { timeoutMs: 30000, signal: abortController.signal });
+      if(monitoring&&/^[a-f0-9]{64}$/.test(String(createdContainer.stdout||'').trim())) {
+        monitoring.containerId=createdContainer.stdout.trim();monitoredRuns.set(monitoring.scope.dispatchId,monitoring);
+      }
       const sandboxStatus = await runProcess('docker', [
         'exec', containerName, '/bin/sh', '-c',
         'while [ ! -f /tmp/traceomics-exit-status ]; do sleep 1; done; cat /tmp/traceomics-exit-status',
@@ -899,6 +943,7 @@ function createExpertSandboxBroker(env = process.env) {
         }
       }
     } finally {
+      if(monitoring&&monitoredRuns.get(monitoring.scope.dispatchId)===monitoring)monitoredRuns.delete(monitoring.scope.dispatchId);
       if (environmentStorageKey && !published) await provider.remove(environmentStorageKey).catch(() => {});
       active -= 1;
       reservedWorkBytes -= workReservationBytes;

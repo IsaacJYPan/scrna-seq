@@ -7,7 +7,7 @@ const { LIMITS, KERNEL_ID, kernelError } = require('./privateKernelContract');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 
 function createPrivateKernelClient({ baseUrl = process.env.EXPERT_R_SANDBOX_URL, token = process.env.EXPERT_R_SANDBOX_TOKEN, timeoutMs = (Math.max(1,Math.min(600,Number(process.env.PRIVATE_R_KERNEL_EXECUTION_SECONDS)||300))+25)*1000, startTimeoutMs=120000, controlTimeoutMs = 30000, exportTimeoutMs = timeoutMs + getPrivateRArtifactPolicy().transferTimeoutSeconds * 1000 + 60000 } = {}) {
-  function request(path, body, timeout) {
+  function request(path, body, timeout, responseLimit = LIMITS.resultBytes) {
     if (!isTrustedExpertRSandboxUrl(baseUrl) || !/^[a-f0-9]{64}$/.test(token || '')) return Promise.reject(kernelError('PRIVATE_KERNEL_UNAVAILABLE', 'The persistent private R runtime is unavailable.', 503));
     const encoded = Buffer.from(JSON.stringify(body));
     if (encoded.length > 256 * 1024) return Promise.reject(kernelError('PRIVATE_KERNEL_REQUEST_INVALID', 'The private R request exceeds its size limit.'));
@@ -16,7 +16,7 @@ function createPrivateKernelClient({ baseUrl = process.env.EXPERT_R_SANDBOX_URL,
       const fail = () => { if (!settled) { settled = true; reject(kernelError('PRIVATE_KERNEL_TRANSPORT_UNKNOWN', 'The R runtime connection ended before completion was confirmed. Check the session state; do not rerun the command automatically.', 503)); } };
       const outgoing = (url.protocol === 'https:' ? https : http).request(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': encoded.length } }, response => {
         const chunks = []; let length = 0;
-        response.on('data', bytes => { length += bytes.length; if (length > LIMITS.resultBytes) { fail(); outgoing.destroy(); } else chunks.push(bytes); });
+        response.on('data', bytes => { length += bytes.length; if (length > responseLimit) { fail(); outgoing.destroy(); } else chunks.push(bytes); });
         response.on('error', fail); response.on('aborted', fail);
         response.on('end', () => {
           if (settled) return;
@@ -53,6 +53,6 @@ function createPrivateKernelClient({ baseUrl = process.env.EXPERT_R_SANDBOX_URL,
     }
     return request(path(id) + '/export', { ...scope, ...input }, deadline);
   }
-  return { start: spec => request('/kernels/start', spec, startTimeoutMs), inspect: (scope, id) => request(path(id) + '/inspect', scope, controlTimeoutMs), execute: (scope, id, input) => request(path(id) + '/execute', { ...scope, ...input }, timeoutMs), interrupt:(scope,id,input)=>request(path(id)+'/interrupt',{...scope,...input},controlTimeoutMs), export:exportOutput,exportStatus:(scope,id,input)=>request(path(id)+'/export-status',{...scope,...input},controlTimeoutMs), stop: (scope, id) => request(path(id) + '/stop', scope, controlTimeoutMs) };
+  return { start: spec => request('/kernels/start', spec, startTimeoutMs), inspect: (scope, id) => request(path(id) + '/inspect', scope, controlTimeoutMs), observe: (scope, id) => request(path(id) + '/observe', scope, 4500, 4096), execute: (scope, id, input) => request(path(id) + '/execute', { ...scope, ...input }, timeoutMs), interrupt:(scope,id,input)=>request(path(id)+'/interrupt',{...scope,...input},controlTimeoutMs), export:exportOutput,exportStatus:(scope,id,input)=>request(path(id)+'/export-status',{...scope,...input},controlTimeoutMs), stop: (scope, id) => request(path(id) + '/stop', scope, controlTimeoutMs) };
 }
 module.exports = { createPrivateKernelClient };

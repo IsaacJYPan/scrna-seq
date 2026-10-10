@@ -182,6 +182,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   }
   const target={kind:'service',id:'private-r-kernel',generation:managerId};
   const docker=(args,options)=>runProcessImpl('docker',args,options);
+  const observeContainer=require('./containerObservation').createContainerObserver({runProcess:runProcessImpl,now:clock});
   function retire(record) {
     if(retiredIds.has(record.kernelId))return;
     if(retiredIds.size>=maxRetiredIds)throw failure('PRIVATE_KERNEL_LIFECYCLE_LIMIT','The private kernel broker reached its lifetime session limit. Stop active kernels before restarting the broker.');
@@ -232,8 +233,8 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
       ...(record.lastExecution?{lastExecution:record.lastExecution}:{}),
       ...(record.reason?{reason:record.reason}:{}),unsavedState:record.status==='stopped'||record.status==='unknown'?'lost':'available'};
   }
-  async function inspectContainer(name) {
-    let result;try{result=await docker(['inspect',name,'--format','{"id":{{json .Id}},"labels":{{json .Config.Labels}}}']);}
+  async function inspectContainer(name, options) {
+    let result;try{result=await docker(['inspect',name,'--format','{"id":{{json .Id}},"labels":{{json .Config.Labels}}}'],options);}
     catch(error){if(error.exitCode===1)return null;throw error;}
     let value;try{value=JSON.parse(result.stdout);}catch{throw failure('PRIVATE_KERNEL_UNAVAILABLE','Container ownership could not be verified.');}
     if(!/^[0-9a-f]{64}$/.test(value.id||'')||!value.labels)throw failure('PRIVATE_KERNEL_UNAVAILABLE','Container ownership could not be verified.');
@@ -426,6 +427,24 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   }
   async function inspect(scope,kernelId) {
     const record=requireRecord(scope,kernelId);await expire(record);return publicRecord(record);
+  }
+  let observationProbes=0;
+  async function observe(scope,kernelId) {
+    const record=requireRecord(scope,kernelId);
+    const empty=()=>({ok:true,kernelId:record.kernelId,generation:record.generation,observation:require('./containerObservation').unavailable()});
+    if(!scope.generation||!['ready','executing'].includes(record.status)||record.stopRequested||clock()>=record.startedAt+policy.resources.maxLifetimeSeconds*1000||observationProbes>=4)return empty();
+    observationProbes++;
+    try {
+      const inspected=await inspectContainer(record.containerName,{timeoutMs:1000});
+      const labels=inspected?.labels;
+      if(!inspected||inspected.id!==record.containerId||labels[LABEL]!=='true'||labels[`${LABEL}.root`]!==rootHash
+          ||labels[`${LABEL}.manager`]!==managerId||labels[`${LABEL}.kernel`]!==record.kernelId||labels[`${LABEL}.generation`]!==record.generation)return empty();
+      const observation=await observeContainer(inspected.id,policy.resources);
+      requireRecord(scope,kernelId);
+      if(!['ready','executing'].includes(record.status)||record.stopRequested||clock()>=record.startedAt+policy.resources.maxLifetimeSeconds*1000)return empty();
+      return {ok:true,kernelId:record.kernelId,generation:record.generation,observation};
+    } catch {return empty();}
+    finally {observationProbes--;}
   }
   function publicationReceipt(record,executionId,entry) {
     return {ok:true,kernelId:record.kernelId,generation:record.generation,publicationId:entry.publication.publicationId,
@@ -650,7 +669,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     }
   }
   async function close(){closed=true;if(timer)clearInterval(timer);for(const record of records.values()){record.stopRequested=true;if(record.creation)await record.creation.catch(()=>{});await terminate(record).catch(()=>{});}}
-  return {initialize,start,inspect,execute,interrupt,export:exportOutput,exportStatus,stop,close,sweep,environment,resources:policy.resources};
+  return {initialize,start,inspect,observe,execute,interrupt,export:exportOutput,exportStatus,stop,close,sweep,environment,resources:policy.resources};
 }
 module.exports={createPrivateKernelRuntime,createTransport,runCommand,resourcePolicy,validateInputs,validateScope,
   PRIVATE_KERNEL_ID_RE:KERNEL_ID,PRIVATE_KERNEL_LABEL:LABEL,MAX_PRIVATE_KERNEL_SOURCE_BYTES:MAX_SOURCE_BYTES,MAX_PRIVATE_KERNEL_RESPONSE_BYTES:MAX_RESPONSE_BYTES,
