@@ -17,6 +17,8 @@ const digest = value => crypto.createHash('sha256').update(typeof value === 'str
 const identifier = prefix => `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
 const extension = type => type === 'rds' ? 'rds' : type === 'figure' ? 'png' : 'json';
 const MAX_WORKING_BYTES = 1024 * 1024 * 1024;
+const MAX_SUBMISSION_BYTES = 64 * 1024;
+const requestIdPattern = /^[a-f0-9-]{16,64}$/;
 
 function error(message, status = 400) { return Object.assign(new Error(message), { status }); }
 async function transaction(db, callback) {
@@ -54,6 +56,50 @@ async function refreshRun(client, row) {
 }
 function publicInstance(row) {
   return { id: row.id, projectId: row.project_id, analysisObjectId: row.analysis_object_id, packageDigest: row.package_digest, package: row.package_json, state: row.state_json };
+}
+
+function validateReceiptLocator(instanceId, requestId) {
+  if (typeof instanceId !== 'string' || !/^wfi_[a-f0-9]{24}$/.test(instanceId)
+      || typeof requestId !== 'string' || !requestIdPattern.test(requestId)) throw error('A valid workflow and run request ID are required.');
+}
+function admittedRequest(row, input, api) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+      || Object.keys(input).some(key => !['requestId', 'stepId', 'parameters', 'seed'].includes(key))) throw error('Invalid workflow run request.');
+  const step = row.package_json.steps.find(item => item.id === input.stepId);
+  if (!step) throw error('Unknown workflow step.');
+  const seed = input.seed === undefined ? 1 : input.seed;
+  if (!Number.isSafeInteger(seed) || seed < 0 || seed > 2147483647) throw error('Invalid random seed.');
+  const request = canonical({ instanceId: row.id, analysisObjectId: row.analysis_object_id, packageDigest: row.package_digest,
+    stepId: step.id, parameters: api.workflowParameters(step, input.parameters), seed });
+  if (Buffer.byteLength(JSON.stringify(request)) > MAX_SUBMISSION_BYTES) throw error('Workflow run settings exceed 64 KiB.');
+  return request;
+}
+function retainedRequest(row) {
+  const request = row.request_json;
+  if (!request || typeof request !== 'object' || Array.isArray(request) || !/^[a-f0-9]{64}$/.test(row.request_hash || '')
+      || Buffer.byteLength(JSON.stringify(request)) > MAX_SUBMISSION_BYTES || digest(request) !== row.request_hash
+      || request.instanceId !== (row.original_instance_id || row.instance_id) || request.stepId !== row.step_id
+      || request.analysisObjectId !== row.analysis_object_id || !/^[a-f0-9]{64}$/.test(request.packageDigest || '')
+      || !Number.isSafeInteger(request.seed) || request.seed < 0 || request.seed > 2147483647) {
+    throw error('The original workflow submission cannot be verified. Inspect its recorded execution before starting a new run.', 409);
+  }
+  return request;
+}
+function publicSubmission(row) {
+  const request = retainedRequest(row);
+  return { schema: 'traceomics.workflow-submission.v1', requestId: row.request_id, requestHash: row.request_hash,
+    instanceId: request.instanceId, projectId: row.project_id, jobId: row.job_id, analysisObjectId: request.analysisObjectId,
+    stepId: request.stepId, seed: request.seed, packageDigest: request.packageDigest, status: row.status,
+    createdAt: new Date(row.created_at).toISOString() };
+}
+async function submissionRow(client, userId, projectId, instanceId, requestId) {
+  const { rows } = await client.query(`SELECT r.job_id,r.instance_id,r.original_instance_id,r.request_id,r.request_hash,r.request_json,r.step_id,
+      j.project_id,j.analysis_object_id,j.status,j.created_at
+    FROM workflow_runs r JOIN jobs j ON j.id=r.job_id
+    WHERE j.owner_user_id=$1 AND j.project_id=$2 AND r.request_id=$3
+      AND (r.original_instance_id=$4 OR (r.original_instance_id IS NULL AND r.instance_id=$4)) LIMIT 1`,
+  [userId, projectId, requestId, instanceId]);
+  return rows[0] || null;
 }
 
 function compileStep(workflow, state) {
@@ -113,23 +159,30 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
   }
   async function run(userId, projectId, id, input) {
     await authorize(db, userId, projectId, true);
-    if (!input || typeof input.requestId !== 'string' || !/^[a-f0-9-]{16,64}$/.test(input.requestId)) throw error('A unique run request ID is required.');
+    validateReceiptLocator(id, input?.requestId);
     const api = await contract;
-    const environmentManifest = await getEnvironment();
     return transaction(db, async client => {
       await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [userId]);
       await lockExecutionAccess(client, userId, projectId);
-      const row = await refreshRun(client, await lockedInstance(client, userId, projectId, id));
-      const duplicate = await client.query('SELECT job_id FROM workflow_runs WHERE instance_id=$1 AND request_id=$2', [id, input.requestId]);
-      if (duplicate.rows[0]) return publicInstance(row);
+      const row = await lockedInstance(client, userId, projectId, id);
+      const request = admittedRequest(row, input, api);
+      const requestHash = digest(request);
+      const duplicate = await submissionRow(client, userId, projectId, id, input.requestId);
+      if (duplicate) {
+        retainedRequest(duplicate);
+        if (duplicate.request_hash !== requestHash) throw error('This run request ID was already used with different workflow settings.', 409);
+        return { ...publicInstance(await refreshRun(client, row)), submission: publicSubmission(duplicate) };
+      }
+      await refreshRun(client, row);
       const queued = await client.query("SELECT COUNT(*)::int AS count FROM jobs WHERE owner_user_id=$1 AND status IN ('queued','running')", [userId]);
       if (queued.rows[0].count >= 3) throw error('Wait for an existing job to finish.', 429);
       const used = await client.query("SELECT COALESCE(SUM((descriptor_json->>'sizeBytes')::bigint),0)::bigint AS bytes FROM workflow_artifacts WHERE owner_user_id=$1", [userId]);
       const reserved = await client.query("SELECT COUNT(*)::int AS count FROM workflow_runs r JOIN jobs j ON j.id=r.job_id WHERE j.owner_user_id=$1 AND j.status IN ('queued','running')", [userId]);
       if (Number(used.rows[0].bytes) + (reserved.rows[0].count + 1) * 200 * 1024 * 1024 > MAX_WORKING_BYTES) throw error('Workflow storage is full. Remove an unused snapshot or close a workflow before running again.', 409);
-      const state = api.beginWorkflowRun(row.package_json, row.state_json, { id: identifier('job'), stepId: input.stepId, parameters: input.parameters, seed: input.seed });
+      const state = api.beginWorkflowRun(row.package_json, row.state_json, { id: identifier('job'), ...request });
       delete state.error;
       const compiled = compileStep(row.package_json, state);
+      const environmentManifest = await getEnvironment();
       const parameters = storedExpertRParams(pinExpertREnvironment({ profileId: row.package_json.runtime.profileId, script: compiled.script, inputIds: [],
         ...(row.state_json.environment ? { environment: row.state_json.environment } : {}) }, environmentManifest));
       state.environment = parameters.environment;
@@ -142,9 +195,22 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
           SELECT 'src_' || id,project_id,owner_user_id,id,'R',parameters_json::jsonb->>'script',parameters_json::jsonb->>'scriptSha256'
           FROM new_job RETURNING id
         ) SELECT id FROM new_job`, [state.active.id, userId, projectId, row.analysis_object_id, JSON.stringify(parameters)]);
-      await client.query('INSERT INTO workflow_runs (job_id,instance_id,request_id,step_id,generation,output_names_json) VALUES ($1,$2,$3,$4,$5,$6)', [state.active.id, id, input.requestId, input.stepId, state.generation, JSON.stringify(Object.values(compiled.outputs).map(output => output.name))]);
+      await client.query(`INSERT INTO workflow_runs (job_id,instance_id,original_instance_id,request_id,request_hash,request_json,step_id,generation,output_names_json)
+        VALUES ($1,$2,$2,$3,$4,$5,$6,$7,$8)`, [state.active.id, id, input.requestId, requestHash, request, request.stepId, state.generation, JSON.stringify(Object.values(compiled.outputs).map(output => output.name))]);
       await client.query('UPDATE workflow_instances SET state_json=$2,updated_at=now() WHERE id=$1', [id, state]);
-      return publicInstance({ ...row, state_json: state });
+      const receipt = await submissionRow(client, userId, projectId, id, input.requestId);
+      return { ...publicInstance({ ...row, state_json: state }), submission: publicSubmission(receipt) };
+    });
+  }
+  async function submission(userId, projectId, instanceId, requestId) {
+    await authorize(db, userId, projectId);
+    validateReceiptLocator(instanceId, requestId);
+    return transaction(db, async client => {
+      const membership = await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId]);
+      if (!['owner', 'admin', 'analyst'].includes(membership.rows[0]?.role)) throw error('Project access is unavailable.', 403);
+      const row = await submissionRow(client, userId, projectId, instanceId, requestId);
+      if (!row) throw error('Workflow submission not found.', 404);
+      return publicSubmission(row);
     });
   }
   async function cancel(userId, projectId, id) {
@@ -255,7 +321,7 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
     const scopes = await db.query('SELECT DISTINCT j.owner_user_id,j.project_id FROM workflow_runs r JOIN jobs j ON j.id=r.job_id');
     for (const scope of scopes.rows) await cleanup(scope.owner_user_id, scope.project_id);
   }
-  return { open, get, run, cancel, save, snapshots, restore, removeSnapshot, close, cleanup, artifact, expire };
+  return { open, get, run, submission, cancel, save, snapshots, restore, removeSnapshot, close, cleanup, artifact, expire };
 }
 
 module.exports = { createWorkflowRuntime, compileStep, contract, digest, identifier, extension, transaction, authorize, lockExecutionAccess, publicInstance };
