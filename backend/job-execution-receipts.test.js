@@ -91,6 +91,14 @@ describe('worker execution target receipts at the actual dispatch boundary', () 
     expect(callR).not.toHaveBeenCalled();
   });
 
+  it('binds sandbox monitoring to the persisted dispatch and trusted claimed owner', async () => {
+    const runExpertSandbox = vi.fn(async () => ({ ok: true }));
+    const { worker } = fixture({ runExpertSandbox,
+      handler: async ctx => ({ result: await ctx.runExpertSandbox({ script: 'print(42)', monitoring: { ownerUserId: 999, dispatchId: 'spoofed' } }) }) });
+    expect((await worker.runOnce()).status).toBe('completed');
+    expect(runExpertSandbox.mock.calls[0][0].monitoring).toEqual({ jobId: 'job_owned', projectId: 'proj_owned', ownerUserId: 1, dispatchId: 'a'.repeat(64) });
+  });
+
   it('retains dispatch evidence on a failed R transport rather than substituting later connection state', async () => {
     const { worker, db } = fixture({ callR: vi.fn(async () => { throw Object.assign(new Error('private endpoint'), { code: 'R_UNREACHABLE' }); }),
       db: { deferIndeterminateRTimeoutByWorker: vi.fn(async () => {}) } });

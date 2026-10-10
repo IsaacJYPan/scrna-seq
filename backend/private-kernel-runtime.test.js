@@ -28,6 +28,7 @@ async function fixture(options={}) {
   const provider=createLocalStorageProvider({root:path.join(directory,'storage')});
   const commands=async(_command,args)=>{
     calls.push(args);
+    if(args[0]==='stats')return options.stats?options.stats(args):{stdout:JSON.stringify({MemUsage:'128MiB / 8GiB',CPUPerc:'125%'})};
     if(args[0]==='image')return{stdout:reference.imageId};
     if(args[0]==='run') {if(options.unsupported)throw new Error('no adapter');return{stdout:JSON.stringify({ok:true,protocol:'jupyter',adapter:1,...(options.publications===false?{}:{publications:true}),...(options.streamedPublications===false?{}:{streamedPublications:true}),...(options.interrupts===false?{}:{interrupt:true})})};}
     if(args[0]==='create') {
@@ -58,6 +59,34 @@ async function fixture(options={}) {
   return{runtime,start,reference,directory,calls,containers,provider,transports,restart,requests:()=>requests,controls:()=>controls,advance:ms=>now+=ms};
 }
 describe('persistent private R runtime ownership and lifecycle',()=>{
+  it('observes only the owned immutable container and never executes source or changes lifecycle',async()=>{
+    const f=await fixture();await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation};
+    const baseline=f.calls.length;
+    const observed=await f.runtime.observe(exact,kernelId);
+    expect(observed).toMatchObject({ok:true,kernelId,generation:started.generation,observation:{state:'observed',scope:'r-container',memoryBytes:128*1024**2,cpuPercent:125}});
+    expect(f.calls.slice(baseline).map(args=>args[0])).toEqual(['inspect','stats']);
+    expect(f.calls.at(-1).at(-1)).toBe([...f.containers.values()][0].id);
+    expect(f.requests()).toBe(0);expect((await f.runtime.inspect(exact,kernelId)).status).toBe('ready');
+    await expect(f.runtime.observe({...exact,ownerUserId:2},kernelId)).rejects.toMatchObject({code:'PRIVATE_KERNEL_NOT_FOUND'});
+    await expect(f.runtime.observe({...exact,generation:'f'.repeat(64)},kernelId)).rejects.toMatchObject({code:'PRIVATE_KERNEL_NOT_FOUND'});
+    const count=f.calls.length;
+    expect((await f.runtime.observe(scope,kernelId)).observation.state).toBe('unavailable');expect(f.calls).toHaveLength(count);
+    [...f.containers.values()][0].labels[`${LABEL}.manager`]='another-manager';
+    expect((await f.runtime.observe(exact,kernelId)).observation.state).toBe('unavailable');
+    expect(f.calls.at(-1)[0]).toBe('inspect');
+  });
+  it('discards a pending observation after stop and does not expire a kernel through observation',async()=>{
+    const pending=deferred(),entered=deferred();
+    const f=await fixture({stats:async()=>{entered.resolve();return pending.promise;}});
+    await f.runtime.initialize();const started=await f.start(),exact={...scope,generation:started.generation};
+    const sampling=f.runtime.observe(exact,kernelId);await entered.promise;
+    await f.runtime.stop(exact,kernelId);pending.resolve({stdout:JSON.stringify({MemUsage:'1MiB / 8GiB',CPUPerc:'1%'})});
+    expect((await sampling).observation.state).toBe('unavailable');expect(f.requests()).toBe(0);
+    const other=await fixture();await other.runtime.initialize();const second=await other.start();other.advance(14400001);
+    const baseline=other.calls.length;
+    expect((await other.runtime.observe({...scope,generation:second.generation},kernelId)).observation.state).toBe('unavailable');
+    expect(other.calls).toHaveLength(baseline);expect(other.containers.size).toBe(1);
+  });
   it('publishes only a verified disk stream paired with a matching successful R command',async()=>{
     const bytes=Buffer.from('streamed RDS fixture'),reservations=[];let descriptor;
     const f=await fixture({reserveDiskImpl:async(work,durable)=>{const held={work,durable,released:false};reservations.push(held);return()=>{held.released=true;};},

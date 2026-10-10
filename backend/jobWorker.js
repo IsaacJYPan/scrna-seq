@@ -2377,6 +2377,7 @@ function createJobWorker(options = {}) {
           'EXECUTION_RECEIPT_UNAVAILABLE',
           'The analysis execution target could not be recorded safely.'
         );
+        return receipt;
       }
       async function runClaimedRBridge(bridgeArgs) {
         const recordedCallR = async request => {
@@ -2402,8 +2403,10 @@ function createJobWorker(options = {}) {
         return descriptor;
       }
       const runClaimedSandbox = typeof runExpertSandbox === 'function' ? async input => {
-        await recordExecutionDispatch(jobType, 'sandbox-r');
-        return runExpertSandbox(input);
+        const receipt = await recordExecutionDispatch(jobType, 'sandbox-r');
+        return runExpertSandbox(/^[a-f0-9]{64}$/.test(receipt?.dispatchId || '') ? {
+          ...input, monitoring: { jobId, projectId: job.projectId, ownerUserId: job.ownerUserId, dispatchId: receipt.dispatchId },
+        } : input);
       } : undefined;
       const makeClaimContext = (overrides = {}) => ({
         job,

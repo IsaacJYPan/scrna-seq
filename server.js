@@ -1909,7 +1909,8 @@ app.get('/api/jobs/:id', async (req, res) => {
 app.get('/api/jobs/:id/logs', async (req, res) => {
   const job = await db.getPrivateJobForUser(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
-  res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
+  const publicJob = db.toPublicJob(job);
+  res.json({ id: publicJob.id, status: publicJob.status, logs: publicJob.logs, error: publicJob.error });
 });
 
 app.post('/api/jobs/:id/cancel', async (req, res) => {
@@ -1940,6 +1941,8 @@ app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ d
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/execution-history', require('./backend/executionHistoryRoutes').executionHistoryRoutes({ db, provider: durableStorage, requireAuth }));
+app.use('/api/run-monitoring', require('./backend/runMonitoringRoutes').runMonitoringRoutes({ db, requireAuth,
+  serviceOptions: require('./backend/runMonitoringResources').createRunResourceObservers() }));
 app.use('/api/private-r-kernels', require('./backend/privateKernelRoutes').privateKernelRoutes({ db, provider: durableStorage, requireAuth }));
 
 // Publishing a trusted pipeline manifest is a platform capability, not a
@@ -3403,7 +3406,8 @@ app.get('/api/projects/:projectId/jobs/:jobId/logs', async (req, res) => {
   try {
     const job = await db.getProjectJob(req.user.id, req.params.projectId, req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found.' });
-    res.json({ id: job.id, status: job.status, logs: job.logs, error: job.error });
+    const publicJob = db.toPublicJob(job);
+    res.json({ id: publicJob.id, status: publicJob.status, logs: publicJob.logs, error: publicJob.error });
   } catch (e) {
     sendProjectResourceError(res, e, 'ProjectJobs');
   }
