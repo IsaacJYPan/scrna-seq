@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const http = require('node:http');
+const https = require('node:https');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { Client } = require('pg');
@@ -89,7 +90,7 @@ function remoteRecipe(profileId) {
     tabs: [{ id: 'subset', label: 'Remote subset', step: 'subset', plots: [] }],
     files: { 'subset.R': `selected <- subset(inputs$analysis, cells=colnames(inputs$analysis)[seq_len(params$cells)])
 stopifnot(inherits(selected,"Seurat"))
-Sys.sleep(30)
+Sys.sleep(60)
 write_output("summary",list(cells=ncol(selected),features=nrow(selected)))` },
   };
 }
@@ -101,6 +102,51 @@ async function stopChild(child) {
   let timer;
   await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => { child.kill(); resolve(); }, 15_000); })]);
   clearTimeout(timer);
+}
+async function appendFixtureWorkerLogs(databaseUrl, job, entries) {
+  // Exercise the production worker's claim and lease fence. Keep disposable
+  // credentials in the private input pipe, outside command arguments/reports.
+  const source = `const db=require('./backend/pgDatabase');let raw='';
+    process.stdin.on('data',chunk=>raw+=chunk);
+    process.stdin.on('end',async()=>{try{const input=JSON.parse(raw);
+      for(const entry of input.entries) await db.appendJobLogByWorker(input.id,input.workerId,input.claimToken,entry);
+      process.stdout.write(JSON.stringify({count:input.entries.length}));
+    }catch{process.exitCode=1;}finally{await db.close();}});`;
+  const child = spawn(process.execPath, ['-e', source], { cwd: root, shell: false, windowsHide: true,
+    env: { ...process.env, NODE_ENV: 'test', DATABASE_URL: databaseUrl }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = ''; child.stdout.on('data', chunk => { output = (output + chunk).slice(-1024); });
+  child.stderr.resume();
+  child.stdin.end(JSON.stringify({ id: job.id, workerId: job.worker_id, claimToken: job.claim_token, entries }));
+  const timer = setTimeout(() => child.kill(), 15_000);
+  const code = await new Promise((resolve, reject) => {
+    child.once('exit', resolve); child.once('error', () => reject(new Error('Could not start the disposable worker log fixture.')));
+  }).finally(() => clearTimeout(timer));
+  assert(code === 0 && JSON.parse(output).count === entries.length, 'The disposable fixture could not append logs through the active worker claim.');
+}
+async function isolatedServiceRequest(service, pathname, { method = 'GET', cookie, body } = {}) {
+  const endpoint = new URL(service.endpoint), payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+  return new Promise((resolve, reject) => {
+    const request = https.request({ hostname: '127.0.0.1', port: endpoint.port, servername: endpoint.hostname,
+      ca: fs.readFileSync(service.caCertificatePath), rejectUnauthorized: true, path: pathname, method,
+      headers: { Host: endpoint.host, Origin: endpoint.origin, ...(cookie ? { Cookie: cookie } : {}),
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}) } }, response => {
+      let bytes = 0; const chunks = [];
+      response.on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > 8192) request.destroy(new Error('The isolated access check exceeded its response bound.'));
+        else chunks.push(chunk);
+      });
+      response.on('end', () => {
+        try { resolve({ status: response.statusCode, value: JSON.parse(Buffer.concat(chunks).toString()),
+          cookie: (response.headers['set-cookie'] || []).map(value => value.split(';')[0]).join('; '), bytes }); }
+        catch { reject(new Error('The isolated service access check returned an invalid response.')); }
+      });
+      response.on('error', () => reject(new Error('The isolated service access check failed.')));
+    });
+    request.setTimeout(10_000, () => request.destroy());
+    request.on('error', () => reject(new Error('The isolated service access check failed.')));
+    request.end(payload);
+  });
 }
 async function main() {
   const image = process.env.EXPERT_R_SANDBOX_IMAGE;
@@ -166,7 +212,13 @@ async function main() {
         service.stop = async () => { await teardownCompute(); await stopService(); };
         return service;
       },
-      exerciseWorkspace: async context => exerciseWorkspace(context),
+      exerciseWorkspace: async context => {
+        try { return await exerciseWorkspace(context); }
+        catch (error) {
+          await context.workspace.screenshot({ path: path.join(output, 'scientific-acceptance-failure.png') }).catch(() => {});
+          throw error;
+        }
+      },
     });
     assert(errors.length === 0, 'The compiled remote workspace raised a browser error.');
     fs.writeFileSync(path.join(output, 'scientific-report.json'), JSON.stringify({ ok: true, checks, browserErrors: errors,
@@ -205,6 +257,36 @@ async function main() {
     });
     };
     observe(workspace); application.on('window', observe);
+    const monitorBase = '/api/run-monitoring/' + service.project.id;
+    const readMonitor = (page, suffix = '') => page.evaluate(async url => {
+      const response = await fetch(url, { credentials: 'include' });
+      return { status: response.status, value: await response.json() };
+    }, monitorBase + suffix);
+    const submittedJobs = () => requests.filter(value => value.method === 'POST'
+      && (/\/jobs$/.test(value.path) || /^\/api\/workflows\/.*\/run$/.test(value.path)
+        || /^\/api\/private-r-kernels\/.*\/executions$/.test(value.path))).length;
+    async function openMonitor(page, recordId) {
+      const historyLink = page.locator('[data-destination="history"]');
+      if (!await historyLink.isVisible()) await page.getByRole('button', { name: 'Results', exact: true }).click();
+      await historyLink.click();
+      const panel = page.getByRole('region', { name: 'Run monitoring', exact: true });
+      await panel.getByRole('list', { name: 'Monitored runs', exact: true }).waitFor();
+      // Workspace tabs retain their mounted views. Refresh the existing list
+      // before selecting work accepted while the researcher used another tab.
+      await panel.getByRole('button', { name: 'Refresh monitoring', exact: true }).click();
+      await panel.getByRole('list', { name: 'Monitored runs', exact: true })
+        .getByRole('button').filter({ hasText: recordId }).click();
+      const detail = panel.getByRole('region', { name: 'Selected run monitoring', exact: true });
+      await detail.waitFor();
+      return { panel, detail };
+    }
+    function assertPrivateMonitor(value, job) {
+      const serialized = JSON.stringify(value);
+      assert(!['claim_token', 'claimToken', 'worker_id', 'workerId', 'storage_uri', 'storageKey', 'source_code', 'sourceCode']
+        .some(field => serialized.includes('"' + field + '"')), 'Run monitoring exposed private source, storage or worker capabilities.');
+      assert(![job?.claim_token, job?.worker_id, service.storageRoot].filter(Boolean).some(secret => serialized.includes(secret)),
+        'Run monitoring exposed a private claim, worker identity or absolute server path.');
+    }
     await workspace.getByRole('button', { name: /^Advanced analysis,/ }).click();
     await workspace.getByRole('button', { name: 'Interactive console', exact: true }).click();
     const consoleUi = workspace.getByRole('region', { name: 'Private R console', exact: true });
@@ -234,6 +316,52 @@ async function main() {
     await workspace.screenshot({ path: path.join(output, 'ssh-private-session-target.png') });
     check('Native SSH free R inspects a genuine server-resident Seurat checkpoint and returns only a small table, console output and figure.');
 
+    const firstCommand = (await database.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 ORDER BY execution_order DESC LIMIT 1', [kernel.id])).rows[0];
+    const firstCommandReport = await readMonitor(workspace, '/' + firstCommand.id);
+    assert(firstCommandReport.status === 200 && firstCommandReport.value.kind === 'r-console'
+      && firstCommandReport.value.kernel.id === kernel.id && firstCommandReport.value.kernel.generation === kernel.runtime_generation
+      && firstCommandReport.value.status === 'completed' && firstCommandReport.value.resources.state === 'unavailable'
+      && firstCommandReport.value.logs.items.some(value => value.message.includes('Remote cells: 12')),
+    'Completed private R monitoring lost its exact kernel generation, retained output or distinction between limits and measured usage.');
+    assertPrivateMonitor(firstCommandReport.value);
+    await consoleUi.getByLabel('R console source').fill('Sys.sleep(30); cat("Monitored private command completed.")');
+    await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).click();
+    const secondCommand = await waitFor(async () => {
+      const row = (await database.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 AND execution_order=2', [kernel.id])).rows[0];
+      if (row?.status === 'failed') throw new Error('The actual monitored private R command failed.');
+      return row?.status === 'running' ? row : null;
+    }, 'The actual private R command did not become durable running work.');
+    const commandPosts = () => requests.filter(value => value.method === 'POST' && /\/executions$/.test(value.path)).length;
+    const commandsBeforeMonitoring = commandPosts();
+    const privateMonitor = await openMonitor(workspace, secondCommand.id);
+    await privateMonitor.detail.getByRole('heading', { name: 'Server state: Running', exact: true }).waitFor();
+    const privateSample = await waitFor(async () => {
+      const report = await readMonitor(workspace, '/' + secondCommand.id);
+      assert(report.status === 200, 'The owner lost access to its running private command monitor.');
+      return report.value.status === 'running' && report.value.resources.state === 'observed' ? report.value : null;
+    }, 'The actual private R command did not yield its own generation-scoped container observation.', 15_000);
+    assert(privateSample.kernel.id === kernel.id && privateSample.kernel.generation === kernel.runtime_generation
+      && privateSample.resources.kernelGeneration === kernel.runtime_generation && privateSample.resources.dispatchId === null
+      && privateSample.target.serviceId === kernel.target_json.serviceId && privateSample.resources.scope === 'r-container'
+      && privateSample.resources.memoryBytes > 0 && Number.isFinite(privateSample.resources.cpuPercent)
+      && privateSample.resources.observedAt && privateSample.progress.percent === null && privateSample.timing.remainingMs === null,
+    'Private command monitoring mixed kernel generations, batch dispatches or inferred scientific progress.');
+    await privateMonitor.panel.getByRole('button', { name: 'Refresh monitoring', exact: true }).click();
+    await privateMonitor.detail.getByLabel('CPU usage', { exact: true }).waitFor();
+    await privateMonitor.detail.getByLabel('Memory usage', { exact: true }).waitFor();
+    assertPrivateMonitor(privateSample);
+    await privateMonitor.detail.scrollIntoViewIfNeeded();
+    await workspace.screenshot({ path: path.join(output, 'ssh-running-private-r-monitor.png') });
+    await waitFor(async () => (await database.query('SELECT status FROM private_r_executions WHERE id=$1', [secondCommand.id])).rows[0]?.status === 'completed',
+      'The monitored private R command did not finish.');
+    const privateCompleted = await readMonitor(workspace, '/' + secondCommand.id);
+    assert(privateCompleted.status === 200 && privateCompleted.value.resources.state === 'unavailable'
+      && privateCompleted.value.logs.items.some(value => value.message.includes('Monitored private command completed.'))
+      && commandPosts() === commandsBeforeMonitoring
+      && (await database.query('SELECT COUNT(*)::int AS count FROM private_r_executions WHERE kernel_id=$1', [kernel.id])).rows[0].count === 2,
+    'Private R monitoring replayed a command or retained another command\'s live resource evidence.');
+    check('Actual native private R monitoring binds measured container usage to the running command\'s exact kernel generation, keeps progress unknown and retrieves its final retained output without replay.');
+
     const explore = workspace.locator('[data-destination="explore"]');
     if (!await explore.isVisible()) await workspace.getByRole('button', { name: 'Explore', exact: true }).click();
     await explore.click();
@@ -251,7 +379,8 @@ async function main() {
       if (row?.status === 'failed') throw new Error('The genuine guided R job failed.');
       return row?.status === 'completed' ? row : null;
     }, 'Guided R did not complete.');
-    await workspace.getByText('Complete', { exact: true }).waitFor();
+    await workspace.getByText('Private analysis workspace · aggregate-only result', { exact: true })
+      .locator('..').getByText('Complete', { exact: true }).waitFor();
     const summary = (await database.query("SELECT metadata_json::jsonb AS metadata FROM job_artifacts WHERE job_id=$1 AND artifact_type='exploration_summary'", [guidedDone.id])).rows[0]?.metadata?.summary;
     assert(summary?.nCells === 12 && summary.nFeatures === 20, 'Actual guided R summary does not match the checkpoint.');
     const guidedReceipt = (await database.query('SELECT * FROM job_execution_receipts WHERE job_id=$1', [guidedDone.id])).rows[0];
@@ -259,14 +388,52 @@ async function main() {
       && guidedReceipt.target_json.runtimeKind === 'guided-r', 'The guided job does not retain the same actual installation as free R.');
     await workspace.screenshot({ path: path.join(output, 'ssh-guided-seurat-summary.png') });
     check('A native SSH UI guided recipe queues a durable real worker job; actual Seurat compute produces the exact 12-cell, 20-feature aggregate.');
+    const owner = (await database.query('SELECT * FROM users WHERE id=$1', [fixture.ownerId])).rows[0];
+    const colleagueEmail = 'monitor-colleague-' + crypto.randomBytes(8).toString('hex') + '@example.invalid';
+    const colleague = (await database.query('INSERT INTO users(email,password_hash,salt,display_name) VALUES($1,$2,$3,$4) RETURNING id',
+      [colleagueEmail, owner.password_hash, owner.salt, 'Separate project analyst'])).rows[0];
+    const organization = (await database.query('SELECT organization_id FROM projects WHERE id=$1', [service.project.id])).rows[0];
+    await database.query("INSERT INTO organization_members(organization_id,user_id,role) VALUES($1,$2,'member')", [organization.organization_id, colleague.id]);
+    await database.query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,'analyst')", [service.project.id, colleague.id]);
+    const colleagueJob = 'job_' + crypto.randomBytes(12).toString('hex');
+    await database.query(`INSERT INTO jobs(id,owner_user_id,project_id,job_type,status,started_at,completed_at,logs_json)
+      VALUES($1,$2,$3,'explore.summarize.v1','completed',NOW(),NOW(),$4)`,
+    [colleagueJob, colleague.id, service.project.id, JSON.stringify([{ ts: new Date().toISOString(), level: 'info', message: 'Private colleague activity.' }])]);
+    const monitorList = await readMonitor(workspace), guidedMonitor = await readMonitor(workspace, '/' + guidedDone.id);
+    assert(monitorList.status === 200 && monitorList.value.schema === 'traceomics.run-monitoring.v1'
+      && monitorList.value.items.length <= 25 && !monitorList.value.items.some(value => value.id === colleagueJob),
+    'Run monitoring returned another project member\'s private activity or an unbounded list.');
+    const deniedColleague = await readMonitor(workspace, '/' + colleagueJob);
+    assert(deniedColleague.status === 404 && Object.keys(deniedColleague.value).every(key => ['error', 'code'].includes(key)),
+      'Owner-scoped monitoring admitted another analyst\'s guided job.');
+    const colleagueLogin = await isolatedServiceRequest(service, '/api/auth/login',
+      { method: 'POST', body: { email: colleagueEmail, password: service.account.password } });
+    assert(colleagueLogin.status === 200 && colleagueLogin.cookie, 'The disposable project colleague could not establish an independent authenticated session.');
+    const colleagueCookie = colleagueLogin.cookie;
+    for (const recordId of [guidedDone.id, firstCommand.id, secondCommand.id]) {
+      const denied = await isolatedServiceRequest(service, monitorBase + '/' + recordId, { cookie: colleagueCookie });
+      assert(denied.status === 404 && Object.keys(denied.value).every(key => ['error', 'code'].includes(key)) && denied.bytes < 1024,
+        'A different authenticated project member received another owner\'s monitored state, logs or resource evidence.');
+      assertPrivateMonitor(denied.value);
+    }
+    assert(guidedMonitor.status === 200 && guidedMonitor.value.logs.items.length <= 50
+      && Buffer.byteLength(JSON.stringify(guidedMonitor.value)) <= 128 * 1024,
+    'Guided monitoring returned an unbounded log or detail payload.');
+    assert(guidedMonitor.value.resources.state === 'unavailable' && guidedMonitor.value.resources.memoryBytes === null
+      && guidedMonitor.value.resources.cpuPercent === null,
+    'Completed guided monitoring represented configured limits as measured resource usage.');
+    assertPrivateMonitor(guidedMonitor.value, guidedDone);
+    check('Owner-scoped monitoring bounds its list and detail, and independent authenticated project colleagues cannot read each other\'s job or private R command observations.');
     await workspace.locator('[data-destination="history"]').click();
     const guidedHistory = workspace.getByRole('region', { name: 'Execution history', exact: true });
-    const [guidedDetailResponse] = await Promise.all([
-      workspace.waitForResponse(response => response.request().method() === 'GET'
-        && new URL(response.url()).pathname === `/api/execution-history/${service.project.id}/${guided.id}`),
-      guidedHistory.getByRole('button').filter({ hasText: guided.id }).click(),
-    ]);
-    const guidedDetail = await guidedDetailResponse.json();
+    await guidedHistory.getByRole('button', { name: 'Refresh executions', exact: true }).click();
+    await guidedHistory.getByRole('button').filter({ hasText: guided.id }).click();
+    const guidedDetailResponse = await workspace.evaluate(async url => {
+      const response = await fetch(url, { credentials: 'include' });
+      return { status: response.status, value: await response.json() };
+    }, `/api/execution-history/${service.project.id}/${guided.id}`);
+    assert(guidedDetailResponse.status === 200, 'The retained guided environment receipt became inaccessible.');
+    const guidedDetail = guidedDetailResponse.value;
     assert(guidedDetail.environment.precision === 'observed-metadata' && guidedDetail.environment.observed.rVersion
       && guidedDetail.environment.observed.packages.some(value => value.name === 'Seurat' && value.version),
     'Guided history does not retain the actual observed R and Seurat versions.');
@@ -290,12 +457,91 @@ async function main() {
       if (row?.status === 'failed') throw new Error('The real custom R step failed.');
       return row?.status === 'running' ? row : null;
     }, 'The custom R step never reached the durable worker.');
+    const jobsBeforeMonitor = submittedJobs();
+    const runningMonitor = await openMonitor(workspace, workflowJob.id);
+    await runningMonitor.detail.getByRole('heading', { name: 'Server state: Running', exact: true }).waitFor();
+    await runningMonitor.detail.getByText('Progress is not reported.', { exact: true }).waitFor();
+    await runningMonitor.detail.getByText('Remaining time is unknown.', { exact: true }).waitFor();
+    const sampled = await waitFor(async () => {
+      const report = await readMonitor(workspace, '/' + workflowJob.id);
+      assert(report.status === 200, 'The admitted job monitor became inaccessible.');
+      return report.value.status === 'running' && report.value.resources.state === 'observed' ? report.value : null;
+    }, 'The actual running recipe did not yield its own bounded R-container resource observation.', 20_000);
+    const activeReceipt = (await database.query('SELECT * FROM job_execution_receipts WHERE job_id=$1 ORDER BY dispatch_order DESC LIMIT 1',
+      [workflowJob.id])).rows[0];
+    assert(sampled.target?.id === kernel.target_json.serviceId && sampled.target.runtimeKind === 'sandbox-r'
+      && sampled.execution.dispatchId === activeReceipt.dispatch_id && sampled.resources.dispatchId === activeReceipt.dispatch_id,
+    'The live recipe observation is not bound to this actual server and dispatch receipt.');
+    assert(sampled.resources.scope === 'r-container' && Number.isSafeInteger(sampled.resources.memoryBytes)
+      && sampled.resources.memoryBytes > 0 && sampled.resources.memoryBytes <= sampled.resources.memoryLimitBytes
+      && sampled.resources.memoryLimitBytes === 2 * 1024 ** 3
+      && Number.isFinite(sampled.resources.cpuPercent) && sampled.resources.cpuPercent >= 0
+      && sampled.resources.cpuPercent <= sampled.resources.cpuLimit * 100 + 10
+      && Number.isFinite(Date.parse(sampled.resources.observedAt))
+      && Date.now() - Date.parse(sampled.resources.observedAt) < 15_000,
+    'The live recipe resource observation is invalid, stale or substitutes an unrelated host policy.');
+    assert(sampled.progress.state === 'unknown' && sampled.progress.percent === null && sampled.progress.remainingMs === null
+      && sampled.timing.remainingMs === null && sampled.timing.runElapsedMs > 0
+      && sampled.worker.state === 'lease-current' && sampled.worker.heartbeatAt,
+    'Running monitoring fabricates progress/ETA or hides its actual worker lease observation.');
+    assertPrivateMonitor(sampled, workflowJob);
+    const benign = 'Retained scientific status is available.';
+    const marker = 'monitor-fixture-' + crypto.randomBytes(12).toString('hex');
+    const fixtureLogs = Array.from({ length: 56 }, (_, index) => ({ level: 'info', message: 'Bounded worker observation ' + (index + 1) + '.' }));
+    fixtureLogs.push({ level: 'info', message: benign }, { level: 'info',
+      message: 'password=' + marker + ' Bearer ' + marker
+        + ' ssh://researcher:' + marker + '@private.host.invalid/study /private/lab/' + marker
+        + ' claim_token=' + marker });
+    await appendFixtureWorkerLogs(service.databaseUrl, workflowJob, fixtureLogs);
+    const scrubbedMonitor = await readMonitor(workspace, '/' + workflowJob.id);
+    assert(scrubbedMonitor.status === 200 && scrubbedMonitor.value.logs.items.length <= 50
+      && scrubbedMonitor.value.logs.omittedCount > 0 && scrubbedMonitor.value.logs.truncated && scrubbedMonitor.value.logs.redacted
+      && scrubbedMonitor.value.logs.items.some(value => value.message.includes(benign))
+      && !JSON.stringify(scrubbedMonitor.value).includes(marker)
+      && Buffer.byteLength(JSON.stringify(scrubbedMonitor.value.logs)) <= 64 * 1024
+      && Buffer.byteLength(JSON.stringify(scrubbedMonitor.value)) <= 128 * 1024,
+    'Monitoring failed to bound real worker logs or preserve useful status while scrubbing credentials, claims and private paths.');
+    assertPrivateMonitor(scrubbedMonitor.value, workflowJob);
+    const foreignMonitor = await isolatedServiceRequest(service, monitorBase + '/' + workflowJob.id, { cookie: colleagueCookie });
+    assert(foreignMonitor.status === 404 && foreignMonitor.bytes < 1024
+      && Object.keys(foreignMonitor.value).every(key => ['error', 'code'].includes(key))
+      && !JSON.stringify(foreignMonitor.value).includes(marker),
+    'Another authenticated owner received the actual live job\'s private logs or resource evidence.');
+    assertPrivateMonitor(foreignMonitor.value, workflowJob);
+    await runningMonitor.panel.getByRole('button', { name: 'Refresh monitoring', exact: true }).click();
+    await runningMonitor.detail.getByLabel('CPU usage', { exact: true }).waitFor();
+    await runningMonitor.detail.getByLabel('Memory usage', { exact: true }).waitFor();
+    await runningMonitor.detail.locator('summary').filter({ hasText: 'Run notes' }).click();
+    await runningMonitor.detail.getByText(benign, { exact: false }).waitFor();
+    assert(!(await runningMonitor.detail.innerText()).includes(marker), 'The actual native monitor displayed a scrubbed secret fixture value.');
+    await runningMonitor.detail.getByLabel('Recorded execution target').getByText('Scientific fixture server · ' + kernel.target_json.serviceId,
+      { exact: true }).waitFor();
+    const liveLayout = await workspace.evaluate(() => ({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth }));
+    assert(liveLayout.scrollWidth <= liveLayout.width, 'The actual native run-monitor panel overflows the page horizontally.');
+    assert(submittedJobs() === jobsBeforeMonitor, 'Monitoring polls or refresh submitted another scientific job.');
+    await runningMonitor.detail.scrollIntoViewIfNeeded();
+    await workspace.screenshot({ path: path.join(output, 'ssh-running-recipe-monitor.png') });
+    check('Actual native monitoring follows the running Seurat recipe with its durable server/dispatch, elapsed time, unknown progress/ETA and measured container CPU/memory; polling and refresh submit no job.');
+    check('Actual native monitoring bounds logs from the production worker claim, preserves useful text, scrubs credential-shaped fixtures and denies a different authenticated project owner access to live evidence.');
     const settings = await openSettings(workspace);
     await settings.getByRole('button', { name: 'Disconnect SSH tunnel', exact: true }).click();
     await workspace.locator('[aria-label="Execution target"]').getByText('SSH tunnel disconnected', { exact: true }).waitFor();
     const stillRunning = (await database.query('SELECT status,attempts FROM jobs WHERE id=$1', [workflowJob.id])).rows[0];
     assert(stillRunning?.status === 'running' && stillRunning.attempts === workflowJob.attempts,
       'The scientific fixture finished before disconnect, so offline continuation was not exercised.');
+    await runningMonitor.detail.getByRole('heading', { name: 'Last confirmed server state: Running', exact: true }).waitFor();
+    assert(await runningMonitor.panel.getByRole('button', { name: 'Refresh monitoring', exact: true }).isDisabled(),
+      'The disconnected monitor permits another network refresh.');
+    const offlineElapsed = await runningMonitor.detail.getByLabel('Run elapsed time', { exact: true }).innerText();
+    const offlineObservation = await runningMonitor.detail.getByLabel('Last run observation', { exact: true }).innerText();
+    await workspace.waitForTimeout(1_200);
+    assert(await runningMonitor.detail.getByLabel('Run elapsed time', { exact: true }).innerText() === offlineElapsed
+      && await runningMonitor.detail.getByLabel('Last run observation', { exact: true }).innerText() === offlineObservation,
+    'Disconnected monitoring invents new elapsed or observation evidence after the last confirmed server response.');
+    assert(submittedJobs() === jobsBeforeMonitor, 'Disconnecting run monitoring replayed a scientific job.');
+    await runningMonitor.detail.scrollIntoViewIfNeeded();
+    await workspace.screenshot({ path: path.join(output, 'ssh-disconnected-monitor-last-known.png') });
+    check('SSH disconnect keeps the same last-confirmed running state and freezes its elapsed/resource evidence separately from connection loss, without replay.');
     const requestsBeforeBlockedSubmit = requests.length;
     const denied = await workspace.evaluate(async ({ projectId, analysisId }) => {
       try { await window.electronAPI.createProjectJob(projectId, { jobType: 'explore.summarize.v1', analysisObjectId: analysisId, parameters: { recipe: 'overview' } }); return null; }
@@ -339,6 +585,7 @@ async function main() {
     if (!await runs.isVisible()) await reconnected.getByRole('button', { name: 'Results', exact: true }).click();
     await runs.click();
     const history = reconnected.getByRole('region', { name: 'Execution history', exact: true });
+    await history.getByRole('button', { name: 'Refresh executions', exact: true }).click();
     await history.getByRole('button').filter({ hasText: workflowJob.id }).click();
     const evidence = history.getByLabel('Recorded execution target').first();
     await evidence.getByText('Scientific fixture server · ' + kernel.target_json.serviceId, { exact: true }).waitFor();
@@ -351,6 +598,24 @@ async function main() {
     await evidence.scrollIntoViewIfNeeded();
     await reconnected.screenshot({ path: path.join(output, 'ssh-recorded-custom-step-evidence.png') });
     check('Actual execution history displays the retained server identity, exact custom source and verified pinned environment independently of the client connection label.');
+    const completedMonitor = await openMonitor(reconnected, workflowJob.id);
+    await completedMonitor.detail.getByRole('heading', { name: 'Server state: Complete', exact: true }).waitFor();
+    const completedReport = await readMonitor(reconnected, '/' + workflowJob.id);
+    assert(completedReport.status === 200 && completedReport.value.status === 'completed'
+      && completedReport.value.execution.dispatchId === activeReceipt.dispatch_id
+      && completedReport.value.progress.state === 'complete' && completedReport.value.resources.state === 'unavailable'
+      && completedReport.value.resources.cpuPercent === null && completedReport.value.resources.memoryBytes === null,
+    'Reconnected monitoring lost the durable attempt or displayed finished-container usage as live evidence.');
+    assert(submittedJobs() === jobsBeforeMonitor
+      && (await database.query('SELECT attempts FROM jobs WHERE id=$1', [workflowJob.id])).rows[0].attempts === workflowJob.attempts,
+    'Monitoring after reconnect submitted or executed a second scientific attempt.');
+    assertPrivateMonitor(completedReport.value, completedOffline);
+    await completedMonitor.detail.scrollIntoViewIfNeeded();
+    await reconnected.screenshot({ path: path.join(output, 'ssh-reconnected-completed-monitor.png') });
+    check('Explicit reconnect retrieves the same completed job and dispatch through GET-only monitoring, clears live usage for the finished container and creates no additional attempt.');
+    assert(requests.some(value => value.path.startsWith(monitorBase))
+      && requests.filter(value => value.path.startsWith(monitorBase)).every(value => value.method === 'GET'),
+    'Browser monitoring sent a mutating request or did not exercise the owner-scoped monitoring routes.');
     assert(!requests.some(value => /checkpoint.*download|\/download$/.test(value.path)), 'The remote compute flow fetched a full checkpoint or output bundle to the renderer.');
     assert(requests.every(value => value.origin === service.endpoint), 'A scientific request left the desktop-selected HTTPS authority.');
     assert(responses.every(value => value.bytes < 512 * 1024 && !value.containsCheckpoint), 'A scientific API response transferred a full analysis object.');
