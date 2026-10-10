@@ -157,7 +157,7 @@ async function main() {
   const token = crypto.randomBytes(32).toString('hex'), rToken = crypto.randomBytes(32).toString('hex');
   const rName = 'traceomics-remote-r-' + crypto.randomBytes(8).toString('hex');
   let database, broker, worker, service, rStarted = false, capability, fixture, compiledAsset, reconnectedAsset;
-  const checks = [], errors = [], responses = [], requests = [];
+  const checks = [], errors = [], responses = [], requests = [], pausedReads = new Set();
   const check = message => { checks.push(message); process.stdout.write('PASS: ' + message + '\n'); };
   async function teardownCompute() {
     await stopChild(worker); worker = null;
@@ -215,6 +215,7 @@ async function main() {
       exerciseWorkspace: async context => {
         try { return await exerciseWorkspace(context); }
         catch (error) {
+          for (const release of pausedReads) release(); pausedReads.clear();
           await context.workspace.screenshot({ path: path.join(output, 'scientific-acceptance-failure.png') }).catch(() => {});
           throw error;
         }
@@ -223,12 +224,14 @@ async function main() {
     assert(errors.length === 0, 'The compiled remote workspace raised a browser error.');
     fs.writeFileSync(path.join(output, 'scientific-report.json'), JSON.stringify({ ok: true, checks, browserErrors: errors,
       environment: capability.environment, checkpointSha256: fixture.checkpointSha256, compiledAsset, reconnectedAsset,
+      peerWindowMode: 'Disposable second renderer sharing the actual native session; readonly copy of its verified target descriptor. Production desktop remains single-window.',
       largestApiResponseBytes: Math.max(0, ...responses.map(value => value.bytes)), requests }, null, 2));
     return { ok: true, checks: checks.length, artifactDirectory: output };
   } catch (error) {
     fs.writeFileSync(path.join(output, 'scientific-report.json'), JSON.stringify({ ok: false, checks, error: error.message }, null, 2));
     throw error;
   } finally {
+    for (const release of pausedReads) release(); pausedReads.clear();
     await teardownCompute();
     await service?.stop();
     if (rStarted) await command('docker', ['rm', '-f', rName]).catch(() => {});
@@ -237,7 +240,7 @@ async function main() {
     await fs.promises.rm(work, { recursive: true, force: true });
   }
 
-  async function exerciseWorkspace({ workspace, application, openSettings }) {
+  async function exerciseWorkspace({ workspace, application, openSettings, restartWorkspace, createPeerWorkspace }) {
     compiledAsset = await workspace.evaluate(() => [...document.scripts].map(script => script.src).find(source => /\/assets\/index-/.test(source)));
     await workspace.locator('[aria-label="Execution target"]').getByText('Compute: Tunneled lab', { exact: true }).waitFor();
     const observed = new WeakSet();
@@ -613,6 +616,252 @@ async function main() {
     await completedMonitor.detail.scrollIntoViewIfNeeded();
     await reconnected.screenshot({ path: path.join(output, 'ssh-reconnected-completed-monitor.png') });
     check('Explicit reconnect retrieves the same completed job and dispatch through GET-only monitoring, clears live usage for the finished container and creates no additional attempt.');
+
+    let recoveryWorkspace = reconnected;
+    const recoveryKey = 'traceomics_submission_recovery_v1';
+    async function requestReceipt(page, pathname, method = 'GET', body) {
+      return page.evaluate(async input => {
+        const response = await fetch(input.pathname, { method: input.method, credentials: 'include',
+          ...(input.body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input.body) }) });
+        const text = await response.text();
+        return { status: response.status, bytes: new TextEncoder().encode(text).length, value: JSON.parse(text) };
+      }, { pathname, method, body });
+    }
+    function assertSafeSubmission(value, expected) {
+      const { job, ...receipt } = value;
+      const serialized = JSON.stringify(receipt);
+      assert(value.requestId === expected.requestId && value.jobId === expected.jobId && value.projectId === service.project.id
+        && /^[a-f0-9]{64}$/.test(value.requestHash), 'A durable submission receipt changed the original request or job identity.');
+      assert(!['source_code', 'sourceCode', 'source', 'claim_token', 'claimToken', 'worker_id', 'workerId', 'storage_uri', 'storageKey', 'parameters']
+        .some(field => serialized.includes('"' + field + '":'))
+        && ![recipe.files['subset.R'], service.account.password, service.storageRoot, fixture.checkpointBase64]
+          .some(secret => serialized.includes(secret)), 'A small submission receipt exposed scientific inputs or a private capability.');
+      assert(Buffer.byteLength(serialized) < 8192, 'A submission receipt exceeded the bounded identifier payload.');
+      if (job) assertPrivateMonitor(job);
+    }
+    async function readRecoveryStorage(page) {
+      const stored = await page.evaluate(key => localStorage.getItem(key), recoveryKey);
+      assert(stored && Buffer.byteLength(stored) <= 32 * 1024, 'Submission recovery did not retain a bounded local identifier record.');
+      const value = JSON.parse(stored);
+      assert(value.scope.installationId === kernel.target_json.serviceId && value.scope.userId === Number(fixture.ownerId)
+        && typeof value.scope.targetHash === 'string' && value.scope.targetHash.length <= 128
+        && Array.isArray(value.records) && value.records.length <= 24,
+      'Submission recovery did not isolate its retained identifiers by installation, target and authenticated owner.');
+      const allowed = ['kind', 'requestId', 'projectId', 'instanceId', 'jobId', 'requestHash', 'state', 'createdAt'];
+      assert(value.records.every(record => Object.keys(record).every(key => allowed.includes(key)))
+        && ![recipe.files['subset.R'], service.account.password, service.storageRoot, fixture.checkpointBase64]
+          .some(secret => stored.includes(secret)), 'Submission recovery persisted source, objects, private paths or credentials.');
+      return value;
+    }
+    async function reopenDesktop(page) {
+      const scientificPostsBefore = submittedJobs();
+      const previousProcess = application.process().pid;
+      const next = await restartWorkspace();
+      application = next.application; recoveryWorkspace = next.workspace;
+      observe(recoveryWorkspace); application.on('window', observe);
+      assert(application.process().pid !== previousProcess && page.isClosed(), 'Acceptance did not close and reopen the whole desktop process.');
+      assert(await recoveryWorkspace.evaluate(() => [...document.scripts].map(script => script.src).find(source => /\/assets\/index-/.test(source))) === compiledAsset,
+        'Complete desktop reopening changed the compiled acceptance UI.');
+      await recoveryWorkspace.getByRole('region', { name: 'Submission recovery', exact: true }).waitFor();
+      await recoveryWorkspace.getByRole('button', { name: 'Open recovered runs', exact: true }).click();
+      await recoveryWorkspace.getByRole('region', { name: 'Saved submissions', exact: true }).waitFor();
+      assert(submittedJobs() === scientificPostsBefore, 'Reopening the complete desktop app replayed a scientific submission.');
+      return scientificPostsBefore;
+    }
+    async function openRecoveredRun(page, requestId, jobId) {
+      const card = page.getByRole('region', { name: 'Submission ' + requestId, exact: true });
+      await card.getByRole('button', { name: 'Open exact run', exact: true }).waitFor({ timeout: 30_000 });
+      await card.getByRole('button', { name: 'Open exact run', exact: true }).click();
+      const detail = page.getByRole('region', { name: 'Selected run monitoring', exact: true });
+      await detail.getByText(new RegExp(jobId)).waitFor({ timeout: 30_000 });
+      const selected = page.getByRole('list', { name: 'Monitored runs', exact: true }).getByRole('button').filter({ hasText: jobId });
+      assert(await selected.getAttribute('aria-pressed') === 'true', 'Recovery displayed a latest matching job instead of the exact saved job.');
+      return detail;
+    }
+
+    const originalWorkflow = (await database.query('SELECT instance_id,request_id FROM workflow_runs WHERE job_id=$1', [workflowJob.id])).rows[0];
+    const firstWorkflowReceiptPath = `/api/workflows/${service.project.id}/instances/${originalWorkflow.instance_id}/submissions/${originalWorkflow.request_id}`;
+    const peer = await createPeerWorkspace(recoveryWorkspace); observe(peer);
+    assert(await peer.evaluate(() => [...document.scripts].map(script => script.src).find(source => /\/assets\/index-/.test(source))) === compiledAsset,
+      'The disposable peer did not load the same production analysis UI.');
+    await peer.getByRole('region', { name: 'Submission recovery', exact: true })
+      .getByText('Saved submissions are confirmed on this server.', { exact: true }).waitFor({ timeout: 30_000 });
+    await peer.getByRole('button', { name: 'Open recovered runs', exact: true }).click();
+    const peerOriginal = peer.getByRole('region', { name: 'Submission ' + originalWorkflow.request_id, exact: true });
+    const peerReadFault = service.interceptNextResponse({ method: 'GET', pathname: firstWorkflowReceiptPath, mode: 'hold' });
+    pausedReads.add(peerReadFault.release);
+    await peerOriginal.getByRole('button', { name: 'Check receipt', exact: true }).click();
+    const delayedPeerReceipt = await waitFor(() => peerReadFault.observation(),
+      'The peer did not complete the production read underlying its delayed receipt.', 15_000);
+    assert(delayedPeerReceipt.status === 200 && delayedPeerReceipt.bytes < 8192,
+      'The peer could not obtain its bounded original workflow receipt through native SSH.');
+    const returnExplore = recoveryWorkspace.locator('[data-destination="explore"]');
+    if (!await returnExplore.isVisible()) await recoveryWorkspace.getByRole('button', { name: 'Explore', exact: true }).click();
+    await returnExplore.click();
+    await waitFor(() => recoveryWorkspace.getByRole('button', { name: 'Run recipe', exact: true }).isEnabled(),
+      'The restored analysis did not enable another explicit guided submission.', 30_000);
+    let lostSubmission, lostInput, retainedBeforeCommit, routeFailure;
+    const lostReplyFault = service.interceptNextResponse({ method: 'POST', pathname: `/api/projects/${service.project.id}/jobs`, mode: 'drop' });
+    const jobRoute = /\/api\/projects\/[^/]+\/jobs$/;
+    await recoveryWorkspace.route(jobRoute, async route => {
+      if (route.request().method() !== 'POST' || lostInput) return route.continue();
+      lostInput = route.request().postDataJSON();
+      try {
+        retainedBeforeCommit = await readRecoveryStorage(recoveryWorkspace);
+        assert(retainedBeforeCommit.records.some(value => value.requestId === lostInput.requestId && value.state === 'pending' && !value.jobId),
+          'The guided request UUID was not retained before any server admission.');
+      } catch (error) { routeFailure = error; await route.abort('failed'); return; }
+      // The server commits its original request while the renderer receives no
+      // acknowledgement. Reopening must reconcile it by GET, never retry POST.
+      await route.continue();
+    });
+    const guidedCountBefore = (await database.query("SELECT COUNT(*)::int AS count FROM jobs WHERE owner_user_id=$1 AND job_type='explore.summarize.v1'", [fixture.ownerId])).rows[0].count;
+    await recoveryWorkspace.getByRole('button', { name: 'Run recipe', exact: true }).click();
+    const lostReply = await waitFor(() => { if (routeFailure) throw routeFailure; return lostReplyFault.observation(); },
+      'The lost-acknowledgement guided submission did not complete its production admission.', 30_000);
+    assert(lostReply.status === 201 && lostReply.bytes < 16 * 1024 && lostReply.value,
+      'The actual guided submission was not admitted before its reply was lost.');
+    lostSubmission = lostReply.value;
+    await recoveryWorkspace.unroute(jobRoute);
+    await recoveryWorkspace.getByText(/Acceptance of this submission is unconfirmed/i).waitFor({ timeout: 10_000 });
+    assert(lostInput.requestId && lostSubmission.submission?.requestId === lostInput.requestId,
+      'Guided submission did not preserve an admitted request UUID across the missing reply.');
+    assertSafeSubmission(lostSubmission.submission, { requestId: lostInput.requestId, jobId: lostSubmission.id });
+    const pendingStorage = await readRecoveryStorage(recoveryWorkspace);
+    assert(pendingStorage.records.some(value => value.requestId === lostInput.requestId && value.state === 'pending' && !value.jobId),
+      'The interrupted receipt body did not leave its original guided request genuinely unconfirmed.');
+    assert((await database.query("SELECT COUNT(*)::int AS count FROM jobs WHERE owner_user_id=$1 AND job_type='explore.summarize.v1'", [fixture.ownerId])).rows[0].count === guidedCountBefore + 1,
+      'Losing the original POST acknowledgement created more than one guided job.');
+    const postsAfterLostReply = submittedJobs();
+    await waitFor(() => recoveryWorkspace.getByRole('button', { name: 'Run recipe', exact: true }).isEnabled(),
+      'The guided page did not release its local busy state after losing the reply.', 10_000);
+    await recoveryWorkspace.getByRole('button', { name: 'Run recipe', exact: true }).click();
+    await recoveryWorkspace.getByText(/An earlier submission has not been confirmed/i).waitFor();
+    assert(submittedJobs() === postsAfterLostReply, 'Clicking the guided page again while acceptance was unknown sent a new scientific POST.');
+    const deliveredPeerReceipt = peer.waitForResponse(response => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === firstWorkflowReceiptPath && response.status() === 200, { timeout: 15_000 });
+    peerReadFault.release(); pausedReads.delete(peerReadFault.release);
+    await deliveredPeerReceipt;
+    await waitFor(() => peerOriginal.getByRole('button', { name: 'Check receipt', exact: true }).isEnabled(),
+      'The peer did not finish its stale original receipt inspection.', 15_000);
+    const afterStalePeerRead = await readRecoveryStorage(peer);
+    assert(afterStalePeerRead.records.some(value => value.requestId === lostInput.requestId && value.state === 'pending' && !value.jobId),
+      'A stale receipt confirmation in another renderer overwrote the new unconfirmed submission locator.');
+    const peerExplore = peer.locator('[data-destination="explore"]');
+    if (!await peerExplore.isVisible()) await peer.getByRole('button', { name: 'Explore', exact: true }).click();
+    await peerExplore.click();
+    await waitFor(() => peer.getByRole('button', { name: 'Run recipe', exact: true }).isEnabled(),
+      'The peer guided page did not become available for the pending-request guard check.', 15_000);
+    const postsBeforePeerClick = submittedJobs();
+    await peer.getByRole('button', { name: 'Run recipe', exact: true }).click();
+    await peer.getByText(/An earlier submission has not been confirmed/i).waitFor();
+    assert(submittedJobs() === postsBeforePeerClick
+      && (await readRecoveryStorage(peer)).records.some(value => value.requestId === lostInput.requestId && value.state === 'pending'),
+    'A genuine second renderer submitted work or erased the first renderer\'s unconfirmed request.');
+    await peer.screenshot({ path: path.join(output, 'ssh-peer-window-pending-request-blocked.png') });
+    await peer.close();
+    check('A disposable second compiled renderer shares the real native SSH/TLS/auth session; its stale receipt response preserves another window\'s pending locator and its guided click sends no scientific POST. Production desktop connection controls are unchanged.');
+    const guidedReceiptPath = `/api/projects/${service.project.id}/job-submissions/${lostInput.requestId}`;
+    const lostReplyReceipt = await requestReceipt(recoveryWorkspace, guidedReceiptPath);
+    assert(lostReplyReceipt.status === 200 && lostReplyReceipt.value.job.id === lostSubmission.id,
+      'The owner-only GET receipt cannot recover the committed guided submission.');
+    assertSafeSubmission(lostReplyReceipt.value, { requestId: lostInput.requestId, jobId: lostSubmission.id });
+    const repeatedGuided = await requestReceipt(recoveryWorkspace, `/api/projects/${service.project.id}/jobs`, 'POST', lostInput);
+    assert(repeatedGuided.status === 200 && repeatedGuided.value.id === lostSubmission.id
+      && repeatedGuided.value.submission.requestHash === lostSubmission.submission.requestHash,
+    'An explicit repeat of the exact guided request did not return its original admitted job.');
+    await reopenDesktop(recoveryWorkspace);
+    const recoveredGuided = await openRecoveredRun(recoveryWorkspace, lostInput.requestId, lostSubmission.id);
+    await waitFor(async () => {
+      const row = (await database.query('SELECT status FROM jobs WHERE id=$1', [lostSubmission.id])).rows[0];
+      if (row?.status === 'failed') throw new Error('The admitted guided job failed after losing its acknowledgement.');
+      return row?.status === 'completed';
+    }, 'The original guided job did not finish after the complete desktop app reopened.');
+    await recoveryWorkspace.getByRole('region', { name: 'Run monitoring', exact: true }).getByRole('button', { name: 'Refresh monitoring', exact: true }).click();
+    await recoveredGuided.getByRole('heading', { name: 'Server state: Complete', exact: true }).waitFor();
+    const recoveredStorage = await readRecoveryStorage(recoveryWorkspace);
+    assert(recoveredStorage.records.some(value => value.requestId === lostInput.requestId && value.jobId === lostSubmission.id && value.state === 'accepted'),
+      'Complete app reopening did not resolve the pending request to its exact accepted job.');
+    assert((await database.query("SELECT COUNT(*)::int AS count FROM jobs WHERE owner_user_id=$1 AND job_type='explore.summarize.v1'", [fixture.ownerId])).rows[0].count === guidedCountBefore + 1,
+      'Complete app reopening duplicated the lost-acknowledgement guided submission.');
+    await recoveredGuided.scrollIntoViewIfNeeded();
+    await recoveryWorkspace.screenshot({ path: path.join(output, 'ssh-reopened-lost-ack-guided.png') });
+    check('A genuine guided POST commits before its acknowledgement is lost; complete Electron shutdown/reopen recovers the exact request and job through GET without a second scientific submission.');
+
+    const originalReceipt = await requestReceipt(recoveryWorkspace, firstWorkflowReceiptPath);
+    assert(originalReceipt.status === 200 && originalReceipt.value.schema === 'traceomics.workflow-submission.v1',
+      'The original workflow request is not independently recoverable.');
+    assertSafeSubmission(originalReceipt.value, { requestId: originalWorkflow.request_id, jobId: workflowJob.id });
+    await recoveryWorkspace.getByRole('button', { name: /^Pipelines,/ }).click();
+    await recoveryWorkspace.getByRole('button', { name: 'Open Remote inspection', exact: true }).click();
+    await recoveryWorkspace.getByLabel('Cells to keep', { exact: true }).fill('4');
+    const [laterRunResponse] = await Promise.all([
+      recoveryWorkspace.waitForResponse(response => response.request().method() === 'POST' && /\/instances\/[^/]+\/run$/.test(new URL(response.url()).pathname)),
+      recoveryWorkspace.getByRole('button', { name: 'Run Remote subset', exact: true }).click(),
+    ]);
+    assert(laterRunResponse.ok(), 'The explicit later workflow step was not admitted.');
+    const laterRun = await laterRunResponse.json();
+    assert(laterRun.submission?.jobId && laterRun.submission.jobId !== workflowJob.id, 'A deliberate new workflow request did not create a distinct run.');
+    const laterJob = await waitFor(async () => {
+      const row = (await database.query('SELECT * FROM jobs WHERE id=$1', [laterRun.submission.jobId])).rows[0];
+      if (row?.status === 'failed') throw new Error('The second actual custom R step failed.');
+      return row?.status === 'running' ? row : null;
+    }, 'The later custom R step did not begin scientific work.');
+    const originalDuringLater = await requestReceipt(recoveryWorkspace, firstWorkflowReceiptPath);
+    assert(originalDuringLater.status === 200 && originalDuringLater.value.jobId === workflowJob.id
+      && originalDuringLater.value.requestHash === originalReceipt.value.requestHash,
+      'The original workflow receipt was replaced by the newer active run.');
+    const duplicate = await requestReceipt(recoveryWorkspace, `/api/workflows/${service.project.id}/instances/${originalWorkflow.instance_id}/run`, 'POST',
+      { requestId: originalWorkflow.request_id, stepId: 'subset', parameters: { cells: 5 }, seed: 1 });
+    assert(duplicate.status === 200 && duplicate.value.submission.jobId === workflowJob.id
+      && duplicate.value.state.active.id === laterJob.id,
+      'A duplicate workflow request lost its original job receipt or displaced the later active step.');
+    for (const changed of [{ parameters: { cells: 3 }, seed: 1 }, { parameters: { cells: 5 }, seed: 2 }]) {
+      const conflict = await requestReceipt(recoveryWorkspace, `/api/workflows/${service.project.id}/instances/${originalWorkflow.instance_id}/run`, 'POST',
+        { requestId: originalWorkflow.request_id, stepId: 'subset', ...changed });
+      assert(conflict.status === 409 && conflict.bytes < 1024 && Object.keys(conflict.value).every(key => ['error', 'code'].includes(key)),
+        'Reusing an admitted workflow UUID with changed scientific inputs was not rejected by a bounded conflict response.');
+    }
+    for (const pathname of [guidedReceiptPath, firstWorkflowReceiptPath]) {
+      const deniedReceipt = await isolatedServiceRequest(service, pathname, { cookie: colleagueCookie });
+      assert(deniedReceipt.status === 404 && deniedReceipt.bytes < 1024
+        && Object.keys(deniedReceipt.value).every(key => ['error', 'code'].includes(key)),
+      'Another authenticated project member received an owner-private submission receipt.');
+    }
+    assert((await database.query("SELECT COUNT(*)::int AS count FROM jobs WHERE owner_user_id=$1 AND job_type='expert.r.v1'", [fixture.ownerId])).rows[0].count === 2,
+      'Workflow receipt inspection, duplicate submission or conflict checks created additional scientific jobs.');
+    check('An original workflow receipt keeps its exact job after a later run; an identical UUID returns that original receipt, changed parameters or seed conflict, and independent project colleagues cannot inspect owner-private receipts.');
+    await openMonitor(recoveryWorkspace, laterJob.id);
+    await recoveryWorkspace.getByRole('region', { name: 'Selected run monitoring', exact: true }).getByRole('heading', { name: 'Server state: Running', exact: true }).waitFor();
+    await reopenDesktop(recoveryWorkspace);
+    const reopenedCustom = await openRecoveredRun(recoveryWorkspace, laterRun.submission.requestId, laterJob.id);
+    const jobAfterReopen = (await database.query('SELECT status,attempts FROM jobs WHERE id=$1', [laterJob.id])).rows[0];
+    assert(jobAfterReopen.status === 'running' && jobAfterReopen.attempts === laterJob.attempts,
+      'The running custom recipe did not survive complete desktop shutdown with the same attempt.');
+    await reopenedCustom.getByRole('heading', { name: 'Server state: Running', exact: true }).waitFor();
+    await reopenedCustom.scrollIntoViewIfNeeded();
+    await recoveryWorkspace.screenshot({ path: path.join(output, 'ssh-reopened-exact-running-recipe.png') });
+    const laterCompleted = await waitFor(async () => {
+      const row = (await database.query('SELECT status,attempts FROM jobs WHERE id=$1', [laterJob.id])).rows[0];
+      if (row?.status === 'failed') throw new Error('The custom recipe failed after complete desktop reopening.');
+      return row?.status === 'completed' ? row : null;
+    }, 'The original running recipe did not complete after full desktop reopening.');
+    await recoveryWorkspace.getByRole('region', { name: 'Run monitoring', exact: true }).getByRole('button', { name: 'Refresh monitoring', exact: true }).click();
+    await reopenedCustom.getByRole('heading', { name: 'Server state: Complete', exact: true }).waitFor();
+    assert(laterCompleted.attempts === laterJob.attempts
+      && (await database.query("SELECT COUNT(*)::int AS count FROM jobs WHERE owner_user_id=$1 AND job_type='expert.r.v1'", [fixture.ownerId])).rows[0].count === 2,
+    'Complete desktop recovery replayed custom R or started another attempt.');
+    const exactLaterReceipt = await requestReceipt(recoveryWorkspace,
+      `/api/workflows/${service.project.id}/instances/${originalWorkflow.instance_id}/submissions/${laterRun.submission.requestId}`);
+    assertSafeSubmission(exactLaterReceipt.value, { requestId: laterRun.submission.requestId, jobId: laterJob.id });
+    await readRecoveryStorage(recoveryWorkspace);
+    await recoveryWorkspace.getByRole('button', { name: /^Pipelines,/ }).click();
+    await recoveryWorkspace.getByRole('button', { name: 'Open Remote inspection', exact: true }).click();
+    await recoveryWorkspace.getByRole('heading', { name: 'Subset summary', exact: true })
+      .locator('xpath=ancestor::section[1]').getByText('4', { exact: true }).waitFor();
+    await recoveryWorkspace.screenshot({ path: path.join(output, 'ssh-reopened-completed-recipe-result.png') });
+    check('Complete Electron shutdown during a real running Seurat recipe restores its exact saved job on the same SSH target, retains one attempt and retrieves the edited four-cell result without scientific replay.');
+    check('Recovery storage and submission receipts contain bounded scoped identifiers, without scientific source, objects, private paths or credentials.');
     assert(requests.some(value => value.path.startsWith(monitorBase))
       && requests.filter(value => value.path.startsWith(monitorBase)).every(value => value.method === 'GET'),
     'Browser monitoring sent a mutating request or did not exercise the owner-scoped monitoring routes.');
@@ -621,7 +870,7 @@ async function main() {
     assert(responses.every(value => value.bytes < 512 * 1024 && !value.containsCheckpoint), 'A scientific API response transferred a full analysis object.');
     check('Scientific browser traffic stays bounded and contains no checkpoint or output-bundle download.');
     // The native transport suite continues its strict certificate, identity and loss checks.
-    return reconnected;
+    return recoveryWorkspace;
   }
 }
 if (require.main === module) main().then(result => process.stdout.write(JSON.stringify(result) + '\n')).catch(error => { process.stderr.write(error.stack + '\n'); process.exitCode = 1; });

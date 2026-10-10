@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import ExecutionTargetIndicator from './components/ExecutionTargetIndicator';
 import AnalysisStatusBar from './components/AnalysisStatusBar';
+import { SubmissionRecoveryNotice } from './components/SubmissionRecovery';
+import { clearSubmissionRecovery } from './executions/submissionRecovery';
 import { Loader2, Microscope } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Login from './pages/Login';
@@ -990,6 +992,7 @@ export default function App() {
   };
 
   const clearAuthenticatedWorkspace = (notice = '') => {
+    clearSubmissionRecovery();
     setLoggedOutNotice(notice);
     setUser(null);
     setAuthResolution('resolved');
@@ -1379,6 +1382,7 @@ export default function App() {
       <main className="flex-1 flex flex-col relative overflow-hidden min-h-0 min-w-0">
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
         <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} userId={user?.id} projectId={activeProjectIdForPipeline} />
+        <SubmissionRecoveryNotice userId={user?.id} projectId={activeProjectIdForPipeline} onOpen={() => setActiveTab('history')} />
         {historyPersistenceNotice && (
           <div role="alert" className="mx-4 mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-text">
             {historyPersistenceNotice}

@@ -2,6 +2,7 @@
 // Replaces the window.electronAPI object with standard fetch calls to our Express server.
 import { publicErrorMessage } from './publicError';
 import { withExecutionTarget } from './runtime/executionTarget';
+import { clearSubmissionRecovery, submitWithRecovery } from './executions/submissionRecovery';
 
 // API base URL is configured via Vite env (VITE_API_BASE_URL).
 // When unset, fall back to same-origin relative requests (empty base),
@@ -206,7 +207,8 @@ function persistAuthResponse(data) {
   return data.user;
 }
 
-export function clearAuthSessionStorage() {
+export async function clearAuthSessionStorage() {
+  await clearSubmissionRecovery();
   const keysToRemove = new Set([AUTH_TOKEN_KEY, AUTH_USER_KEY, ...SESSION_STORAGE_KEYS]);
   for (let i = 0; i < localStorage.length; i += 1) {
     const key = localStorage.key(i);
@@ -287,8 +289,7 @@ function formatRequestError(error) {
   return publicErrorMessage(error);
 }
 
-async function req(endpoint, options = {}) {
-  return withExecutionTarget(async () => {
+async function performRequest(endpoint, options = {}) {
   options.headers = options.headers || {};
   options.headers['Content-Type'] = options.headers['Content-Type'] || 'application/json';
   options.headers['X-Client-ID'] = CLIENT_ID;
@@ -308,7 +309,16 @@ async function req(endpoint, options = {}) {
     throw error;
   }
   return res.json();
-  }, { mutation: Boolean(options.method && options.method !== 'GET') });
+}
+
+async function req(endpoint, options = {}) {
+  const projectSubmission = options.method === 'POST' && /^\/api\/projects\/([^/]+)\/jobs$/.exec(endpoint);
+  if (projectSubmission) {
+    const body = JSON.parse(options.body || '{}');
+    return submitWithRecovery({ projectId: decodeURIComponent(projectSubmission[1]), requestId: body.requestId,
+      submit: requestId => performRequest(endpoint, { ...options, body: JSON.stringify({ ...body, requestId }) }) });
+  }
+  return withExecutionTarget(() => performRequest(endpoint, options), { mutation: Boolean(options.method && options.method !== 'GET') });
 }
 
 async function requestRuntimeReadiness(projectId, { signal } = {}) {
@@ -499,7 +509,7 @@ export const electronAPI = {
       });
       if (!res.ok) {
         if (res.status === 401) {
-          clearAuthSessionStorage();
+          await clearAuthSessionStorage();
           return null;
         }
         const error = new Error('The session could not be checked. Please retry.');
@@ -544,14 +554,14 @@ export const electronAPI = {
         // The server clears an invalid/expired cookie on this successful path.
         // There is no authenticated session left to preserve, so make the login
         // screen reachable while accurately warning about the revoke-all result.
-        clearAuthSessionStorage();
+        await clearAuthSessionStorage();
         return {
           success: true,
           allSessionsRevoked: false,
           warning: 'The current session had already expired; other sessions could not be revoked.',
         };
       }
-      clearAuthSessionStorage();
+      await clearAuthSessionStorage();
       return { success: true };
     } catch {
       return { error: 'Session revocation failed. Please check your connection and retry.' };

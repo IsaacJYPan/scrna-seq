@@ -87,9 +87,23 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
   let compatibilityOverride = null;
   let runtimeHealth = { value: { status: 'ok' }, status: 200 };
   let stopped = false;
+  const responseFaults = new Set();
+  function interceptNextResponse({ method, pathname, mode }) {
+    if (!['GET', 'POST'].includes(method) || !['drop', 'hold'].includes(mode)
+      || typeof pathname !== 'string' || !pathname.startsWith('/api/') || pathname.length > 256 || pathname.includes('?')) {
+      throw new Error('A disposable response fault requires an exact bounded API method and path.');
+    }
+    let release;
+    const fault = { method, pathname, mode, matched: false, observation: null,
+      released: new Promise(resolve => { release = resolve; }) };
+    fault.release = release;
+    responseFaults.add(fault);
+    return { observation: () => fault.observation, release };
+  }
   fs.mkdirSync(privateDirectory, { recursive: true });
   const stop = async () => {
     if (stopped) return; stopped = true;
+    for (const fault of responseFaults) fault.release(); responseFaults.clear();
     await closeServer(ingress);
     if (web && web.exitCode === null) {
       const exited = new Promise(resolve => web.once('exit', resolve));
@@ -140,11 +154,51 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
       }
       const headers = { ...req.headers, 'x-forwarded-proto': 'https', 'x-forwarded-for': '127.0.0.1',
         'x-forwarded-host': req.headers.host };
+      const fault = [...responseFaults].find(value => !value.matched && value.method === req.method
+        && value.pathname === new URL(req.url, 'https://fixture.invalid').pathname);
+      if (fault) fault.matched = true;
       const upstream = http.request({ hostname: '127.0.0.1', port: appPort, method: req.method,
         path: req.url, headers }, response => {
+        if (fault) {
+          // The original browser request still traverses native SSH/TLS and the
+          // production service. Only its completed response is held or dropped.
+          // Keep bounded JSON in memory; never capture request/auth headers.
+          let bytes = 0; const chunks = [];
+          response.on('data', chunk => {
+            bytes += chunk.length;
+            if (bytes > 16 * 1024) {
+              fault.observation = { status: response.statusCode, bytes, value: null };
+              response.destroy(); res.destroy(); responseFaults.delete(fault);
+            } else chunks.push(chunk);
+          });
+          response.on('end', async () => {
+            const body = Buffer.concat(chunks);
+            let value;
+            try { value = JSON.parse(body.toString('utf8')); } catch { value = null; }
+            fault.observation = { status: response.statusCode, bytes, value };
+            if (fault.mode === 'drop') {
+              // Sending the original status and an incomplete JSON prefix
+              // prevents Chromium from treating a headerless socket loss as a
+              // safe transparent retry. The admission evidence is still lost.
+              res.writeHead(response.statusCode, response.headers);
+              res.flushHeaders();
+              res.write(body.subarray(0, 1), () => res.destroy());
+              responseFaults.delete(fault); return;
+            }
+            await fault.released;
+            responseFaults.delete(fault);
+            if (stopped || res.destroyed) return;
+            res.writeHead(response.statusCode, response.headers); res.end(body);
+          });
+          response.on('error', () => { res.destroy(); responseFaults.delete(fault); });
+          return;
+        }
         res.writeHead(response.statusCode, response.headers); response.pipe(res);
       });
-      upstream.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+      upstream.on('error', () => {
+        if (fault) { fault.observation ??= { status: 502, bytes: 0, value: null }; fault.release(); responseFaults.delete(fault); }
+        if (!res.headersSent) res.writeHead(502); res.end();
+      });
       req.on('aborted', () => upstream.destroy()); req.pipe(upstream);
     });
     const selectedHttpsPort = await listen(ingress, httpsPort, '0.0.0.0');
@@ -196,6 +250,7 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
     }
     return { endpoint, httpsPort: selectedHttpsPort, caCertificatePath, certificatePath, privateKeyPath,
       account, project, databaseUrl, storageRoot: env.STORAGE_ROOT, stop,
+      interceptNextResponse,
       setCompatibilityResponse(value, status = 200) {
         compatibilityOverride = value == null ? null : { value, status };
       },

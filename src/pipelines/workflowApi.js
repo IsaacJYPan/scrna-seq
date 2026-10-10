@@ -1,4 +1,5 @@
 import { withExecutionTarget } from '../runtime/executionTarget';
+import { submitWithRecovery } from '../executions/submissionRecovery';
 
 const base = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 
@@ -15,15 +16,20 @@ export function mergeWorkflowUpdate(current, incoming, replace = false) {
 export function workflowUrl(projectId, suffix) {
   return `${base}/api/workflows/${encodeURIComponent(projectId)}/${suffix}`;
 }
-export async function workflowRequest(projectId, suffix, method = 'GET', body, signal) {
-  return withExecutionTarget(async () => {
+async function performWorkflowRequest(projectId, suffix, method, body, signal) {
   const response = await fetch(workflowUrl(projectId, suffix), {
     method, credentials: 'include', signal,
     headers: { 'Content-Type': 'application/json', 'X-Traceomics-Csrf': '1' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error || 'The workflow request failed.');
+  const value = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(value.error || 'The workflow request failed.'), { status: response.status, code: value.code });
   return value;
-  }, { mutation: method !== 'GET' });
+}
+
+export async function workflowRequest(projectId, suffix, method = 'GET', body, signal) {
+  const run = method === 'POST' && /^instances\/([^/]+)\/run$/.exec(suffix);
+  if (run) return submitWithRecovery({ projectId, instanceId: run[1], kind: 'workflow', requestId: body?.requestId,
+    submit: requestId => performWorkflowRequest(projectId, suffix, method, { ...body, requestId }, signal) });
+  return withExecutionTarget(() => performWorkflowRequest(projectId, suffix, method, body, signal), { mutation: method !== 'GET' });
 }

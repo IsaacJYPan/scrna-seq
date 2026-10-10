@@ -1,4 +1,5 @@
 import { TARGET_CHANGED_MESSAGE, TARGET_CHECKING_MESSAGE, TARGET_DISCONNECTED_MESSAGE, TARGET_UNCONFIRMED_MESSAGE } from './runtime/executionTarget';
+import { SUBMISSION_RECOVERY_MESSAGES } from './executions/submissionRecoveryMessages';
 
 const DEFAULT_PUBLIC_ERROR = 'We could not complete this request. Please review the settings and try again.';
 
@@ -44,6 +45,7 @@ export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
   if (EXPERT_R_OWNER_MESSAGES.has(message)) return message;
   if (CELLCHAT_OWNER_MESSAGES.has(message)) return message;
   if ([TARGET_CHANGED_MESSAGE, TARGET_CHECKING_MESSAGE, TARGET_DISCONNECTED_MESSAGE, TARGET_UNCONFIRMED_MESSAGE].includes(message)) return message;
+  if (Object.values(SUBMISSION_RECOVERY_MESSAGES).includes(message)) return message;
 
   if (/^(?:R service|Analysis compute) is busy\b/i.test(message)) {
     return 'Analysis compute is busy. Wait a moment and try again.';
