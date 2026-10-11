@@ -78,6 +78,15 @@ async function freePort() {
   const port = server.address().port;
   await new Promise(resolve => server.close(resolve)); return port;
 }
+async function waitFor(check, message, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await check();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(message);
+}
 async function readableContrast(locator) {
   return locator.evaluate(element => {
     const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
@@ -108,7 +117,7 @@ async function main() {
   fs.mkdirSync(directory, { recursive: true });
   const port = await freePort(), token = crypto.randomBytes(32).toString('hex');
   let service, broker, browser, page, database;
-  const errors = [], checks = [];
+  const errors = [], checks = [], kernelRequests = [], recoveryReads = [];
   const check = message => { checks.push(message); console.log('PASS: ' + message); };
   try {
     service = await createDesktopTunnelServiceFixture({ artifactDirectory: directory,
@@ -141,6 +150,22 @@ async function main() {
     ] });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     page = await context.newPage(); page.on('pageerror', error => errors.push(error.message));
+    page.on('request', request => {
+      const pathname = new URL(request.url()).pathname;
+      if (pathname.startsWith('/api/private-r-kernels/')) {
+        if (kernelRequests.length >= 2500) {
+          if (!errors.includes('Private R acceptance exceeded its bounded request ledger.')) errors.push('Private R acceptance exceeded its bounded request ledger.');
+          return;
+        }
+        kernelRequests.push({ method: request.method(), pathname });
+      }
+    });
+    const assertReadOnly = (offset, phase) => {
+      const requests = kernelRequests.slice(offset);
+      assert(requests.length > 0 && requests.every(request => request.method === 'GET'),
+        phase + ' dispatched a private R mutation or did not inspect the server.');
+      recoveryReads.push({ phase, requests });
+    };
     await page.goto(service.endpoint);
     await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email);
     await page.getByLabel('Password', { exact: true }).fill(service.account.password);
@@ -167,18 +192,81 @@ async function main() {
     await output.getByRole('cell', { name: 'a', exact: true }).waitFor();
     const figure = output.getByRole('img', { name: 'R figure 1', exact: true });
     await figure.waitFor();
-    await consoleUi.screenshot({ path: path.join(directory, 'persistent-r-table-figure.png') });
+    await output.screenshot({ path: path.join(directory, 'persistent-r-table-figure.png') });
     await figure.scrollIntoViewIfNeeded();
     await figure.screenshot({ path: path.join(directory, 'rendered-r-figure.png') });
     check('Free R cells preserve variables and render actual bounded tables and PNG plots.');
-    await page.reload();
-    await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
-    await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
+    const originalKernel = (await database.query('SELECT id,runtime_generation,next_order FROM private_r_kernels ORDER BY created_at DESC LIMIT 1')).rows[0];
+    const initialReads = kernelRequests.length;
+    const initialInspection = service.interceptNextResponse({ method: 'GET',
+      pathname: '/api/private-r-kernels/' + service.project.id + '/' + originalKernel.id, mode: 'hold' });
+    try {
+      await page.reload();
+      await page.getByRole('button', { name: /^Advanced analysis,/ }).click();
+      await page.getByRole('button', { name: 'Interactive console', exact: true }).click();
+      await waitFor(() => initialInspection.observation(), 'Initial attach did not inspect the exact existing kernel.');
+      await consoleUi.getByText('Checking the private R session. Commands and saves wait for fresh server confirmation.', { exact: true }).waitFor();
+      assert(!await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).isEnabled(),
+        'A cached ready session allowed execution before its initial exact-kernel inspection finished.');
+      const initialSave = consoleUi.getByRole('button', { name: 'Save object', exact: true });
+      assert(await initialSave.count() === 0 || !await initialSave.isEnabled(),
+        'An unconfirmed initial session allowed object serialization.');
+    } finally { initialInspection.release(); }
+    await output.getByText('Command 2 · completed', { exact: true }).waitFor({ timeout: 30_000 });
+    await output.getByRole('cell', { name: 'a', exact: true }).waitFor();
+    await output.getByRole('img', { name: 'R figure 1', exact: true }).evaluate(element => element.decode());
+    await consoleUi.getByLabel('R command journal').getByRole('button', { name: 'Command 1 · completed', exact: true }).waitFor();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor();
+    const reattached = (await database.query('SELECT id,runtime_generation,next_order FROM private_r_kernels ORDER BY created_at DESC LIMIT 1')).rows[0];
+    assert(reattached.id === originalKernel.id && reattached.runtime_generation === originalKernel.runtime_generation
+      && Number(reattached.next_order) === 2, 'Initial journal inspection changed the exact kernel or replayed a command.');
+    assertReadOnly(initialReads, 'Initial existing-session and latest journal/output recovery');
+    await output.screenshot({ path: path.join(directory, 'reloaded-existing-journal-output.png') });
+    await consoleUi.getByLabel('R session identity').screenshot({ path: path.join(directory, 'reloaded-exact-session-identity.png') });
+    check('Initial reload requires fresh exact-kernel inspection, restores the existing latest journal/table/figure through GET, and never starts or executes R.');
+    const editor = consoleUi.getByLabel('R console source');
+    const retainedDraft = '# Unexecuted local inspection draft\ncat(private_value + 100L)';
+    await editor.fill(retainedDraft);
+    const sourceCopyRequests = kernelRequests.length;
+    await output.getByRole('button', { name: 'Copy executed source to new R cell', exact: true }).click();
+    const retainedSource = (await database.query('SELECT source_code FROM private_r_executions WHERE kernel_id=$1 AND execution_order=2', [originalKernel.id])).rows[0].source_code;
+    assert(await editor.inputValue() === retainedSource, 'Source copy did not select the exact retained executed source.');
+    await consoleUi.getByRole('button', { name: 'Cell 1', exact: true }).click();
+    assert(await editor.inputValue() === retainedDraft, 'Copying retained source replaced the researcher\'s existing draft.');
+    assert(kernelRequests.length === sourceCopyRequests, 'Copying executed source sent a scientific request.');
+    check('Copying exact retained source creates a separate editable R cell, preserves the existing draft, and sends no request.');
+    await consoleUi.getByLabel('Existing R binding', { exact: true }).fill('private_value');
+    await consoleUi.getByLabel('Saved output name', { exact: true }).fill('Unsubmitted private value');
+    assert(await consoleUi.getByRole('button', { name: 'Save object', exact: true }).isEnabled(),
+      'The valid unsent output form was not usable before disconnect.');
+    const unavailableReads = kernelRequests.length;
+    await context.setOffline(true);
+    try {
+      await consoleUi.getByRole('button', { name: 'Refresh session status', exact: true }).click();
+      await consoleUi.getByText('Session inspection is unconfirmed. Previously confirmed evidence remains visible; inspect status before running or saving.', { exact: true }).waitFor();
+      assert(!await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).isEnabled(),
+        'An unavailable status inspection left R execution enabled.');
+      assert(!await consoleUi.getByRole('button', { name: 'Save object', exact: true }).isEnabled(),
+        'An unavailable status inspection left object serialization enabled.');
+      assert(await editor.inputValue() === retainedDraft, 'A temporary outage erased edited R source.');
+      await output.getByRole('cell', { name: 'a', exact: true }).waitFor();
+      await consoleUi.getByText('Session inspection is unconfirmed. Previously confirmed evidence remains visible; inspect status before running or saving.', { exact: true }).scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(directory, 'unavailable-session-retains-draft-output.png') });
+      await editor.screenshot({ path: path.join(directory, 'unavailable-retained-edited-source.png') });
+      await output.screenshot({ path: path.join(directory, 'unavailable-retained-command-output.png') });
+    } finally { await context.setOffline(false); }
+    await consoleUi.getByRole('button', { name: 'Refresh session status', exact: true }).click();
+    await waitFor(() => consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).isEnabled(),
+      'The same surviving session did not become usable after fresh online inspection.');
+    assert(await editor.inputValue() === retainedDraft, 'Reconnect inspection replaced edited R source.');
+    assertReadOnly(unavailableReads, 'Unavailable and recovered exact-session inspection');
+    const survived = (await database.query('SELECT runtime_generation,next_order FROM private_r_kernels WHERE id=$1', [originalKernel.id])).rows[0];
+    assert(survived.runtime_generation === originalKernel.runtime_generation && Number(survived.next_order) === 2,
+      'Outage recovery changed the generation or ran the unexecuted local draft.');
+    check('A genuine browser transport outage gates R and saves, retains prior output and edited cells, and recovers the same generation through explicit GET inspection.');
     await run('cat(private_value)', 3);
     assert((await output.getByLabel('R stdout').innerText()).includes('41'), 'Reload silently restarted the kernel.');
     check('Reload reconnects to the existing generation without rerunning earlier commands.');
-    const editor = consoleUi.getByLabel('R console source');
     await editor.fill('cat(private_value);\nstop("unselected source must not execute")');
     await editor.press('Control+Home'); await editor.press('Control+Shift+ArrowDown');
     await consoleUi.getByRole('button', { name: 'Run selected R', exact: true }).click();
@@ -282,9 +370,55 @@ async function main() {
     const freshRows = (await database.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 ORDER BY execution_order', [restarted.session.id])).rows;
     assert(freshRows.length === 2 && freshRows.every(row => row.kernel_generation === restarted.session.generation), 'Reload replayed old cells or changed the replacement generation.');
     check('Explicit restart during a long R command discards old globals, creates a linked fresh generation, retains the old journal for inspection, and reloads without replaying earlier cells.');
-    await consoleUi.getByRole('button', { name: 'Stop session', exact: true }).click();
-    await consoleUi.getByRole('button', { name: 'Stop and discard unsaved memory', exact: true }).click();
+    // These tiny commands use the genuine R bridge and durable source journal.
+    // Preserve the earlier ten-command acceptance assumptions in the previous
+    // generation and exercise pagination only in this disposable fresh kernel.
+    for (let order = 3; order <= 32; order += 1) {
+      await run('stopifnot(!exists("private_value")); cat("Journal pagination command ' + order + '")', order);
+    }
+    const paginatedRows = (await database.query('SELECT id,execution_order,kernel_generation,source_code FROM private_r_executions WHERE kernel_id=$1 ORDER BY execution_order', [restarted.session.id])).rows;
+    assert(paginatedRows.length === 32 && paginatedRows.every((row, index) => Number(row.execution_order) === index + 1
+      && row.kernel_generation === restarted.session.generation), 'The pagination fixture lost real command order or generation.');
+    const journalUi = consoleUi.getByLabel('R command journal');
+    await waitFor(async () => await journalUi.getByRole('button', { name: /^Command \d+ · completed$/ }).count() === 30,
+      'The latest private command journal was not bounded to 30 entries.');
+    assert(await journalUi.getByRole('button', { name: 'Command 1 · completed', exact: true }).count() === 0,
+      'Latest journal inspection silently loaded every retained command.');
+    const olderReads = kernelRequests.length;
+    await journalUi.getByRole('button', { name: 'Load older R commands', exact: true }).click();
+    await journalUi.getByRole('button', { name: 'Command 1 · completed', exact: true }).waitFor();
+    assert(await journalUi.getByRole('button', { name: /^Command \d+ · completed$/ }).count() === 32,
+      'Older journal pagination lost entries or created duplicates.');
+    await journalUi.getByRole('button', { name: 'Command 1 · completed', exact: true }).click();
+    await output.getByText('Command 1 · completed', { exact: true }).waitFor();
+    assert((await output.getByLabel('R stdout').innerText()).includes('Fresh restart has no discarded globals'),
+      'An older journal item did not retrieve its exact retained output.');
+    assertReadOnly(olderReads, 'Bounded older-journal page and exact first-command detail');
+    await journalUi.screenshot({ path: path.join(directory, 'older-private-command-page.png') });
+    await output.screenshot({ path: path.join(directory, 'older-exact-command-output.png') });
+    check('Thirty-two real R commands retain one generation and exact order; latest inspection loads thirty entries and explicit GET pagination opens the original command without replay.');
+    const expiryReads = kernelRequests.length;
+    // Move only this owned fixture's authoritative expiry into the past. The
+    // production GET then runs its real broker stop path and removes the actual
+    // isolated kernel; no receipt or kernel status is fabricated by the harness.
+    const expired = await database.query("UPDATE private_r_kernels SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1 AND runtime_generation=$2 AND status='ready' RETURNING id",
+      [restarted.session.id, restarted.session.generation]);
+    assert(expired.rowCount === 1, 'The exact disposable ready kernel could not be expired.');
+    await consoleUi.getByRole('button', { name: 'Refresh session status', exact: true }).click();
     await consoleUi.getByText('Session stopped · unsaved memory lost', { exact: true }).waitFor();
+    assert(!await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).isEnabled(),
+      'An authoritatively expired kernel still allowed R execution.');
+    await consoleUi.getByText('This session no longer has unsaved memory. Earlier journal source and saved versions remain available. Start a new session explicitly; earlier commands will not run automatically.', { exact: true }).waitFor();
+    await output.getByText('Command 1 · completed', { exact: true }).waitFor();
+    const endedKernel = (await database.query('SELECT id,runtime_generation,status,next_order FROM private_r_kernels WHERE id=$1', [restarted.session.id])).rows[0];
+    const endedCount = Number((await database.query('SELECT COUNT(*) AS count FROM private_r_executions WHERE kernel_id=$1', [restarted.session.id])).rows[0].count);
+    assert(endedKernel.status === 'stopped' && endedKernel.runtime_generation === restarted.session.generation
+      && Number(endedKernel.next_order) === 32 && endedCount === 32,
+      'Expiry inspection changed the exact generation, replayed retained source, or did not confirm stopped memory.');
+    assertReadOnly(expiryReads, 'Authoritative exact-kernel expiry and retained selected source/output');
+    await consoleUi.getByLabel('R session identity').screenshot({ path: path.join(directory, 'expired-exact-kernel-retained-evidence.png') });
+    await output.screenshot({ path: path.join(directory, 'expired-selected-command-evidence.png') });
+    check('Authoritative expiry inspection stops the genuine owned kernel, gates execution, preserves exact selected journal evidence, and requires explicit creation of another session.');
     await consoleUi.getByRole('button', { name: 'Start private session', exact: true }).click();
     await consoleUi.getByText('Session ready · unsaved memory available', { exact: true }).waitFor({ timeout: 125_000 });
     await run('cat(exists("private_value"))', 1);
@@ -318,7 +452,7 @@ cat("Loaded cells:", ncol(obj), "features:", nrow(obj))`, 1);
     const identity = consoleUi.getByLabel('R session identity');
     assert((await identity.innerText()).includes(selectedAnalysis.checkpointSha256)
       && (await identity.innerText()).includes(selectedAnalysis.tableSha256), 'The console identity omitted its exact selected input hashes.');
-    await consoleUi.screenshot({ path: path.join(directory, 'saved-analysis-r-inputs.png') });
+    await identity.screenshot({ path: path.join(directory, 'saved-analysis-r-inputs.png') });
     const savedKernel = (await database.query('SELECT * FROM private_r_kernels WHERE analysis_object_id=$1 ORDER BY created_at DESC LIMIT 1', [selectedAnalysis.analysisId])).rows[0];
     assert(savedKernel?.status === 'ready' && savedKernel.inputs_json.length === 2
       && savedKernel.inputs_json.some(input => input.role === 'checkpoint' && input.versionId === selectedAnalysis.checkpointId && input.checksumSha256 === selectedAnalysis.checkpointSha256)
@@ -475,7 +609,7 @@ stopifnot(inherits(restored_obj, "Seurat"), ncol(restored_obj)==6L, nrow(restore
 cat("Restored original cells:", ncol(restored_obj)); display_table(restored_table, name="Restored saved counts")`, 1);
     assert((await output.getByLabel('R stdout').innerText()).includes('Restored original cells: 6'), 'The original RDS version could not reopen after termination.');
     await output.getByRole('cell', { name: 'treated', exact: true }).waitFor();
-    await consoleUi.screenshot({ path: path.join(directory, 'published-object-table-reopened.png') });
+    await output.screenshot({ path: path.join(directory, 'published-object-table-reopened.png') });
     check('After kernel termination an independent session reopens the original genuine Seurat RDS and exact saved CSV via selected immutable versions and read_input.');
     await consoleUi.getByRole('button', { name: 'Stop session', exact: true }).click();
     await consoleUi.getByRole('button', { name: 'Stop and discard unsaved memory', exact: true }).click();
@@ -571,7 +705,9 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
       'Revoked membership left a saved private preview visible.');
     check('Membership revocation denies actual saved-byte APIs and clears previous private preview content from the project UI.');
     assert(errors.length === 0, 'The production browser raised an uncaught application error.');
-    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: true, checks, browserErrors: errors, publications: published.map(value => ({ publication: value.publication, reference: value.version.reference })) }, null, 2));
+    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: true, checks, browserErrors: errors,
+      recoveryReads, privateKernelRequestCount: kernelRequests.length,
+      publications: published.map(value => ({ publication: value.publication, reference: value.version.reference })) }, null, 2));
     console.log('Private R console acceptance passed; report: ' + directory);
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true }).catch(() => {});
