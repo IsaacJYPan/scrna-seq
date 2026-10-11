@@ -30,8 +30,39 @@ and a server with submission-receipt support. Open windows coordinate their
 saved identifiers before admitting work, so an unresolved submission in another
 window also blocks a new submission in that project.
 Earlier runs without receipts remain available in execution history. Private R
-session journal and editor recovery after a full app restart remain separate work;
-saved artifacts and ended-session memory are not interchangeable.
+commands use their own session journal; recovery of a command whose submission
+response was lost remains separate from these analysis-job receipts.
+
+## Reopen a private R session
+
+Opening **Advanced analysis → Private R console** inspects your workspace's
+existing session, latest 30 journal entries, and most recent command output.
+Reconnecting to the same selected server checks that session again using read-only
+requests. **Refresh session status** performs the same inspection. New commands
+and object saves require a fresh confirmation that the session is ready; a cached
+ready label alone does not enable execution.
+
+If a command or save acknowledgment was lost and its exact receipt is not known,
+a ready status cannot establish which submission completed. Further commands and
+saves remain blocked in the open console. Inspect the retained journal and saved
+outputs before explicitly stopping or restarting the session; confirmed memory
+discard clears that pending state. Recovery of these pending request identifiers
+after closing the app is not yet available.
+
+If inspection fails, the console retains the last confirmed output and edited
+cells while indicating that current memory availability is unknown. A confirmed
+stopped or expired session reports that unsaved memory is lost. Selected saved
+artifact versions and retained journal source remain available for explicit
+recovery; commands are never replayed automatically.
+
+Use **Load older R commands** to inspect earlier journal pages, up to 120 entries
+in the open console, and **Copy executed source to new R cell** to create an
+editable cell from the selected recorded command. Copying
+does not execute R or overwrite other cells. Draft edits survive a connection
+interruption within the open console; unexecuted drafts are not restored after
+closing the app. Switching accounts, installations, projects, or workspaces
+clears the previous private console contents. Losing project access clears them
+as well.
 
 ## Monitor work on the selected server
 

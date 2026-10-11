@@ -5,6 +5,23 @@ beforeEach(()=>vi.stubGlobal('fetch',vi.fn()));afterEach(()=>vi.unstubAllGlobals
 it('uses cookie authentication/CSRF and exact encoded session/command routes without scientific retries',async()=>{fetch.mockResolvedValue({ok:true,json:async()=>({id:'kernel'})});await api.startPrivateRKernel('project one',{requestId:'request',source:'n <- 3'});expect(fetch).toHaveBeenCalledWith('/api/private-r-kernels/project%20one',expect.objectContaining({method:'POST',credentials:'include',headers:{'X-Traceomics-Csrf':'1','Content-Type':'application/json'}}));await api.getPrivateRExecution('project','kernel 1','execution 1');expect(fetch.mock.lastCall[0]).toBe('/api/private-r-kernels/project/kernel%201/executions/execution%201');});
 it('marks network or malformed replies unconfirmed without exposing endpoint URLs or response HTML',async()=>{fetch.mockRejectedValueOnce(new Error('https://private-host/token'));await expect(api.executePrivateRKernel('project','kernel',{source:'n'})).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});expect(fetch).toHaveBeenCalledTimes(1);fetch.mockResolvedValueOnce({ok:true,json:async()=>{throw new SyntaxError('<html>secret');}});await expect(api.getPrivateRKernel('project','kernel')).rejects.toMatchObject({code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});});
 it('preserves bounded access errors and cancellation semantics',async()=>{fetch.mockResolvedValueOnce({ok:false,status:403,json:async()=>({error:'Private R access required.',code:'EXPERT_R_ACCESS_REQUIRED'})});await expect(api.listPrivateRKernels('project')).rejects.toMatchObject({status:403,code:'EXPERT_R_ACCESS_REQUIRED'});const aborted=new DOMException('Aborted','AbortError');fetch.mockRejectedValueOnce(aborted);await expect(api.getPrivateRKernel('project','kernel')).rejects.toBe(aborted);});
+it.each([401,403])('preserves non-JSON HTTP %s access loss without exposing response HTML',async status=>{
+  fetch.mockResolvedValueOnce({ok:false,status,json:async()=>{throw new SyntaxError('<html>private login page</html>');}});
+  const failure=await api.getPrivateRKernel('project','kernel').catch(error=>error);
+  expect(failure).toMatchObject({status,code:'PRIVATE_KERNEL_ACCESS_REQUIRED'});
+  expect(failure.message).not.toMatch(/html|private login page/);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+it('reads authenticated installation identity without submitting work',async()=>{
+  const identity={schema:'traceomics.installation.v1',installationId:'svc_'+'a'.repeat(32),userId:7};
+  fetch.mockResolvedValueOnce({ok:true,json:async()=>identity});
+  await expect(api.getPrivateRIdentity()).resolves.toEqual(identity);
+  expect(fetch).toHaveBeenLastCalledWith('/api/auth/installation',expect.objectContaining({method:'GET',credentials:'include'}));
+});
+it('retains HTTP error status when an upstream error body is malformed',async()=>{
+  fetch.mockResolvedValueOnce({ok:false,status:503,json:async()=>{throw new SyntaxError('upstream HTML');}});
+  await expect(api.getPrivateRKernel('project','kernel')).rejects.toMatchObject({status:503,code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});
+});
 it('publishes only an explicit binding or exact figure reference through cookie/CSRF authenticated bounded routes',async()=>{
   fetch.mockResolvedValue({ok:true,json:async()=>({publication:{id:'pub_one',status:'completed'},version:{versionId:'av_one'}})});
   const controller=new AbortController();const input={requestId:'same-request',type:'object',binding:'cells with spaces',name:'Control cells',previousVersionId:'av_prior'};

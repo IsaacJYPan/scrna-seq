@@ -7,11 +7,15 @@ async function request(path, {method='GET',body,signal}={}) {
   let response;
   try {response=await fetch(apiUrl(path),{method,credentials:'include',signal,headers:{'X-Traceomics-Csrf':'1',...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});}
   catch(error){if(error.name==='AbortError'||isExecutionTargetError(error))throw error;throw Object.assign(new Error('The private R connection ended before completion was confirmed. Refresh the session status before running another command.'),{code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});}
-  let value;try{value=await response.json();}catch{throw Object.assign(new Error('The private R response could not be read. Refresh the session status before continuing.'),{code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});}
+  let value;try{value=await response.json();}catch{
+    if(!response.ok)throw Object.assign(new Error(response.status===401?'Sign in again to inspect your private R session.':response.status===403?'Private R access is no longer available.':'The private R request could not be confirmed. Refresh session status before continuing.'),{status:response.status,code:[401,403].includes(response.status)?'PRIVATE_KERNEL_ACCESS_REQUIRED':'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});
+    throw Object.assign(new Error('The private R response could not be read. Refresh the session status before continuing.'),{code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'});
+  }
   if(!response.ok)throw Object.assign(new Error(typeof value?.error==='string'&&value.error.length<=500?value.error:'Private R sessions are unavailable.'),{status:response.status,code:value?.code});
   return value;
   }, { mutation: method !== 'GET' });
 }
+export const getPrivateRIdentity=signal=>request('/api/auth/installation',{signal});
 export const listPrivateRKernels=(projectId,{workspaceId,limit=10,signal}={})=>request(`${base(projectId)}?${new URLSearchParams({limit:String(limit),...(workspaceId?{workspaceId}:{})})}`,{signal});
 export const startPrivateRKernel=(projectId,input,signal)=>request(base(projectId),{method:'POST',body:input,signal});
 export const getPrivateRKernel=(projectId,kernelId,signal)=>request(`${base(projectId)}/${encodeURIComponent(kernelId)}`,{signal});
