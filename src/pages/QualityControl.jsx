@@ -1,22 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Activity, SlidersHorizontal, AlertTriangle, BarChart3, Info, Scissors, Check, FileText, ChevronRight, Settings } from 'lucide-react';
-import Plot from '../components/Plot';
+import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import { publicErrorMessage } from '../publicError';
 import PageHeader from '../components/PageHeader';
 
-// Shared dark-themed hover template style
-const hoverStyle = {
-  bgcolor: '#1e293b',
-  bordercolor: '#475569',
-  font: { color: '#e2e8f0', size: 12, family: 'Inter, system-ui' }
+const QC_METRICS = {
+  'percent.mt': { label: 'Mitochondrial RNA', format: '.2f', suffix: '%' },
+  nFeature_RNA: { label: 'Genes detected', format: ',.0f' },
+  nCount_RNA: { label: 'RNA counts', format: ',.0f' },
 };
+
+function qcMetricLabel(metric) {
+  return QC_METRICS[metric]?.label || metric;
+}
+
+function qcMetricHover(metric, axis) {
+  const { label, format, suffix = '' } = QC_METRICS[metric] || { label: metric, format: '.2f' };
+  return `${label}: %{${axis}:${format}}${suffix}`;
+}
 
 const PLOT_TABS = [
   { id: 'mt', label: 'Mitochondrial %' },
-  { id: 'features', label: 'nFeature_RNA' },
-  { id: 'counts', label: 'nCount_RNA' },
+  { id: 'features', label: 'Detected genes' },
+  { id: 'counts', label: 'RNA counts' },
   { id: 'scatter', label: 'Feature Scatter' },
   { id: 'stats', label: 'Distribution Summary' },
 ];
@@ -220,32 +228,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
     font: { color: theme === 'light' ? '#475569' : '#94a3b8', size: 11, family: 'Inter, system-ui' },
     margin: { l: 60, r: 30, t: 20, b: 55 },
     showlegend: false,
-    hoverlabel: hoverStyle,
+    hoverlabel: getPlotHoverStyle(theme),
     hovermode: 'closest',
     hoverdistance: 30,
     spikedistance: 30,
     uirevision: activePlot // Preserves user zoom across state changes!
   };
 
-  const seuratViolin = (id, yvals, name, color, hover, jitteredX) => {
-    const ymin = Math.min(...yvals);
-    const ymax = Math.max(...yvals);
-    const gridX = [];
-    const gridY = [];
-
-    // Inject a 25 x 800 dense invisible scattergl bounding grid.
-    // This perfectly hacks Plotly into treating the entire plot 
-    // container as a mathematically un-jittered Cartesian hover surface.
-    for (let i = 0; i < 25; i++) {
-      const cx = -0.5 + (i * 1.0 / 24);
-      for (let j = 0; j < 800; j++) {
-        gridX.push(cx);
-        gridY.push(ymin + (ymax - ymin) * (j / 799));
-      }
-    }
-
-    // JitteredX is precomputed and passed in.
-
+  const seuratViolin = (id, yvals, color, hover, jitteredX) => {
     return [
       {
         type: 'violin',
@@ -266,26 +256,10 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
         y: yvals,
         mode: 'markers',
         marker: { size: 2, opacity: pointOpacity[id], color: theme === 'light' ? '#000000' : '#ffffff' },
-        hoverinfo: 'skip',
-        // In SVG mode, use the real cell marks for hover rather than mounting
-        // the 20,000-point invisible WebGL hover grid below.
-        svgFallback: {
-          hoverinfo: 'all',
-          hovertemplate: hover,
-        },
-        showlegend: false
-      }] : []),
-      {
-        type: 'scattergl',
-        x: gridX,
-        y: gridY,
-        mode: 'markers',
-        marker: { size: 10, opacity: 0 },
         hovertemplate: hover,
-        hoverlabel: { bgcolor: '#1e293b', font: { color: color, size: 12 } },
-        svgFallback: { omit: true },
+        hoverlabel: getPlotHoverStyle(theme),
         showlegend: false
-      }
+      }] : [])
     ];
   };
 
@@ -293,11 +267,10 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
   const plotConfigs = distributions ? {
     mt: {
-      data: [...seuratViolin('mt', mtValues, 'percent.mt', '#22c55e', 'percent.mt: <b>%{y:.2f}%</b><extra></extra>', mtJitter)],
+      data: [...seuratViolin('mt', mtValues, '#22c55e', `<b>${qcMetricHover('percent.mt', 'y')}</b><extra></extra>`, mtJitter)],
       layout: {
         ...baseLayout,
         hovermode: 'closest',
-        hoverdistance: -1,
         xaxis: { range: [-0.6, 0.6], fixedrange: true, showticklabels: false },
         yaxis: { title: '% MT', autorange: true, zeroline: false },
         shapes: [{ type: 'line', x0: -0.5, x1: 0.5, y0: mtCutoff, y1: mtCutoff, line: { color: '#f43f5e', dash: 'dash', width: 2 } }]
@@ -305,43 +278,41 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       title: 'Mitochondrial Content', color: '#22c55e', hint: 'Cells extending past the upper cutoff (red bounds) are removed.'
     },
     features: {
-      data: [...seuratViolin('features', featureValues, 'nFeature_RNA', '#a855f7', 'nFeature_RNA: <b>%{y:,.0f}</b><extra></extra>', featureJitter)],
+      data: [...seuratViolin('features', featureValues, '#a855f7', `<b>${qcMetricHover('nFeature_RNA', 'y')}</b><extra></extra>`, featureJitter)],
       layout: {
         ...baseLayout,
         hovermode: 'closest',
-        hoverdistance: -1,
         xaxis: { range: [-0.6, 0.6], fixedrange: true, showticklabels: false },
-        yaxis: { title: 'nFeature_RNA', autorange: true, zeroline: false },
+        yaxis: { title: 'Genes detected per cell', autorange: true, zeroline: false },
         shapes: [
           { type: 'line', x0: -0.5, x1: 0.5, y0: minFeatures, y1: minFeatures, line: { color: '#f43f5e', dash: 'dash', width: 2 } },
           { type: 'line', x0: -0.5, x1: 0.5, y0: maxFeatures, y1: maxFeatures, line: { color: '#f43f5e', dash: 'dash', width: 2 } }
         ]
       },
-      title: 'Genes Detected (nFeature_RNA)', color: '#a855f7', hint: 'Cells falling outside the min/max bounds are removed.'
+      title: 'Genes detected per cell', color: '#a855f7', hint: 'Cells falling outside the min/max bounds are removed.'
     },
     counts: {
-      data: [...seuratViolin('counts', countValues, 'nCount_RNA', '#3b82f6', 'nCount_RNA: <b>%{y:,.0f}</b><extra></extra>', countJitter)],
+      data: [...seuratViolin('counts', countValues, '#3b82f6', `<b>${qcMetricHover('nCount_RNA', 'y')}</b><extra></extra>`, countJitter)],
       layout: {
         ...baseLayout,
         hovermode: 'closest',
-        hoverdistance: -1,
         xaxis: { range: [-0.6, 0.6], fixedrange: true, showticklabels: false },
-        yaxis: { title: 'nCount_RNA', autorange: true, zeroline: false },
+        yaxis: { title: 'RNA counts per cell', autorange: true, zeroline: false },
         shapes: [{ type: 'line', x0: -0.5, x1: 0.5, y0: minCounts, y1: minCounts, line: { color: '#f43f5e', dash: 'dash', width: 2 } }]
       },
-      title: 'Library Size (nCount_RNA)', color: '#3b82f6', hint: 'Low count cells (left tail) are likely empty droplets or debris.'
+      title: 'RNA counts per cell', color: '#3b82f6', hint: 'Low count cells (left tail) are likely empty droplets or debris.'
     },
     scatter: {
       data: [{
         type: 'scattergl', mode: 'markers',
         x: getValues(scatterX), y: getValues(scatterY),
         marker: { size: 3, color: '#f43f5e', opacity: pointOpacity['scatter'] },
-        hovertemplate: `${scatterX}: %{x}<br>${scatterY}: %{y}<extra></extra>`
+        hovertemplate: `${qcMetricHover(scatterX, 'x')}<br>${qcMetricHover(scatterY, 'y')}<extra></extra>`
       }],
       layout: {
         ...baseLayout,
-        xaxis: { title: scatterX },
-        yaxis: { title: scatterY },
+        xaxis: { title: qcMetricLabel(scatterX) },
+        yaxis: { title: qcMetricLabel(scatterY) },
       },
       title: 'Feature Relationships', color: '#f43f5e', hint: 'Scatter plots reveal correlations between sequencing depth and cell quality.'
     }
@@ -387,92 +358,49 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
       )}
 
       {/* Summary Statistics Card */}
-      {(result || pipelineState?.qcSummary || pipelineState?.qc) && (
-        <div className={`card p-6 mb-6 border-t-4 ${result ? 'border-t-success' : 'border-t-primary/50'}`}>
-          <div className="flex flex-col gap-3 mb-5 border-b border-border pb-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="font-semibold text-lg text-text">
-              {result ? 'QC Filtering Summary' : 'QC Metrics Applied'}
-            </h3>
-            {(pipelineState?.isSubset || datasetInfo?.parentObjId) && !result && (
-              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-bold rounded border border-primary/20 uppercase tracking-wider">
-                <Scissors size={10} /> Subset Inherited
+      {(result || pipelineState?.qcSummary || pipelineState?.qc) && (() => {
+        const summary = result?.result || pipelineState?.qcSummary;
+        const count = summary?.post_filter_cells ?? distributions?.n_cells;
+        const removed = [
+          ['mitochondrial', summary?.removed_mt],
+          ['gene range', summary?.removed_features],
+          ['RNA counts', summary?.removed_counts],
+        ].filter(([, value]) => Number.isFinite(Number(value)) && Number(value) > 0);
+        const medians = [
+          ['mitochondrial RNA', summary?.median_mt != null ? `${summary.median_mt}%` : stats?.mt[0].value],
+          ['genes detected', stats?.features[0].value],
+          ['RNA counts', stats?.counts[0].value],
+        ].filter(([, value]) => value != null);
+        return (
+          <div className={`card px-4 py-3 mb-4 border-t-4 ${result ? 'border-t-success' : 'border-t-primary/50'}`}>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <h3 className="text-sm font-semibold text-text">{result ? 'QC Filtering Summary' : 'QC Metrics Applied'}</h3>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs text-textMuted">{summary?.post_filter_cells != null ? 'Post-filter cells' : 'Total cells'}</span>
+                <strong className="text-lg font-black text-success">{count?.toLocaleString() || '—'}</strong>
+              </div>
+              {(pipelineState?.isSubset || datasetInfo?.parentObjId) && !result && (
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-bold rounded border border-primary/20 uppercase tracking-wider">
+                  <Scissors size={10} /> Subset inherited
+                </span>
+              )}
+              {Number.isFinite(distributions?.n_features) && <span className="text-xs text-textMuted">{distributions.n_features.toLocaleString()} genes measured</span>}
+            </div>
+            {(medians.length > 0 || removed.length > 0) && (
+              <div className="mt-2 pt-2 border-t border-border/70 flex flex-wrap gap-x-4 gap-y-1 text-xs text-textMuted">
+                {medians.length > 0 && <span>Medians: {medians.map(([label, value]) => `${label} ${value}`).join(' · ')}</span>}
+                {removed.length > 0 && <span className="text-danger">Removed {removed.map(([label, value]) => `${Number(value).toLocaleString()} ${label}`).join(' · ')}</span>}
               </div>
             )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3 font-mono text-sm sm:gap-4 xl:grid-cols-5">
-            {(result?.result || pipelineState?.qcSummary) ? (
-              <>
-                {/* Detailed stats from a fresh run or persisted summary */}
-                {(() => {
-                  const s = result?.result || pipelineState.qcSummary;
-                  return (
-                    <>
-                      <div className="p-4 bg-black/20 rounded text-center">
-                        <div className="text-[10px] text-textMuted uppercase mb-1 font-bold">Post-Filter Cells</div>
-                        <div className="text-success font-black text-xl">{s.post_filter_cells?.toLocaleString() || '—'}</div>
-                      </div>
-                      <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                        <div className="text-[10px] text-textMuted uppercase mb-1">Removed (MT)</div>
-                        <div className="text-danger font-bold">{s.removed_mt ?? '—'}</div>
-                      </div>
-                      <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                        <div className="text-[10px] text-textMuted uppercase mb-1">Removed (Features)</div>
-                        <div className="text-danger font-bold">{s.removed_features ?? '—'}</div>
-                      </div>
-                      <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                        <div className="text-[10px] text-textMuted uppercase mb-1">Removed (Counts)</div>
-                        <div className="text-danger font-bold">{s.removed_counts ?? '—'}</div>
-                      </div>
-                      <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                        <div className="text-[10px] text-textMuted uppercase mb-1 font-bold">Median MT %</div>
-                        <div className="text-text font-black">{s.median_mt ?? '—'}%</div>
-                      </div>
-                    </>
-                  );
-                })()}
-              </>
-            ) : (
-              <>
-                {/* Fallback: Current Median Stats if no specific QC run was recorded for this object */}
-                <div className="p-4 bg-black/20 rounded text-center border border-primary/20">
-                  <div className="text-[10px] text-textMuted uppercase mb-1 font-bold">Total Cells</div>
-                  <div className="text-primary font-black text-xl">{distributions?.n_cells?.toLocaleString() || '—'}</div>
-                </div>
-                <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                  <div className="text-[10px] text-textMuted uppercase mb-1 font-bold">Median MT</div>
-                  <div className="text-text font-bold">{stats?.mt[0].value || '—'}</div>
-                </div>
-                <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                  <div className="text-[10px] text-textMuted uppercase mb-1 font-bold">Median Features</div>
-                  <div className="text-text font-bold">{stats?.features[0].value || '—'}</div>
-                </div>
-                <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                  <div className="text-[10px] text-textMuted uppercase mb-1 font-bold">Median Counts</div>
-                  <div className="text-text font-bold">{stats?.counts[0].value || '—'}</div>
-                </div>
-                <div className="p-4 bg-black/20 rounded text-center border border-border/5">
-                  <div className="text-[10px] text-textMuted uppercase mb-1 font-bold font-bold">Genes/Features</div>
-                  <div className="text-text font-bold" title={Number.isFinite(distributions?.n_features) ? 'Features measured in the current object.' : 'Feature count was not recorded in this saved summary.'}>
-                    {Number.isFinite(distributions?.n_features) ? distributions.n_features.toLocaleString() : 'Unavailable'}
-                  </div>
-                </div>
-              </>
+            {(summary?.message || (!result && pipelineState?.qc)) && (
+              <p className="text-xs text-textMuted mt-2 flex items-center gap-2">
+                <Check size={14} className="text-success" />
+                <span>{summary?.message || <>Thresholds applied. Adjust values and click <strong>Re-run QC Filters</strong> to re-filter from raw baseline.</>}</span>
+              </p>
             )}
           </div>
-          {(result?.result || pipelineState?.qcSummary) && (
-            <p className="text-xs text-textMuted mt-4 italic opacity-80 font-medium tracking-tight">
-              ✓ {(result?.result || pipelineState.qcSummary).message}
-            </p>
-          )}
-          {!result && pipelineState?.qc && (
-            <p className="text-[11px] text-textMuted mt-4 flex items-center gap-2">
-              <Check size={14} className="text-success" />
-              <span>Thresholds applied. Adjust values and click <strong>Re-run QC Filters</strong> to re-filter from raw baseline.</span>
-            </p>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* Manual Threshold Controls */}
       <fieldset disabled={!canMutate} className="card p-6 mb-8 border-l-4 border-l-primary relative overflow-hidden disabled:opacity-60">
@@ -502,21 +430,21 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
             <input id="qc-minf" type="number" min="0" step="1" value={minFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">nFeature_RNA lower bound</p>
+            <p className="text-[10px] text-slate-400 mt-1">Cells with fewer detected genes are removed</p>
           </div>
           <div>
             <label htmlFor="qc-maxf" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Max Features</label>
             <input id="qc-maxf" type="number" min="1" step="1" value={maxFeatures} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('maxFeatures', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">nFeature_RNA upper bound</p>
+            <p className="text-[10px] text-slate-400 mt-1">Cells with more detected genes are removed</p>
           </div>
           <div>
             <label htmlFor="qc-minc" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Min Counts</label>
             <input id="qc-minc" type="number" min="0" step="1" value={minCounts} aria-invalid={Boolean(validationError)}
               onChange={e => setParam('minCounts', e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary transition-colors" />
-            <p className="text-[10px] text-slate-400 mt-1">nCount_RNA lower bound</p>
+            <p className="text-[10px] text-slate-400 mt-1">Cells with fewer RNA counts are removed</p>
           </div>
         </div>
         {validationError && <p className="mt-4 text-sm text-danger" role="alert">{validationError}</p>}
@@ -605,7 +533,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
                   {/* Mitochondrial Block */}
                   <div className="col-span-1 p-4 bg-black/20 rounded-xl border border-border">
-                    <h4 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">percent.mt</h4>
+                    <h4 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">Mitochondrial RNA</h4>
                     <div className="space-y-3">
                       {stats.mt.map((s, i) => (
                         <div key={i} className="flex justify-between items-center bottom-border pb-1 border-border/30">
@@ -618,7 +546,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
                   {/* Features Block */}
                   <div className="col-span-1 p-4 bg-black/20 rounded-xl border border-border">
-                    <h4 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">nFeature_RNA</h4>
+                    <h4 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">Genes detected</h4>
                     <div className="space-y-3">
                       {stats.features.map((s, i) => (
                         <div key={i} className="flex justify-between items-center bottom-border pb-1 border-border/30">
@@ -631,7 +559,7 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
                   {/* Counts Block */}
                   <div className="col-span-1 p-4 bg-black/20 rounded-xl border border-border">
-                    <h4 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">nCount_RNA</h4>
+                    <h4 className="text-xs font-bold text-slate-400 mb-3 uppercase tracking-wider">RNA counts</h4>
                     <div className="space-y-3">
                       {stats.counts.map((s, i) => (
                         <div key={i} className="flex justify-between items-center bottom-border pb-1 border-border/30">
@@ -696,15 +624,15 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                       <div className="grid grid-cols-[auto_minmax(0,1fr)] sm:flex items-center gap-2 sm:gap-3 text-xs text-textMuted font-medium">
                         <span>X Axis:</span>
                         <select aria-label="Scatter X axis" className="bg-surface border border-border rounded text-text p-1 px-2 focus:ring-1 focus:ring-primary focus:outline-none" value={scatterX} onChange={e => setScatterX(e.target.value)}>
-                          <option value="nCount_RNA">nCount_RNA</option>
-                          <option value="nFeature_RNA">nFeature_RNA</option>
-                          <option value="percent.mt">percent.mt</option>
+                          <option value="nCount_RNA">RNA counts</option>
+                          <option value="nFeature_RNA">Detected genes</option>
+                          <option value="percent.mt">Mitochondrial %</option>
                         </select>
                         <span>Y Axis:</span>
                         <select aria-label="Scatter Y axis" className="bg-surface border border-border rounded text-text p-1 px-2 focus:ring-1 focus:ring-primary focus:outline-none" value={scatterY} onChange={e => setScatterY(e.target.value)}>
-                          <option value="nCount_RNA">nCount_RNA</option>
-                          <option value="nFeature_RNA">nFeature_RNA</option>
-                          <option value="percent.mt">percent.mt</option>
+                          <option value="nCount_RNA">RNA counts</option>
+                          <option value="nFeature_RNA">Detected genes</option>
+                          <option value="percent.mt">Mitochondrial %</option>
                         </select>
                       </div>
                     )}
@@ -730,16 +658,14 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
                     <Info size={16} className="text-primary" />
                     Related Statistics
                   </h3>
-                  {stats[activePlot]?.map((s, i) => (
-                    <div key={i} className="p-3 bg-black/20 rounded-xl border border-border">
-                      <div className="text-[10px] text-textMuted uppercase font-bold tracking-wider mb-1">{s.label}</div>
-                      <div className="text-base font-bold text-white font-mono">{s.value}</div>
-                    </div>
-                  ))}
-                  <div className="p-3 bg-primary/10 rounded-xl border border-primary/20 mt-2">
-                    <div className="text-[10px] text-blue-400 uppercase font-bold tracking-wider mb-1">Total Dataset Size</div>
-                    <div className="text-base font-bold text-blue-400 font-mono">{stats.global[0].value}</div>
-                  </div>
+                  <dl className="divide-y divide-border/70 text-xs">
+                    {stats[activePlot]?.map((s, i) => (
+                      <div key={i} className="flex items-center justify-between gap-3 py-2.5">
+                        <dt className="text-textMuted">{s.label}</dt>
+                        <dd className="font-semibold text-text font-mono">{s.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
                 </div>
               )}
             </div>

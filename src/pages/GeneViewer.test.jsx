@@ -2,7 +2,9 @@ import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 
-vi.mock('../components/Plot', () => ({ default: () => <div data-testid="plot-stub" /> }));
+const { plotSpy } = vi.hoisted(() => ({ plotSpy: vi.fn() }));
+vi.mock('../components/Plot', () => ({ default: props => { plotSpy(props); return <div data-testid="plot-stub" />; },
+  getPlotHoverStyle: theme => ({ theme }) }));
 vi.mock('../components/FigureSavePanel', () => ({ default: () => null }));
 import GeneViewer from './GeneViewer';
 
@@ -42,4 +44,20 @@ it('can collapse and reopen marker browsing without clearing the search', () => 
   expect(screen.getByRole('button', { name: 'Hide categories' })).toHaveAttribute('aria-expanded', 'true');
   fireEvent.click(screen.getByRole('button', { name: 'Hide categories' }));
   expect(search).toHaveValue('LYZ');
+});
+
+it('uses concise expression tooltips for violin and UMAP feature views', async () => {
+  const callApi = vi.fn(async () => ({
+    gene: 'CD3E', expression: [1.25, 2], clusters: ['0', '1'],
+    u1: [0.2, 0.4], u2: [0.5, 0.7],
+  }));
+  render(<GeneViewer datasetInfo={{ id: 'ao_1' }} pipelineState={{ umap: true }} callApi={callApi} theme="dark" />);
+  fireEvent.click(screen.getByRole('button', { name: 'CD3E' }));
+  await screen.findByRole('button', { name: /FeaturePlot/i });
+
+  expect(plotSpy.mock.calls.at(-1)[0].data[0].hovertemplate).toBe('<b>Cluster 0</b><br>Expression: %{y:.2f}<extra></extra>');
+  expect(plotSpy.mock.calls.at(-1)[0].layout.hoverlabel).toEqual({ theme: 'dark' });
+
+  fireEvent.click(screen.getByRole('button', { name: /FeaturePlot/i }));
+  expect(plotSpy.mock.calls.at(-1)[0].data[0].hovertemplate).toBe('<b>CD3E</b><br>Expression: %{marker.color:.2f}<extra></extra>');
 });

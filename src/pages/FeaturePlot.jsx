@@ -1,7 +1,7 @@
 import { usePlotGeometry } from '../hooks/usePlotGeometry';
 import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect } from 'react';
-import Plot from '../components/Plot';
+import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { AlertTriangle, Palette, Sun, Moon, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 import { publicErrorMessage } from '../publicError';
@@ -25,8 +25,6 @@ const LIGHT_CHART_PALETTE = {
   mutedText: '#475569',
   grid: '#e2e8f0',
   line: '#cbd5e1',
-  hoverBackground: '#ffffff',
-  hoverBorder: '#cbd5e1',
 };
 const DARK_CHART_PALETTE = {
   background: '#0e1626',
@@ -34,8 +32,6 @@ const DARK_CHART_PALETTE = {
   mutedText: '#9fb0c9',
   grid: '#29364b',
   line: '#34445d',
-  hoverBackground: '#182236',
-  hoverBorder: '#34445d',
 };
 
 export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, deploymentPolicy, onNavigateToUmap, theme = 'light' }) {
@@ -138,7 +134,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       },
       opacity: 0.9,
     },
-    hovertemplate: `<b>${gene}</b>: %{marker.color:.3f}<extra></extra>`,
+    hovertemplate: `<b>${gene}</b><br>Expression: %{marker.color:.2f}<extra></extra>`,
   }] : [];
 
   const layout = {
@@ -150,11 +146,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       size: 12,
       family: 'Inter, system-ui',
     },
-    hoverlabel: {
-      bgcolor: palette.hoverBackground,
-      bordercolor: palette.hoverBorder,
-      font: { color: palette.text, family: 'Inter, system-ui' },
-    },
+    hoverlabel: getPlotHoverStyle(lightMode ? 'light' : 'dark'),
     margin: { l: 44, r: 12, t: 24, b: 120 },
     xaxis: {
       title: { text: 'UMAP 1', font: { size: 12, color: palette.text } },

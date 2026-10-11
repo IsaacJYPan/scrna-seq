@@ -2,7 +2,8 @@ import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 const { plotSpy, saveSpy } = vi.hoisted(() => ({ plotSpy: vi.fn(), saveSpy: vi.fn() }));
-vi.mock('../components/Plot', () => ({ default: props => { plotSpy(props); return <div data-testid="dot-result" />; } }));
+vi.mock('../components/Plot', () => ({ default: props => { plotSpy(props); return <div data-testid="dot-result" />; },
+  getPlotHoverStyle: theme => ({ theme }) }));
 vi.mock('../components/FigureSavePanel', () => ({ default: props => { saveSpy(props); return null; } }));
 import DotPlot from './DotPlot';
 it('handles a single-gene response and exports the plotted data even when the pending selection changes', async () => {
@@ -13,7 +14,12 @@ it('handles a single-gene response and exports the plotted data even when the pe
   fireEvent.click(screen.getByRole('button', { name: 'Add', exact: true }));
   fireEvent.click(screen.getByRole('button', { name: 'Plot', exact: true }));
   await screen.findByTestId('dot-result');
-  expect(plotSpy.mock.calls.at(-1)[0].data[0]).toEqual(expect.objectContaining({ x: ['0', '1'], y: ['CD3E', 'CD3E'], marker: expect.objectContaining({ color: [1, 2], size: [14, 28] }) }));
+  expect(plotSpy.mock.calls.at(-1)[0].data[0]).toEqual(expect.objectContaining({
+    x: ['0', '1'], y: ['CD3E', 'CD3E'], customdata: [50, 100],
+    hovertemplate: '<b>%{y}</b><br>Cluster: %{x}<br>Average expression: %{marker.color:.2f}<br>Cells expressing: %{customdata:.1f}%<extra></extra>',
+    marker: expect.objectContaining({ color: [1, 2], size: [14, 28] }),
+  }));
+  expect(plotSpy.mock.calls.at(-1)[0].layout.hoverlabel).toEqual({ theme: 'light' });
   fireEvent.change(input, { target: { value: 'MS4A1' } });
   fireEvent.click(screen.getByRole('button', { name: 'Add', exact: true }));
   expect(screen.getByRole('status')).toHaveTextContent('last plotted gene set');

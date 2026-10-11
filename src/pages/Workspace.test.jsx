@@ -65,6 +65,55 @@ describe('Workspace backend-backed project/object UI', () => {
     vi.restoreAllMocks();
   });
 
+  const workspaceWithAnalysis = {
+    ...baseWorkspace,
+    projects: [{ id: 'proj_1', name: 'PBMC Project', role: 'owner' }],
+    selectedProjectId: 'proj_1',
+    objects: [{ id: 'local_1', projectId: 'proj_1', name: 'PBMC 3k', cells: 2700, features: 13714, timestamp: '2026-01-01', liveState: 'attached' }],
+    selectedObjectIds: ['local_1'],
+  };
+
+  it('keeps analysis actions open when the pointer leaves the row and closes with Escape', () => {
+    renderWorkspace({ currentWs: workspaceWithAnalysis });
+    const trigger = screen.getByRole('button', { name: 'Object options' });
+    fireEvent.click(trigger);
+    const inspect = screen.getByRole('button', { name: 'Inspect Data' });
+    expect(inspect.closest('div[aria-labelledby]')?.parentElement).toBe(document.body);
+    fireEvent.mouseLeave(screen.getByRole('group', { name: /Saved analysis PBMC 3k/ }));
+    expect(inspect).toBeVisible();
+    inspect.focus();
+    fireEvent.keyDown(inspect, { key: 'Escape' });
+    expect(inspect).not.toBeVisible();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('cancels a pending delete when actions are dismissed and closes after inspecting', () => {
+    const { props } = renderWorkspace({ currentWs: workspaceWithAnalysis });
+    const trigger = screen.getByRole('button', { name: 'Object options' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Object' }));
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeVisible();
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(trigger);
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect Data' }));
+    expect(props.setActiveTab).toHaveBeenCalledWith('inspect');
+    expect(screen.queryByRole('button', { name: 'Inspect Data' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('moves focus to the saved-analysis heading after deleting the final analysis', () => {
+    const view = renderWorkspace({ currentWs: workspaceWithAnalysis });
+    fireEvent.click(screen.getByRole('button', { name: 'Object options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Object' }));
+    const confirm = screen.getByRole('button', { name: 'Confirm' });
+    confirm.focus(); fireEvent.click(confirm);
+    const update = view.props.updateActiveWorkspace.mock.calls.at(-1)[0];
+    expect(update.objects).toEqual([]);
+    view.rerender(<Workspace {...view.props} currentWs={{ ...workspaceWithAnalysis, ...update }} />);
+    expect(screen.getByRole('heading', { name: 'Saved analyses 0' })).toHaveFocus();
+  });
+
   it('does not show a fake Default Project when no projects exist', () => {
     renderWorkspace();
 
@@ -121,7 +170,7 @@ describe('Workspace backend-backed project/object UI', () => {
     expect(screen.getByText(/2,700 cells/i)).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Current analysis' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Saved analyses 1' })).toBeInTheDocument();
-    expect(screen.getAllByText(/Open a saved version/i).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Reload PBMC demo' })).toBeEnabled();
     expect(screen.queryByText(/No Objects in Project/i)).not.toBeInTheDocument();
     expect(container.textContent).not.toMatch(/ao_abc123|pbmc3k_demo|DB-backed|Live R/i);
   });
@@ -298,6 +347,28 @@ describe('Workspace backend-backed project/object UI', () => {
       expect.objectContaining({ id: 'ao_demo123' }),
       expect.objectContaining({ cells: 2700, features: 13714 })
     );
+  });
+
+  it('routes curated PBMC guests to saved checkpoint restore without calling the raw loader', () => {
+    const { props } = renderWorkspace({
+      currentWs: {
+        ...baseWorkspace,
+        projects: [{ id: 'proj_1', name: 'Curated demo', role: 'owner', isBackendProject: true }],
+        selectedProjectId: 'proj_1',
+        objects: [{ id: 'ao_curated', projectId: 'proj_1', ownerUserId: 7,
+          name: 'PBMC3k tutorial', source: 'pbmc3k_demo', liveState: 'unknown',
+          isBackendAnalysisObject: true, metadata: { sourceType: 'pbmc3k_demo', curatedDemo: true } }],
+        selectedObjectIds: ['ao_curated'],
+      },
+      userId: 7,
+      deploymentPolicy: { demoMode: true },
+    });
+    expect(screen.queryByRole('button', { name: /Reload PBMC demo/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/restore this saved analysis/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Open Runs & Results', exact: true })[0]);
+    expect(props.setActiveTab).toHaveBeenCalledWith('history');
+    expect(window.electronAPI.apiRequest).not.toHaveBeenCalled();
+    expect(props.onCreateAnalysisObjectForLoad).not.toHaveBeenCalled();
   });
 
   it('routes production imports to the durable Pipeline Manager and hides blocked local loaders', () => {

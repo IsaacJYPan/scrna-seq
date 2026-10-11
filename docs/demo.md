@@ -1,6 +1,18 @@
 # Deploy a student demo
 
-The public demo runs a small synthetic tutorial with expiring guest accounts.
+The Azure PBMC3k demo opens directly into a guided Seurat analysis with an isolated,
+expiring guest session. Visitors do not register or log in. The Azure deployment
+uses the original counts from a verified public 10x PBMC3k checkpoint. Visitors
+start with QC distributions for 2,700 input cells, choose quality thresholds,
+run normalization and PCA, inspect the elbow plot, and choose clustering and UMAP
+parameters. Every stage runs Seurat and saves its result; no UMAP is prepared on
+entry. Reapplying QC starts from the original counts and clears downstream results.
+Uploads, account login, custom R, collaboration UI, and advanced analyses are
+disabled for this focused experience. Private installations keep their full UI.
+
+The default local demo fixture is a small synthetic tutorial and retains the
+fixture workbench. The guided experience is enabled for demo deployments with
+`DEMO_DATASET=pbmc3k`.
 It needs a Linux VM, Docker Compose, HTTPS, and persistent storage. It cannot
 run as a static site or fit on a typical 512 MiB free web service.
 

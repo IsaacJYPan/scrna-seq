@@ -405,6 +405,25 @@ describe('Sidebar component', () => {
       });
     }
   });
+
+  it('moves focus to the expand control when a focused desktop drawer collapses at the narrow breakpoint', () => {
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1200 });
+    try {
+      render(<Sidebar activeTab="workspace" {...baseProps} selectedObjects={[{ id: 'ao_abc123' }]} />);
+      const focusedDrawerControl = screen.getByRole('button', { name: 'Collapse sidebar' });
+      focusedDrawerControl.focus();
+      expect(focusedDrawerControl).toHaveFocus();
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 1000 });
+      fireEvent.resize(window);
+
+      expect(screen.getByRole('button', { name: 'Expand sidebar' })).toHaveFocus();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: originalInnerWidth });
+    }
+  });
+
   it('lets groups collapse while retaining the active destination when it changes', () => {
     const view = render(<Sidebar {...baseProps} activeTab="workspace" selectedObjects={[{ id: 'ao_1' }]} />);
     const explore = screen.getByRole('button', { name: 'Explore', exact: true });

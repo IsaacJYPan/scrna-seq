@@ -77,6 +77,7 @@ export default function Sidebar({
   const shellRef = useRef(null);
   const navigationScrollRef = useRef(null);
   const previousNarrowRef = useRef(window.innerWidth < 1024);
+  const focusExpandAfterBreakpointRef = useRef(false);
   const [closedGroups, setClosedGroups] = useState(new Set());
   const [isPhone, setIsPhone] = useState(() => window.innerWidth < 640);
   const expandRef = useRef(null);
@@ -87,19 +88,33 @@ export default function Sidebar({
   const [isCollapsed, setIsCollapsed] = useState(() => (
     typeof window !== 'undefined' ? window.innerWidth < 1024 : false
   ));
+  const isCollapsedRef = useRef(isCollapsed);
+  isCollapsedRef.current = isCollapsed;
 
   useEffect(() => {
     const collapseForNarrowViewport = () => {
       const narrow = window.innerWidth < 1024;
       setIsNarrow(narrow);
       setIsPhone(window.innerWidth < 640);
-      if (narrow && !previousNarrowRef.current) setIsCollapsed(true);
+      if (narrow && !previousNarrowRef.current) {
+        const aside = shellRef.current?.querySelector('aside');
+        if (!isCollapsedRef.current && aside?.contains(document.activeElement)) {
+          focusExpandAfterBreakpointRef.current = true;
+        }
+        setIsCollapsed(true);
+      }
       previousNarrowRef.current = narrow;
     };
     collapseForNarrowViewport();
     window.addEventListener('resize', collapseForNarrowViewport);
     return () => window.removeEventListener('resize', collapseForNarrowViewport);
   }, []);
+
+  useEffect(() => {
+    if (!isNarrow || !isCollapsed || !focusExpandAfterBreakpointRef.current) return;
+    focusExpandAfterBreakpointRef.current = false;
+    expandRef.current?.focus({ preventScroll: true });
+  }, [isNarrow, isCollapsed]);
 
   useEffect(() => {
     if (!isNarrow || isCollapsed) return;

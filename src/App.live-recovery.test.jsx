@@ -20,10 +20,16 @@ vi.mock('./pages/Workspace', () => ({
     return <div>
       <output data-testid="live-object">{datasetInfo?.id}:{datasetInfo?.liveState}</output>
       <output data-testid="live-completion">{pipelineState.umap ? 'completed' : 'pending'}</output>
+      <output data-testid="pipeline-readiness">{JSON.stringify({
+        normalize: pipelineState.normalize, pca: pipelineState.pca,
+        cluster: pipelineState.cluster, umap: pipelineState.umap,
+      })}</output>
       <output data-testid="execution-outcome">{result ? JSON.stringify(result) : ''}</output>
       <button onClick={() => onSelectAnalysisObject('proj_test', 'analysis_b')}>Select other analysis</button>
       <button onClick={() => callApi('/umap', {}, { operation: 'umap', step: 'umap' })}>Change live analysis</button>
       <button onClick={async () => setResult(await callApi('/umap', {}, { operation: 'umap', step: 'umap', cacheParams: { dims: 10 } }))}>Run and cache live analysis</button>
+      <button onClick={async () => setResult(await callApi('/normalize', {}, { operation: 'normalize', step: 'normalize', cacheParams: { method: 'LogNormalize' } }))}>Hydrate cached normalization</button>
+      <button onClick={() => callApi('/normalize', {}, { operation: 'normalize', step: 'normalize', useCache: false })}>Run fresh normalization</button>
     </div>;
   },
 }));
@@ -106,6 +112,54 @@ describe('App live analysis recovery', () => {
     expect(screen.queryByText('Unsaved live changes.')).not.toBeInTheDocument();
     expect(screen.getByTestId('live-object')).toHaveTextContent('analysis_b:attached');
   });
+
+  it('preserves completed downstream readiness when a valid normalization cache entry hydrates', async () => {
+    window.electronAPI.apiRequest.mockImplementation(async path => {
+      if (path === '/session-id') return { sessionId: 'runtime-test' };
+      if (path === '/pipeline-state') return {
+        ...clean, has_qc: true, has_normalized: true, has_pca: true, has_clusters: true, has_umap: true,
+      };
+      return {};
+    });
+    getCachedResult.mockResolvedValue({
+      provenanceId: 'prov_normalize_cached', result: { success: true },
+    });
+    window.electronAPI.getProvenance = vi.fn(async id => ({ id, operation: 'normalize' }));
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('pipeline-readiness')).toHaveTextContent(
+      '{"normalize":true,"pca":true,"cluster":true,"umap":true}'
+    ));
+    fireEvent.click(screen.getByRole('button', { name: 'Hydrate cached normalization' }));
+    await waitFor(() => expect(screen.getByTestId('execution-outcome')).toHaveTextContent('"_fromCache":true'));
+    await waitFor(() => expect(screen.getByTestId('pipeline-readiness')).toHaveTextContent(
+      '{"normalize":true,"pca":true,"cluster":true,"umap":true}'
+    ));
+    expect(window.electronAPI.apiRequest).not.toHaveBeenCalledWith('/normalize', expect.anything());
+  });
+
+  it('invalidates downstream readiness after a fresh normalization run', async () => {
+    window.electronAPI.apiRequest.mockImplementation(async path => {
+      if (path === '/session-id') return { sessionId: 'runtime-test' };
+      if (path === '/pipeline-state') return {
+        ...clean, has_qc: true, has_normalized: true, has_pca: true, has_clusters: true, has_umap: true,
+      };
+      if (path === '/normalize') return {
+        provenance: { id: 'prov_normalize_fresh', operation: 'normalize' }, result: { success: true },
+      };
+      return {};
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('pipeline-readiness')).toHaveTextContent(
+      '{"normalize":true,"pca":true,"cluster":true,"umap":true}'
+    ));
+    fireEvent.click(screen.getByRole('button', { name: 'Run fresh normalization' }));
+    await waitFor(() => expect(screen.getByTestId('pipeline-readiness')).toHaveTextContent(
+      '{"normalize":true,"pca":false,"cluster":false,"umap":false}'
+    ));
+  });
+
   it('retries a canceled initial object probe after slow workspace loading', async () => {
     let finishObjectLoad;
     window.electronAPI.listProjectAnalysisObjects.mockImplementation(() => new Promise(resolve => {

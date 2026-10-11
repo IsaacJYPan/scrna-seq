@@ -1336,12 +1336,17 @@ app.get('/api/service/compatibility', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json(SERVICE_COMPATIBILITY);
 });
+const { DEMO_JOB_TYPES, demoAccountPolicy, demoCapabilityPolicy } = require('./backend/demoExperiencePolicy');
+const guidedDemoMode = () => config.demoMode() && process.env.DEMO_DATASET === 'pbmc3k';
+
 app.get('/api/auth/policy', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const legacyUiEnabled = !config.isProduction();
   const demoMode = config.demoMode();
   res.json({
-    registrationEnabled: config.registrationEnabled(),
+    registrationEnabled: !guidedDemoMode() && config.registrationEnabled(),
+    authenticationEnabled: !guidedDemoMode(),
+    guidedDemoEnabled: guidedDemoMode(),
     passwordPolicy: passwordPolicy.publicPasswordPolicy(),
     legacyLocalImportsEnabled: legacyUiEnabled,
     // Live mutation tools write into the source object's in-memory R state.
@@ -1360,6 +1365,8 @@ app.get('/api/auth/policy', (req, res) => {
 
 // In production this route terminates before database initialization or body
 // parsing. Outside production it falls through to the normal signup handler.
+app.use(demoAccountPolicy(guidedDemoMode));
+app.use(demoCapabilityPolicy(guidedDemoMode));
 app.post('/api/auth/signup', requireNetworkRegistrationEnabled);
 
 app.use(async (req, res, next) => {
@@ -3331,6 +3338,9 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
   if (config.demoMode()) {
     if (!req.user.isDemoGuest) {
       return res.status(403).json({ error: 'Only an active demo guest may launch demo compute.' });
+    }
+    if (guidedDemoMode() && !DEMO_JOB_TYPES.includes(body.jobType)) {
+      return res.status(403).json({ error: 'This capability is disabled for the demo. Try the standard Seurat workflow.' });
     }
     if (body.jobType === 'expert.r.v1') {
       return res.status(403).json({ error: 'Expert R is disabled in the public demo.' });

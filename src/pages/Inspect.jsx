@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  X, Database, Tag, Layers, Scissors, FileSpreadsheet,
-  ChevronDown, RefreshCw, CheckSquare, Square, AlertTriangle,
-  Check, Plus, Cpu, BarChart3, Search
+  Database, Tag, Scissors, FileSpreadsheet,
+  RefreshCw, CheckSquare, Square, AlertTriangle,
+  Check, Plus
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 
@@ -12,12 +12,12 @@ import { publicErrorMessage } from '../publicError';
 function Badge({ children, color = 'primary' }) {
   const palette = {
     primary: 'bg-primary/15 text-blue-400 border-blue-400/30',
-    green:   'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+    green:   'bg-emerald-500/15 text-emerald-800 dark:text-emerald-300 border-emerald-500/30',
     amber:   'bg-amber-500/15 text-amber-400 border-amber-500/30',
     slate:   'bg-slate-800 text-slate-300 border-slate-600',
   };
   return (
-    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wide ${palette[color]}`}>
+    <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${palette[color]}`}>
       {children}
     </span>
   );
@@ -48,26 +48,33 @@ function OverviewTab({ info }) {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-3">
-        {[
-          { label: 'Cells', value: info.n_cells?.toLocaleString(), icon: <Database size={14} /> },
-          { label: 'Features', value: info.n_features?.toLocaleString(), icon: <BarChart3 size={14} /> },
-          { label: 'Active Assay', value: info.active_assay, icon: <Cpu size={14} /> },
-          { label: 'Metadata Cols', value: info.meta_cols?.length, icon: <Tag size={14} /> },
-        ].map((s, i) => (
-          <div key={i} className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/50">
-            <div className="flex items-center gap-1.5 text-slate-400 mb-2 text-[10px] font-bold uppercase tracking-wide">
-              {s.icon} {s.label}
-            </div>
-            <div className="text-lg font-black text-white">{s.value ?? '—'}</div>
+      <section aria-label="Dataset summary" className="rounded-xl border border-border bg-surface p-5">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-4">
+          <div>
+            <dt className="text-sm text-textMuted">Cells</dt>
+            <dd className="mt-1 text-2xl font-semibold tabular-nums text-text">{info.n_cells?.toLocaleString() ?? '—'}</dd>
           </div>
-        ))}
-      </div>
+          <div>
+            <dt className="text-sm text-textMuted">Features</dt>
+            <dd className="mt-1 text-2xl font-semibold tabular-nums text-text">{info.n_features?.toLocaleString() ?? '—'}</dd>
+          </div>
+        </dl>
+        <dl className="mt-5 grid gap-x-8 gap-y-3 border-t border-border pt-4 sm:grid-cols-2">
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-sm text-textMuted">Active assay</dt>
+            <dd className="text-sm font-medium text-text">{info.active_assay || '—'}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-sm text-textMuted">Metadata columns</dt>
+            <dd className="text-sm font-medium tabular-nums text-text">{info.meta_cols?.length ?? '—'}</dd>
+          </div>
+        </dl>
+      </section>
 
       {/* Assays */}
-      {assays.length > 0 && (
+      {assays.length > 1 && (
         <div>
-          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Assays</div>
+          <h3 className="mb-2 text-sm font-medium text-text">Assays</h3>
           <div className="flex flex-wrap gap-2">
             {assays.map(a => (
               <Badge key={a} color={a === info.active_assay ? 'primary' : 'slate'}>{a}</Badge>
@@ -78,7 +85,7 @@ function OverviewTab({ info }) {
 
       {/* Reductions */}
       <div>
-        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Reductions</div>
+        <h3 className="mb-2 text-sm font-medium text-text">Reductions</h3>
         {reductions.length > 0 ? (
           <div className="flex flex-wrap gap-2">
             {reductions.map(r => (
@@ -86,7 +93,7 @@ function OverviewTab({ info }) {
             ))}
           </div>
         ) : (
-          <p className="text-xs text-slate-400 italic">No reductions computed yet.</p>
+          <p className="text-sm text-textMuted">No reductions computed yet.</p>
         )}
       </div>
     </div>
@@ -689,16 +696,12 @@ export default function Inspect({
   return (
     <div className="flex-1 w-full h-full flex flex-col bg-background overflow-hidden relative">
         {/* Header */}
-        <div className="flex flex-wrap gap-4 items-center justify-between px-4 sm:px-8 pt-6 sm:pt-8 pb-4 border-b border-slate-800 bg-slate-800/10">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border bg-surface px-4 py-5 sm:px-8">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-[.25em] mb-2">
-              <Search size={12} className="text-primary" />
-              Analysis details
-            </div>
-            <h2 className="text-2xl font-black text-text tracking-tighter break-words">
+            <h2 className="break-words text-xl font-semibold text-text">
               {obj.name}
             </h2>
-            <p className="text-[12px] font-bold text-slate-400 mt-1 uppercase tracking-widest">
+            <p className="mt-1 text-sm text-textMuted">
               {info && !loading
                 ? `${info.n_cells?.toLocaleString()} cells · ${info.n_features?.toLocaleString()} features · ${info.meta_cols?.length} metadata columns`
                 : loading ? 'Loading…' : 'Details unavailable'}
@@ -707,7 +710,7 @@ export default function Inspect({
           <div className="flex items-center gap-2">
             <button
               onClick={fetchInfo}
-              className="btn btn-ghost border border-slate-700 flex items-center gap-2 text-sm text-slate-400 hover:text-white"
+              className="btn btn-secondary flex items-center gap-2 text-sm"
               title="Refresh"
             >
               <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
@@ -717,29 +720,22 @@ export default function Inspect({
         </div>
 
         {/* Tabs */}
-        <div className="flex overflow-x-auto custom-scrollbar border-b border-slate-800 px-2 sm:px-6" role="group" aria-label="Analysis detail views">
+        <div className="flex overflow-x-auto custom-scrollbar border-b border-border px-2 sm:px-6" role="group" aria-label="Analysis detail views">
           {visibleTabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               aria-pressed={activeTab === tab.id}
-              className={`flex shrink-0 whitespace-nowrap items-center gap-2 px-4 sm:px-6 py-4 text-xs font-bold uppercase tracking-widest border-b-2 transition-colors ${
+              className={`flex shrink-0 whitespace-nowrap items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === tab.id
-                  ? 'border-blue-400 text-blue-400'
-                  : 'border-transparent text-slate-400 hover:text-slate-300'
+                  ? 'border-primary text-text'
+                  : 'border-transparent text-textMuted hover:text-text'
               }`}
             >
               {tab.icon} {tab.label}
             </button>
           ))}
         </div>
-
-        {!legacyLiveMutationToolsEnabled && (
-          <div className="mx-6 mt-4 flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-900/20 p-3 text-xs text-amber-300">
-            <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
-            <span>Subsetting is disabled in this deployment. Create a private checkpoint copy from Runs &amp; Results before continuing with a separate analysis.</span>
-          </div>
-        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-8">

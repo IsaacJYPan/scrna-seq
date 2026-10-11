@@ -76,6 +76,19 @@ database reserved for tests before running `npm run test:backend`.
 API responses. `npm run test:deployment:browser` uses a real API and PostgreSQL
 with a deterministic R test service.
 
+`npm run test:ui-interactions` records pointer paths, keyboard navigation, and
+touch workflows with simulated API responses. Recordings, screenshots, and the
+acceptance report are saved in `playwright/report/ui-interactions/`. To check
+the production build, run `npm run build` and then
+`npm run test:ui-interactions -- --production`.
+
+`npm run build` followed by `npm run test:workbench-ui` checks the full
+authenticated workbench at desktop and phone widths in both themes. It records
+navigation and real cursor paths, tests data-point hover and empty-space behavior,
+and checks keyboard input, layout, and accessibility. The deterministic frontend
+fixtures do not require R or change research data. Recordings and results are
+saved in `playwright/report/full-workbench/after/`.
+
 ## Deploy a demo
 
 Start with the [student demo guide](docs/demo.md). The [deployment guide](docs/deployment.md) covers a Linux host with Docker Compose,

@@ -7,6 +7,7 @@ const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { createHash } = require('node:crypto');
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 const VITE_PORT     = Number(process.env.VISUAL_VITE_PORT || 5173);
@@ -481,7 +482,8 @@ async function checkResponsiveWorkbench(page) {
     const expand = page.getByRole('button', { name: 'Expand sidebar', exact: true });
     if (await expand.isVisible()) await expand.click();
     for (const group of await page.locator('aside button[aria-expanded="false"]').all()) await group.click();
-    await page.locator('aside button').filter({ hasText: label }).first().click();
+    const destination = { Cluster: 'cluster', Lineage: 'lineage', Validation: 'validation' }[label];
+    await page.locator(`aside button[data-destination="${destination}"]`).click();
     await sleep(600);
     await page.getByText(/^Opening .+…$/).first().waitFor({ state: 'hidden' });
   };
@@ -498,8 +500,9 @@ async function checkResponsiveWorkbench(page) {
       if (width < 640) {
         const main = await page.locator('main').boundingBox();
         assert(`Phone ${width}px: navigation does not consume content width`, main.x === 0 && Math.abs(main.width - width) < 1);
-        await page.locator('section[aria-label="Analysis status"] summary').click();
-        const panel = page.locator('section[aria-label="Analysis status"] details[open] > div');
+        const trigger = page.getByRole('button', { name: 'Status details', exact: true });
+        await trigger.click();
+        const panel = page.locator(`[id="${await trigger.getAttribute('aria-controls')}"]`);
         await sleep(100);
         const rect = await panel.boundingBox();
         assert(`Status ${width}px: open details stay inside viewport gutters`, rect.x >= 15 && rect.x + rect.width <= width - 15);
@@ -520,24 +523,7 @@ async function checkResponsiveWorkbench(page) {
   }
 }
 
-async function main() {
-  console.log('='.repeat(60));
-  console.log('  TraceOmics Visual & UI/UX Test Suite');
-  console.log('='.repeat(60));
-  console.log(`  Mode      : ${MODE_NAME}`);
-  console.log(`  Snapshots : ${SNAPSHOTS_DIR}`);
-  console.log(`  Report    : ${REPORT_DIR}`);
-  console.log(`  Timestamp : ${new Date().toISOString()}\n`);
-
-  // ── Start Vite ─────────────────────────────────────────────────────────────
-  section(PRODUCTION_PREVIEW ? 'SETUP: Starting production preview' : 'SETUP: Starting Vite dev server');
-  await startVite();
-
-  // ── Launch Browser ─────────────────────────────────────────────────────────
-  section('SETUP: Launching browser');
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  
+async function prepareVisualPage(context, { logConsole = true } = {}) {
   // Mock Electron API
   await context.addInitScript(() => {
     localStorage.setItem('traceomics_auth_token', 'visual-test-token');
@@ -574,7 +560,7 @@ async function main() {
   const networkFailures = [];
 
   page.on('console', msg => {
-    console.log(`[BROWSER CONSOLE] ${msg.type().toUpperCase()}: ${msg.text()}`);
+    if (logConsole) console.log(`[BROWSER CONSOLE] ${msg.type().toUpperCase()}: ${msg.text()}`);
     if (msg.type() === 'error' && !isIgnorableError(msg.text())) {
       consoleErrors.push(msg.text());
     }
@@ -645,13 +631,36 @@ async function main() {
   // retain saved figures in this route mock rather than relying on window state.
   // This models the small GET/POST gallery contract used by the save-figure flow.
   const visualFigures = [];
+  const visualCache = new Map();
+  const visualProvenance = new Map();
   await page.route('**/api/db/**', async route => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
     let status = 200;
     let body = [];
 
-    if (pathname === '/api/db/figures') {
+    // A cache miss is null in the real API. A truthy empty array falsely
+    // hydrates an upstream step and can invalidate the server's PCA state.
+    if (pathname === '/api/db/cache-key') {
+      body = { key: createHash('sha256').update(request.postData() || '{}').digest('hex') };
+    } else if (pathname.startsWith('/api/db/cache/')) {
+      const key = pathname.split('/').at(-1);
+      if (request.method() === 'POST') {
+        const record = request.postDataJSON();
+        visualCache.set(key, { provenanceId: record.provenanceId, result: record.resultData });
+        body = { success: true };
+      } else body = visualCache.get(key) || null;
+    } else if (pathname === '/api/db/cache' && request.method() === 'DELETE') {
+      visualCache.clear();
+      body = { success: true };
+    } else if (pathname === '/api/db/provenance' && request.method() === 'POST') {
+      const record = request.postDataJSON();
+      const id = record.provenance?.id || `prov_visual_${visualProvenance.size + 1}`;
+      visualProvenance.set(id, { ...record.provenance, result: record.result, id });
+      body = { id };
+    } else if (pathname.startsWith('/api/db/provenance/')) {
+      body = visualProvenance.get(pathname.split('/').at(-1)) || null;
+    } else if (pathname === '/api/db/figures') {
       if (request.method() === 'POST') {
         let record = {};
         try {
@@ -1239,6 +1248,25 @@ async function main() {
     });
   });
 
+  return { page, consoleErrors, networkFailures };
+}
+
+async function main() {
+  console.log('='.repeat(60));
+  console.log('  TraceOmics Visual & UI/UX Test Suite');
+  console.log('='.repeat(60));
+  console.log(`  Mode      : ${MODE_NAME}`);
+  console.log(`  Snapshots : ${SNAPSHOTS_DIR}`);
+  console.log(`  Report    : ${REPORT_DIR}`);
+  console.log(`  Timestamp : ${new Date().toISOString()}\n`);
+
+  section(PRODUCTION_PREVIEW ? 'SETUP: Starting production preview' : 'SETUP: Starting Vite dev server');
+  await startVite();
+  section('SETUP: Launching browser');
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const { page, consoleErrors, networkFailures } = await prepareVisualPage(context);
+
   // ── Navigate to App ────────────────────────────────────────────────────────
   section('STEP 1: Initial page load');
   const t0 = Date.now();
@@ -1469,7 +1497,7 @@ async function main() {
           continue;
         }
       } else {
-        const btn = page.locator(`aside button:has-text("${tab.label}")`).first();
+        const btn = page.locator(`aside button[data-destination="${tab.id}"]`).first();
         if (await btn.count() === 0) {
           warn(`${tab.label}: sidebar button not found`);
           continue;
@@ -1593,7 +1621,7 @@ async function main() {
   section('STEP 7b: Save Figure Integration Flow');
   try {
     if (dataLoaded) {
-      const umapBtn = page.locator('aside button:has-text("UMAP")').first();
+      const umapBtn = page.locator('aside button[data-destination="umap"]').first();
       if (await umapBtn.count() > 0) {
         await umapBtn.click();
         await sleep(PAGE_SETTLE_MS);
@@ -1609,6 +1637,8 @@ async function main() {
         if (!saveFigureReady) {
           const runUmapBtn = page.getByRole('button', { name: /^(Run 2D UMAP|Re-compute UMAP)$/ }).first();
           if (await runUmapBtn.count() === 0) {
+            await page.screenshot({ path: path.join(REPORT_DIR, 'umap-save-unavailable.png') });
+            info((await page.locator('main').innerText()).slice(0, 1800));
             fail('UMAP run control not found before the figure-save flow');
           } else if (await runUmapBtn.isDisabled()) {
             fail('UMAP run control is disabled before the figure-save flow');
@@ -1841,7 +1871,8 @@ function generateHtmlReport({ failures, warnings, consoleErrors }) {
 }
 
 // ── Entry Point ────────────────────────────────────────────────────────────────
-main().catch(e => {
+module.exports = { prepareVisualPage };
+if (require.main === module) main().catch(e => {
   console.error('[FATAL]', e.message);
   stopVite();
   process.exit(1);

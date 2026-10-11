@@ -32,3 +32,35 @@ it('hands keyboard focus into the portaled controls and continues after the open
   screen.getByRole('button', { name: 'Last action' }).focus(); fireEvent.keyDown(document.activeElement, { key: 'Tab' });
   expect(screen.getByRole('button', { name: 'After details' })).toHaveFocus(); expect(opener.closest('details').open).toBe(false);
 });
+
+it('positions tall content above the anchor when needed and repositions after content grows', () => {
+  const originalHeight = window.innerHeight;
+  const observers = [];
+  class TestResizeObserver {
+    constructor(callback) { this.callback = callback; observers.push(this); }
+    observe() {}
+    disconnect() {}
+  }
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 });
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
+  try {
+    render(<DetailsPopover label="Details"><p>Long details</p></DetailsPopover>);
+    const opener = screen.getByText('Details');
+    opener.closest('details').getBoundingClientRect = () => ({ top: 650, bottom: 690, left: 280, right: 320, width: 40, height: 40 });
+    fireEvent.click(opener);
+    const panel = document.getElementById(opener.getAttribute('aria-controls'));
+    let contentHeight = 300;
+    Object.defineProperty(panel, 'scrollHeight', { configurable: true, get: () => contentHeight });
+    fireEvent.resize(window);
+    expect(panel.style.top).toBe('342px');
+    expect(panel.style.maxHeight).toBe('626px');
+
+    contentHeight = 700;
+    observers[0].callback();
+    expect(panel.style.top).toBe('16px');
+    expect(panel.style.maxHeight).toBe('626px');
+  } finally {
+    vi.unstubAllGlobals();
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight });
+  }
+});
