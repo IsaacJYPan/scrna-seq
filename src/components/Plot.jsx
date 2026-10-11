@@ -81,6 +81,22 @@ export function isWebGLFailure(error) {
   return /webgl|gpu|regl|context\s+lost/i.test(message);
 }
 
+// Keep Plotly's generated hover cards legible and visually consistent across
+// the analysis pages. Individual pages can still supply a more specific
+// label font or border when needed.
+export function getPlotHoverStyle(theme = 'light') {
+  const isDark = theme === 'dark';
+  return {
+    bgcolor: isDark ? '#182236' : '#ffffff',
+    bordercolor: isDark ? '#34445d' : '#cbd5e1',
+    font: {
+      color: isDark ? '#f1f5f9' : '#334155',
+      family: 'Inter, system-ui',
+      size: 12,
+    },
+  };
+}
+
 /**
  * Shared Plotly wrapper with a graceful SVG fallback for two-dimensional
  * scattergl and heatmapgl traces. It preserves WebGL where it works and also

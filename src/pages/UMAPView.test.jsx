@@ -13,6 +13,7 @@ vi.mock('../components/Plot', () => ({
     return <div data-testid="plot-stub" />;
   },
   supportsWebGL: supportsWebGLMock,
+  getPlotHoverStyle: theme => ({ theme }),
 }));
 
 vi.mock('../components/FigureSavePanel', () => ({
@@ -59,6 +60,16 @@ describe('UMAPView', () => {
     supportsWebGLMock.mockReturnValue(true);
   });
 
+  it('shows the cluster identity without coordinates or Plotly trace boxes', async () => {
+    render(<UMAPView {...baseProps()} />);
+    await screen.findByRole('button', { name: /Re-compute UMAP/i });
+
+    const [trace] = plotRenderSpy.mock.calls.at(-1)[0];
+    expect(trace.hovertemplate).toBe('<b>%{fullData.name}</b><extra></extra>');
+    expect(trace.hovertemplate).not.toMatch(/%\{[xyz]\}/i);
+    expect(trace.hoverlabel).toEqual({ theme: 'light' });
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
@@ -88,6 +99,64 @@ describe('UMAPView', () => {
 
     expect(await screen.findByRole('button', { name: /Re-compute UMAP/i })).toBeInTheDocument();
     expect(screen.getByText('Cluster 0')).toBeInTheDocument();
+  });
+
+  it('preserves an in-progress decimal minimum distance while it is edited', async () => {
+    const callApi = vi.fn(async () => resultPayload());
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await screen.findByRole('button', { name: /Re-compute UMAP/i });
+    callApi.mockClear();
+
+    const minDist = screen.getByLabelText(/Minimum Distance/i);
+    const run = screen.getByRole('button', { name: /Re-compute UMAP/i });
+    fireEvent.change(minDist, { target: { value: '' } });
+    expect(minDist.value).toBe('');
+    expect(minDist).toHaveAttribute('aria-invalid', 'true');
+    expect(run).toBeDisabled();
+
+    fireEvent.change(minDist, { target: { value: '0' } });
+    expect(minDist.value).toBe('0');
+    expect(run).toBeEnabled();
+    fireEvent.change(minDist, { target: { value: '0.3' } });
+    expect(minDist.value).toBe('0.3');
+    fireEvent.change(minDist, { target: { value: '0.35' } });
+    expect(minDist.value).toBe('0.35');
+    expect(run).toBeEnabled();
+
+    fireEvent.click(run);
+    await waitFor(() => expect(callApi.mock.calls.some(([path]) => path.includes('min_dist=0.35'))).toBe(true));
+  });
+
+  it.each([1, 2])('runs UMAP with %i input PCs, two neighbors, and zero minimum distance', async dims => {
+    const callApi = vi.fn(async path => path.startsWith('/reduction-results')
+      ? { result: { exists: false } } : resultPayload());
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await waitFor(() => expect(callApi).toHaveBeenCalledTimes(1));
+    callApi.mockClear();
+    fireEvent.change(screen.getByLabelText(/Input Dimensions/), { target: { value: String(dims) } });
+    fireEvent.change(screen.getByLabelText(/Number of Neighbors/), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText(/Minimum Distance/), { target: { value: '0' } });
+    const run = screen.getByRole('button', { name: /Run 2D UMAP/i });
+    expect(run).toBeEnabled();
+    fireEvent.click(run);
+    await waitFor(() => expect(callApi).toHaveBeenCalledWith(
+      `/umap?dims=${dims}&n_components=2&n_neighbors=2&min_dist=0&seed=seed-1`,
+      expect.any(Object), expect.objectContaining({
+        cacheParams: expect.objectContaining({ dims, n_neighbors: 2, min_dist: 0 }),
+      }),
+    ));
+  });
+
+  it('keeps restored two-PC, two-neighbor, zero-distance settings valid and unchanged', async () => {
+    const callApi = vi.fn(async () => ({ result: { ...resultPayload().result, exists: true,
+      restored: true, n_components: 2, settings: { dims: 2, n_neighbors: 2, min_dist: 0, seed: 42 } } }));
+    render(<UMAPView {...baseProps({ callApi })} />);
+    await screen.findByText(/Showing the saved UMAP result/);
+    expect(screen.getByLabelText(/Minimum Distance/)).toHaveValue(0);
+    expect(screen.getByLabelText(/Minimum Distance/)).toHaveAttribute('aria-invalid', 'false');
+    expect(screen.getByRole('button', { name: /Re-compute UMAP/i })).toBeEnabled();
+    expect(screen.queryByText(/Showing a previous calculation/)).not.toBeInTheDocument();
+    expect(callApi).toHaveBeenCalledTimes(1);
   });
 
   it('does not offer figure saving before a UMAP result exists', async () => {
@@ -207,7 +276,10 @@ describe('UMAPView', () => {
     const callApi = vi.fn(async () => ({ result: { ...resultPayload().result, exists: true,
       restored: true, n_components: 2, settings: { dims: 10, n_neighbors: 20, min_dist: 0.25, seed: 42 } } }));
     render(<UMAPView {...baseProps({ callApi })} />);
-    await screen.findByText(/Showing the existing UMAP from this analysis/);
+    await screen.findByText(/Showing the saved UMAP result/);
+    expect(screen.getByText('Original computation settings').closest('details')).not.toHaveAttribute('open');
+    fireEvent.click(screen.getByText('Original computation settings'));
+    expect(screen.getByText('Original computation settings').parentElement).toHaveTextContent('Input PCs: 10. Neighbors: 20. Minimum distance: 0.25. Seed: 42.');
     expect(callApi).toHaveBeenCalledTimes(1);
     expect(callApi).toHaveBeenCalledWith('/reduction-results?reduction=umap', expect.any(Object), { useCache: false });
     expect(screen.getByLabelText(/Input Dimensions/)).toHaveValue(10);
@@ -254,7 +326,7 @@ describe('UMAPView', () => {
     const callApi = vi.fn(async () => ({ result: { ...resultPayload().result, exists: true,
       restored: true, n_components: 2, settings: {} } }));
     render(<UMAPView {...baseProps({ callApi, pipelineState: { pca: false, umap: true } })} />);
-    await screen.findByText(/Showing the existing UMAP from this analysis/);
+    await screen.findByText(/Showing the saved UMAP result/);
     expect(screen.getByRole('button', { name: /Re-compute UMAP/ })).toBeDisabled();
     expect(callApi).toHaveBeenCalledTimes(1);
   });

@@ -1,6 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { isWebGLFailure, preparePlotData, supportsWebGL } from './Plot';
+import { getPlotHoverStyle, isWebGLFailure, preparePlotData, supportsWebGL } from './Plot';
+
+describe('shared Plot hover style', () => {
+  it('uses readable neutral palettes for both themes', () => {
+    expect(getPlotHoverStyle('light')).toEqual({
+      bgcolor: '#ffffff', bordercolor: '#cbd5e1',
+      font: { color: '#334155', family: 'Inter, system-ui', size: 12 },
+    });
+    expect(getPlotHoverStyle('dark')).toEqual({
+      bgcolor: '#182236', bordercolor: '#34445d',
+      font: { color: '#f1f5f9', family: 'Inter, system-ui', size: 12 },
+    });
+  });
+});
 
 describe('Plot SVG fallback', () => {
   it('keeps WebGL traces untouched when a usable context exists', () => {

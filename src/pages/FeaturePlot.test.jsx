@@ -4,13 +4,18 @@ import { expect, it, vi } from 'vitest';
 
 vi.mock('../components/Plot', async () => {
   const React = await import('react');
-  return { default: ({ layout }) => React.createElement('div', {
+  return { default: ({ layout, data }) => React.createElement('div', {
     'data-testid': 'plot-stub',
     'data-paper-background': layout.paper_bgcolor,
     'data-plot-background': layout.plot_bgcolor,
     'data-axis-text': layout.xaxis.tickfont.color,
     'data-hover-text': layout.hoverlabel.font.color,
     'data-hover-background': layout.hoverlabel.bgcolor,
+    'data-hover-template': data[0]?.hovertemplate,
+  }), getPlotHoverStyle: theme => ({
+    bgcolor: theme === 'dark' ? '#182236' : '#ffffff',
+    bordercolor: theme === 'dark' ? '#34445d' : '#cbd5e1',
+    font: { color: theme === 'dark' ? '#f1f5f9' : '#334155', family: 'Inter, system-ui', size: 12 },
   }) };
 });
 vi.mock('../components/FigureSavePanel', () => ({ default: () => null }));
@@ -46,6 +51,7 @@ it('keeps the chart palette readable when its local dark mode is selected', asyn
   expect(plot).toHaveAttribute('data-axis-text', '#9fb0c9');
   expect(plot).toHaveAttribute('data-hover-text', '#f1f5f9');
   expect(plot).toHaveAttribute('data-hover-background', '#182236');
+  expect(plot).toHaveAttribute('data-hover-template', '<b>CD3E</b><br>Expression: %{marker.color:.2f}<extra></extra>');
 
   fireEvent.click(screen.getByRole('button', { name: 'Light' }));
   expect(plot).toHaveAttribute('data-paper-background', '#ffffff');

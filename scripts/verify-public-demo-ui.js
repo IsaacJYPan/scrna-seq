@@ -130,7 +130,14 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
         'Every Expert R entry must remain disabled in the public demo.');
     }
 
-    await openSidebarPage(page, 'Runs & Results');
+    if (expectedDataset === 'pbmc3k') {
+      assert(await page.getByRole('button', { name: 'Reload PBMC demo', exact: true }).count() === 0,
+        'Curated guests must restore their checkpoint, not call the raw PBMC loader.');
+      await page.getByText(/load your verified tutorial checkpoint/).waitFor({ state: 'visible' });
+      await page.getByRole('button', { name: 'Open Runs & Results', exact: true }).first().click();
+    } else {
+      await openSidebarPage(page, 'Runs & Results');
+    }
     await page.getByRole('heading', { name: 'Runs & Results', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
     const attach = page.getByRole('button', { name: 'Restore saved version', exact: true });

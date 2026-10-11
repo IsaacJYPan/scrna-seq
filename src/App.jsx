@@ -855,7 +855,10 @@ export default function App() {
               if (cached.result?.n_clusters) extraState.clusterCount = cached.result.n_clusters;
               if (cached.result?.dims_used)  extraState.clusterDims  = cached.result.dims_used;
             }
-            markPipelineStep(step, extraState);
+            // Hydration reads an existing result in this object and R session.
+            // Preserve server-confirmed downstream work; only a fresh
+            // computation invalidates the steps that depend on it.
+            setPipelineState(prev => ({ ...prev, [step]: true, ...extraState }));
             // QC: update workspace object cell count to post-filter value
             if (step === 'qc' && cached.result?.post_filter_cells) {
               updateActiveWorkspace({

@@ -8,6 +8,8 @@ afterEach(() => { delete window.desktopShell; delete window.electronAPI; });
 
 it('shows verified R availability with browser server details on demand', () => {
   render(<ExecutionTargetIndicator deploymentPolicy={{ expertRStatus: { state: 'ready' } }} />);
+  expect(screen.getByText('Analysis server')).toBeVisible();
+  expect(screen.getByText('Custom R available')).not.toBeVisible();
   expect(screen.getByText(`Server: ${window.location.origin}`)).not.toBeVisible();
   fireEvent.click(screen.getByText('Connection details'));
   expect(screen.getByText(`Server: ${window.location.origin}`)).toBeVisible();
@@ -42,7 +44,7 @@ it('preserves initially disconnected target metadata and provides reconnect inst
     endpoint: 'https://analysis.example.org', status: 'disconnected', sshTunnel: { state: 'disconnected' } })) };
   render(<ExecutionTargetIndicator deploymentPolicy={{ expertRStatus: { state: 'not-configured' } }} />);
   expect(await screen.findByText('SSH tunnel disconnected')).toBeVisible();
-  expect(screen.getByText('Custom R setup required')).toBeVisible();
+  expect(screen.getByText('Custom R setup required')).not.toBeVisible();
   fireEvent.click(screen.getByText('Connection details'));
   expect(screen.getByText('Server: Lab server')).toBeVisible();
   expect(screen.getByText(/Reconnect through server settings/)).toBeVisible();

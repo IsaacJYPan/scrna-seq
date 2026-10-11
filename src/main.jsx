@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
+import DemoRouter from './demo/DemoRouter';
 import './App.css';
 import { electronAPI } from './api';
 
@@ -20,7 +20,7 @@ class GlobalErrorBoundary extends React.Component {
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <GlobalErrorBoundary>
-      <App />
+      <DemoRouter />
     </GlobalErrorBoundary>
   </React.StrictMode>
 );

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, FolderTree, Lock } from 'lucide-react';
+import { Database, FolderTree } from 'lucide-react';
 
 const PROJECT_WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 
@@ -17,12 +17,6 @@ export default function WorkbenchOverview({
   const hasObjectsInProject = activeProjectObjects.length > 0;
 
   const liveAttached = selectedObject?.liveState === 'attached';
-  const liveStatus = !hasObject
-    ? 'Select an analysis'
-    : liveAttached
-      ? 'Ready in your workspace'
-      : 'Open a saved version';
-
   let nextAction = 'Select or create a project.';
   let actionLabel = 'Create Project';
   let action = null;
@@ -41,19 +35,24 @@ export default function WorkbenchOverview({
         'This project is read-only for your role. You can inspect saved analyses, results, and lineage when they are available.';
     }
   } else if (hasProject && hasObject && !liveAttached) {
-    if (selectedObject?.source === 'pbmc3k_demo' && typeof onReloadPbmcDemo === 'function') {
+    if (selectedObject?.metadata?.curatedDemo === true) {
       nextAction =
-        'This PBMC demo is selected but is not open in your private analysis workspace. Reload the built-in demo to open it again.';
+        'Open Runs & Results to restore this saved analysis.';
+      actionLabel = 'Open Runs & Results';
+      action = () => setActiveTab('history');
+    } else if (selectedObject?.source === 'pbmc3k_demo' && typeof onReloadPbmcDemo === 'function') {
+      nextAction =
+        'Reload the PBMC dataset to continue your analysis.';
       actionLabel = 'Reload PBMC demo';
       action = onReloadPbmcDemo;
     } else {
       nextAction =
-        'This saved analysis is not open in your private analysis workspace. Open Runs & Results to open a saved version or create a branch of your own.';
+        'Open a saved version from Runs & Results to continue your analysis.';
       actionLabel = 'Open Runs & Results';
       action = () => setActiveTab('history');
     }
   } else if (hasProject && hasObject && !pipelineState?.qc) {
-    nextAction = 'Run quality control in your private analysis workspace.';
+    nextAction = 'Review cell quality and choose filtering thresholds.';
     actionLabel = 'Open Quality Control';
     action = () => setActiveTab('qc');
   } else if (hasProject && hasObject && !pipelineState?.normalize) {
@@ -65,7 +64,7 @@ export default function WorkbenchOverview({
     actionLabel = 'Open PCA';
     action = () => setActiveTab('pca');
   } else if (hasProject && hasObject) {
-    nextAction = 'Continue through clustering, UMAP, markers, or review Runs & Results.';
+    nextAction = 'Explore clusters and gene expression, or review saved results.';
     actionLabel = 'Open Runs & Results';
     action = () => setActiveTab('history');
   }
@@ -74,7 +73,7 @@ export default function WorkbenchOverview({
 
   return (
     <section
-      className="rounded-xl border border-border bg-surface/60 p-4"
+      className="border-b border-border pb-5"
       aria-label="Current analysis"
     >
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -89,11 +88,7 @@ export default function WorkbenchOverview({
               {selectedObject?.name || selectedObject?.displayName || 'No analysis selected'}
             </span>
           </h3>
-          <p className="mt-1 text-sm text-textMuted">
-            {hasObject
-              ? liveStatus
-              : `${activeProjectObjects.length} saved analyses in this project`}
-          </p>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-textMuted">{nextAction}</p>
         </div>
         {action && (
           <button onClick={action} className="btn btn-primary text-sm">
@@ -101,15 +96,6 @@ export default function WorkbenchOverview({
           </button>
         )}
       </div>
-      <p className="mt-3 text-sm leading-relaxed text-text">
-        {nextAction}
-      </p>
-      {hasObject && (
-        <p className="mt-3 flex items-start gap-2 text-xs text-textMuted">
-          <Lock size={13} className="mt-0.5 shrink-0" aria-hidden="true" />
-          Your live workspace is private. Share saved versions through Runs &amp; Results.
-        </p>
-      )}
     </section>
   );
 }

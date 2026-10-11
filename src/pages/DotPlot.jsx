@@ -1,7 +1,7 @@
 import { usePlotGeometry, categoryTickAngle, categoryPlotWidth } from '../hooks/usePlotGeometry';
 import PageHeader from '../components/PageHeader';
 import React, { useState, useEffect } from 'react';
-import Plot from '../components/Plot';
+import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 import { publicErrorMessage } from '../publicError';
@@ -111,7 +111,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     const y = [];
     const sizes = [];
     const colors = [];
-    const hoverText = [];
+    const pctCustomData = [];
 
     allGenes.forEach((g, gi) => {
       allClusters.forEach((cl, ci) => {
@@ -122,7 +122,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         y.push(g);
         sizes.push(Math.max(4, pctExpr * 28));
         colors.push(avgExpr);
-        hoverText.push(`<b>${g}</b> in ${cl}<br>Avg expr: ${avgExpr.toFixed(3)}<br>Pct expr: ${(pctExpr * 100).toFixed(1)}%`);
+        pctCustomData.push(pctExpr * 100);
       });
     });
 
@@ -144,7 +144,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         ],
         showscale: true,
         colorbar: {
-          title: { text: 'Avg Expr', side: 'top', font: { color: colorbarText } },
+          title: { text: 'Average expression', side: 'bottom', font: { color: colorbarText } },
           thickness: 15,
           orientation: 'h', yref: 'container', y: 0.015, xref: 'container', x: 0.5, xanchor: 'center', yanchor: 'bottom',
           len: 0.6,
@@ -152,8 +152,8 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
         },
         line: { color: '#1e293b', width: 0.5 },
       },
-      hoverinfo: 'text',
-      text: hoverText,
+      customdata: pctCustomData,
+      hovertemplate: '<b>%{y}</b><br>Cluster: %{x}<br>Average expression: %{marker.color:.2f}<br>Cells expressing: %{customdata:.1f}%<extra></extra>',
       showlegend: false,
     });
   }
@@ -167,6 +167,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
     font: { color: plotText, size: 12, family: 'Inter, system-ui' },
+    hoverlabel: getPlotHoverStyle(theme),
     margin: { l: 58, r: 12, t: 24, b: 120 },
     xaxis: { 
       title: { text: 'Cluster ID', font: { size: 13, color: axisTitle }, standoff: 20 },
@@ -244,7 +245,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
 
       {dotData && categoryPlotWidth(dotData.genes, dotData.clusters) > chart.width - 48 && <p role="note" className="mx-4 sm:mx-6 mt-3 text-xs text-textMuted">Scroll horizontally to inspect all clusters; hover a cell for its values.</p>}
 
-      <div ref={chart.ref} className="min-w-0 p-3 sm:p-6 overflow-x-auto shrink-0" style={{ height: Math.max(380, Math.min(1000, (Array.isArray(dotData?.genes) ? dotData.genes.length : dotData?.genes ? 1 : 3) * 28 + (chart.compact ? 180 : 120))) }}>
+      <div ref={chart.ref} className="min-w-0 p-3 sm:p-6 overflow-x-auto" style={{ flex: '1 0 auto', minHeight: Math.max(380, Math.min(1000, (Array.isArray(dotData?.genes) ? dotData.genes.length : dotData?.genes ? 1 : 3) * 28 + (chart.compact ? 180 : 120))) }}>
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center text-slate-400">

@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import Inspect from './Inspect';
 
@@ -35,13 +35,39 @@ describe('Inspect deployment policy', () => {
 
     await waitFor(() => expect(callApi).toHaveBeenCalledWith('/object-info', {}, { useCache: false }));
     expect(screen.queryByRole('button', { name: 'Subset' })).not.toBeInTheDocument();
-    expect(screen.getByText(/Subsetting is disabled in this deployment/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Subsetting is disabled in this deployment/i)).not.toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole('button', { name: 'Metadata' }));
+    expect(screen.queryByText(/Subsetting is disabled in this deployment/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Add Metadata' }));
     expect(await screen.findByRole('button', { name: 'Map from Column' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Import CSV' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Click to select CSV/i)).not.toBeInTheDocument();
     expect(screen.getByText(/This import and subsetting option is not available in this deployment/i)).toBeInTheDocument();
+  });
+
+  it('shows a calm dataset summary with primary dimensions and grouped secondary details', async () => {
+    const callApi = vi.fn(async endpoint => endpoint === '/object-info' ? objectInfo() : { values: [] });
+    render(
+      <Inspect
+        obj={{ id: 'ao_summary', name: 'Policy object' }}
+        globalTab="inspect"
+        workspaceObjects={[]}
+        callApi={callApi}
+        deploymentPolicy={{ legacyLiveMutationToolsEnabled: false }}
+      />
+    );
+
+    expect(await screen.findByRole('heading', { name: 'Policy object' })).toBeVisible();
+    const summary = screen.getByRole('region', { name: 'Dataset summary' });
+    expect(within(summary).getByText('Cells')).toBeVisible();
+    expect(within(summary).getByText('120')).toBeVisible();
+    expect(within(summary).getByText('Features')).toBeVisible();
+    expect(within(summary).getByText('800')).toBeVisible();
+    expect(within(summary).getByText('Active assay')).toBeVisible();
+    expect(within(summary).getByText('Metadata columns')).toBeVisible();
+    expect(within(summary).getByText('1')).toBeVisible();
+    expect(screen.queryByText('ANALYSIS DETAILS')).not.toBeInTheDocument();
   });
 
   it('shows only a selected CSV filename, never its local path', async () => {

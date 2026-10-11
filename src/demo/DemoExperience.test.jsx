@@ -1,0 +1,134 @@
+import React from 'react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import DemoExperience, { expressionSummary, qcPassing } from './DemoExperience';
+import { openDemo, applyDemoQC, processDemo, clusterDemo, resetDemo, readDemoGene, DEFAULT_QC, DEFAULT_PROCESSING, DEFAULT_CLUSTERING } from './demoApi';
+vi.mock('./demoApi', async importOriginal => ({ ...(await importOriginal()), openDemo: vi.fn(), applyDemoQC: vi.fn(), processDemo: vi.fn(), clusterDemo: vi.fn(), resetDemo: vi.fn(), readDemoGene: vi.fn() }));
+vi.mock('../components/Plot', () => ({ default: props => <div aria-label="Computed plot" data-plot-shapes={JSON.stringify(props.layout?.shapes || [])} /> }));
+const baseline = { n_cells: 2700, nFeature_RNA: Array(2700).fill(800), nCount_RNA: Array(2700).fill(1500), percent_mt: Array(2700).fill(2) };
+const input = { context: { currentObjectId: 'ao', originalObjectId: 'ao', stage: 'input', baseline }, info: { n_cells: 2700, n_features: 13714 }, qc: baseline, baseline, pca: null, map: null };
+const filtered = { ...input, context: { ...input.context, stage: 'qc', appliedQC: DEFAULT_QC }, info: { ...input.info, n_cells: 2638 } };
+const computed = { ...filtered, context: { ...filtered.context, stage: 'pca', processing: DEFAULT_PROCESSING }, pca: { npcs: 30, stdevs: [12, 8, 5], gene_loadings: { PC1: ['LYZ', 'CD3D'] } } };
+const complete = { ...computed, context: { ...computed.context, stage: 'complete', clustering: DEFAULT_CLUSTERING }, map: { n_cells: 2638, n_clusters: 9, trace_data: [{ name: 'Cluster 0', x: [1, 2], y: [2, 3] }] } };
+describe('public analysis demo', () => {
+  beforeEach(() => { vi.clearAllMocks(); openDemo.mockResolvedValue(input); });
+  it('opens on input QC without a prepared embedding or promotional copy', async () => {
+    render(<DemoExperience />);
+    expect(await screen.findByRole('heading', { name: 'PBMC3k analysis' })).toBeVisible();
+    expect(screen.getByText(/Some capabilities are disabled/)).toBeVisible();
+    expect(screen.getByRole('tab', { name: /Normalization/ })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: /Clustering/ })).toBeDisabled();
+    expect(screen.queryByRole('heading', { name: 'UMAP' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/No account needed|Meet the|A few|small window|made approachable/)).not.toBeInTheDocument();
+  });
+  it('applies user filters before enabling PCA and shows the real retained count', async () => {
+    applyDemoQC.mockResolvedValue(filtered);
+    render(<DemoExperience />);
+    fireEvent.change(await screen.findByLabelText('Maximum mitochondrial counts (%)'), { target: { value: '8' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply QC' }));
+    expect(await screen.findByText('2,638')).toBeVisible();
+    expect(applyDemoQC).toHaveBeenCalledWith(input.context, { ...DEFAULT_QC, mt_threshold: 8 }, expect.any(Function));
+    expect(screen.getByRole('tab', { name: /Normalization/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('PCA has not been computed')).toBeVisible();
+  });
+  it('announces invalid QC values and omits their threshold line from the plot', async () => {
+    render(<DemoExperience />);
+    const mtThreshold = await screen.findByLabelText('Maximum mitochondrial counts (%)');
+    fireEvent.change(mtThreshold, { target: { value: '' } });
+    expect(mtThreshold).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByText('Enter a value from 0.5 to 30.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Apply QC' })).toBeDisabled();
+    expect(screen.getAllByLabelText('Computed plot')[2]).toHaveAttribute('data-plot-shapes', '[]');
+  });
+  it('locks all analysis actions during computation and reveals the computed elbow plot', async () => {
+    let finish;
+    openDemo.mockResolvedValue(filtered); processDemo.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    render(<DemoExperience />);
+    fireEvent.change(await screen.findByLabelText('Variable genes'), { target: { value: '1500' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run normalization & PCA' }));
+    expect(screen.getByRole('button', { name: 'Reset analysis' })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: /Quality control/ })).toBeDisabled();
+    expect(processDemo).toHaveBeenCalledWith(filtered.context, { ...DEFAULT_PROCESSING, variableFeatures: 1500 }, expect.any(Function));
+    finish(computed);
+    expect(await screen.findByRole('button', { name: 'Continue to clustering' })).toBeVisible();
+    expect(screen.queryByText('PCA has not been computed')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reset analysis' })).toBeEnabled());
+  });
+  it('requires an explicit clustering action after PCA and forwards all chosen parameters', async () => {
+    openDemo.mockResolvedValue(computed); clusterDemo.mockResolvedValue(complete);
+    render(<DemoExperience />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue to clustering' }));
+    expect(screen.getByText('UMAP has not been computed')).toBeVisible();
+    expect(clusterDemo).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('Principal components to use'), { target: { value: '15' } });
+    fireEvent.change(screen.getByLabelText('Clustering resolution'), { target: { value: '0.8' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run clustering & UMAP' }));
+    expect(await screen.findByText('Clustering complete: 9 clusters.')).toBeVisible();
+    expect(clusterDemo).toHaveBeenCalledWith(computed.context, { ...DEFAULT_CLUSTERING, dims: 15, resolution: 0.8 }, expect.any(Function));
+  });
+  it('keeps incomplete decimal edits visible, blocks blank values, and submits parsed numbers', async () => {
+    openDemo.mockResolvedValue(computed); clusterDemo.mockResolvedValue(complete);
+    render(<DemoExperience />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue to clustering' }));
+    const resolution = screen.getByLabelText('Clustering resolution');
+    fireEvent.change(resolution, { target: { value: '0.' } });
+    expect(resolution).toHaveValue('0.');
+    expect(screen.getByRole('button', { name: 'Run clustering & UMAP' })).toBeDisabled();
+    fireEvent.change(resolution, { target: { value: '0.8' } });
+    fireEvent.change(screen.getByLabelText('UMAP minimum distance'), { target: { value: '' } });
+    expect(screen.getByLabelText('UMAP minimum distance')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Run clustering & UMAP' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('UMAP minimum distance'), { target: { value: '0.4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run clustering & UMAP' }));
+    await screen.findByText('Clustering complete: 9 clusters.');
+    expect(clusterDemo).toHaveBeenCalledWith(computed.context, { ...DEFAULT_CLUSTERING, resolution: 0.8, minDist: 0.4 }, expect.any(Function));
+  });
+  it('moves among enabled workflow tabs with arrow keys and Home/End', async () => {
+    openDemo.mockResolvedValue(complete);
+    render(<DemoExperience />);
+    const pcaTab = await screen.findByRole('tab', { name: /Normalization/ });
+    const clusterTab = screen.getByRole('tab', { name: /Clustering/ });
+    const qcTab = screen.getByRole('tab', { name: /Quality control/ });
+    expect(clusterTab).toHaveAttribute('tabindex', '0');
+    expect(qcTab).toHaveAttribute('tabindex', '-1');
+    clusterTab.focus();
+    fireEvent.keyDown(clusterTab, { key: 'ArrowLeft' });
+    expect(pcaTab).toHaveFocus();
+    expect(pcaTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(pcaTab, { key: 'End' });
+    expect(clusterTab).toHaveFocus();
+    expect(clusterTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(clusterTab, { key: 'Home' });
+    expect(qcTab).toHaveFocus();
+    expect(qcTab).toHaveAttribute('aria-selected', 'true');
+  });
+  it('prevents continuing with stale PCA after processing parameters change', async () => {
+    openDemo.mockResolvedValue(computed);
+    render(<DemoExperience />);
+    fireEvent.change(await screen.findByLabelText('Variable genes'), { target: { value: '1500' } });
+    expect(screen.getByRole('button', { name: 'Continue to clustering' })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: /Clustering/ })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: /Normalization/ })).toHaveAttribute('tabindex', '0');
+    expect(screen.getByRole('tab', { name: /Clustering/ })).toHaveAttribute('tabindex', '-1');
+  });
+  it('uses returned values for expression statistics', async () => {
+    openDemo.mockResolvedValue(complete); readDemoGene.mockResolvedValue({ expression: [0, 0, 2, 4], u1: [1, 2, 3, 4], u2: [2, 3, 4, 5] });
+    render(<DemoExperience />);
+    fireEvent.click(await screen.findByRole('button', { name: 'MS4A1' }));
+    expect(await screen.findByText('50.0%')).toBeVisible(); expect(screen.getByText('1.50')).toBeVisible();
+    expect(expressionSummary([0, 2, NaN, Infinity])).toEqual({ mean: 1, percent: 50, count: 2 });
+  });
+  it('resets to counts, disables downstream steps, and keeps saved plots on a failed request', async () => {
+    openDemo.mockResolvedValue(complete); resetDemo.mockRejectedValueOnce(new Error('Server busy')).mockResolvedValueOnce(input);
+    render(<DemoExperience />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset analysis' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Server busy');
+    expect(screen.getByRole('heading', { name: 'UMAP' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Reset analysis' }));
+    expect(await screen.findByText('Analysis reset to input counts.')).toBeVisible();
+    expect(screen.getByRole('tab', { name: /Clustering/ })).toBeDisabled();
+  });
+  it('previews strict QC thresholds from real metric arrays', () => {
+    expect(qcPassing({ nFeature_RNA: [200, 201, 2499, 2500, 500], percent_mt: [1, 1, 4.9, 1, 5], nCount_RNA: [1000, 1000, 1000, 1000, 1000] }, DEFAULT_QC)).toBe(2);
+  });
+});

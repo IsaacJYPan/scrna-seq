@@ -285,6 +285,16 @@ describe('CellChat durable worker UI', () => {
     expect(screen.getByText(/not open in your private analysis workspace/i)).toBeInTheDocument();
   });
 
+  it.each([true, false])('routes the PBMC recovery action consistently when curatedDemo=%s', curatedDemo => {
+    const setActiveTab = vi.fn();
+    renderPage({ setActiveTab, datasetInfo: { id: 'ao_abc123', projectId: 'proj_1', name: 'PBMC 3k',
+      liveState: 'not_attached', source: 'pbmc3k_demo', metadata: { curatedDemo } } });
+    const button = screen.getByRole('button', { name: curatedDemo ? 'Open Runs & Results' : 'Open workspace', exact: true });
+    fireEvent.click(button);
+    expect(setActiveTab).toHaveBeenCalledWith(curatedDemo ? 'history' : 'workspace');
+    expect(window.electronAPI.createCellChatInferenceJob).not.toHaveBeenCalled();
+  });
+
   it('restores the latest saved CellChat job for the selected object', async () => {
     window.electronAPI.listProjectJobs.mockResolvedValueOnce([{
       id: 'job_cellchat123',

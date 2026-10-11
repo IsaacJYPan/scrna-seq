@@ -1,10 +1,11 @@
 import WorkbenchOverview from '../components/WorkbenchOverview';
+import DetailsPopover from '../components/DetailsPopover';
 import React, { useRef, useState } from 'react';
 import {
   Database, FileUp, Zap, CheckCircle, Info, Globe, Lock,
   LayoutGrid, List, Edit2, FolderOpen, HardDrive, FlaskConical,
   X, SlidersHorizontal, ChevronDown, ChevronUp, Search, Scissors, Trash2,
-  FolderTree, Plus, MoreVertical, ScatterChart, Loader2, RefreshCw, Archive
+  FolderTree, Plus, MoreVertical, Loader2, RefreshCw, Archive
 } from 'lucide-react';
 import { mapBackendAnalysisObject } from '../backendWorkspaceModel';
 import { publicErrorMessage } from '../publicError';
@@ -1655,7 +1656,16 @@ export default function Workspace({
   const [newProjectName, setNewProjectName] = useState('');
   const createProjectInFlightRef = useRef(false);
   const [isSubmittingProject, setIsSubmittingProject] = useState(false);
-  const [openMenuId, setOpenMenuId] = useState(null);
+  const analysisCardsRef = useRef(new Map());
+  const analysisHeadingRef = useRef(null);
+  const deleteFocusRef = useRef(null);
+
+  React.useLayoutEffect(() => {
+    const pending = deleteFocusRef.current;
+    if (!pending || currentWs.objects.some(object => object.id === pending.deleted)) return;
+    deleteFocusRef.current = null;
+    (analysisCardsRef.current.get(pending.next) || analysisHeadingRef.current)?.focus();
+  }, [currentWs.objects]);
 
   // Sync active project if workspace changes
   React.useEffect(() => {
@@ -1730,8 +1740,7 @@ export default function Workspace({
     setEditingId(null);
   };
 
-  const handleDeleteObject = (e, objId) => {
-    e.stopPropagation();
+  const handleDeleteObject = (objId) => {
     if (confirmDeleteId !== objId) {
       setConfirmDeleteId(objId);
       return;
@@ -1743,10 +1752,10 @@ export default function Workspace({
       // but right now subsets exist inside the parent's vault file.
     }
     setConfirmDeleteId(null);
-    setOpenMenuId(null);
 
     // 2. App State update
     const remainingObjects = currentWs.objects.filter(o => o.id !== objId);
+    deleteFocusRef.current = { deleted: objId, next: remainingObjects.find(object => object.projectId === activeProjectId)?.id };
     const wasSelected = currentWs.selectedObjectIds?.includes(objId);
     const newSelected = wasSelected
       ? remainingObjects.length > 0 ? [remainingObjects[0].id] : []
@@ -1787,8 +1796,7 @@ export default function Workspace({
     }
   };
 
-  const handleChangeObjectProject = (e, objId, newProjectId) => {
-    e.stopPropagation();
+  const handleChangeObjectProject = (objId, newProjectId) => {
     
     let newSelected = currentWs.selectedObjectIds || [];
     if (newSelected.includes(objId)) {
@@ -1811,6 +1819,7 @@ export default function Workspace({
   const activeProject = currentWs.projects?.find(project => project.id === activeProjectId) || null;
   const canWriteProject = PROJECT_WRITE_ROLES.has(activeProject?.role);
   const canReloadPbmcDemo = selectedObject?.source === 'pbmc3k_demo'
+    && selectedObject?.metadata?.curatedDemo !== true
     && canWriteProject
     && (!selectedObject?.ownerUserId || Number(selectedObject.ownerUserId) === Number(userId));
 
@@ -1855,7 +1864,7 @@ export default function Workspace({
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6">
-        <div className="max-w-5xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-6">
+        <div className="max-w-5xl mx-auto space-y-6">
           <WorkbenchOverview
             activeProject={activeProject}
             selectedObject={selectedObject}
@@ -1874,37 +1883,24 @@ export default function Workspace({
 
           {/* Stats Block */}
           {displayObject && (
-            <div className="animate-in fade-in slide-in-from-bottom-8 duration-700">
-              <div className="flex items-center gap-2 mb-4 px-2 py-1 -ml-2">
-                <Info size={16} className="text-primary group-hover/info:text-white transition-colors" />
-                <h3 className="text-[10px] font-black text-slate-400 group-hover/info:text-slate-300 uppercase tracking-widest transition-colors">
-                  {activeCount > 1
-                    ? `Multi-Select Mode (${activeCount} Selected)`
-                    : `Data Info: ${displayObject.name}`}
-                </h3>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+            <div className="flex flex-wrap items-center justify-between gap-4" aria-label="Dataset summary">
+              <dl className="flex flex-wrap gap-x-8 gap-y-3">
                 {[
-                  { label: 'Cells (Primary)',    value: Number.isFinite(displayObject.cells) ? displayObject.cells.toLocaleString() : 'Unavailable', info: 'Total unique barcodes after filtering.', icon: Database },
-                  { label: 'Features (Primary)', value: Number.isFinite(displayObject.features) ? displayObject.features.toLocaleString() : 'Unavailable', info: 'Number of genes measured per cell.', icon: LayoutGrid },
-                  { label: 'Density',            value: Number.isFinite(displayObject.density) ? `${displayObject.density}%` : 'Unavailable', info: 'Percentage of non-zero entries in the sparse matrix. This value is unavailable when it was not recorded with an older saved version.', icon: ScatterChart },
-                  { label: 'Branch',             value: currentWs.activeBranch.toUpperCase(),                 info: 'Current analytical provenance branch.', icon: FolderTree },
-                ].map((stat, i) => (
-                  <div key={i} className="card min-w-0 p-3 sm:p-4 bg-surface/50 border-border/50 relative flex flex-col justify-center items-center">
-                    <div className="absolute top-2 right-2">
-                      <div className="group/info relative">
-                        <Info size={12} className="text-slate-400 cursor-help" />
-                        <div className="absolute bottom-full right-0 mb-2 w-48 p-2 bg-slate-800 border border-slate-700 rounded-lg text-[10px] text-slate-300 shadow-2xl invisible group-hover/info:visible z-50 pointer-events-none text-center">
-                          {stat.info}
-                        </div>
-                      </div>
-                    </div>
-                    <stat.icon size={18} className="text-textMuted mb-1" />
-                    <div className="text-xl sm:text-2xl font-black text-text mb-1 tracking-tighter text-center break-all">{stat.value}</div>
-                    <div className="text-[10px] font-bold text-text uppercase tracking-widest text-center">{stat.label}</div>
-                  </div>
-                ))}
-              </div>
+                  { label: 'Cells', value: Number.isFinite(displayObject.cells) ? displayObject.cells.toLocaleString() : 'Unavailable' },
+                  { label: 'Features', value: Number.isFinite(displayObject.features) ? displayObject.features.toLocaleString() : 'Unavailable' },
+                ].map(stat => <div key={stat.label}>
+                  <dt className="text-xs text-textMuted">{stat.label}</dt>
+                  <dd className="mt-1 text-xl font-semibold tabular-nums text-text">{stat.value}</dd>
+                </div>)}
+              </dl>
+              <DetailsPopover label="Dataset details">
+                {activeCount > 1 && <p className="mb-2">{activeCount} analyses selected. Counts describe the primary analysis.</p>}
+                <dl className="space-y-2">
+                  <div><dt className="text-textMuted">Matrix density</dt><dd>{Number.isFinite(displayObject.density) ? `${displayObject.density}% non-zero values` : 'Unavailable for this saved analysis'}</dd></div>
+                  <div><dt className="text-textMuted">Branch</dt><dd className="break-words">{currentWs.activeBranch}</dd></div>
+                </dl>
+                <p className="mt-3 text-textMuted">Your live workspace is private. Share saved versions through Runs &amp; Results.</p>
+              </DetailsPopover>
             </div>
           )}
 
@@ -1995,7 +1991,7 @@ export default function Workspace({
           {/* Objects List */}
           <div className="pt-2">
             <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
-              <h3 className="text-lg font-bold text-text flex items-center gap-3">
+              <h3 ref={analysisHeadingRef} tabIndex={-1} className="text-lg font-bold text-text flex items-center gap-3">
                 Saved analyses{' '}
                 <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">
                   {activeProjectObjects.length}
@@ -2049,20 +2045,19 @@ export default function Workspace({
                 return (
                   <div
                     key={obj.id}
-                    onClick={() => { selectObject(obj.id); setOpenMenuId(null); }}
+                    ref={element => { if (element) analysisCardsRef.current.set(obj.id, element); else analysisCardsRef.current.delete(obj.id); }}
+                    onClick={() => selectObject(obj.id)}
                     onKeyDown={event => {
                       if (event.target !== event.currentTarget) return;
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault();
                         selectObject(obj.id);
-                        setOpenMenuId(null);
                       }
                     }}
                     role="group"
                     aria-label={`Saved analysis ${obj.name}. Press Enter or Space to select.`}
                     tabIndex={0}
-                    onMouseLeave={() => setOpenMenuId(null)}
-                    className={`p-5 rounded-xl border transition-colors cursor-pointer group relative flex items-center gap-5 ${
+                    className={`p-4 sm:p-5 rounded-xl border transition-colors cursor-pointer group relative grid grid-cols-[40px_minmax(0,1fr)_44px] items-start gap-3 sm:flex sm:items-center sm:gap-5 ${
                       isSelected
                         ? 'bg-primary/5 border-primary shadow-lg'
                         : 'bg-surface border-border hover:border-slate-700'
@@ -2077,7 +2072,7 @@ export default function Workspace({
 
                     {/* Info */}
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 group/edit h-6">
+                      <div className="flex flex-wrap items-center gap-2 group/edit min-h-6">
                         {editingId === obj.id ? (
                           <input
                             type="text" autoFocus
@@ -2141,37 +2136,27 @@ export default function Workspace({
                     <div className="flex items-center gap-3 flex-shrink-0 relative">
 
                       {isSelected && (
-                        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-black text-text uppercase shadow-sm">
+                        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 border border-primary/20 rounded-full text-[9px] font-black text-text uppercase shadow-sm">
                           <CheckCircle size={10} /> Selected
                         </div>
                       )}
 
                       {/* 3-dot Menu */}
-                      <div className="relative">
-                        <button
-                          onClick={e => {
-                            e.stopPropagation();
-                            setOpenMenuId(openMenuId === obj.id ? null : obj.id);
-                          }}
-                          aria-label="Object options"
-                          className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+                      <div onClick={e => e.stopPropagation()}>
+                        <DetailsPopover
+                          label={<><MoreVertical size={16} aria-hidden="true" /><span className="sr-only">Object options</span></>}
+                          summaryClassName="flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center rounded-lg text-textMuted hover:bg-black/5 hover:text-text transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                          preferredWidth={224}
+                          panelClassName="!p-1.5"
+                          onOpenChange={() => setConfirmDeleteId(null)}
                         >
-                          <MoreVertical size={16} />
-                        </button>
-                        
-                        {openMenuId === obj.id && (
-                          <div 
-                            className="absolute right-0 top-full mt-2 w-48 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 py-1.5 overflow-hidden animate-in fade-in zoom-in-95"
-                            onClick={e => e.stopPropagation()}
-                          >
                             <button
-                              onClick={e => {
-                                e.stopPropagation();
+                              data-close-popover
+                              onClick={() => {
                                 selectObject(obj.id);
                                 setActiveTab('inspect');
-                                setOpenMenuId(null);
                               }}
-                              className="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-slate-700/50 hover:text-white flex items-center gap-2"
+                              className="min-h-11 w-full rounded-lg text-left px-3 py-2 text-sm text-text hover:bg-black/5 flex items-center gap-2"
                             >
                               <Search size={14} /> Inspect Data
                             </button>
@@ -2185,8 +2170,9 @@ export default function Workspace({
                                 {currentWs.projects.map(p => (
                                   <button
                                     key={p.id}
-                                    onClick={e => { handleChangeObjectProject(e, obj.id, p.id); setOpenMenuId(null); }}
-                                    className="w-full text-left px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-700/50 hover:text-white flex items-center justify-between"
+                                    data-close-popover
+                                    onClick={() => handleChangeObjectProject(obj.id, p.id)}
+                                    className="min-h-11 w-full rounded-lg text-left px-3 py-2 text-sm text-textMuted hover:bg-black/5 hover:text-text flex items-center justify-between"
                                   >
                                     {p.name}
                                     {obj.projectId === p.id && <CheckCircle size={12} className="text-primary"/>}
@@ -2202,30 +2188,30 @@ export default function Workspace({
                                 {confirmDeleteId === obj.id ? (
                                   <div className="flex gap-1 px-2 py-1">
                                     <button
-                                      onClick={e => handleDeleteObject(e, obj.id)}
-                                      className="flex-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold py-1.5 rounded"
+                                      data-close-popover
+                                      onClick={() => handleDeleteObject(obj.id)}
+                                      className="btn btn-primary flex-1 !bg-danger"
                                     >
                                       Confirm
                                     </button>
                                     <button
-                                      onClick={e => { e.stopPropagation(); setConfirmDeleteId(null); }}
-                                      className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold py-1.5 rounded"
+                                      onClick={() => setConfirmDeleteId(null)}
+                                      className="btn btn-secondary flex-1"
                                     >
                                       Cancel
                                     </button>
                                   </div>
                                 ) : (
                                   <button
-                                    onClick={e => handleDeleteObject(e, obj.id)}
-                                    className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 flex items-center gap-2"
+                                    onClick={() => handleDeleteObject(obj.id)}
+                                    className="min-h-11 w-full rounded-lg text-left px-3 py-2 text-sm text-danger hover:bg-danger/10 flex items-center gap-2"
                                   >
                                     <Trash2 size={14} /> Delete Object
                                   </button>
                                 )}
                               </>
                             )}
-                          </div>
-                        )}
+                        </DetailsPopover>
                       </div>
                     </div>
                   </div>

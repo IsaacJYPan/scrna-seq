@@ -2,7 +2,7 @@ import './analysisUi.css';
 import PageHeader from '../components/PageHeader';
 import React, { useState } from 'react';
 import { BarChart3, AlertTriangle, FileText } from 'lucide-react';
-import Plot from '../components/Plot';
+import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import { useRestoredReduction } from '../hooks/useRestoredReduction';
@@ -14,7 +14,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
   const npcs = params.npcs;
   const setNpcs = (v) => setParam('npcs', v);
   // Separate local state for the input so every keystroke doesn't change ipcContext/endpoint
-  const [inputNpcs, setInputNpcs] = React.useState(npcs);
+  const [inputNpcs, setInputNpcs] = React.useState(String(npcs));
   const parsedNpcs = Number(inputNpcs);
   const pcaValidationError = !Number.isInteger(parsedNpcs) || parsedNpcs < 5 || parsedNpcs > 100
     ? 'Number of PCs must be a whole number from 5 to 100.'
@@ -46,11 +46,23 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
       setResult(data);
       const actualNpcs = Number(data.result.npcs);
       if (actualNpcs >= 5 && actualNpcs <= 100) {
-        setNpcs(actualNpcs); setInputNpcs(actualNpcs);
+        setNpcs(actualNpcs); setInputNpcs(String(actualNpcs));
       }
     }
   });
-  const runPCA = () => { restored.invalidate(); runStep(); };
+  const runPCA = () => {
+    if (pcaValidationError) return;
+    const requestedNpcs = parsedNpcs;
+    setNpcs(requestedNpcs);
+    restored.invalidate();
+    runStep(false, `/pca?npcs=${requestedNpcs}&seed=${pcaSeed}`, {
+      operation: 'pca',
+      step: 'pca',
+      parentIds: normProvId ? [normProvId] : [],
+      useCache: true,
+      cacheParams: { type: 'pca', npcs: requestedNpcs, seed: pcaSeed || 'random' },
+    });
+  };
 
   if (!datasetInfo) {
     return (
@@ -85,7 +97,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
     y: stdevs,
     marker: { color: '#6366f1', size: 5 },
     line: { color: '#6366f1', width: 2 },
-    hovertemplate: '<b>PC%{x}</b><br>Stdev: %{y:.3f}<extra></extra>'
+    hovertemplate: '<b>Principal component %{x}</b><br>Standard deviation: %{y:.2f}<extra></extra>'
   }];
 
   const isDark = theme === 'dark';
@@ -96,6 +108,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
     margin: { l: 48, r: 12, t: 10, b: 48 },
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: plotText, size: 12 },
+    hoverlabel: getPlotHoverStyle(theme),
     xaxis: { title: { text: 'Principal Component' }, automargin: true, gridcolor: plotGrid, zeroline: false },
     yaxis: { title: { text: 'Standard Deviation' }, automargin: true, gridcolor: plotGrid, zeroline: false },
     showlegend: false
@@ -144,10 +157,16 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
         No PCA reduction is present in this analysis. Run PCA to create one.
       </p>}
       {result?.result?.restored && <p role="note" className="text-sm text-textMuted mb-4">
-        Showing the existing PCA from this analysis; no computation was run.
-        {result.result.settings?.seed != null && ` Seed: ${result.result.settings.seed}.`}
-        {!Object.keys(result.result.settings || {}).length && ' Original calculation settings are unavailable.'}
+        Showing the saved PCA result.
       </p>}
+      {result?.result?.restored && <details className="mb-4 text-sm text-textMuted">
+        <summary className="w-fit cursor-pointer rounded px-1 py-1 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Original computation settings</summary>
+        <p className="mt-2 pl-1">
+          {Object.keys(result.result.settings || {}).length
+            ? <>{result.result.settings.npcs != null && `Components: ${result.result.settings.npcs}. `}{result.result.settings.seed != null && `Seed: ${result.result.settings.seed}.`}</>
+            : 'Settings were not recorded for this PCA result.'}
+        </p>
+      </details>}
 
       {/* Parameters */}
       {!result && !running && (
@@ -159,16 +178,12 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
             <label htmlFor="pca-npcs" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of PCs</label>
             <input
               id="pca-npcs"
-              type="number" value={inputNpcs} min={5} max={100}
+              type="number" value={inputNpcs} min={5} max={100} step={1}
               onChange={e => {
-                const value = e.target.value === '' ? '' : Number(e.target.value);
-                setInputNpcs(value);
+                const rawValue = e.target.value;
+                const value = Number(rawValue);
+                setInputNpcs(rawValue);
                 if (Number.isInteger(value) && value >= 5 && value <= 100) setNpcs(value);
-              }}
-              onBlur={e => {
-                const v = parseInt(e.target.value) || 50;
-                setInputNpcs(v);
-                setNpcs(v);
               }}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-primary"
               aria-invalid={Boolean(pcaValidationError)}
@@ -191,21 +206,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
 
       {result && (
         <div className="space-y-6">
-          {/* Summary stats */}
-          <div className="analysis-metrics">
-            <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-xs text-textMuted uppercase font-bold mb-1">Components</div>
-              <div className="text-2xl font-black text-text">{stdevs.length}</div>
-            </div>
-            <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-xs text-textMuted uppercase font-bold mb-1">Top PC Stdev</div>
-              <div className="text-2xl font-black text-primary">{stdevs[0]?.toFixed(2) || '—'}</div>
-            </div>
-            <div className="card p-4 bg-black/5 dark:bg-black/20 text-center shadow-inner">
-              <div className="text-xs text-textMuted uppercase font-bold mb-1">PC10 Stdev</div>
-              <div className="text-2xl font-black text-slate-400">{stdevs[9]?.toFixed(2) || '—'}</div>
-            </div>
-          </div>
+          <p className="text-sm text-textMuted">{stdevs.length} principal components computed</p>
 
           {/* View tabs */}
           <div className="flex flex-wrap bg-black/5 dark:bg-slate-800 rounded-lg p-1 border border-border w-fit max-w-full">
@@ -245,7 +246,7 @@ export default function PCA({ callApi, datasetInfo, currentProvId: _currentProvI
               <div className="h-[320px] sm:h-[400px]">
                 <Plot preferSvg useResizeHandler className="w-full h-full"
                   data={result.result.trace_data.map(trace => ({ ...trace, type: 'scatter', mode: 'markers',
-                    marker: { size: 4 }, hovertemplate: '%{x:.2f}, %{y:.2f}<extra>%{fullData.name}</extra>' }))}
+                    marker: { size: 4 }, hovertemplate: '<b>%{fullData.name}</b><extra></extra>' }))}
                   layout={{ ...elbowLayout,
                     xaxis: { ...elbowLayout.xaxis, title: { text: 'PC 1' } },
                     yaxis: { ...elbowLayout.yaxis, title: { text: 'PC 2' }, scaleanchor: 'x', scaleratio: 1 } }}

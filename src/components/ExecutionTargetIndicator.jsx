@@ -25,8 +25,7 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projec
   const disconnected = target?.sshTunnel?.state && target.sshTunnel.state !== 'connected';
   return <><div aria-label="Execution target" className="shrink-0 h-12 flex items-center justify-between gap-3 border-b border-border bg-surface px-4 text-xs text-text">
     <div className="min-w-0 flex-1">
-      <span className="block truncate font-medium" title={endpoint}>Compute: {target?.name || endpoint}</span>
-      <span className="block truncate text-textMuted" title="Availability of custom R on this server">{runtime}</span>
+      <span className="block truncate font-medium">{target?.name || 'Analysis server'}</span>
       {target?.sshTunnel && <span role="status" className={`block truncate ${disconnected ? 'text-amber-800 dark:text-amber-200' : 'text-textMuted'}`}>
         {disconnected ? 'SSH tunnel disconnected' : 'SSH tunnel connected'}
       </span>}
@@ -35,7 +34,8 @@ export default function ExecutionTargetIndicator({ deploymentPolicy = {}, projec
     <DetailsPopover label="Connection details" className="shrink-0">
       <p className="font-medium break-words">Server: {target?.name || endpoint}</p>
       {target && <p className="mt-1 break-all text-textMuted">{endpoint}</p>}
-      <p className="mt-3">{runtime}. This describes custom R access; standard analysis tools have their own prerequisites.</p>
+      <p className="mt-3 font-medium">{runtime}</p>
+      <p className="mt-1 text-textMuted">Availability of advanced R tools on this server.</p>
       <p className="mt-3">Analysis jobs, recipes, and R commands run on this server. Your browser displays bounded previews and figures.</p>
       {disconnected && <p className="mt-3 text-amber-800 dark:text-amber-200">SSH tunnel disconnected. Reconnect through server settings.</p>}
       {blocked && <p role="status" className="mt-3 text-amber-800 dark:text-amber-200">New server work is blocked until this connection is restored. Existing work is not rerun automatically; reconnect to inspect its retained status.</p>}

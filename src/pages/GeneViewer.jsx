@@ -4,7 +4,7 @@ import './analysisUi.css';
 import PageHeader from '../components/PageHeader';
 import React, { useState } from 'react';
 import { Search, BarChart3, Play, Layers, ChevronDown, ChevronRight, ImageDown } from 'lucide-react';
-import Plot from '../components/Plot';
+import Plot, { getPlotHoverStyle } from '../components/Plot';
 import FigureSavePanel from '../components/FigureSavePanel';
 import UmapPrerequisiteNotice, { hasUmapResult } from '../components/UmapPrerequisiteNotice';
 
@@ -22,11 +22,6 @@ const GENE_CATEGORIES = {
 
 const CLUSTERS = ['T-Cell', 'B-Cell', 'Monocyte', 'NK Cell', 'Dendritic', 'Platelet'];
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#22c55e', '#eab308'];
-
-const hoverStyle = {
-  bgcolor: '#1e293b', bordercolor: '#475569',
-  font: { color: '#e2e8f0', size: 12, family: 'Inter, system-ui' }
-};
 
 function formatViolinData(data) {
   if (!data) return [];
@@ -68,7 +63,7 @@ function formatFeaturePlot(data, theme) {
       showscale: true,
       colorbar: { thickness: 15, tickfont: { color: colorbarText }, titlefont: { color: colorbarText } }
     },
-    hovertemplate: `<b>${data.gene}</b><br>Expr: %{marker.color:.2f}<extra></extra>`
+    hovertemplate: `<b>${data.gene}</b><br>Expression: %{marker.color:.2f}<extra></extra>`
   }];
 }
 
@@ -291,7 +286,7 @@ export default function GeneViewer({ datasetInfo, pipelineState, userEmail, obje
                     plot_bgcolor: 'transparent',
                     font: { color: plotText, size: 12 },
                     margin: { l: 48, r: viewMode === 'feature' ? 64 : 12, t: 20, b: 64 },
-                    hoverlabel: hoverStyle,
+                    hoverlabel: getPlotHoverStyle(theme),
                     ...(viewMode === 'violin' ? {
                       xaxis: { gridcolor: plotGrid, title: { text: 'Cluster' }, automargin: true },
                       yaxis: { title: { text: 'Expression' }, automargin: true, gridcolor: plotGrid },

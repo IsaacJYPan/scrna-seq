@@ -1,7 +1,7 @@
 import PageHeader from '../components/PageHeader';
 import React, { useState, useCallback, useEffect } from 'react';
 import { Layers, ListFilter, AlertTriangle, ImageDown, FileText } from 'lucide-react';
-import Plot, { supportsWebGL } from '../components/Plot';
+import Plot, { getPlotHoverStyle, supportsWebGL } from '../components/Plot';
 import { useTabParams } from '../hooks/useTabParams';
 import { usePipelineStep } from '../hooks/usePipelineStep';
 import FigureSavePanel from '../components/FigureSavePanel';
@@ -22,7 +22,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     nNeighbors: 30,
     minDist: 0.3,
   });
-  const { nComponents: storedNComponents, nNeighbors, minDist } = params;
+  const { nComponents: storedNComponents, nNeighbors: storedNNeighbors, minDist: storedMinDist } = params;
+  const [nNeighborsInput, setNNeighborsInput] = useState(String(storedNNeighbors));
+  const [minDistInput, setMinDistInput] = useState(String(storedMinDist));
   // Plotly's scatter3d renderer has no SVG equivalent. Never mount or request
   // it in a renderer without WebGL; a saved 3D preference safely falls back to
   // the usable 2D view instead.
@@ -31,6 +33,23 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   // dims defaults to the PC count used for clustering (from pipelineState)
   const [clusterParams] = useTabParams('cluster', userEmail, objectId, { dims: isPbmcTutorial ? 10 : 15 });
   const [dims, setDims] = useState(clusterParams.dims);
+  const [dimsInput, setDimsInput] = useState(String(clusterParams.dims));
+  const parsedNNeighbors = Number(nNeighborsInput);
+  const parsedMinDist = Number(minDistInput);
+  const parsedDims = Number(dimsInput);
+  const nNeighborsValid = Number.isInteger(parsedNNeighbors) && parsedNNeighbors >= 2 && parsedNNeighbors <= 100;
+  const minDistValid = minDistInput.trim() !== '' && Number.isFinite(parsedMinDist) && parsedMinDist >= 0 && parsedMinDist <= 1;
+  const dimsValid = Number.isInteger(parsedDims) && parsedDims >= 1 && parsedDims <= 100;
+  const umapValidationError = !nNeighborsValid
+    ? 'Number of neighbors must be a whole number from 2 to 100.'
+    : !minDistValid
+      ? 'Minimum distance must be from 0 to 1.'
+      : !dimsValid
+        ? 'Input dimensions must be a whole number from 1 to 100.'
+        : null;
+  const nNeighbors = nNeighborsValid ? parsedNNeighbors : storedNNeighbors;
+  const minDist = minDistValid ? parsedMinDist : storedMinDist;
+  const currentDims = dimsValid ? parsedDims : dims;
   const [base64Image, setBase64Image] = useState(null);
   const [loadingBase64, setLoadingBase64] = useState(false);
   const cellCount = Number(datasetInfo?.cells) || 0;
@@ -48,13 +67,13 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   // Pipeline step hook for state and cache-checking
   const { running, error, setResult, runStep } = usePipelineStep({
     callApi,
-    endpoint: `/umap?dims=${dims}&n_components=${nComponents}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`,
+    endpoint: `/umap?dims=${currentDims}&n_components=${nComponents}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`,
     ipcContext: {
       operation: 'umap',
       step: 'umap',
       parentIds: umapParentIds,
       useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nComponents, n_neighbors: nNeighbors, min_dist: minDist, seed: umapSeed || 'random' }
+      cacheParams: { type: 'umap', dims: currentDims, n_components: nComponents, n_neighbors: nNeighbors, min_dist: minDist, seed: umapSeed || 'random' }
     },
     readyToHydrate: !!(datasetInfo && pipelineState?.pca),
     sessionReady,
@@ -90,13 +109,21 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     }
   }, [pipelineState?.clusterDims]);
 
+  useEffect(() => setNNeighborsInput(String(storedNNeighbors)), [storedNNeighbors]);
+  useEffect(() => setMinDistInput(String(storedMinDist)), [storedMinDist]);
+  useEffect(() => setDimsInput(String(dims)), [dims]);
+
   // In-memory UI cache dictionary to enable zero-latency dimension toggling
   const [cachedDims, setCachedDims] = useState({});
   const contextKey = JSON.stringify([userEmail, objectId, rSessionId, sessionReady]);
   const runGeneration = React.useRef(0);
   const currentReductionComponents = React.useRef(null);
   const settingsKeyFor = (values) => JSON.stringify([values.dims, values.nNeighbors, values.minDist, umapSeed, rSessionId, pcaProvId, clusterProvId]);
-  const settingsKey = settingsKeyFor({ dims, nNeighbors, minDist });
+  const settingsKey = settingsKeyFor({
+    dims: dimsValid ? parsedDims : dimsInput,
+    nNeighbors: nNeighborsValid ? parsedNNeighbors : nNeighborsInput,
+    minDist: minDistValid ? parsedMinDist : minDistInput,
+  });
   useEffect(() => {
     // Drop in-memory UI cache if clustering parameters change
     setCachedDims({});
@@ -119,6 +146,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       const restoredNeighbors = Number(settings.n_neighbors) || nNeighbors;
       const restoredMinDist = Number.isFinite(settings.min_dist) ? settings.min_dist : minDist;
       setDims(restoredDims);
+      setDimsInput(String(restoredDims));
+      setNNeighborsInput(String(restoredNeighbors));
+      setMinDistInput(String(restoredMinDist));
       setParams(previous => ({ ...previous, nComponents: viewComponents,
         nNeighbors: restoredNeighbors, minDist: restoredMinDist }));
       const restoredKey = settingsKeyFor({ dims: restoredDims, nNeighbors: restoredNeighbors, minDist: restoredMinDist });
@@ -129,17 +159,23 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
   });
 
   const runUMAP = useCallback(async () => {
+    if (umapValidationError) return;
+    const runDims = parsedDims;
+    const runNeighbors = parsedNNeighbors;
+    const runMinDist = parsedMinDist;
+    setDims(runDims);
+    setParams(previous => ({ ...previous, nNeighbors: runNeighbors, minDist: runMinDist }));
     invalidateRestored();
     const generation = ++runGeneration.current;
     const requestedComponents = nComponents;
     const nc = !canUse3D && requestedComponents === 3 ? 2 : requestedComponents;
-    const ep = `/umap?dims=${dims}&n_components=${nc}&n_neighbors=${nNeighbors}&min_dist=${minDist}&seed=${umapSeed}`;
+    const ep = `/umap?dims=${runDims}&n_components=${nc}&n_neighbors=${runNeighbors}&min_dist=${runMinDist}&seed=${umapSeed}`;
     const ipc = {
       operation: 'umap',
       step: 'umap',
       parentIds: umapParentIds,
       useCache: true,
-      cacheParams: { type: 'umap', dims, n_components: nc, n_neighbors: nNeighbors, min_dist: minDist, seed: umapSeed || 'random' }
+      cacheParams: { type: 'umap', dims: runDims, n_components: nc, n_neighbors: runNeighbors, min_dist: runMinDist, seed: umapSeed || 'random' }
     };
 
     let data = null;
@@ -155,7 +191,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
       currentReductionComponents.current = nc;
       setCachedDims(prev => ({ ...prev, [nc]: { ...data, settingsKey, contextKey } }));
     }
-  }, [runStep, dims, nComponents, nNeighbors, minDist, umapSeed, umapParentIds, canUse3D, settingsKey, contextKey, invalidateRestored]);
+  }, [runStep, parsedDims, parsedNNeighbors, parsedMinDist, nComponents, umapSeed, umapParentIds, canUse3D, settingsKey, contextKey, invalidateRestored, umapValidationError, setParams]);
 
   const is2D = nComponents === 2;
 
@@ -177,11 +213,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           type: useSvg2D ? 'scatter' : 'scattergl',
           name: newName,
           marker: { size: 4, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
-          hovertemplate: `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>`,
+          hovertemplate: '<b>%{fullData.name}</b><extra></extra>',
+          hoverlabel: getPlotHoverStyle(theme),
         };
       })
       : [];
-  }, [cachedDims, activeAnnotations, useSvg2D]);
+  }, [cachedDims, activeAnnotations, useSvg2D, theme]);
 
   const traces3D = React.useMemo(() => {
     const dataObj = cachedDims[3];
@@ -198,11 +235,12 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           type: 'scatter3d',
           name: newName,
           marker: { size: 3, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 1 },
-          hovertemplate: `<b>${newName}</b><br>UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<br>UMAP3: %{z:.2f}<extra></extra>`,
+          hovertemplate: '<b>%{fullData.name}</b><extra></extra>',
+          hoverlabel: getPlotHoverStyle(theme),
         };
       })
       : [];
-  }, [cachedDims, activeAnnotations]);
+  }, [cachedDims, activeAnnotations, theme]);
 
   // Traces corresponding to the actively viewed dimension
   const activeTraces = is2D ? traces2D : traces3D;
@@ -242,8 +280,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
     xaxis: { title: { text: 'UMAP 1' }, automargin: true, showgrid: false, zeroline: false, constrain: 'domain' },
     yaxis: { title: { text: 'UMAP 2' }, automargin: true, showgrid: false, zeroline: false, scaleanchor: 'x', scaleratio: 1 },
     showlegend: false,
-    hovermode: 'closest'
-  }), [plotText]);
+    hovermode: 'closest',
+    hoverlabel: getPlotHoverStyle(theme),
+  }), [plotText, theme]);
 
   // layout3D is memoized with NO dependencies to ensure perfect stability.
   // By keeping this object reference the same for the entire life of the mount,
@@ -305,7 +344,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
           )}
           <button
             onClick={() => runUMAP()}
-            disabled={running || restored.loading || !pipelineState?.pca}
+            disabled={running || restored.loading || !pipelineState?.pca || Boolean(umapValidationError)}
             className={`btn ${result && resultNComponents === nComponents
                 ? 'btn-secondary border-primary text-primary'
                 : 'btn-primary'
@@ -339,12 +378,17 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
         {restored.error} <button onClick={restored.retry} className="underline">Retry loading result</button>
       </div>}
       {displayedResult?.result?.restored && <p role="note" className="text-sm text-textMuted mb-4">
-        Showing the existing UMAP from this analysis; no computation was run.
-        {displayedResult.result.settings?.dims != null && ` Input PCs: ${displayedResult.result.settings.dims}.`}
-        {displayedResult.result.settings?.seed != null && ` Seed: ${displayedResult.result.settings.seed}.`}
-        {!Object.keys(displayedResult.result.settings || {}).length && ' Original calculation settings are unavailable.'}
+        Showing the saved UMAP result.
         {displayedResult.projectedFrom3D && ' Showing the first two coordinates of the saved 3D embedding.'}
       </p>}
+      {displayedResult?.result?.restored && <details className="mb-4 text-sm text-textMuted">
+        <summary className="w-fit cursor-pointer rounded px-1 py-1 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">Original computation settings</summary>
+        <p className="mt-2 pl-1">
+          {Object.keys(displayedResult.result.settings || {}).length
+            ? <>{displayedResult.result.settings.dims != null && `Input PCs: ${displayedResult.result.settings.dims}. `}{displayedResult.result.settings.n_neighbors != null && `Neighbors: ${displayedResult.result.settings.n_neighbors}. `}{displayedResult.result.settings.min_dist != null && `Minimum distance: ${displayedResult.result.settings.min_dist}. `}{displayedResult.result.settings.seed != null && `Seed: ${displayedResult.result.settings.seed}.`}</>
+            : 'Settings were not recorded for this UMAP result.'}
+        </p>
+      </details>}
       {displayedResult?.result?.sampled && <p role="note" className="text-sm text-textMuted mb-4">
         Preview shows {displayedResult.result.n_points?.toLocaleString()} of {displayedResult.result.n_cells?.toLocaleString()} cells.
         {displayedResult.result.clusters_truncated && ' Some cell groups are omitted by the preview limit.'}
@@ -390,8 +434,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <label htmlFor="umap-neighbors" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Number of Neighbors</label>
             <input
               id="umap-neighbors"
-              type="number" value={nNeighbors} min={5} max={100}
-              onChange={e => setParam('nNeighbors', parseInt(e.target.value))}
+              type="number" value={nNeighborsInput} min={2} max={100} step={1}
+              aria-invalid={!nNeighborsValid}
+              onChange={e => setNNeighborsInput(e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
             <p className="text-[10px] text-textMuted mt-1">Local vs global structure</p>
@@ -400,8 +445,9 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <label htmlFor="umap-dist" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Minimum Distance</label>
             <input
               id="umap-dist"
-              type="number" value={minDist} min={0.01} max={1.0} step={0.05}
-              onChange={e => setParam('minDist', parseFloat(e.target.value))}
+              type="number" value={minDistInput} min={0} max={1.0} step={0.05}
+              aria-invalid={!minDistValid}
+              onChange={e => setMinDistInput(e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
             <p className="text-[10px] text-textMuted mt-1">Packing density</p>
@@ -410,13 +456,15 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
             <label htmlFor="umap-dims" className="block text-xs text-textMuted mb-1.5 uppercase tracking-wide font-bold">Input Dimensions (PCs)</label>
             <input
               id="umap-dims"
-              type="number" value={dims} min={5} max={100}
-              onChange={e => setDims(parseInt(e.target.value))}
+              type="number" value={dimsInput} min={1} max={100} step={1}
+              aria-invalid={!dimsValid}
+              onChange={e => setDimsInput(e.target.value)}
               className="w-full bg-surface border border-border rounded p-2.5 text-sm text-text focus:outline-none focus:border-blue-500"
             />
             <p className="text-[10px] text-textMuted mt-1">From PCA</p>
           </div>
         </div>
+        {umapValidationError && <p role="alert" className="mt-4 text-sm text-danger">{umapValidationError}</p>}
       </div>
 
       {/* Plot area */}
