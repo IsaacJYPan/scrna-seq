@@ -8,6 +8,10 @@ function privateKernelRoutes({db,provider,requireAuth,serviceOptions}) {
   const route=callback=>async(req,res)=>{res.setHeader('Cache-Control','private, no-store');try{res.json(await callback(req));}catch(error){const status=error.status||(/NOT_FOUND/.test(error.code||'')?404:['FORBIDDEN','PROJECT_ROLE_REQUIRED'].includes(error.code)?403:error.code==='R_ENVIRONMENT_MISMATCH'?409:error.code==='R_ENVIRONMENT_INVALID'?400:error.code==='R_ENVIRONMENT_UNAVAILABLE'?503:500); const safe=error.publicSafeHandlerError===true||status<500;res.status(status).json({error:safe?error.message:'Private R sessions are unavailable. Check the session state before continuing.',...(safe&&error.code?{code:error.code}:{})});}};
   router.get('/:projectId',route(req=>service.list(req.user.id,req.params.projectId,req.query)));
   router.post('/:projectId',route(req=>service.start(req.user.id,req.params.projectId,req.body)));
+  router.get('/:projectId/start-submissions/:requestId',route(req=>service.submission('start',req.user.id,req.params.projectId,req.params.requestId)));
+  router.get('/:projectId/restart-submissions/:requestId',route(req=>service.submission('restart',req.user.id,req.params.projectId,req.params.requestId)));
+  router.get('/:projectId/:kernelId/execution-submissions/:requestId',route(req=>service.submission('execution',req.user.id,req.params.projectId,req.params.requestId,req.params.kernelId)));
+  router.get('/:projectId/:kernelId/publication-submissions/:requestId',route(req=>service.submission('publication',req.user.id,req.params.projectId,req.params.requestId,req.params.kernelId)));
   router.get('/:projectId/:kernelId',route(req=>service.get(req.user.id,req.params.projectId,req.params.kernelId)));
   router.post('/:projectId/:kernelId/stop',route(req=>service.stop(req.user.id,req.params.projectId,req.params.kernelId)));
   router.post('/:projectId/:kernelId/interrupt',route(req=>service.interrupt(req.user.id,req.params.projectId,req.params.kernelId,req.body)));
