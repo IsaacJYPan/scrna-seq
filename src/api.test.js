@@ -409,6 +409,8 @@ describe('API Client (electronAPI)', () => {
     localStorage.setItem('traceomics_session_id', 'session-123');
     localStorage.setItem('client_id', 'client-123');
     localStorage.setItem('traceomics_ws_user@example.com', 'workspace-state');
+    // Logout must clear private locators even before the console is mounted.
+    localStorage.setItem('traceomics_private_r_submission_recovery_v1', JSON.stringify({ records: [{ requestId: 'retained-private-request' }] }));
 
     expect(electronAPI.getCurrentUser()).toEqual({ email: 'user@example.com' });
 
@@ -425,6 +427,7 @@ describe('API Client (electronAPI)', () => {
     expect(localStorage.getItem('traceomics_auth_extra')).toBeNull();
     expect(localStorage.getItem('traceomics_session_id')).toBeNull();
     expect(localStorage.getItem('client_id')).toBeNull();
+    expect(localStorage.getItem('traceomics_private_r_submission_recovery_v1')).toBeNull();
     expect(localStorage.getItem('traceomics_ws_user@example.com')).toBe('workspace-state');
 
     vi.resetModules();
