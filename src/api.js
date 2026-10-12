@@ -3,6 +3,9 @@
 import { publicErrorMessage } from './publicError';
 import { withExecutionTarget } from './runtime/executionTarget';
 import { clearSubmissionRecovery, submitWithRecovery } from './executions/submissionRecovery';
+// Register private-R storage cleanup before any logout or account switch,
+// including when the console has not been opened in this renderer.
+import './executions/privateSubmissionRecovery';
 
 // API base URL is configured via Vite env (VITE_API_BASE_URL).
 // When unset, fall back to same-origin relative requests (empty base),

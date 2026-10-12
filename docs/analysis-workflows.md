@@ -30,24 +30,43 @@ and a server with submission-receipt support. Open windows coordinate their
 saved identifiers before admitting work, so an unresolved submission in another
 window also blocks a new submission in that project.
 Earlier runs without receipts remain available in execution history. Private R
-commands use their own session journal; recovery of a command whose submission
-response was lost remains separate from these analysis-job receipts.
+uses separate request receipts and its own ordered session journal, as described
+below.
 
 ## Reopen a private R session
 
 Opening **Advanced analysis → Private R console** inspects your workspace's
-existing session, latest 30 journal entries, and most recent command output.
+selected session, latest 30 journal entries, and selected recorded command output.
 Reconnecting to the same selected server checks that session again using read-only
 requests. **Refresh session status** performs the same inspection. New commands
 and object saves require a fresh confirmation that the session is ready; a cached
 ready label alone does not enable execution.
 
-If a command or save acknowledgment was lost and its exact receipt is not known,
-a ready status cannot establish which submission completed. Further commands and
-saves remain blocked in the open console. Inspect the retained journal and saved
-outputs before explicitly stopping or restarting the session; confirmed memory
-discard clears that pending state. Recovery of these pending request identifiers
-after closing the app is not yet available.
+Before starting a session, running a cell, saving an output, or restarting, the
+app saves that request's identifier and payload hash locally. These bounded
+locators survive closing the whole app. Reopening checks the original UUID using
+read-only requests and restores the matching kernel, command, publication version,
+or linked restart generation. Closing the client does not cancel accepted server
+work, and recovery does not replay R or repeat serialization.
+
+The **Exact private R requests** panel shows retained identifiers and provides
+**Check exact receipt** controls. A ready session or a newer journal entry cannot
+confirm an earlier request. Unconfirmed and unfinished requests block more
+commands and saves, including in another window using the same account and
+server. A missing receipt keeps its identifier because work may still arrive.
+Inspect the receipt, journal, and saved outputs before explicitly stopping or
+restarting a known session. Confirmed memory discard clears unfinished commands
+and saves for that generation. A restart keeps its own identifier until the
+replacement receipt is resolved. **Forget unconfirmed identifier** requires an explicit warning
+acknowledgment because forgetting can permit duplicate work.
+
+Private R retains at most 24 request locators in 32 KiB, plus one session/command
+selection. Source, bindings, parameters, results, credentials, and server paths
+are excluded. Logout clears these locators; account, installation, execution
+target, and project access checks prevent using them in another scope. Recovery
+requires writable browser storage, Web Locks, and private R receipt support on
+the selected server. An unavailable receipt keeps further work blocked until
+the request is checked or explicitly discarded.
 
 If inspection fails, the console retains the last confirmed output and edited
 cells while indicating that current memory availability is unknown. A confirmed

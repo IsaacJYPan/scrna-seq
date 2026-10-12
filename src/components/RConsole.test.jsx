@@ -3,9 +3,17 @@ import {act,fireEvent,render,screen,waitFor,within} from '@testing-library/react
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import RConsole from './RConsole';
 import * as api from '../executions/privateKernelApi';
+import * as recovery from '../executions/privateSubmissionRecovery';
 import {listArtifactVersions,getArtifactVersion,previewArtifactVersion} from '../artifacts/artifactApi';
 vi.mock('../executions/privateKernelApi',()=>({getPrivateRIdentity:vi.fn(),listPrivateRKernels:vi.fn(),startPrivateRKernel:vi.fn(),getPrivateRKernel:vi.fn(),executePrivateRKernel:vi.fn(),listPrivateRExecutions:vi.fn(),getPrivateRExecution:vi.fn(),stopPrivateRKernel:vi.fn(),interruptPrivateRKernel:vi.fn(),restartPrivateRKernel:vi.fn(),getPrivateRRestart:vi.fn(),publishPrivateROutput:vi.fn(),listPrivateRPublications:vi.fn()}));
 vi.mock('../artifacts/artifactApi',()=>({listArtifactVersions:vi.fn(),getArtifactVersion:vi.fn(),previewArtifactVersion:vi.fn(),artifactImageUrl:(project,id)=>`/api/artifact-versions/${project}/${id}/image`}));
+const recoveryState=vi.hoisted(()=>({snapshot:null,listeners:new Set()}));
+vi.mock('../executions/privateSubmissionRecovery',()=>({
+  getPrivateRecoverySnapshot:()=>recoveryState.snapshot,
+  subscribePrivateRecovery:listener=>{recoveryState.listeners.add(listener);return()=>recoveryState.listeners.delete(listener);},
+  ensurePrivateRecovery:vi.fn(),reconcilePrivateSubmissions:vi.fn(),submitPrivateWithRecovery:vi.fn(),
+  selectPrivateRecoveredSession:vi.fn(),clearKernelPrivateRecovery:vi.fn(),checkPrivateSubmissionReceipt:vi.fn(),forgetPrivateSubmission:vi.fn(),
+}));
 const environment={rVersion:'4.5.3',manifestSha256:'a'.repeat(64)};
 const kernel={id:'pk_one',status:'ready',generation:'b'.repeat(64),environment,inputs:[],resources:{cpuLimit:1,memoryBytes:1024**3,idleTimeoutSeconds:900},target:{id:'private-r-kernel'},memoryState:'available'};
 const entry={id:'pex_one',order:1,status:'completed',source:'n <- 3',sourceSha256:'c'.repeat(64),completionKnown:true,result:{stdout:'[1] 3\n',warnings:['R warning'],error:null,tables:[{name:'Cells',columns:['count','condition'],rows:[[3,'<script>inert</script>']]}],figures:[{mimeType:'image/png',data:'YWJj',sha256:'d'.repeat(64)}]}};
@@ -16,6 +24,13 @@ const controlProps={...publishingProps,deploymentPolicy:{...publishingProps.depl
 const savedVersion={versionId:'av_saved',artifactId:'art_saved',name:'Saved cells',versionNumber:1,format:{id:'org.r-project.rds',version:'1'},sha256:'e'.repeat(64),ownerId:'1',canReplace:true,reference:{artifactId:'art_saved',versionId:'av_saved',projectId:'project_one',sha256:'e'.repeat(64)},provenance:{sourceExecutionId:'pex_save',environment}};
 const publication={id:'pub_one',status:'completed',type:'object',name:'Saved cells',kernelId:'pk_one',generation:kernel.generation,sourceExecutionId:'pex_save',order:2,sourceSha256:'f'.repeat(64),lineage:{environment,inputs:[],sourceVersions:[{id:'pex_one',order:1,sha256:entry.sourceSha256,status:'completed'}],replay:{complete:false,issues:['Untracked intermediate state']}}};
 beforeEach(()=>{vi.resetAllMocks();api.getPrivateRIdentity.mockResolvedValue({schema:'traceomics.installation.v1',installationId:'svc_'+'1'.repeat(32),userId:1});api.listPrivateRKernels.mockResolvedValue({items:[]});api.startPrivateRKernel.mockResolvedValue(kernel);api.getPrivateRKernel.mockResolvedValue(kernel);api.executePrivateRKernel.mockResolvedValue(entry);api.listPrivateRExecutions.mockResolvedValue({items:[entry]});api.getPrivateRExecution.mockResolvedValue(entry);api.stopPrivateRKernel.mockResolvedValue({...kernel,status:'stopped',memoryState:'lost'});api.listPrivateRPublications.mockResolvedValue({items:[]});api.publishPrivateROutput.mockResolvedValue({publication,version:savedVersion});listArtifactVersions.mockResolvedValue({items:[]});getArtifactVersion.mockResolvedValue(savedVersion);previewArtifactVersion.mockResolvedValue({integrityVerified:true,preview:{family:'metadata',message:'Open only in a suitable private R runtime.'}});});
+beforeEach(()=>{
+  recoveryState.snapshot={scope:{installationId:'svc_'+'1'.repeat(32),userId:1},records:[],selection:null,error:''};
+  recovery.ensurePrivateRecovery.mockImplementation(async({userId})=>{const identity=await api.getPrivateRIdentity.mock.results.at(-1)?.value;recoveryState.snapshot={...recoveryState.snapshot,scope:{...recoveryState.snapshot.scope,installationId:identity?.installationId||recoveryState.snapshot.scope?.installationId,userId:Number(userId)}};for(const listener of recoveryState.listeners)listener();return recoveryState.snapshot;});
+  recovery.reconcilePrivateSubmissions.mockImplementation(async()=>recoveryState.snapshot);
+  recovery.submitPrivateWithRecovery.mockImplementation(async(_project,_kind,input,{post})=>post(input));
+  recovery.selectPrivateRecoveredSession.mockResolvedValue(true);recovery.clearKernelPrivateRecovery.mockResolvedValue(true);
+});
 async function start(){await waitFor(()=>expect(screen.getByRole('button',{name:'Start private session'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Start private session'}));await screen.findByText('Session ready · unsaved memory available');}
 it('blocks remote commands and saves after tunnel loss while retaining confirmed output and editable source',async()=>{
   let notify;
@@ -145,7 +160,7 @@ it('clears save progress after an explicit stop and ignores the late publication
 it('interrupts a pending command through its exact request and generation, preserves a confirmed receipt and rejects a late original response',async()=>{
   let finish;api.executePrivateRKernel.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
   const interrupted={...entry,kernelId:kernel.id,status:'failed',result:{interrupted:true,stdout:'',warnings:[],tables:[],figures:[],error:{code:'PRIVATE_KERNEL_INTERRUPTED',message:'R command interrupted.'}}};
-  api.interruptPrivateRKernel.mockResolvedValue({session:kernel,execution:interrupted,outcome:'interrupted',idleConfirmed:true});api.listPrivateRExecutions.mockResolvedValue({items:[interrupted]});
+  api.interruptPrivateRKernel.mockResolvedValue({session:kernel,execution:interrupted,outcome:'interrupted',idleConfirmed:true});api.listPrivateRExecutions.mockResolvedValue({items:[interrupted]});api.getPrivateRExecution.mockResolvedValue(interrupted);
   render(<RConsole {...controlProps}/>);await start();fireEvent.click(screen.getByRole('button',{name:'Run R cell',exact:true}));
   expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeDisabled();expect(screen.getByRole('button',{name:'Interrupt R command',exact:true})).toBeEnabled();
   expect(screen.getByText('R command is running or awaiting confirmation. Session controls remain available.')).toBeVisible();
@@ -310,4 +325,131 @@ it('bounds the complete inspection to 30 seconds and retains last-confirmed evid
   vi.useFakeTimers();fireEvent.click(screen.getByRole('button',{name:'Refresh session status',exact:true}));await act(async()=>{});expect(finish).toBeTypeOf('function');expect(screen.getByRole('button',{name:'Refresh session status',exact:true})).toBeDisabled();await act(async()=>vi.advanceTimersByTimeAsync(30000));
   expect(signal.aborted).toBe(true);expect(screen.getByRole('alert')).toHaveTextContent('could not be confirmed within 30 seconds');expect(screen.getByRole('button',{name:'Refresh session status',exact:true})).toBeEnabled();expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeDisabled();expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();expect(screen.getByLabelText('R stdout')).toHaveTextContent('[1] 3');expect(screen.getByLabelText('R console source')).toHaveValue('keep_this_unexecuted_draft <- 17');
   await act(async()=>finish(kernel));expect(screen.getByRole('alert')).toHaveTextContent('could not be confirmed within 30 seconds');expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeDisabled();expect(api.executePrivateRKernel).not.toHaveBeenCalled();expect(api.publishPrivateROutput).not.toHaveBeenCalled();
+});
+const recoveredRequest='55555555-5555-4555-8555-555555555555';
+const recoveredRecord=(kind,extra={})=>({kind,requestId:recoveredRequest,projectId:props.projectId,workspaceId:props.workspaceId,state:'pending',confirmed:false,requestHash:'f'.repeat(64),createdAt:'2026-10-11T10:00:00.000Z',...(kind!=='start'?{kernelId:kernel.id,generation:kernel.generation}:{}),...extra});
+function updateRecovery(patch){recoveryState.snapshot={...recoveryState.snapshot,...patch};for(const listener of recoveryState.listeners)listener();}
+it.each(['start','execution','publication','restart'])('restores an exact lost %s request after reopening through GETs without repeating work',async kind=>{
+  const pending=recoveredRecord(kind);
+  updateRecovery({records:[pending]});
+  const first=render(<RConsole {...controlProps}/>);
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh session status'})).toBeEnabled());
+  expect(screen.getByRole('region',{name:`Private R request ${recoveredRequest}`})).toHaveTextContent('acceptance unconfirmed');
+  expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();
+  if(kind==='start'){expect(api.listPrivateRKernels).not.toHaveBeenCalled();expect(screen.getByRole('button',{name:'Start private session'})).toBeDisabled();}
+  first.unmount();
+  const admitted=recoveredRecord(kind,{kernelId:kernel.id,generation:kernel.generation,state:'accepted',confirmed:true,status:kind==='start'?'ready':'completed',completionKnown:true,...(kind==='execution'?{executionId:'pex_exact',order:1}:kind==='publication'?{publicationId:publication.id,sourceExecutionId:publication.sourceExecutionId,order:2,versionId:savedVersion.versionId}:kind==='restart'?{restartId:'restart_exact',replacementKernelId:'pk_two'}:{})});
+  updateRecovery({records:[admitted],selection:{projectId:props.projectId,workspaceId:props.workspaceId,kernelId:kernel.id,...(kind==='execution'?{executionId:'pex_exact'}:{}),requestId:recoveredRequest}});
+  const replacement={...kernel,id:'pk_two',generation:'2'.repeat(64),restartedFromKernelId:kernel.id};
+  api.getPrivateRKernel.mockImplementation(async(_project,id)=>id==='pk_two'?replacement:kernel);
+  api.getPrivateRExecution.mockImplementation(async(_project,_kernel,id)=>({...entry,id,kernelId:_kernel,source:id==='pex_exact'?'original_request <- 9':'later_request <- 10'}));
+  api.listPrivateRExecutions.mockResolvedValue({items:[{...entry,id:'pex_later',order:2}]});
+  api.listPrivateRPublications.mockResolvedValue({items:[{...publication,version:savedVersion}]});
+  api.getPrivateRRestart.mockResolvedValue({requestId:recoveredRequest,status:'completed',session:replacement,previousSession:{...kernel,status:'stopped',memoryState:'lost'},previousKernelId:kernel.id});
+  render(<RConsole {...controlProps}/>);
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());
+  expect(api.listPrivateRKernels).not.toHaveBeenCalled();
+  expect(api.getPrivateRKernel).toHaveBeenCalledWith(props.projectId,kernel.id,expect.any(AbortSignal));
+  if(kind==='execution')expect(api.getPrivateRExecution).toHaveBeenLastCalledWith(props.projectId,kernel.id,'pex_exact',expect.any(AbortSignal));
+  if(kind==='publication')expect(await screen.findByRole('button',{name:'Inspect Saved cells · v1'})).toBeVisible();
+  if(kind==='restart'){expect(api.getPrivateRRestart).toHaveBeenCalledWith(props.projectId,kernel.id,expect.any(AbortSignal));expect(api.getPrivateRKernel).toHaveBeenCalledWith(props.projectId,'pk_two',expect.any(AbortSignal));}
+  expect(screen.getByLabelText('R console source')).toHaveValue('# Variables persist in this private session.\nn <- 3\nn');
+  for(const mutation of [api.startPrivateRKernel,api.executePrivateRKernel,api.publishPrivateROutput,api.restartPrivateRKernel])expect(mutation).not.toHaveBeenCalled();
+});
+it('keeps a missing start identifier fenced despite a generic ready kernel and warns before explicit forgetting',async()=>{
+  updateRecovery({records:[recoveredRecord('start',{state:'missing'})]});api.listPrivateRKernels.mockResolvedValue({items:[kernel]});
+  render(<RConsole {...controlProps}/>);await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh session status'})).toBeEnabled());
+  expect(screen.getByRole('region',{name:`Private R request ${recoveredRequest}`})).toHaveTextContent('receipt not found · still unconfirmed');
+  expect(screen.getByRole('button',{name:'Start private session'})).toBeDisabled();expect(api.listPrivateRKernels).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:'Forget unconfirmed identifier'}));expect(screen.getByText(/This request may already be running or may arrive later/)).toBeVisible();expect(recovery.forgetPrivateSubmission).not.toHaveBeenCalled();
+  recovery.forgetPrivateSubmission.mockImplementation(async()=>updateRecovery({records:[]}));
+  fireEvent.click(screen.getByRole('button',{name:'Forget identifier and accept this risk'}));
+  await waitFor(()=>expect(recovery.forgetPrivateSubmission).toHaveBeenCalledWith(recoveredRequest));
+  await waitFor(()=>expect(api.listPrivateRKernels).toHaveBeenCalled());expect(api.startPrivateRKernel).not.toHaveBeenCalled();
+});
+it('keeps an admitted running execution blocked until its own terminal UUID receipt and fresh exact kernel inspection',async()=>{
+  const running=recoveredRecord('execution',{state:'accepted',confirmed:true,status:'running',completionKnown:false,executionId:'pex_exact',order:1});
+  updateRecovery({records:[running],selection:{projectId:props.projectId,workspaceId:props.workspaceId,kernelId:kernel.id,executionId:'pex_exact',requestId:recoveredRequest}});
+  api.getPrivateRExecution.mockResolvedValue({...entry,id:'pex_exact',completionKnown:false,status:'running',result:null});
+  render(<RConsole {...controlProps}/>);await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh session status'})).toBeEnabled());
+  expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();
+  api.getPrivateRExecution.mockResolvedValue({...entry,id:'pex_exact',kernelId:kernel.id,generation:kernel.generation});
+  recovery.checkPrivateSubmissionReceipt.mockImplementation(async()=>updateRecovery({records:[{...running,status:'completed',completionKnown:true}]}));
+  fireEvent.click(screen.getByRole('button',{name:'Check exact execution receipt'}));
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());
+  expect(api.executePrivateRKernel).not.toHaveBeenCalled();expect(api.getPrivateRExecution).toHaveBeenLastCalledWith(props.projectId,kernel.id,'pex_exact',expect.any(AbortSignal));
+});
+it('immediately fences a peer window pending request while retaining the local edited draft',async()=>{
+  api.listPrivateRKernels.mockResolvedValue({items:[kernel]});render(<RConsole {...publishingProps}/>);
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());
+  fireEvent.change(screen.getByLabelText('R console source'),{target:{value:'keep_unexecuted_draft <- 41'}});
+  act(()=>updateRecovery({records:[recoveredRecord('execution')]}));
+  expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();
+  expect(screen.getByLabelText('R console source')).toHaveValue('keep_unexecuted_draft <- 41');expect(api.executePrivateRKernel).not.toHaveBeenCalled();
+});
+it('routes each explicit mutation through durable scoped admission before its POST and clears only discarded memory',async()=>{
+  const order=[];recovery.submitPrivateWithRecovery.mockImplementation(async(project,kind,input,options)=>{order.push(`save:${kind}`);expect(options).toMatchObject({workspaceId:props.workspaceId,userId:props.userId});const value=await options.post(input);order.push(`post:${kind}`);return value;});
+  api.restartPrivateRKernel.mockResolvedValue({requestId:recoveredRequest,status:'completed',session:{...kernel,id:'pk_two',generation:'2'.repeat(64)},previousSession:{...kernel,status:'stopped',memoryState:'lost'},previousKernelId:kernel.id});
+  render(<RConsole {...controlProps}/>);await start();fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());
+  fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'n'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Saved n'}});fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));await screen.findByLabelText('Saved R artifact preview');
+  fireEvent.click(screen.getByRole('button',{name:'Restart session'}));fireEvent.click(screen.getByRole('button',{name:'Restart and discard unsaved memory'}));await screen.findByText(/Restart created a fresh session/);
+  expect(order).toEqual(['save:start','post:start','save:execution','post:execution','save:publication','post:publication','save:restart','post:restart']);
+  expect(recovery.clearKernelPrivateRecovery).toHaveBeenCalledWith(props.projectId,kernel.id,kernel.generation);
+  expect(recovery.submitPrivateWithRecovery.mock.calls[1][3]).toMatchObject({kernelId:kernel.id,generation:kernel.generation});
+});
+it('ignores a delayed exact detail after a peer forget changes the durable generation instead of restoring its selection',async()=>{
+  updateRecovery({generation:'generation_one',accessGeneration:'access_one',mutationGeneration:'mutation_one',selection:{projectId:props.projectId,workspaceId:props.workspaceId,kernelId:kernel.id,executionId:entry.id}});
+  let finish;api.getPrivateRExecution.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  render(<RConsole {...controlProps}/>);await waitFor(()=>expect(finish).toBeTypeOf('function'));
+  act(()=>updateRecovery({mutationGeneration:'mutation_two',selection:null}));
+  await act(async()=>finish({...entry,source:'forgotten_private_source <- 99'}));
+  expect(screen.queryByLabelText('R stdout')).not.toBeInTheDocument();expect(screen.getByRole('alert')).toHaveTextContent('selection changed during inspection');
+  expect(recovery.selectPrivateRecoveredSession).not.toHaveBeenCalled();expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();
+});
+it('prevents dispatch when durable admission cannot save the request identity',async()=>{
+  recovery.submitPrivateWithRecovery.mockRejectedValueOnce(Object.assign(new Error('The private R request identifier could not be saved.'),{code:'PRIVATE_SUBMISSION_RECOVERY_REQUIRED'}));
+  render(<RConsole {...props}/>);await waitFor(()=>expect(screen.getByRole('button',{name:'Start private session'})).toBeEnabled());
+  fireEvent.click(screen.getByRole('button',{name:'Start private session'}));await screen.findByRole('alert');
+  expect(api.startPrivateRKernel).not.toHaveBeenCalled();expect(screen.getByRole('button',{name:'Start private session'})).toBeDisabled();
+});
+it('clears private evidence on a silent account-ledger removal and ignores the late command reply',async()=>{
+  api.listPrivateRKernels.mockResolvedValue({items:[kernel]});let finish;
+  api.executePrivateRKernel.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  render(<RConsole {...publishingProps}/>);await screen.findByLabelText('R stdout');
+  fireEvent.change(screen.getByLabelText('R console source'),{target:{value:'private_account_draft <- 81'}});fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));await waitFor(()=>expect(finish).toBeTypeOf('function'));
+  act(()=>updateRecovery({scope:null,records:[],selection:null,error:''}));
+  expect(screen.queryByLabelText('R stdout')).not.toBeInTheDocument();expect(screen.getByLabelText('R console source')).not.toHaveValue('private_account_draft <- 81');
+  await act(async()=>finish({...entry,source:'late_account_source <- 82'}));
+  expect(screen.queryByLabelText('R stdout')).not.toBeInTheDocument();expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();
+});
+it.each(['execution','publication'])('repairs a pre-dispatch %s storage failure by inspection without discarding memory or inventing pending work',async kind=>{
+  api.listPrivateRKernels.mockResolvedValue({items:[kernel]});render(<RConsole {...publishingProps}/>);await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());
+  recovery.submitPrivateWithRecovery.mockRejectedValueOnce(Object.assign(new Error('The private R request identifier could not be saved.'),{code:'PRIVATE_SUBMISSION_STORAGE_UNAVAILABLE'}));
+  if(kind==='execution')fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));
+  else{fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'n'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Saved n'}});fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));}
+  await screen.findByRole('alert');expect(api.executePrivateRKernel).not.toHaveBeenCalled();expect(api.publishPrivateROutput).not.toHaveBeenCalled();expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();
+  fireEvent.click(screen.getByRole('button',{name:'Refresh session status'}));await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());
+  expect(screen.queryByText('R command is running or awaiting confirmation. Session controls remain available.')).not.toBeInTheDocument();expect(screen.queryByText(/Publication completion is unconfirmed/)).not.toBeInTheDocument();expect(api.stopPrivateRKernel).not.toHaveBeenCalled();
+});
+it('keeps a peer pending second command selected after the first command acknowledgement arrives late',async()=>{
+  api.listPrivateRKernels.mockResolvedValue({items:[kernel]});
+  recovery.selectPrivateRecoveredSession.mockImplementation(async(value,options)=>{if(options&&JSON.stringify(options.expectedSelection)!==JSON.stringify(recoveryState.snapshot.selection))return null;updateRecovery({selection:value});return true;});
+  let finish;api.executePrivateRKernel.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  render(<RConsole {...publishingProps}/>);await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell'})).toBeEnabled());
+  fireEvent.click(screen.getByRole('button',{name:'Run R cell'}));await waitFor(()=>expect(finish).toBeTypeOf('function'));
+  const originalId=api.executePrivateRKernel.mock.calls[0][2].requestId;
+  const peerSelection={projectId:props.projectId,workspaceId:props.workspaceId,kernelId:kernel.id,requestId:recoveredRequest};
+  act(()=>updateRecovery({records:[recoveredRecord('execution',{requestId:originalId,state:'accepted',confirmed:true,completionKnown:true,status:'completed',executionId:entry.id,order:1}),recoveredRecord('execution')],selection:peerSelection}));
+  recovery.selectPrivateRecoveredSession.mockClear();
+  await act(async()=>finish({...entry,kernelId:kernel.id,generation:kernel.generation,requestId:originalId}));
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh session status'})).toBeEnabled());
+  expect(recoveryState.snapshot.selection).toEqual(peerSelection);expect(recovery.selectPrivateRecoveredSession).not.toHaveBeenCalled();
+  expect(screen.getByRole('region',{name:`Private R request ${recoveredRequest}`})).toHaveTextContent('acceptance unconfirmed');expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();expect(api.executePrivateRKernel).toHaveBeenCalledTimes(1);
+});
+it.each(['starting','unknown'])('retains exact restart ambiguity when the old memory is stopped but the replacement remains %s',async status=>{
+  const replacement={...kernel,id:'pk_two',generation:'2'.repeat(64),status};
+  api.restartPrivateRKernel.mockImplementation(async(_project,_kernel,input)=>{updateRecovery({records:[recoveredRecord('restart',{requestId:input.requestId,state:'accepted',confirmed:true,status,completionKnown:false,replacementKernelId:replacement.id,restartId:'restart_exact'})],selection:{projectId:props.projectId,workspaceId:props.workspaceId,kernelId:kernel.id,requestId:input.requestId}});return{requestId:input.requestId,status,session:replacement,previousKernelId:kernel.id,previousSession:{...kernel,status:'stopped',memoryState:'lost'}};});
+  render(<RConsole {...controlProps}/>);await start();recovery.selectPrivateRecoveredSession.mockClear();
+  fireEvent.click(screen.getByRole('button',{name:'Restart session'}));fireEvent.click(screen.getByRole('button',{name:'Restart and discard unsaved memory'}));await screen.findByText(/Restart completion is unconfirmed/);
+  expect(recovery.clearKernelPrivateRecovery).not.toHaveBeenCalled();expect(recovery.selectPrivateRecoveredSession).not.toHaveBeenCalled();expect(recoveryState.snapshot.records[0]).toMatchObject({kind:'restart',status,completionKnown:false});expect(screen.getByRole('button',{name:'Run R cell'})).toBeDisabled();
 });

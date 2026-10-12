@@ -16,6 +16,7 @@ let expectedOwner;
 let quarantine;
 let stopStorageWatching;
 const listeners = new Set();
+const companions = new Set();
 let initialization;
 const checks = new Map();
 const emit = next => { snapshot = Object.freeze(next); for (const listener of listeners) listener(); };
@@ -90,7 +91,8 @@ function watchStorage() {
       if (quarantine) {
         const proof = envelope && sameScope(envelope.scope, quarantine.scope) && envelope.generation === quarantine.generation
           && envelope.accessGeneration !== quarantine.accessGeneration && !envelope.records.some(record => record.projectId === quarantine.projectId)
-          && envelope.selection?.projectId !== quarantine.projectId;
+          && envelope.selection?.projectId !== quarantine.projectId
+          && [...companions].every(companion => !companion.proveProjectCleared || companion.proveProjectCleared(quarantine.projectId, envelope));
         if (proof) {
           quarantine = null;
           ensureSubmissionRecovery({ userId: expectedOwner, force: true }).then(() => reconcileSubmissions()).catch(() => {});
@@ -164,7 +166,10 @@ export async function clearSubmissionRecovery({ preserveOwner = false } = {}) {
   quarantine = null; invalidateMemory(); if (!preserveOwner) expectedOwner = undefined; stopStorageWatching?.();
   const clear = () => {
     try { localStorage.setItem(RECOVERY_GENERATION_KEY, crypto.randomUUID()); }
-    finally { localStorage.removeItem(RECOVERY_STORAGE_KEY); }
+    finally {
+      try { for (const companion of companions) companion.clear(); }
+      finally { localStorage.removeItem(RECOVERY_STORAGE_KEY); }
+    }
   };
   try {
     if (typeof navigator.locks?.request === 'function') await ledgerLock(clear); else clear();
@@ -173,8 +178,12 @@ export async function clearSubmissionRecovery({ preserveOwner = false } = {}) {
 
 export async function clearProjectSubmissionRecovery(projectId) {
   const context = contextNow();
-  const updated = await alterLedger(latest => ({ ...latest, records: latest.records.filter(record => record.projectId !== projectId),
-    selection: latest.selection?.projectId === projectId ? null : latest.selection, accessGeneration: crypto.randomUUID(), accessLoss: { projectId, sequence: ++accessSequence } }), { context });
+  const updated = await alterLedger(latest => {
+    const accessGeneration = crypto.randomUUID();
+    for (const companion of companions) companion.clearProject(projectId, { ...latest, accessGeneration });
+    return { ...latest, records: latest.records.filter(record => record.projectId !== projectId),
+      selection: latest.selection?.projectId === projectId ? null : latest.selection, accessGeneration, accessLoss: { projectId, sequence: ++accessSequence } };
+  }, { context });
   if (!updated && matchesContext(context)) {
     quarantine = { scope: context.scope, generation: context.generation, accessGeneration: context.accessGeneration, projectId };
     invalidateMemory(messages.storage);
@@ -251,6 +260,7 @@ export async function ensureSubmissionRecovery({ userId, force = false, signal }
         if (!sameScope(envelope?.scope, scope)) {
           if (current.raw !== before.raw) { invalidateMemory(messages.identity); throw failure(messages.identity, 'SUBMISSION_RECOVERY_CHANGED'); }
           const generation = crypto.randomUUID(); localStorage.setItem(RECOVERY_GENERATION_KEY, generation);
+          for (const companion of companions) companion.clear();
           envelope = { scope, generation, accessGeneration: generation, records: [], selection: null };
         }
         const changed = !sameScope(snapshot.scope, scope) || snapshot.generation !== envelope.generation;
@@ -379,3 +389,11 @@ export async function selectRecoveredRun(projectId, runId, { requestId } = {}) {
 export async function clearRecoveredRunSelection(projectId) {
   return alterLedger(latest => latest.selection?.projectId === projectId ? { ...latest, selection: null } : null);
 }
+
+// Companion ledgers share the authenticated scope, tombstone and short Web Lock.
+// Hooks must be synchronous: no network requests or scientific work inside a lock.
+export const submissionRecoveryCoordination = Object.freeze({
+  lock: ledgerLock, readJson, context: contextNow, matches: matchesContext,
+  latest: latestWithinLock, sameScope,
+  registerCompanion(companion) { companions.add(companion); return () => companions.delete(companion); },
+});
