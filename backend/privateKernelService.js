@@ -12,6 +12,7 @@ const { createPrivateKernelClient } = require('./privateKernelClient');
 const c = require('./privateKernelContract');
 const { createPrivateKernelPublicationService } = require('./privateKernelPublications');
 const { createPrivateKernelControlService } = require('./privateKernelControls');
+const { createPrivateKernelSubmissionService } = require('./privateKernelSubmissions');
 const { effectivePrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const { privateKernelTarget, validatePrivateKernelTarget } = require('./executionTargets');
 const ACTIVE = ['starting','ready','running','unknown','stopping'];
@@ -54,7 +55,7 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
     return { id:row.id,projectId:row.project_id,workspaceId:row.workspace_id,analysisObjectId:row.analysis_object_id,status:row.status,generation:row.runtime_generation,restartedFromKernelId:row.restarted_from_kernel_id||null,restart:row.restart_receipt?{requestId:row.restart_receipt.request_id,status:row.restart_receipt.status,replacementKernelId:row.restart_receipt.replacement_kernel_id}:null,environment:row.environment_json,inputs:row.inputs_json,resources:row.resources_json,target:row.target_json,nextOrder:Number(row.next_order),activeExecutionId:row.active_execution_id,createdAt:time(row.created_at),startedAt:time(row.started_at),expiresAt:time(row.expires_at),stoppedAt:time(row.stopped_at),memoryState:['ready','running'].includes(row.status)?'available':['stopped','failed'].includes(row.status)?'lost':'unknown',replay:{complete:false,issues:['Variables and files in kernel memory are unsaved. Selected input versions and ordered source alone do not capture every intermediate value.','Console previews are journal evidence. Explicitly saved outputs retain artifact versions; other variables and files remain unsaved.']}};
   }
   function receipt(row, detail = false) {
-    return { id:row.id,kernelId:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),status:row.status,sourceSha256:row.source_sha256,createdAt:time(row.created_at),startedAt:time(row.started_at),completedAt:time(row.completed_at),...(row.status==='failed'&&row.result_json?.interrupted===true&&row.result_json.error?.code==='PRIVATE_KERNEL_INTERRUPTED'?{interrupted:true}:{}),...(detail?{source:row.source_code,result:row.result_json}:{}),completionKnown:['completed','failed'].includes(row.status) };
+    return { id:row.id,requestId:row.request_id,kernelId:row.kernel_id,generation:row.kernel_generation,order:Number(row.execution_order),status:row.status,sourceSha256:row.source_sha256,createdAt:time(row.created_at),startedAt:time(row.started_at),completedAt:time(row.completed_at),...(row.status==='failed'&&row.result_json?.interrupted===true&&row.result_json.error?.code==='PRIVATE_KERNEL_INTERRUPTED'?{interrupted:true}:{}),...(detail?{source:row.source_code,result:row.result_json}:{}),completionKnown:['completed','failed'].includes(row.status) };
   }
   async function stopRow(row) {
     if (!ACTIVE.includes(row.status)) return row;
@@ -206,6 +207,16 @@ function createPrivateKernelService(db, provider = storage.createLocalStoragePro
   async function stop(userId,projectId,kernelId) { const row=await owned(userId,projectId,kernelId); await checked(row); const result=await stopRow(row); await access(userId,projectId); return session(result); }
   const publications=createPrivateKernelPublicationService({db,provider,client,artifacts,transaction,access,lockedAccess,owned,checked,probe});
   const controls=createPrivateKernelControlService({db,client,artifacts,transaction,access,lockedAccess,owned,checked,stopRow,session,receipt,finalize,reconcile,publications,getEnvironment,now,maxOwner,maxActive,id,probe});
-  return {list,start,get,execute,execution,executions,stop,interrupt:controls.interrupt,restart:controls.restart,restartStatus:controls.restartStatus,publish:publications.publish,publications:publications.list};
+  const submissions=createPrivateKernelSubmissionService(db);
+  async function submitted(kind,perform,userId,projectId,kernelId,input) {
+    const result=await perform();
+    return {...result,submission:await submissions.get(kind,userId,projectId,input.requestId,kernelId)};
+  }
+  return {list,get,execution,executions,stop,interrupt:controls.interrupt,restartStatus:controls.restartStatus,publications:publications.list,
+    start:(userId,projectId,input)=>submitted('start',()=>start(userId,projectId,input),userId,projectId,null,input),
+    execute:(userId,projectId,kernelId,input)=>submitted('execution',()=>execute(userId,projectId,kernelId,input),userId,projectId,kernelId,input),
+    publish:(userId,projectId,kernelId,input)=>submitted('publication',()=>publications.publish(userId,projectId,kernelId,input),userId,projectId,kernelId,input),
+    restart:(userId,projectId,kernelId,input)=>submitted('restart',()=>controls.restart(userId,projectId,kernelId,input),userId,projectId,kernelId,input),
+    submission:submissions.get};
 }
 module.exports={createPrivateKernelService};
