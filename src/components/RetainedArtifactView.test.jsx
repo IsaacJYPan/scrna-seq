@@ -201,6 +201,26 @@ it('rejects unsupported pointers without making reads and delegates optional ins
 
 const typedMetadata = family => ({ ...metadata(), artifactId: 'af_source', previews: [family] });
 const typedSource = { artifactId: 'af_source', versionId, projectId: 'project', sha256 };
+it('displays declared roles, titles and metric units as inert text while keeping absent meaning absent', async () => {
+  const version = typedMetadata('metrics');
+  const preview = { family: 'metrics', source: typedSource, semantics: { role: 'diagnostic', title: '<script>QC summary</script>' },
+    items: [{ key: 'cells', value: 12, label: 'Retained cells', unit: 'cells' }] };
+  getArtifactVersion.mockResolvedValue(version); previewArtifactVersion.mockResolvedValue({ version, integrityVerified: true, preview });
+  render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByText('Diagnostic')).toBeVisible();
+  expect(screen.getByRole('heading', { name: '<script>QC summary</script>' })).toBeVisible();
+  expect(screen.getByText('Retained cells (cells)')).toBeVisible(); expect(document.querySelector('script')).toBeNull();
+});
+
+it('binds common figure semantics to the exact source before exposing the declared meaning', async () => {
+  const version = { ...typedMetadata('image'), format: { id: 'org.w3.png', version: '1' } };
+  getArtifactVersion.mockResolvedValue(version);
+  previewArtifactVersion.mockResolvedValue({ version, integrityVerified: true, preview: { family: 'image', width: 1, height: 1,
+    source: { ...typedSource, versionId: secondId }, semantics: { role: 'primary', title: 'Wrong figure meaning' } } });
+  render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not be verified');
+  expect(screen.queryByText('Wrong figure meaning')).not.toBeInTheDocument(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+});
 it('renders finite scalar values without losing zero, false or inert text and rejects a mismatched typed source', async () => {
   const version = typedMetadata('metrics');
   const preview = { family: 'metrics', source: typedSource, semantics: { role: null, title: null }, items: [

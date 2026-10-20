@@ -1,3 +1,5 @@
+import { validateResultSemantics } from './resultSemantics.mjs';
+
 export const WORKFLOW_LIMITS = Object.freeze({ bytes: 512 * 1024, metadataBytes: 64 * 1024, steps: 40, files: 64, scriptBytes: 30 * 1024 });
 export const OUTPUT_TYPES = Object.freeze(['rds', 'table', 'metrics', 'scatter', 'figure']);
 const encoder = new TextEncoder();
@@ -148,9 +150,10 @@ export function validateWorkflowPackage(input) {
     record(step.outputs, Object.keys(step.outputs || {}), 'Step outputs');
     if (!Object.keys(step.outputs).length || Object.keys(step.outputs).length > 8) fail('A step requires 1–8 outputs.');
     for (const [name, output] of Object.entries(step.outputs)) {
-      identifier(name, 'Output name'); record(output, ['type', 'label'], 'Output');
+      identifier(name, 'Output name'); record(output, ['type', 'label', 'semantics'], 'Output');
       if (!OUTPUT_TYPES.includes(output.type)) fail('Unsupported output type.');
       text(output.label, 'Output label');
+      if (own(output, 'semantics')) validateResultSemantics(output.semantics, output.type);
     }
     const parameters = list(step.parameters, 'Parameters', 24).map(validateParameter);
     unique(parameters.map(parameter => parameter.key), 'Parameter keys');

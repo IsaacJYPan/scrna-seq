@@ -95,15 +95,29 @@ async function main() {
     page.on('response', async response => {
       const pathname = new URL(response.url()).pathname;
       if (/^\/assets\/.*\.js$/.test(pathname) && response.ok()) { try { assets[pathname] = sha(await response.body()); } catch { /* Checked through browser errors. */ } }
-      if (/\/preview$/.test(pathname) && response.ok()) { try { const body = await response.body(); const parsed = JSON.parse(body); responses.push({ path: pathname, bytes: body.length, sha256: parsed.preview.source?.sha256, sampling: parsed.preview.sampling }); } catch { /* Navigation can cancel a body. */ } }
+      if (/\/preview$/.test(pathname) && response.ok()) { try { const body = await response.body(); const parsed = JSON.parse(body); responses.push({ path: pathname, bytes: body.length, sha256: parsed.preview.source?.sha256, sampling: parsed.preview.sampling, semantics: parsed.preview.semantics,
+        metricDescriptors: parsed.preview.items?.map(({ key, label, unit }) => ({ key, label, unit })) }); } catch { /* Navigation can cancel a body. */ } }
       if (/\/image$/.test(pathname) && response.ok()) { try { const body = await response.body(); imageResponses.push({ path: pathname, sha256: sha(body), sizeBytes: body.length }); } catch { /* Navigation can cancel a body. */ } }
     });
     await page.goto(service.endpoint); await page.getByPlaceholder('researcher@lab.edu').fill(service.account.email); await page.getByLabel('Password', { exact: true }).fill(service.account.password); await page.getByRole('button', { name: /Open Workbench/ }).click();
     await page.getByText('Connection details', { exact: true }).waitFor(); await nav(/^Data workspace,/); await page.getByRole('button', { name: new RegExp('^' + service.project.name) }).click();
     await openInspector(); await select(material.outputs.metrics);
     await viewer().getByText('2638', { exact: true }).waitFor(); await viewer().getByText('13714', { exact: true }).waitFor();
+    await viewer().getByText('Diagnostic', { exact: true }).waitFor(); await viewer().getByRole('heading', { name: 'PBMC3k retained dataset summary', exact: true }).waitFor();
+    await viewer().getByText('Retained cells (cells)', { exact: true }).waitFor(); await viewer().getByText('Measured features (features)', { exact: true }).waitFor();
     await capture('measured-pbmc-metrics'); check('Actual measured PBMC3k scalar counts render from authorized exact retained bytes without a kernel.');
+    for (const viewport of [{ width: 1366, height: 768 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      for (const theme of ['light', 'dark']) { await setTheme(theme); await viewer().getByLabel('Declared result meaning').scrollIntoViewIfNeeded();
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Declared metric meaning overflows the viewport.');
+        await capture(`declared-metrics-${theme}-${viewport.width}`, theme);
+      }
+    }
+    await page.setViewportSize({ width: 1366, height: 768 }); await setTheme('light');
     await select(material.outputs.embedding); await chartReady(viewer()); await viewer().getByText('Showing 2,000 of 2,638 source points.', { exact: true }).waitFor();
+    await viewer().getByText('Primary result', { exact: true }).waitFor(); await viewer().getByRole('heading', { name: 'PBMC3k cell UMAP', exact: true }).waitFor();
+    await viewer().getByText(/Points represent cells/).waitFor();
+    assert(await graph(viewer()).evaluate(element => element._fullLayout.xaxis.title.text === 'UMAP 1' && element._fullLayout.yaxis.title.text === 'UMAP 2'), 'Declared saved UMAP axes did not reach the actual chart.');
     const retainedGraph = await graph(viewer()).elementHandle();
     const sameGraph = async () => graph(viewer()).evaluate((element, original) => element === original && original.isConnected, retainedGraph);
     assert(await graph(viewer()).evaluate(element => element._fullData.every(trace => trace.type === 'scatter')), 'The bounded chart did not use its SVG renderer.');
@@ -157,10 +171,12 @@ async function main() {
     }
     await page.setViewportSize({ width: 1366, height: 768 }); await setTheme('light');
     await select(material.stress); await chartReady(viewer()); await viewer().getByText('Showing 2,000 of 10,000 source points.', { exact: true }).waitFor();
+    await viewer().getByText(/Point entity type is not declared/).waitFor(); assert(await viewer().getByLabel('Declared result meaning').count() === 0, 'An undeclared result was assigned a role or title.');
+    assert(await graph(viewer()).evaluate(element => element._fullLayout.xaxis.title.text === 'Coordinate 1' && element._fullLayout.yaxis.title.text === 'Coordinate 2'), 'Legacy unknown axes were inferred from data shape.');
     await viewer().getByRole('combobox', { name: 'Maximum points', exact: true }).selectOption('500'); await viewer().getByText('Showing 500 of 10,000 source points.', { exact: true }).waitFor();
     await viewer().getByRole('combobox', { name: 'Maximum points', exact: true }).selectOption('5000'); await viewer().getByText('Showing 5,000 of 10,000 source points.', { exact: true }).waitFor(); await chartReady(viewer());
     assert(responses.filter(value => value.sampling).every(value => value.bytes <= 256 * 1024), 'A typed preview exceeded its whole response byte envelope.'); await capture('synthetic-10k-bounded-stress');
-    check('Bounded 10k synthetic stress projections change to 500/5000 points with explicit deterministic sampling and bounded responses.');
+    check('Persisted declared role/title, metric labels/units and cell/UMAP meaning reach actual views; undeclared stress metadata stays unknown within bounded projections.');
     await select(material.outputs.figure); await waitFor(async () => viewer().getByRole('img').evaluate(element => element.complete && element.naturalWidth === 1000 && element.naturalHeight === 650), 'The actual readable retained PBMC figure did not render.');
     for (const viewport of [{ width: 1366, height: 768 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
@@ -205,6 +221,7 @@ async function main() {
     await capture('workflow-common-retained-runtime-off');
     const workflowViews = page.getByRole('region', { name: 'Retained result', exact: true });
     const workflowMetrics = workflowViews.filter({ has: page.getByRole('heading', { name: /^Workflow metrics/ }) });
+    await workflowMetrics.getByRole('heading', { name: 'PBMC3k retained dataset summary', exact: true }).waitFor();
     await workflowMetrics.getByText('2638', { exact: true }).scrollIntoViewIfNeeded(); await capture('workflow-metrics-runtime-off');
     const workflowEmbedding = workflowViews.filter({ has: page.getByRole('combobox', { name: 'Maximum points', exact: true }) });
     await chartReady(workflowEmbedding); await capture('workflow-embedding-runtime-off');
@@ -217,7 +234,7 @@ async function main() {
     assert(errors.length === 0, 'An uncaught browser error occurred.');
     const report = { passed: true, checks, screenshots, themes, compiledAssets: assets, browserErrors: errors, responses, uiMeasurements, scientificDispatchCount: scientific.length,
       fixture: 'Own disposable production HTTPS/auth/PostgreSQL/storage; actual measured PBMC3k checkpoint extracted in a no-network/read-only immutable R container; separate synthetic 10k stress fixture; inserted retained records are not app-captured runs',
-      origin: material.manifest, resultDigests: material.resultDigests, exclusions: ['app scientific execution', 'SSH', 'new semantic descriptor persistence', 'researcher usability observation'] };
+      origin: material.manifest, resultDigests: material.resultDigests, exclusions: ['app scientific execution', 'SSH', 'researcher usability observation'] };
     fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify(report, null, 2) + '\n'); console.log('Typed retained UI acceptance passed; report: ' + directory); return report;
   } catch (failure) {
     await page?.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true }).catch(() => {});

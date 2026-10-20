@@ -1,11 +1,13 @@
 'use strict';
 
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
+const { validateResultSemantics } = require('../shared/resultSemantics.mjs');
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const scalar = value => value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) || (typeof value === 'string' && value.length <= 2000);
 function invalid() { throw new Error('Workflow output does not match its declared type or size limit.'); }
 
 async function validateWorkflowOutput(provider, key, descriptor) {
+  if (Object.hasOwn(descriptor, 'semantics')) validateResultSemantics(descriptor.semantics, descriptor.type);
   const file = await provider.openVerifiedRead(key, { checksumSha256: descriptor.sha256, sizeBytes: descriptor.sizeBytes });
   try {
     if (descriptor.type === 'rds') return; // Deserialization remains exclusively inside the sandbox.
@@ -22,6 +24,7 @@ async function validateWorkflowOutput(provider, key, descriptor) {
     const value = JSON.parse(await file.handle.readFile({ encoding: 'utf8' }));
     if (descriptor.type === 'metrics') {
       if (!plain(value) || Object.keys(value).length > 40 || Object.entries(value).some(([key, item]) => key.length > 100 || !scalar(item))) invalid();
+      if (Object.hasOwn(descriptor, 'semantics')) validateResultSemantics(descriptor.semantics, descriptor.type, Object.keys(value));
     } else if (descriptor.type === 'table') {
       if (!Array.isArray(value) || value.length > 50000) invalid();
       const columns = value.length ? Object.keys(value[0] || {}) : [];

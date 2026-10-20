@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { parseWorkflowJSON, parseWorkflowPackage, serializeWorkflow, validateWorkflowPackage, WORKFLOW_LIMITS } from '../../shared/workflowPackage.mjs';
 import { beginWorkflowRun, cancelWorkflowRun, commitWorkflowRun, createWorkflowState, snapshotWorkflowState, workflowAvailability, workflowTabAvailability } from '../../shared/workflowState.mjs';
 import { mergeWorkflowUpdate } from './workflowApi';
+import { adaptWorkflowV1 } from '../../shared/recipePackage.mjs';
 
 function example() {
   const step = (id, inputs) => ({ id, label: id, entry: `${id}.R`, inputs, parameters: [], outputs: { data: { type: 'rds', label: 'Data' } } });
@@ -36,6 +37,14 @@ describe('workflow packages', () => {
   it('round-trips a branching definition without executing source', () => {
     const workflow = example();
     expect(parseWorkflowPackage(serializeWorkflow(workflow))).toEqual(workflow);
+  });
+  it('retains optional declared output semantics in a pinned package and rejects incompatible meaning', () => {
+    const workflow = example();
+    workflow.steps[0].outputs.summary = { type: 'metrics', label: 'QC', semantics: { role: 'diagnostic', title: 'QC summary', metrics: { cells: { label: 'Retained cells', unit: 'cells' } } } };
+    expect(parseWorkflowPackage(serializeWorkflow(workflow))).toEqual(workflow);
+    expect(adaptWorkflowV1(workflow).steps[0].outputs.summary.format.metadata['org.traceomics.result:semantics']).toEqual(workflow.steps[0].outputs.summary.semantics);
+    workflow.steps[0].outputs.summary.semantics.entityType = 'cell';
+    expect(() => validateWorkflowPackage(workflow)).toThrow(/unsupported field/);
   });
   it.each([
     value => { value.steps[0].inputs.analysis.from = 'clusters.data'; },
@@ -110,6 +119,13 @@ describe('working workflow state', () => {
     const before = complete(); const after = run(workflow, before, 'pca');
     expect(after.results.umap).toBe(before.results.umap);
     expect(after.results.pca.outputs.data).toBe(before.results.pca.outputs.data);
+  });
+  it('keeps changed declared meaning attached to its new immutable output instead of reusing an older descriptor', () => {
+    const before = complete();
+    const output = { ...artifact(), semantics: { role: 'primary', title: 'New declared source meaning' } };
+    const after = run(workflow, before, 'pca', output);
+    expect(after.results.pca.outputs.data).toBe(output);
+    expect(after.results.umap).toBeUndefined();
   });
   it('preserves working results on failure or cancellation and rejects late completion', () => {
     const before = complete();

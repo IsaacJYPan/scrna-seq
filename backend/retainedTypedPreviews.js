@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { TextDecoder } = require('node:util');
 const { PREVIEW_LIMITS } = require('./artifactPreviews');
+const { validateResultSemantics } = require('../shared/resultSemantics.mjs');
 
 const RETAINED_TYPED_LIMITS = Object.freeze({
   sourceJsonBytes: 5 * 1024 * 1024, responseBytes: PREVIEW_LIMITS.bytes,
@@ -40,35 +41,18 @@ function sourceReference(value) {
   return { artifactId: value.artifactId, versionId: value.versionId, projectId: value.projectId, sha256: value.sha256 };
 }
 function descriptorFor(value, source) {
-  record(value, ['id', 'type', 'sha256', 'sizeBytes', 'profileId'], 'Workflow output descriptor');
+  record(value, ['id', 'type', 'sha256', 'sizeBytes', 'profileId', 'semantics'], 'Workflow output descriptor');
   if (value.id !== source.versionId || value.sha256 !== source.sha256) throw failure('The trusted output descriptor does not match the exact source reference.', 409);
   if (!['metrics', 'scatter'].includes(value.type)) throw failure('This output has no typed metrics or embedding adapter.');
   if (!Number.isSafeInteger(value.sizeBytes) || value.sizeBytes < 0 || value.sizeBytes > RETAINED_TYPED_LIMITS.sourceJsonBytes) throw failure('Typed preview source JSON exceeds its bounded size.', 413);
   if (Object.hasOwn(value, 'profileId')) identifier(value.profileId, 'Output profile');
   return value;
 }
-function optionalText(value, maximum, name) { return value === undefined || value === null ? null : text(value, maximum, name); }
 function semanticsFor(value = {}, embedding = false, metricKeys = []) {
-  if (value === null) value = {};
-  record(value, embedding ? ['role', 'title', 'entityType', 'axes'] : ['role', 'title', 'metrics'], 'Result semantics');
-  if (value.role !== undefined && value.role !== null && !['primary', 'diagnostic'].includes(value.role)) throw failure('Result role must be primary or diagnostic when declared.');
-  const common = { role: value.role ?? null, title: optionalText(value.title, 160, 'Result title') };
-  if (embedding) {
-    if (value.entityType !== undefined && value.entityType !== null && !['cell', 'sample', 'observation', 'feature', 'point'].includes(value.entityType)) throw failure('The declared point entity type is unsupported.');
-    const axes = value.axes == null ? {} : record(value.axes, ['x', 'y'], 'Embedding axes');
-    const axis = key => {
-      const item = axes[key] == null ? {} : record(axes[key], ['label', 'unit'], 'Axis semantics');
-      return { label: optionalText(item.label, 120, 'Axis label'), unit: optionalText(item.unit, 80, 'Axis unit') };
-    };
-    return { ...common, entityType: value.entityType ?? null, axes: { x: axis('x'), y: axis('y') } };
-  }
-  const metrics = value.metrics == null ? {} : record(value.metrics, metricKeys, 'Metric semantics');
-  const entries = new Map();
-  for (const [key, description] of Object.entries(metrics)) {
-    const item = description === null ? {} : record(description, ['label', 'unit'], 'Metric description');
-    entries.set(key, { label: optionalText(item.label, 120, 'Metric label'), unit: optionalText(item.unit, 80, 'Metric unit') });
-  }
-  return { ...common, metrics: entries };
+  try {
+    const result = validateResultSemantics(value, embedding ? 'scatter' : 'metrics', metricKeys);
+    return embedding ? result : { ...result, metrics: new Map(Object.entries(result.metrics)) };
+  } catch (error) { throw failure(error.message); }
 }
 function byteAllowance(value) {
   if (!Number.isSafeInteger(value) || value < 1 || value > RETAINED_TYPED_LIMITS.responseBytes) throw failure('The preview response allowance must be a positive integer within the common response budget.');
@@ -175,6 +159,10 @@ function projectRetainedEmbedding({ source, value, pointLimit = RETAINED_TYPED_L
 
 function projectRetainedTypedPreview({ source, descriptor, bytes, pointLimit, semantics, responseBytes }) {
   const reference = sourceReference(source), output = descriptorFor(descriptor, reference);
+  if (Object.hasOwn(output, 'semantics')) {
+    if (semantics !== undefined) throw failure('Use the trusted descriptor semantics without a second override.');
+    semantics = output.semantics;
+  }
   if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) throw failure('Typed preview bytes must be a bounded binary buffer.');
   if (bytes.byteLength !== output.sizeBytes) throw failure('The parsed bytes do not match the trusted descriptor size.', 409);
   let value;

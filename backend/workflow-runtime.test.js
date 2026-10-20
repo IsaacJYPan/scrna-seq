@@ -63,7 +63,7 @@ describe.skipIf(!configured)('workflow runtime', () => {
     const workflowFiles = [];
     for (const declaration of Object.values(input.workflowOutputs)) {
       const bytes = declaration.type === 'rds' ? Buffer.from(replacement)
-        : declaration.type === 'figure' ? png : Buffer.from(JSON.stringify(declaration.type === 'metrics' ? { cells: 80 }
+        : declaration.type === 'figure' ? png : Buffer.from(JSON.stringify(declaration.type === 'metrics' ? { cells: 80, features: 1000 }
           : declaration.type === 'scatter' ? { x: [1], y: [2], ids: ['cell-1'] } : [{ cell: 'cell-1', cluster: '0' }]));
       const storageKey = `${input.outputStorageKey}-${declaration.name}`;
       await writeFile(provider.prepareWrite(storageKey), bytes, { flag: 'wx' });
@@ -90,6 +90,13 @@ describe.skipIf(!configured)('workflow runtime', () => {
     expect(JSON.stringify(instance)).not.toContain('storage_key');
     const jobs = await db.query("SELECT parameters_json FROM jobs WHERE job_type='expert.r.v1'");
     expect(jobs.rows.every(row => !Object.hasOwn(JSON.parse(row.parameters_json), 'script'))).toBe(true);
+    const output = instance.state.results.qc.outputs.summary;
+    expect(output.semantics).toEqual(instance.package.steps.find(step => step.id === 'qc').outputs.summary.semantics);
+    expect((await runtime.artifact(user.id, project.id, output.id)).descriptor_json.semantics).toEqual(output.semantics);
+    const { createArtifactVersionService } = require('./artifactVersions');
+    const preview = await createArtifactVersionService(db, provider).preview(user.id, project.id, output.id);
+    expect(preview.preview).toMatchObject({ semantics: { role: 'diagnostic', title: 'Dataset after quality filters' },
+      items: [{ key: 'cells', value: 80, label: 'Retained cells', unit: 'cells' }, { key: 'features', value: 1000, label: 'Measured features', unit: 'features' }] });
   });
   it('runs a role-authorized workflow without an individual grant and enforces explicit denial', async () => {
     process.env.EXPERT_R_ACCESS_POLICY = 'project-roles';

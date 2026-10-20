@@ -1,7 +1,9 @@
 const scalar = value => value === null || typeof value === 'boolean' || typeof value === 'string' && value.length <= 2000 || typeof value === 'number' && Number.isFinite(value);
-const optionalText = value => value === null || typeof value === 'string' && value.length <= 200;
+const optionalText = (value, maximum = 200) => value === null || typeof value === 'string' && value.trim() && value.length <= maximum && value.isWellFormed()
+  && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+export const validRetainedMeaning = value => Boolean(value && [null, 'primary', 'diagnostic'].includes(value.role) && optionalText(value.title, 160));
 export function validRetainedTypedPreview(value) {
-  if (!value || !value.semantics || ![null, 'primary', 'diagnostic'].includes(value.semantics.role) || !optionalText(value.semantics.title)) return false;
+  if (!value || !validRetainedMeaning(value.semantics)) return false;
   if (value.family === 'metrics') return Array.isArray(value.items) && value.items.length <= 40
     && new Set(value.items.map(item => item?.key)).size === value.items.length
     && value.items.every(item => item && typeof item.key === 'string' && item.key.length <= 100 && scalar(item.value) && optionalText(item.label) && optionalText(item.unit));
@@ -24,9 +26,10 @@ export function validRetainedTypedPreview(value) {
 }
 
 export function assertRetainedTypedSource(preview, version) {
-  if (!['metrics', 'embedding'].includes(preview?.family)) return;
+  const typed = ['metrics', 'embedding'].includes(preview?.family);
+  if (!typed && !Object.hasOwn(preview || {}, 'semantics')) return;
   const source = preview.source;
-  if (!validRetainedTypedPreview(preview) || !source || !version.artifactId || source.artifactId !== version.artifactId
+  if (!(typed ? validRetainedTypedPreview(preview) : validRetainedMeaning(preview.semantics)) || !source || !version.artifactId || source.artifactId !== version.artifactId
       || source.versionId !== version.versionId || source.projectId !== version.projectId || source.sha256 !== version.sha256) {
     throw Object.assign(new Error('The typed preview does not match the exact saved source.'), { status: 409 });
   }

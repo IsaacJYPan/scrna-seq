@@ -4,7 +4,7 @@ import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifac
 import { fetchRetainedArtifactImage } from '../artifacts/retainedArtifactApi';
 import { artifactBytesLabel } from '../artifacts/privateRArtifactPolicy';
 import useExecutionTarget from '../runtime/useExecutionTarget';
-import { assertRetainedTypedSource, validRetainedTypedPreview } from '../artifacts/retainedTypedPreview';
+import { assertRetainedTypedSource, validRetainedMeaning, validRetainedTypedPreview } from '../artifacts/retainedTypedPreview';
 import RetainedEmbedding from './RetainedEmbedding';
 
 const opaqueMessage = 'This saved artifact has no supported browser preview. Only its saved metadata is shown; its contents have not been read or verified here.';
@@ -30,9 +30,22 @@ function boundedTable(value) {
     && Number.isSafeInteger(value.limit) && value.limit >= 1 && value.limit <= 100;
 }
 
-// Rendering has no transport or execution dependency. Typed retained metric and
-// embedding adapters can use this same surface when their bounded contracts exist.
-export function RetainedResultContent({ preview, integrityVerified = false, imageUrl, name, loading, pageSize, onPageChange, onPageSizeChange, onImageError, pointLimit = 2000, onPointLimitChange }) {
+function ResultMeaning({ semantics }) {
+  if (!validRetainedMeaning(semantics) || !semantics.role && !semantics.title) return null;
+  return <div aria-label="Declared result meaning" className="flex min-w-0 flex-wrap items-center gap-2">
+    {semantics.role && <span className="rounded border border-border px-2 py-1 text-xs text-textMuted">{semantics.role === 'primary' ? 'Primary result' : 'Diagnostic'}</span>}
+    {semantics.title && <h5 className="min-w-0 break-words font-medium">{semantics.title}</h5>}
+  </div>;
+}
+
+// Rendering has no transport or execution dependency.
+export function RetainedResultContent(props) {
+  const { preview } = props;
+  if (!preview) return null;
+  return <div className="min-w-0 space-y-3"><ResultMeaning semantics={preview.semantics} /><RetainedResultBody {...props} /></div>;
+}
+
+function RetainedResultBody({ preview, integrityVerified = false, imageUrl, name, loading, pageSize, onPageChange, onPageSizeChange, onImageError, pointLimit = 2000, onPointLimitChange }) {
   if (!preview) return null;
   if (preview.family === 'metadata') return <p className="text-sm text-textMuted">{integrityVerified
     ? 'The saved bytes match this version, but no bounded browser preview is available. Inspect the contents explicitly in an appropriate analysis runtime.' : opaqueMessage}</p>;

@@ -61,11 +61,16 @@ async function prepareRetainedTypedFixture({ database, service, ownerId, directo
   const checkpointDestination = ownedPath(service.storageRoot, checkpointKey); fs.mkdirSync(path.dirname(checkpointDestination), { recursive: true }); fs.copyFileSync(checkpoint, checkpointDestination);
   await database.query("INSERT INTO job_artifacts(id,project_id,job_id,result_analysis_object_id,created_by_user_id,artifact_type,name,storage_kind,storage_uri,checksum_sha256,size_bytes,status) VALUES($1,$2,$3,$4,$5,'checkpoint','Retained PBMC3k checkpoint','local_internal',$6,$7,$8,'available')", [checkpointId, projectId, jobId, objectId, ownerId, checkpointKey, inputHash, manifest.sizeBytes]);
   const provider = storage.createLocalStorageProvider({ root: service.storageRoot });
+  const semantics = {
+    metrics: { role: 'diagnostic', title: 'PBMC3k retained dataset summary', metrics: { cells: { label: 'Retained cells', unit: 'cells' }, features: { label: 'Measured features', unit: 'features' }, clusters: { label: 'Observed clusters', unit: 'clusters' } } },
+    embedding: { role: 'primary', title: 'PBMC3k cell UMAP', entityType: 'cell', axes: { x: { label: 'UMAP 1' }, y: { label: 'UMAP 2' } } },
+    figure: { role: 'primary', title: 'PBMC3k cell UMAP by cluster' },
+  };
   const outputs = {};
   for (const [port, type, filename] of [['metrics', 'metrics', 'metrics.json'], ['embedding', 'scatter', 'embedding.json'], ['figure', 'figure', 'figure.png']]) {
     const bytes = fs.readFileSync(path.join(output, filename));
     const versionId = id('eri'), key = storage.projectStorageFileKey(projectId, 'artifacts', jobId, versionId + '.' + filename.split('.').pop());
-    const descriptor = { id: versionId, type, sha256: sha(bytes), sizeBytes: bytes.length, profileId: EXPERT_R_PROFILE.id };
+    const descriptor = { id: versionId, type, sha256: sha(bytes), sizeBytes: bytes.length, profileId: EXPERT_R_PROFILE.id, semantics: semantics[port] };
     fs.writeFileSync(provider.prepareWrite(key), bytes); await validateWorkflowOutput(provider, key, descriptor);
     await database.query('INSERT INTO workflow_artifacts(id,owner_user_id,project_id,job_id,descriptor_json,storage_key) VALUES($1,$2,$3,$4,$5,$6)', [versionId, ownerId, projectId, jobId, descriptor, key]);
     outputs[port] = descriptor;
@@ -79,7 +84,7 @@ async function prepareRetainedTypedFixture({ database, service, ownerId, directo
   const recipe = { format: 'traceomics-workflow', schemaVersion: 1, id: 'retained-pbmc-review', name: 'Retained PBMC3k review', version: '1.0.0',
     description: 'Read-only acceptance of previously measured PBMC3k results; no app execution is claimed.', runtime: { language: 'r', profileId: EXPERT_R_PROFILE.id }, files: { 'review.R': '# Retained fixture only. Do not execute.' },
     steps: [{ id: 'review', label: 'Retained measured results', entry: 'review.R', inputs: { analysis: { from: 'input.analysis', type: 'rds' } }, parameters: [],
-      outputs: { metrics: { type: 'metrics', label: 'Measured summary' }, embedding: { type: 'scatter', label: 'Measured embedding' }, figure: { type: 'figure', label: 'Measured figure' } } }], tabs: [{ id: 'review', label: 'Review', step: 'review', plots: [] }] };
+      outputs: { metrics: { type: 'metrics', label: 'Measured summary', semantics: semantics.metrics }, embedding: { type: 'scatter', label: 'Measured embedding', semantics: semantics.embedding }, figure: { type: 'figure', label: 'Measured figure', semantics: semantics.figure } } }], tabs: [{ id: 'review', label: 'Review', step: 'review', plots: [] }] };
   const { parseLegacyExecutableWorkflowPackage } = await import('../shared/recipePackage.mjs');
   const workflow = parseLegacyExecutableWorkflowPackage(recipe, { environmentProfiles: [EXPERT_R_PROFILE.id] });
   const state = { generation: 1, root: { id: checkpointId, sha256: inputHash, sizeBytes: manifest.sizeBytes, type: 'rds', profileId: EXPERT_R_PROFILE.id, root: true }, active: null,

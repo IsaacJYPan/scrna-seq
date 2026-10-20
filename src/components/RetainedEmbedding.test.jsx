@@ -44,3 +44,10 @@ it('preserves Plotly data/layout/config and graph identity through ready/export 
   await act(async () => finish());
   expect(Plot.mock.calls.at(-1)[0].layout).toBe(initial.layout); expect(screen.getByTestId('plot')).toBe(graph);
 });
+
+it('shows declared entity meaning separately from version-scoped identifiers and leaves unknown entities explicit', () => {
+  const view = render(<RetainedEmbedding preview={{ ...preview, semantics: { ...preview.semantics, entityType: 'sample' } }} pointLimit={2000} onPointLimitChange={vi.fn()} />);
+  expect(screen.getByText(/Points represent samples/)).toHaveTextContent('Source identifiers belong to this exact saved version.');
+  view.rerender(<RetainedEmbedding preview={preview} pointLimit={2000} onPointLimitChange={vi.fn()} />);
+  expect(screen.getByText(/Point entity type is not declared/)).toBeVisible();
+});

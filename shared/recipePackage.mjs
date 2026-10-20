@@ -1,4 +1,5 @@
 import { parseWorkflowJSON, validateWorkflowPackage, WORKFLOW_LIMITS } from './workflowPackage.mjs';
+import { validateResultSemantics } from './resultSemantics.mjs';
 import {
   artifactPortsCompatible, contractDigest, contractError, contractId, contractInteger,
   contractJSON, contractList, contractPortId, contractRecord, contractText, contractUnique,
@@ -245,7 +246,8 @@ const legacyFormats = Object.freeze({
   scatter: 'org.traceomics.scatter', figure: 'org.traceomics.figure',
 });
 function legacyPort(spec) {
-  return { type: legacyTypes[spec.type], cardinality: 'one', format: { id: legacyFormats[spec.type], version: '1' }, ...(spec.label ? { label: spec.label } : {}) };
+  return { type: legacyTypes[spec.type], cardinality: 'one', format: { id: legacyFormats[spec.type], version: '1',
+    ...(own(spec, 'semantics') ? { metadata: { 'org.traceomics.result:semantics': validateResultSemantics(spec.semantics, spec.type) } } : {}) }, ...(spec.label ? { label: spec.label } : {}) };
 }
 
 export function adaptWorkflowV1(input) {

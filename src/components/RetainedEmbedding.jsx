@@ -54,6 +54,8 @@ export default function RetainedEmbedding({ preview, pointLimit, onPointLimitCha
   };
   return <div className="min-w-0 space-y-3" aria-label="Retained embedding">
     <p className="text-sm">Showing {preview.sampling.returnedCount.toLocaleString()} of {preview.sampling.sourceCount.toLocaleString()} source points.</p>
+    <p className="text-xs text-textMuted">{preview.semantics.entityType ? `Points represent ${{ cell: 'cells', sample: 'samples', observation: 'observations', feature: 'features', point: 'points' }[preview.semantics.entityType]}.` : 'Point entity type is not declared.'}
+      {preview.ids !== null && ' Source identifiers belong to this exact saved version.'}</p>
     <p className="text-xs text-textMuted">{preview.sampling.sampled ? 'Deterministic checksum-bound sample; no stratification or aggregation.' : 'All source points; no sampling or aggregation.'}
       {preview.sampling.budgetLimited && ' Fewer points fit within the response byte limit.'}
       {preview.ids === null && ' Point identities are positions in this exact source version, not cell identifiers.'}</p>

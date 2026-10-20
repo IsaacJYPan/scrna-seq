@@ -7,6 +7,7 @@ const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, validateRetainedRast
 const { DOWNLOADABLE_ARTIFACT_TYPES, authorizeArtifactDownload } = require('./researchExports');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const analysisContract = import('../shared/analysisModel.mjs');
+const { validateResultSemantics } = require('../shared/resultSemantics.mjs');
 
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
@@ -293,8 +294,16 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
         if (!version.sourcePublicationId || version.format.id !== 'org.ietf.csv' || error.code !== 'ARTIFACT_PREVIEW_INVALID') throw error;
         result = { family: 'metadata', message: 'Integrity verified. This complete saved table exceeds the bounded browser preview. Inspect it in a private R session.' };
       }
+      if (opened.typedDescriptor && Object.hasOwn(opened.typedDescriptor, 'semantics') && !['metrics', 'embedding'].includes(result.family)) {
+        let semantics;
+        try { semantics = validateResultSemantics(opened.typedDescriptor.semantics, opened.typedDescriptor.type); }
+        catch { throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The retained result has invalid declared meaning.', 400); }
+        result = { ...result, source: version.reference, semantics };
+      }
+      const response = { version, integrityVerified: true, preview: result };
+      if (Buffer.byteLength(JSON.stringify(response)) > previews.PREVIEW_LIMITS.bytes) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The retained preview exceeds the bounded response size.', 413);
       await recheckOpened(userId, projectId, opened);
-      return { version, integrityVerified: true, preview: result };
+      return response;
     }
     finally { await opened.handle.close(); }
   }

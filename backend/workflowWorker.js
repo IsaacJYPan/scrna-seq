@@ -58,7 +58,9 @@ async function runWorkflowJob(db, ctx, workerId, claimToken, provider) {
     const key = `${outputStorageKey}-${declaration.name}`;
     if (!file || file.storageKey !== key || !/^[a-f0-9]{64}$/.test(file.checksumSha256)
         || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 0 || file.sizeBytes > 200 * 1024 * 1024) throw new Error('Invalid workflow output descriptor.');
-    const output = { id: identifier('eri'), type: declaration.type, sha256: file.checksumSha256, sizeBytes: file.sizeBytes, profileId: result.profileId };
+    const specification = instance.package_json.steps.find(step => step.id === run.stepId).outputs[port];
+    const output = { id: identifier('eri'), type: declaration.type, sha256: file.checksumSha256, sizeBytes: file.sizeBytes, profileId: result.profileId,
+      ...(Object.hasOwn(specification, 'semantics') ? { semantics: specification.semantics } : {}) };
     await validateWorkflowOutput(provider, key, output);
     outputs[port] = output;
   }

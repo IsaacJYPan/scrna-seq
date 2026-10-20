@@ -11,6 +11,13 @@ const typed = (type, value, changes = {}) => {
   return { source, descriptor: { id: source.versionId, type, sha256: source.sha256, sizeBytes: bytes.length, profileId: 'seurat-5' }, bytes, ...changes };
 };
 
+it('uses persisted trusted descriptor semantics and rejects a competing caller override', () => {
+  const input = typed('metrics', { cells: 12 });
+  input.descriptor.semantics = { role: 'diagnostic', title: 'Saved QC meaning', metrics: { cells: { label: 'Retained cells', unit: 'cells' } } };
+  expect(projectRetainedTypedPreview(input)).toMatchObject({ semantics: { role: 'diagnostic', title: 'Saved QC meaning' }, items: [{ key: 'cells', label: 'Retained cells', unit: 'cells' }] });
+  expect(() => projectRetainedTypedPreview({ ...input, semantics: { title: 'Override' } })).toThrow(/second override/);
+});
+
 describe('pure retained scalar metric projections', () => {
   it('preserves exact scalar values, source identity and unknown units without asserting integrity or scientific semantics', () => {
     const value = { zero: 0, finite: -1.25, missing: null, passed: false, label: '<script>inert text</script>' };

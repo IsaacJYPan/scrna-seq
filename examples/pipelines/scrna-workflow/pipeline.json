@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "scrna-workflow",
   "name": "Single-cell workflow",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "QC, normalization, PCA, independent neighbors and UMAP branches, and custom R figures.",
   "runtime": {
     "language": "r",
@@ -45,11 +45,20 @@
         },
         "summary": {
           "type": "metrics",
-          "label": "Dataset summary"
+          "label": "Dataset summary",
+          "semantics": {
+            "role": "diagnostic",
+            "title": "Dataset after quality filters",
+            "metrics": {
+              "cells": { "label": "Retained cells", "unit": "cells" },
+              "features": { "label": "Measured features", "unit": "features" }
+            }
+          }
         },
         "distribution": {
           "type": "figure",
-          "label": "Feature counts"
+          "label": "Feature counts",
+          "semantics": { "role": "diagnostic", "title": "Feature counts after quality filters" }
         }
       }
     },
@@ -107,7 +116,8 @@
         },
         "elbow": {
           "type": "figure",
-          "label": "PCA variance"
+          "label": "PCA variance",
+          "semantics": { "role": "diagnostic", "title": "PCA variance by component" }
         }
       }
     },
@@ -161,7 +171,8 @@
       "outputs": {
         "labels": {
           "type": "table",
-          "label": "Cluster assignments"
+          "label": "Cluster assignments",
+          "semantics": { "role": "primary", "title": "Cell cluster assignments" }
         }
       }
     },
@@ -196,7 +207,13 @@
       "outputs": {
         "coordinates": {
           "type": "scatter",
-          "label": "UMAP embedding"
+          "label": "UMAP embedding",
+          "semantics": {
+            "role": "primary",
+            "title": "Cell UMAP embedding",
+            "entityType": "cell",
+            "axes": { "x": { "label": "UMAP 1" }, "y": { "label": "UMAP 2" } }
+          }
         }
       }
     },
@@ -227,7 +244,8 @@
       "outputs": {
         "figure": {
           "type": "figure",
-          "label": "UMAP by cluster"
+          "label": "UMAP by cluster",
+          "semantics": { "role": "primary", "title": "Cell UMAP colored by cluster" }
         }
       }
     }

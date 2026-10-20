@@ -80,6 +80,19 @@ describe.skipIf(!configured)('typed retained results through real PostgreSQL/sto
     const smaller = await get(record.id, '/preview?pointLimit=500');
     expect(smaller.data.preview.sourceIndices).toEqual(preview.sourceIndices.slice(0, 500));
   });
+  it('persists and transports only declared source-bound meaning for metrics, coordinates, figures and tables', async () => {
+    const metrics = await retained('metrics', { cells: 12, fraction: 0.5 }, { descriptorChanges: { semantics: { role: 'diagnostic', title: 'Declared QC', metrics: { cells: { label: 'Retained cells', unit: 'cells' } } } } });
+    expect((await get(metrics.id, '/preview')).data.preview).toMatchObject({ semantics: { role: 'diagnostic', title: 'Declared QC' },
+      items: [{ key: 'cells', label: 'Retained cells', unit: 'cells' }, { key: 'fraction', label: null, unit: null }] });
+    const coordinates = await retained('scatter', { x: [1], y: [2], ids: ['sample-A'] }, { descriptorChanges: { semantics: { role: 'primary', title: 'Declared sample map', entityType: 'sample', axes: { x: { label: 'Position', unit: 'µm' } } } } });
+    expect((await get(coordinates.id, '/preview')).data.preview).toMatchObject({ semantics: { role: 'primary', title: 'Declared sample map', entityType: 'sample', axes: { x: { label: 'Position', unit: 'µm' }, y: { label: null, unit: null } } } });
+    for (const [type, value] of [['figure', png], ['table', [{ sample: 'A' }]]]) {
+      const record = await retained(type, value, { descriptorChanges: { semantics: { role: 'primary', title: `Declared ${type}` } } });
+      expect((await get(record.id, '/preview')).data.preview).toMatchObject({ source: { versionId: record.id, sha256: sha(record.bytes) }, semantics: { role: 'primary', title: `Declared ${type}` } });
+    }
+    const malformed = await retained('metrics', { cells: 12 }, { validated: false, descriptorChanges: { semantics: { metrics: { missing: { label: 'Wrong output key' } } } } });
+    expect((await get(malformed.id, '/preview')).status).toBe(400);
+  });
   it('retains private source permissions for members and wrong projects and denies changed bytes/descriptors', async () => {
     const record = await retained('metrics', { cells: 12 });
     const other = await http.createUserWithToken({ email: 'typed-viewer@example.test' });

@@ -40,6 +40,14 @@ it('rejects modified contents even when their structure is valid', async () => {
   await expect(validate('metrics', { cells: 100 }, { sha256: '0'.repeat(64) })).rejects.toThrow();
 });
 
+it('validates declared meaning against its output type and actual metric keys before retention', async () => {
+  await expect(validate('metrics', { cells: 80 }, { semantics: { role: 'diagnostic', title: 'QC summary', metrics: { cells: { label: 'Retained cells', unit: 'cells' } } } })).resolves.toBeUndefined();
+  await expect(validate('metrics', { cells: 80 }, { semantics: { metrics: { missing: { unit: 'cells' } } } })).rejects.toThrow(/unsupported field/);
+  await expect(validate('scatter', { x: [1], y: [2], ids: ['a'] }, { semantics: { role: 'primary', entityType: 'cell', axes: { x: { label: 'UMAP 1' } } } })).resolves.toBeUndefined();
+  await expect(validate('table', [], { semantics: { entityType: 'cell' } })).rejects.toThrow(/unsupported field/);
+  await expect(validate('rds', Buffer.from('opaque'), { semantics: { role: 'guessed' } })).rejects.toThrow(/role/);
+});
+
 it('checks PNG dimensions before serving a figure', async () => {
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jf1sAAAAASUVORK5CYII=', 'base64');
   await expect(validate('figure', png)).resolves.toBeUndefined();

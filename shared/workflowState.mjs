@@ -59,6 +59,7 @@ export function invalidatedWorkflowSteps(workflow, changedPorts) {
 function sameOutput(previous, next, sameProducer) {
   return previous && next && previous.type === next.type && previous.sha256 === next.sha256
     && previous.sizeBytes === next.sizeBytes && previous.profileId === next.profileId
+    && JSON.stringify(previous.semantics ?? null) === JSON.stringify(next.semantics ?? null)
     && (next.type !== 'rds' || sameProducer);
 }
 
