@@ -3,10 +3,14 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import WorkflowWorkbench from './WorkflowWorkbench';
 import { workflowRequest } from '../pipelines/workflowApi';
+import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifactApi';
 
 vi.mock('../pipelines/workflowApi', () => ({ workflowRequest: vi.fn(), workflowUrl: (project, suffix) => `/api/workflows/${project}/${suffix}` }));
-vi.mock('./Plot', () => ({ default: ({ data }) => <pre data-testid="scatter">{JSON.stringify(data)}</pre> }));
+vi.mock('../artifacts/artifactApi', () => ({ getArtifactVersion: vi.fn(), previewArtifactVersion: vi.fn() }));
 let instance, restored, requests;
+const outputId = 'eri_' + '1'.repeat(24), checksum = 'a'.repeat(64);
+const metadata = { artifactId: outputId, versionId: outputId, projectId: 'proj_one', name: 'Saved workflow summary', sha256: checksum, format: { id: 'org.ietf.json', version: '1' }, previews: ['metrics'] };
+const metricPreview = { family: 'metrics', source: { artifactId: outputId, versionId: outputId, projectId: 'proj_one', sha256: checksum }, semantics: { role: null, title: null }, items: [{ key: 'cells', value: 80, label: null, unit: null }] };
 const step = {
   id: 'qc', label: 'Quality Control', inputs: { analysis: { from: 'input.analysis', type: 'rds' } },
   parameters: [{ key: 'minimum', label: 'Minimum features', type: 'integer', default: 5, min: 0, max: 100 }],
@@ -20,10 +24,12 @@ function Workbench() {
 beforeEach(() => {
   vi.clearAllMocks();
   requests = [];
+  getArtifactVersion.mockResolvedValue(metadata);
+  previewArtifactVersion.mockResolvedValue({ version: metadata, integrityVerified: true, preview: metricPreview });
   instance = {
     id: 'wfi_one', analysisObjectId: 'ao_one',
     package: { name: 'Sample', version: '1.0.0', steps: [step], tabs: [{ id: 'qc', step: 'qc', plots: [] }] },
-    state: { root: { id: 'root' }, generation: 1, active: null, results: { qc: { parameters: { minimum: 5 }, seed: 1, outputs: { summary: { id: 'output', type: 'metrics' } } } } },
+    state: { root: { id: 'root' }, generation: 1, active: null, results: { qc: { parameters: { minimum: 5 }, seed: 1, outputs: { summary: { id: outputId, type: 'metrics', sha256: checksum } } } } },
   };
   restored = structuredClone(instance);
   restored.state.generation = 2;
@@ -38,7 +44,7 @@ beforeEach(() => {
 });
 afterEach(() => { delete window.desktopShell; vi.restoreAllMocks(); });
 
-it('blocks recipe execution during tunnel loss and retains results and local parameter drafts', async () => {
+it('requires a fresh authorized read after tunnel loss while retaining local parameter drafts', async () => {
   let notify;
   const target={id:'lab',status:'connected',serviceIdentity:'selected-lab',sshTunnel:{state:'connected'}};
   window.desktopShell={getCurrentTarget:async()=>target,onTargetStatus:listener=>{notify=listener;return()=>{};}};
@@ -47,11 +53,16 @@ it('blocks recipe execution during tunnel loss and retains results and local par
   await waitFor(()=>expect(screen.getByRole('button',{name:'Run Quality Control'})).toBeEnabled());
   act(()=>notify({...target,sshTunnel:{state:'disconnected'}}));
   expect(screen.getByRole('button',{name:'Run Quality Control'})).toBeDisabled();
-  expect(screen.getByText('80')).toBeVisible();
+  expect(screen.queryByText('80')).not.toBeInTheDocument();
+  expect(screen.getByText(/Reconnect to the same workspace/)).toBeVisible();
   fireEvent.change(screen.getByLabelText('Minimum features'),{target:{value:'20'}});
   expect(screen.getByLabelText('Minimum features')).toHaveValue(20);
   fireEvent.click(screen.getByRole('button',{name:'Run Quality Control'}));
   expect(requests.some(request=>request.method==='POST')).toBe(false);
+  act(()=>notify(target));
+  expect(await screen.findByText('80')).toBeVisible();
+  expect(getArtifactVersion).toHaveBeenCalledTimes(2);
+  expect(requests.some(request => request.suffix.startsWith('artifacts/'))).toBe(false);
 });
 
 it('keeps applied output when a draft changes and submits settings only on Run', async () => {

@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const storage = require('./storage');
 const previews = require('./artifactPreviews');
+const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, validateRetainedRasterMetadata } = require('./retainedTypedPreviews');
 const { DOWNLOADABLE_ARTIFACT_TYPES, authorizeArtifactDownload } = require('./researchExports');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const analysisContract = import('../shared/analysisModel.mjs');
@@ -56,12 +57,18 @@ function serverImportProvenance(value) {
 function createArtifactVersionService(db, provider = storage.createLocalStorageProvider()) {
   async function display(row, ownerName) {
     if (!ownerName) ownerName = (await db.query('SELECT display_name FROM users WHERE id=$1', [row.ownerId])).rows[0]?.display_name || 'Researcher';
+    let capabilities = previews.previewCapabilities(row.type, row.format, row.size);
+    if (row.typedDescriptor?.type === 'metrics' && row.size <= RETAINED_TYPED_LIMITS.sourceJsonBytes) capabilities = ['metrics'];
+    if (row.typedDescriptor?.type === 'scatter' && row.size <= RETAINED_TYPED_LIMITS.sourceJsonBytes) capabilities = ['embedding'];
+    // Trusted workflow PNGs have their dimensions checked from verified bytes
+    // when opened; old descriptors do not retain those dimensions themselves.
+    if (row.typedDescriptor?.type === 'figure' && row.size <= previews.PREVIEW_LIMITS.imageBytes) capabilities = ['image'];
     const record = {
       kind: 'artifact-version', schemaVersion: 1, artifactId: row.artifactId, versionId: row.versionId,
       projectId: row.projectId, ownerId: String(row.ownerId), type: row.type, format: row.format,
       sha256: row.checksum, sizeBytes: row.size, storageRef: row.versionId,
       sourceRunId: row.sourceRunId || null, createdAt: canonicalTime(row.createdAt),
-      previews: previews.previewCapabilities(row.type, row.format, row.size),
+      previews: capabilities,
     };
     (await analysisContract).validateArtifactVersion(record);
     const sourceImport = serverImportProvenance(row.provenance);
@@ -106,6 +113,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       name: `Workflow ${spec.type || 'output'} · ${row.id.slice(-8)}`, type: types[spec.type] || 'file', format: { id: formats[spec.type] || 'org.traceomics.opaque-file', version: '1' },
       checksum: spec.sha256, size: Number(spec.sizeBytes), key: row.storage_key,
       sourceRunId: row.job_id, createdAt: row.created_at, sourceKind: 'workflow-output', sourceId: row.id,
+      typedDescriptor: spec,
     };
   }
   function jobArtifact(artifact) {
@@ -198,13 +206,58 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       opened = await provider.openVerifiedRead(row.key, { checksumSha256: row.checksum, sizeBytes: row.size });
       // Access can be revoked while a large object is being hashed; recheck before handing bytes to a consumer.
       const current = await internal(userId, projectId, reference.versionId);
-      if (current.checksum !== row.checksum || current.size !== row.size || current.key !== row.key) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The selected artifact version changed during verification.', 409);
+      if (current.checksum !== row.checksum || current.size !== row.size || current.key !== row.key
+          || JSON.stringify(current.typedDescriptor) !== JSON.stringify(row.typedDescriptor)) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The selected artifact version changed during verification.', 409);
       if (purpose === 'execution') await db.requireProjectRole(userId, projectId, WRITE_ROLES);
-      return { ...opened, internalStorageKey: row.key, version: await display(row) };
+      return { ...opened, internalStorageKey: row.key, version: await display(row), ...(row.typedDescriptor ? { typedDescriptor: row.typedDescriptor } : {}) };
     } catch (error) {
       if (opened) await opened.handle.close();
       if (['STORAGE_SIZE_MISMATCH', 'STORAGE_CHECKSUM_MISMATCH', 'STORAGE_OBJECT_MISSING', 'UNSAFE_STORAGE_PATH'].includes(error.code)) throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The saved artifact is missing or its integrity check failed. Earlier versions remain available.', 409);
       throw error;
+    }
+  }
+
+  async function prefix(opened, maximum) {
+    const bytes = Buffer.alloc(Math.min(maximum, opened.stat.size));
+    let position = 0;
+    while (position < bytes.length) {
+      const read = await opened.handle.read(bytes, position, bytes.length - position, position);
+      if (!read.bytesRead) break;
+      position += read.bytesRead;
+    }
+    return bytes.subarray(0, position);
+  }
+  async function completeBytes(opened, version, maximum) {
+    if (opened.stat.size > maximum) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The saved result exceeds this bounded preview.', 413);
+    const bytes = await prefix(opened, maximum);
+    if (bytes.length !== version.sizeBytes || crypto.createHash('sha256').update(bytes).digest('hex') !== version.sha256) {
+      throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The saved artifact changed while its preview was read.', 409);
+    }
+    return bytes;
+  }
+  function raster(bytes, version) {
+    if (!['org.w3.png', 'org.iso.jpeg'].includes(version.format.id)) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'A bounded raster preview is unavailable for this version.', 404);
+    const dimensions = previews.imageDimensions(bytes.subarray(0, 128 * 1024), version.format.id);
+    return validateRetainedRasterMetadata({ formatId: version.format.id, sizeBytes: version.sizeBytes, ...dimensions });
+  }
+  async function readVerifiedImage(userId, projectId, versionId) {
+    const version = await get(userId, projectId, versionId);
+    if (!version.previews.includes('image')) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'A bounded image preview is unavailable for this version.', 404);
+    const opened = await resolveVerified(userId, projectId, version.reference);
+    try {
+      const bytes = await completeBytes(opened, version, previews.PREVIEW_LIMITS.imageBytes);
+      const dimensions = raster(bytes, version);
+      // Recheck after the bounded snapshot, including revocation during reads.
+      await recheckOpened(userId, projectId, opened);
+      return { version, dimensions, bytes };
+    } finally { await opened.handle.close(); }
+  }
+
+  async function recheckOpened(userId, projectId, opened) {
+    const current = await internal(userId, projectId, opened.version.versionId);
+    if (current.checksum !== opened.version.sha256 || current.size !== opened.version.sizeBytes
+        || current.key !== opened.internalStorageKey || JSON.stringify(current.typedDescriptor) !== JSON.stringify(opened.typedDescriptor)) {
+      throw artifactError('ARTIFACT_VERSION_CHANGED', 'The selected artifact version changed during inspection.', 409);
     }
   }
 
@@ -213,13 +266,34 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     const opened = await resolveVerified(userId, projectId, version.reference);
     try {
       let result;
-      try { result = version.previews.length ? await previews.buildPreview(opened, version, options) : { family: 'metadata', message: 'Integrity verified. This version supports metadata inspection; its contents require an appropriate private analysis runtime.' }; }
+      try {
+        if (['metrics', 'scatter'].includes(opened.typedDescriptor?.type)) {
+          if (Object.keys(options).some(key => key.startsWith('pointLimit[') || key.startsWith('pointLimit.'))) throw artifactError('INVALID_ARTIFACT_PAGE', 'Embedding point limit must be one integer from 1 to 5000.');
+          const raw = options.pointLimit ?? RETAINED_TYPED_LIMITS.defaultPoints;
+          if ((typeof raw !== 'number' && (typeof raw !== 'string' || !/^[0-9]{1,4}$/.test(raw)))
+              || !Number.isSafeInteger(Number(raw)) || Number(raw) < 1 || Number(raw) > RETAINED_TYPED_LIMITS.maximumPoints) throw artifactError('INVALID_ARTIFACT_PAGE', 'Embedding point limit must be one integer from 1 to 5000.');
+          const overhead = Buffer.byteLength(JSON.stringify({ version, integrityVerified: true, preview: null })) - 4;
+          const allowance = RETAINED_TYPED_LIMITS.responseBytes - overhead;
+          if (allowance < 1) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The saved result metadata exceeds the bounded response.', 413);
+          result = projectRetainedTypedPreview({ source: version.reference, descriptor: opened.typedDescriptor,
+            bytes: await completeBytes(opened, version, RETAINED_TYPED_LIMITS.sourceJsonBytes), pointLimit: Number(raw), responseBytes: allowance });
+        } else if (version.previews.includes('image')) {
+          try {
+            const dimensions = raster(await completeBytes(opened, version, previews.PREVIEW_LIMITS.imageBytes), version);
+            result = { family: 'image', width: dimensions.width, height: dimensions.height, boundedBytes: dimensions.boundedBytes };
+          } catch (error) {
+            if (error.status !== 413) throw error;
+            result = { family: 'metadata', message: 'Integrity verified. This complete saved figure exceeds the bounded browser preview.' };
+          }
+        } else result = version.previews.length ? await previews.buildPreview(opened, version, options) : { family: 'metadata', message: 'Integrity verified. This version supports metadata inspection; its contents require an appropriate private analysis runtime.' };
+      }
       catch (error) {
         // The private serializer can save a full data frame whose dimensions or
         // cells exceed browser preview budgets. Preserve those verified bytes.
         if (!version.sourcePublicationId || version.format.id !== 'org.ietf.csv' || error.code !== 'ARTIFACT_PREVIEW_INVALID') throw error;
         result = { family: 'metadata', message: 'Integrity verified. This complete saved table exceeds the bounded browser preview. Inspect it in a private R session.' };
       }
+      await recheckOpened(userId, projectId, opened);
       return { version, integrityVerified: true, preview: result };
     }
     finally { await opened.handle.close(); }
@@ -345,7 +419,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       [value.versionId,value.artifactId,projectId,userId,safeName(value.name),Number(next.version),value.previousVersionId||null,value.type,value.format,value.mimeType,value.checksumSha256,value.sizeBytes,value.key,value.publicationId,value.provenance]);
     return inserted.rows[0];
   }
-  return { list, get, preview, importFile, resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
+  return { list, get, preview, readVerifiedImage, importFile, resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

@@ -1343,7 +1343,7 @@ export default function App() {
     return (
       <div className="relative w-full h-full bg-background">
         {activeWorkflow && activeTab.startsWith('workflow:') && <div className="h-full overflow-auto"><ErrorBoundary key={activeWorkflow.id}>
-          <WorkflowWorkbench instance={activeWorkflow} projectId={activeWorkflow.projectId} activeTab={activeTab}
+          <WorkflowWorkbench instance={activeWorkflow} projectId={activeWorkflow.projectId} userId={user?.id} activeTab={activeTab}
             onUpdate={updateWorkflow} enabled={deploymentPolicy.expertREnabled === true}
             onExit={() => { setActiveWorkflow(null); setActiveTab('pipeline-manager'); }} />
         </ErrorBoundary></div>}

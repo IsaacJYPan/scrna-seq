@@ -9,6 +9,7 @@ import useExecutionTarget from '../runtime/useExecutionTarget';
 vi.mock('../artifacts/artifactApi', () => ({ getArtifactVersion: vi.fn(), previewArtifactVersion: vi.fn() }));
 vi.mock('../artifacts/retainedArtifactApi', () => ({ fetchRetainedArtifactImage: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
+vi.mock('./Plot', () => ({ default: ({ data, layout }) => <pre data-testid="retained-plot">{JSON.stringify({ data, layout })}</pre>, getPlotHoverStyle: () => ({}) }));
 const versionId = 'av_' + '1'.repeat(24), secondId = 'av_' + '2'.repeat(24), sha256 = 'a'.repeat(64);
 const reference = { kind: 'artifact-version', versionId, sha256 };
 const metadata = (id = versionId, projectId = 'project') => ({
@@ -152,11 +153,15 @@ it('loads images through a fenced digest-verifying helper and releases their obj
   const view = render(<RetainedArtifactView {...props} />);
   const image = await screen.findByRole('img');
   expect(image).toHaveAttribute('src', 'blob:verified-image');
+  expect(screen.getByRole('link', { name: 'Open full-size image' })).toHaveAttribute('href', 'blob:verified-image');
+  expect(screen.getByRole('link', { name: 'Open full-size image' })).toHaveAttribute('target', '_blank');
+  expect(screen.getByRole('link', { name: 'Open full-size image' })).toHaveAttribute('rel', 'noopener noreferrer');
   expect(fetchRetainedArtifactImage).toHaveBeenCalledWith('project', versionId, sha256, expect.objectContaining({ signal: expect.any(AbortSignal) }));
   fireEvent.error(image);
   expect(screen.getByRole('alert')).toHaveTextContent('integrity check failed');
   expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:verified-image');
   expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'Open full-size image' })).not.toBeInTheDocument();
   view.unmount();
 });
 
@@ -192,4 +197,40 @@ it('rejects unsupported pointers without making reads and delegates optional ins
   view.rerender(<RetainedArtifactView {...props} onInspect={onInspect} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Inspect result' }));
   expect(onInspect).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project', reference }));
+});
+
+const typedMetadata = family => ({ ...metadata(), artifactId: 'af_source', previews: [family] });
+const typedSource = { artifactId: 'af_source', versionId, projectId: 'project', sha256 };
+it('renders finite scalar values without losing zero, false or inert text and rejects a mismatched typed source', async () => {
+  const version = typedMetadata('metrics');
+  const preview = { family: 'metrics', source: typedSource, semantics: { role: null, title: null }, items: [
+    { key: 'zero', value: 0, label: null, unit: null }, { key: 'flag', value: false, label: null, unit: null },
+    { key: 'note', value: '<img onerror="attack()">', label: null, unit: null }, { key: 'missing', value: null, label: null, unit: null },
+  ] };
+  getArtifactVersion.mockResolvedValue(version);
+  previewArtifactVersion.mockResolvedValue({ version, integrityVerified: true, preview });
+  const view = render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByText('false')).toBeVisible(); expect(screen.getByText('0')).toBeVisible();
+  expect(screen.getByText('Not recorded')).toBeVisible(); expect(screen.getByText('<img onerror="attack()">')).toBeVisible();
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  previewArtifactVersion.mockResolvedValue({ version, integrityVerified: true, preview: { ...preview, source: { ...typedSource, sha256: 'b'.repeat(64) } } });
+  view.rerender(<RetainedArtifactView {...props} userId={2} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not be verified');
+  expect(screen.queryByText('false')).not.toBeInTheDocument();
+});
+
+it('requests bounded deterministic embedding projections and changes limits without running analysis', async () => {
+  const version = typedMetadata('embedding');
+  const preview = { family: 'embedding', source: typedSource, semantics: { role: null, title: null, entityType: null, axes: { x: { label: null, unit: null }, y: { label: null, unit: null } } },
+    x: [1, 2], y: [3, 4], ids: null, sourceIndices: [7, 9], identity: { kind: 'source-row-positions', scope: 'exact-source-version', indexBase: 0 },
+    sampling: { method: 'sha256-priority-v1', sourceCount: 10000, returnedCount: 2, requestedLimit: 2000, sampled: true, aggregated: false, stratified: false, budgetLimited: true } };
+  getArtifactVersion.mockResolvedValue(version);
+  previewArtifactVersion.mockImplementation(async (project, id, options) => ({ version, integrityVerified: true, preview: { ...preview, sampling: { ...preview.sampling, requestedLimit: options.pointLimit } } }));
+  render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByText('Showing 2 of 10,000 source points.')).toBeVisible();
+  expect(screen.getByText(/not cell identifiers/)).toBeVisible();
+  expect(screen.getByTestId('retained-plot')).toHaveTextContent('Source row 7 (zero-based)');
+  fireEvent.change(screen.getByRole('combobox', { name: 'Maximum points' }), { target: { value: '500' } });
+  await waitFor(() => expect(previewArtifactVersion).toHaveBeenLastCalledWith('project', versionId, expect.objectContaining({ pointLimit: 500 })));
+  expect(await screen.findByText('Showing 2 of 10,000 source points.')).toBeVisible();
 });

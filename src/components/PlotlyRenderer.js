@@ -4,6 +4,9 @@ import Plotly from './plotlyRuntime';
 
 const PlotlyPlot = createPlotlyComponent(Plotly);
 
+// Keep exports on the same lazy boundary as the curated plotting runtime.
+export function downloadPlotImage(graph, options) { return Plotly.downloadImage(graph, options); }
+
 export default function PlotlyRenderer({ onInitialized, useResizeHandler, config, ...props }) {
   const [graph, setGraph] = React.useState(null);
   // Plotly's global zoom/legend tips outlive their page during tab navigation.

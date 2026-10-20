@@ -27,8 +27,8 @@ export function listArtifactVersions(projectId, { signal, before, limit = 50 } =
 export function getArtifactVersion(projectId, versionId, signal) {
   return request(`${base(projectId)}/${encodeURIComponent(versionId)}`, { signal });
 }
-export function previewArtifactVersion(projectId, versionId, { signal, offset = 0, limit = 25 } = {}) {
-  return request(`${base(projectId)}/${encodeURIComponent(versionId)}/preview?${new URLSearchParams({ offset: String(offset), limit: String(limit) })}`, { signal });
+export function previewArtifactVersion(projectId, versionId, { signal, offset = 0, limit = 25, pointLimit } = {}) {
+  return request(`${base(projectId)}/${encodeURIComponent(versionId)}/preview?${new URLSearchParams({ offset: String(offset), limit: String(limit), ...(pointLimit === undefined ? {} : { pointLimit: String(pointLimit) }) })}`, { signal });
 }
 export function artifactImageUrl(projectId, versionId) {
   return apiUrl(`${base(projectId)}/${encodeURIComponent(versionId)}/image`);

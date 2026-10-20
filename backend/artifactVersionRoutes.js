@@ -40,20 +40,13 @@ function artifactVersionRoutes({ db, provider, requireAuth, uploadDirectory } = 
     res.json(await service.preview(req.user.id, req.params.projectId, req.params.versionId, req.query));
   }));
   router.get('/:projectId/:versionId/image', route(async (req, res) => {
-    const version = await service.get(req.user.id, req.params.projectId, req.params.versionId);
-    if (!version.previews.includes('image')) return res.status(404).json({ error: 'A bounded image preview is unavailable for this version.' });
-    const opened = await service.resolveVerified(req.user.id, req.params.projectId, version.reference);
-    try {
-      res.setHeader('Content-Type', version.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg');
-      res.setHeader('Content-Length', String(opened.stat.size));
-      res.setHeader('Cache-Control', 'private, no-store');
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-      const stream = opened.handle.createReadStream({ start: 0, autoClose: true });
-      res.once('close', () => stream.destroy());
-      stream.on('error', () => res.destroy());
-      stream.pipe(res);
-    } catch (error) { await opened.handle.close(); throw error; }
+    const { version, bytes } = await service.readVerifiedImage(req.user.id, req.params.projectId, req.params.versionId);
+    res.setHeader('Content-Type', version.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg');
+    res.setHeader('Content-Length', String(bytes.length));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    res.send(bytes);
   }));
 
   async function writer(req, res, next) {

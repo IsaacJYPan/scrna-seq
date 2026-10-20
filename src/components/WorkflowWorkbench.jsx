@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import Plot from './Plot';
+import RetainedArtifactView from './RetainedArtifactView';
 import { invalidatedWorkflowSteps, workflowAvailability } from '../../shared/workflowState.mjs';
 import { workflowParameters } from '../../shared/workflowPackage.mjs';
 import { workflowRequest, workflowUrl } from '../pipelines/workflowApi';
@@ -27,49 +27,15 @@ function ParameterField({ parameter, value, onChange }) {
   return <label className="grid gap-1 text-sm">{parameter.label}{control}</label>;
 }
 
-function scatterTraces(data) {
-  const escape = value => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const traces = new Map();
-  data.ids.forEach((id, index) => {
-    const group = data.groups?.[index] ?? 'Cells';
-    if (!traces.has(group)) traces.set(group, {
-      name: escape(group), type: data.ids.length <= 20000 ? 'scatter' : 'scattergl',
-      mode: 'markers', x: [], y: [], text: [], marker: { size: 4 }, hoverinfo: 'text',
-    });
-    const trace = traces.get(group);
-    trace.x.push(data.x[index]); trace.y.push(data.y[index]); trace.text.push(escape(id));
-  });
-  return [...traces.values()];
-}
-
-function ResultPanel({ projectId, output, label }) {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  const [page, setPage] = useState(0);
-  const url = workflowUrl(projectId, `artifacts/${output.id}`);
-  useEffect(() => {
-    if (['figure', 'rds'].includes(output.type)) return;
-    const controller = new AbortController();
-    setData(null); setError(''); setPage(0);
-    workflowRequest(projectId, `artifacts/${output.id}`, 'GET', undefined, controller.signal)
-      .then(setData).catch(error => { if (error.name !== 'AbortError') setError(error.message); });
-    return () => controller.abort();
-  }, [projectId, output.id, output.type]);
-  return <section className="rounded-lg border border-border bg-surface p-4">
-    <div className="mb-3 flex items-center justify-between gap-3"><h3 className="font-medium">{label}</h3><a className="text-sm text-primary" href={`${url}?download=1`}>Download</a></div>
-    {error && <p role="alert">{error}</p>}
-    {output.type === 'figure' && <img src={url} alt={label} className="h-auto max-w-full" />}
-    {output.type === 'rds' && <p className="text-sm text-textMuted">Available to dependent steps in this workflow.</p>}
-    {data && output.type === 'metrics' && <dl className="grid grid-cols-2 gap-3">{Object.entries(data).map(([key, value]) => <div key={key}><dt className="text-sm text-textMuted">{key}</dt><dd>{String(value ?? '—')}</dd></div>)}</dl>}
-    {data && output.type === 'table' && <>
-      <div className="overflow-auto"><table className="w-full text-left text-sm"><thead><tr>{Object.keys(data[0] || {}).map(key => <th key={key} className="p-2">{key}</th>)}</tr></thead><tbody>{data.slice(page * 100, (page + 1) * 100).map((row, index) => <tr key={index}>{Object.entries(row).map(([key, value]) => <td key={key} className="border-t border-border p-2">{String(value ?? '')}</td>)}</tr>)}</tbody></table></div>
-      <div className="mt-3 flex gap-3 text-sm"><button disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</button><span>{data.length} rows</span><button disabled={(page + 1) * 100 >= data.length} onClick={() => setPage(page + 1)}>Next</button></div>
-    </>}
-    {data && output.type === 'scatter' && <Plot data={scatterTraces(data)} layout={{ autosize: true, height: 460, showlegend: !!data.groups, margin: { l: 45, r: 20, t: 20, b: 40 } }} config={{ responsive: true, displaylogo: false }} style={{ width: '100%' }} useResizeHandler />}
+function ResultPanel({ projectId, userId, output, label }) {
+  const { blocked } = useExecutionTarget();
+  return <section className="min-w-0 rounded-lg border border-border bg-surface p-4">
+    <div className="mb-3 flex items-center justify-between gap-3"><h3 className="font-medium">{label}</h3>{!blocked && <a className="text-sm text-primary" href={`${workflowUrl(projectId, `artifacts/${output.id}`)}?download=1`}>Download</a>}</div>
+    <RetainedArtifactView projectId={projectId} userId={userId} reference={{ kind: 'artifact-version', versionId: output.id, sha256: output.sha256 }} compact />
   </section>;
 }
 
-function StepPanel({ step, instance, projectId, update, enabled, request }) {
+function StepPanel({ step, instance, projectId, userId, update, enabled, request }) {
   const { state, package: workflow } = instance;
   const applied = state.results[step.id];
   const [parameters, setParameters] = useState(() => workflowParameters(step, applied?.parameters));
@@ -101,11 +67,11 @@ function StepPanel({ step, instance, projectId, update, enabled, request }) {
       {error && <p role="alert" className="mt-3 text-danger">{error}</p>}
     </div>}
     {applied && <details className="text-sm text-textMuted"><summary>Applied settings</summary><pre className="mt-2 whitespace-pre-wrap">{JSON.stringify({ ...applied.parameters, seed: applied.seed }, null, 2)}</pre></details>}
-    {applied && Object.entries(applied.outputs).map(([port, output]) => <ResultPanel key={output.id} projectId={projectId} output={output} label={step.outputs[port].label} />)}
+    {applied && Object.entries(applied.outputs).map(([port, output]) => <ResultPanel key={output.id} projectId={projectId} userId={userId} output={output} label={step.outputs[port].label} />)}
   </section>;
 }
 
-export default function WorkflowWorkbench({ instance, projectId, activeTab, onUpdate, onExit, enabled }) {
+export default function WorkflowWorkbench({ instance, projectId, userId, activeTab, onUpdate, onExit, enabled }) {
   const { blocked } = useExecutionTarget();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -139,7 +105,7 @@ export default function WorkflowWorkbench({ instance, projectId, activeTab, onUp
   return <div className="mx-auto max-w-6xl space-y-6 p-6 text-text">
     <div className="flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-2xl font-semibold">{instance.package.name}</h1><p className="text-sm text-textMuted">{instance.package.version} · Working results are temporary until saved.</p></div><button className="btn btn-secondary" onClick={onExit}>Back to Pipelines</button></div>
     {error && <p role="alert" className="text-danger">{error}</p>}
-    {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Retained results stay visible; no recipe step is rerun automatically.</p>}
+    {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Reconnect to the same workspace for a fresh authorized read of retained results. No analysis runtime is started and no recipe step is rerun automatically.</p>}
     {instance.state.error && <p role="alert" className="text-danger">{instance.state.error}</p>}
     {notice && <p role="status">{notice}</p>}
     <div className="flex flex-wrap items-end gap-3">
@@ -173,6 +139,6 @@ export default function WorkflowWorkbench({ instance, projectId, activeTab, onUp
         }}>Delete</button>
       </li>)}</ul>
     </details>
-    {[tab.step, ...tab.plots].map(id => <StepPanel key={`${instance.id}:${restoration}:${id}`} step={instance.package.steps.find(step => step.id === id)} instance={instance} projectId={projectId} update={onUpdate} enabled={enabled && !blocked} request={request} />)}
+    {[tab.step, ...tab.plots].map(id => <StepPanel key={`${instance.id}:${restoration}:${id}`} step={instance.package.steps.find(step => step.id === id)} instance={instance} projectId={projectId} userId={userId} update={onUpdate} enabled={enabled && !blocked} request={request} />)}
   </div>;
 }

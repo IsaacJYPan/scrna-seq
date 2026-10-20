@@ -4,6 +4,8 @@ import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifac
 import { fetchRetainedArtifactImage } from '../artifacts/retainedArtifactApi';
 import { artifactBytesLabel } from '../artifacts/privateRArtifactPolicy';
 import useExecutionTarget from '../runtime/useExecutionTarget';
+import { assertRetainedTypedSource, validRetainedTypedPreview } from '../artifacts/retainedTypedPreview';
+import RetainedEmbedding from './RetainedEmbedding';
 
 const opaqueMessage = 'This saved artifact has no supported browser preview. Only its saved metadata is shown; its contents have not been read or verified here.';
 const safeFailure = error => {
@@ -30,7 +32,7 @@ function boundedTable(value) {
 
 // Rendering has no transport or execution dependency. Typed retained metric and
 // embedding adapters can use this same surface when their bounded contracts exist.
-export function RetainedResultContent({ preview, integrityVerified = false, imageUrl, name, loading, pageSize, onPageChange, onPageSizeChange, onImageError }) {
+export function RetainedResultContent({ preview, integrityVerified = false, imageUrl, name, loading, pageSize, onPageChange, onPageSizeChange, onImageError, pointLimit = 2000, onPointLimitChange }) {
   if (!preview) return null;
   if (preview.family === 'metadata') return <p className="text-sm text-textMuted">{integrityVerified
     ? 'The saved bytes match this version, but no bounded browser preview is available. Inspect the contents explicitly in an appropriate analysis runtime.' : opaqueMessage}</p>;
@@ -39,7 +41,10 @@ export function RetainedResultContent({ preview, integrityVerified = false, imag
     {preview.truncated && <p className="text-xs text-textMuted">Bounded text preview; additional contents remain in storage.</p>}
   </>;
   if (preview.family === 'image') return imageUrl ? <figure><img src={imageUrl} alt={`Preview of ${name}`} className="max-h-80 max-w-full object-contain bg-white" onError={onImageError} />
+    <a href={imageUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-sm text-primary underline">Open full-size image</a>
     <figcaption className="mt-1 text-xs text-textMuted">{preview.width} × {preview.height} pixels · bounded raster preview</figcaption></figure> : null;
+  if (preview.family === 'metrics' && validRetainedTypedPreview(preview)) return <dl aria-label="Saved scalar metrics" className="grid grid-cols-1 gap-3 sm:grid-cols-2">{preview.items.map(item => <div key={item.key} className="min-w-0 rounded border border-border p-3"><dt className="break-words text-xs text-textMuted">{item.label || item.key}{item.unit ? ` (${item.unit})` : ''}</dt><dd className="break-words whitespace-pre-wrap font-medium">{item.value === null ? 'Not recorded' : String(item.value)}</dd></div>)}</dl>;
+  if (preview.family === 'embedding' && validRetainedTypedPreview(preview)) return <RetainedEmbedding preview={preview} pointLimit={pointLimit} onPointLimitChange={onPointLimitChange} loading={loading} />;
   if (preview.family === 'table' && boundedTable(preview)) return <>
     <div tabIndex={0} aria-label="Saved table preview" className="max-h-80 overflow-auto rounded border border-border"><table className="w-full text-left text-xs"><thead><tr>{preview.columns.map((column, index) => <th scope="col" className="p-2" key={index}>{column}</th>)}</tr></thead>
       <tbody>{preview.rows.map((row, index) => <tr key={preview.offset + index}>{row.map((cell, column) => <td className="border-t border-border p-2 whitespace-pre-wrap" key={column}>{cell}</td>)}</tr>)}</tbody></table></div>
@@ -79,10 +84,11 @@ function ExactArtifactView({ projectId, referenceKey, compact, onInspect }) {
   const [version, setVersion] = useState(null), [result, setResult] = useState(null);
   const [error, setError] = useState(''), [loading, setLoading] = useState(false), [copied, setCopied] = useState(false);
   const [imageUrl, setImageUrl] = useState(null), [pageSize, setPageSize] = useState(25);
+  const [pointLimit, setPointLimit] = useState(2000);
   const request = useRef(null), generation = useRef(0), image = useRef(null);
   const releaseImage = useCallback(() => { if (image.current) URL.revokeObjectURL(image.current); image.current = null; setImageUrl(null); }, []);
   const versionId = reference.versionId || reference.checkpointVersionId;
-  const load = useCallback(async (offset = 0, limit = 25) => {
+  const load = useCallback(async (offset = 0, limit = 25, maximumPoints = 2000) => {
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
     const current = ++generation.current;
@@ -93,10 +99,11 @@ function ExactArtifactView({ projectId, referenceKey, compact, onInspect }) {
       if (!valid()) return;
       assertVersion(metadata, projectId, reference); setVersion(metadata);
       if (!metadata.previews.length) { setResult({ integrityVerified: false, preview: { family: 'metadata' } }); return; }
-      const preview = await previewArtifactVersion(projectId, versionId, { signal: controller.signal, offset, limit });
+      const preview = await previewArtifactVersion(projectId, versionId, { signal: controller.signal, offset, limit, ...(metadata.previews.includes('embedding') ? { pointLimit: maximumPoints } : {}) });
       if (!valid()) return;
       assertVersion(preview.version, projectId, reference);
       if (preview.integrityVerified !== true || !preview.preview || typeof preview.preview.family !== 'string') throw Object.assign(new Error('The saved preview has no exact integrity evidence.'), { status: 409 });
+      assertRetainedTypedSource(preview.preview, metadata);
       if (preview.preview.family === 'image') {
         const blob = await fetchRetainedArtifactImage(projectId, versionId, reference.sha256, { signal: controller.signal });
         if (!valid()) return;
@@ -121,9 +128,10 @@ function ExactArtifactView({ projectId, referenceKey, compact, onInspect }) {
         catch { setError('Reference could not be copied. Select it in the details below.'); }
       }} /></>}
     {loading && <p role="status" className="text-sm text-textMuted">Loading authorized saved details and a bounded preview…</p>}
-    {error && <div className="space-y-2"><p role="alert" className="text-sm text-danger">{error}</p><button type="button" className="btn btn-secondary text-xs" disabled={loading} onClick={() => void load(0, pageSize)}>Retry saved result</button></div>}
+    {error && <div className="space-y-2"><p role="alert" className="text-sm text-danger">{error}</p><button type="button" className="btn btn-secondary text-xs" disabled={loading} onClick={() => void load(0, pageSize, pointLimit)}>Retry saved result</button></div>}
     {result?.integrityVerified && <p role="status" className="text-xs text-success">Saved checksum verified · preview from this exact version</p>}
     <RetainedResultContent preview={result?.preview} integrityVerified={result?.integrityVerified} imageUrl={imageUrl} name={version?.name} loading={loading} pageSize={pageSize}
+      pointLimit={pointLimit} onPointLimitChange={maximum => { setPointLimit(maximum); void load(0, pageSize, maximum); }}
       onPageChange={offset => void load(offset, pageSize)} onPageSizeChange={size => { setPageSize(size); void load(0, size); }}
       onImageError={() => { releaseImage(); setResult(null); setError('The image preview is unavailable or its integrity check failed.'); }} />
   </section>;
