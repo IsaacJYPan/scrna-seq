@@ -1,0 +1,195 @@
+import React from 'react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import RetainedArtifactView, { RetainedResultContent } from './RetainedArtifactView';
+import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifactApi';
+import { fetchRetainedArtifactImage } from '../artifacts/retainedArtifactApi';
+import useExecutionTarget from '../runtime/useExecutionTarget';
+
+vi.mock('../artifacts/artifactApi', () => ({ getArtifactVersion: vi.fn(), previewArtifactVersion: vi.fn() }));
+vi.mock('../artifacts/retainedArtifactApi', () => ({ fetchRetainedArtifactImage: vi.fn() }));
+vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
+const versionId = 'av_' + '1'.repeat(24), secondId = 'av_' + '2'.repeat(24), sha256 = 'a'.repeat(64);
+const reference = { kind: 'artifact-version', versionId, sha256 };
+const metadata = (id = versionId, projectId = 'project') => ({
+  versionId: id, projectId, name: id === versionId ? 'Donor scores' : 'Other result', sha256,
+  format: { id: 'org.ietf.csv', version: '1' }, previews: ['table'], sizeBytes: 50,
+  owner: { displayName: 'Private source owner' }, versionNumber: 1,
+});
+const table = { family: 'table', columns: ['gene', 'score'], rows: [['Gene1', '2']], offset: 0, limit: 25, hasMore: true, truncated: true };
+const result = (preview = table, id = versionId, projectId = 'project') => ({ version: metadata(id, projectId), integrityVerified: true, preview });
+const props = { projectId: 'project', userId: 1, reference };
+const connection = { identity: 'service-a', epoch: 1, blocked: false };
+beforeEach(() => {
+  vi.clearAllMocks();
+  useExecutionTarget.mockReturnValue(connection);
+  getArtifactVersion.mockImplementation(async (project, id) => metadata(id, project));
+  previewArtifactVersion.mockImplementation(async (project, id, options) => result({ ...table, offset: options.offset, limit: options.limit }, id, project));
+  vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:verified-image'), revokeObjectURL: vi.fn() });
+});
+afterEach(() => vi.unstubAllGlobals());
+
+it('loads only the requested exact version, verifies response evidence, and requests bounded pages', async () => {
+  render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByRole('columnheader', { name: 'gene' })).toBeVisible();
+  expect(screen.getByText('Saved checksum verified · preview from this exact version')).toBeVisible();
+  expect(screen.getByText(/scans a bounded portion/)).toBeVisible();
+  expect(getArtifactVersion).toHaveBeenCalledWith('project', versionId, expect.any(AbortSignal));
+  fireEvent.click(screen.getByRole('button', { name: 'Next rows' }));
+  await waitFor(() => expect(previewArtifactVersion).toHaveBeenLastCalledWith('project', versionId, expect.objectContaining({ offset: 25, limit: 25 })));
+  await screen.findByText('Rows 26–26');
+  fireEvent.change(screen.getByRole('combobox', { name: 'Rows per page' }), { target: { value: '10' } });
+  await waitFor(() => expect(previewArtifactVersion).toHaveBeenLastCalledWith('project', versionId, expect.objectContaining({ offset: 0, limit: 10 })));
+  expect(screen.queryByLabelText('Artifact file')).not.toBeInTheDocument();
+});
+
+it('rejects mismatched metadata before requesting bytes and rejects a mismatched preview version', async () => {
+  getArtifactVersion.mockResolvedValueOnce({ ...metadata(), sha256: 'b'.repeat(64) });
+  const view = render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not be verified');
+  expect(previewArtifactVersion).not.toHaveBeenCalled();
+  expect(screen.queryByText('Private source owner')).not.toBeInTheDocument();
+  previewArtifactVersion.mockResolvedValueOnce(result(table, secondId));
+  view.rerender(<RetainedArtifactView {...props} userId={2} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not be verified');
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Saved checksum verified/)).not.toBeInTheDocument();
+});
+
+it('requires affirmative integrity evidence rather than treating any successful JSON response as verified', async () => {
+  previewArtifactVersion.mockResolvedValueOnce({ ...result(), integrityVerified: false });
+  render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not be verified');
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+});
+
+it('shows authorized opaque metadata without reading or hashing a full analysis object', async () => {
+  const checkpointId = 'art_' + '3'.repeat(24);
+  getArtifactVersion.mockResolvedValueOnce({ ...metadata(checkpointId), name: 'Saved checkpoint', previews: [], format: { id: 'org.r-project.rds', version: '1' } });
+  render(<RetainedArtifactView {...props} reference={{ kind: 'analysis-object', analysisObjectId: 'ao_' + '4'.repeat(24), checkpointVersionId: checkpointId, sha256 }} />);
+  expect(await screen.findByText(/contents have not been read or verified/)).toBeVisible();
+  expect(previewArtifactVersion).not.toHaveBeenCalled();
+  expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Saved checksum verified/)).not.toBeInTheDocument();
+});
+
+it('distinguishes a verified but unrenderable saved table from metadata whose bytes were not inspected', async () => {
+  previewArtifactVersion.mockResolvedValueOnce(result({ family: 'metadata', message: 'The complete table exceeds the browser preview budget.' }));
+  render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByText(/saved bytes match this version, but no bounded browser preview/)).toBeVisible();
+  expect(screen.getByText(/Saved checksum verified/)).toBeVisible();
+  expect(screen.queryByText(/contents have not been read or verified/)).not.toBeInTheDocument();
+});
+
+it.each([401, 403, 404])('clears source details and rendered bytes when access fails with %s', async status => {
+  previewArtifactVersion.mockRejectedValueOnce(Object.assign(new Error('Private host path must never be shown'), { status }));
+  render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent(/access is restricted/);
+  expect(screen.queryByText('Private source owner')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Private host path/)).not.toBeInTheDocument();
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+});
+
+it('fences an old read after project, user, reference or target epoch changes even if abort is ignored', async () => {
+  let finish;
+  getArtifactVersion.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const view = render(<RetainedArtifactView {...props} />);
+  const signal = getArtifactVersion.mock.calls[0][2];
+  useExecutionTarget.mockReturnValue({ ...connection, identity: 'service-b', epoch: 2 });
+  view.rerender(<RetainedArtifactView {...props} projectId="other-project" userId={2} reference={{ ...reference, versionId: secondId }} />);
+  expect(signal.aborted).toBe(true);
+  expect(await screen.findByRole('heading', { name: 'Other result · v1' })).toBeVisible();
+  await act(async () => finish(metadata()));
+  expect(screen.queryByRole('heading', { name: 'Donor scores · v1' })).not.toBeInTheDocument();
+  expect(previewArtifactVersion).not.toHaveBeenCalledWith('project', versionId, expect.anything());
+});
+
+it('immediately removes already displayed source metadata when the target becomes unavailable', async () => {
+  const view = render(<RetainedArtifactView {...props} />);
+  await screen.findByRole('table');
+  useExecutionTarget.mockReturnValue({ ...connection, blocked: true, epoch: 2 });
+  view.rerender(<RetainedArtifactView {...props} />);
+  expect(screen.queryByText('Private source owner')).not.toBeInTheDocument();
+  expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('No analysis runtime is started');
+});
+
+it('discards a late preview body after a different exact version has already loaded', async () => {
+  let finish;
+  previewArtifactVersion.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const view = render(<RetainedArtifactView {...props} />);
+  await waitFor(() => expect(previewArtifactVersion).toHaveBeenCalledOnce());
+  const oldSignal = previewArtifactVersion.mock.calls[0][2].signal;
+  view.rerender(<RetainedArtifactView {...props} reference={{ ...reference, versionId: secondId }} />);
+  await screen.findByRole('columnheader', { name: 'gene' });
+  expect(oldSignal.aborted).toBe(true);
+  await act(async () => finish(result({ family: 'text', text: 'Private obsolete contents' })));
+  expect(screen.queryByText('Private obsolete contents')).not.toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Other result · v1' })).toBeVisible();
+});
+
+it('keeps an exact view stable when its parent rerenders an equivalent reference', async () => {
+  const view = render(<RetainedArtifactView {...props} />);
+  await screen.findByRole('table');
+  view.rerender(<RetainedArtifactView {...props} reference={{ ...reference }} compact />);
+  expect(getArtifactVersion).toHaveBeenCalledTimes(1);
+  expect(screen.getByText('Saved version details')).toBeVisible();
+});
+
+it('renders saved text inertly and provides an honest unknown-format fallback', async () => {
+  previewArtifactVersion.mockResolvedValueOnce(result({ family: 'text', text: '<script>window.execute = true</script>', truncated: true }));
+  const view = render(<RetainedArtifactView {...props} />);
+  expect(await screen.findByText('<script>window.execute = true</script>')).toBeVisible();
+  expect(document.querySelector('script')).toBeNull();
+  view.unmount();
+  render(<RetainedResultContent preview={{ family: 'future-embedding' }} />);
+  expect(screen.getByText(/no supported browser renderer/)).toBeVisible();
+});
+
+it('loads images through a fenced digest-verifying helper and releases their object URLs', async () => {
+  previewArtifactVersion.mockResolvedValue(result({ family: 'image', width: 1, height: 1 }));
+  fetchRetainedArtifactImage.mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
+  const view = render(<RetainedArtifactView {...props} />);
+  const image = await screen.findByRole('img');
+  expect(image).toHaveAttribute('src', 'blob:verified-image');
+  expect(fetchRetainedArtifactImage).toHaveBeenCalledWith('project', versionId, sha256, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  fireEvent.error(image);
+  expect(screen.getByRole('alert')).toHaveTextContent('integrity check failed');
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:verified-image');
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  view.unmount();
+});
+
+it('does not expose a late image after identity changes', async () => {
+  let finish;
+  previewArtifactVersion.mockResolvedValue(result({ family: 'image', width: 1, height: 1 }));
+  fetchRetainedArtifactImage.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const view = render(<RetainedArtifactView {...props} />);
+  await waitFor(() => expect(fetchRetainedArtifactImage).toHaveBeenCalledOnce());
+  getArtifactVersion.mockRejectedValueOnce(Object.assign(new Error('No access'), { status: 403 }));
+  view.rerender(<RetainedArtifactView {...props} userId={2} />);
+  await act(async () => finish(new Blob(['old image'])));
+  expect(URL.createObjectURL).not.toHaveBeenCalled();
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+});
+
+it('revokes an already rendered image as soon as its target disconnects', async () => {
+  previewArtifactVersion.mockResolvedValue(result({ family: 'image', width: 1, height: 1 }));
+  fetchRetainedArtifactImage.mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
+  const view = render(<RetainedArtifactView {...props} />);
+  await screen.findByRole('img');
+  useExecutionTarget.mockReturnValue({ ...connection, epoch: 2, blocked: true });
+  view.rerender(<RetainedArtifactView {...props} />);
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:verified-image');
+});
+
+it('rejects unsupported pointers without making reads and delegates optional inspection explicitly', async () => {
+  const onInspect = vi.fn();
+  const view = render(<RetainedArtifactView {...props} reference={{ kind: 'path', path: '/private' }} />);
+  expect(screen.getByRole('alert')).toHaveTextContent('supported exact saved-result reference');
+  expect(getArtifactVersion).not.toHaveBeenCalled();
+  view.rerender(<RetainedArtifactView {...props} onInspect={onInspect} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Inspect result' }));
+  expect(onInspect).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project', reference }));
+});
