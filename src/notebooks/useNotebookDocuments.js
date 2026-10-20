@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createNotebook, getNotebook, listNotebooks, saveNotebook } from './notebookApi';
+import { getNotebook, listNotebooks } from './notebookApi';
 import { NOTEBOOK_DOCUMENT_SCHEMA, NOTEBOOK_DOCUMENT_ID, NOTEBOOK_VERSION_ID,
-  normalizeNotebookContent, normalizeNotebookCreate, normalizeNotebookSave } from '../../shared/notebookDocument.mjs';
+  canonicalNotebookContent, normalizeNotebookContent, normalizeNotebookCreate, normalizeNotebookSave } from '../../shared/notebookDocument.mjs';
 import { publicErrorMessage } from '../publicError';
 import useNotebookDraftAutosave from './useNotebookDraftAutosave';
 import { normalizeNotebookDraft } from '../../shared/notebookDraft.mjs';
+import useNotebookPendingSources from './useNotebookPendingSources';
+import { notebookRequestHash, pendingResponseError, validateNotebookSubmission } from './notebookPendingClient';
 
 const errorMessage = error => {
   const messages = {
@@ -13,6 +15,7 @@ const errorMessage = error => {
     FORBIDDEN: 'Your project role allows reading documents but not editing them.',
     NOTEBOOK_DOCUMENT_TOO_LARGE: 'The document exceeds the saved source size limit. Reduce source or metadata and try again.',
     NOTEBOOK_REQUEST_CONFLICT: 'This request belongs to a different saved draft. Check the original save before starting another request.',
+    NOTEBOOK_PENDING_CONFLICT: 'Another window has an unresolved shared submission. Check that original request before sharing more source.',
   };
   return messages[error.code] || publicErrorMessage(error, 'The document request could not be confirmed. Your draft is kept here.');
 };
@@ -63,6 +66,8 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
   const selected = records[selectedId] || null;
   const draft = selected && (drafts[selectedId] || draftFor(selected));
   const createKey = `new:${analysisId}`;
+  const journal = useNotebookPendingSources({ projectId, userId, pending, pendingDraftVersions });
+  const { read: readJournal, send: sendJournal, complete: completeJournal, replay: replayJournal } = journal;
 
   useEffect(() => {
     mounted.current = true;
@@ -111,6 +116,10 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
   useEffect(() => {
     if (isActive && analysisId && !blocked && !index?.loaded && !index?.loading && !index?.error) void loadList(analysisId);
   }, [isActive, analysisId, blocked, index?.loaded, index?.loading, index?.error, loadList]);
+  useEffect(() => {
+    if (isActive && analysisId && !blocked && !journal.states[createKey]?.loaded
+        && !journal.states[createKey]?.checking && !journal.states[createKey]?.error) void readJournal(analysisId, null);
+  }, [isActive, analysisId, blocked, createKey, journal.states, readJournal]);
 
   const open = useCallback(async (id, scope = analysisId, select = true) => {
     if (select) {
@@ -126,6 +135,7 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
       setRecords(previous => ({ ...previous, [id]: previous[id]?.version > result.document.version ? previous[id] : result.document }));
       const current = rememberHead(result.currentHead);
       if (current.version > result.document.version) setNotices(previous => ({ ...previous, [id]: `Showing saved version ${result.document.version}. A newer saved version is available.` }));
+      await readJournal(scope, id);
       await readPrivateDraft(id, scope);
     } catch (error) {
       if (mounted.current && projectScope.current === projectId && documentGenerations.current.get(id) === request) {
@@ -133,10 +143,10 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
         if ([403, 404].includes(error.status)) setRecords(previous => { const next = { ...previous }; delete next[id]; return next; });
       }
     }
-  }, [projectId, analysisId, rememberHead, readPrivateDraft]);
+  }, [projectId, analysisId, rememberHead, readPrivateDraft, readJournal]);
 
   const edit = useCallback((id, change) => {
-    if (!canWrite || blocked || pending.current.has(id) || inFlight.current.has(id)) return;
+    if (!canWrite || blocked || pending.current.has(id) || inFlight.current.has(id) || journal.known.current[id]?.checking) return;
     setDrafts(previous => {
       const base = previous[id] || (live.current.records[id] && draftFor(live.current.records[id]));
       if (!base) return previous;
@@ -147,10 +157,10 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
     });
     editedPrivateDraft(id);
     setNotices(previous => ({ ...previous, [id]: '' }));
-  }, [canWrite, blocked, editedPrivateDraft]);
+  }, [canWrite, blocked, editedPrivateDraft, journal.known]);
 
   const editUiState = useCallback((id, change) => {
-    if (!canWrite || blocked || pending.current.has(id) || inFlight.current.has(id)) return false;
+    if (!canWrite || blocked || pending.current.has(id) || inFlight.current.has(id) || journal.known.current[id]?.checking) return false;
     const base = live.current.drafts[id] || (live.current.records[id] && draftFor(live.current.records[id]));
     if (!base) return false;
     let uiState;
@@ -163,15 +173,25 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
     setDrafts(previous => ({ ...previous, [id]: { ...(previous[id] || base), uiState, privateDirty: true } }));
     editedPrivateDraft(id);
     return true;
-  }, [canWrite, blocked, editedPrivateDraft]);
+  }, [canWrite, blocked, editedPrivateDraft, journal.known]);
 
-  const applySaved = useCallback((scope, result) => {
+  const applySaved = useCallback((scope, result, submittedPayload) => {
     const saved = result.document;
     const current = rememberHead(result.currentHead);
     generation(documentGenerations, saved.id);
     generation(listGenerations, scope);
     setRecords(previous => ({ ...previous, [saved.id]: previous[saved.id]?.version > saved.version ? previous[saved.id] : saved }));
-    setDrafts(previous => { const next = { ...previous }; delete next[saved.id]; return next; });
+    setDrafts(previous => {
+      const existing = previous[saved.id];
+      // Resolving an older admitted save must not erase later source that was
+      // already present locally before the pending operation was discovered.
+      let matchesSubmission = false;
+      try { matchesSubmission = !!submittedPayload && existing?.title === submittedPayload.title
+        && canonicalNotebookContent(existing.content) === canonicalNotebookContent(submittedPayload.content); }
+      catch { /* Newer incomplete local source must remain recoverable. */ }
+      if (existing?.dirty && !matchesSubmission) return previous;
+      const next = { ...previous }; delete next[saved.id]; return next;
+    });
     setProblems(previous => ({ ...previous, [saved.id]: null }));
     setIndexes(previous => {
       const entry = previous[scope] || {};
@@ -200,16 +220,19 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
     setBusy(previous => ({ ...previous, [key]: true }));
     setProblems(previous => ({ ...previous, [key]: null }));
     try {
-      const result = await createNotebook(projectId, scope, input);
+      const response = await sendJournal(scope, null, input);
       if (!mounted.current || projectScope.current !== projectId) return null;
+      if (!response) return null;
+      const result = response.result;
       validateDocumentResult(result, projectId, scope);
-      pending.current.delete(key); const current = applySaved(scope, result);
+      await validateNotebookSubmission(result, { projectId, analysisId: scope, documentId: null, action: 'create' }, response.operation);
+      if (!mounted.current || projectScope.current !== projectId) return null;
+      completeJournal(scope, null, response.operation.payload.requestId); const current = applySaved(scope, result, response.operation.payload);
       if ((selectionGenerations.current.get(scope) || 0) === selection) setSelections(previous => ({ ...previous, [scope]: result.document.id }));
       if (current.version > result.document.version) void open(result.document.id, scope, false);
       return result.document;
     } catch (error) {
       if (mounted.current && projectScope.current === projectId) {
-        if (error.status >= 400 && error.status < 500 && error.code !== 'TARGET_EXECUTION_UNCONFIRMED') pending.current.delete(key);
         setProblems(previous => ({ ...previous, [key]: { message: errorMessage(error) } }));
       }
       return null;
@@ -217,22 +240,21 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
       inFlight.current.delete(key);
       if (mounted.current && projectScope.current === projectId) setBusy(previous => ({ ...previous, [key]: false }));
     }
-  }, [projectId, analysisId, canWrite, blocked, applySaved, open]);
+  }, [projectId, analysisId, canWrite, blocked, applySaved, open, sendJournal, completeJournal]);
 
   const save = useCallback(async () => {
     if (!selected || !draft || blocked || inFlight.current.has(selected.id)) return;
     const id = selected.id, scope = analysisId;
-    let input = pending.current.get(id);
-    if (!input && (!canWrite || !draft.dirty)) return;
-    try {
-      if (!input) input = normalizeNotebookSave({ requestId: crypto.randomUUID(), expectedVersion: draft.baseVersion,
-        title: draft.title, content: draft.content });
-    } catch (error) { setProblems(previous => ({ ...previous, [id]: { message: localErrorMessage(error) } })); return; }
-    const existingPending = pending.current.has(id);
     inFlight.current.add(id);
     setBusy(previous => ({ ...previous, [id]: true }));
     setProblems(previous => ({ ...previous, [id]: null }));
     try {
+      if (!journal.known.current[id]?.loaded && !await readJournal(scope, id)) throw pendingResponseError();
+      let input = pending.current.get(id);
+      if (!input && (!canWrite || !draft.dirty)) return;
+      const existingPending = !!input;
+      if (!input) input = normalizeNotebookSave({ requestId: crypto.randomUUID(), expectedVersion: draft.baseVersion,
+        title: draft.title, content: draft.content });
       if (!existingPending) {
         const confirmed = await ensurePrivateDraft(id, scope, draft);
         if (!confirmed) {
@@ -242,25 +264,71 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
         pendingDraftVersions.current.set(id, confirmed.draftVersion);
       }
       pending.current.set(id, input);
-      const result = await saveNotebook(projectId, scope, id, input);
+      const response = await sendJournal(scope, id, input, pendingDraftVersions.current.get(id) ?? null);
       if (!mounted.current || projectScope.current !== projectId) return;
+      if (!response) return;
+      if (response.admission?.state === 'rejected') {
+        completeJournal(scope, id, response.operation.payload.requestId);
+        const failure = response.journal?.requestId === input.requestId ? response.journal.failure : response.admission.failure;
+        const currentHead = failure?.currentHead ? rememberHead(failure.currentHead) : undefined;
+        setProblems(previous => ({ ...previous, [id]: {
+          message: 'The submitted source did not replace a newer saved version.', currentHead, submissionRejected: true,
+        } }));
+        return;
+      }
+      const result = response.result;
       validateDocumentResult(result, projectId, scope, id);
-      pending.current.delete(id); const current = applySaved(scope, result);
-      const privateVersion = pendingDraftVersions.current.get(id);
-      pendingDraftVersions.current.delete(id);
-      if (privateVersion !== undefined) await clearPublishedDraft(id, scope, privateVersion);
+      await validateNotebookSubmission(result, { projectId, analysisId: scope, documentId: id, action: 'save' }, response.operation);
+      if (!mounted.current || projectScope.current !== projectId) return;
+      completeJournal(scope, id, response.operation.payload.requestId); const current = applySaved(scope, result, response.operation.payload);
+      const privateVersion = response.operation.confirmedDraftVersion;
+      if (!pending.current.has(id)) pendingDraftVersions.current.delete(id);
+      if (privateVersion !== null) await clearPublishedDraft(id, scope, privateVersion);
       if (current.version > result.document.version) void open(id, scope, false);
     } catch (error) {
       if (mounted.current && projectScope.current === projectId) {
-        if (error.status >= 400 && error.status < 500 && error.code !== 'TARGET_EXECUTION_UNCONFIRMED') pending.current.delete(id);
         const currentHead = error.currentHead ? rememberHead(error.currentHead) : undefined;
-        setProblems(previous => ({ ...previous, [id]: { message: errorMessage(error), currentHead } }));
+        setProblems(previous => ({ ...previous, [id]: { message: localErrorMessage(error), currentHead } }));
       }
     } finally {
       inFlight.current.delete(id);
       if (mounted.current && projectScope.current === projectId) setBusy(previous => ({ ...previous, [id]: false }));
     }
-  }, [selected, draft, projectId, analysisId, canWrite, blocked, applySaved, open, rememberHead, ensurePrivateDraft, clearPublishedDraft]);
+  }, [selected, draft, projectId, analysisId, canWrite, blocked, applySaved, open, rememberHead, ensurePrivateDraft, clearPublishedDraft, sendJournal, completeJournal, journal.known, readJournal]);
+
+  const reviewSubmission = useCallback(async (documentId = null) => {
+    const scope = analysisId, key = documentId || `new:${scope}`;
+    if (blocked || inFlight.current.has(key)) return null;
+    inFlight.current.add(key); setBusy(previous => ({ ...previous, [key]: true }));
+    try {
+      const response = await replayJournal(scope, documentId);
+      if (!mounted.current || projectScope.current !== projectId || !response?.result) return null;
+      const result = response.result, outcome = response.originalJournal.outcome;
+      validateDocumentResult(result, projectId, scope, documentId);
+      if (!outcome || result.document.id !== outcome.documentId || result.document.versionId !== outcome.versionId
+          || result.document.sha256 !== outcome.sha256 || result.document.version !== outcome.version
+          || result.submission?.requestId !== response.originalJournal.requestId) throw pendingResponseError();
+      const sourceScope = { projectId, analysisId: scope, documentId, action: documentId ? 'save' : 'create' };
+      const originalPayload = { requestId: response.originalJournal.requestId, title: result.document.title, content: result.document.content,
+        ...(documentId ? { expectedVersion: result.document.version - 1 } : {}) };
+      if (await notebookRequestHash(sourceScope, originalPayload) !== response.originalJournal.requestSha256) throw pendingResponseError();
+      await validateNotebookSubmission(result, sourceScope, { payload: originalPayload });
+      if (!mounted.current || projectScope.current !== projectId) return null;
+      const current = applySaved(scope, result);
+      if (!documentId) setSelections(previous => ({ ...previous, [scope]: result.document.id }));
+      const privateVersion = response.originalJournal.confirmedDraftVersion;
+      if (documentId && privateVersion !== null) await clearPublishedDraft(documentId, scope, privateVersion);
+      completeJournal(scope, documentId, response.originalJournal.requestId);
+      if (current.version > result.document.version) void open(result.document.id, scope, false);
+      return result.document;
+    } catch (error) {
+      if (mounted.current && projectScope.current === projectId) setProblems(previous => ({ ...previous, [key]: { message: errorMessage(error) } }));
+      return null;
+    } finally {
+      inFlight.current.delete(key);
+      if (mounted.current && projectScope.current === projectId) setBusy(previous => ({ ...previous, [key]: false }));
+    }
+  }, [analysisId, projectId, blocked, replayJournal, applySaved, clearPublishedDraft, completeJournal, open]);
 
   return { index: index || { items: [] }, selectedId, selected, draft, heads, drafts,
     problem: problems[selectedId], creationProblem: problems[createKey], notice: notices[selectedId],
@@ -269,6 +337,10 @@ export default function useNotebookDocuments({ projectId, analysisId, userId, is
     pendingCreateInfo: pending.current.has(createKey) ? { title: pending.current.get(createKey).title,
       language: pending.current.get(createKey).content.defaultLanguage,
       content: structuredClone(pending.current.get(createKey).content) } : null,
+    pendingSaveInfo: pending.current.has(selectedId) ? structuredClone(pending.current.get(selectedId)) : null,
+    sharedRecovery: journal.states[selectedId], creationRecovery: journal.states[createKey],
+    clearUnsubmitted: (id, requestId) => journal.clearUnsubmitted(analysisId, id, requestId),
+    reviewSubmission, refreshSubmission: id => readJournal(analysisId, id),
     autosave: autosave.copies[selectedId] || { state: 'idle', message: '', confirmedDraftVersion: 0, updatedAt: null },
     recoverableDraft: autosave.copies[selectedId]?.recovery || null,
     recoverDraft: () => autosave.recover(selectedId),

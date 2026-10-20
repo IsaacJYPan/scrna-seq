@@ -13,6 +13,7 @@ async function request(path, { method = 'GET', body, signal } = {}) {
       status: response.status, code: result?.code, currentHead: result?.currentHead,
       submittedExpectedVersion: result?.submittedExpectedVersion,
       currentDraftVersion: result?.currentDraftVersion, currentDraft: result?.currentDraft,
+      currentJournal: result?.currentJournal, currentJournalVersion: result?.currentJournalVersion,
     });
     if (!result || typeof result !== 'object') throw new Error('The notebook service returned an unreadable response.');
     return result;
@@ -38,3 +39,12 @@ export const saveNotebookDraft = (projectId, analysisId, documentId, body) =>
   request(`${base(projectId, analysisId)}/${encodeURIComponent(documentId)}/draft`, { method: 'PUT', body });
 export const clearNotebookDraft = (projectId, analysisId, documentId, body) =>
   request(`${base(projectId, analysisId)}/${encodeURIComponent(documentId)}/draft`, { method: 'DELETE', body });
+const pendingPath = (projectId, analysisId, documentId) => documentId
+  ? `${base(projectId, analysisId)}/${encodeURIComponent(documentId)}/pending`
+  : `${base(projectId, analysisId)}/pending/create`;
+export const getNotebookPending = (projectId, analysisId, documentId, { signal } = {}) =>
+  request(pendingPath(projectId, analysisId, documentId), { signal });
+export const admitNotebookPending = (projectId, analysisId, documentId, body) =>
+  request(pendingPath(projectId, analysisId, documentId), { method: 'PUT', body });
+export const submitNotebookPending = (projectId, analysisId, documentId, body) =>
+  request(`${pendingPath(projectId, analysisId, documentId)}/submit`, { method: 'POST', body });

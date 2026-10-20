@@ -6,10 +6,13 @@ import { undo } from '@codemirror/commands';
 import NotebookWorkspace from './NotebookWorkspace';
 import { createNotebook, getNotebook, getNotebookVersion, listNotebooks, saveNotebook, getNotebookDraft, saveNotebookDraft, clearNotebookDraft } from './notebookApi';
 import { importScriptDocument } from '../../shared/scriptDocument.mjs';
+import * as notebookApi from './notebookApi';
+import { installNotebookJournalFixture } from './notebookPending.testFixture';
 
 vi.mock('./notebookApi', () => ({
   createNotebook: vi.fn(), getNotebook: vi.fn(), getNotebookVersion: vi.fn(), listNotebooks: vi.fn(), saveNotebook: vi.fn(),
   getNotebookDraft: vi.fn(), saveNotebookDraft: vi.fn(), clearNotebookDraft: vi.fn(),
+  getNotebookPending: vi.fn(), admitNotebookPending: vi.fn(), submitNotebookPending: vi.fn(),
 }));
 
 const sourceR = '\tcells <- ncol(object)  \r\n# retained source\r\n';
@@ -42,6 +45,7 @@ beforeAll(() => {
 });
 beforeEach(() => {
   vi.resetAllMocks(); createdCount = 0; privateCopies = new Map();
+  installNotebookJournalFixture(notebookApi);
   records = new Map([original, other].map(document => [document.id, clone(document)]));
   versions = new Map([original, other].map(document => [document.versionId, clone(document)]));
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1150, height: 800, top: 0, left: 0, right: 1150, bottom: 800 });
@@ -114,6 +118,7 @@ describe('ordinary script documents in the analysis workspace', () => {
     render(<NotebookWorkspace {...defaults} />);
     fireEvent.click(await screen.findByRole('button', { name: /^analysis\.R/ }));
     const box = await screen.findByRole('textbox', { name: 'Script source' });
+    await screen.findByRole('button', { name: 'Edit script source' });
     const view = EditorView.findFromDOM(box);
     expect(screen.getByRole('textbox', { name: 'Script title' })).toHaveValue('analysis.R');
     expect(screen.getByText(/R script · UTF-8 with BOM/)).toBeVisible();
@@ -126,6 +131,7 @@ describe('ordinary script documents in the analysis workspace', () => {
     await waitFor(() => expect(saveNotebook).toHaveBeenCalledOnce());
     expect(saveNotebook.mock.calls[0][3].content.cells).toEqual(script.content.cells);
     expect(saveNotebook.mock.calls[0][3].content.metadata).toEqual(script.content.metadata);
+    await screen.findByRole('button', { name: 'Edit script source' });
     fireEvent.keyDown(box, { key: 'Escape' });
     expect(screen.getByRole('button', { name: 'Edit script source' })).toHaveFocus();
   });
@@ -359,7 +365,7 @@ describe('notebook workspace editing and review flows', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save notebook' }));
     expect(await screen.findByText(/Your edits remain in this draft/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Save notebook' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Review latest saved source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review saved version 2' }));
     const inspected = await screen.findByRole('complementary', { name: 'Saved source' });
     expect(inspected.textContent).toContain('Colleague saved interpretation');
     fireEvent.click(within(inspected).getByRole('button', { name: 'Close inspector' }));

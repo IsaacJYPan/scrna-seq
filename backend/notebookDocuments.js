@@ -5,6 +5,7 @@ const db = require('./pgDatabase');
 const contract = import('../shared/notebookDocument.mjs');
 const draftContract = import('../shared/notebookDraft.mjs');
 const scriptContract = import('../shared/scriptDocument.mjs');
+const pendingContract = import('../shared/notebookPending.mjs');
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const digest = text => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
@@ -100,9 +101,16 @@ function createNotebookDocumentService(database = db) {
 
   async function receipt(client, userId, projectId, analysisId, requestId, requestHash) {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`notebook:${projectId}:${analysisId}:${userId}:${requestId}`]);
+    const reserved = (await client.query(`SELECT request_sha256,state,failure_json FROM research_document_pending_requests
+      WHERE project_id=$1 AND analysis_id=$2 AND owner_user_id=$3 AND request_id=$4`, [projectId, analysisId, userId, requestId])).rows[0];
+    if (reserved && reserved.request_sha256 !== requestHash) throw failure('NOTEBOOK_REQUEST_CONFLICT', 'This request already identifies different notebook content. Recover the original submission before saving again.', 409);
+    if (reserved?.state === 'rejected') throw Object.assign(failure(reserved.failure_json.code, reserved.failure_json.message, 409), reserved.failure_json);
     const row = (await client.query(`SELECT * FROM research_document_submissions
       WHERE project_id=$1 AND analysis_id=$2 AND actor_user_id=$3 AND request_id=$4`, [projectId, analysisId, userId, requestId])).rows[0];
-    if (!row) return null;
+    if (!row) {
+      if (reserved?.state === 'succeeded') throw failure('NOTEBOOK_RECEIPT_UNAVAILABLE', 'The original saved source could not be confirmed. Keep the pending request and try again.', 500);
+      return null;
+    }
     if (row.request_sha256 !== requestHash) throw failure('NOTEBOOK_REQUEST_CONFLICT', 'This request already saved different notebook content. Check the original save before creating a new request.', 409);
     const current = await head(client, projectId, analysisId, row.document_id);
     const saved = await revision(client, current, row.version_id);
@@ -136,39 +144,37 @@ function createNotebookDocumentService(database = db) {
     return response(updated, saved, submitted);
   }
 
-  async function create(userId, projectId, analysisId, input) {
-    const schema = await contract, parsed = schema.normalizeNotebookCreate(input);
-    const canonical = schema.canonicalNotebookContent(parsed.content);
-    const requestHash = digest(JSON.stringify({ action: 'create', projectId, analysisId, ...parsed }));
-    return transaction(userId, projectId, analysisId, async (client, access) => {
+  async function writeSource(client, access, userId, projectId, analysisId, documentId, action, parsed) {
+    const canonical = (await contract).canonicalNotebookContent(parsed.content);
+    const requestHash = digest((await pendingContract).canonicalNotebookPendingRequest({ action, projectId, analysisId, documentId, payload: parsed }));
       const replay = await receipt(client, userId, projectId, analysisId, parsed.requestId, requestHash);
-      if (replay) return { ...replay, created: false };
+      if (replay) return { ...replay, ...(action === 'create' ? { created: false } : {}) };
       writable(access);
+      if (action === 'save') {
+        const current = await head(client, projectId, analysisId, documentId, true);
+        if (Number(current.version) !== parsed.expectedVersion) {
+          throw Object.assign(failure('NOTEBOOK_VERSION_CONFLICT', 'This notebook changed while you were editing. Your draft has not replaced the newer version.', 409),
+            { currentHead: summary(current), submittedExpectedVersion: parsed.expectedVersion });
+        }
+        return append(client, userId, current, parsed, 'save', requestHash, canonical);
+      }
       const current = (await client.query(`INSERT INTO research_documents
         (id,project_id,analysis_id,title,created_by_user_id,updated_by_user_id,version,head_version_id,sha256,content_bytes,cell_count,code_cell_count,default_language,document_kind)
         VALUES($1,$2,$3,$4,$5,$5,1,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [identity('doc'), projectId, analysisId, parsed.title, userId, identity('dv'), digest(canonical), Buffer.byteLength(canonical, 'utf8'),
         parsed.content.cells.length, parsed.content.cells.filter(cell => cell.type === 'code').length, parsed.content.defaultLanguage, await documentKindFor(parsed.content)])).rows[0];
       return { ...await append(client, userId, current, parsed, 'create', requestHash, canonical), created: true };
-    });
+  }
+
+  async function create(userId, projectId, analysisId, input) {
+    const parsed = (await contract).normalizeNotebookCreate(input);
+    return transaction(userId, projectId, analysisId, (client, access) => writeSource(client, access, userId, projectId, analysisId, null, 'create', parsed));
   }
 
   async function save(userId, projectId, analysisId, documentId, input) {
     await validateScope(projectId, analysisId, documentId);
-    const schema = await contract, parsed = schema.normalizeNotebookSave(input);
-    const canonical = schema.canonicalNotebookContent(parsed.content);
-    const requestHash = digest(JSON.stringify({ action: 'save', projectId, analysisId, documentId, ...parsed }));
-    return transaction(userId, projectId, analysisId, async (client, access) => {
-      const replay = await receipt(client, userId, projectId, analysisId, parsed.requestId, requestHash);
-      if (replay) return replay;
-      writable(access);
-      const current = await head(client, projectId, analysisId, documentId, true);
-      if (Number(current.version) !== parsed.expectedVersion) {
-        throw Object.assign(failure('NOTEBOOK_VERSION_CONFLICT', 'This notebook changed while you were editing. Your draft has not replaced the newer version.', 409),
-          { currentHead: summary(current), submittedExpectedVersion: parsed.expectedVersion });
-      }
-      return append(client, userId, current, parsed, 'save', requestHash, canonical);
-    });
+    const parsed = (await contract).normalizeNotebookSave(input);
+    return transaction(userId, projectId, analysisId, (client, access) => writeSource(client, access, userId, projectId, analysisId, documentId, 'save', parsed));
   }
 
   async function get(userId, projectId, analysisId, documentId, versionId) {
@@ -277,7 +283,8 @@ function createNotebookDocumentService(database = db) {
     });
   }
 
-  return { create, save, get, list, getDraft,
+  const pending = require('./notebookPending').createNotebookPendingService({ transaction, writable, head, validateScope, receipt, writeSource });
+  return { create, save, get, list, getDraft, ...pending,
     putDraft: (userId, projectId, analysisId, documentId, input) => updateDraft(userId, projectId, analysisId, documentId, input),
     clearDraft: (userId, projectId, analysisId, documentId, input) => updateDraft(userId, projectId, analysisId, documentId, input, true),
     checkAccess: (userId, projectId, analysisId) => transaction(userId, projectId, analysisId, async () => undefined) };
@@ -290,6 +297,7 @@ function notebookDocumentRoutes({ database = db, logger = console } = {}) {
     if ([400, 403, 404, 409, 413, 415].includes(error.status)) {
       return res.status(error.status).json({ error: error.message, code: error.code,
         ...(error.currentDraftVersion !== undefined ? { currentDraftVersion: error.currentDraftVersion, currentDraft: error.currentDraft } : {}),
+        ...(error.currentJournalVersion !== undefined ? { currentJournalVersion: error.currentJournalVersion, currentJournal: error.currentJournal } : {}),
         ...(error.currentHead ? { currentHead: error.currentHead, submittedExpectedVersion: error.submittedExpectedVersion } : {}) });
     }
     const code = String(error.code || 'REQUEST_FAILED').replace(/[^A-Z0-9_]/gi, '').slice(0, 64);
@@ -325,6 +333,13 @@ function notebookDocumentRoutes({ database = db, logger = console } = {}) {
   };
   router.get('/', route(req => service.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.post('/', route(req => service.create(req.user.id, req.params.projectId, req.params.analysisId, req.body)));
+  router.get('/pending', route(req => service.listPending(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/pending/create', route(req => service.getPending(req.user.id, req.params.projectId, req.params.analysisId)));
+  router.put('/pending/create', route(req => service.admitPending(req.user.id, req.params.projectId, req.params.analysisId, null, req.body)));
+  router.post('/pending/create/submit', route(req => service.submitPending(req.user.id, req.params.projectId, req.params.analysisId, null, req.body)));
+  router.get('/:documentId/pending', route(req => service.getPending(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId)));
+  router.put('/:documentId/pending', route(req => service.admitPending(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.body)));
+  router.post('/:documentId/pending/submit', route(req => service.submitPending(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.body)));
   router.get('/:documentId/draft', route(req => service.getDraft(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId)));
   router.put('/:documentId/draft', route(req => service.putDraft(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.body)));
   router.delete('/:documentId/draft', route(req => service.clearDraft(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.body)));

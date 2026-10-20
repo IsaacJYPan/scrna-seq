@@ -17,6 +17,35 @@ const newCell = (type, language) => ({ id: crypto.randomUUID(), type, source: ''
   ...(type === 'code' ? { language } : {}) });
 const scriptInfo = content => { try { return scriptDocumentInfo(content); } catch { return null; } };
 
+function SharedSourceRecovery({ record, payload, busy, blocked, onCheck, onRetry, onReviewSaved, onReviewSource, onCopy, onReviewUnsubmitted, onCopyUnsubmitted, pending }) {
+  if (!record || record.phase === 'resolved' && !record.unsubmittedPayload) return null;
+  const saved = record.journal?.state === 'succeeded' && !payload;
+  const rejected = record.journal?.state === 'rejected';
+  if (!record.journal && !record.error && !record.phase) return record.checking
+    ? <p role="status" className="text-xs text-textMuted">Checking previous shared submissions…</p> : null;
+  return <section aria-label="Shared source recovery" className="space-y-2 rounded border border-border bg-surface p-3 text-sm">
+    <p className="font-medium">{saved ? `Your last submission was saved as version ${record.journal.outcome?.version || 'available'}.`
+      : rejected ? 'Your submitted source is available privately.' : 'A shared submission needs confirmation.'}</p>
+    <p className="text-xs leading-relaxed text-textMuted">{saved ? 'Review the saved result to check its exact version. Later shared source and private edits stay separate.'
+      : rejected ? 'A newer shared version prevented this save. Review the submitted source or keep it as a separate document.'
+        : record.phase === 'unconfirmed' ? 'Recovery storage has not been confirmed. Keep this window open and retry the original request.'
+          : record.loaded ? 'The original request is kept privately. Retry checks that submission; it does not create a replacement.'
+            : 'Previous submission checks are unavailable. Reconnect and check before sharing more source.'}</p>
+    <div className="flex flex-wrap gap-3 text-xs">
+      {payload && <button type="button" className="text-primary underline" onClick={onReviewSource}>Review submitted source</button>}
+      {!saved && !rejected && payload && <button type="button" className="text-primary underline" disabled={busy || blocked || record.checking} onClick={onRetry}>Check original submission</button>}
+      {saved && <button type="button" className="text-primary underline" disabled={busy || blocked} onClick={onReviewSaved}>Review saved result</button>}
+      {!record.loaded && <button type="button" className="text-primary underline" disabled={busy || blocked || record.checking} onClick={onCheck}>Check shared submission</button>}
+      {rejected && payload && onCopy && <button type="button" className="text-primary underline" disabled={busy || blocked} onClick={onCopy}>Copy submitted source as a new document</button>}
+    </div>
+    {record.unsubmittedPayload && <div className="space-y-2 border-t border-border pt-2 text-xs">
+      <p className="text-textMuted">Another window submitted first. Your unsubmitted source is kept in this window; save it before closing.</p>
+      <div className="flex flex-wrap gap-3"><button type="button" className="text-primary underline" onClick={onReviewUnsubmitted}>Review unsubmitted source</button>
+        {onCopyUnsubmitted && <button type="button" className="text-primary underline" disabled={busy || blocked || pending} onClick={onCopyUnsubmitted}>Save unsubmitted source as a new document</button>}</div>
+    </div>}
+  </section>;
+}
+
 const NotebookCell = memo(function NotebookCell({
   cell, index, count, documentId, active, canEdit, theme, editorStates, onEdit, onActivate, onMove, onDuplicate, onRemove,
 }) {
@@ -106,7 +135,8 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const activeId = activeCells[selectedId];
-  const sourceFrozen = !canWrite || docs.busy || docs.pendingSave || connection.blocked;
+  const sourceFrozen = !canWrite || docs.busy || docs.pendingSave || docs.sharedRecovery?.checking
+    || docs.sharedRecovery?.loaded === false || connection.blocked;
   const creatingHere = !importOpen && (creation?.analysisId === analysis?.id || docs.pendingCreate);
   const newerHead = selected && docs.heads[selected.id]?.version > draft.baseVersion;
 
@@ -206,7 +236,11 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     <button type="button" className="text-xs text-textMuted underline" disabled={connection.blocked} onClick={() => void docs.refresh()}>Refresh documents</button>
     <div className="border-t border-border pt-3"><button type="button" className="text-left text-sm text-textMuted hover:text-text" onClick={() => setInspector({ kind: 'links' })}>Linked material ({analysis?.references.length || 0})</button></div>
   </div>;
-  const inspectorContent = inspector?.kind === 'private-source' ? <div className="space-y-4 text-sm">
+  const inspectorContent = inspector?.kind === 'submission-source' ? <div className="space-y-4 text-sm">
+    <p className="font-semibold">{inspector.payload.title}</p>
+    <p className="text-xs leading-relaxed text-textMuted">{inspector.unsubmitted ? 'This source was not admitted. It is kept only in this window until you explicitly save it.' : 'Exact submitted source, visible only to your account until its shared save is confirmed.'} Reviewing it does not change your working copy.</p>
+    {inspector.payload.content.cells.map((cell, index) => <div key={cell.id}><p className="mb-2 text-xs font-semibold">Cell {index + 1} · {cellLabel(cell)} source</p><pre className="max-h-80 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-xs">{cell.source || '(empty source)'}</pre></div>)}
+  </div> : inspector?.kind === 'private-source' ? <div className="space-y-4 text-sm">
     <p className="font-semibold">{inspector.document.title}</p>
     <p className="text-xs text-textMuted">Private working copy {inspector.document.draftVersion}, based on saved source version {inspector.document.baseVersion}. This draft is visible only to your account.</p>
     <dl className="space-y-2 break-all text-xs"><dt className="text-textMuted">Base saved version</dt><dd>{inspector.document.baseVersionId}</dd><dt className="text-textMuted">SHA-256</dt><dd className="font-mono">{inspector.document.sha256}</dd></dl>
@@ -228,14 +262,26 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
   if (!analysis) return null;
   return <AnalysisShell projectName={projectName} analysisName={analysis.name} documentTitle={draft?.title || 'Documents'} onOpenOverview={onOpenOverview}
     outline={outline} status={<span className={draft?.dirty ? 'text-primary' : 'text-textMuted'}>{draft?.dirty ? 'Draft edited' : selected ? `Saved version ${selected.version}` : 'Project documents'}</span>}
-    inspector={inspectorContent} inspectorTitle={inspector?.kind === 'source' ? 'Saved source' : inspector?.kind === 'private-source' ? 'Private draft' : 'Linked material'} onCloseInspector={() => setInspector(null)}
+    inspector={inspectorContent} inspectorTitle={inspector?.kind === 'source' ? 'Saved source' : inspector?.kind === 'submission-source' ? inspector.unsubmitted ? 'Unsubmitted source' : 'Submitted source' : inspector?.kind === 'private-source' ? 'Private draft' : 'Linked material'} onCloseInspector={() => setInspector(null)}
     toolbar={<>{selected && <button type="button" className="btn btn-secondary text-xs" onClick={() => void inspectSaved(selected.versionId)}>Saved source</button>}
       {script && <button type="button" className="btn btn-secondary text-xs" title="Export the current edited script source" onClick={exportScript}>Export script</button>}
       {selected && (canWrite || docs.pendingSave) && <button type="button" className="btn btn-primary text-sm" disabled={docs.busy || connection.blocked || !draft?.dirty && !docs.pendingSave || !!docs.problem?.currentHead && !docs.pendingSave} onClick={() => void docs.save()}>{docs.busy ? 'Saving…' : docs.pendingSave ? 'Retry save' : script ? 'Save script' : 'Save notebook'}</button>}</>}>
     <div ref={body} className="mx-auto max-w-4xl space-y-5 px-4 py-6 sm:px-7">
       {connection.blocked && <p role="status" className="rounded border border-border p-3 text-sm text-textMuted">Reconnect to save changes. Your current document draft is kept here.</p>}
+      {(!selectedId || docs.creationRecovery?.journal?.state !== 'succeeded' || docs.creationRecovery?.unsubmittedPayload) && <SharedSourceRecovery record={docs.creationRecovery} payload={docs.pendingCreateInfo || docs.creationRecovery?.journal?.payload}
+        busy={docs.creating} blocked={connection.blocked} pending={docs.pendingCreate} onCheck={() => void docs.refreshSubmission(null)}
+        onRetry={() => void docs.create(docs.pendingCreateInfo?.title, docs.pendingCreateInfo?.language, docs.pendingCreateInfo?.content)}
+        onReviewSaved={() => void docs.reviewSubmission(null)}
+        onReviewSource={() => setInspector({ kind: 'submission-source', payload: docs.pendingCreateInfo || docs.creationRecovery?.journal?.payload })}
+        onReviewUnsubmitted={() => setInspector({ kind: 'submission-source', unsubmitted: true, payload: docs.creationRecovery.unsubmittedPayload })}
+        onCopyUnsubmitted={canWrite ? async () => {
+          const input = docs.creationRecovery.unsubmittedPayload;
+          if (await docs.create(input.title, input.content.defaultLanguage, input.content)) {
+            docs.clearUnsubmitted(null, input.requestId); setImportOpen(analysis.id, false); setCreation(null);
+          }
+        } : undefined} />}
       {Object.entries(imports).filter(([, open]) => open).map(([scope]) => <div key={scope} hidden={scope !== analysis.id}>
-        <ScriptImport theme={theme} busy={scope === analysis.id && docs.creating} disabled={scope !== analysis.id || connection.blocked || !canWrite && !pendingScript}
+        <ScriptImport theme={theme} busy={scope === analysis.id && docs.creating} disabled={scope !== analysis.id || connection.blocked || !canWrite && !pendingScript || docs.pendingCreate && !pendingScript}
           error={scope === analysis.id ? docs.creationProblem?.message || '' : ''}
           pending={scope === analysis.id && pendingScript ? { filename: pendingScript.filename, title: docs.pendingCreateInfo.title, content: docs.pendingCreateInfo.content } : null}
           onCancel={() => setImportOpen(scope, false)} onImport={async input => {
@@ -260,15 +306,29 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
         <div className="flex flex-wrap gap-3"><button type="submit" className="btn btn-primary" disabled={docs.creating || connection.blocked}>{docs.creating ? 'Creating…' : docs.pendingCreate ? 'Retry create' : 'Create notebook'}</button>
           <button type="button" className="btn btn-secondary" disabled={docs.creating || docs.pendingCreate} onClick={() => setCreation(null)}>Cancel</button></div>
       </form>}
-      {docs.problem && <div role="alert" className="space-y-3 rounded border border-danger/30 bg-danger/5 p-4 text-sm"><p>{docs.problem.message}</p>
-        {docs.problem.currentHead && <><p className="text-textMuted">Latest saved: {docs.problem.currentHead.title}, version {docs.problem.currentHead.version}. Your edits remain in this draft.</p>
-          <div className="flex flex-wrap gap-3"><button type="button" className="btn btn-secondary text-xs" onClick={() => void inspectSaved(docs.problem.currentHead.versionId, true)}>Review latest saved source</button>
-            {canWrite && <button type="button" className="btn btn-secondary text-xs" disabled={docs.creating || connection.blocked} onClick={() => void docs.create(`${[...draft.title].slice(0, 150).join('')} (copy)`, draft.content.defaultLanguage, draft.content)}>{script ? 'Save my draft as a new script' : 'Save my draft as a new notebook'}</button>}</div></>}
+      {docs.problem && (!docs.problem.submissionRejected || draft?.dirty) && <div role="alert" className="space-y-3 rounded border border-danger/30 bg-danger/5 p-4 text-sm"><p>{docs.problem.message}</p>
+        {docs.problem.currentHead && <><p className="text-textMuted">Saved when checked: {docs.problem.currentHead.title}, version {docs.problem.currentHead.version}. {draft?.dirty ? 'Your edits remain in this draft.' : 'The submitted source is kept separately below.'}</p>
+          <div className="flex flex-wrap gap-3"><button type="button" className="btn btn-secondary text-xs" onClick={() => void inspectSaved(docs.problem.currentHead.versionId, true)}>Review saved version {docs.problem.currentHead.version}</button>
+            {canWrite && draft?.dirty && <button type="button" className="btn btn-secondary text-xs" disabled={docs.creating || connection.blocked} onClick={() => void docs.create(`${[...draft.title].slice(0, 150).join('')} (copy)`, draft.content.defaultLanguage, draft.content)}>{script ? 'Save my draft as a new script' : 'Save my draft as a new notebook'}</button>}</div></>}
       </div>}
       {inspectionError && <p role="alert" className="text-sm text-danger">{inspectionError}</p>}
       {docs.notice && <p role="status" className="text-sm text-success">{docs.notice}</p>}
+      <SharedSourceRecovery record={docs.sharedRecovery} payload={docs.pendingSaveInfo || docs.sharedRecovery?.journal?.payload}
+        busy={docs.busy} blocked={connection.blocked} pending={docs.pendingCreate || docs.pendingSave} onCheck={() => void docs.refreshSubmission(selectedId)}
+        onRetry={() => void docs.save()}
+        onReviewSaved={() => void docs.reviewSubmission(selectedId)}
+        onReviewSource={() => setInspector({ kind: 'submission-source', payload: docs.pendingSaveInfo || docs.sharedRecovery?.journal?.payload })}
+        onReviewUnsubmitted={() => setInspector({ kind: 'submission-source', unsubmitted: true, payload: docs.sharedRecovery.unsubmittedPayload })}
+        onCopyUnsubmitted={canWrite ? async () => {
+          const input = docs.sharedRecovery.unsubmittedPayload;
+          if (await docs.create(`${[...input.title].slice(0, 150).join('')} (copy)`, input.content.defaultLanguage, input.content)) docs.clearUnsubmitted(selectedId, input.requestId);
+        } : undefined}
+        onCopy={canWrite ? () => {
+          const submitted = docs.sharedRecovery.journal.payload;
+          void docs.create(`${[...submitted.title].slice(0, 150).join('')} (copy)`, submitted.content.defaultLanguage, submitted.content);
+        } : undefined} />
       {docs.pendingSave && !docs.busy && <p role="status" className="text-sm text-textMuted">Retry checks the same save request. Editing resumes when its outcome is confirmed.</p>}
-      {selected && docs.autosave && docs.autosave.state !== 'idle' && <div className="flex flex-wrap items-center gap-3 text-xs text-textMuted">
+      {selected && docs.autosave && !docs.recoverableDraft && docs.autosave.state !== 'idle' && <div className="flex flex-wrap items-center gap-3 text-xs text-textMuted">
         <p role="status">{docs.autosave.message}</p>{['failed', 'offline-unsaved'].includes(docs.autosave.state) && <button type="button" className="text-primary underline" disabled={connection.blocked} onClick={() => void docs.retryAutosave()}>Retry private autosave</button>}
       </div>}
       {docs.recoverableDraft && <section aria-label="Private draft recovery" className="space-y-3 rounded border border-primary/30 bg-primary/5 p-4 text-sm">

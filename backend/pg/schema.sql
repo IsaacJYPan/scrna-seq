@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261021, now())
+VALUES ('traceomics.runtime', 20261022, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1373,3 +1373,80 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_research_document_draft_identity ON research_document_drafts;
 CREATE TRIGGER trg_research_document_draft_identity BEFORE UPDATE ON research_document_drafts
   FOR EACH ROW EXECUTE FUNCTION enforce_research_document_draft_identity();
+
+-- Exact shared-source operations survive closure independently of mutable
+-- private working copies. Reservations retain no source; each owner/slot has
+-- at most one frozen source body, removed after its immutable save succeeds.
+CREATE TABLE IF NOT EXISTS research_document_pending_requests (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  slot_key TEXT NOT NULL,
+  document_id TEXT,
+  action TEXT NOT NULL CHECK(action IN ('create','save')),
+  admitted_version INTEGER NOT NULL CHECK(admitted_version>0),
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  admission_sha256 TEXT NOT NULL CHECK(admission_sha256 ~ '^[a-f0-9]{64}$'),
+  confirmed_draft_version INTEGER CHECK(confirmed_draft_version>0),
+  state TEXT NOT NULL CHECK(state IN ('pending','succeeded','rejected')),
+  failure_json JSONB CHECK(jsonb_typeof(failure_json)='object' AND octet_length(failure_json::text)<=8192),
+  result_document_id TEXT,
+  result_version_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id,analysis_id,owner_user_id,request_id),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id),
+  FOREIGN KEY(document_id,project_id,analysis_id) REFERENCES research_documents(id,project_id,analysis_id),
+  FOREIGN KEY(result_document_id,result_version_id) REFERENCES research_document_revisions(document_id,id),
+  CHECK((action='create' AND slot_key='create' AND document_id IS NULL AND confirmed_draft_version IS NULL)
+    OR (action='save' AND slot_key=document_id AND document_id IS NOT NULL)),
+  CHECK((state='pending' AND failure_json IS NULL AND result_document_id IS NULL AND result_version_id IS NULL)
+    OR (state='rejected' AND failure_json IS NOT NULL AND result_document_id IS NULL AND result_version_id IS NULL)
+    OR (state='succeeded' AND failure_json IS NULL AND result_document_id IS NOT NULL AND result_version_id IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS research_document_pending (
+  project_id TEXT NOT NULL,
+  analysis_id TEXT NOT NULL,
+  owner_user_id BIGINT NOT NULL,
+  slot_key TEXT NOT NULL,
+  journal_version INTEGER NOT NULL CHECK(journal_version>0),
+  request_id UUID NOT NULL,
+  payload_json JSONB CHECK(jsonb_typeof(payload_json)='object' AND octet_length(payload_json::text)<=2097152),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id,analysis_id,owner_user_id,slot_key),
+  FOREIGN KEY(project_id,analysis_id,owner_user_id,request_id)
+    REFERENCES research_document_pending_requests(project_id,analysis_id,owner_user_id,request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_document_pending_owner ON research_document_pending(project_id,analysis_id,owner_user_id,updated_at DESC);
+
+CREATE OR REPLACE FUNCTION enforce_research_document_pending_identity() RETURNS TRIGGER AS $$
+BEGIN
+  IF ROW(NEW.project_id,NEW.analysis_id,NEW.owner_user_id,NEW.slot_key,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.project_id,OLD.analysis_id,OLD.owner_user_id,OLD.slot_key,OLD.created_at)
+    OR NEW.journal_version<>OLD.journal_version+1
+  THEN RAISE EXCEPTION 'Pending source identity and version are protected' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_research_document_pending_identity ON research_document_pending;
+CREATE TRIGGER trg_research_document_pending_identity BEFORE UPDATE ON research_document_pending
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_document_pending_identity();
+
+CREATE OR REPLACE FUNCTION enforce_research_document_pending_request_identity() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Pending source reservations are retained' USING ERRCODE='55000'; END IF;
+  IF ROW(NEW.project_id,NEW.analysis_id,NEW.owner_user_id,NEW.request_id,NEW.slot_key,NEW.document_id,NEW.action,
+      NEW.admitted_version,NEW.request_sha256,NEW.admission_sha256,NEW.confirmed_draft_version,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.project_id,OLD.analysis_id,OLD.owner_user_id,OLD.request_id,OLD.slot_key,OLD.document_id,OLD.action,
+      OLD.admitted_version,OLD.request_sha256,OLD.admission_sha256,OLD.confirmed_draft_version,OLD.created_at)
+    OR OLD.state<>'pending' OR NEW.state NOT IN ('succeeded','rejected')
+  THEN RAISE EXCEPTION 'Pending source reservations and known outcomes are protected' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_research_document_pending_request_identity ON research_document_pending_requests;
+CREATE TRIGGER trg_research_document_pending_request_identity BEFORE UPDATE OR DELETE ON research_document_pending_requests
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_document_pending_request_identity();

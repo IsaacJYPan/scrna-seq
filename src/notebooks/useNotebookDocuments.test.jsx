@@ -3,9 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import useNotebookDocuments from './useNotebookDocuments';
 import { createNotebook, getNotebook, listNotebooks, saveNotebook, getNotebookDraft, saveNotebookDraft, clearNotebookDraft } from './notebookApi';
 import { NOTEBOOK_DOCUMENT_SCHEMA, normalizeNotebookContent } from '../../shared/notebookDocument.mjs';
+import * as notebookApi from './notebookApi';
+import { installNotebookJournalFixture } from './notebookPending.testFixture';
 
 vi.mock('./notebookApi', () => ({ createNotebook: vi.fn(), getNotebook: vi.fn(), listNotebooks: vi.fn(), saveNotebook: vi.fn(),
-  getNotebookDraft: vi.fn(), saveNotebookDraft: vi.fn(), clearNotebookDraft: vi.fn() }));
+  getNotebookDraft: vi.fn(), saveNotebookDraft: vi.fn(), clearNotebookDraft: vi.fn(),
+  getNotebookPending: vi.fn(), admitNotebookPending: vi.fn(), submitNotebookPending: vi.fn() }));
 const projectId = `proj_${'1'.repeat(24)}`, analysisId = `ra_${'2'.repeat(24)}`, secondAnalysis = `ra_${'3'.repeat(24)}`;
 const defaults = { projectId, analysisId, isActive: true, blocked: false, canWrite: true };
 const body = source => normalizeNotebookContent({ schema: NOTEBOOK_DOCUMENT_SCHEMA, defaultLanguage: 'R',
@@ -23,6 +26,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 let stored, privateCopies, privateReceipts;
 beforeEach(() => {
   vi.resetAllMocks(); stored = [structuredClone(first), structuredClone(second), structuredClone(other)]; privateCopies = new Map(); privateReceipts = new Map();
+  installNotebookJournalFixture(notebookApi);
   listNotebooks.mockImplementation(async (_project, analysis) => ({ documents: stored.filter(doc => doc.analysisId === analysis).map(head), nextCursor: null }));
   getNotebook.mockImplementation(async (_project, _analysis, id) => response(stored.find(doc => doc.id === id)));
   createNotebook.mockImplementation(async (_project, analysis, input) => {
@@ -74,6 +78,139 @@ const privateInput = (source, extra = {}) => ({ requestId: crypto.randomUUID(), 
   baseVersion: first.version, baseVersionId: first.versionId, title: first.title, content: body(source),
   uiState: { activeCellId: 'stable-cell', scrollTop: 50 }, ...extra });
 
+describe('durable shared source recovery', () => {
+  it('recognizes confirmed source regardless of database JSON key order', async () => {
+    const saved = stored.find(value => value.id === first.id);
+    saved.content = { metadata: {}, cells: saved.content.cells.map(cell => ({ collapsed: cell.collapsed, metadata: cell.metadata,
+      source: cell.source, language: cell.language, type: cell.type, id: cell.id })), defaultLanguage: 'R', schema: NOTEBOOK_DOCUMENT_SCHEMA };
+    const { result } = await start(); await open(result); editSource(result, 'same_exact_confirmed_source()');
+    await act(async () => result.current.save());
+    expect(result.current.selected.version).toBe(2); expect(result.current.pendingSave).toBe(false);
+    expect(result.current.draft.dirty).toBe(false);
+  });
+
+  it('keeps a newer admitted save and its private cleanup identity when an older success arrives late', async () => {
+    const { result } = await start(); await open(result); editSource(result, 'original shared A');
+    const submit = notebookApi.submitNotebookPending.getMockImplementation(), committed = deferred(), delayed = deferred();
+    notebookApi.submitNotebookPending.mockImplementationOnce(async (...args) => {
+      const response = await submit(...args); committed.resolve(response); return delayed.promise;
+    });
+    let saving; act(() => { saving = result.current.save(); });
+    let firstResult; await act(async () => { firstResult = await committed.promise; });
+    await act(async () => saveNotebookDraft(projectId, analysisId, first.id, privateInput('newer pending B', {
+      expectedDraftVersion: 1, baseVersion: 2, baseVersionId: firstResult.result.document.versionId,
+    })));
+    const payloadB = { requestId: crypto.randomUUID(), expectedVersion: 2, title: first.title, content: body('newer pending B') };
+    await notebookApi.admitNotebookPending(projectId, analysisId, first.id, {
+      expectedJournalVersion: 2, payload: payloadB, confirmedDraftVersion: 2,
+    });
+    await act(async () => result.current.refreshSubmission(first.id));
+    await act(async () => { delayed.resolve(firstResult); await saving; });
+    expect(result.current.pendingSaveInfo).toEqual(payloadB);
+    expect(result.current.sharedRecovery.phase).toBe('confirmed');
+    expect(privateCopies.get(first.id).draft.content.cells[0].source).toBe('newer pending B');
+    expect(clearNotebookDraft).not.toHaveBeenCalled();
+    await act(async () => result.current.save());
+    expect(saveNotebook.mock.calls[1][3]).toEqual(payloadB);
+    expect(clearNotebookDraft.mock.calls[0][3].expectedDraftVersion).toBe(2);
+    expect(result.current.pendingSave).toBe(false);
+  });
+
+  it.each(['missing rejection metadata', 'wrong expected version', 'unknown terminal state'])('keeps an uncertain shared UUID after %s', async defect => {
+    const { result } = await start(); await open(result); editSource(result, 'keep_this_exact_submission()');
+    const submit = notebookApi.submitNotebookPending.getMockImplementation();
+    notebookApi.submitNotebookPending.mockImplementationOnce(async (...args) => {
+      const response = await submit(...args);
+      response.admission.state = defect === 'unknown terminal state' ? 'unknown' : 'rejected';
+      response.admission.failure = defect === 'wrong expected version'
+        ? { code: 'NOTEBOOK_VERSION_CONFLICT', submittedExpectedVersion: 99 } : null;
+      return response;
+    });
+    await act(async () => result.current.save());
+    expect(result.current.pendingSave).toBe(true); expect(clearNotebookDraft).not.toHaveBeenCalled();
+    const original = structuredClone(notebookApi.submitNotebookPending.mock.calls[0][3]);
+    await act(async () => result.current.save());
+    expect(notebookApi.submitNotebookPending.mock.calls[1][3]).toEqual(original);
+    expect(result.current.pendingSave).toBe(false); expect(result.current.selected.version).toBe(2);
+    expect(saveNotebook).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not submit an unknown admission and recovers the original source after complete controller closure', async () => {
+    const admit = notebookApi.admitNotebookPending.getMockImplementation();
+    notebookApi.admitNotebookPending.mockImplementationOnce(async (...args) => { await admit(...args); throw new Error('Lost admission reply'); });
+    const firstMount = await start();
+    await act(async () => firstMount.result.current.create('Original private admission', 'R', body('exact_admitted_source()\r\n')));
+    expect(notebookApi.submitNotebookPending).not.toHaveBeenCalled();
+    const original = structuredClone(notebookApi.admitNotebookPending.mock.calls[0][3].payload);
+    expect(firstMount.result.current.creationRecovery.phase).toBe('unconfirmed');
+    firstMount.unmount();
+    const { result } = await start(); await waitFor(() => expect(result.current.pendingCreate).toBe(true));
+    expect(result.current.pendingCreateInfo.content).toEqual(original.content);
+    expect(notebookApi.submitNotebookPending).not.toHaveBeenCalled();
+    await act(async () => result.current.create('Must not replace original', 'python', body('unrelated()')));
+    expect(createNotebook.mock.calls[0][2]).toEqual(original);
+    expect(result.current.selected.title).toBe(original.title);
+    expect(notebookApi.admitNotebookPending).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains the exact UUID and never dispatches after a malformed durable acknowledgment', async () => {
+    const admit = notebookApi.admitNotebookPending.getMockImplementation();
+    notebookApi.admitNotebookPending.mockImplementationOnce(async (...args) => {
+      const result = await admit(...args); result.admission.requestSha256 = '0'.repeat(64); return result;
+    });
+    const { result } = await start(); await act(async () => result.current.create('Frozen admission', 'R', body('unchanged()')));
+    expect(notebookApi.submitNotebookPending).not.toHaveBeenCalled();
+    const original = structuredClone(notebookApi.admitNotebookPending.mock.calls[0][3]);
+    await act(async () => result.current.create('Changed form', 'python'));
+    expect(notebookApi.admitNotebookPending.mock.calls[1][3]).toEqual(original);
+    expect(result.current.pendingCreate).toBe(false);
+  });
+
+  it('preserves unadmitted source separately and resolves the other window admission after a genuine slot conflict', async () => {
+    const { result } = await start();
+    await waitFor(() => expect(result.current.creationRecovery.loaded).toBe(true));
+    const original = { requestId: crypto.randomUUID(), title: 'Other window source', content: body('window_A()') };
+    await notebookApi.admitNotebookPending(projectId, analysisId, null, { expectedJournalVersion: 0, payload: original, confirmedDraftVersion: null });
+    await act(async () => result.current.create('Unadmitted source B', 'R', body('window_B()')));
+    expect(notebookApi.submitNotebookPending).not.toHaveBeenCalled();
+    expect(result.current.pendingCreateInfo.title).toBe(original.title);
+    expect(result.current.creationRecovery.unsubmittedPayload.content).toEqual(body('window_B()'));
+    await act(async () => result.current.create('Ignored retry form', 'R'));
+    expect(createNotebook.mock.calls[0][2]).toEqual(original);
+    expect(result.current.creationRecovery.unsubmittedPayload.content).toEqual(body('window_B()'));
+  });
+
+  it('does not resurrect a resolved operation when an older pending read arrives after its success', async () => {
+    const { result } = await start(); const submitted = deferred(); createNotebook.mockReturnValueOnce(submitted.promise);
+    let creating; act(() => { creating = result.current.create('Delayed read', 'R', body('kept_once()')); });
+    await waitFor(() => expect(createNotebook).toHaveBeenCalledTimes(1));
+    const oldResult = await notebookApi.getNotebookPending(projectId, analysisId, null), delayed = deferred();
+    notebookApi.getNotebookPending.mockReturnValueOnce(delayed.promise);
+    let reading; act(() => { reading = result.current.refreshSubmission(null); });
+    await act(async () => { submitted.resolve(response({ ...notebook('d'), title: 'Delayed read', content: body('kept_once()') })); await creating; });
+    expect(result.current.pendingCreate).toBe(false);
+    await act(async () => { delayed.resolve(oldResult); await reading; });
+    expect(result.current.pendingCreate).toBe(false);
+    expect(result.current.creationRecovery.journal.state).toBe('succeeded');
+  });
+
+  it('requires the original request hash when recovering a successful slot after closure', async () => {
+    const { result, unmount } = await start();
+    await act(async () => result.current.create('Exact original title', 'R', body('immutable_source()')));
+    unmount(); const secondMount = await start();
+    await waitFor(() => expect(secondMount.result.current.creationRecovery.journal?.state).toBe('succeeded'));
+    const submit = notebookApi.submitNotebookPending.getMockImplementation();
+    notebookApi.submitNotebookPending.mockImplementationOnce(async (...args) => {
+      const response = await submit(...args); response.result.document.title = 'Wrong title with unchanged source checksum'; return response;
+    });
+    await act(async () => secondMount.result.current.reviewSubmission(null));
+    expect(secondMount.result.current.selected).toBeNull();
+    expect(secondMount.result.current.creationProblem.message).toMatch(/could not be confirmed/);
+    await act(async () => secondMount.result.current.reviewSubmission(null));
+    expect(secondMount.result.current.selected.title).toBe('Exact original title');
+  });
+});
+
 describe('notebook document draft and request controller', () => {
   it('retains two independent source drafts and selections through document, analysis and tab navigation', async () => {
     const { result, rerender } = await start();
@@ -96,7 +233,7 @@ describe('notebook document draft and request controller', () => {
     stored = stored.map(doc => doc.id === first.id ? third : doc);
     await open(result);
     listNotebooks.mockResolvedValue({ documents: [head(first), head(second)], nextCursor: null });
-    const secondSaved = { ...first, title: 'Saved second', version: 2, versionId: `dv_${'e'.repeat(24)}`, content: body('my saved second\n') };
+    const secondSaved = { ...first, version: 2, versionId: `dv_${'e'.repeat(24)}`, content: body('my saved second\n') };
     await act(async () => { pending.resolve(response(secondSaved)); await saving; });
     await waitFor(() => expect(result.current.index.items.find(doc => doc.id === first.id)?.version).toBe(3));
     expect(result.current.selected.version).toBe(3); expect(result.current.selected.content.cells[0].source).toBe('colleague_source()\n');
@@ -182,8 +319,8 @@ describe('notebook document draft and request controller', () => {
     await act(async () => { pendingSave.resolve(response({ ...first, version: 2, content: body('single admitted snapshot') })); await saving; });
     const pendingCreate = deferred(); createNotebook.mockReturnValueOnce(pendingCreate.promise);
     let creating; act(() => { creating = result.current.create('One', 'R'); void result.current.create('Two', 'R'); });
-    expect(createNotebook).toHaveBeenCalledTimes(1);
-    await act(async () => { pendingCreate.resolve(response(notebook('d'))); await creating; });
+    await waitFor(() => expect(createNotebook).toHaveBeenCalledTimes(1));
+    await act(async () => { pendingCreate.resolve(response({ ...notebook('d'), title: 'One', content: createNotebook.mock.calls[0][2].content })); await creating; });
     expect(result.current.pendingCreate).toBe(false);
   });
 
@@ -198,7 +335,8 @@ describe('notebook document draft and request controller', () => {
     const pendingCreate = deferred(); createNotebook.mockReturnValueOnce(pendingCreate.promise);
     let creating; act(() => { creating = result.current.create('Created in original analysis', 'R'); });
     rerender({ ...defaults, analysisId: secondAnalysis });
-    await act(async () => { pendingCreate.resolve(response(notebook('d'))); await creating; });
+    await waitFor(() => expect(createNotebook).toHaveBeenCalledTimes(1));
+    await act(async () => { pendingCreate.resolve(response({ ...notebook('d'), title: 'Created in original analysis', content: createNotebook.mock.calls[0][2].content })); await creating; });
     expect(result.current.selected.id).toBe(other.id);
     rerender(defaults); expect(result.current.selected.id).toBe(notebook('d').id);
   });
@@ -224,7 +362,7 @@ describe('notebook document draft and request controller', () => {
   it('distinguishes retained old create evidence from the newer head and loads the actual current source', async () => {
     const { result } = await start(); const original = notebook('d'), newer = { ...original, version: 2, versionId: `dv_${'e'.repeat(24)}`, content: body('newer persisted source') };
     stored.push(newer); createNotebook.mockResolvedValueOnce(response(original, newer));
-    await act(async () => result.current.create('Recover old creation', 'R'));
+    await act(async () => result.current.create(original.title, 'R', original.content));
     await waitFor(() => expect(result.current.selected?.version).toBe(2));
     expect(result.current.draft.content.cells[0].source).toBe('newer persisted source');
     expect(result.current.notice).toMatch(/version 1.*newer/);

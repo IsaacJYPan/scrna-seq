@@ -86,6 +86,7 @@
     "test:artifact-versions-browser": "node scripts/verify-artifact-versions-ui.js",
     "test:research-analyses-browser": "npm run build && node scripts/verify-research-analyses-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",
+    "test:notebook-pending-browser": "npm run build && node scripts/verify-notebook-pending-ui.js",
     "test:retained-results-browser": "npm run build && node scripts/verify-retained-results-ui.js",
     "test:execution-history-browser": "node scripts/verify-execution-history-ui.js",
     "test:backend": "npm run test:backend:postgres",

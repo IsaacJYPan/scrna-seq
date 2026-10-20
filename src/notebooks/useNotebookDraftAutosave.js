@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getNotebookDraft, saveNotebookDraft, clearNotebookDraft } from './notebookApi';
-import { NOTEBOOK_VERSION_ID, normalizeNotebookContent } from '../../shared/notebookDocument.mjs';
+import { NOTEBOOK_VERSION_ID, normalizeNotebookContent, canonicalNotebookContent } from '../../shared/notebookDocument.mjs';
 import { normalizeNotebookDraft, canonicalNotebookDraftSnapshot } from '../../shared/notebookDraft.mjs';
 
 const invalid = () => Object.assign(new Error('The private document draft service returned an unreadable response.'), { code: 'INVALID_DRAFT_RESPONSE' });
@@ -181,7 +181,7 @@ export default function useNotebookDraftAutosave({ projectId, analysisId, userId
     const saved = live.current.records[id];
     const restored = { title: remote.title, content: normalizeNotebookContent(remote.content), baseVersion: remote.baseVersion,
       baseVersionId: remote.baseVersionId, uiState: remote.uiState,
-      dirty: !saved || saved.title !== remote.title || JSON.stringify(saved.content) !== JSON.stringify(remote.content), privateDirty: false };
+      dirty: !saved || saved.title !== remote.title || canonicalNotebookContent(saved.content) !== canonicalNotebookContent(remote.content), privateDirty: false };
     confirmedObjects.current.set(id, restored); setDrafts(previous => ({ ...previous, [id]: restored }));
     patch(id, { recovery: null, needsConfirmation: false, state: 'saved', message: 'Restored your confirmed private draft. Shared saved source is unchanged.' });
     return true;
