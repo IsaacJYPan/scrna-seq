@@ -20,6 +20,8 @@ import {
 } from './liveRState';
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
 import { publicErrorMessage } from './publicError';
+import { getExecutionTargetSnapshot } from './runtime/executionTarget';
+import { prepareOriginalObjectHistory } from './analyses/openOriginalHistory';
 import { buildProjectProvenancePayload } from './projectProvenance';
 
 import {
@@ -631,6 +633,18 @@ export default function App() {
         : (ws.lastSelectedByProject || {}),
     }));
   }, [patchActiveWorkspace, user, workflowContext]);
+
+  const savedWorkScope = React.useRef(null);
+  savedWorkScope.current = { userId: user?.id, projectId: currentWs?.selectedProjectId, workspaceId: currentWs?.id,
+    objectId: datasetInfo?.id, unsavedLiveChanges, activeTab };
+  const openOriginalObjectHistory = useCallback(async objectId => {
+    const state = await prepareOriginalObjectHistory({ api: window.electronAPI, objectId,
+      getScope: () => savedWorkScope.current, getTarget: getExecutionTargetSnapshot,
+      getSelection: () => checkpointSaveRequestRef.current });
+    patchActiveWorkspace(ws => ({ objects: reconcileAnalysisObjectMetadata(ws.objects, state.objects) }));
+    if (state.selectObject) handleSelectAnalysisObject(state.projectId, objectId);
+    setActiveTab('history');
+  }, [patchActiveWorkspace, handleSelectAnalysisObject]);
 
   const handleSaveLiveAnalysis = useCallback(async () => {
     const projectId = datasetInfo?.projectId || currentWs.selectedProjectId;
@@ -1375,6 +1389,7 @@ export default function App() {
             isActive={activeTab === 'analyses'}
             onOpenWorkspace={() => setActiveTab('workspace')}
             onOpenAdvanced={() => setActiveTab('expert-r')}
+            onOpenOriginal={openOriginalObjectHistory}
           />
         </TabContent></ErrorBoundary>
         <ErrorBoundary key="pipeline-manager"><TabContent id="pipeline-manager" activeTab={activeTab}>

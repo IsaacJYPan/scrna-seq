@@ -41,3 +41,8 @@ export function listReferenceOptions(projectId, { cursor, signal } = {}) {
   if (cursor) query.set('cursor', cursor);
   return request(`${projectPath(projectId)}/reference-options?${query}`, { signal });
 }
+export function listExistingWork(projectId, { kind = 'objects', cursor, signal } = {}) {
+  const query = new URLSearchParams({ kind, limit: '30' });
+  if (cursor) query.set('cursor', cursor);
+  return request(`${projectPath(projectId)}/existing-work?${query}`, { signal });
+}

@@ -43,7 +43,7 @@ function createResearchAnalysisService(database = db) {
       const member = (await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId])).rows[0];
       if (!member) notFound();
       if (!roles.includes(member.role)) throw error('FORBIDDEN', 'Your project role allows reading analyses but not editing them.', 403);
-      const result = await action(client);
+      const result = await action(client, member);
       await client.query('COMMIT');
       return result;
     } catch (failure) { await client.query('ROLLBACK'); throw failure; }
@@ -87,12 +87,13 @@ function createResearchAnalysisService(database = db) {
     const parsed = (await contract).normalizeResearchAnalysisCreate(input);
     const { requestId, ...content } = parsed;
     const requestHash = digest(content);
-    return transaction(userId, projectId, WRITE_ROLES, async client => {
+    return transaction(userId, projectId, READ_ROLES, async (client, member) => {
       let row = (await client.query('SELECT * FROM research_analyses WHERE project_id=$1 AND created_by_user_id=$2 AND request_id=$3', [projectId, userId, requestId])).rows[0];
       if (row) {
         if (row.request_sha256 !== requestHash) throw error('ANALYSIS_REQUEST_CONFLICT', 'This request already created a different analysis. Use its original fields to recover it, or create a new request.', 409);
         return { analysis: (await display(client, userId, projectId, [row]))[0], created: false };
       }
+      if (!WRITE_ROLES.includes(member.role)) throw error('FORBIDDEN', 'Your project role allows reading analyses but not creating them.', 403);
       const allowed = await accessibleReferences(client, userId, projectId, content.references);
       if (content.references.some(ref => !allowed.has(referenceKey(ref)))) throw error('ANALYSIS_REFERENCE_NOT_FOUND', 'A selected exact reference is unavailable or not accessible to your account.', 404);
       const inserted = await client.query(`INSERT INTO research_analyses(id,project_id,created_by_user_id,request_id,request_sha256,name,description,references_json,study_design_ref_json)
@@ -190,7 +191,9 @@ function createResearchAnalysisService(database = db) {
       return { analysis: (await display(client, userId, projectId, [updated]))[0] };
     });
   }
-  return { create, list, get, patch, referenceOptions };
+  const existingWork = require('./existingWorkCatalog').createExistingWorkCatalog({ sourceSql: SOURCE_SQL,
+    transaction: (userId, projectId, action) => transaction(userId, projectId, READ_ROLES, action) });
+  return { create, list, get, patch, referenceOptions, listExistingWork: existingWork.list };
 }
 function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   const router = require('express').Router({ mergeParams: true });
@@ -215,6 +218,7 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.get('/', route(req => service.list(req.user.id, req.params.projectId, req.query)));
   router.post('/', route(req => service.create(req.user.id, req.params.projectId, req.body)));
   router.get('/reference-options', route(req => service.referenceOptions(req.user.id, req.params.projectId, req.query)));
+  router.get('/existing-work', route(req => service.listExistingWork(req.user.id, req.params.projectId, req.query)));
   router.get('/:analysisId', route(req => service.get(req.user.id, req.params.projectId, req.params.analysisId)));
   router.patch('/:analysisId', route(req => service.patch(req.user.id, req.params.projectId, req.params.analysisId, req.body)));
   return router;

@@ -3,9 +3,10 @@ import { ArrowLeft, Archive, FileText, Link2, Loader2, Plus, RefreshCw } from 'l
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import { publicErrorMessage } from '../publicError';
 import { createAnalysis, getAnalysis, listAnalyses, listReferenceOptions, updateAnalysis } from '../analyses/researchAnalysisApi';
-import { RESEARCH_ANALYSIS_LIMITS } from '../../shared/researchAnalysis.mjs';
+import { RESEARCH_ANALYSIS_ID, RESEARCH_ANALYSIS_LIMITS } from '../../shared/researchAnalysis.mjs';
 
 const NotebookWorkspace = React.lazy(() => import('../notebooks/NotebookWorkspace'));
+const ExistingWorkBrowser = React.lazy(() => import('../analyses/ExistingWorkBrowser'));
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const cleanReferences = analysis => (analysis.references || []).map(item => item.reference);
@@ -36,7 +37,7 @@ const describeTime = value => {
   return Number.isNaN(date.getTime()) ? 'Saved in this project' : `Updated ${date.toLocaleDateString()}`;
 };
 
-function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive, onOpenWorkspace, onOpenAdvanced, connection }) {
+function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive, onOpenWorkspace, onOpenAdvanced, onOpenOriginal, connection }) {
   const [items, setItems] = useState([]);
   const [status, setStatus] = useState('active');
   const [nextCursor, setNextCursor] = useState(null);
@@ -46,6 +47,9 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
   const [detailOpen, setDetailOpen] = useState(false);
   const [notebookVisited, setNotebookVisited] = useState(false);
   const [notebookOpen, setNotebookOpen] = useState(false);
+  const [adoptionOpen, setAdoptionOpen] = useState(false), [adoptionVisited, setAdoptionVisited] = useState(false);
+  const adoptionButton = useRef(null), adoptionVisible = useRef(false);
+  adoptionVisible.current = adoptionOpen;
   const [drafts, setDrafts] = useState({});
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
@@ -216,19 +220,35 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
   };
 
   const labelForReference = (reference, access) => `${access === 'restricted' ? 'Restricted saved source' : knownLabels[referenceKey(reference)] || referenceTitle(reference)} · ${versionId(reference).slice(-8)}`;
+  const closeAdoption = () => { setAdoptionOpen(false); requestAnimationFrame(() => adoptionButton.current?.focus()); };
+  const adopt = async input => {
+    const selection = selectionRequest.current;
+    const result = await createAnalysis(projectId, input);
+    if (!mounted.current) return;
+    if (!result?.analysis || result.analysis.projectId !== projectId || !RESEARCH_ANALYSIS_ID.test(result.analysis.id)
+        || !Number.isSafeInteger(result.analysis.version) || result.analysis.version < 1) throw new Error('The saved analysis could not be confirmed. Retry the original request.');
+    if (selection === selectionRequest.current && adoptionVisible.current) {
+      applySaved(result.analysis); setSelected(result.analysis); setDetailOpen(true); setCreating(false); closeAdoption();
+      setKnownLabels(previous => ({ ...previous, [referenceKey(input.references[0])]: input.name }));
+      setNotice('Analysis created from the exact saved version. Original source access is unchanged.');
+    } else void load();
+    return result.analysis;
+  };
 
   if (!projectId) return <div className="p-6 sm:p-10"><h2 className="text-2xl font-semibold text-text">Analyses</h2>
     <p className="mt-3 max-w-xl text-sm text-textMuted">Choose a project to organize questions, documents, results, and decisions together.</p>
     <button type="button" className="btn btn-primary mt-5" onClick={onOpenWorkspace}>Choose a project</button></div>;
 
   return <div className="relative h-full min-w-0">
-    <div ref={scrollContainer} hidden={notebookOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
+    <div ref={scrollContainer} hidden={notebookOpen || adoptionOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
     <div className="mx-auto w-full max-w-6xl lg:flex lg:h-full lg:min-h-0 lg:flex-col">
       <header className="mb-7 flex shrink-0 flex-wrap items-start justify-between gap-4">
         <div><p className="mb-1 text-xs text-textMuted">{projectName || 'Current project'}</p><h2 className="text-2xl font-semibold tracking-tight">Analyses</h2>
           <p className="mt-2 max-w-xl text-sm text-textMuted">Keep a scientific question and its supporting work together.</p></div>
-        {canWrite && <button type="button" className="btn btn-primary inline-flex items-center gap-2" disabled={!!mutation || connection.blocked}
-          onClick={() => { setCreating(true); setError(''); setNotice(''); }}><Plus size={16} />New analysis</button>}
+        <div className="flex flex-wrap gap-3"><button ref={adoptionButton} type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" disabled={!!mutation || connection.blocked || !!pendingCreate.current}
+          onClick={() => { setAdoptionVisited(true); setAdoptionOpen(true); }}><FileText size={16} />Bring saved work</button>
+          {canWrite && <button type="button" className="btn btn-primary inline-flex items-center gap-2" disabled={!!mutation || connection.blocked}
+          onClick={() => { setCreating(true); setError(''); setNotice(''); }}><Plus size={16} />New analysis</button>}</div>
       </header>
       {connection.blocked && <p role="status" className="mb-4 text-sm text-textMuted">Reconnect to this workspace to save changes. Your current draft is kept here.</p>}
       {error && <p role="alert" className="mb-4 rounded border border-danger/30 bg-danger/5 p-3 text-sm text-danger">{error}</p>}
@@ -313,6 +333,13 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
         <NotebookWorkspace projectId={projectId} projectName={projectName} analysis={selected} role={role} userId={userId} theme={theme}
           connection={connection} isActive={isActive && notebookOpen} onOpenOverview={() => setNotebookOpen(false)}
           onOpenAdvanced={onOpenAdvanced} referenceLabel={labelForReference} />
+      </React.Suspense>
+    </div>}
+    {adoptionVisited && <div hidden={!adoptionOpen} className="absolute inset-0">
+      <React.Suspense fallback={<p role="status" className="p-8 text-sm text-textMuted">Finding saved work…</p>}>
+        <ExistingWorkBrowser projectId={projectId} projectName={projectName} userId={userId} canWrite={canWrite}
+          blocked={connection.blocked} isActive={isActive && adoptionOpen} onClose={closeAdoption} onAdopt={adopt}
+          onOpenOriginal={onOpenOriginal ? async id => { await onOpenOriginal(id); setAdoptionOpen(false); } : undefined} />
       </React.Suspense>
     </div>}
   </div>;

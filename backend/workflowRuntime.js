@@ -286,6 +286,15 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
         for (const result of Object.values(state.results)) for (const output of Object.values(result.outputs)) retained.add(output.id);
         for (const input of Object.values(state.active?.inputs || {})) retained.add(input.id);
       }
+      // Scientific analysis versions retain their exact linked evidence even
+      // after a working workflow or its legacy snapshot has been closed.
+      const analysisReferences = await client.query(`SELECT DISTINCT artifact.id FROM workflow_artifacts artifact JOIN (
+        SELECT reference->>'versionId' AS id FROM (
+          SELECT jsonb_array_elements(references_json) AS reference FROM research_analyses WHERE project_id=$1
+          UNION ALL SELECT jsonb_array_elements(snapshot_json->'references') FROM research_analysis_revisions WHERE project_id=$1
+        ) saved WHERE reference->>'kind'='artifact-version'
+      ) linked ON linked.id=artifact.id WHERE artifact.project_id=$1 AND artifact.owner_user_id=$2`, [projectId, userId]);
+      for (const { id } of analysisReferences.rows) retained.add(id);
       const artifacts = await client.query('SELECT id,storage_key FROM workflow_artifacts WHERE owner_user_id=$1 AND project_id=$2', [userId, projectId]);
       for (const artifact of artifacts.rows) if (!retained.has(artifact.id)) {
         // Delete files before their orphan records so a failed unlink remains retryable.

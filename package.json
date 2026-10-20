@@ -85,6 +85,7 @@
     "test:server-data-import-browser": "npm run build && node scripts/verify-server-data-import-ui.js",
     "test:artifact-versions-browser": "node scripts/verify-artifact-versions-ui.js",
     "test:research-analyses-browser": "npm run build && node scripts/verify-research-analyses-ui.js",
+    "test:existing-work-browser": "npm run build && node scripts/verify-existing-work-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",
     "test:notebook-pending-browser": "npm run build && node scripts/verify-notebook-pending-ui.js",
     "test:retained-results-browser": "npm run build && node scripts/verify-retained-results-ui.js",

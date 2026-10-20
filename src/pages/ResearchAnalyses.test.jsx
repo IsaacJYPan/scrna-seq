@@ -2,10 +2,10 @@ import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ResearchAnalyses from './ResearchAnalyses';
-import { createAnalysis, getAnalysis, listAnalyses, listReferenceOptions, updateAnalysis } from '../analyses/researchAnalysisApi';
+import { createAnalysis, getAnalysis, listAnalyses, listReferenceOptions, listExistingWork, updateAnalysis } from '../analyses/researchAnalysisApi';
 
 vi.mock('../analyses/researchAnalysisApi', () => ({
-  createAnalysis: vi.fn(), getAnalysis: vi.fn(), listAnalyses: vi.fn(), listReferenceOptions: vi.fn(), updateAnalysis: vi.fn(),
+  createAnalysis: vi.fn(), getAnalysis: vi.fn(), listAnalyses: vi.fn(), listReferenceOptions: vi.fn(), updateAnalysis: vi.fn(), listExistingWork: vi.fn(),
 }));
 
 const reference = { kind: 'artifact-version', versionId: `av_${'b'.repeat(24)}`, sha256: 'c'.repeat(64) };
@@ -26,7 +26,7 @@ beforeEach(() => {
   listAnalyses.mockImplementation(async (_projectId, { status }) => ({ analyses: savedAnalyses.filter(item => item.status === status), nextCursor: null }));
   getAnalysis.mockImplementation(async (_projectId, id) => ({ analysis: savedAnalyses.find(item => item.id === id) }));
   createAnalysis.mockImplementation(async (_projectId, input) => {
-    const analysis = { ...first, id: `ra_${'e'.repeat(24)}`, name: input.name, description: input.description || '', references: [] };
+    const analysis = { ...first, id: `ra_${'e'.repeat(24)}`, name: input.name, description: input.description || '', references: (input.references || []).map(reference => ({ reference, access: 'available' })) };
     savedAnalyses = [analysis, ...savedAnalyses]; return { analysis };
   });
   updateAnalysis.mockImplementation(async (_projectId, id, input) => {
@@ -37,10 +37,38 @@ beforeEach(() => {
     return { analysis };
   });
   listReferenceOptions.mockResolvedValue({ options: [{ reference, label: 'Cell metadata.csv', type: 'table' }], nextCursor: null });
+  listExistingWork.mockResolvedValue({ projectId: 'project_one', kind: 'objects', items: [{ id: 'ao_' + 'f'.repeat(24), kind: 'analysis-object',
+    label: 'Established donor work', type: 'seurat', ownerUserId: 1, ownership: 'yours', reference, savedState: 'recorded', liveState: 'not-checked', createdAt: first.updatedAt }], nextCursor: null });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('durable project analyses', () => {
+  it('adopts an exact saved version through the analysis entry without losing another question draft', async () => {
+    render(<ResearchAnalyses {...defaults} />); await open(first.name);
+    fireEvent.change(editor('Research question or notes'), { target: { value: 'Keep this unsaved question.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Bring saved work' }));
+    const browser = await screen.findByRole('region', { name: 'Existing saved work' });
+    fireEvent.click(await within(browser).findByRole('button', { name: /^Established donor work/ }));
+    fireEvent.click(within(browser).getByRole('button', { name: 'Start analysis with this saved version' }));
+    await screen.findByText('Analysis created from the exact saved version. Original source access is unchanged.');
+    expect(createAnalysis.mock.calls[0][1].references).toEqual([reference]);
+    expect(editor('Analysis name')).toHaveValue('Established donor work');
+    expect(within(panel()).getByText(/Exact version linked/)).toBeVisible();
+    await open(first.name); expect(editor('Research question or notes')).toHaveValue('Keep this unsaved question.');
+  });
+
+  it('opens original object history deliberately without creating an analysis or altering its saved source', async () => {
+    const original = vi.fn().mockResolvedValue(undefined);
+    render(<ResearchAnalyses {...defaults} onOpenOriginal={original} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Bring saved work' }));
+    const browser = await screen.findByRole('region', { name: 'Existing saved work' });
+    fireEvent.click(await within(browser).findByRole('button', { name: /^Established donor work/ }));
+    fireEvent.click(within(browser).getByRole('button', { name: 'Open original object history' }));
+    await waitFor(() => expect(original).toHaveBeenCalledWith('ao_' + 'f'.repeat(24)));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Existing saved work' })).toBeNull());
+    expect(createAnalysis).not.toHaveBeenCalled(); expect(updateAnalysis).not.toHaveBeenCalled();
+  });
+
   it('opens a different desktop analysis at the start of its detail while retaining the list position', async () => {
     vi.stubGlobal('innerWidth', 1366);
     render(<ResearchAnalyses {...defaults} />);
