@@ -114,7 +114,7 @@ async function workbench(browser) {
     await page.keyboard.press('Escape');
     check('Drawer Escape restores launcher focus', await expand.evaluate(el => el === document.activeElement));
     await expand.click();
-    await drawer.getByRole('button', { name:/Analysis workspace/ }).click();
+    await drawer.getByRole('button', { name:/Data workspace/ }).click();
     check('Selecting a destination closes drawer', await drawer.isHidden());
     const connection = page.getByRole('button', { name:'Connection details', exact:true });
     await connection.click();

@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  CheckCircle2, ChevronDown, ChevronLeft, Database, GitBranch, LayoutPanelTop,
+  CheckCircle2, ChevronDown, ChevronLeft, Database, FileText, GitBranch, LayoutPanelTop,
   Info, Lock, LogOut, Menu, Microscope, Moon, Sun, UserRound, Users, Wrench,
 } from 'lucide-react';
 import { buildPipelineSidebarSections } from '../pipelines/pipelineRegistry';
 import { workflowTabAvailability } from '../../shared/workflowState.mjs';
 
 const PRIMARY_DESTINATION_IDS = new Set([
-  'workspace', 'pipeline-manager', 'branches', 'study-design', 'expert-r',
+  'workspace', 'analyses', 'pipeline-manager', 'branches', 'study-design', 'expert-r',
   'team', 'history', 'lineage', 'publication', 'validation',
 ]);
 
@@ -281,7 +281,8 @@ export default function Sidebar({
         </button>
 
         <div className="shrink-0 border-b border-border p-2">
-          <NavButton {...navProps} item={{ id: 'workspace', label: 'Analysis workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
+          <NavButton {...navProps} item={{ id: 'analyses', label: 'Analyses', icon: FileText }} disabled={!hasProject} />
+          <NavButton {...navProps} item={{ id: 'workspace', label: 'Data workspace', icon: Database, status: hasProject ? 'Project selected' : 'Select project' }} />
         </div>
         <div ref={navigationScrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2 space-y-3 custom-scrollbar" style={{ scrollbarGutter: 'stable' }}>
           <NavSection id="project" label="Project" active={['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'history'].includes(activeTab)} open={!closedGroups.has('project') || ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'history'].includes(activeTab)} onToggle={() => toggleGroup('project', ['pipeline-manager', 'branches', 'study-design', 'expert-r', 'team', 'history'].includes(activeTab))}>

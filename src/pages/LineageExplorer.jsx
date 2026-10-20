@@ -356,7 +356,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
         <div className="max-w-lg rounded-xl border border-dashed border-border bg-surface p-8 text-center">
           <GitBranch size={38} className="mx-auto text-primary" aria-hidden="true" />
           <h2 className="mt-4 text-xl font-bold text-text">Select a saved analysis</h2>
-          <p className="mt-2 text-sm text-textMuted">Choose a saved analysis in the Analysis workspace to view its recorded relationships.</p>
+          <p className="mt-2 text-sm text-textMuted">Choose a saved analysis in the Data workspace to view its recorded relationships.</p>
         </div>
       </div>
     );

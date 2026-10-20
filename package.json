@@ -84,6 +84,7 @@
     "test:runtime-monitor-browser": "npm run build && node scripts/verify-remote-compute-ui.js",
     "test:server-data-import-browser": "npm run build && node scripts/verify-server-data-import-ui.js",
     "test:artifact-versions-browser": "node scripts/verify-artifact-versions-ui.js",
+    "test:research-analyses-browser": "npm run build && node scripts/verify-research-analyses-ui.js",
     "test:execution-history-browser": "node scripts/verify-execution-history-ui.js",
     "test:backend": "npm run test:backend:postgres",
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",

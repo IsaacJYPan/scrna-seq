@@ -256,7 +256,7 @@ describe('Sidebar component', () => {
       />
     );
 
-    const workbench = screen.getByRole('button', { name: /Analysis workspace, Project selected/i });
+    const workbench = screen.getByRole('button', { name: /Data workspace, Project selected/i });
     expect(workbench).toHaveClass('bg-primary/10');
     expect(workbench).toHaveClass('border-primary/30');
     expect(workbench).toHaveClass('text-text');
@@ -430,7 +430,7 @@ describe('Sidebar component', () => {
     fireEvent.click(explore);
     expect(explore).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('button', { name: 'Heatmap' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Analysis workspace/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Data workspace/ })).toBeInTheDocument();
     view.rerender(<Sidebar {...baseProps} activeTab="heatmap" selectedObjects={[{ id: 'ao_1' }]} />);
     expect(explore).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByRole('button', { name: 'Heatmap' })).toHaveAttribute('aria-current', 'page');

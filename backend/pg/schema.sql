@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261016, now())
+VALUES ('traceomics.runtime', 20261019, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1158,3 +1158,65 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_server_data_import_identity ON server_data_imports;
 CREATE TRIGGER trg_server_data_import_identity BEFORE UPDATE ON server_data_imports
   FOR EACH ROW EXECUTE FUNCTION enforce_server_data_import_identity();
+
+
+-- Research analyses are editable project documents, separate from live R objects
+-- and immutable scientific artifact versions. Every saved draft has a retained
+-- revision. Source references store identities/checksums, never source bytes.
+CREATE TABLE IF NOT EXISTS research_analyses (
+  id TEXT PRIMARY KEY CHECK(id ~ '^ra_[a-f0-9]{24}$'),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  name TEXT NOT NULL CHECK(char_length(name) BETWEEN 1 AND 160),
+  description TEXT NOT NULL DEFAULT '' CHECK(char_length(description) <= 8000),
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+  version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+  references_json JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK(jsonb_typeof(references_json)='array' AND jsonb_array_length(references_json)<=50 AND octet_length(references_json::text)<=65536),
+  study_design_ref_json JSONB CHECK(study_design_ref_json IS NULL OR
+    (jsonb_typeof(study_design_ref_json)='object' AND octet_length(study_design_ref_json::text)<=4096)),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(project_id,created_by_user_id,request_id),
+  UNIQUE(id,project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_analysis_project_created ON research_analyses(project_id,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_research_analysis_project_status ON research_analyses(project_id,status,created_at DESC,id DESC);
+
+CREATE TABLE IF NOT EXISTS research_analysis_revisions (
+  analysis_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  version INTEGER NOT NULL CHECK(version > 0),
+  actor_user_id BIGINT NOT NULL REFERENCES users(id),
+  snapshot_json JSONB NOT NULL CHECK(jsonb_typeof(snapshot_json)='object' AND octet_length(snapshot_json::text)<=98304),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(analysis_id,version),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_analysis_revision_project ON research_analysis_revisions(project_id,analysis_id,version);
+
+CREATE OR REPLACE FUNCTION enforce_research_analysis_identity() RETURNS TRIGGER AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.project_id,NEW.created_by_user_id,NEW.request_id,NEW.request_sha256,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.project_id,OLD.created_by_user_id,OLD.request_id,OLD.request_sha256,OLD.created_at)
+  THEN RAISE EXCEPTION 'Research analysis identity is immutable' USING ERRCODE='55000'; END IF;
+  IF NEW.version <> OLD.version+1
+  THEN RAISE EXCEPTION 'Research analysis updates require a new draft version' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_research_analysis_identity ON research_analyses;
+CREATE TRIGGER trg_research_analysis_identity BEFORE UPDATE ON research_analyses
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_identity();
+
+CREATE OR REPLACE FUNCTION enforce_research_analysis_revision_immutable() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Research analysis revisions are append-only' USING ERRCODE='55000';
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_research_analysis_revision_immutable ON research_analysis_revisions;
+CREATE TRIGGER trg_research_analysis_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_revisions
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();

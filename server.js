@@ -12,6 +12,7 @@ const analysisBranches = require('./backend/analysisBranches');
 const experimentalDesign = require('./backend/experimentalDesign');
 const projectAudit = require('./backend/projectAudit');
 const researchExports = require('./backend/researchExports');
+const { researchAnalysisRoutes } = require('./backend/researchAnalyses');
 const {
   expertRSandboxEnabled,
   EXPERT_R_PROFILE,
@@ -1954,6 +1955,7 @@ app.use('/api/organizations', express.json());
 app.use('/api/organizations', requireAuth);
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
+app.use('/api/projects/:projectId/analyses', researchAnalysisRoutes({ database: db }));
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth }));

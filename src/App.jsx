@@ -45,6 +45,7 @@ import {
 } from './backendWorkspaceModel';
 
 const Workspace = React.lazy(() => import('./pages/Workspace'));
+const ResearchAnalyses = React.lazy(() => import('./pages/ResearchAnalyses'));
 const QualityControl = React.lazy(() => import('./pages/QualityControl'));
 const Normalization = React.lazy(() => import('./pages/Normalization'));
 const PCA = React.lazy(() => import('./pages/PCA'));
@@ -82,6 +83,7 @@ const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'
 // keeps the screen-reader heading tree rooted instead of starting at h2.
 const TAB_TITLES = {
   account: 'Account security',
+  analyses: 'Analyses',
   workspace: 'Workbench', 'pipeline-manager': 'Pipelines', team: 'Collaborators',
   branches: 'Analysis Branches',
   'study-design': 'Study Design',
@@ -1361,6 +1363,16 @@ export default function App() {
             onAnalysisObjectLoaded={handleAnalysisObjectLoaded}
             onAnalysisObjectLoadFailed={handleAnalysisObjectLoadFailed}
             onSelectAnalysisObject={handleSelectAnalysisObject}
+          />
+        </TabContent></ErrorBoundary>
+        <ErrorBoundary key="analyses"><TabContent id="analyses" activeTab={activeTab} contextKey={`${user?.id}:${activeProjectIdForPipeline}`}>
+          <ResearchAnalyses
+            userId={user?.id}
+            projectId={activeProjectIdForPipeline}
+            projectName={currentWs?.projects?.find(project => project.id === activeProjectIdForPipeline)?.name}
+            role={currentWs?.projects?.find(project => project.id === activeProjectIdForPipeline)?.role}
+            isActive={activeTab === 'analyses'}
+            onOpenWorkspace={() => setActiveTab('workspace')}
           />
         </TabContent></ErrorBoundary>
         <ErrorBoundary key="pipeline-manager"><TabContent id="pipeline-manager" activeTab={activeTab}>
