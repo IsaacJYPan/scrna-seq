@@ -561,7 +561,7 @@ export default function PathwayEnrichment({
         <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
           <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
           <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
-          <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Gene sets</dt><dd className="text-text">GO Biological Process (fixed in v1)</dd></div>
+          <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Gene sets</dt><dd className="text-text">GO Biological Process</dd></div>
         </dl>
         {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
 
@@ -697,15 +697,13 @@ export default function PathwayEnrichment({
               <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             </div>
+            <p className="mt-3 text-xs text-textMuted">The cell limit controls sampling. The random seed makes sampling repeatable.</p>
           </details>
           {!geneSetSizesAreValid && (
             <p role="alert" className="mt-3 text-sm text-danger">
               The smallest gene set must be smaller than the largest gene set.
             </p>
           )}
-          <p className="mt-3 text-xs text-textMuted">
-            The cell limit keeps large comparisons from overwhelming R. The fixed random seed makes any sampling repeatable.
-          </p>
         </section>
 
         <section className="rounded-lg border border-border bg-surface/50 p-5">
@@ -746,7 +744,7 @@ export default function PathwayEnrichment({
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="flex items-center gap-2 text-lg font-bold text-text"><Archive size={18} className="text-primary" /> Pathway summary</h3>
-              <p className="mt-1 text-sm text-textMuted">This page shows a small, safe scientific summary. The complete result table remains a controlled result.</p>
+              <p className="mt-1 text-sm text-textMuted">Review the leading pathways here. Export the full table from Runs &amp; Results.</p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}
           </div>

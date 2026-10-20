@@ -7,8 +7,9 @@ export function SubmissionRecoveryNotice({ userId, projectId, onOpen }) {
   const records = recovery.records.filter(record => record.projectId === projectId);
   if (!records.length) return null;
   const unresolved = records.filter(record => record.state !== 'accepted' || !record.confirmed).length;
+  if (!unresolved) return null;
   return <section aria-label="Submission recovery" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
-    <p>{recovery.checking ? 'Checking saved submissions…' : unresolved ? `${unresolved} saved submission${unresolved === 1 ? '' : 's'} need a receipt check before more work is submitted.` : 'Saved submissions are confirmed on this server.'}</p>
+    <p>{recovery.checking ? 'Checking saved submissions…' : `${unresolved} saved submission${unresolved === 1 ? '' : 's'} need a receipt check before more work is submitted.`}</p>
     <button type="button" className="mt-1 font-bold underline" onClick={onOpen}>Open recovered runs</button>
   </section>;
 }

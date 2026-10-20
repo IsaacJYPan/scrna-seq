@@ -523,7 +523,7 @@ async function checkResponsiveWorkbench(page) {
   }
 }
 
-async function prepareVisualPage(context, { logConsole = true } = {}) {
+async function prepareVisualPage(context, { logConsole = true, fullPipeline = false } = {}) {
   // Mock Electron API
   await context.addInitScript(() => {
     localStorage.setItem('traceomics_auth_token', 'visual-test-token');
@@ -820,6 +820,15 @@ async function prepareVisualPage(context, { logConsole = true } = {}) {
       visualPipelineTab('history', 'Runs & Results', 'projectHistory')
     ]
   };
+  if (fullPipeline) {
+    visualDefaultPipelineManifest.tabs.splice(11, 0, visualPipelineTab('explore', 'Exploratory Analysis', 'exploratoryAnalysis'));
+    visualDefaultPipelineManifest.tabs.push(
+      visualPipelineTab('enrichment', 'Pathway Enrichment', 'pathwayEnrichment'),
+      visualPipelineTab('cellchat', 'CellChat', 'cellChat'),
+      visualPipelineTab('study-design', 'Study Design & Conditions', 'conditionComparison'),
+      visualPipelineTab('expert-r', 'Expert R', 'expertR', true)
+    );
+  }
   const visualDefaultPipelineDefinition = {
     id: visualDefaultPipelineId,
     manifestId: visualDefaultPipelineId,

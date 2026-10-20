@@ -28,7 +28,7 @@ vi.mock('./pages/Workspace', () => ({
       <button onClick={() => onSelectAnalysisObject('proj_test', 'analysis_b')}>Select other analysis</button>
       <button onClick={() => callApi('/umap', {}, { operation: 'umap', step: 'umap' })}>Change live analysis</button>
       <button onClick={async () => setResult(await callApi('/umap', {}, { operation: 'umap', step: 'umap', cacheParams: { dims: 10 } }))}>Run and cache live analysis</button>
-      <button onClick={async () => setResult(await callApi('/normalize', {}, { operation: 'normalize', step: 'normalize', cacheParams: { method: 'LogNormalize' } }))}>Hydrate cached normalization</button>
+      <button onClick={async () => setResult(await callApi('/normalize', {}, { operation: 'normalize', step: 'normalize', cacheParams: { method: 'LogNormalize' }, onlyIfCached: true }))}>Hydrate cached normalization</button>
       <button onClick={() => callApi('/normalize', {}, { operation: 'normalize', step: 'normalize', useCache: false })}>Run fresh normalization</button>
     </div>;
   },
@@ -113,7 +113,7 @@ describe('App live analysis recovery', () => {
     expect(screen.getByTestId('live-object')).toHaveTextContent('analysis_b:attached');
   });
 
-  it('preserves completed downstream readiness when a valid normalization cache entry hydrates', async () => {
+  it('preserves completed downstream readiness when a normalization cache entry has no verified live identity', async () => {
     window.electronAPI.apiRequest.mockImplementation(async path => {
       if (path === '/session-id') return { sessionId: 'runtime-test' };
       if (path === '/pipeline-state') return {
@@ -131,7 +131,8 @@ describe('App live analysis recovery', () => {
       '{"normalize":true,"pca":true,"cluster":true,"umap":true}'
     ));
     fireEvent.click(screen.getByRole('button', { name: 'Hydrate cached normalization' }));
-    await waitFor(() => expect(screen.getByTestId('execution-outcome')).toHaveTextContent('"_fromCache":true'));
+    await waitFor(() => expect(makeCacheKey).toHaveBeenCalled());
+    expect(screen.getByTestId('execution-outcome')).toHaveTextContent('');
     await waitFor(() => expect(screen.getByTestId('pipeline-readiness')).toHaveTextContent(
       '{"normalize":true,"pca":true,"cluster":true,"umap":true}'
     ));
@@ -188,7 +189,7 @@ describe('App live analysis recovery', () => {
     });
     if (failure === 'provenance') saveProvenance.mockRejectedValueOnce(unavailable);
     if (failure === 'cache') setCachedResult.mockRejectedValueOnce(unavailable);
-    if (failure === 'cache-key') makeCacheKey.mockResolvedValueOnce('live-cache-key').mockRejectedValueOnce(unavailable);
+    if (failure === 'cache-key') makeCacheKey.mockRejectedValueOnce(unavailable);
     if (failure === 'project-provenance') window.electronAPI.createProjectProvenance = vi.fn().mockRejectedValueOnce(unavailable);
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('live-object')).toHaveTextContent('analysis_a:attached'));

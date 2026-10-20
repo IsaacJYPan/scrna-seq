@@ -268,10 +268,15 @@ async function main() {
     const submittedJobs = () => requests.filter(value => value.method === 'POST'
       && (/\/jobs$/.test(value.path) || /^\/api\/workflows\/.*\/run$/.test(value.path)
         || /^\/api\/private-r-kernels\/.*\/executions$/.test(value.path))).length;
-    async function openMonitor(page, recordId) {
+    async function openHistory(page) {
+      const expandSidebar = page.getByRole('button', { name: 'Expand sidebar', exact: true });
+      if (await expandSidebar.isVisible()) await expandSidebar.click();
       const historyLink = page.locator('[data-destination="history"]');
-      if (!await historyLink.isVisible()) await page.getByRole('button', { name: 'Results', exact: true }).click();
+      if (!await historyLink.isVisible()) await page.getByRole('button', { name: 'Project', exact: true }).click();
       await historyLink.click();
+    }
+    async function openMonitor(page, recordId) {
+      await openHistory(page);
       const panel = page.getByRole('region', { name: 'Run monitoring', exact: true });
       await panel.getByRole('list', { name: 'Monitored runs', exact: true }).waitFor();
       // Workspace tabs retain their mounted views. Refresh the existing list
@@ -662,8 +667,7 @@ async function main() {
       assert(application.process().pid !== previousProcess && page.isClosed(), 'Acceptance did not close and reopen the whole desktop process.');
       assert(await recoveryWorkspace.evaluate(() => [...document.scripts].map(script => script.src).find(source => /\/assets\/index-/.test(source))) === compiledAsset,
         'Complete desktop reopening changed the compiled acceptance UI.');
-      await recoveryWorkspace.getByRole('region', { name: 'Submission recovery', exact: true }).waitFor();
-      await recoveryWorkspace.getByRole('button', { name: 'Open recovered runs', exact: true }).click();
+      await openHistory(recoveryWorkspace);
       await recoveryWorkspace.getByRole('region', { name: 'Saved submissions', exact: true }).waitFor();
       assert(submittedJobs() === scientificPostsBefore, 'Reopening the complete desktop app replayed a scientific submission.');
       return scientificPostsBefore;
@@ -684,10 +688,11 @@ async function main() {
     const peer = await createPeerWorkspace(recoveryWorkspace); observe(peer);
     assert(await peer.evaluate(() => [...document.scripts].map(script => script.src).find(source => /\/assets\/index-/.test(source))) === compiledAsset,
       'The disposable peer did not load the same production analysis UI.');
-    await peer.getByRole('region', { name: 'Submission recovery', exact: true })
-      .getByText('Saved submissions are confirmed on this server.', { exact: true }).waitFor({ timeout: 30_000 });
-    await peer.getByRole('button', { name: 'Open recovered runs', exact: true }).click();
+    await openHistory(peer);
     const peerOriginal = peer.getByRole('region', { name: 'Submission ' + originalWorkflow.request_id, exact: true });
+    await peerOriginal.getByRole('button', { name: 'Open exact run', exact: true }).waitFor({ timeout: 30_000 });
+    assert(await peer.getByRole('region', { name: 'Submission recovery', exact: true }).count() === 0,
+      'Confirmed submissions kept an unnecessary recovery warning in the workspace.');
     const peerReadFault = service.interceptNextResponse({ method: 'GET', pathname: firstWorkflowReceiptPath, mode: 'hold' });
     pausedReads.add(peerReadFault.release);
     await peerOriginal.getByRole('button', { name: 'Check receipt', exact: true }).click();

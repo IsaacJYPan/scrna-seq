@@ -4,8 +4,11 @@ import Plotly from './plotlyRuntime';
 
 const PlotlyPlot = createPlotlyComponent(Plotly);
 
-export default function PlotlyRenderer({ onInitialized, useResizeHandler, ...props }) {
+export default function PlotlyRenderer({ onInitialized, useResizeHandler, config, ...props }) {
   const [graph, setGraph] = React.useState(null);
+  // Plotly's global zoom/legend tips outlive their page during tab navigation.
+  // Keep the visible modebar controls and data hover labels without those tips.
+  const plotConfig = React.useMemo(() => ({ showTips: false, ...config }), [config]);
   React.useEffect(() => {
     if (!graph || !useResizeHandler || typeof ResizeObserver === 'undefined') return;
     let timer;
@@ -30,5 +33,5 @@ export default function PlotlyRenderer({ onInitialized, useResizeHandler, ...pro
     onInitialized?.(figure, element);
   }, [onInitialized]);
 
-  return React.createElement(PlotlyPlot, { ...props, useResizeHandler, onInitialized: handleInitialized });
+  return React.createElement(PlotlyPlot, { ...props, config: plotConfig, useResizeHandler, onInitialized: handleInitialized });
 }

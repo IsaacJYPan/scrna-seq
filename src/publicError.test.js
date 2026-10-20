@@ -4,6 +4,11 @@ import { TARGET_CHANGED_MESSAGE, TARGET_CHECKING_MESSAGE, TARGET_DISCONNECTED_ME
 import { SUBMISSION_RECOVERY_MESSAGES } from './executions/submissionRecoveryMessages';
 
 describe('publicErrorMessage', () => {
+  it('preserves generic credential rejection without exposing authentication diagnostics', () => {
+    expect(publicErrorMessage('{"error":"Invalid email or password."}')).toBe('Invalid email or password.');
+    expect(publicErrorMessage('Invalid email or password. Internal server diagnostic')).toBe(DEFAULT_PUBLIC_ERROR);
+    expect(publicErrorMessage('Account ui-review@example.invalid was not found')).not.toContain('ui-review@example.invalid');
+  });
   it('preserves only the fixed safe submission-recovery instructions', () => {
     for (const message of Object.values(SUBMISSION_RECOVERY_MESSAGES)) expect(publicErrorMessage(new Error(message))).toBe(message);
     expect(publicErrorMessage('An earlier submission has not been confirmed: /__private_vault__/source.R')).toBe(DEFAULT_PUBLIC_ERROR);

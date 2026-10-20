@@ -21,6 +21,11 @@ const identityInput = document.querySelector('#ssh-identity');
 const trustButton = document.querySelector('#trust-host');
 const tunnelButton = document.querySelector('#connect-ssh-service');
 const disconnectButton = document.querySelector('#disconnect-target');
+const advancedSsh = document.querySelector('#ssh-advanced');
+
+form.addEventListener('invalid', event => {
+  if (event.target.closest('#ssh-advanced')) advancedSsh.open = true;
+}, true);
 
 function updateConnectionFields() {
   const ssh = kindInput.value === 'ssh';

@@ -41,6 +41,7 @@ function unpackError(value) {
 export function publicErrorMessage(value, fallback = DEFAULT_PUBLIC_ERROR) {
   const message = unpackError(value).replace(/\s+/g, ' ').trim();
   if (!message || message.length > 240 || UNSAFE_ERROR_DETAIL.test(message)) return fallback;
+  if (message === 'Invalid email or password.') return message;
 
   if (EXPERT_R_OWNER_MESSAGES.has(message)) return message;
   if (CELLCHAT_OWNER_MESSAGES.has(message)) return message;

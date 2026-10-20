@@ -89,6 +89,28 @@ and checks keyboard input, layout, and accessibility. The deterministic frontend
 fixtures do not require R or change research data. Recordings and results are
 saved in `playwright/report/full-workbench/after/`.
 
+For the expanded 26-page review with measured PBMC3k plots, export an existing
+prepared checkpoint using `Rscript scripts/export-ui-review-pbmc.R <checkpoint.rds>
+<output.json>` (Seurat and jsonlite required). Set `UI_REVIEW_PBMC_DATA` to that JSON
+path, or save it as `playwright/report/ui-audit/data/pbmc-ui-data.json`. Then run
+`npm run build`, `npm run test:app-ui-tour`, `npm run test:app-ui-hover`, and
+`npm run test:app-ui-auth`. These checks record both themes at 1440px and 390px,
+return to earlier tabs, and check drafts, scroll, job submissions, cursor hover,
+zoom, export, dialogs, and authentication forms. The measured plot values are
+replayed; application services and job admission are simulated. Recordings,
+screenshots, and acceptance reports go to `playwright/report/ui-audit/`.
+`npm run record:app-ui` creates a single paced video of all 26 full-app pages,
+sign-in/signup, secondary plot views, dialogs, and a dark-theme preview. It uses
+the same prepared data and simulated services. The video and chapter timestamps
+are saved in `playwright/report/ui-audit/walkthrough/`.
+`node scripts/verify-app-ui-tour.js --pipeline-layout` records the two analysis
+approaches, responsive step rows, keyboard and hover states, conditional settings,
+multi-condition design, and navigation to and from each inspection step. Its
+screenshots, videos, and checks are saved in `playwright/report/ui-audit/pipeline-layout/`.
+Graph pixels are inspected visually; the automated accessibility scan covers
+controls and labels while excluding bulk scatter/heatmap graphics. Native
+`test:desktop:ssh-ui` and `test:desktop:tunnel-ui` use disposable real SSH services.
+
 ## Deploy a demo
 
 Start with the [student demo guide](docs/demo.md). The [deployment guide](docs/deployment.md) covers a Linux host with Docker Compose,

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle, Archive, Briefcase, Clock, FileText,
-  GitBranch, ImageIcon, Loader2, RefreshCw, ShieldCheck,
+  GitBranch, ImageIcon, Loader2, RefreshCw,
 } from 'lucide-react';
 import { publicErrorMessage } from '../publicError';
 import ArtifactInspector from '../components/ArtifactInspector';
@@ -166,6 +166,7 @@ function displayStatus(status) {
     running: 'Running',
     completed: 'Complete',
     available: 'Available',
+    unavailable: 'Unavailable',
     failed: 'Needs attention',
     canceled: 'Canceled',
   };
@@ -194,16 +195,6 @@ function EmptyState({ title, children }) {
     <div className="rounded-lg border border-dashed border-border p-6 text-center">
       <p className="font-bold text-text">{title}</p>
       <p className="mt-2 text-sm text-textMuted">{children}</p>
-    </div>
-  );
-}
-
-function SummaryCard({ label, value, detail }) {
-  return (
-    <div className="card p-4 bg-surface/70">
-      <div className="text-2xl font-black text-text">{value}</div>
-      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-text">{label}</div>
-      {detail && <div className="mt-2 text-xs text-textMuted">{detail}</div>}
     </div>
   );
 }
@@ -337,7 +328,8 @@ function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, for
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-border">
+    <div tabIndex={0} role="region" aria-label="Saved results table"
+      className="overflow-x-auto rounded-lg border border-border focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2">
       <table className="min-w-[560px] w-full text-left text-xs">
         <thead className="bg-slate-800 text-[10px] font-bold uppercase tracking-wider text-textMuted">
           <tr>
@@ -357,6 +349,8 @@ function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, for
               && artifact.storageKind === 'local_internal'
               && artifact.status === 'available'
               && Boolean(artifact.resultAnalysisObjectId);
+            const availability = isCheckpoint && !isLoadableCheckpoint && artifact.status === 'available'
+              ? 'unavailable' : artifact.status;
             const checkpointCandidates = isLoadableCheckpoint
               ? (loadableCheckpointsByObject.get(artifact.resultAnalysisObjectId) || [])
               : [];
@@ -373,7 +367,7 @@ function ArtifactList({ artifacts, jobs = [], analysisObjects = [], canFork, for
                 {sourceAnalysisName && <div className="mt-1 text-xs text-textMuted">From {sourceAnalysisName}</div>}
                 {recordedAt && <div className="mt-1 text-xs text-textMuted">Recorded: {formatDate(recordedAt)}</div>}
               </td>
-              <td className="p-3"><StatusBadge tone={artifact.status === 'available' ? 'green' : 'amber'}>{displayStatus(artifact.status)}</StatusBadge></td>
+              <td className="p-3"><StatusBadge tone={availability === 'available' ? 'green' : 'amber'}>{displayStatus(availability)}</StatusBadge></td>
               <td className="p-3">
                 {canDownload ? (
                   <div>
@@ -585,6 +579,8 @@ export default function ProjectHistory({
   const [forkState, setForkState] = useState(null);
   const [attachState, setAttachState] = useState(null);
   const [retryState, setRetryState] = useState(null);
+  const [executionHistoryOpen, setExecutionHistoryOpen] = useState(false);
+  const [executionHistoryMounted, setExecutionHistoryMounted] = useState(false);
   const activeForkState = forkState?.projectId === activeProjectId ? forkState : null;
   const activeAttachState = attachState?.projectId === activeProjectId
     && attachState?.objectId === selectedObjectId
@@ -907,31 +903,24 @@ export default function ProjectHistory({
 
         } />
 
-        <div className="rounded-lg border border-border bg-surface/40 p-4">
-          <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+        <div className="rounded-lg border border-border bg-surface/40 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-3 text-sm">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Project</div>
-              <div className="mt-1 font-bold text-text">{activeProject?.name || 'Selected project'}</div>
+              <div className="font-bold text-text">{activeProject?.name || 'Selected project'}</div>
             </div>
             <div>
               <div className="text-[10px] font-bold uppercase tracking-widest text-textMuted">Selected analysis</div>
-              <div className="mt-1 text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
+              <div className="text-text">{selectedObject?.displayName || selectedObject?.name || 'None selected'}</div>
             </div>
-            <div>
-              <div className="text-xs text-textMuted">Visibility</div>
-              <div className="mt-1 text-text">History access does not open another researcher’s private workspace.</div>
-            </div>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-primary hover:underline">Visibility &amp; privacy</summary>
+              <p className="mt-2 max-w-md text-xs text-textMuted">History access does not open another researcher’s private workspace.</p>
+            </details>
           </div>
         </div>
 
         <SubmissionRecovery projectId={activeProjectId} userId={userId} />
-        <RunMonitor key={`monitor:${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />
-        <ExecutionHistory key={`${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />
-        <details className="rounded-lg border border-border bg-surface/40 p-4">
-          <summary className="cursor-pointer font-medium text-text">Inspect or import artifact files</summary>
-          <p className="mt-2 mb-4 text-sm text-textMuted">Imports stay private. Inspect exact saved versions or add a file without changing earlier contents.</p>
-          <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
-        </details>
 
         {selectedObject && selectedObject.liveState !== 'attached' && (
           <section className="rounded-lg border border-primary/20 bg-primary/5 p-5">
@@ -992,6 +981,8 @@ export default function ProjectHistory({
           </div>
         )}
 
+        {historyState.loading && <RunMonitor key={`monitor:${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />}
+
         {historyState.loading ? (
           <div className="flex h-64 flex-col items-center justify-center rounded-lg border border-border bg-surface">
             <Loader2 size={34} className="mb-3 animate-spin text-primary" />
@@ -999,11 +990,11 @@ export default function ProjectHistory({
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-              <SummaryCard label="Selected runs" value={selectedJobs.length} detail="Runs tied to the selected analysis" />
-              <SummaryCard label="Selected results" value={selectedArtifacts.length} detail="Saved results tied to the selection" />
-              <SummaryCard label="Provenance" value={historyState.provenance.length} detail="Project records" />
-              <SummaryCard label="Lineage" value={historyState.lineage?.edges?.length || 0} detail="Saved-analysis relationships" />
+            <div role="group" aria-label="Selected analysis counts" className="flex flex-wrap gap-x-5 gap-y-1 border-b border-border pb-3 text-xs text-textMuted">
+              <span><strong className="text-text">{selectedJobs.length}</strong> selected run{selectedJobs.length === 1 ? '' : 's'}</span>
+              <span><strong className="text-text">{selectedArtifacts.length}</strong> selected result{selectedArtifacts.length === 1 ? '' : 's'}</span>
+              <span><strong className="text-text">{historyState.provenance.length}</strong> project records</span>
+              <span><strong className="text-text">{historyState.lineage?.edges?.length || 0}</strong> lineage links</span>
             </div>
 
             <Section title="Selected Analysis Runs" icon={<Clock size={18} className="text-primary" />} subtitle="Only runs whose input or saved result is the selected analysis are shown here.">
@@ -1031,6 +1022,38 @@ export default function ProjectHistory({
                 )}
               />
             </Section>
+
+            {!historyState.loading && <RunMonitor key={`monitor:${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />}
+
+            <div className="rounded-lg border border-border bg-surface/40 p-3">
+              <button
+                type="button"
+                aria-expanded={executionHistoryOpen}
+                aria-controls="execution-history-panel"
+                onClick={() => {
+                  setExecutionHistoryMounted(true);
+                  setExecutionHistoryOpen(open => !open);
+                }}
+                className="flex min-h-10 w-full items-center justify-between gap-3 text-left"
+              >
+                <span>
+                  <span className="block font-semibold text-text">Execution history</span>
+                  <span className="block text-xs text-textMuted">Recorded inputs, methods, environments, and results</span>
+                </span>
+                <span className="text-sm text-primary">{executionHistoryOpen ? 'Hide details' : 'Show details'}</span>
+              </button>
+              <div id="execution-history-panel" hidden={!executionHistoryOpen} className="mt-3">
+                {executionHistoryMounted && (
+                  <ExecutionHistory key={`${activeProjectId}:${userId}`} projectId={activeProjectId} userId={userId} />
+                )}
+              </div>
+            </div>
+
+            <details className="rounded-lg border border-border bg-surface/40 p-4">
+              <summary className="cursor-pointer font-medium text-text">Inspect or import artifact files</summary>
+              <p className="mt-2 mb-4 text-sm text-textMuted">Imports stay private. Inspect exact saved versions or add a file without changing earlier contents.</p>
+              <ArtifactInspector key={activeProjectId} projectId={activeProjectId} canWrite={canFork && deploymentPolicy?.demoMode !== true} userId={userId} />
+            </details>
 
             {(otherJobs.length > 0 || otherArtifacts.length > 0) && (
               <details className="rounded-lg border border-border bg-surface/50 p-4">
@@ -1072,13 +1095,6 @@ export default function ProjectHistory({
               <FigureList figures={historyState.figures} />
             </Section>
 
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
-              <div className="mb-1 flex items-center gap-2 font-bold text-text">
-                <ShieldCheck size={16} className="text-primary" />
-                Boundary note
-              </div>
-              Runs &amp; Results visibility does not grant access to another researcher&apos;s private analysis workspace.
-            </div>
           </>
         )}
       </div>

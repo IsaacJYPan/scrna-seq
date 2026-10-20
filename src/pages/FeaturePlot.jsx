@@ -6,6 +6,7 @@ import { AlertTriangle, Palette, Sun, Moon, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 import { publicErrorMessage } from '../publicError';
 import UmapPrerequisiteNotice, { hasUmapResult } from '../components/UmapPrerequisiteNotice';
+import { findGeneSuggestions } from '../geneSuggestions';
 
 // Removed API constant
 // Dark mode: faithful magma ramp, starting at a dark purple visible against the navy background
@@ -45,6 +46,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
   const [geneList, setGeneList] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [lightMode, setLightMode] = useState(theme !== 'dark');
+  const plotConfig = React.useMemo(() => ({ responsive: true, displayModeBar: true, displaylogo: false }), []);
 
   useEffect(() => { setLightMode(theme !== 'dark'); }, [theme]);
 
@@ -58,7 +60,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
   const handleInputChange = (val) => {
     setGeneInput(val);
     if (val.length >= 2) {
-      setSuggestions(geneList.filter(g => g.toLowerCase().startsWith(val.toLowerCase())).slice(0, 8));
+      setSuggestions(findGeneSuggestions(geneList, val));
     } else {
       setSuggestions([]);
     }
@@ -92,28 +94,14 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
 
   const hasUmap = hasUmapResult(pipelineState);
 
-  if (!datasetInfo) {
-    return (
-      <div className="h-full flex items-center justify-center bg-background">
-        <div className="text-center">
-          <Palette size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
-          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
-          <p className="text-textMuted">Load a dataset in the Workspace first.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!hasUmap) {
-    return <div className="h-full overflow-y-auto bg-background"><PageHeader title="Feature Plot" description="Visualize gene expression overlaid on UMAP coordinates." className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" /><UmapPrerequisiteNotice onNavigateToUmap={onNavigateToUmap} /></div>;
-  }
-
   const colorscale = lightMode ? LIGHT_COLORSCALE : DARK_COLORSCALE;
   const palette = lightMode ? LIGHT_CHART_PALETTE : DARK_CHART_PALETTE;
   // Plotly's 'Blues' goes dark→light by default; reverse so low expression = white
   const reversescale = lightMode;
 
-  const trace = plotData ? [{
+  // Stable figure props let Plotly skip a full redraw while editing a gene or
+  // opening the export panel. Result and palette changes still update it.
+  const trace = React.useMemo(() => plotData ? [{
     type: 'scattergl',
     mode: 'markers',
     x: plotData.u1,
@@ -135,9 +123,9 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       opacity: 0.9,
     },
     hovertemplate: `<b>${gene}</b><br>Expression: %{marker.color:.2f}<extra></extra>`,
-  }] : [];
+  }] : [], [plotData, gene, colorscale, reversescale, palette]);
 
-  const layout = {
+  const layout = React.useMemo(() => ({
     autosize: true,
     paper_bgcolor: palette.background,
     plot_bgcolor: palette.background,
@@ -165,7 +153,25 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
       zeroline: false,
     },
     showlegend: false,
-  };
+    // Plotly mutates zoom ranges in this object; a new result needs fresh axes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [palette, lightMode, plotData]);
+
+  if (!datasetInfo) {
+    return (
+      <div className="h-full flex items-center justify-center bg-background">
+        <div className="text-center">
+          <Palette size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
+          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
+          <p className="text-textMuted">Load a dataset in the Workspace first.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!hasUmap) {
+    return <div className="h-full overflow-y-auto bg-background"><PageHeader title="Feature Plot" description="Visualize gene expression overlaid on UMAP coordinates." className="px-4 sm:px-8 pt-6 pb-4 border-b border-border" /><UmapPrerequisiteNotice onNavigateToUmap={onNavigateToUmap} /></div>;
+  }
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
@@ -234,7 +240,7 @@ export default function FeaturePlot({ datasetInfo, pipelineState, sessionReady, 
             preferSvg
             data={trace}
             layout={layout}
-            config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+            config={plotConfig}
             style={{ width: '100%', height: '100%' }}
             useResizeHandler
           />

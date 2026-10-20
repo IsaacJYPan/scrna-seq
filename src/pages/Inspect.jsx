@@ -740,7 +740,7 @@ export default function Inspect({
         {/* Content */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-8">
           <div className="max-w-4xl mx-auto">
-            {loading && (
+            {loading && !info && (
               <div className="flex flex-col items-center justify-center h-40 gap-3">
                 <Spinner />
                 <p className="text-xs text-slate-400">Fetching object info…</p>
@@ -754,7 +754,7 @@ export default function Inspect({
               </div>
             )}
 
-            {!loading && !error && info && (
+            {!error && info && (
               <>
                 {activeTab === 'overview'  && <OverviewTab info={info} />}
                 {activeTab === 'metadata'  && <MetadataTab info={info} />}

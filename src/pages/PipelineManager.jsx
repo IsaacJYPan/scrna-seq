@@ -248,7 +248,7 @@ export default function PipelineManager({
   return (
     <div className="h-full w-full overflow-y-auto bg-background p-4 custom-scrollbar sm:p-8">
       <div className="mx-auto max-w-6xl space-y-8">
-        <PageHeader title="Pipelines" icon={Layers} description="Browse shared pipelines, inspect their steps, and choose one for your project." className="border-b border-border pb-5" actions={<button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+        <PageHeader title="Pipelines" icon={Layers} description="Run a complete analysis or inspect each step as you go." className="border-b border-border pb-5" actions={<button onClick={refreshAll} disabled={loading || Boolean(selectingId)} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
             Refresh
           </button>} />
@@ -274,6 +274,20 @@ export default function PipelineManager({
                 <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} /> Workflow selection changed</div>
                 <p className="mt-1">{registryWarning}</p>
               </div>
+            )}
+
+            {manifest.id === DEFAULT_PIPELINE_ID && (
+              <SeuratPipelinePanel
+                key={`seurat:${activeProjectId}`}
+                activeProjectId={activeProjectId}
+                selectedObject={selectedObject}
+                currentWs={currentWs}
+                updateActiveWorkspace={updateActiveWorkspace}
+                onSelectAnalysisObject={onSelectAnalysisObject}
+                setActiveTab={setActiveTab}
+                datasetUploadsEnabled={deploymentPolicy.datasetUploadsEnabled !== false}
+                canWriteProject={canWriteProject}
+              />
             )}
 
             <PipelineCatalog
@@ -305,18 +319,6 @@ export default function PipelineManager({
               onSubmitted={onExpertRSubmitted}
               setActiveTab={setActiveTab}
             />
-            {manifest.id === DEFAULT_PIPELINE_ID && (
-              <SeuratPipelinePanel
-                activeProjectId={activeProjectId}
-                selectedObject={selectedObject}
-                currentWs={currentWs}
-                updateActiveWorkspace={updateActiveWorkspace}
-                onSelectAnalysisObject={onSelectAnalysisObject}
-                setActiveTab={setActiveTab}
-                datasetUploadsEnabled={deploymentPolicy.datasetUploadsEnabled !== false}
-                canWriteProject={canWriteProject}
-              />
-            )}
           </>
         )}
 

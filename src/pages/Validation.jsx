@@ -104,7 +104,7 @@ export default function Validation({ callApi, datasetInfo, currentWs: _currentWs
               </div>
               <div className="overflow-x-auto">
                  <table className="w-full text-left text-xs">
-                    <thead className="bg-black/40 text-textMuted font-bold uppercase tracking-wider border-b border-border">
+                    <thead className="bg-background text-textMuted font-semibold border-b border-border">
                        <tr>
                           <th className="p-4">Metric</th>
                           <th className="p-4">Value</th>

@@ -6205,6 +6205,25 @@ function(res, top_n = 5) {
   }, error = function(e) list(error = paste("Heatmap failed:", e$message)))
 }
 
+dot_plot_group_summaries <- function(expression_data, genes, idents, clusters) {
+  # Group membership is shared by every gene. Preserve cell order and NA indices
+  # from logical subsetting so each mean uses exactly the same values as before.
+  cell_indices <- seq_along(idents)
+  group_indices <- lapply(clusters, function(cluster) cell_indices[idents == cluster])
+  avg_list <- vector("list", length(genes))
+  pct_list <- vector("list", length(genes))
+  for (gi in seq_along(genes)) {
+    expr <- as.numeric(expression_data[[genes[gi]]])
+    group_stats <- vapply(group_indices, function(indices) {
+      group_expr <- expr[indices]
+      c(mean(group_expr), mean(group_expr > 0))
+    }, numeric(2))
+    avg_list[[gi]] <- as.numeric(group_stats[1L, ])
+    pct_list[[gi]] <- as.numeric(group_stats[2L, ])
+  }
+  list(avg_expr = avg_list, pct_expr = pct_list)
+}
+
 #* Dot plot data — pct expressing and avg expression per cluster per gene
 #* @get /dot-plot
 function(res, genes = "") {
@@ -6234,21 +6253,12 @@ function(res, genes = "") {
     analysis_cells <- colnames(global_obj)[analysis_idx]
     expression_data <- FetchData(global_obj, vars = gene_vec, cells = analysis_cells)
     idents <- as.character(identity_values[rownames(expression_data)])
-    avg_list <- vector("list", length(gene_vec))
-    pct_list <- vector("list", length(gene_vec))
-    for (gi in seq_along(gene_vec)) {
-      g <- gene_vec[gi]
-      expr <- as.numeric(expression_data[[g]])
-      avg_row <- sapply(clusters, function(cl) mean(expr[idents == cl]))
-      pct_row <- sapply(clusters, function(cl) mean(expr[idents == cl] > 0))
-      avg_list[[gi]] <- as.numeric(avg_row)
-      pct_list[[gi]] <- as.numeric(pct_row)
-    }
+    summaries <- dot_plot_group_summaries(expression_data, gene_vec, idents, clusters)
     list(
       genes = gene_vec,
       clusters = bounded_public_labels(clusters),
-      avg_expr = avg_list,
-      pct_expr = pct_list,
+      avg_expr = summaries$avg_expr,
+      pct_expr = summaries$pct_expr,
       n_cells = ncol(global_obj),
       analysis_cells = nrow(expression_data),
       sampled = nrow(expression_data) < ncol(global_obj),

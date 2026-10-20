@@ -563,7 +563,7 @@ export default function UMAPView({ callApi, datasetInfo, pcaProvId, clusterProvI
               <h4 className="font-semibold border-b border-border pb-2 mb-3 text-text text-sm">
                 <ListFilter size={14} className="inline text-primary mr-2" />Cell groups
               </h4>
-              <div className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar">
+              <div role="region" aria-label="Cell group counts" tabIndex={0} className="space-y-1.5 overflow-y-auto flex-1 custom-scrollbar rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
                 {activeTraces.map((trace, i) => (
                   <div key={i} className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-white/5">
                     <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: trace.marker?.color || CLUSTER_COLORS[i] }}></div>

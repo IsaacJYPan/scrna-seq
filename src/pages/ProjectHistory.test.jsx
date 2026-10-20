@@ -148,10 +148,32 @@ describe('ProjectHistory', () => {
 
     expect(screen.getByText('Runs & Results')).toBeInTheDocument();
     expect(screen.getAllByText(/analysis history/i).length).toBeGreaterThan(0);
+    const privacy = screen.getByText('Visibility & privacy');
+    expect(privacy.closest('details')).not.toHaveAttribute('open');
+    fireEvent.click(privacy);
     expect(screen.getByText(/History access does not open another researcher’s private workspace/i)).toBeInTheDocument();
+    expect(await screen.findByText('PBMC preprocessing')).toBeInTheDocument();
     expect(screen.getByText(/Inspect or import artifact files/i)).toBeInTheDocument();
 
-    expect(await screen.findByText('PBMC preprocessing')).toBeInTheDocument();
+    expect(screen.getByLabelText('Selected analysis counts')).toHaveTextContent('3 selected runs');
+    expect(screen.getByLabelText('Selected analysis counts')).toHaveTextContent('1 selected result');
+    const selectedRuns = screen.getByText('Selected Analysis Runs').closest('section');
+    const selectedResults = screen.getByText('Selected Analysis Results').closest('section');
+    const runMonitor = screen.getByRole('region', { name: 'Run monitoring' });
+    expect(selectedRuns.compareDocumentPosition(selectedResults) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(selectedResults.compareDocumentPosition(runMonitor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const executionHistory = screen.getByRole('button', { name: /Execution history.*Recorded inputs/i });
+    expect(executionHistory).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('region', { name: 'Execution history' })).not.toBeInTheDocument();
+    fireEvent.click(executionHistory);
+    expect(executionHistory).toHaveAttribute('aria-expanded', 'true');
+    const executionRegion = await screen.findByRole('region', { name: 'Execution history' });
+    fireEvent.click(executionHistory);
+    expect(executionHistory).toHaveAttribute('aria-expanded', 'false');
+    expect(container.querySelector('#execution-history-panel')).toHaveAttribute('hidden');
+    expect(container.querySelector('#execution-history-panel [aria-label="Execution history"]')).toBe(executionRegion);
+
     expect(screen.getByText('Saved version')).toBeInTheDocument();
     expect(screen.getByText('Cluster marker analysis')).toBeInTheDocument();
     expect(screen.getByText('This analysis needs attention. Review the settings and try again.')).toBeInTheDocument();
@@ -505,6 +527,19 @@ describe('ProjectHistory', () => {
 
     expect((await screen.findAllByText(/cannot be selected automatically/i)).length).toBe(3);
     expect(screen.queryByRole('button', { name: /create branch from this version/i })).not.toBeInTheDocument();
+  });
+
+  it('shows an unavailable saved version when only its metadata remains', async () => {
+    window.electronAPI.listProjectArtifacts.mockResolvedValueOnce([{
+      id: 'artifact_metadata_only', artifactType: 'checkpoint', status: 'available',
+      storageKind: 'metadata_only', jobId: 'job_safe_1', resultAnalysisObjectId: 'ao_result123',
+    }]);
+    render(<ProjectHistory currentWs={currentWs} datasetInfo={{ id: 'ao_abc123', projectId: 'proj_1' }} />);
+
+    const row = (await screen.findByText('This saved version is unavailable.')).closest('tr');
+    expect(within(row).getByText('Unavailable', { exact: true })).toBeInTheDocument();
+    expect(within(row).queryByText('Available', { exact: true })).not.toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /create branch/i })).not.toBeInTheDocument();
   });
 
   it('ignores delayed history from a previously selected project', async () => {

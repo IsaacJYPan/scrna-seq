@@ -751,7 +751,7 @@ export default function CellChat({
     <div className="h-full w-full overflow-y-auto bg-background p-4 sm:p-6 custom-scrollbar">
       <div className="mx-auto flex max-w-6xl flex-col gap-4">
         <PageHeader title="CellChat communication candidates" icon={MessageSquare} description={<>
-          Uses CellChat&apos;s curated ligand–receptor resource to generate bounded, hypothesis-generating candidate signaling between selected cell groups.
+          Find candidate signaling between cell groups using CellChat&apos;s ligand–receptor database.
         </>} actions={<>
 
             <button onClick={launchJob} disabled={!canLaunch} className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50">
@@ -770,7 +770,7 @@ export default function CellChat({
         <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3 rounded-lg border border-border bg-surface/50 px-4 py-3 text-sm">
           <div className="min-w-0"><dt className="text-xs text-textMuted">Project</dt><dd className="break-words font-medium text-text">{activeProject?.name || 'Selected project'}</dd></div>
           <div className="min-w-0"><dt className="text-xs text-textMuted">Saved analysis</dt><dd className="break-words text-text">{selectedObjectId ? selectedAnalysisName : 'None selected'}</dd></div>
-          <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Assay</dt><dd className="text-text">RNA (fixed in v1)</dd></div>
+          <div className="min-w-0 col-span-2 sm:col-span-1"><dt className="text-xs text-textMuted">Assay</dt><dd className="text-text">RNA</dd></div>
         </dl>
         {isDbBackedObject && ownsPrivateLiveObject && !unsavedLiveChanges && <p className="text-sm text-textMuted">Runs use the saved checkpoint; live changes must be saved first.</p>}
 
@@ -899,10 +899,8 @@ export default function CellChat({
               <input type="number" min="0" max="2147483647" value={params.randomSeed} onChange={event => setParam('randomSeed', event.target.value)} className="w-full rounded border border-border bg-surface p-2.5 text-sm text-text" />
             </label>
             </div>
+            <p className="mt-3 text-xs text-textMuted">Runs include up to 10,000 cells. The random seed makes sampling repeatable.</p>
           </details>
-          <p className="mt-3 text-xs text-textMuted">
-            This analysis is capped at 10,000 cells for a bounded, reproducible run. The recorded random seed makes any sampling repeatable.
-          </p>
         </section>
 
         <section className="rounded-lg border border-border bg-surface/50 p-5">

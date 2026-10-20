@@ -267,6 +267,9 @@ jobs:
       - name: Verify saved reduction previews are read-only
         run: npm run test:r-restored-reductions
 
+      - name: Verify exact dot-plot aggregation parity
+        run: Rscript r-backend/tests/test_dot_plot_summaries.R
+
       - name: Verify default R inspection works on raw and processed analyses
         run: npm run test:r-expert-starter
 

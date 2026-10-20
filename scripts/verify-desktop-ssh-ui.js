@@ -84,10 +84,69 @@ async function runDesktopSshAcceptance({ artifactDirectory } = {}) {
     const encryptedProfile = { ...profile, id: 'encrypted-ssh', name: 'Encrypted native identity', ssh: { ...profile.ssh, identityFile: encryptedKey } };
     const settingsFile = path.join(userData, 'desktop-settings.json');
     fs.writeFileSync(settingsFile, JSON.stringify({ schemaVersion: 1, selectedProfileId: profile.id, profiles: [profile, encryptedProfile] }));
+    const videoDirectory = path.join(output, 'video');
+    fs.mkdirSync(videoDirectory, { recursive: true });
     application = await electron.launch({ args: [root, `--user-data-dir=${userData}`],
-      env: { ...process.env, TRACEOMICS_DESKTOP_URL: '' }, timeout: 60000 });
+      env: { ...process.env, TRACEOMICS_DESKTOP_URL: '' }, artifactsDir: output,
+      recordVideo: { dir: videoDirectory, size: { width: 1000, height: 1400 },
+        showActions: { duration: 700, position: 'bottom-right', fontSize: 16 } }, timeout: 60000 });
     const page = await application.firstWindow();
     await page.getByRole('heading', { name: 'Choose your research server', exact: true }).waitFor();
+    await page.locator('#saved-target').selectOption('');
+    await page.getByLabel('Target name', { exact: true }).fill('Walkthrough draft');
+    await page.getByLabel('Connection type', { exact: true }).selectOption('ssh');
+    assert(await page.locator('#ssh-host').evaluate(element => element.validity.valueMissing),
+      'Blank SSH host validation did not identify the required host field.');
+    await page.getByRole('button', { name: 'Verify SSH access', exact: true }).click();
+    assert(await page.locator('#ssh-host').evaluate(element => element.matches(':invalid')),
+      'Blank SSH verification advanced without a required host.');
+    await page.screenshot({ path: path.join(output, 'blank-ssh-validation.png'), fullPage: true });
+    await page.locator('#ssh-host').fill('compute.example.org');
+    await page.locator('#ssh-advanced summary').click();
+    await page.locator('#remote-host').fill('');
+    await page.locator('#ssh-advanced summary').click();
+    await page.getByRole('button', { name: 'Verify SSH access', exact: true }).click();
+    assert(await page.locator('#ssh-advanced').evaluate(element => element.open),
+      'Invalid advanced SSH fields remained hidden after form validation.');
+    await page.locator('#remote-host').fill('127.0.0.1');
+    await page.locator('#ssh-advanced').evaluate(element => { element.open = false; });
+    for (const kind of ['https', 'local', 'ssh']) {
+      await page.getByLabel('Connection type', { exact: true }).selectOption(kind);
+      assert((await page.locator('#ssh-fields').isVisible()) === (kind === 'ssh'),
+        'Changing connection type did not reveal only the matching SSH settings.');
+      assert((await page.locator('#server-url').evaluate(element => element.required)) === (kind !== 'ssh'),
+        'Changing connection type left the wrong server-address requirement.');
+    }
+    const advancedSummary = page.locator('#ssh-advanced summary');
+    await page.locator('#target-kind').focus();
+    for (let index = 0; index < 12 && !(await advancedSummary.evaluate(element => document.activeElement === element)); index++) {
+      await page.keyboard.press('Tab');
+    }
+    assert(await advancedSummary.evaluate(element => document.activeElement === element),
+      'The advanced-options disclosure is missing from keyboard navigation.');
+    assert(await advancedSummary.evaluate(element => getComputedStyle(element).outlineStyle === 'solid'),
+      'The advanced-options disclosure has no visible keyboard focus state.');
+    await advancedSummary.press('Enter');
+    assert(await page.locator('#ssh-advanced').evaluate(element => element.open),
+      'The advanced-options disclosure cannot be opened from the keyboard.');
+    await advancedSummary.press('Enter');
+    assert(await page.locator('#ssh-advanced').evaluate(element => !element.open),
+      'The advanced-options disclosure cannot be closed from the keyboard.');
+    const verifyButton = page.getByRole('button', { name: 'Verify SSH access', exact: true });
+    const defaultButtonColor = await verifyButton.evaluate(element => getComputedStyle(element).backgroundColor);
+    await verifyButton.hover();
+    assert(await verifyButton.evaluate(element => getComputedStyle(element).backgroundColor) !== defaultButtonColor,
+      'The primary SSH action has no visible hover state.');
+    checks.push('blank required-field validation and repeated HTTPS/local/SSH type switching preserve a coherent form');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      'The connection form overflows at a narrow viewport.');
+    await page.screenshot({ path: path.join(output, 'narrow-ssh-form.png'), fullPage: true });
+    await page.setViewportSize({ width: 900, height: 700 });
+    await page.locator('#saved-target').selectOption(encryptedProfile.id);
+    assert(await page.locator('#ssh-identity').inputValue() === encryptedKey,
+      'Switching profiles did not load the selected native identity reference.');
+    await page.locator('#saved-target').selectOption(profile.id);
     assert(await page.locator('#ssh-identity').inputValue() === key, 'The native identity reference did not restore.');
     assert((await page.evaluate(() => window.desktopShell.getCurrentTarget())).status === 'configuration_only',
       'A saved SSH profile was mislabeled application-connected.');
@@ -196,7 +255,10 @@ async function runDesktopSshAcceptance({ artifactDirectory } = {}) {
       for (const socket of closingSockets) socket.destroy();
       await new Promise(resolve => closingServer.close(resolve));
     }
-    const result = { completedAt: new Date().toISOString(), sshPort: port, nativeOpenSshVersion, checks };
+    const videos = fs.readdirSync(videoDirectory).filter(name => name.endsWith('.webm'));
+    const result = { completedAt: new Date().toISOString(), sshPort: port, nativeOpenSshVersion,
+      video: videos[0] ? path.join('video', videos[0]) : null,
+      screenshots: fs.readdirSync(output).filter(name => name.endsWith('.png')).length, checks };
     fs.writeFileSync(path.join(output, 'acceptance.json'), JSON.stringify(result, null, 2) + '\n');
     return { artifactDirectory: output, ...result };
   } catch (error) {

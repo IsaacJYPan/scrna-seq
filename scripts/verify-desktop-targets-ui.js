@@ -78,7 +78,14 @@ async function assertTargetIndicator({ page, name, endpoint, rStatus, applicatio
   const panel = page.locator('[id=' + JSON.stringify(panelId) + ']');
   await panel.getByText('Server: ' + name, { exact: true }).waitFor();
   assert(await panel.getByText(endpoint, { exact: true }).isVisible(), 'The indicator omits the connected service endpoint.');
-  if (rStatus) await indicator.getByText(rStatus, { exact: true }).waitFor();
+  if (rStatus) {
+    try { await panel.getByText(rStatus, { exact: true }).waitFor({ timeout: 5000 }); }
+    catch {
+      const rendered = await panel.textContent();
+      if (artifactDirectory) await page.screenshot({ path: path.join(artifactDirectory, 'execution-target-status-mismatch.png') });
+      throw new Error(`Expected runtime status "${rStatus}" in Connection details; found: ${rendered}`);
+    }
+  }
   assert(await panel.getByRole('button', { name: 'Change server', exact: true }).isVisible(),
     'The desktop indicator does not expose native target settings.');
   if (artifactDirectory) await page.screenshot({ path: path.join(artifactDirectory,

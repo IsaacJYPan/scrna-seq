@@ -45,9 +45,15 @@
           <label for="ssh-port">SSH port (optional)</label><input id="ssh-port" type="number" min="1" max="65535" placeholder="From OpenSSH configuration, otherwise 22" />
           <label for="ssh-identity">Identity reference (optional)</label><input id="ssh-identity" readonly placeholder="Use your existing SSH agent and configuration" />
           <div class="actions"><button id="choose-identity" class="secondary" type="button">Choose identity file</button><button id="clear-identity" class="secondary" type="button">Use agent/config</button><button id="unlock-identity" class="secondary" type="button" disabled>Unlock with OpenSSH</button></div>
-          <label for="remote-host">Project service host on the server</label><input id="remote-host" value="127.0.0.1" />
-          <label for="remote-port">Project service port on the server</label><input id="remote-port" type="number" min="1" max="65535" value="3000" />
-          <p class="hint">SSH uses your system OpenSSH agent and configuration. Encrypted keys unlock in a native OpenSSH credential window. Verify SSH access first, then connect the HTTPS application. Only its loopback service is forwarded; the original HTTPS certificate must be valid and trusted by this computer.</p>
+          <p class="hint">SSH uses your system OpenSSH agent and configuration. Verify the host fingerprint before connecting; the HTTPS service also needs a trusted certificate.</p>
+          <details id="ssh-advanced" class="ssh-advanced">
+            <summary>Advanced SSH options</summary>
+            <div class="advanced-content">
+              <label for="remote-host">Project service host on the server</label><input id="remote-host" value="127.0.0.1" />
+              <label for="remote-port">Project service port on the server</label><input id="remote-port" type="number" min="1" max="65535" value="3000" />
+              <p class="hint">Only this service address is forwarded. Encrypted keys can be unlocked with the native OpenSSH credential prompt.</p>
+            </div>
+          </details>
           <section id="ssh-host-verification" class="host-verification" aria-labelledby="ssh-host-verification-title" hidden>
             <h2 id="ssh-host-verification-title">Verify the server’s host identity</h2>
             <p id="ssh-discovered-host"></p>

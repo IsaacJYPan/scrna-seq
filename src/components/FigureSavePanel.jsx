@@ -586,7 +586,7 @@ export default function FigureSavePanel({
                 {!previewB64 && !previewLoading && !previewError && !previewUnavailableReason && (
                   <div className="text-center text-slate-400 p-6">
                     <Image size={40} className="mx-auto mb-3 opacity-30" />
-                    <p className="text-xs">Preview will appear here after R renders it</p>
+                    <p className="text-xs">Preparing figure preview…</p>
                   </div>
                 )}
               </div>

@@ -43,8 +43,8 @@ it('reopens a lost acknowledgement using GET and selects its exact run instead o
   expect(screen.getByRole('button', { name: /R analysis.*job_exact/ })).toHaveAttribute('aria-pressed', 'true');
   expect(getRunMonitoring.mock.calls.every(([, id]) => id === 'job_exact')).toBe(true);
   expect(fetch.mock.calls.every(([, options]) => !options.method)).toBe(true);
-  fireEvent.click(screen.getByRole('button', { name: 'Open recovered runs' }));
-  expect(onOpen).toHaveBeenCalledOnce();
+  expect(screen.queryByRole('region', { name: 'Submission recovery' })).toBeNull();
+  expect(screen.getByRole('region', { name: 'Saved submissions' })).toBeVisible();
 });
 
 it('shows a missing receipt truthfully and requires explicit confirmation before forgetting it', async () => {
@@ -53,6 +53,8 @@ it('shows a missing receipt truthfully and requires explicit confirmation before
   const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
   render(<RecoveryView monitor={false} />);
   await screen.findByText(/No matching receipt was found/);
+  fireEvent.click(screen.getByRole('button', { name: 'Open recovered runs' }));
+  expect(onOpen).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole('button', { name: 'Forget unconfirmed request' }));
   expect(getSubmissionRecoverySnapshot().records).toHaveLength(1);
   expect(confirm).toHaveBeenCalledWith(expect.stringContaining('could create duplicate work'));

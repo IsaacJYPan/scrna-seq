@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PipelineManager from './PipelineManager';
 import { DEFAULT_PIPELINE_ID, getDefaultPipelineManifest } from '../pipelines/pipelineRegistry';
@@ -124,6 +124,89 @@ describe('PipelineManager', () => {
     expect(screen.getByRole('button', { name: /Run Seurat preprocessing/i })).toBeDisabled();
     expect(window.electronAPI.uploadDataset).not.toHaveBeenCalled();
     expect(window.electronAPI.createSeuratPipelineJob).not.toHaveBeenCalled();
+  });
+
+  it('keeps edited settings when switching approaches and revealing conditional parameters', async () => {
+    renderPipelineManager();
+    const panel = await screen.findByTestId('seurat-pipeline-panel');
+    const ui = within(panel);
+    expect(ui.queryByRole('heading', { name: 'Run status' })).not.toBeInTheDocument();
+    expect(ui.getAllByRole('group').map(group => group.getAttribute('aria-labelledby')).filter(Boolean)).toHaveLength(6);
+    expect(within(ui.getByRole('group', { name: 'Quality control' })).getByLabelText('Max mitochondrial RNA (%)')).toBeInTheDocument();
+    expect(within(ui.getByRole('group', { name: 'PCA' })).getByLabelText('PCA components')).toBeInTheDocument();
+    fireEvent.change(ui.getByLabelText('Resolution'), { target: { value: '0.65' } });
+    fireEvent.change(ui.getByLabelText('Max mitochondrial RNA (%)'), { target: { value: '7.5' } });
+    fireEvent.click(ui.getByLabelText('Apply QC filter'));
+    expect(ui.queryByLabelText('Max mitochondrial RNA (%)')).not.toBeInTheDocument();
+    fireEvent.click(ui.getByLabelText('Apply QC filter'));
+    expect(ui.getByLabelText('Max mitochondrial RNA (%)')).toHaveValue(7.5);
+    fireEvent.change(ui.getByLabelText('Scale factor'), { target: { value: '12000' } });
+    fireEvent.change(ui.getByRole('combobox', { name: 'Normalization', exact: true }), { target: { value: 'SCTransform' } });
+    expect(ui.queryByLabelText('Scale factor')).not.toBeInTheDocument();
+    fireEvent.change(ui.getByRole('combobox', { name: 'Normalization', exact: true }), { target: { value: 'LogNormalize' } });
+    expect(ui.getByLabelText('Scale factor')).toHaveValue(12000);
+    fireEvent.click(ui.getByRole('tab', { name: 'Inspect step by step' }));
+    expect(ui.getByRole('tabpanel', { name: 'Inspect step by step' })).toBeVisible();
+    expect(ui.queryByRole('button', { name: /Run Seurat preprocessing/i })).not.toBeInTheDocument();
+    fireEvent.click(ui.getByRole('tab', { name: 'Run whole pipeline' }));
+    expect(ui.getByLabelText('Resolution')).toHaveValue(0.65);
+    expect(window.electronAPI.createSeuratPipelineJob).not.toHaveBeenCalled();
+  });
+
+  it('supports keyboard approach selection and requires an opened analysis for inspection', async () => {
+    const { props } = renderPipelineManager();
+    const ui = within(await screen.findByTestId('seurat-pipeline-panel'));
+    const automatic = ui.getByRole('tab', { name: 'Run whole pipeline' });
+    const guided = ui.getByRole('tab', { name: 'Inspect step by step' });
+    automatic.focus();
+    fireEvent.keyDown(automatic, { key: 'ArrowRight' });
+    expect(guided).toHaveAttribute('aria-selected', 'true');
+    expect(guided).toHaveFocus();
+    expect(ui.getByRole('button', { name: 'Open Quality control' })).toBeDisabled();
+    fireEvent.click(ui.getByRole('button', { name: 'Choose / open analysis' }));
+    expect(props.setActiveTab).toHaveBeenCalledWith('workspace');
+    fireEvent.keyDown(guided, { key: 'Home' });
+    expect(automatic).toHaveFocus();
+    expect(automatic).toHaveAttribute('aria-selected', 'true');
+    expect(window.electronAPI.createProjectJob).not.toHaveBeenCalled();
+  });
+
+  it('opens individual inspection pages on the selected live analysis without submitting a whole job', async () => {
+    const { props } = renderPipelineManager({ currentWs: {
+      ...currentWs, objects: [{ ...currentWs.objects[0], liveState: 'attached' }],
+    } });
+    const ui = within(await screen.findByTestId('seurat-pipeline-panel'));
+    fireEvent.click(ui.getByRole('tab', { name: 'Inspect step by step' }));
+    for (const [name, route] of [['Inspect', 'inspect'], ['Quality control', 'qc'], ['Normalization', 'normalize'], ['Integration (optional)', 'integrate'], ['PCA', 'pca'], ['Clustering', 'cluster'], ['UMAP', 'umap']]) {
+      fireEvent.click(ui.getByRole('button', { name: `Open ${name}`, exact: true }));
+      expect(props.onSelectAnalysisObject).toHaveBeenLastCalledWith('proj_1', 'ao_abc123');
+      expect(props.setActiveTab).toHaveBeenLastCalledWith(route);
+    }
+    expect(window.electronAPI.createSeuratPipelineJob).not.toHaveBeenCalled();
+    expect(window.electronAPI.createProjectJob).not.toHaveBeenCalled();
+  });
+
+  it('submits edited numeric parameters as numbers in one complete pipeline job', async () => {
+    window.electronAPI.listDatasets.mockResolvedValue([{ id: 'ds_numeric', fileType: 'tenx_h5', originalFilename: 'PBMC.h5', uploadStatus: 'uploaded', validationStatus: 'valid' }]);
+    window.electronAPI.createSeuratPipelineJob.mockResolvedValue({ id: 'job_numeric', status: 'queued' });
+    window.electronAPI.getProjectJob.mockResolvedValue({ id: 'job_numeric', status: 'queued' });
+    const object = { ...currentWs.objects[0], datasetId: 'ds_numeric' };
+    renderPipelineManager({ currentWs: { ...currentWs, objects: [object] } });
+    const ui = within(await screen.findByTestId('seurat-pipeline-panel'));
+    await ui.findByText('PBMC.h5');
+    fireEvent.change(ui.getByLabelText('Resolution'), { target: { value: '0.65' } });
+    fireEvent.change(ui.getByLabelText('PCA components'), { target: { value: '35' } });
+    fireEvent.change(ui.getByLabelText('Minimum distance'), { target: { value: '0.25' } });
+    fireEvent.click(ui.getByLabelText('Apply QC filter'));
+    fireEvent.click(ui.getByText('Reproducibility'));
+    fireEvent.change(ui.getByLabelText('Seed (optional)'), { target: { value: '42' } });
+    fireEvent.click(ui.getByRole('button', { name: /Run Seurat preprocessing/i }));
+    await waitFor(() => expect(window.electronAPI.createSeuratPipelineJob).toHaveBeenCalledTimes(1));
+    expect(window.electronAPI.createSeuratPipelineJob).toHaveBeenCalledWith('proj_1', expect.objectContaining({
+      analysisObjectId: 'ao_abc123', datasetId: 'ds_numeric',
+      params: expect.objectContaining({ clusterResolution: 0.65, pcaDims: 35, umapMinDist: 0.25, applyQcFilter: false, seed: 42 }),
+    }));
+    expect(window.electronAPI.createProjectAnalysisObject).not.toHaveBeenCalled();
   });
 
   it('uses the workspace-selected project for user-project pipeline selection', async () => {
@@ -555,6 +638,7 @@ describe('PipelineManager', () => {
 
     const degButton = screen.getByRole('button', { name: /Continue to marker analysis/i });
     expect(degButton).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Inspect this result step by step' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: /Open saved version/i }));
     await waitFor(() => {
@@ -571,6 +655,18 @@ describe('PipelineManager', () => {
     fireEvent.click(screen.getByRole('button', { name: /Continue to marker analysis/i }));
     expect(onSelectAnalysisObject).toHaveBeenCalledWith('proj_1', 'ao_result123');
     expect(setActiveTab).toHaveBeenCalledWith('deg');
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect this result step by step' }));
+    expect(onSelectAnalysisObject).toHaveBeenLastCalledWith('proj_1', 'ao_result123');
+    expect(setActiveTab).toHaveBeenLastCalledWith('qc');
+
+    window.electronAPI.createSeuratPipelineJob.mockResolvedValueOnce({ id: 'job_second', status: 'queued' });
+    window.electronAPI.getProjectJob.mockResolvedValueOnce({ id: 'job_second', status: 'completed', resultAnalysisObjectId: 'ao_result_second' });
+    window.electronAPI.getProjectAnalysisObject.mockResolvedValueOnce({ id: 'ao_result_second', projectId: 'proj_1', objectType: 'seurat' });
+    fireEvent.click(screen.getByRole('button', { name: /Run Seurat preprocessing/i }));
+    await waitFor(() => expect(window.electronAPI.getProjectAnalysisObject).toHaveBeenLastCalledWith('proj_1', 'ao_result_second'));
+    expect(screen.getByRole('button', { name: 'Inspect this result step by step' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Continue to marker analysis/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Open saved version/i })).toBeEnabled();
   });
 
   it('uploads multiple durable sample files and launches a condition-aware Seurat preparation job', async () => {

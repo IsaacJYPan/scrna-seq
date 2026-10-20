@@ -131,14 +131,14 @@ class ErrorBoundary extends React.Component {
 // tab fires its own live-R probes on mount (e.g. /genes, /meta-values), and the
 // R proxy admits only one in-flight analytical request per user — mounting all
 // tabs at once produced a burst of "R service is busy" (429) responses on load.
-const TabContent = ({ id, activeTab, children }) => {
-  const [hasBeenActive, setHasBeenActive] = useState(activeTab === id);
+export const TabContent = ({ id, activeTab, contextKey = 'workspace', children }) => {
+  const [visitedContext, setVisitedContext] = useState(activeTab === id ? contextKey : null);
   useEffect(() => {
-    if (activeTab === id) setHasBeenActive(true);
-  }, [activeTab, id]);
+    if (activeTab === id) setVisitedContext(contextKey);
+  }, [activeTab, id, contextKey]);
   return (
     <div className={`absolute inset-0 ${activeTab === id ? 'block' : 'hidden'}`}>
-      {hasBeenActive || activeTab === id ? (
+      {visitedContext === contextKey || activeTab === id ? (
         <React.Suspense fallback={(
           <div role="status" className="flex h-full items-center justify-center text-sm text-textMuted">
             Opening {TAB_TITLES[id] || 'workspace'}…
@@ -592,6 +592,9 @@ export default function App() {
   // has already verified the requesting owner and selected the checkpoint.
   const handleLiveObjectAttached = useCallback((projectId, objectId) => {
     if (!projectId || !objectId) return;
+    if (workflowContext.projectId === projectId && workflowContext.analysisObjectId === objectId) {
+      delete workflowContext.resultCache;
+    }
     setUnsavedLiveChanges(false);
     setLiveRecoveryNotice('');
     patchActiveWorkspace(ws => ({
@@ -601,7 +604,7 @@ export default function App() {
           : object
       )),
     }));
-  }, [patchActiveWorkspace]);
+  }, [patchActiveWorkspace, workflowContext]);
 
   useEffect(() => {
     if (!unsavedLiveChanges) return undefined;
@@ -615,6 +618,9 @@ export default function App() {
 
   const handleSelectAnalysisObject = useCallback((projectId, objectId) => {
     checkpointSaveRequestRef.current += 1;
+    // Restoring a checkpoint can replace live R state while retaining this ID.
+    // Discard known result identities even when selection does not change.
+    delete workflowContext.resultCache;
     cacheSelectedAnalysisObject(localStorage, user, projectId, objectId);
     patchActiveWorkspace(ws => ({
       selectedObjectIds: objectId ? [objectId] : [],
@@ -622,7 +628,7 @@ export default function App() {
         ? { ...(ws.lastSelectedByProject || {}), [projectId]: objectId }
         : (ws.lastSelectedByProject || {}),
     }));
-  }, [patchActiveWorkspace, user]);
+  }, [patchActiveWorkspace, user, workflowContext]);
 
   const handleSaveLiveAnalysis = useCallback(async () => {
     const projectId = datasetInfo?.projectId || currentWs.selectedProjectId;
@@ -840,40 +846,47 @@ export default function App() {
       if (datasetInfo?.id) effectiveCacheParams._objectId = datasetInfo.id;
     }
 
+    // Reuse the exact lookup identity when saving. Parent provenance is part of
+    // that identity, and generating it again adds a remote request per run.
+    let cacheKey = null;
+    let cacheKeyUnavailable = false;
+    // The browser can prove which parameters produced a live step only after
+    // observing that step run in this object/session. Unknown identities after
+    // reload are cache misses until a fresh run establishes them.
+    if (workflowContext.resultCache?.rSessionId !== rSessionId) {
+      workflowContext.resultCache = { rSessionId, stepKeys: new Map(), liveRevision: null };
+    }
+    const resultCache = workflowContext.resultCache;
+
+    // Stateful operations must run when requested: a historical result cannot
+    // apply its parameters to the current R object. Hydrate a completed step
+    // only after the server has confirmed it exists in this attached session.
+    const canReadCache = !step || (forceOnlyIfCached
+      && hasAttachedLiveRObject(datasetInfo) && pipelineState[step]);
+
     // 1. Check Cache First
     if (useCache && effectiveCacheParams) {
-      const key = await makeCacheKey(operation, effectiveCacheParams, currentWs.dataVersion, parentIds);
-      const cached = await getCachedResult(key);
-      if (cached) {
-        const prov = await (window.electronAPI?.getProvenance?.(cached.provenanceId));
-        if (prov) {
-          // Cached provenance can render a prior result, but it cannot prove
-          // that the selected object exists in the current private R process.
-          if (step && hasAttachedLiveRObject(datasetInfo)) {
-            const extraState = {};
-            if (step === 'cluster') {
-              if (cached.result?.n_clusters) extraState.clusterCount = cached.result.n_clusters;
-              if (cached.result?.dims_used)  extraState.clusterDims  = cached.result.dims_used;
-            }
-            // Hydration reads an existing result in this object and R session.
-            // Preserve server-confirmed downstream work; only a fresh
-            // computation invalidates the steps that depend on it.
-            setPipelineState(prev => ({ ...prev, [step]: true, ...extraState }));
-            // QC: update workspace object cell count to post-filter value
-            if (step === 'qc' && cached.result?.post_filter_cells) {
-              updateActiveWorkspace({
-                objects: currentWs.objects.map((obj, i) =>
-                  i === 0 ? { ...obj, cells: cached.result.post_filter_cells } : obj
-                )
-              });
-            }
+      try {
+        cacheKey = await makeCacheKey(operation, effectiveCacheParams, currentWs.dataVersion, parentIds);
+        const matchesLiveStep = !step || resultCache.stepKeys.get(step)?.cacheKey === cacheKey;
+        const cached = canReadCache && matchesLiveStep ? await getCachedResult(cacheKey) : null;
+        if (cached) {
+          const prov = await (window.electronAPI?.getProvenance?.(cached.provenanceId));
+          if (prov && workflowContext.active && workflowContext.resultCache === resultCache
+              && (!step || (resultCache.stepKeys.get(step)?.cacheKey === cacheKey
+                && resultCache.stepKeys.get(step)?.provenanceId === cached.provenanceId))) {
+            // Reading a prior result never changes current live completion,
+            // cluster settings, or object metadata.
+            return {
+              provenance: { ...prov, parentIds: prov.parentIds || parentIds },
+              result: cached.result,
+              _fromCache: true,
+            };
           }
-          return {
-            provenance: { ...prov, parentIds: prov.parentIds || parentIds },
-            result: cached.result,
-            _fromCache: true,
-          };
         }
+      } catch {
+        // Cache availability must not block an explicitly requested analysis.
+        cacheKeyUnavailable = cacheKey === null;
       }
     }
 
@@ -893,6 +906,14 @@ export default function App() {
 
     // 2. Fresh Fetch
     try {
+      const stepIndex = PIPELINE_ORDER.indexOf(step);
+      if (stepIndex >= 0) {
+        // A failed mutation may still change R before returning an error. Once
+        // dispatched, old identities stay invalid until a success proves one.
+        for (const downstream of PIPELINE_ORDER.slice(stepIndex)) resultCache.stepKeys.delete(downstream);
+      } else if (step || (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase()))) {
+        resultCache.stepKeys.clear();
+      }
       options.headers = options.headers || {};
       if (datasetInfo?.id) {
         options.headers['X-Object-ID'] = datasetInfo.id;
@@ -903,7 +924,27 @@ export default function App() {
         setHistoryPersistenceNotice(HISTORY_PERSISTENCE_NOTICE);
       }
       const serverUnsaved = serverUnsavedLiveChanges(data.live_state);
-      if (serverUnsaved !== null) {
+      const responseRevision = data.live_state?.live_revision;
+      const hasResponseRevision = Number.isSafeInteger(responseRevision);
+      const olderResponse = hasResponseRevision && Number.isSafeInteger(resultCache.liveRevision)
+        && responseRevision < resultCache.liveRevision;
+      const currentResultContext = workflowContext.resultCache === resultCache && !olderResponse;
+      if (currentResultContext && stepIndex < 0 && hasResponseRevision
+          && responseRevision !== resultCache.liveRevision) {
+        // A mutation outside the ordered pipeline can invalidate every live
+        // result. Read-only responses at the same revision keep known keys.
+        resultCache.stepKeys.clear();
+      }
+      if (hasResponseRevision && !olderResponse) {
+        resultCache.liveRevision = responseRevision;
+      }
+      // Persist every completed attempt, but project only the newest confirmed
+      // state into the live workspace. Recheck after asynchronous history writes:
+      // another response or checkpoint attachment may have superseded this one.
+      const canProjectLiveResult = () => workflowContext.active
+        && workflowContext.resultCache === resultCache && !olderResponse
+        && (!hasResponseRevision || resultCache.liveRevision === responseRevision);
+      if (serverUnsaved !== null && canProjectLiveResult()) {
         setUnsavedLiveChanges(serverUnsaved);
         setLiveRecoveryNotice('');
       }
@@ -929,19 +970,23 @@ export default function App() {
           }
         }
 
-        setProvenanceRecords(prev => {
-          if (prev.some(p => p.id === data.provenance.id)) return prev;
-          return [data.provenance, ...prev];
-        });
+        if (workflowContext.active) {
+          setProvenanceRecords(prev => {
+            if (prev.some(p => p.id === data.provenance.id)) return prev;
+            return canProjectLiveResult() ? [data.provenance, ...prev] : [...prev, data.provenance];
+          });
+        }
 
-        updateActiveWorkspace({
-          branches: {
-            ...currentWs.branches,
-            [currentWs.activeBranch]: data.provenance.id
-          }
-        });
+        if (canProjectLiveResult()) {
+          updateActiveWorkspace({
+            branches: {
+              ...currentWs.branches,
+              [currentWs.activeBranch]: data.provenance.id
+            }
+          });
+        }
 
-        if (step) {
+        if (step && canProjectLiveResult()) {
           const extraState = {};
           if (step === 'cluster') {
             if (data.result?.n_clusters) extraState.clusterCount = data.result.n_clusters;
@@ -965,10 +1010,16 @@ export default function App() {
           }
         }
 
-        if (useCache && effectiveCacheParams) {
+        if (useCache && effectiveCacheParams && canProjectLiveResult()) {
           try {
-            const key = await makeCacheKey(operation, effectiveCacheParams, currentWs.dataVersion);
-            await setCachedResult(key, data.provenance.id, data.result);
+            if (cacheKey !== null) {
+              await setCachedResult(cacheKey, data.provenance.id, data.result);
+              if (stepIndex >= 0 && workflowContext.resultCache === resultCache
+                  && (!hasResponseRevision || resultCache.liveRevision === responseRevision)) {
+                resultCache.stepKeys.set(step, { cacheKey, provenanceId: data.provenance.id });
+              }
+            }
+            else if (cacheKeyUnavailable) setHistoryPersistenceNotice(HISTORY_PERSISTENCE_NOTICE);
           } catch { setHistoryPersistenceNotice(HISTORY_PERSISTENCE_NOTICE); }
         }
       }
@@ -986,7 +1037,7 @@ export default function App() {
       else console.error(err);
       return { error: publicErrorMessage(err) };
     }
-  }, [checkpointSaveBusy, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo, workflowContext]);
+  }, [checkpointSaveBusy, markPipelineStep, currentWs, updateActiveWorkspace, rSessionId, datasetInfo, workflowContext, pipelineState]);
 
   const openProvenance = async (provId) => {
     const chain = await getProvenanceChain(provId);
@@ -1334,21 +1385,21 @@ export default function App() {
         </TabContent></ErrorBoundary>
         <ErrorBoundary key="inspect"><TabContent id="inspect" activeTab={activeTab}><Inspect key={objKey} globalTab={activeTab} obj={datasetInfo} workspaceObjects={currentWs.objects} onSubsetCreated={handleSubsetCreated} userEmail={user?.email} parentSessionPath={null} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="lineage"><TabContent id="lineage" activeTab={activeTab}><LineageExplorer {...props} provenanceRecords={provenanceRecords} setProvenanceRecords={setProvenanceRecords} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="normalize"><TabContent id="normalize" activeTab={activeTab}><Normalization key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="pca"><TabContent id="pca" activeTab={activeTab}><PCA key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="cluster"><TabContent id="cluster" activeTab={activeTab}><Clustering key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="umap"><TabContent id="umap" activeTab={activeTab}><UMAPView key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="featureplot"><TabContent id="featureplot" activeTab={activeTab}><FeaturePlot key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="heatmap"><TabContent id="heatmap" activeTab={activeTab}><HeatmapPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="explore"><TabContent id="explore" activeTab={activeTab}><ExploratoryAnalysis key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="qc"><TabContent id="qc" activeTab={activeTab} contextKey={objKey}><QualityControl key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="normalize"><TabContent id="normalize" activeTab={activeTab} contextKey={objKey}><Normalization key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="pca"><TabContent id="pca" activeTab={activeTab} contextKey={objKey}><PCA key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cluster"><TabContent id="cluster" activeTab={activeTab} contextKey={objKey}><Clustering key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="umap"><TabContent id="umap" activeTab={activeTab} contextKey={objKey}><UMAPView key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="featureplot"><TabContent id="featureplot" activeTab={activeTab} contextKey={objKey}><FeaturePlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="heatmap"><TabContent id="heatmap" activeTab={activeTab} contextKey={objKey}><HeatmapPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="dotplot"><TabContent id="dotplot" activeTab={activeTab} contextKey={objKey}><DotPlot key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="explore"><TabContent id="explore" activeTab={activeTab} contextKey={objKey}><ExploratoryAnalysis key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="geneviewer"><TabContent id="geneviewer" activeTab={activeTab} contextKey={objKey}><GeneViewer key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="deg"><TabContent id="deg" activeTab={activeTab} contextKey={objKey}><DifferentialExpression key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="history"><TabContent id="history" activeTab={activeTab}><ProjectHistory {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} onLiveObjectAttached={handleLiveObjectAttached} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
-        <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="enrichment"><TabContent id="enrichment" activeTab={activeTab} contextKey={objKey}><PathwayEnrichment key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="cellchat"><TabContent id="cellchat" activeTab={activeTab} contextKey={objKey}><CellChat key={objKey} {...props} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="integrate"><TabContent id="integrate" activeTab={activeTab} contextKey={objKey}><BatchIntegration key={objKey} {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="team"><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>

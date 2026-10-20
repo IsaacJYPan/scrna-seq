@@ -136,6 +136,8 @@ jobs:
         run: npm run test:spatial-seurat
       - name: Verify fixed condition-model R contract
         run: Rscript r-backend/tests/test_units.R
+      - name: Verify exact dot-plot aggregation parity
+        run: Rscript r-backend/tests/test_dot_plot_summaries.R
 
   windows-installer:
     runs-on: windows-latest

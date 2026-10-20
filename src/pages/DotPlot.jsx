@@ -5,6 +5,7 @@ import Plot, { getPlotHoverStyle } from '../components/Plot';
 import { CircleDot, AlertTriangle, ImageDown } from 'lucide-react';
 import FigureSavePanel from '../components/FigureSavePanel';
 import { publicErrorMessage } from '../publicError';
+import { findGeneSuggestions } from '../geneSuggestions';
 
 // Removed API constant
 export default function DotPlot({ datasetInfo, pipelineState, sessionReady, userEmail, objectId, callApi, theme, deploymentPolicy }) {
@@ -17,6 +18,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
   const [genes, setGenes] = useState([]);
   const [geneList, setGeneList] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
+  const plotConfig = React.useMemo(() => ({ responsive: true, displayModeBar: true, displaylogo: false }), []);
 
   const hasClusters = pipelineState?.cluster;
 
@@ -30,7 +32,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
   const handleInputChange = (val) => {
     setGeneInput(val);
     if (val.length >= 2) {
-      setSuggestions(geneList.filter(g => g.toLowerCase().startsWith(val.toLowerCase())).slice(0, 8));
+      setSuggestions(findGeneSuggestions(geneList, val));
     } else {
       setSuggestions([]);
     }
@@ -59,36 +61,12 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
     setLoading(false);
   };
 
-  if (!datasetInfo) {
-    return (
-      <div className="h-full flex items-center justify-center bg-background">
-        <div className="text-center">
-          <CircleDot size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
-          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
-          <p className="text-textMuted">Load a dataset in the Workspace first.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!hasClusters) {
-    return (
-      <div className="h-full flex items-center justify-center bg-background">
-        <div className="text-center max-w-sm">
-          <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
-          <h2 className="text-xl font-bold text-text mb-2">Clustering Required</h2>
-          <p className="text-textMuted">Run Clustering first to group cells into identities for dot plot visualization.</p>
-        </div>
-      </div>
-    );
-  }
-
   const plottedGenes = dotData?.genes == null ? [] : Array.isArray(dotData.genes) ? dotData.genes : [dotData.genes];
   const selectionChanged = dotData && (genes.length !== plottedGenes.length || genes.some((gene, index) => gene !== plottedGenes[index]));
 
-  // Build Plotly bubble chart from dot plot data
-  const traces = [];
-  if (dotData) {
+  // Reuse the flattened expression matrix until the result or theme changes.
+  const traces = React.useMemo(() => {
+    if (!dotData) return [];
     const ensureArray = (v) => {
       if (v === undefined || v === null) return [];
       return Array.isArray(v) ? v : [v];
@@ -126,7 +104,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
       });
     });
 
-    traces.push({
+    return [{
       x,
       y,
       type: 'scatter',
@@ -155,14 +133,14 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
       customdata: pctCustomData,
       hovertemplate: '<b>%{y}</b><br>Cluster: %{x}<br>Average expression: %{marker.color:.2f}<br>Cells expressing: %{customdata:.1f}%<extra></extra>',
       showlegend: false,
-    });
-  }
+    }];
+  }, [dotData, theme]);
 
   const isDark = theme === 'dark';
   const plotText = isDark ? '#94a3b8' : '#475569';
   const plotGrid = isDark ? '#1e293b' : '#d8e0ea';
   const axisTitle = isDark ? '#f8fafc' : '#334155';
-  const layout = {
+  const layout = React.useMemo(() => ({
     autosize: true,
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
@@ -183,7 +161,31 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
       zeroline: false
     },
     showlegend: false,
-  };
+  }), [plotText, plotGrid, axisTitle, theme, dotData, chart.width]);
+
+  if (!datasetInfo) {
+    return (
+      <div className="h-full flex items-center justify-center bg-background">
+        <div className="text-center">
+          <CircleDot size={48} className="mx-auto text-slate-400 mb-4 opacity-50" />
+          <h2 className="text-xl font-bold text-text mb-2">No Dataset Loaded</h2>
+          <p className="text-textMuted">Load a dataset in the Workspace first.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!hasClusters) {
+    return (
+      <div className="h-full flex items-center justify-center bg-background">
+        <div className="text-center max-w-sm">
+          <AlertTriangle size={48} className="mx-auto text-amber-500 mb-4" />
+          <h2 className="text-xl font-bold text-text mb-2">Clustering Required</h2>
+          <p className="text-textMuted">Run Clustering first to group cells into identities for dot plot visualization.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
@@ -257,7 +259,7 @@ export default function DotPlot({ datasetInfo, pipelineState, sessionReady, user
           <Plot
             data={traces}
             layout={layout}
-            config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+            config={plotConfig}
             style={{ width: '100%', minWidth: categoryPlotWidth(dotData?.genes, dotData?.clusters), height: '100%' }}
             useResizeHandler
           />

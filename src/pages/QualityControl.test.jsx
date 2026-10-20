@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const { plotSpy } = vi.hoisted(() => ({ plotSpy: vi.fn() }));
@@ -64,6 +64,25 @@ describe('QualityControl', () => {
     }).not.toThrow();
 
     expect(screen.getByText('No Dataset Loaded')).toBeInTheDocument();
+  });
+
+  it('starts a new distribution request on session change and ignores the old response', async () => {
+    let resolveOldSession;
+    const oldSession = new Promise(resolve => { resolveOldSession = resolve; });
+    const callApi = vi.fn()
+      .mockReturnValueOnce(oldSession)
+      .mockResolvedValue({ percent_mt: [9], nFeature_RNA: [900], nCount_RNA: [9000] });
+    const props = baseProps({ callApi });
+    const { rerender } = render(<QualityControl {...props} />);
+
+    await waitFor(() => expect(callApi).toHaveBeenCalledTimes(1));
+    rerender(<QualityControl {...props} rSessionId="sess-2" />);
+    await waitFor(() => expect(callApi).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(plotSpy.mock.calls.at(-1)?.[0].data[1].y).toEqual([9]));
+
+    resolveOldSession({ percent_mt: [1], nFeature_RNA: [100], nCount_RNA: [1000] });
+    await waitFor(() => expect(plotSpy.mock.calls.at(-1)?.[0].data[1].y).toEqual([9]));
+    expect(screen.queryByText(/Computing QC distributions/)).not.toBeInTheDocument();
   });
 
   it('blocks impossible filter ranges before calling the analysis endpoint', async () => {

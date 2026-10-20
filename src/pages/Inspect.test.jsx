@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import Inspect from './Inspect';
 
@@ -18,6 +18,20 @@ function objectInfo() {
 }
 
 describe('Inspect deployment policy', () => {
+  it('keeps the metadata filter mounted when returning from another app tab and refreshing', async () => {
+    let completeRefresh;
+    const callApi = vi.fn().mockResolvedValueOnce(objectInfo()).mockImplementationOnce(() => new Promise(resolve => { completeRefresh = resolve; }));
+    const props = { obj: { id: 'ao_review', name: 'Metadata review' }, callApi, workspaceObjects: [] };
+    const view = render(<Inspect {...props} globalTab="inspect" />);
+    await screen.findByRole('region', { name: 'Dataset summary' });
+    fireEvent.click(screen.getByRole('button', { name: 'Metadata', exact: true }));
+    fireEvent.change(screen.getByPlaceholderText('Filter columns…'), { target: { value: 'sample' } });
+    view.rerender(<Inspect {...props} globalTab="qc" />);
+    view.rerender(<Inspect {...props} globalTab="inspect" />);
+    expect(screen.getByPlaceholderText('Filter columns…')).toHaveValue('sample');
+    await act(async () => completeRefresh(objectInfo()));
+    expect(screen.getByPlaceholderText('Filter columns…')).toHaveValue('sample');
+  });
   it('omits production-blocked CSV import and live subsetting while keeping bounded mapping', async () => {
     const callApi = vi.fn(async (endpoint) => {
       if (endpoint === '/object-info') return objectInfo();

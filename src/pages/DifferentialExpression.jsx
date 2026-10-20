@@ -545,7 +545,7 @@ export default function DifferentialExpression({
             <div>
               <h3 className="text-lg font-bold text-text">Approved settings</h3>
               <p className="mt-1 text-sm text-textMuted">
-                This marker analysis uses approved settings. The statistical test is fixed to Wilcoxon in v1.
+                Compare gene expression between cell groups using the Wilcoxon test.
               </p>
             </div>
             {!sessionReady || !liveObjectAttached ? (
@@ -658,7 +658,7 @@ export default function DifferentialExpression({
               />
               <span>
                 <span className="block text-sm font-bold text-text">Only positive markers</span>
-                <span className="block text-xs text-textMuted">Sent as a strict boolean.</span>
+                <span className="block text-xs text-textMuted">Report genes expressed more strongly in each group.</span>
               </span>
             </label>
           </div>
@@ -726,7 +726,7 @@ export default function DifferentialExpression({
                 Marker analysis summary
               </h3>
               <p className="mt-1 text-sm text-textMuted">
-                This page shows a bounded scientific summary. The full marker table remains a controlled result.
+                Review the top markers here. Export the full table from Runs &amp; Results.
               </p>
             </div>
             {summaryArtifact && <StatusBadge tone="green">summary available</StatusBadge>}

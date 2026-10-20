@@ -14,6 +14,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
   const [topN, setTopN] = useState(5);
   const chart = usePlotGeometry();
   const [savePanelOpen, setSavePanelOpen] = useState(false);
+  const plotConfig = React.useMemo(() => ({ responsive: true, displayModeBar: true, displaylogo: false }), []);
 
   const hasDeg = pipelineState?.cluster;
 
@@ -33,6 +34,30 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
   useEffect(() => {
     if (sessionReady && hasDeg) fetchHeatmap();
   }, [sessionReady, hasDeg, fetchHeatmap]);
+
+  const trace = React.useMemo(() => heatmapData ? [{
+    type: 'heatmap',
+    z: heatmapData.z,
+    x: heatmapData.clusters,
+    y: heatmapData.genes,
+    colorscale: 'Viridis',
+    hovertemplate: '<b>%{y}</b><br>Cluster: %{x}<br>Average expression: %{z:.2f}<extra></extra>',
+    colorbar: { thickness: 14, orientation: 'h', yref: 'container', y: 0.015, xref: 'container', x: 0.5, xanchor: 'center', yanchor: 'bottom', len: 0.7, title: { text: 'Average expression', side: 'bottom' } },
+  }] : [], [heatmapData]);
+
+  const isDark = theme === 'dark';
+  const plotText = isDark ? '#94a3b8' : '#475569';
+  const plotGrid = isDark ? '#1e293b' : '#d8e0ea';
+  const layout = React.useMemo(() => ({
+    autosize: true,
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    font: { color: plotText, size: 12, family: 'Inter, system-ui' },
+    hoverlabel: getPlotHoverStyle(theme),
+    margin: { l: 58, r: 12, t: 24, b: 120 },
+    xaxis: { title: { text: 'Cluster' }, automargin: true, type: 'category', tickangle: categoryTickAngle(heatmapData?.clusters || [], Math.max(chart.width, categoryPlotWidth(heatmapData?.genes, heatmapData?.clusters)) - 100), gridcolor: plotGrid },
+    yaxis: { title: { text: 'Gene' }, automargin: true, gridcolor: plotGrid },
+  }), [plotText, plotGrid, theme, heatmapData, chart.width]);
 
   if (!datasetInfo) {
     return (
@@ -57,30 +82,6 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
       </div>
     );
   }
-
-  const trace = heatmapData ? [{
-    type: 'heatmap',
-    z: heatmapData.z,
-    x: heatmapData.clusters,
-    y: heatmapData.genes,
-    colorscale: 'Viridis',
-    hovertemplate: '<b>%{y}</b><br>Cluster: %{x}<br>Average expression: %{z:.2f}<extra></extra>',
-    colorbar: { thickness: 14, orientation: 'h', yref: 'container', y: 0.015, xref: 'container', x: 0.5, xanchor: 'center', yanchor: 'bottom', len: 0.7, title: { text: 'Average expression', side: 'bottom' } },
-  }] : [];
-
-  const isDark = theme === 'dark';
-  const plotText = isDark ? '#94a3b8' : '#475569';
-  const plotGrid = isDark ? '#1e293b' : '#d8e0ea';
-  const layout = {
-    autosize: true,
-    paper_bgcolor: 'transparent',
-    plot_bgcolor: 'transparent',
-    font: { color: plotText, size: 12, family: 'Inter, system-ui' },
-    hoverlabel: getPlotHoverStyle(theme),
-    margin: { l: 58, r: 12, t: 24, b: 120 },
-    xaxis: { title: { text: 'Cluster' }, automargin: true, type: 'category', tickangle: categoryTickAngle(heatmapData?.clusters || [], Math.max(chart.width, categoryPlotWidth(heatmapData?.genes, heatmapData?.clusters)) - 100), gridcolor: plotGrid },
-    yaxis: { title: { text: 'Gene' }, automargin: true, gridcolor: plotGrid },
-  };
 
   return (
     <div className="h-full w-full flex flex-col bg-background overflow-y-auto custom-scrollbar">
@@ -126,7 +127,7 @@ export default function HeatmapPlot({ datasetInfo, pipelineState, sessionReady, 
           <Plot
             data={trace}
             layout={layout}
-            config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+            config={plotConfig}
             style={{ width: '100%', minWidth: categoryPlotWidth(heatmapData?.genes, heatmapData?.clusters), height: '100%' }}
             useResizeHandler
           />

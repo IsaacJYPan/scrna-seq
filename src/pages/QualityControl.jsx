@@ -77,43 +77,56 @@ export default function QualityControl({ callApi, datasetInfo, currentProvId, op
 
 
   useEffect(() => {
+    let active = true;
+    const stop = () => { active = false; };
+
+    if (!datasetInfo) {
+      setDistributions(null);
+      setLoadingDist(false);
+      setError(null);
+      return stop;
+    }
+
     if (datasetInfo && !canMutate) {
       // Detailed distributions come from the owner's private live R object.
       // Project viewers may inspect persisted summary metrics only.
       setDistributions(null);
       setLoadingDist(false);
       setError(null);
-      return;
+      return stop;
     }
     if (datasetInfo && !sessionReady) {
       setDistributions(null);
+      setLoadingDist(false);
       setError(qcUnavailableMessage(null, { datasetInfo, sessionReady }));
-      return;
+      return stop;
     }
 
-    if (datasetInfo && !loadingDist) {
-      // Re-fetch distributions when the R session changes (e.g. after session restore)
-      // so a failed early fetch (before session restore) doesn't persist.
-      setLoadingDist(true);
-      setDistributions(null);
-      callApi('/qc-distributions', {}, { useCache: false })
-        .then(data => {
-          if (data.error) {
-            setError(qcUnavailableMessage(data.error, { datasetInfo, sessionReady }));
-          } else {
-            setDistributions(data);
-            setError(null); // clear any previous 'no object' error
-          }
-          setLoadingDist(false);
-        })
-        .catch(() => {
-          setError('Failed to fetch QC distributions.');
-          setLoadingDist(false);
-        });
-    }
-  // rSessionId triggers re-fetch when session is restored
+    // Re-fetch for every object/session context. A previous request must not
+    // block the new one or commit its data after the workspace has changed.
+    setLoadingDist(true);
+    setDistributions(null);
+    Promise.resolve()
+      .then(() => callApi('/qc-distributions', {}, { useCache: false }))
+      .then(data => {
+        if (!active) return;
+        if (data.error) {
+          setError(qcUnavailableMessage(data.error, { datasetInfo, sessionReady }));
+        } else {
+          setDistributions(data);
+          setError(null); // clear any previous 'no object' error
+        }
+        setLoadingDist(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setError('Failed to fetch QC distributions.');
+        setLoadingDist(false);
+      });
+    return stop;
+  // Fetch scope follows the selected data and session, not callback identity.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetInfo, rSessionId, sessionReady]);
+  }, [datasetInfo, rSessionId, sessionReady, canMutate]);
 
   const mtCutoffNum = Number(mtCutoff);
   const minFeatNum = Number(minFeatures);

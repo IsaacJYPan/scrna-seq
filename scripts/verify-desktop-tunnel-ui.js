@@ -56,8 +56,27 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
   const identities = accounts.map(account => path.join(privateDirectory, account + ' identity')), publicFiles = accounts.map(account => path.join(privateDirectory, account + '_authorized_keys'));
   const hostPort = await portAvailable(), extraLocalPort = await portAvailable(), extraDynamicPort = await portAvailable();
   const checks = [], started = new Set(); let networkCreated = false, application, service;
+  const videoDirectory = path.join(output, 'video');
+  const windowRecords = [];
+  fs.mkdirSync(videoDirectory, { recursive: true });
   fs.mkdirSync(userData, { recursive: true });
   await secureFixtureDirectory(privateDirectory, output);
+  async function recordWindows(checkpoint) {
+    if (!application) return;
+    const record = { checkpoint, recordedAt: new Date().toISOString(), windows: [] };
+    for (const [index, page] of application.windows().entries()) {
+      const nativeWindow = await application.browserWindow(page).catch(() => null);
+      let native = null;
+      if (nativeWindow) {
+        native = await nativeWindow.evaluate(window => ({ bounds: window.getBounds(), visible: window.isVisible(), title: window.getTitle() })).catch(() => null);
+        await nativeWindow.dispose().catch(() => {});
+      }
+      record.windows.push({ index, title: await page.title().catch(() => ''), url: page.url(),
+        viewport: page.viewportSize(), native });
+    }
+    windowRecords.push(record);
+    fs.writeFileSync(path.join(output, 'window-records.json'), JSON.stringify(windowRecords, null, 2) + '\n');
+  }
   function saveSettings(profile, selected = null) { fs.writeFileSync(path.join(userData, 'desktop-settings.json'), JSON.stringify({ schemaVersion: 1, selectedProfileId: selected, profiles: [profile] })); }
   const profile = { id: 'tunneled-lab', name: 'Tunneled lab', kind: 'ssh',
     ssh: { host: aliases[1], remoteHost: '127.0.0.1', remotePort: 8443 } };
@@ -82,22 +101,34 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
       ] : []),
       'require(' + JSON.stringify(path.join(root, 'desktop/main.cjs')) + ');',
     ].join('\n'));
-    application = await electron.launch({ args: [launcher, '--user-data-dir=' + userData], env: { ...process.env, TRACEOMICS_DESKTOP_URL: '' }, timeout: 60000 });
+    application = await electron.launch({ args: [launcher, '--user-data-dir=' + userData],
+      env: { ...process.env, TRACEOMICS_DESKTOP_URL: '' }, artifactsDir: output,
+      recordVideo: { dir: videoDirectory, size: { width: 1200, height: 900 },
+        showActions: { duration: 700, position: 'bottom-right', fontSize: 16 } }, timeout: 60000 });
     application.process().stderr.on('data', chunk => fs.appendFileSync(path.join(output, 'electron-diagnostics.txt'), chunk.toString().split(privateDirectory).join('[private fixture]')));
     const setup = await application.firstWindow();
     if (restoreSelected) {
       await setup.waitForURL(service.endpoint + '**', { timeout: 30_000 });
       await setup.locator('[aria-label="Execution target"]').getByText('SSH tunnel connected', { exact: true }).waitFor({ timeout: 30_000 });
+      await recordWindows('restored-tunneled-workspace');
       return setup;
     }
     await setup.getByRole('heading', { name: 'Choose your research server', exact: true }).waitFor();
-    await setup.locator('#saved-target').selectOption(direct ? 'direct-lab' : profile.id); return setup;
+    await setup.locator('#saved-target').selectOption(direct ? 'direct-lab' : profile.id);
+    await recordWindows(direct ? 'direct-connection-settings' : 'ssh-connection-settings');
+    return setup;
   }
   async function connect(setup) {
     const waiting = application.waitForEvent('window'); await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click();
-    const page = await waiting; await page.waitForURL(service.endpoint + '**', { timeout: 30000 }); return page;
+    const page = await waiting; await page.waitForURL(service.endpoint + '**', { timeout: 30000 });
+    await recordWindows('opened-project-service'); return page;
   }
-  async function openSettings(page) { const waiting = application.waitForEvent('window'); await page.evaluate(() => window.desktopShell.openTargetSettings()); const setup = await waiting; await setup.locator('#saved-target').selectOption(profile.id); return setup; }
+  async function openSettings(page) { const waiting = application.waitForEvent('window'); await page.evaluate(() => window.desktopShell.openTargetSettings()); const setup = await waiting; await setup.locator('#saved-target').selectOption(profile.id); await recordWindows('opened-connection-settings'); return setup; }
+  async function setRemoteServicePort(setup, port) {
+    const disclosure = setup.locator('#ssh-advanced');
+    if (!(await disclosure.evaluate(element => element.open))) await disclosure.locator('summary').click();
+    await setup.locator('#remote-port').fill(String(port));
+  }
   async function restartWorkspace() {
     const previousPort = await application.evaluate(() => globalThis.__fixtureTunnelPort);
     await application.close(); application = null;
@@ -138,6 +169,7 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     await peer.locator('[aria-label="Execution target"]').getByText('SSH tunnel connected', { exact: true }).waitFor({ timeout: 30_000 });
     assert((await peer.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200,
       'The disposable peer did not share the actual authenticated HTTPS target partition.');
+    await recordWindows('shared-session-peer-window');
     return peer;
   }
   async function failedConnect(setup, expression) { await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); await setup.getByRole('alert').filter({ hasText: expression }).waitFor({ timeout: 30000 }); }
@@ -307,11 +339,11 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     assert((await workspace.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200, 'Failed certificate switching disconnected the old authenticated tunnel.');
     await setup.screenshot({ path: path.join(output, 'wrong-authority-preserves-workspace.png'), fullPage: true });
     checks.push('actual certificate hostname mismatch rejects the candidate and preserves the old authenticated workspace and native tunnel');
-    await setup.locator('#server-url').fill(service.endpoint); await setup.locator('#remote-port').fill('1');
+    await setup.locator('#server-url').fill(service.endpoint); await setRemoteServicePort(setup, 1);
     await failedConnect(setup, /could not reach|could not forward|canceled/i);
     assert((await workspace.evaluate(async () => (await fetch('/api/auth/session')).status)) === 200, 'Failed destination forwarding displaced the current tunnel.');
     checks.push('actual refused loopback service forwarding fails before switching and preserves the existing session');
-    await setup.locator('#remote-port').fill('8444');
+    await setRemoteServicePort(setup, 8444);
     const openssl = process.platform === 'win32' && fs.existsSync('C:\\Program Files\\Git\\usr\\bin\\openssl.exe') ? 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe' : 'openssl';
     const tlsDirectory = path.dirname(service.caCertificatePath), expiredCertificate = path.join(privateDirectory, 'expired-leaf.pem');
     await command(openssl, ['x509', '-req', '-in', path.join(tlsDirectory, 'leaf.csr'), '-CA', service.caCertificatePath,
@@ -335,32 +367,43 @@ async function runDesktopTunnelAcceptance({ artifactDirectory,
     const alternateState = await alternate.evaluate(async () => ({ remembered: localStorage.getItem('tunnel-selected-project'), status: (await fetch('/api/auth/session')).status }));
     assert(alternateState.remembered === null && alternateState.status === 401, 'Switching resolved service identities carried project selection or session credentials.');
     checks.push('switching another SSH loopback service creates an isolated cookie/storage partition even with the same HTTPS authority');
-    setup = await openSettings(alternate); await setup.locator('#remote-port').fill('8443'); const returning = application.waitForEvent('window'); await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); const restored = await returning;
+    setup = await openSettings(alternate); await setRemoteServicePort(setup, 8443); const returning = application.waitForEvent('window'); await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); const restored = await returning;
     await restored.locator('[aria-label="Execution target"]').getByText('SSH tunnel connected', { exact: true }).waitFor({ timeout: 30000 });
     assert(await restored.evaluate(() => localStorage.getItem('tunnel-selected-project')) === 'original-project-selection', 'The original service partition did not restore.');
     checks.push('returning to the original resolved service restores only its own authenticated session and workspace selection');
-    setup = await openSettings(restored); const closedPort = await application.evaluate(() => globalThis.__fixtureTunnelPort);
+    setup = await openSettings(restored);
+    await setup.screenshot({ path: path.join(output, 'native-tunnel-connected-settings.png'), fullPage: true });
+    const closedPort = await application.evaluate(() => globalThis.__fixtureTunnelPort);
     await setup.getByRole('button', { name: 'Disconnect SSH tunnel', exact: true }).click();
     await restored.locator('[aria-label="Execution target"]').getByText('SSH tunnel disconnected', { exact: true }).waitFor();
     await waitFor(async () => !(await isListening(closedPort)), 'Explicit native disconnect left its owned forward listening.');
     assert((await restored.evaluate(() => window.desktopShell.getCurrentTarget())).sshAuthentication.applicationConnected === false, 'Disconnect kept authenticated application connectivity in metadata.');
+    await setup.screenshot({ path: path.join(output, 'native-tunnel-disconnected-settings.png'), fullPage: true });
+    await recordWindows('explicitly-disconnected');
     const reconnecting = application.waitForEvent('window'); await setup.getByRole('button', { name: 'Connect HTTPS service', exact: true }).click(); const reconnected = await reconnecting;
     await reconnected.locator('[aria-label="Execution target"]').getByText('SSH tunnel connected', { exact: true }).waitFor({ timeout: 30000 });
     assert(await reconnected.evaluate(() => localStorage.getItem('tunnel-selected-project')) === 'original-project-selection', 'Native reconnect lost the original service selection.');
+    await reconnected.screenshot({ path: path.join(output, 'native-tunnel-reconnected-workspace.png') });
+    await recordWindows('explicitly-reconnected');
     checks.push('explicit native disconnect removes only the owned forward and an explicit reconnect restores the same isolated authenticated workspace');
     await command('docker', ['stop', names[1]]); started.delete(names[1]);
     await reconnected.locator('[aria-label="Execution target"]').getByText('SSH tunnel disconnected', { exact: true }).waitFor({ timeout: 20000 });
     assert((await reconnected.evaluate(() => window.desktopShell.getCurrentTarget())).status === 'disconnected', 'Native transport loss still claimed application connectivity.');
     assert(await reconnected.evaluate(async () => { try { await fetch('/api/auth/session'); return false; } catch { return true; } }), 'Transport loss silently used a direct or local service.');
     await reconnected.screenshot({ path: path.join(output, 'native-tunnel-loss-workspace.png') });
+    await recordWindows('ssh-daemon-lost');
     checks.push('actual SSH daemon loss updates the existing React workspace, disables remote requests and never falls back to another service');
     await application.close(); application = null;
     await waitFor(async () => !fs.readdirSync(userData).some(name => name.startsWith('.ssh-route-') || name.startsWith('.ssh-policy-')), 'Closing desktop left an owned native policy behind.');
     assert(digest(nativeConfigFile) === nativeHash && digest(nativeKnownHosts) === trustHash && digest(includedFile) === includeHash, 'Tunneling modified user-owned native SSH policy.');
     for (let index = 0; index < originalFiles.length; index++) assert(digest(originalFiles[index]) === originalHashes[index], 'Acceptance modified the real user SSH configuration or trust.');
     checks.push('window shutdown cleans owned route snapshots and tunnel descendants while user SSH policy, trust, keys and agents remain untouched');
-    fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ ok: true, checks, endpoint: service.endpoint }, null, 2) + '\n');
-    return { ok: true, checks: checks.length, artifactDirectory: output };
+    const videos = fs.readdirSync(videoDirectory).filter(name => name.endsWith('.webm')).sort();
+    fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ ok: true, checks, endpoint: service.endpoint,
+      videoFiles: videos.map(name => path.join('video', name)), windowRecordCount: windowRecords.length,
+      screenshots: fs.readdirSync(output).filter(name => name.endsWith('.png')).length }, null, 2) + '\n');
+    return { ok: true, checks: checks.length, videos: videos.length, windows: windowRecords.length,
+      screenshots: fs.readdirSync(output).filter(name => name.endsWith('.png')).length, artifactDirectory: output };
   } catch (error) {
     if (application) { for (const [index, page] of application.windows().entries()) await page.screenshot({ path: path.join(output, 'failure-' + index + '.png'), fullPage: true }).catch(() => {}); }
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ ok: false, checks, error: error.message }, null, 2) + '\n'); throw error;

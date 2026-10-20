@@ -12,7 +12,7 @@
      both white and lightly tinted surfaces. */
   --color-textMuted: #5c5c62;
   --color-success: #1f6f35;
-  --color-danger: #d70015;
+  --color-danger: #b91c1c;
 }
 
 @layer base {
@@ -51,6 +51,21 @@
 }
 
 @layer components {
+  .pipeline-settings { container-type: inline-size; }
+  .pipeline-step-row { display: grid; grid-template-columns: 11rem minmax(0, 1fr); align-items: start; gap: 1.5rem; padding: 1.25rem; }
+  .pipeline-step-heading { display: flex; align-items: baseline; gap: 0.75rem; }
+  .pipeline-step-number { color: var(--color-textMuted); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+  .pipeline-step-fields { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; min-width: 0; }
+  .pipeline-parameter { display: flex; flex: 1 1 10rem; flex-direction: column; gap: 0.5rem; min-width: 0; max-width: 16rem; color: var(--color-text); font-size: 0.8125rem; font-weight: 500; }
+  .pipeline-parameter .input { min-height: 40px; width: 100%; margin: 0; font-weight: 400; }
+  .pipeline-qc-toggle { display: flex; flex: 0 0 100%; align-items: center; gap: 0.5rem; min-height: 24px; color: var(--color-text); font-size: 0.8125rem; font-weight: 500; }
+  .pipeline-qc-toggle input { width: 1rem; height: 1rem; accent-color: var(--color-primary); }
+  @container (max-width: 40rem) {
+    .pipeline-step-row { grid-template-columns: minmax(0, 1fr); gap: 1rem; padding: 1rem; }
+  }
+  @media (max-width: 639px) {
+    .pipeline-parameter .input, .pipeline-qc-toggle { min-height: 44px; }
+  }
   .btn {
     @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-semibold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-50 disabled:pointer-events-none;
     min-height: 40px;
@@ -295,6 +310,34 @@
      blue with white text). Applies to text-primary spans and icon fills. */
   :root[data-theme="dark"] .text-primary {
     color: #93c5fd !important;
+  }
+  /* Error text needs contrast against its tinted alert surface. Keep solid
+     danger fills independent so their button foregrounds are unchanged. */
+  :root[data-theme="dark"] .text-danger {
+    color: #ff8589 !important;
+  }
+  /* Plot exports can finish while a dialog opens. Keep their brief status
+     below modal layers, with readable text and ordinary word wrapping. */
+  .plotly-notifier {
+    z-index: 40 !important;
+    max-width: min(22rem, calc(100vw - 2rem)) !important;
+    right: 1rem !important;
+  }
+  .plotly-notifier .notifier-note {
+    min-width: 0 !important;
+    max-width: none !important;
+    margin-bottom: 0.5rem !important;
+    border: 1px solid var(--color-border) !important;
+    border-radius: 0.75rem !important;
+    background: var(--color-surface) !important;
+    color: var(--color-text) !important;
+    box-shadow: var(--elev-2);
+    font: 0.875rem/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    hyphens: none !important;
+    overflow-wrap: anywhere !important;
+  }
+  .plotly-notifier .notifier-close {
+    color: var(--color-textMuted) !important;
   }
 
   /* Semantic accent TEXT (amber/cyan/emerald/rose/violet/sky) was authored at

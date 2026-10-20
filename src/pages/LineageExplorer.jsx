@@ -411,7 +411,7 @@ export default function LineageExplorer({ currentWs, datasetInfo, theme }) {
             )}
             {graphNodes.length > 0 && <button type="button" onClick={fitGraph} className="absolute right-3 top-3 z-10 flex min-h-11 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm font-semibold text-text shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"><Maximize2 size={16} aria-hidden="true" />Fit graph to view</button>}
           </section>
-          <aside className="min-h-0 bg-surface p-4 custom-scrollbar sm:p-6 lg:col-span-4 lg:overflow-y-auto">
+          <aside tabIndex={0} aria-label="Lineage details" className="min-h-0 bg-surface p-4 custom-scrollbar sm:p-6 lg:col-span-4 lg:overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-inset">
             {selectedNode ? (
               <div className="space-y-5">
                 <div>

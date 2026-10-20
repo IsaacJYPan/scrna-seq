@@ -1,5 +1,6 @@
 import WorkbenchOverview from '../components/WorkbenchOverview';
 import DetailsPopover from '../components/DetailsPopover';
+import SeuratPipelineSettings from '../components/SeuratPipelineSettings';
 import React, { useRef, useState } from 'react';
 import {
   Database, FileUp, Zap, CheckCircle, Info, Globe, Lock,
@@ -788,7 +789,8 @@ function rawDatasetObjectName(dataset) {
 function scrubEmptyParams(params) {
   const out = {};
   for (const [key, value] of Object.entries(params || {})) {
-    if (value !== '') out[key] = value;
+    if (value !== '') out[key] = value !== null && (key === 'seed' || key === 'umapComponents' || SEURAT_NUMERIC_CONTROLS.some(control => control.key === key))
+      ? Number(value) : value;
   }
   return out;
 }
@@ -803,6 +805,8 @@ export function SeuratPipelinePanel({
   datasetUploadsEnabled = true,
   canWriteProject = false,
 }) {
+  const [analysisApproach, setAnalysisApproach] = useState('automatic');
+  const approachId = React.useId();
   const [workflowMode, setWorkflowMode] = useState('scrna');
   const [datasets, setDatasets] = useState([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState('');
@@ -875,12 +879,31 @@ export function SeuratPipelinePanel({
     ...(Array.isArray(job?.warnings) ? job.warnings : []),
     ...(Array.isArray(summaryArtifact?.metadata?.warnings) ? summaryArtifact.metadata.warnings : []),
   ];
-  const checkpointAttached = loadJob?.status === 'completed' || resultObject?.liveState === 'attached';
+  const checkpointAttached = (loadJob?.status === 'completed' && loadJob.analysisObjectId === resultObjectId) || resultObject?.liveState === 'attached';
   const loadCompleted = checkpointAttached;
   const loadJobErrorMessage = loadJob?.status === 'failed'
     ? publicErrorMessage(loadJob.error, 'Opening this saved version needs attention.')
     : null;
   const canContinueToDeg = Boolean(resultObjectId && checkpointAttached);
+  const guidedReady = selectedObject?.projectId === activeProjectId && selectedObject?.liveState === 'attached';
+  const hasRunActivity = Boolean(job || loadJob || jobStatus.launching || jobStatus.error || loadStatus.error);
+  const changeApproachWithKeys = event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'automatic' : event.key === 'End' ? 'guided' : analysisApproach === 'automatic' ? 'guided' : 'automatic';
+    setAnalysisApproach(next);
+    document.getElementById(`${approachId}-${next}-tab`)?.focus();
+  };
+  const openGuidedStep = route => {
+    if (!guidedReady) return;
+    onSelectAnalysisObject?.(activeProjectId, selectedObject.id);
+    setActiveTab?.(route);
+  };
+  const inspectPipelineResult = () => {
+    if (!canContinueToDeg) return;
+    onSelectAnalysisObject?.(activeProjectId, resultObjectId);
+    setActiveTab?.('qc');
+  };
 
   const loadDatasets = React.useCallback(async () => {
     if (!activeProjectId) {
@@ -1064,6 +1087,8 @@ export function SeuratPipelinePanel({
       return;
     }
     setJobStatus({ launching: true, refreshing: false, error: null });
+    setLoadJob(null);
+    setLoadStatus({ launching: false, refreshing: false, error: null });
     setLogs([]);
     setArtifacts([]);
     try {
@@ -1197,22 +1222,35 @@ export function SeuratPipelinePanel({
   }, [multiSampleMode, multiSampleRows]);
 
   return (
-    <section className="rounded-lg border border-border bg-surface/70 p-5" data-testid="seurat-pipeline-panel">
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <h3 className="text-xl font-black tracking-tight text-text">Supported Seurat workflows</h3>
-            <StatusPill label="Approved workflow" tone="blue" />
-            <StatusPill label={workflow.shortFormatLabel} tone="green" />
-          </div>
-          <p className="max-w-3xl text-sm text-textMuted">
-            {spatialMode
-              ? 'This path supports classic 10x Visium Space Ranger output bundles containing the filtered matrix plus spatial image and coordinate files. Visium HD and Xenium are not accepted by this workflow.'
-              : multiSampleMode
-                ? 'Upload one 10x HDF5 file per biological sample, assign each sample to a condition, and create one checkpoint-backed Seurat analysis with sample and condition metadata.'
-                : 'This path supports 10x Genomics filtered feature-barcode matrix HDF5 files (`.h5`). Other formats are not labeled as supported here.'}
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Seurat workflow type">
+    <section className="rounded-lg border border-border bg-surface/70 p-4 sm:p-5" data-testid="seurat-pipeline-panel">
+      <h3 className="text-xl font-bold tracking-tight text-text">Seurat analysis</h3>
+      <div className="mt-4 flex border-b border-border" role="tablist" aria-label="Analysis approach">
+        {[['automatic', 'Run whole pipeline'], ['guided', 'Inspect step by step']].map(([mode, label]) => (
+          <button key={mode} type="button" role="tab" id={`${approachId}-${mode}-tab`}
+            aria-controls={`${approachId}-${mode}-panel`} aria-selected={analysisApproach === mode}
+            tabIndex={analysisApproach === mode ? 0 : -1} onKeyDown={changeApproachWithKeys}
+            onClick={() => setAnalysisApproach(mode)}
+            className={`min-h-12 border-b-2 px-3 py-3 text-sm font-semibold transition-colors sm:px-5 ${analysisApproach === mode ? 'border-primary text-primary' : 'border-transparent text-textMuted hover:text-text hover:border-border'}`}
+          >{label}</button>
+        ))}
+      </div>
+
+      {!activeProjectId ? (
+        <div className="mt-5 rounded border border-dashed border-border p-5 text-sm text-textMuted">
+          Select or create a project before uploading data or running the Seurat workflow.
+        </div>
+      ) : (
+        <div className="mt-5 space-y-5">
+          {!canWriteProject && (
+            <div className="rounded border border-border bg-surface px-3 py-2 text-sm text-textMuted" role="note">
+              This project is read-only for your role. You can review workflow settings and results, but only an owner, administrator, or analyst can upload data or start a run.
+            </div>
+          )}
+          <div role="tabpanel" id={`${approachId}-automatic-panel`} aria-labelledby={`${approachId}-automatic-tab`}
+            hidden={analysisApproach !== 'automatic'} className="space-y-4">
+            <p className="text-sm text-textMuted">Set every step below, then submit one job from input to UMAP. Inspect the results when it finishes.</p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap gap-2" role="group" aria-label="Seurat workflow type">
             <button
               type="button"
               aria-pressed={workflowMode === 'scrna'}
@@ -1237,31 +1275,19 @@ export function SeuratPipelinePanel({
             >
               Spatial transcriptomics (Visium)
             </button>
-          </div>
-        </div>
-        <button onClick={loadDatasets} disabled={!activeProjectId || datasetStatus.loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
-          {datasetStatus.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-          Refresh datasets
-        </button>
-      </div>
-
-      {!activeProjectId ? (
-        <div className="rounded border border-dashed border-border p-5 text-sm text-textMuted">
-          Select or create a project before uploading data or running the Seurat workflow.
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
-          <div className="space-y-4">
-            {!canWriteProject && (
-              <div className="rounded border border-border bg-surface px-3 py-2 text-sm text-textMuted" role="note">
-                This project is read-only for your role. You can review approved workflow settings and recorded results, but only an owner, administrator, or analyst can upload data or start a run.
               </div>
-            )}
+              <button onClick={loadDatasets} disabled={datasetStatus.loading} className="btn btn-secondary inline-flex items-center gap-2 text-sm">
+                {datasetStatus.loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                Refresh datasets
+              </button>
+            </div>
             <div className="rounded border border-border bg-background/40 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h4 className="font-bold text-text">Dataset upload / selection</h4>
                   <p className="mt-1 text-xs text-textMuted">Supported format: {workflow.formatLabel}.</p>
+                  {spatialMode && <p className="mt-1 text-xs text-textMuted">Visium HD and Xenium are not accepted by this workflow.</p>}
+                  {multiSampleMode && <p className="mt-1 text-xs text-textMuted">Use one file per biological sample and assign its condition below.</p>}
                 </div>
                 {datasetUploadsEnabled && canWriteProject ? <label className="btn btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
                   <FileUp size={16} />
@@ -1354,75 +1380,10 @@ export function SeuratPipelinePanel({
               )}
             </div>
 
-            <div className="rounded border border-border bg-background/40 p-4">
-              <h4 className="mb-3 font-bold text-text">Launch parameters</h4>
-              <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2 xl:grid-cols-3">
-                <label className="rounded border border-border bg-surface p-3">
-                  <span className="block font-bold text-textMuted">Normalization</span>
-                  <select
-                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-text"
-                    value={params.normalizationMethod}
-                    onChange={event => setParams(prev => ({ ...prev, normalizationMethod: event.target.value }))}
-                  >
-                    <option value="LogNormalize">LogNormalize</option>
-                    <option value="SCTransform">SCTransform</option>
-                  </select>
-                </label>
-                <label className="rounded border border-border bg-surface p-3">
-                  <span className="block font-bold text-textMuted">UMAP components</span>
-                  <select
-                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-text"
-                    value={params.umapComponents}
-                    onChange={event => setParams(prev => ({ ...prev, umapComponents: Number(event.target.value) }))}
-                  >
-                    <option value={2}>2</option>
-                    <option value={3}>3</option>
-                  </select>
-                </label>
-                <label className="flex items-center gap-2 rounded border border-border bg-surface p-3 font-bold text-textMuted">
-                  <input
-                    type="checkbox"
-                    checked={params.applyQcFilter}
-                    onChange={event => setParams(prev => ({ ...prev, applyQcFilter: event.target.checked }))}
-                  />
-                  Apply QC filter
-                </label>
-                {SEURAT_NUMERIC_CONTROLS.map(control => (
-                  <label key={control.key} className="rounded border border-border bg-surface p-3">
-                    <span className="block font-bold text-textMuted">{control.label}</span>
-                    <input
-                      type="number"
-                      min={control.min}
-                      max={control.max}
-                      step={control.step}
-                      className="mt-1 w-full rounded border border-border bg-background px-2 py-1 font-mono text-text"
-                      value={params[control.key]}
-                      onChange={event => setParams(prev => ({
-                        ...prev,
-                        [control.key]: event.target.value === '' ? '' : Number(event.target.value),
-                      }))}
-                    />
-                  </label>
-                ))}
-                <label className="rounded border border-border bg-surface p-3">
-                  <span className="block font-bold text-textMuted">Seed (optional)</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={2147483647}
-                    step={1}
-                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1 font-mono text-text"
-                    value={params.seed ?? ''}
-                    onChange={event => setParams(prev => ({
-                      ...prev,
-                      seed: event.target.value === '' ? null : Number(event.target.value),
-                    }))}
-                  />
-                </label>
-              </div>
-              <div className="mt-3 rounded border border-border bg-surface px-3 py-2 text-xs text-textMuted">
-                Input analysis: <span className="text-text">{inputObject?.displayName || inputObject?.name || 'Will be created from the selected dataset'}</span>
-              </div>
+            <div className="overflow-hidden rounded border border-border bg-background/40">
+              <h4 className="border-b border-border px-4 py-3 font-semibold text-text sm:px-5">Pipeline settings</h4>
+              <SeuratPipelineSettings params={params} setParams={setParams} controls={SEURAT_NUMERIC_CONTROLS} />
+              <div className="border-t border-border p-4 sm:p-5">
               {multiSampleMode && (
                 <div className="mt-3 rounded border border-primary/20 bg-primary/5 px-3 py-3 text-xs text-textMuted" role="status">
                   <p className="font-bold text-text">Multi-condition preparation</p>
@@ -1473,15 +1434,46 @@ export function SeuratPipelinePanel({
                   ? 'Run spatial Seurat preprocessing'
                   : multiSampleMode ? 'Prepare multi-condition analysis' : 'Run Seurat preprocessing'}
               </button>
-              {jobStatus.error && (
-                <div className="mt-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-                  {safeMessage(jobStatus.error)}
-                </div>
-              )}
+              </div>
             </div>
           </div>
 
-          <div className="space-y-4">
+          <div role="tabpanel" id={`${approachId}-guided-panel`} aria-labelledby={`${approachId}-guided-tab`}
+            hidden={analysisApproach !== 'guided'} className="space-y-4">
+            <p className="max-w-3xl text-sm leading-relaxed text-textMuted">Run and review one step at a time. Use each result to choose the settings for the next step.</p>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-border bg-background/40 px-4 py-3">
+              <div className="min-w-0">
+                <p className="text-xs text-textMuted">Analysis to inspect</p>
+                <p className="mt-1 break-words font-semibold text-text">{selectedObject?.displayName || selectedObject?.name || 'No analysis selected'}</p>
+                {!guidedReady && <p className="mt-1 text-sm text-textMuted">Open an analysis in the workspace to start inspecting its steps.</p>}
+              </div>
+              <button type="button" onClick={() => setActiveTab?.('workspace')} className="btn btn-secondary text-sm">
+                {guidedReady ? 'Change analysis' : 'Choose / open analysis'}
+              </button>
+            </div>
+            <ol className="divide-y divide-border rounded border border-border bg-background/40">
+              {[
+                ['inspect', 'Inspect', 'Check the input data and metadata.'],
+                ['qc', 'Quality control', 'Review distributions and choose cell filters.'],
+                ['normalize', 'Normalization', 'Choose a method and variable features.'],
+                ['integrate', 'Integration (optional)', 'Combine samples when integration is needed.'],
+                ['pca', 'PCA', 'Review principal components before choosing dimensions.'],
+                ['cluster', 'Clustering', 'Compare groups and adjust resolution.'],
+                ['umap', 'UMAP', 'Review the cell embedding.'],
+              ].map(([route, title, description], index) => (
+                <li key={route} className="flex flex-wrap items-center justify-between gap-3 p-4">
+                  <div className="flex min-w-0 flex-1 items-baseline gap-3">
+                    <span className="pipeline-step-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                    <div><h4 className="font-semibold text-text">{title}</h4><p className="mt-1 text-xs leading-relaxed text-textMuted">{description}</p></div>
+                  </div>
+                  <button type="button" onClick={() => openGuidedStep(route)} disabled={!guidedReady}
+                    className="btn btn-secondary text-sm" aria-label={`Open ${title}`}>Open</button>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          {hasRunActivity && <div className="grid grid-cols-1 gap-4 lg:grid-cols-2" aria-label="Pipeline run">
             <div className="rounded border border-border bg-background/40 p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h4 className="font-bold text-text">Run status</h4>
@@ -1492,6 +1484,7 @@ export function SeuratPipelinePanel({
                   </button>
                 )}
               </div>
+              {jobStatus.error && <div className="mb-3 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">{safeMessage(jobStatus.error)}</div>}
               {!job ? (
                 <p className="text-sm text-textMuted">No {spatialMode ? 'spatial Seurat' : multiSampleMode ? 'multi-condition Seurat' : 'Seurat'} preprocessing run has been launched from this panel yet.</p>
               ) : (
@@ -1572,6 +1565,11 @@ export function SeuratPipelinePanel({
                   </button>
                 )}
                 <button
+                  onClick={inspectPipelineResult}
+                  disabled={!canContinueToDeg}
+                  className="btn btn-secondary text-sm disabled:opacity-50"
+                >Inspect this result step by step</button>
+                <button
                   onClick={continueToDeg}
                   disabled={!canContinueToDeg}
                   className="btn btn-primary inline-flex items-center gap-2 text-sm disabled:opacity-50"
@@ -1593,12 +1591,12 @@ export function SeuratPipelinePanel({
               </div>
             </div>
 
-            <div className="rounded border border-border bg-background/40 p-4">
-              <h4 className="mb-3 font-bold text-text">Run notes</h4>
+            <details className="rounded border border-border bg-background/40 p-4 lg:col-span-2">
+              <summary className="cursor-pointer font-semibold text-textMuted hover:text-text">Run notes</summary>
               {logs.length === 0 ? (
                 <p className="text-sm text-textMuted">Run notes will appear when compute begins.</p>
               ) : (
-                <div className="max-h-44 space-y-2 overflow-y-auto custom-scrollbar">
+                <div className="mt-3 max-h-44 space-y-2 overflow-y-auto custom-scrollbar">
                   {logs.map((entry, index) => (
                     <div key={`${entry?.ts || index}-${index}`} className="rounded border border-border bg-surface p-2 text-xs">
                       <div className="font-mono text-textMuted">{formatDate(entry?.ts)} / {entry?.level || 'info'}</div>
@@ -1607,8 +1605,8 @@ export function SeuratPipelinePanel({
                   ))}
                 </div>
               )}
-            </div>
-          </div>
+            </details>
+          </div>}
         </div>
       )}
     </section>
