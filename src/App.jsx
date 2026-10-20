@@ -1371,8 +1371,10 @@ export default function App() {
             projectId={activeProjectIdForPipeline}
             projectName={currentWs?.projects?.find(project => project.id === activeProjectIdForPipeline)?.name}
             role={currentWs?.projects?.find(project => project.id === activeProjectIdForPipeline)?.role}
+            theme={theme}
             isActive={activeTab === 'analyses'}
             onOpenWorkspace={() => setActiveTab('workspace')}
+            onOpenAdvanced={() => setActiveTab('expert-r')}
           />
         </TabContent></ErrorBoundary>
         <ErrorBoundary key="pipeline-manager"><TabContent id="pipeline-manager" activeTab={activeTab}>
@@ -1461,9 +1463,9 @@ export default function App() {
             <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>
           </div>
         )}
-        <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}
+        {(activeTab !== 'analyses' || unsavedLiveChanges || ['saving', 'opening', 'pending', 'error'].includes(checkpointSaveState.phase)) && <AnalysisStatusBar datasetInfo={datasetInfo} unsavedLiveChanges={unsavedLiveChanges}
           checkpointSaveState={checkpointSaveState} checkpointSaveBusy={checkpointSaveBusy}
-          onSave={() => void handleSaveLiveAnalysis()} onOpenHistory={() => setActiveTab('history')} />
+          onSave={() => void handleSaveLiveAnalysis()} onOpenHistory={() => setActiveTab('history')} />}
         <div className="min-h-0 flex-1">{renderContent()}</div>
       </main>
 

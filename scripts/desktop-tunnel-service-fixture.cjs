@@ -89,7 +89,7 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
   let stopped = false;
   const responseFaults = new Set();
   function interceptNextResponse({ method, pathname, mode }) {
-    if (!['GET', 'POST'].includes(method) || !['drop', 'hold'].includes(mode)
+    if (!['GET', 'POST', 'PUT'].includes(method) || !['drop', 'hold'].includes(mode)
       || typeof pathname !== 'string' || !pathname.startsWith('/api/') || pathname.length > 256 || pathname.includes('?')) {
       throw new Error('A disposable response fault requires an exact bounded API method and path.');
     }

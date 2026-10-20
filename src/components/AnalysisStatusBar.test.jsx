@@ -47,7 +47,7 @@ describe('Analysis status', () => {
   it('offers opening a durable saved version without suggesting it is live or editable', () => {
     const onOpenHistory = vi.fn();
     render(<AnalysisStatusBar {...base} datasetInfo={{ ...base.datasetInfo, liveState: 'saved' }} onOpenHistory={onOpenHistory} />);
-    expect(screen.getByRole('status')).toHaveTextContent('Saved analysis selected');
+    expect(screen.getByRole('status')).toHaveTextContent('Saved object selected');
     expect(screen.queryByRole('button', { name: 'Save current analysis' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Open saved analysis from Runs & Results' }));
     expect(onOpenHistory).toHaveBeenCalledOnce();

@@ -12,7 +12,7 @@ export default function AnalysisStatusBar({ datasetInfo, unsavedLiveChanges, che
   const phase = checkpointSaveState.phase;
   const liveAttached = datasetInfo.liveState === 'attached';
   const savedButNotOpened = phase === 'error' && checkpointSaveState.durableSaved;
-  const status = savedButNotOpened ? 'Saved; opening failed' : PHASE_LABEL[phase] || (unsavedLiveChanges ? 'Unsaved live changes.' : liveAttached ? 'Live analysis' : 'Saved analysis selected');
+  const status = savedButNotOpened ? 'Saved; opening failed' : PHASE_LABEL[phase] || (unsavedLiveChanges ? 'Unsaved live changes.' : liveAttached ? 'Live analysis' : 'Saved object selected');
   const attention = unsavedLiveChanges || phase === 'error' || phase === 'pending';
   return <section aria-label="Analysis status" className={`shrink-0 h-16 border-b border-border px-4 flex items-center justify-between gap-3 ${attention ? 'bg-amber-500/10' : 'bg-surface'}`}>
     <div className="min-w-0 flex-1">

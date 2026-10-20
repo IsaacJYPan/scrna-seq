@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261019, now())
+VALUES ('traceomics.runtime', 20261020, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1220,3 +1220,96 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_research_analysis_revision_immutable ON research_analysis_revisions;
 CREATE TRIGGER trg_research_analysis_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_revisions
   FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
+
+-- Authored notebooks are explicitly shared project documents. Source remains
+-- separate from private execution records; saving never executes code.
+CREATE TABLE IF NOT EXISTS research_documents (
+  id TEXT PRIMARY KEY CHECK(id ~ '^doc_[a-f0-9]{24}$'),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  updated_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  title TEXT NOT NULL CHECK(char_length(title) BETWEEN 1 AND 160),
+  version INTEGER NOT NULL CHECK(version > 0),
+  head_version_id TEXT NOT NULL CHECK(head_version_id ~ '^dv_[a-f0-9]{24}$'),
+  sha256 TEXT NOT NULL CHECK(sha256 ~ '^[a-f0-9]{64}$'),
+  content_bytes INTEGER NOT NULL CHECK(content_bytes BETWEEN 0 AND 1048576),
+  cell_count INTEGER NOT NULL CHECK(cell_count BETWEEN 0 AND 2000),
+  code_cell_count INTEGER NOT NULL CHECK(code_cell_count BETWEEN 0 AND cell_count),
+  default_language TEXT NOT NULL CHECK(default_language IN ('R','python')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(id,project_id,analysis_id),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_document_analysis_created ON research_documents(project_id,analysis_id,created_at DESC,id DESC);
+
+CREATE TABLE IF NOT EXISTS research_document_revisions (
+  id TEXT PRIMARY KEY CHECK(id ~ '^dv_[a-f0-9]{24}$'),
+  document_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  version INTEGER NOT NULL CHECK(version > 0),
+  title TEXT NOT NULL CHECK(char_length(title) BETWEEN 1 AND 160),
+  content_json JSONB NOT NULL CHECK(jsonb_typeof(content_json)='object' AND octet_length(content_json::text)<=2097152),
+  sha256 TEXT NOT NULL CHECK(sha256 ~ '^[a-f0-9]{64}$'),
+  content_bytes INTEGER NOT NULL CHECK(content_bytes BETWEEN 0 AND 1048576),
+  actor_user_id BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(document_id,version),
+  UNIQUE(document_id,id),
+  UNIQUE(document_id,id,version),
+  FOREIGN KEY(document_id,project_id,analysis_id) REFERENCES research_documents(id,project_id,analysis_id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_document_revision_project ON research_document_revisions(project_id,analysis_id,document_id,version);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_research_document_head' AND conrelid='research_documents'::regclass) THEN
+    ALTER TABLE research_documents ADD CONSTRAINT fk_research_document_head
+      FOREIGN KEY(id,head_version_id,version) REFERENCES research_document_revisions(document_id,id,version)
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS research_document_submissions (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  actor_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('create','save')),
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  expected_version INTEGER,
+  version_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id,analysis_id,actor_user_id,request_id),
+  FOREIGN KEY(document_id,project_id,analysis_id) REFERENCES research_documents(id,project_id,analysis_id),
+  FOREIGN KEY(document_id,version_id) REFERENCES research_document_revisions(document_id,id),
+  CHECK((action='create' AND expected_version IS NULL) OR (action='save' AND expected_version > 0))
+);
+
+CREATE OR REPLACE FUNCTION enforce_research_document_identity() RETURNS TRIGGER AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.project_id,NEW.analysis_id,NEW.created_by_user_id,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.project_id,OLD.analysis_id,OLD.created_by_user_id,OLD.created_at)
+  THEN RAISE EXCEPTION 'Notebook identity is immutable' USING ERRCODE='55000'; END IF;
+  IF NEW.version<>OLD.version+1 OR NEW.head_version_id=OLD.head_version_id
+  THEN RAISE EXCEPTION 'Notebook updates require a new exact saved version' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_research_document_identity ON research_documents;
+CREATE TRIGGER trg_research_document_identity BEFORE UPDATE ON research_documents
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_document_identity();
+
+CREATE OR REPLACE FUNCTION enforce_research_document_evidence_immutable() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Notebook versions and save receipts are append-only' USING ERRCODE='55000';
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_research_document_revision_immutable ON research_document_revisions;
+CREATE TRIGGER trg_research_document_revision_immutable BEFORE UPDATE OR DELETE ON research_document_revisions
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_document_evidence_immutable();
+DROP TRIGGER IF EXISTS trg_research_document_submission_immutable ON research_document_submissions;
+CREATE TRIGGER trg_research_document_submission_immutable BEFORE UPDATE OR DELETE ON research_document_submissions
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_document_evidence_immutable();

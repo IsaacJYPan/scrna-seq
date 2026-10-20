@@ -85,6 +85,8 @@
     "test:server-data-import-browser": "npm run build && node scripts/verify-server-data-import-ui.js",
     "test:artifact-versions-browser": "node scripts/verify-artifact-versions-ui.js",
     "test:research-analyses-browser": "npm run build && node scripts/verify-research-analyses-ui.js",
+    "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",
+    "test:retained-results-browser": "npm run build && node scripts/verify-retained-results-ui.js",
     "test:execution-history-browser": "node scripts/verify-execution-history-ui.js",
     "test:backend": "npm run test:backend:postgres",
     "test:backend:postgres": "vitest run backend/ --environment node --fileParallelism=false",
@@ -107,6 +109,13 @@
     "test:plots": "node scripts/verify-plot-rendering.js"
   },
   "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-python": "6.2.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/legacy-modes": "6.5.5",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@lezer/highlight": "1.2.5",
     "@xyflow/react": "^12.10.2",
     "buffer": "^6.0.3",
     "cors": "^2.8.6",
@@ -119,6 +128,7 @@
     "plotly.js": "3.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "10.1.0",
     "react-plotly.js": "^2.6.0",
     "uuid": "^14.0.0"
   },

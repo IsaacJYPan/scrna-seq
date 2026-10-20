@@ -5,6 +5,8 @@ import { publicErrorMessage } from '../publicError';
 import { createAnalysis, getAnalysis, listAnalyses, listReferenceOptions, updateAnalysis } from '../analyses/researchAnalysisApi';
 import { RESEARCH_ANALYSIS_LIMITS } from '../../shared/researchAnalysis.mjs';
 
+const NotebookWorkspace = React.lazy(() => import('../notebooks/NotebookWorkspace'));
+
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const cleanReferences = analysis => (analysis.references || []).map(item => item.reference);
 const referenceKey = reference => JSON.stringify(reference);
@@ -34,7 +36,7 @@ const describeTime = value => {
   return Number.isNaN(date.getTime()) ? 'Saved in this project' : `Updated ${date.toLocaleDateString()}`;
 };
 
-function ProjectAnalyses({ projectId, projectName, role, isActive, onOpenWorkspace, connection }) {
+function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive, onOpenWorkspace, onOpenAdvanced, connection }) {
   const [items, setItems] = useState([]);
   const [status, setStatus] = useState('active');
   const [nextCursor, setNextCursor] = useState(null);
@@ -42,6 +44,8 @@ function ProjectAnalyses({ projectId, projectName, role, isActive, onOpenWorkspa
   const [error, setError] = useState('');
   const [selected, setSelected] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [notebookVisited, setNotebookVisited] = useState(false);
+  const [notebookOpen, setNotebookOpen] = useState(false);
   const [drafts, setDrafts] = useState({});
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
@@ -123,6 +127,7 @@ function ProjectAnalyses({ projectId, projectName, role, isActive, onOpenWorkspa
   }));
 
   const open = async item => {
+    setNotebookOpen(false);
     listScroll.current = scrollContainer.current?.scrollTop || 0;
     if (window.innerWidth >= 1024 && detailScroller.current) detailScroller.current.scrollTop = 0;
     const requestId = ++selectionRequest.current;
@@ -216,7 +221,8 @@ function ProjectAnalyses({ projectId, projectName, role, isActive, onOpenWorkspa
     <p className="mt-3 max-w-xl text-sm text-textMuted">Choose a project to organize questions, documents, results, and decisions together.</p>
     <button type="button" className="btn btn-primary mt-5" onClick={onOpenWorkspace}>Choose a project</button></div>;
 
-  return <div ref={scrollContainer} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
+  return <div className="relative h-full min-w-0">
+    <div ref={scrollContainer} hidden={notebookOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
     <div className="mx-auto w-full max-w-6xl lg:flex lg:h-full lg:min-h-0 lg:flex-col">
       <header className="mb-7 flex shrink-0 flex-wrap items-start justify-between gap-4">
         <div><p className="mb-1 text-xs text-textMuted">{projectName || 'Current project'}</p><h2 className="text-2xl font-semibold tracking-tight">Analyses</h2>
@@ -256,6 +262,7 @@ function ProjectAnalyses({ projectId, projectName, role, isActive, onOpenWorkspa
             <button ref={detailBack} type="button" className="inline-flex items-center gap-2 rounded text-sm text-textMuted underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:hidden" onClick={() => setDetailOpen(false)}><ArrowLeft size={15} />All analyses</button>
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-textMuted">Version {selected.version} · {selected.status === 'archived' ? 'Archived' : 'Project analysis'}</span>
               {!canWrite && <span className="text-xs text-textMuted">View access</span>}{dirty && <span role="status" className="text-xs text-primary">Draft edited</span>}</div>
+            <button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => { setNotebookVisited(true); setNotebookOpen(true); }}><FileText size={15} />Open notebooks</button>
             {conflict && <section aria-label="Newer saved version" className="space-y-3 rounded border border-border bg-surface p-4">
               <h3 className="text-sm font-semibold">Latest saved version {conflict.version}</h3><p className="break-words text-sm">{conflict.name}</p><p className="whitespace-pre-wrap break-words text-sm text-textMuted">{conflict.description}</p>
               <p className="text-xs text-textMuted">Linked material in this version: {conflict.references.length}</p>
@@ -300,10 +307,18 @@ function ProjectAnalyses({ projectId, projectName, role, isActive, onOpenWorkspa
       </div>
       {onOpenWorkspace && <button type="button" className="mt-8 inline-flex items-center gap-2 self-start text-xs text-textMuted underline lg:mt-4 lg:shrink-0" onClick={onOpenWorkspace}><ArrowLeft size={13} />Return to data workspace</button>}
     </div>
+    </div>
+    {notebookVisited && <div hidden={!notebookOpen} className="absolute inset-0">
+      <React.Suspense fallback={<p role="status" className="p-8 text-sm text-textMuted">Opening notebooks…</p>}>
+        <NotebookWorkspace projectId={projectId} projectName={projectName} analysis={selected} role={role} userId={userId} theme={theme}
+          connection={connection} isActive={isActive && notebookOpen} onOpenOverview={() => setNotebookOpen(false)}
+          onOpenAdvanced={onOpenAdvanced} referenceLabel={labelForReference} />
+      </React.Suspense>
+    </div>}
   </div>;
 }
 
 export default function ResearchAnalyses({ userId, projectId, ...props }) {
   const connection = useExecutionTarget();
-  return <ProjectAnalyses key={`${userId || 'none'}:${connection.identity}:${projectId || 'none'}`} projectId={projectId} {...props} connection={connection} />;
+  return <ProjectAnalyses key={`${userId || 'none'}:${connection.identity}:${projectId || 'none'}`} userId={userId} projectId={projectId} {...props} connection={connection} />;
 }

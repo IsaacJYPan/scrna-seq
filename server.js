@@ -1953,6 +1953,10 @@ app.post('/api/jobs/:id/cancel', async (req, res) => {
 // project ownership.
 app.use('/api/organizations', express.json());
 app.use('/api/organizations', requireAuth);
+// Notebook source has its own authenticated 2 MiB parser. Mount before the
+// ordinary project parser so other project APIs retain their smaller limit.
+app.use('/api/projects/:projectId/analyses/:analysisId/documents', requireAuth,
+  require('./backend/notebookDocuments').notebookDocumentRoutes({ database: db }));
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 app.use('/api/projects/:projectId/analyses', researchAnalysisRoutes({ database: db }));
