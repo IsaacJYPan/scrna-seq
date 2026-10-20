@@ -90,7 +90,7 @@ async function main({ artifactDirectory } = {}) {
   }
   async function openNotebooks(target, analysis) {
     await openAnalysis(target, analysis.name);
-    await selectedAnalysis(target).getByRole('button', { name: 'Open notebooks', exact: true }).click();
+    await selectedAnalysis(target).getByRole('button', { name: 'Open documents', exact: true }).click();
     await target.getByRole('region', { name: 'Document work area', exact: true }).waitFor();
   }
   async function ensureOutline(target) {
@@ -355,7 +355,7 @@ async function main({ artifactDirectory } = {}) {
         await capture(page, `notebook-${theme}-${viewport.width}`, theme);
       }
     }
-    check('Both real themes at1366/1440/390 retain a usable notebook layout; mobile outline closes, native inspector focuses and Escape returns to its opener.');
+    check('Both real themes at 1366/1440/390 retain a usable notebook layout; mobile outline closes, native inspector focuses and Escape returns to its opener.');
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await selectNotebook(page, retainedFirst.title); await setTheme(page, 'dark');
@@ -370,14 +370,14 @@ async function main({ artifactDirectory } = {}) {
     await capture(viewer, 'viewer-read-only-source');
     const outsider = await login(users.outsider);
     for (const url of [documentsPath(), documentPath(copy), documentPath(copy) + '/versions/' + copy.versionId]) assert((await api(outsider, url)).status === 404, 'Nonmember discovered notebook source or identity.');
-    check('Shared source is readable by project viewers, editing stays disabled in UI/API, and nonmembers receive existence-neutral404s.');
+    check('Shared source is readable by project viewers, editing stays disabled in UI/API, and nonmembers receive existence-neutral 404s.');
 
     await page.getByRole('button', { name: 'Analysis overview', exact: true }).click();
     const archiveReply = page.waitForResponse(value => new URL(value.url()).pathname === analysisPath() + '/' + currentAnalysis.id && value.request().method() === 'PATCH');
     await selectedAnalysis(page).getByRole('button', { name: 'Archive', exact: true }).click();
     assert((await archiveReply).status() === 200, 'Analysis archive did not persist.');
     await selectedAnalysis(page).getByRole('button', { name: 'Restore analysis', exact: true }).waitFor();
-    await selectedAnalysis(page).getByRole('button', { name: 'Open notebooks', exact: true }).click();
+    await selectedAnalysis(page).getByRole('button', { name: 'Open documents', exact: true }).click();
     await selectNotebook(page, copy.title);
     assert(!(await page.getByRole('button', { name: 'Save notebook', exact: true }).count()), 'Archived analysis exposed notebook writes.');
     assert((await api(page, documentPath(copy), { method: 'PUT', body: { requestId: crypto.randomUUID(), expectedVersion: copy.version, title: copy.title, content: copy.content } })).status === 409, 'Archived analysis admitted a new source save.');

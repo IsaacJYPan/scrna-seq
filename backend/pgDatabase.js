@@ -66,7 +66,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261020;
+const SCHEMA_CONTRACT_VERSION = 20261021;
 
 let pool = null;
 
@@ -731,6 +731,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      research_document_draft_receipts, research_document_drafts,
       research_document_submissions, research_document_revisions, research_documents,
       research_analysis_revisions, research_analyses,
       server_data_imports, private_r_publications, private_r_executions, private_r_kernel_restarts, private_r_kernels,
@@ -1527,6 +1528,8 @@ async function deleteExpiredDemoGuest(userId) {
     const projectIds = projectRows.rows.map((row) => row.id);
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
+      await client.query('DELETE FROM research_document_draft_receipts WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM research_document_drafts WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_document_submissions WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_document_revisions WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_documents WHERE project_id = ANY($1::text[])', [projectIds]);

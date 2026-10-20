@@ -3,6 +3,8 @@
 const crypto = require('node:crypto');
 const db = require('./pgDatabase');
 const contract = import('../shared/notebookDocument.mjs');
+const draftContract = import('../shared/notebookDraft.mjs');
+const scriptContract = import('../shared/scriptDocument.mjs');
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const digest = text => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
@@ -15,7 +17,7 @@ function summary(row) {
   return { id: row.id, projectId: row.project_id, analysisId: row.analysis_id, visibility: 'project',
     title: row.title, version: Number(row.version), versionId: row.head_version_id, sha256: row.sha256,
     contentBytes: Number(row.content_bytes), cellCount: row.cell_count, codeCellCount: row.code_cell_count,
-    defaultLanguage: row.default_language, createdByUserId: Number(row.created_by_user_id),
+    defaultLanguage: row.default_language, documentKind: row.document_kind || 'notebook', createdByUserId: Number(row.created_by_user_id),
     updatedByUserId: Number(row.updated_by_user_id), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) };
 }
 
@@ -24,8 +26,22 @@ function document(head, revision) {
     sha256: revision.sha256, contentBytes: Number(revision.content_bytes),
     cellCount: revision.content_json.cells.length,
     codeCellCount: revision.content_json.cells.filter(cell => cell.type === 'code').length,
-    defaultLanguage: revision.content_json.defaultLanguage, content: revision.content_json,
+    defaultLanguage: revision.content_json.defaultLanguage, documentKind: revision.document_kind || 'notebook', content: revision.content_json,
     updatedByUserId: Number(revision.actor_user_id), updatedAt: iso(revision.created_at) };
+}
+
+async function documentKindFor(content) {
+  try { return (await scriptContract).scriptDocumentInfo(content) ? 'script' : 'notebook'; }
+  catch { return 'notebook'; }
+}
+
+function privateDraft(row, includeContent = true) {
+  if (!row || row.cleared) return null;
+  return { schema: 'traceomics.notebook-draft.v1', documentId: row.document_id,
+    projectId: row.project_id, analysisId: row.analysis_id, ownerUserId: Number(row.owner_user_id), visibility: 'private',
+    draftVersion: Number(row.draft_version), baseVersion: Number(row.base_version), baseVersionId: row.base_version_id,
+    title: row.title, sha256: row.sha256, contentBytes: Number(row.content_bytes), updatedAt: iso(row.updated_at),
+    ...(includeContent ? { content: row.content_json, uiState: row.ui_state } : {}) };
 }
 
 async function validateScope(projectId, analysisId, documentId, versionId) {
@@ -103,15 +119,16 @@ function createNotebookDocumentService(database = db) {
     const versionId = action === 'create' ? current.head_version_id : identity('dv');
     const sha256 = digest(canonical), version = action === 'create' ? 1 : Number(current.version) + 1;
     const bytes = Buffer.byteLength(canonical, 'utf8');
+    const documentKind = await documentKindFor(parsed.content);
     const saved = (await client.query(`INSERT INTO research_document_revisions
-      (id,document_id,project_id,analysis_id,version,title,content_json,sha256,content_bytes,actor_user_id)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-    [versionId, current.id, current.project_id, current.analysis_id, version, parsed.title, canonical, sha256, bytes, userId])).rows[0];
+      (id,document_id,project_id,analysis_id,version,title,content_json,sha256,content_bytes,actor_user_id,document_kind)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+    [versionId, current.id, current.project_id, current.analysis_id, version, parsed.title, canonical, sha256, bytes, userId, documentKind])).rows[0];
     const updated = action === 'create' ? current : (await client.query(`UPDATE research_documents SET title=$2,version=$3,head_version_id=$4,
-      sha256=$5,content_bytes=$6,cell_count=$7,code_cell_count=$8,default_language=$9,updated_by_user_id=$10,updated_at=$11
+      sha256=$5,content_bytes=$6,cell_count=$7,code_cell_count=$8,default_language=$9,updated_by_user_id=$10,updated_at=$11,document_kind=$12
       WHERE id=$1 RETURNING *`, [current.id, parsed.title, version, versionId, sha256, bytes,
       parsed.content.cells.length, parsed.content.cells.filter(cell => cell.type === 'code').length,
-      parsed.content.defaultLanguage, userId, saved.created_at])).rows[0];
+      parsed.content.defaultLanguage, userId, saved.created_at, documentKind])).rows[0];
     const submitted = (await client.query(`INSERT INTO research_document_submissions
       (project_id,analysis_id,document_id,actor_user_id,request_id,action,request_sha256,expected_version,version_id)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, [current.project_id, current.analysis_id, current.id,
@@ -128,10 +145,10 @@ function createNotebookDocumentService(database = db) {
       if (replay) return { ...replay, created: false };
       writable(access);
       const current = (await client.query(`INSERT INTO research_documents
-        (id,project_id,analysis_id,title,created_by_user_id,updated_by_user_id,version,head_version_id,sha256,content_bytes,cell_count,code_cell_count,default_language)
-        VALUES($1,$2,$3,$4,$5,$5,1,$6,$7,$8,$9,$10,$11) RETURNING *`,
+        (id,project_id,analysis_id,title,created_by_user_id,updated_by_user_id,version,head_version_id,sha256,content_bytes,cell_count,code_cell_count,default_language,document_kind)
+        VALUES($1,$2,$3,$4,$5,$5,1,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [identity('doc'), projectId, analysisId, parsed.title, userId, identity('dv'), digest(canonical), Buffer.byteLength(canonical, 'utf8'),
-        parsed.content.cells.length, parsed.content.cells.filter(cell => cell.type === 'code').length, parsed.content.defaultLanguage])).rows[0];
+        parsed.content.cells.length, parsed.content.cells.filter(cell => cell.type === 'code').length, parsed.content.defaultLanguage, await documentKindFor(parsed.content)])).rows[0];
       return { ...await append(client, userId, current, parsed, 'create', requestHash, canonical), created: true };
     });
   }
@@ -184,7 +201,85 @@ function createNotebookDocumentService(database = db) {
     });
   }
 
-  return { create, save, get, list,
+  async function draftRow(client, userId, projectId, analysisId, documentId, lock = false) {
+    return (await client.query(`SELECT * FROM research_document_drafts
+      WHERE document_id=$1 AND owner_user_id=$2 AND project_id=$3 AND analysis_id=$4${lock ? ' FOR UPDATE' : ''}`,
+    [documentId, userId, projectId, analysisId])).rows[0];
+  }
+
+  function draftResponse(current, row, accepted = null, replayed = false) {
+    return { draft: privateDraft(row), draftVersion: Number(row?.draft_version || 0), currentHead: summary(current), replayed,
+      ...(accepted ? { checkpoint: { requestId: accepted.request_id, action: accepted.action,
+        draftVersion: Number(accepted.draft_version), sha256: accepted.sha256, cleared: accepted.action === 'clear' } } : {}) };
+  }
+
+  async function getDraft(userId, projectId, analysisId, documentId) {
+    await validateScope(projectId, analysisId, documentId);
+    return transaction(userId, projectId, analysisId, async client => {
+      const current = await head(client, projectId, analysisId, documentId);
+      return draftResponse(current, await draftRow(client, userId, projectId, analysisId, documentId));
+    });
+  }
+
+  async function updateDraft(userId, projectId, analysisId, documentId, input, clear = false) {
+    await validateScope(projectId, analysisId, documentId);
+    const schema = await draftContract;
+    const parsed = clear ? schema.normalizeNotebookDraftClear(input) : schema.normalizeNotebookDraft(input);
+    const action = clear ? 'clear' : 'update';
+    const requestHash = digest(JSON.stringify({ action, projectId, analysisId, documentId, ...parsed }));
+    return transaction(userId, projectId, analysisId, async (client, access) => {
+      // Request locks are acquired before per-document locks on every path. The
+      // latter also serializes the first checkpoint, when no draft row exists.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`notebook-draft-request:${projectId}:${analysisId}:${userId}:${parsed.requestId}`]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`notebook-draft:${documentId}:${userId}`]);
+      const current = await head(client, projectId, analysisId, documentId);
+      const existing = await draftRow(client, userId, projectId, analysisId, documentId, true);
+      const accepted = (await client.query(`SELECT * FROM research_document_draft_receipts
+        WHERE project_id=$1 AND analysis_id=$2 AND owner_user_id=$3 AND request_id=$4`,
+      [projectId, analysisId, userId, parsed.requestId])).rows[0];
+      if (accepted) {
+        if (accepted.request_sha256 !== requestHash) throw failure('NOTEBOOK_DRAFT_REQUEST_CONFLICT', 'This request already checkpointed a different private draft. Recover the original request before saving again.', 409);
+        // Receipts retain metadata, not another source snapshot. A replay may
+        // acknowledge an older checkpoint while returning the newer private copy.
+        return draftResponse(current, existing, accepted, true);
+      }
+      writable(access);
+      if (Number(existing?.draft_version || 0) !== parsed.expectedDraftVersion) {
+        throw Object.assign(failure('NOTEBOOK_DRAFT_CONFLICT', 'Your private draft changed in another window. Your current edits have not replaced it; review both copies before continuing.', 409),
+          { currentDraftVersion: Number(existing?.draft_version || 0), currentDraft: privateDraft(existing, false), currentHead: summary(current) });
+      }
+      if (!clear) {
+        const base = await revision(client, current, parsed.baseVersionId);
+        if (Number(base.version) !== parsed.baseVersion) throw failure('INVALID_NOTEBOOK_DRAFT_BASE', 'The private draft must identify one exact saved source version.');
+      }
+      const version = Number(existing?.draft_version || 0) + 1;
+      const sha256 = clear ? null : digest(schema.canonicalNotebookDraftSnapshot(parsed));
+      const contentBytes = clear ? 0 : Buffer.byteLength((await contract).canonicalNotebookContent(parsed.content), 'utf8');
+      const row = (await client.query(`INSERT INTO research_document_drafts
+        (document_id,owner_user_id,project_id,analysis_id,draft_version,base_version,base_version_id,title,content_json,ui_state,sha256,content_bytes,cleared)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT(document_id,owner_user_id) DO UPDATE SET draft_version=EXCLUDED.draft_version,
+          base_version=EXCLUDED.base_version,base_version_id=EXCLUDED.base_version_id,title=EXCLUDED.title,
+          content_json=EXCLUDED.content_json,ui_state=EXCLUDED.ui_state,sha256=EXCLUDED.sha256,
+          content_bytes=EXCLUDED.content_bytes,cleared=EXCLUDED.cleared,updated_at=clock_timestamp() RETURNING *`,
+      [documentId, userId, projectId, analysisId, version, clear ? null : parsed.baseVersion, clear ? null : parsed.baseVersionId,
+        clear ? null : parsed.title, clear ? null : JSON.stringify(parsed.content), clear ? '{}' : JSON.stringify(parsed.uiState), sha256, contentBytes, clear])).rows[0];
+      const receipt = (await client.query(`INSERT INTO research_document_draft_receipts
+        (project_id,analysis_id,document_id,owner_user_id,request_id,action,request_sha256,draft_version,sha256)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [projectId, analysisId, documentId, userId, parsed.requestId, action, requestHash, version, sha256])).rows[0];
+      // Autosave is a mutable working copy, not append-only scientific history.
+      // Bound source-free deduplication receipts; an older retry still fails CAS
+      // instead of recreating or overwriting a newer draft/tombstone.
+      await client.query(`DELETE FROM research_document_draft_receipts WHERE document_id=$1 AND owner_user_id=$2 AND draft_version<=$3`,
+        [documentId, userId, version - schema.NOTEBOOK_DRAFT_LIMITS.receipts]);
+      return draftResponse(current, row, receipt);
+    });
+  }
+
+  return { create, save, get, list, getDraft,
+    putDraft: (userId, projectId, analysisId, documentId, input) => updateDraft(userId, projectId, analysisId, documentId, input),
+    clearDraft: (userId, projectId, analysisId, documentId, input) => updateDraft(userId, projectId, analysisId, documentId, input, true),
     checkAccess: (userId, projectId, analysisId) => transaction(userId, projectId, analysisId, async () => undefined) };
 }
 
@@ -194,6 +289,7 @@ function notebookDocumentRoutes({ database = db, logger = console } = {}) {
   function sendError(res, error) {
     if ([400, 403, 404, 409, 413, 415].includes(error.status)) {
       return res.status(error.status).json({ error: error.message, code: error.code,
+        ...(error.currentDraftVersion !== undefined ? { currentDraftVersion: error.currentDraftVersion, currentDraft: error.currentDraft } : {}),
         ...(error.currentHead ? { currentHead: error.currentHead, submittedExpectedVersion: error.submittedExpectedVersion } : {}) });
     }
     const code = String(error.code || 'REQUEST_FAILED').replace(/[^A-Z0-9_]/gi, '').slice(0, 64);
@@ -208,7 +304,7 @@ function notebookDocumentRoutes({ database = db, logger = console } = {}) {
   const parse = express.json({ limit: 2 * 1024 * 1024, inflate: false, strict: true,
     type: ['application/json', 'application/*+json'] });
   router.use(async (req, res, next) => {
-    if (!['POST', 'PUT'].includes(req.method)) return next();
+    if (!['POST', 'PUT', 'DELETE'].includes(req.method)) return next();
     try {
       await validateScope(req.params.projectId, req.params.analysisId);
       await service.checkAccess(req.user.id, req.params.projectId, req.params.analysisId);
@@ -229,6 +325,9 @@ function notebookDocumentRoutes({ database = db, logger = console } = {}) {
   };
   router.get('/', route(req => service.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.post('/', route(req => service.create(req.user.id, req.params.projectId, req.params.analysisId, req.body)));
+  router.get('/:documentId/draft', route(req => service.getDraft(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId)));
+  router.put('/:documentId/draft', route(req => service.putDraft(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.body)));
+  router.delete('/:documentId/draft', route(req => service.clearDraft(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.body)));
   router.get('/:documentId/versions/:versionId', route(req => service.get(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.params.versionId)));
   router.get('/:documentId', route(req => service.get(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId)));
   router.put('/:documentId', route(req => service.save(req.user.id, req.params.projectId, req.params.analysisId, req.params.documentId, req.body)));

@@ -12,6 +12,7 @@ async function request(path, { method = 'GET', body, signal } = {}) {
     if (!response.ok) throw Object.assign(new Error(result?.error || 'The notebook service is unavailable.'), {
       status: response.status, code: result?.code, currentHead: result?.currentHead,
       submittedExpectedVersion: result?.submittedExpectedVersion,
+      currentDraftVersion: result?.currentDraftVersion, currentDraft: result?.currentDraft,
     });
     if (!result || typeof result !== 'object') throw new Error('The notebook service returned an unreadable response.');
     return result;
@@ -31,3 +32,9 @@ export const saveNotebook = (projectId, analysisId, documentId, body) =>
   request(`${base(projectId, analysisId)}/${encodeURIComponent(documentId)}`, { method: 'PUT', body });
 export const getNotebookVersion = (projectId, analysisId, documentId, versionId, { signal } = {}) =>
   request(`${base(projectId, analysisId)}/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}`, { signal });
+export const getNotebookDraft = (projectId, analysisId, documentId, { signal } = {}) =>
+  request(`${base(projectId, analysisId)}/${encodeURIComponent(documentId)}/draft`, { signal });
+export const saveNotebookDraft = (projectId, analysisId, documentId, body) =>
+  request(`${base(projectId, analysisId)}/${encodeURIComponent(documentId)}/draft`, { method: 'PUT', body });
+export const clearNotebookDraft = (projectId, analysisId, documentId, body) =>
+  request(`${base(projectId, analysisId)}/${encodeURIComponent(documentId)}/draft`, { method: 'DELETE', body });

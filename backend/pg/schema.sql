@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261020, now())
+VALUES ('traceomics.runtime', 20261021, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1262,6 +1262,8 @@ CREATE TABLE IF NOT EXISTS research_document_revisions (
   FOREIGN KEY(document_id,project_id,analysis_id) REFERENCES research_documents(id,project_id,analysis_id)
 );
 CREATE INDEX IF NOT EXISTS idx_research_document_revision_project ON research_document_revisions(project_id,analysis_id,document_id,version);
+ALTER TABLE research_documents ADD COLUMN IF NOT EXISTS document_kind TEXT NOT NULL DEFAULT 'notebook' CHECK(document_kind IN ('notebook','script'));
+ALTER TABLE research_document_revisions ADD COLUMN IF NOT EXISTS document_kind TEXT NOT NULL DEFAULT 'notebook' CHECK(document_kind IN ('notebook','script'));
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_research_document_head' AND conrelid='research_documents'::regclass) THEN
     ALTER TABLE research_documents ADD CONSTRAINT fk_research_document_head
@@ -1313,3 +1315,61 @@ CREATE TRIGGER trg_research_document_revision_immutable BEFORE UPDATE OR DELETE 
 DROP TRIGGER IF EXISTS trg_research_document_submission_immutable ON research_document_submissions;
 CREATE TRIGGER trg_research_document_submission_immutable BEFORE UPDATE OR DELETE ON research_document_submissions
   FOR EACH ROW EXECUTE FUNCTION enforce_research_document_evidence_immutable();
+
+-- Owner-private mutable working copies. These never replace shared saved source
+-- and deliberately do not retain an immutable copy for every autosave.
+CREATE TABLE IF NOT EXISTS research_document_drafts (
+  document_id TEXT NOT NULL,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  draft_version INTEGER NOT NULL CHECK(draft_version > 0),
+  base_version INTEGER,
+  base_version_id TEXT,
+  title TEXT CHECK(char_length(title) BETWEEN 1 AND 160),
+  content_json JSONB CHECK(jsonb_typeof(content_json)='object' AND octet_length(content_json::text)<=2097152),
+  ui_state JSONB NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof(ui_state)='object' AND octet_length(ui_state::text)<=1024),
+  sha256 TEXT CHECK(sha256 ~ '^[a-f0-9]{64}$'),
+  content_bytes INTEGER NOT NULL CHECK(content_bytes BETWEEN 0 AND 1048576),
+  cleared BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(document_id,owner_user_id),
+  UNIQUE(document_id,owner_user_id,project_id,analysis_id),
+  FOREIGN KEY(document_id,project_id,analysis_id) REFERENCES research_documents(id,project_id,analysis_id),
+  FOREIGN KEY(document_id,base_version_id,base_version) REFERENCES research_document_revisions(document_id,id,version),
+  CHECK((cleared AND base_version IS NULL AND base_version_id IS NULL AND title IS NULL AND content_json IS NULL AND sha256 IS NULL AND content_bytes=0)
+    OR (NOT cleared AND base_version IS NOT NULL AND base_version>0 AND base_version_id IS NOT NULL AND title IS NOT NULL AND content_json IS NOT NULL AND sha256 IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_research_document_draft_owner ON research_document_drafts(project_id,analysis_id,owner_user_id,updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS research_document_draft_receipts (
+  project_id TEXT NOT NULL,
+  analysis_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  owner_user_id BIGINT NOT NULL,
+  request_id UUID NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('update','clear')),
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  draft_version INTEGER NOT NULL CHECK(draft_version>0),
+  sha256 TEXT CHECK(sha256 ~ '^[a-f0-9]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id,analysis_id,owner_user_id,request_id),
+  FOREIGN KEY(document_id,owner_user_id,project_id,analysis_id)
+    REFERENCES research_document_drafts(document_id,owner_user_id,project_id,analysis_id),
+  CHECK((action='update' AND sha256 IS NOT NULL) OR (action='clear' AND sha256 IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_research_document_draft_receipt_version ON research_document_draft_receipts(document_id,owner_user_id,draft_version);
+
+CREATE OR REPLACE FUNCTION enforce_research_document_draft_identity() RETURNS TRIGGER AS $$
+BEGIN
+  IF ROW(NEW.document_id,NEW.owner_user_id,NEW.project_id,NEW.analysis_id,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.document_id,OLD.owner_user_id,OLD.project_id,OLD.analysis_id,OLD.created_at)
+    OR NEW.draft_version<>OLD.draft_version+1
+  THEN RAISE EXCEPTION 'Private notebook draft identity and version are protected' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_research_document_draft_identity ON research_document_drafts;
+CREATE TRIGGER trg_research_document_draft_identity BEFORE UPDATE ON research_document_drafts
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_document_draft_identity();

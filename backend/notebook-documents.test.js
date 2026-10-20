@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHash, randomUUID } from 'node:crypto';
 import { NOTEBOOK_DOCUMENT_SCHEMA, canonicalNotebookContent } from '../shared/notebookDocument.mjs';
+import { importScriptDocument, copyScriptToNotebook } from '../shared/scriptDocument.mjs';
 
 const db = require('./pgDatabase');
 const config = require('./config');
@@ -98,6 +99,25 @@ describe.skipIf(!configured)('project notebook documents through actual HTTP and
     expect(await count('research_document_revisions')).toBe(2);
     const originalRow = (await db.query('SELECT content_json FROM research_document_revisions WHERE id=$1', [original.versionId])).rows[0];
     expect(originalRow.content_json).toEqual(original.content);
+  });
+
+  it('keeps validated source-free script kind on summaries and exact historical versions after metadata conversion', async () => {
+    const script = importScriptDocument({ filename: 'inspect.R', bytes: new TextEncoder().encode('  inspect()\r\n'), cellId: 'whole-script' });
+    const original = (await post(createBody({ title: 'Imported script', content: script }))).data.document;
+    expect(original.documentKind).toBe('script');
+    const firstList = await api(server, endpoint(), { token: viewer.token });
+    expect(firstList.data.documents[0]).toMatchObject({ id: original.id, documentKind: 'script' });
+    expect(firstList.data.documents[0]).not.toHaveProperty('content');
+    const converted = await put(original, saveBody(original, { content: copyScriptToNotebook(original.content) }));
+    expect(converted.data).toMatchObject({ document: { documentKind: 'notebook', version: 2 }, currentHead: { documentKind: 'notebook' } });
+    const exactOld = await api(server, endpoint() + '/' + original.id + '/versions/' + original.versionId, { token: viewer.token });
+    expect(exactOld.data).toMatchObject({ document: { documentKind: 'script', version: 1 }, currentHead: { documentKind: 'notebook', version: 2 } });
+    expect(exactOld.data.document.content.cells[0].source).toBe('  inspect()\r\n');
+    const malformed = structuredClone(script); malformed.metadata.traceomics.script.language = 'python';
+    const ordinary = await post(createBody({ title: 'Ordinary source with inert invalid marker', content: malformed }));
+    expect(ordinary.status).toBe(201); expect(ordinary.data.document.documentKind).toBe('notebook');
+    const finalList = await api(server, endpoint(), { token: viewer.token });
+    expect(finalList.data.documents.every(item => item.documentKind === 'notebook' && !Object.hasOwn(item, 'content'))).toBe(true);
   });
 
   it('serializes repeated create UUIDs and replays the original version even after the head advances', async () => {
@@ -253,7 +273,7 @@ describe.skipIf(!configured)('project notebook documents through actual HTTP and
     await db.initSchema({ force: true }); await db.initSchema({ force: true });
     expect((await api(server, endpoint() + '/' + original.id, { token: viewer.token })).data.document).toEqual(second);
     expect((await api(server, endpoint() + '/' + original.id + '/versions/' + original.versionId, { token: viewer.token })).data.document).toEqual(original);
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261020);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261021);
   });
 
   it('deletes an expired guest notebook head/version/receipt cycle while preserving another project', async () => {

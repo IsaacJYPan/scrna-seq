@@ -262,7 +262,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
             <button ref={detailBack} type="button" className="inline-flex items-center gap-2 rounded text-sm text-textMuted underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:hidden" onClick={() => setDetailOpen(false)}><ArrowLeft size={15} />All analyses</button>
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-textMuted">Version {selected.version} · {selected.status === 'archived' ? 'Archived' : 'Project analysis'}</span>
               {!canWrite && <span className="text-xs text-textMuted">View access</span>}{dirty && <span role="status" className="text-xs text-primary">Draft edited</span>}</div>
-            <button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => { setNotebookVisited(true); setNotebookOpen(true); }}><FileText size={15} />Open notebooks</button>
+            <button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => { setNotebookVisited(true); setNotebookOpen(true); }}><FileText size={15} />Open documents</button>
             {conflict && <section aria-label="Newer saved version" className="space-y-3 rounded border border-border bg-surface p-4">
               <h3 className="text-sm font-semibold">Latest saved version {conflict.version}</h3><p className="break-words text-sm">{conflict.name}</p><p className="whitespace-pre-wrap break-words text-sm text-textMuted">{conflict.description}</p>
               <p className="text-xs text-textMuted">Linked material in this version: {conflict.references.length}</p>

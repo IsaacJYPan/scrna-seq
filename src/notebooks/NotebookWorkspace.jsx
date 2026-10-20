@@ -1,17 +1,21 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Copy, FileText, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Copy, FileText, Plus, Trash2, Upload } from 'lucide-react';
 import AnalysisShell from '../components/AnalysisShell';
 import CodeEditor from './CodeEditor';
+import ScriptEditor from './ScriptEditor';
+import ScriptImport from './ScriptImport';
 import useNotebookDocuments from './useNotebookDocuments';
 import { getNotebookVersion } from './notebookApi';
 import { publicErrorMessage } from '../publicError';
+import { copyScriptToNotebook, exportScriptDocument, scriptDocumentInfo } from '../../shared/scriptDocument.mjs';
 
 const RetainedArtifactView = React.lazy(() => import('../components/RetainedArtifactView'));
 const cellLabel = cell => cell.type === 'markdown' ? 'Markdown' : cell.language === 'python' ? 'Python' : 'R';
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const newCell = (type, language) => ({ id: crypto.randomUUID(), type, source: '', metadata: {}, collapsed: false,
   ...(type === 'code' ? { language } : {}) });
+const scriptInfo = content => { try { return scriptDocumentInfo(content); } catch { return null; } };
 
 const NotebookCell = memo(function NotebookCell({
   cell, index, count, documentId, active, canEdit, theme, editorStates, onEdit, onActivate, onMove, onDuplicate, onRemove,
@@ -70,8 +74,9 @@ const NotebookCell = memo(function NotebookCell({
 export default function NotebookWorkspace({ projectId, projectName, analysis, role, userId, theme = 'light', isActive, connection,
   onOpenOverview, onOpenAdvanced, referenceLabel }) {
   const canWrite = WRITE_ROLES.has(role) && analysis?.status === 'active';
-  const docs = useNotebookDocuments({ projectId, analysisId: analysis?.id, isActive, blocked: connection.blocked, canWrite });
+  const docs = useNotebookDocuments({ projectId, analysisId: analysis?.id, userId, isActive, blocked: connection.blocked, canWrite });
   const editDocument = docs.edit;
+  const editUiState = docs.editUiState;
   const [creations, setCreations] = useState({});
   const setCreation = useCallback(change => setCreations(previous => {
     const id = analysis?.id;
@@ -79,20 +84,30 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     return { ...previous, [id]: value };
   }), [analysis?.id]);
   const creation = docs.pendingCreateInfo ? { analysisId: analysis?.id, ...docs.pendingCreateInfo } : creations[analysis?.id];
+  const [imports, setImports] = useState({});
+  const setImportOpen = (scope, value) => setImports(previous => ({ ...previous, [scope]: value }));
   const [activeCells, setActiveCells] = useState({});
   const [removed, setRemoved] = useState({});
   const [inspector, setInspector] = useState(null);
   const [inspectionError, setInspectionError] = useState('');
   const editorStates = useRef(new Map());
+  const downloads = useRef(new Set());
+  const body = useRef(null);
   const inspectRequest = useRef(0);
   const analysisRef = useRef(analysis?.id);
   analysisRef.current = analysis?.id;
   const { selected, selectedId, draft } = docs;
+  const selectionRef = useRef(selectedId);
+  selectionRef.current = selectedId;
+  const script = scriptInfo(draft?.content);
+  const pendingScript = scriptInfo(docs.pendingCreateInfo?.content);
+  const importOpen = !!imports[analysis?.id] || !!pendingScript;
+  const titleLabel = script ? 'Script title' : 'Notebook title';
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const activeId = activeCells[selectedId];
   const sourceFrozen = !canWrite || docs.busy || docs.pendingSave || connection.blocked;
-  const creatingHere = creation?.analysisId === analysis?.id || docs.pendingCreate;
+  const creatingHere = !importOpen && (creation?.analysisId === analysis?.id || docs.pendingCreate);
   const newerHead = selected && docs.heads[selected.id]?.version > draft.baseVersion;
 
   useEffect(() => {
@@ -104,18 +119,46 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     inspectRequest.current += 1;
     setInspector(current => current?.kind === 'source' ? null : current);
   }, [activeId]);
+  useEffect(() => {
+    const urls = downloads.current;
+    return () => { for (const url of urls) URL.revokeObjectURL(url); urls.clear(); };
+  }, []);
+  useEffect(() => {
+    const area = body.current?.closest('[aria-label="Document work area"]');
+    if (!area || !selectedId || !isActive) return;
+    area.scrollTop = draftRef.current?.uiState?.scrollTop || 0;
+    let timer;
+    const changed = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => editUiState?.(selectedId, { scrollTop: Math.min(10000000, Math.max(0, area.scrollTop)) }), 200);
+    };
+    area.addEventListener('scroll', changed, { passive: true });
+    return () => { clearTimeout(timer); area.removeEventListener('scroll', changed); };
+  }, [selectedId, analysis?.id, isActive, editUiState]);
+
+  const exportScript = () => {
+    try {
+      const { filename, bytes } = exportScriptDocument(draft.content);
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'text/plain;charset=utf-8' }));
+      downloads.current.add(url);
+      const link = document.createElement('a'); link.href = url; link.download = filename;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => { URL.revokeObjectURL(url); downloads.current.delete(url); }, 1000);
+    } catch { setInspectionError('This script could not be exported. Its current source is still here.'); }
+  };
 
   const editCell = useCallback((id, change) => {
     editDocument(selectedId, current => ({ ...current, content: { ...current.content,
       cells: current.content.cells.map(cell => cell.id === id ? { ...cell, ...change } : cell) } }));
   }, [editDocument, selectedId]);
   const activate = useCallback((index, scroll = false) => {
-    if (index === -1 && !scroll) { setActiveCells(previous => ({ ...previous, [selectedId]: null })); return; }
+    if (index === -1 && !scroll) { setActiveCells(previous => ({ ...previous, [selectedId]: null })); editUiState?.(selectedId, { activeCellId: null }); return; }
     const cell = draftRef.current?.content.cells[index];
     if (!cell) return;
     setActiveCells(previous => ({ ...previous, [selectedId]: cell.id }));
+    editUiState?.(selectedId, { activeCellId: cell.id });
     if (scroll) requestAnimationFrame(() => document.getElementById(`notebook-cell-${cell.id}`)?.scrollIntoView({ block: 'nearest' }));
-  }, [selectedId]);
+  }, [selectedId, editUiState]);
   const add = type => {
     const cell = newCell(type, draft.content.defaultLanguage);
     docs.edit(selectedId, current => ({ ...current, content: { ...current.content, cells: [...current.content.cells, cell] } }));
@@ -149,20 +192,26 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     } catch (error) { if (request === inspectRequest.current) setInspectionError(publicErrorMessage(error, 'The saved source could not be opened. Your draft is still here.')); }
   };
   const outline = <div className="space-y-3">
-    <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-semibold text-textMuted">Notebooks</p>
-      {canWrite && <button type="button" aria-label="New notebook" className="rounded p-1 text-primary focus-visible:ring-2 focus-visible:ring-primary" onClick={() => setCreation({ analysisId: analysis.id, title: '', language: 'R' })}><Plus size={16} /></button>}</div>
-    {docs.index.loading && <p role="status" className="text-xs text-textMuted">Loading notebooks…</p>}
+    <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-semibold text-textMuted">Documents</p>
+      {canWrite && <button type="button" aria-label="New notebook" disabled={docs.creating || docs.pendingCreate} className="rounded p-1 text-primary focus-visible:ring-2 focus-visible:ring-primary" onClick={() => { setImportOpen(analysis.id, false); setCreation({ analysisId: analysis.id, title: '', language: 'R' }); }}><Plus size={16} /></button>}</div>
+    {canWrite && <button type="button" className="inline-flex items-center gap-2 text-xs text-primary underline" disabled={docs.creating || docs.pendingCreate || connection.blocked} onClick={() => { setCreation(null); setImportOpen(analysis.id, true); }}><Upload size={13} />Import script</button>}
+    {docs.index.loading && <p role="status" className="text-xs text-textMuted">Loading documents…</p>}
     {docs.index.error && <p role="alert" className="text-xs text-danger">{docs.index.error}</p>}
     <ul className="space-y-1">{docs.index.items.map(item => <li key={item.id}><button type="button" aria-current={selectedId === item.id ? 'page' : undefined}
       className={`w-full break-words rounded p-2 text-left text-sm focus-visible:ring-2 focus-visible:ring-primary ${selectedId === item.id ? 'bg-primary/10 font-semibold text-text' : 'text-textMuted hover:bg-primary/5'}`} onClick={() => void docs.open(item.id)}>
-      {item.title}<span className="mt-1 block text-[11px] font-normal text-textMuted">{item.cellCount} cells · {docs.drafts[item.id]?.dirty ? 'Draft edited' : `v${item.version}`}</span>
+      {item.title}{' '}<span className="mt-1 block text-[11px] font-normal text-textMuted">{item.documentKind === 'script' || scriptInfo(docs.drafts[item.id]?.content || (selectedId === item.id ? draft?.content : null)) ? `${item.defaultLanguage === 'python' ? 'Python' : 'R'} script` : `${item.cellCount} cells`} · {docs.drafts[item.id]?.dirty ? 'Draft edited' : `v${item.version}`}</span>
     </button></li>)}</ul>
-    {!docs.index.loading && !docs.index.items.length && <p className="text-xs leading-relaxed text-textMuted">No notebooks yet.</p>}
-    {docs.index.nextCursor && <button type="button" className="text-xs text-primary underline" disabled={docs.index.loading} onClick={() => void docs.loadMore()}>More notebooks</button>}
-    <button type="button" className="text-xs text-textMuted underline" disabled={connection.blocked} onClick={() => void docs.refresh()}>Refresh notebooks</button>
+    {!docs.index.loading && !docs.index.items.length && <p className="text-xs leading-relaxed text-textMuted">No documents yet.</p>}
+    {docs.index.nextCursor && <button type="button" className="text-xs text-primary underline" disabled={docs.index.loading} onClick={() => void docs.loadMore()}>More documents</button>}
+    <button type="button" className="text-xs text-textMuted underline" disabled={connection.blocked} onClick={() => void docs.refresh()}>Refresh documents</button>
     <div className="border-t border-border pt-3"><button type="button" className="text-left text-sm text-textMuted hover:text-text" onClick={() => setInspector({ kind: 'links' })}>Linked material ({analysis?.references.length || 0})</button></div>
   </div>;
-  const inspectorContent = inspector?.kind === 'source' ? <div className="space-y-4 text-sm">
+  const inspectorContent = inspector?.kind === 'private-source' ? <div className="space-y-4 text-sm">
+    <p className="font-semibold">{inspector.document.title}</p>
+    <p className="text-xs text-textMuted">Private working copy {inspector.document.draftVersion}, based on saved source version {inspector.document.baseVersion}. This draft is visible only to your account.</p>
+    <dl className="space-y-2 break-all text-xs"><dt className="text-textMuted">Base saved version</dt><dd>{inspector.document.baseVersionId}</dd><dt className="text-textMuted">SHA-256</dt><dd className="font-mono">{inspector.document.sha256}</dd></dl>
+    {inspector.document.content.cells.map((cell, index) => <div key={cell.id}><p className="mb-2 text-xs font-semibold">Cell {index + 1} · {cellLabel(cell)} source</p><pre className="max-h-80 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-xs">{cell.source || '(empty source)'}</pre></div>)}
+  </div> : inspector?.kind === 'source' ? <div className="space-y-4 text-sm">
     <p className="font-semibold">{inspector.document.title}</p><p className="text-xs text-textMuted">Saved source version {inspector.document.version}. This snapshot records saved code, not an execution.</p>
     {inspector.missingCell && <p className="text-xs text-textMuted">The selected draft cell is absent from this saved version. Showing the saved document.</p>}
     <dl className="space-y-2 break-all text-xs"><dt className="text-textMuted">Version</dt><dd>{inspector.document.versionId}</dd><dt className="text-textMuted">SHA-256</dt><dd className="font-mono">{inspector.document.sha256}</dd></dl>
@@ -177,13 +226,28 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
   </div> : null;
 
   if (!analysis) return null;
-  return <AnalysisShell projectName={projectName} analysisName={analysis.name} documentTitle={draft?.title || 'Notebooks'} onOpenOverview={onOpenOverview}
-    outline={outline} status={<span className={draft?.dirty ? 'text-primary' : 'text-textMuted'}>{draft?.dirty ? 'Draft edited' : selected ? `Saved version ${selected.version}` : 'Project notebooks'}</span>}
-    inspector={inspectorContent} inspectorTitle={inspector?.kind === 'source' ? 'Saved source' : 'Linked material'} onCloseInspector={() => setInspector(null)}
+  return <AnalysisShell projectName={projectName} analysisName={analysis.name} documentTitle={draft?.title || 'Documents'} onOpenOverview={onOpenOverview}
+    outline={outline} status={<span className={draft?.dirty ? 'text-primary' : 'text-textMuted'}>{draft?.dirty ? 'Draft edited' : selected ? `Saved version ${selected.version}` : 'Project documents'}</span>}
+    inspector={inspectorContent} inspectorTitle={inspector?.kind === 'source' ? 'Saved source' : inspector?.kind === 'private-source' ? 'Private draft' : 'Linked material'} onCloseInspector={() => setInspector(null)}
     toolbar={<>{selected && <button type="button" className="btn btn-secondary text-xs" onClick={() => void inspectSaved(selected.versionId)}>Saved source</button>}
-      {selected && (canWrite || docs.pendingSave) && <button type="button" className="btn btn-primary text-sm" disabled={docs.busy || connection.blocked || !draft?.dirty && !docs.pendingSave || !!docs.problem?.currentHead && !docs.pendingSave} onClick={() => void docs.save()}>{docs.busy ? 'Saving…' : docs.pendingSave ? 'Retry save' : 'Save notebook'}</button>}</>}>
-    <div className="mx-auto max-w-4xl space-y-5 px-4 py-6 sm:px-7">
-      {connection.blocked && <p role="status" className="rounded border border-border p-3 text-sm text-textMuted">Reconnect to save changes. Your current notebook draft is kept here.</p>}
+      {script && <button type="button" className="btn btn-secondary text-xs" title="Export the current edited script source" onClick={exportScript}>Export script</button>}
+      {selected && (canWrite || docs.pendingSave) && <button type="button" className="btn btn-primary text-sm" disabled={docs.busy || connection.blocked || !draft?.dirty && !docs.pendingSave || !!docs.problem?.currentHead && !docs.pendingSave} onClick={() => void docs.save()}>{docs.busy ? 'Saving…' : docs.pendingSave ? 'Retry save' : script ? 'Save script' : 'Save notebook'}</button>}</>}>
+    <div ref={body} className="mx-auto max-w-4xl space-y-5 px-4 py-6 sm:px-7">
+      {connection.blocked && <p role="status" className="rounded border border-border p-3 text-sm text-textMuted">Reconnect to save changes. Your current document draft is kept here.</p>}
+      {Object.entries(imports).filter(([, open]) => open).map(([scope]) => <div key={scope} hidden={scope !== analysis.id}>
+        <ScriptImport theme={theme} busy={scope === analysis.id && docs.creating} disabled={scope !== analysis.id || connection.blocked || !canWrite && !pendingScript}
+          error={scope === analysis.id ? docs.creationProblem?.message || '' : ''}
+          pending={scope === analysis.id && pendingScript ? { filename: pendingScript.filename, title: docs.pendingCreateInfo.title, content: docs.pendingCreateInfo.content } : null}
+          onCancel={() => setImportOpen(scope, false)} onImport={async input => {
+            if (scope !== analysis.id) return null;
+            const created = await docs.create(input.title, input.content.defaultLanguage, input.content);
+            if (created) setImportOpen(scope, false);
+            return created;
+          }} />
+      </div>)}
+      {pendingScript && !imports[analysis.id] && <ScriptImport theme={theme} busy={docs.creating} disabled={connection.blocked}
+        error={docs.creationProblem?.message || ''} pending={{ filename: pendingScript.filename, title: docs.pendingCreateInfo.title, content: docs.pendingCreateInfo.content }}
+        onCancel={() => {}} onImport={input => docs.create(input.title, input.content.defaultLanguage, input.content)} />}
       {creatingHere && <form aria-label="New notebook" className="space-y-4 rounded-lg border border-border bg-surface p-5" onSubmit={async event => {
         event.preventDefault();
         const created = await docs.create(creation?.title || '', creation?.language || 'R');
@@ -199,28 +263,52 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
       {docs.problem && <div role="alert" className="space-y-3 rounded border border-danger/30 bg-danger/5 p-4 text-sm"><p>{docs.problem.message}</p>
         {docs.problem.currentHead && <><p className="text-textMuted">Latest saved: {docs.problem.currentHead.title}, version {docs.problem.currentHead.version}. Your edits remain in this draft.</p>
           <div className="flex flex-wrap gap-3"><button type="button" className="btn btn-secondary text-xs" onClick={() => void inspectSaved(docs.problem.currentHead.versionId, true)}>Review latest saved source</button>
-            {canWrite && <button type="button" className="btn btn-secondary text-xs" disabled={docs.creating || connection.blocked} onClick={() => void docs.create(`${draft.title.slice(0, 150)} (copy)`, draft.content.defaultLanguage, draft.content)}>Save my draft as a new notebook</button>}</div></>}
+            {canWrite && <button type="button" className="btn btn-secondary text-xs" disabled={docs.creating || connection.blocked} onClick={() => void docs.create(`${[...draft.title].slice(0, 150).join('')} (copy)`, draft.content.defaultLanguage, draft.content)}>{script ? 'Save my draft as a new script' : 'Save my draft as a new notebook'}</button>}</div></>}
       </div>}
       {inspectionError && <p role="alert" className="text-sm text-danger">{inspectionError}</p>}
       {docs.notice && <p role="status" className="text-sm text-success">{docs.notice}</p>}
       {docs.pendingSave && !docs.busy && <p role="status" className="text-sm text-textMuted">Retry checks the same save request. Editing resumes when its outcome is confirmed.</p>}
-      {selected && draft ? <>
-        <div className="space-y-3"><label className="block text-xs font-medium text-textMuted">Notebook title<input aria-label="Notebook title" maxLength={160} readOnly={sourceFrozen} className="mt-1 w-full rounded border border-transparent bg-transparent px-0 py-1 text-xl font-semibold text-text focus:border-border focus:bg-surface focus:px-2 focus:outline-none" value={draft.title} onChange={event => docs.edit(selectedId, { title: event.target.value })} /></label>
-          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-textMuted"><p>Shared with this project · {canWrite ? 'Editable source' : 'View access'}</p><label>New cells use<select aria-label="Notebook default language" disabled={sourceFrozen} className="ml-2 rounded border border-border bg-surface px-2 py-1" value={draft.content.defaultLanguage} onChange={event => docs.edit(selectedId, current => ({ ...current, content: { ...current.content, defaultLanguage: event.target.value } }))}><option value="R">R</option><option value="python">Python</option></select></label></div>
-          {newerHead && !docs.problem?.currentHead && <p role="status" className="text-xs text-textMuted">A newer saved version exists. Your draft stays separate.</p>}
-          <p className="text-xs leading-relaxed text-textMuted">Notebook cells are source only. {onOpenAdvanced && <button type="button" className="text-primary underline" onClick={onOpenAdvanced}>Open Advanced analysis for R</button>}</p>
+      {selected && docs.autosave && docs.autosave.state !== 'idle' && <div className="flex flex-wrap items-center gap-3 text-xs text-textMuted">
+        <p role="status">{docs.autosave.message}</p>{['failed', 'offline-unsaved'].includes(docs.autosave.state) && <button type="button" className="text-primary underline" disabled={connection.blocked} onClick={() => void docs.retryAutosave()}>Retry private autosave</button>}
+      </div>}
+      {docs.recoverableDraft && <section aria-label="Private draft recovery" className="space-y-3 rounded border border-primary/30 bg-primary/5 p-4 text-sm">
+        <p className="font-semibold">Your private working copy is available</p>
+        <p className="text-xs leading-relaxed text-textMuted">{docs.recoverableDraft.title} · private draft {docs.recoverableDraft.draftVersion}, based on saved source version {docs.recoverableDraft.baseVersion}. Review it before choosing which source to continue.</p>
+        <div className="flex flex-wrap gap-3"><button type="button" className="btn btn-secondary text-xs" onClick={() => setInspector({ kind: 'private-source', document: docs.recoverableDraft })}>Review private draft</button>
+          <button type="button" className="btn btn-secondary text-xs" disabled={docs.busy || !!docs.pendingSave || docs.autosave?.state === 'saving'} onClick={() => {
+            const view = docs.recoverableDraft.uiState;
+            const scope = analysis.id, id = selectedId;
+            if (!docs.recoverDraft()) return;
+            setActiveCells(previous => ({ ...previous, [selectedId]: view?.activeCellId || null })); setInspector(null);
+            requestAnimationFrame(() => {
+              if (selectionRef.current !== id || analysisRef.current !== scope) return;
+              const area = body.current?.closest('[aria-label="Document work area"]');
+              if (area) area.scrollTop = view?.scrollTop || 0;
+            });
+          }}>{draft?.dirty ? 'Replace current edits with private draft' : 'Restore private draft'}</button>
+          <button type="button" className="btn btn-secondary text-xs" disabled={!canWrite || connection.blocked || docs.busy || !!docs.pendingSave || docs.autosave?.state === 'saving'} onClick={() => void docs.discardDraft()}>Keep current source</button>
+          {draft?.dirty && canWrite && <button type="button" className="btn btn-secondary text-xs" disabled={docs.creating || docs.pendingCreate || connection.blocked} onClick={() => void docs.create(`${[...draft.title].slice(0, 150).join('')} (copy)`, draft.content.defaultLanguage, draft.content)}>Save current edits as a new document</button>}
         </div>
-        <div className="space-y-4">{draft.content.cells.map((cell, index) => <div key={cell.id} id={`notebook-cell-${cell.id}`}><NotebookCell cell={cell} index={index} count={draft.content.cells.length} documentId={selectedId}
+      </section>}
+      {selected && draft ? <>
+        <div className="space-y-3"><label className="block text-xs font-medium text-textMuted">{titleLabel}<input aria-label={titleLabel} maxLength={160} readOnly={sourceFrozen} className="mt-1 w-full rounded border border-transparent bg-transparent px-0 py-1 text-xl font-semibold text-text focus:border-border focus:bg-surface focus:px-2 focus:outline-none" value={draft.title} onChange={event => docs.edit(selectedId, { title: event.target.value })} /></label>
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-textMuted"><p>{draft.dirty ? 'Your private working copy · Shared saved source is unchanged' : 'Shared with this project'} · {canWrite ? 'Editable source' : 'View access'}</p>{!script && <label>New cells use<select aria-label="Notebook default language" disabled={sourceFrozen} className="ml-2 rounded border border-border bg-surface px-2 py-1" value={draft.content.defaultLanguage} onChange={event => docs.edit(selectedId, current => ({ ...current, content: { ...current.content, defaultLanguage: event.target.value } }))}><option value="R">R</option><option value="python">Python</option></select></label>}</div>
+          {newerHead && !docs.problem?.currentHead && <p role="status" className="text-xs text-textMuted">A newer saved version exists. Your draft stays separate.</p>}
+          <p className="text-xs leading-relaxed text-textMuted">{script ? 'Script editing is source only. ' : 'Notebook cells are source only. '}{onOpenAdvanced && <button type="button" className="text-primary underline" onClick={onOpenAdvanced}>Open Advanced analysis for R</button>}</p>
+          {!script && draft.content.metadata?.traceomics?.kind === 'script' && <p role="status" className="text-xs text-textMuted">This document has incompatible script metadata. Its source is available in the notebook view.</p>}
+        </div>
+        {script ? <ScriptEditor documentId={selectedId} content={draft.content} info={script} canEdit={!sourceFrozen} theme={theme} editorStates={editorStates}
+          onChange={source => editCell(draft.content.cells[0].id, { source })} /> : <div className="space-y-4">{draft.content.cells.map((cell, index) => <div key={cell.id} id={`notebook-cell-${cell.id}`}><NotebookCell cell={cell} index={index} count={draft.content.cells.length} documentId={selectedId}
           active={activeId === cell.id} canEdit={!sourceFrozen} theme={theme} editorStates={editorStates}
-          onEdit={editCell} onActivate={activate} onMove={move} onDuplicate={duplicate} onRemove={remove} /></div>)}</div>
+          onEdit={editCell} onActivate={activate} onMove={move} onDuplicate={duplicate} onRemove={remove} /></div>)}</div>}
         {removed[selectedId] && <p role="status" className="flex flex-wrap items-center gap-3 text-xs text-textMuted">Cell removed.
           <button type="button" className="text-primary underline" disabled={sourceFrozen} onClick={() => {
             const item = removed[selectedId];
             docs.edit(selectedId, current => { const cells = [...current.content.cells]; if (!cells.some(cell => cell.id === item.cell.id)) cells.splice(Math.min(item.index, cells.length), 0, item.cell); return { ...current, content: { ...current.content, cells } }; });
             setRemoved(previous => ({ ...previous, [selectedId]: null }));
           }}>Undo removal</button></p>}
-        {canWrite && <div className="flex flex-wrap gap-3 border-t border-border pt-4"><button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" disabled={sourceFrozen} onClick={() => add('code')}><Plus size={15} />Add code cell</button><button type="button" className="btn btn-secondary text-sm" disabled={sourceFrozen} onClick={() => add('markdown')}>Add Markdown</button></div>}
-      </> : selectedId ? !docs.problem && <p role="status" className="py-10 text-sm text-textMuted">Loading notebook…</p> : !creatingHere && <div className="py-12 text-center"><FileText size={30} className="mx-auto mb-4 text-textMuted" /><h3 className="text-xl font-semibold">Write alongside your research question</h3><p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-textMuted">Keep ordinary R or Python source and Markdown in a notebook. Saved versions remain part of this analysis.</p>
+        {canWrite && <div className="flex flex-wrap gap-3 border-t border-border pt-4">{script ? <button type="button" className="btn btn-secondary text-sm" disabled={sourceFrozen || docs.creating || docs.pendingCreate} onClick={() => void docs.create(`${[...draft.title].slice(0, 149).join('')} (notebook)`, script.language, copyScriptToNotebook(draft.content))}>Copy to a notebook</button> : <><button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" disabled={sourceFrozen} onClick={() => add('code')}><Plus size={15} />Add code cell</button><button type="button" className="btn btn-secondary text-sm" disabled={sourceFrozen} onClick={() => add('markdown')}>Add Markdown</button></>}</div>}
+      </> : selectedId ? !docs.problem && <p role="status" className="py-10 text-sm text-textMuted">Loading document…</p> : !creatingHere && <div className="py-12 text-center"><FileText size={30} className="mx-auto mb-4 text-textMuted" /><h3 className="text-xl font-semibold">Write alongside your research question</h3><p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-textMuted">Import an ordinary R or Python script, or keep code and Markdown in a notebook. Saved versions remain part of this analysis.</p>
         {canWrite && <button type="button" className="btn btn-primary mt-6" onClick={() => setCreation({ analysisId: analysis.id, title: '', language: 'R' })}>Create a notebook</button>}</div>}
     </div>
   </AnalysisShell>;

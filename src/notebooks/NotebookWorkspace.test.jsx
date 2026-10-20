@@ -4,10 +4,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { EditorView } from '@codemirror/view';
 import { undo } from '@codemirror/commands';
 import NotebookWorkspace from './NotebookWorkspace';
-import { createNotebook, getNotebook, getNotebookVersion, listNotebooks, saveNotebook } from './notebookApi';
+import { createNotebook, getNotebook, getNotebookVersion, listNotebooks, saveNotebook, getNotebookDraft, saveNotebookDraft, clearNotebookDraft } from './notebookApi';
+import { importScriptDocument } from '../../shared/scriptDocument.mjs';
 
 vi.mock('./notebookApi', () => ({
   createNotebook: vi.fn(), getNotebook: vi.fn(), getNotebookVersion: vi.fn(), listNotebooks: vi.fn(), saveNotebook: vi.fn(),
+  getNotebookDraft: vi.fn(), saveNotebookDraft: vi.fn(), clearNotebookDraft: vi.fn(),
 }));
 
 const sourceR = '\tcells <- ncol(object)  \r\n# retained source\r\n';
@@ -23,9 +25,10 @@ const original = documentFixture('a', 'Donor responses', [
 ]);
 const other = documentFixture('b', 'Cell annotation', [cell('annotation', 'code', 'levels(object)')]);
 const head = document => ({ id: document.id, title: document.title, version: document.version,
-  versionId: document.versionId, sha256: document.sha256, projectId: document.projectId, analysisId: document.analysisId, cellCount: document.content.cells.length });
+  versionId: document.versionId, sha256: document.sha256, projectId: document.projectId, analysisId: document.analysisId,
+  cellCount: document.content.cells.length, defaultLanguage: document.content.defaultLanguage, documentKind: document.documentKind || 'notebook' });
 const clone = value => structuredClone(value);
-let records, versions, createdCount;
+let records, versions, createdCount, privateCopies;
 const nativeClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close');
 const nativeShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal');
 const defaults = {
@@ -38,7 +41,7 @@ beforeAll(() => {
   if (!Range.prototype.getBoundingClientRect) Range.prototype.getBoundingClientRect = () => ({ left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 });
 });
 beforeEach(() => {
-  vi.resetAllMocks(); createdCount = 0;
+  vi.resetAllMocks(); createdCount = 0; privateCopies = new Map();
   records = new Map([original, other].map(document => [document.id, clone(document)]));
   versions = new Map([original, other].map(document => [document.versionId, clone(document)]));
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1150, height: 800, top: 0, left: 0, right: 1150, bottom: 800 });
@@ -59,6 +62,26 @@ beforeEach(() => {
     records.set(id, document); versions.set(document.versionId, clone(document));
     return { document: clone(document), currentHead: head(document) };
   });
+  getNotebookDraft.mockImplementation(async (_project, _analysis, id) => ({
+    draft: clone(privateCopies.get(id)?.draft || null), draftVersion: privateCopies.get(id)?.draftVersion || 0,
+    currentHead: head(records.get(id)), replayed: false,
+  }));
+  saveNotebookDraft.mockImplementation(async (projectId, analysisId, id, input) => {
+    const draftVersion = (privateCopies.get(id)?.draftVersion || 0) + 1;
+    const draft = { schema: 'traceomics.notebook-draft.v1', visibility: 'private', ownerUserId: 1,
+      projectId, analysisId, documentId: id, draftVersion, title: input.title, content: clone(input.content),
+      baseVersion: input.baseVersion, baseVersionId: input.baseVersionId, uiState: clone(input.uiState),
+      sha256: 'f'.repeat(64), updatedAt: '2026-10-20T12:00:00Z' };
+    privateCopies.set(id, { draft, draftVersion });
+    return { draft: clone(draft), draftVersion, currentHead: head(records.get(id)), replayed: false,
+      checkpoint: { requestId: input.requestId, action: 'update', draftVersion, sha256: draft.sha256, cleared: false } };
+  });
+  clearNotebookDraft.mockImplementation(async (_project, _analysis, id, input) => {
+    const draftVersion = (privateCopies.get(id)?.draftVersion || 0) + 1;
+    privateCopies.set(id, { draft: null, draftVersion });
+    return { draft: null, draftVersion, currentHead: head(records.get(id)), replayed: false,
+      checkpoint: { requestId: input.requestId, action: 'clear', draftVersion, sha256: null, cleared: true } };
+  });
 });
 afterEach(() => {
   cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals();
@@ -77,6 +100,124 @@ const activateCode = async (label, action = 'Edit source') => {
   return EditorView.findFromDOM(textbox);
 };
 const append = (view, text) => act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: text }, userEvent: 'input.type' }));
+const registerScript = (filename, source, title = filename) => {
+  const content = importScriptDocument({ filename, bytes: new Uint8Array(new TextEncoder().encode(source)), cellId: 'script-source' });
+  const script = { ...documentFixture('0', title, []), content, documentKind: 'script' };
+  records.set(script.id, script); versions.set(script.versionId, clone(script));
+  return script;
+};
+
+describe('ordinary script documents in the analysis workspace', () => {
+  it('uses one source editor without cell controls, preserving exact script edits and ordinary undo', async () => {
+    const source = '\uFEFF# β 🧬\r\nsource("helpers/prepare.R")\r\n';
+    const script = registerScript('analysis.R', source);
+    render(<NotebookWorkspace {...defaults} />);
+    fireEvent.click(await screen.findByRole('button', { name: /^analysis\.R/ }));
+    const box = await screen.findByRole('textbox', { name: 'Script source' });
+    const view = EditorView.findFromDOM(box);
+    expect(screen.getByRole('textbox', { name: 'Script title' })).toHaveValue('analysis.R');
+    expect(screen.getByText(/R script · UTF-8 with BOM/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Add code cell' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add Markdown' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Notebook default language' })).toBeNull();
+    append(view, '# changed\n');
+    act(() => undo(view));
+    fireEvent.click(screen.getByRole('button', { name: 'Save script' }));
+    await waitFor(() => expect(saveNotebook).toHaveBeenCalledOnce());
+    expect(saveNotebook.mock.calls[0][3].content.cells).toEqual(script.content.cells);
+    expect(saveNotebook.mock.calls[0][3].content.metadata).toEqual(script.content.metadata);
+    fireEvent.keyDown(box, { key: 'Escape' });
+    expect(screen.getByRole('button', { name: 'Edit script source' })).toHaveFocus();
+  });
+
+  it('copies a whole script into a notebook explicitly and keeps the original source document unchanged', async () => {
+    const script = registerScript('analysis.py', 'from helpers.prepare import prepare\nprint("β")\n');
+    render(<NotebookWorkspace {...defaults} />);
+    fireEvent.click(await screen.findByRole('button', { name: /^analysis\.py/ }));
+    await screen.findByRole('textbox', { name: 'Script source' });
+    fireEvent.click(screen.getByRole('button', { name: 'Copy to a notebook' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Notebook title' })).toHaveValue('analysis.py (notebook)'));
+    expect(createNotebook.mock.calls[0][2].content.cells).toEqual(script.content.cells);
+    expect(createNotebook.mock.calls[0][2].content.metadata).toEqual({});
+    expect(records.get(script.id)).toEqual(script);
+    expect(screen.getByRole('button', { name: 'Add code cell' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /^analysis\.py\s+Python script/ }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Script title' })).toHaveValue('analysis.py'));
+    expect(screen.getByRole('textbox', { name: 'Script source' })).toHaveTextContent('from helpers.prepare import prepare');
+    expect(saveNotebook).not.toHaveBeenCalled();
+  });
+
+  it('allows a project viewer to read/export the saved script without import, editing or copying', async () => {
+    registerScript('analysis.R', 'summary(object)\n');
+    render(<NotebookWorkspace {...defaults} role="viewer" />);
+    fireEvent.click(await screen.findByRole('button', { name: /^analysis\.R/ }));
+    const box = await screen.findByRole('textbox', { name: 'Script source' });
+    expect(box).toHaveAttribute('aria-readonly', 'true');
+    expect(screen.getByRole('textbox', { name: 'Script title' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Export script' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Import script' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save script' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy to a notebook' })).toBeNull();
+    expect(createNotebook).not.toHaveBeenCalled();
+    expect(saveNotebook).not.toHaveBeenCalled();
+  });
+
+  it('keeps source accessible when script metadata is incompatible instead of mounting a misleading script editor', async () => {
+    const script = registerScript('analysis.R', 'summary(object)\n');
+    script.content.cells.push(cell('second', 'code', 'len(cells)', 'python'));
+    render(<NotebookWorkspace {...defaults} />);
+    fireEvent.click(await screen.findByRole('button', { name: /^analysis\.R/ }));
+    await screen.findByRole('textbox', { name: 'Notebook title' });
+    expect(screen.getByText(/incompatible script metadata/)).toBeVisible();
+    expect(screen.queryByRole('textbox', { name: 'Script source' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Export script' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'R cell 1' })).toHaveTextContent('summary(object)');
+    expect(screen.getByRole('region', { name: 'Python cell 2' })).toHaveTextContent('len(cells)');
+  });
+});
+
+describe('private working-copy recovery presentation', () => {
+  const seedPrivate = () => {
+    const content = clone(original.content);
+    content.cells[1].source = '# Private alternative\r\nprivate_value <- 42L\r\n';
+    const draft = { schema: 'traceomics.notebook-draft.v1', visibility: 'private', ownerUserId: 1,
+      projectId: defaults.projectId, analysisId: defaults.analysis.id, documentId: original.id, draftVersion: 2,
+      title: 'My private alternative', content, baseVersion: original.version, baseVersionId: original.versionId,
+      uiState: { activeCellId: 'r_counts', scrollTop: 0 }, sha256: 'f'.repeat(64), updatedAt: '2026-10-20T12:00:00Z' };
+    privateCopies.set(original.id, { draft, draftVersion: 2 });
+    return draft;
+  };
+  it('reviews an existing private snapshot and restores it only after an explicit choice', async () => {
+    const privateDraft = seedPrivate();
+    render(<NotebookWorkspace {...defaults} />);
+    await openDocument(original.title);
+    const recovery = await screen.findByRole('region', { name: 'Private draft recovery' });
+    expect(screen.getByRole('textbox', { name: 'Notebook title' })).toHaveValue(original.title);
+    expect(saveNotebookDraft).not.toHaveBeenCalled();
+    fireEvent.click(within(recovery).getByRole('button', { name: 'Review private draft' }));
+    expect(screen.getByText(/This draft is visible only to your account/)).toBeVisible();
+    expect(screen.getByText(/private_value <- 42L/)).toBeVisible();
+    fireEvent.click(within(recovery).getByRole('button', { name: 'Restore private draft' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Notebook title' })).toHaveValue(privateDraft.title));
+    expect(screen.getByRole('textbox', { name: 'R cell 2 source' })).toHaveTextContent('private_value <- 42L');
+    expect(screen.getByText(/Your private working copy · Shared saved source is unchanged/)).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Private draft recovery' })).toBeNull();
+    expect(records.get(original.id).title).toBe(original.title);
+    expect(saveNotebook).not.toHaveBeenCalled();
+  });
+  it('keeps saved source explicitly and clears only the current private draft version', async () => {
+    seedPrivate();
+    render(<NotebookWorkspace {...defaults} />);
+    await openDocument(original.title);
+    const recovery = await screen.findByRole('region', { name: 'Private draft recovery' });
+    fireEvent.click(within(recovery).getByRole('button', { name: 'Keep current source' }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Private draft recovery' })).toBeNull());
+    expect(clearNotebookDraft.mock.calls[0][3]).toMatchObject({ expectedDraftVersion: 2 });
+    expect(screen.getByRole('textbox', { name: 'Notebook title' })).toHaveValue(original.title);
+    expect(records.get(original.id)).toEqual(original);
+    expect(saveNotebook).not.toHaveBeenCalled();
+  });
+});
 
 describe('notebook workspace editing and review flows', () => {
   it('makes shared-source privacy and save-without-execution explicit before creating a Python notebook', async () => {
