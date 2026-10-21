@@ -13,7 +13,7 @@ function artifactVersionRoutes({ db, provider, requireAuth, uploadDirectory } = 
   const service = createArtifactVersionService(db, provider);
   const directory = uploadDirectory || fs.mkdtempSync(path.join(os.tmpdir(), 'traceomics-artifacts-'));
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const upload = multer({ dest: directory, limits: { fileSize: 200 * 1024 * 1024, files: 1, fields: 2, fieldSize: 1024 } });
+  const upload = multer({ dest: directory, defParamCharset: 'utf8', limits: { fileSize: 200 * 1024 * 1024, files: 1, fields: 4, fieldSize: 1024 } });
   router.use(requireAuth, express.json({ limit: '16kb' }));
 
   const sendError = (res, error) => {
@@ -30,6 +30,10 @@ function artifactVersionRoutes({ db, provider, requireAuth, uploadDirectory } = 
   router.get('/:projectId', route(async (req, res) => {
     res.setHeader('Cache-Control', 'private, no-store');
     res.json(await service.list(req.user.id, req.params.projectId, req.query));
+  }));
+  router.get('/:projectId/imports/:requestId', route(async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json(await service.getImportReceipt(req.user.id, req.params.projectId, req.params.requestId));
   }));
   router.get('/:projectId/:versionId', route(async (req, res) => {
     res.setHeader('Cache-Control', 'private, no-store');
@@ -60,12 +64,15 @@ function artifactVersionRoutes({ db, provider, requireAuth, uploadDirectory } = 
     try {
       if (uploadError) return res.status(uploadError.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: uploadError.message });
       if (!req.file) return res.status(400).json({ error: 'Select one artifact file.' });
-      const unknown = Object.keys(req.body || {}).filter(key => !['name', 'artifactType'].includes(key));
+      const unknown = Object.keys(req.body || {}).filter(key => !['name', 'artifactType', 'requestId', 'expectedRequestSha256'].includes(key));
       if (unknown.length) return res.status(400).json({ error: 'Artifact identity, ownership and storage are server-controlled.' });
       const version = await service.importFile(req.user.id, req.params.projectId, {
         path: req.file.path, originalFilename: req.file.originalname, name: req.body.name, artifactType: req.body.artifactType,
+        ...(req.body.requestId === undefined ? {} : { requestId: req.body.requestId }),
+        ...(req.body.expectedRequestSha256 === undefined ? {} : { expectedRequestSha256: req.body.expectedRequestSha256 }),
       }, req.params.versionId || null);
-      res.status(201).json(version);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.status(version.importRequest?.replayed ? 200 : 201).json(version);
     } catch (error) { sendError(res, error); }
     finally { if (req.file?.path) await fs.promises.unlink(req.file.path).catch(() => {}); }
   });

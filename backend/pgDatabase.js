@@ -66,7 +66,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261023;
+const SCHEMA_CONTRACT_VERSION = 20261024;
 
 let pool = null;
 
@@ -731,7 +731,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
-      workflow_restoration_receipts, research_document_pending, research_document_pending_requests,
+      managed_artifact_import_receipts, workflow_restoration_receipts, research_document_pending, research_document_pending_requests,
       research_document_draft_receipts, research_document_drafts,
       research_document_submissions, research_document_revisions, research_documents,
       research_analysis_revisions, research_analyses,
@@ -1529,6 +1529,7 @@ async function deleteExpiredDemoGuest(userId) {
     const projectIds = projectRows.rows.map((row) => row.id);
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
+      await client.query('DELETE FROM managed_artifact_import_receipts WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM workflow_restoration_receipts WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_document_pending WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_document_pending_requests WHERE project_id = ANY($1::text[])', [projectIds]);

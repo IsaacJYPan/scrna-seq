@@ -1,7 +1,9 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const storage = require('./storage');
+const config = require('./config');
 const previews = require('./artifactPreviews');
 const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, validateRetainedRasterMetadata } = require('./retainedTypedPreviews');
 const { DOWNLOADABLE_ARTIFACT_TYPES, authorizeArtifactDownload } = require('./researchExports');
@@ -13,6 +15,7 @@ const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const QUOTA = Object.freeze({ versions: 200, bytes: 5 * 1024 * 1024 * 1024 });
 const VERSION_PATTERN = /^(?:av|art|eri)_[a-f0-9]{16,40}$/;
+const REQUEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const id = prefix => `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
 const canonicalTime = value => new Date(value).toISOString();
 function artifactError(code, message, status = 400) { return Object.assign(new Error(message), { code, status }); }
@@ -56,6 +59,81 @@ function serverImportProvenance(value) {
 }
 
 function createArtifactVersionService(db, provider = storage.createLocalStorageProvider()) {
+  const importLock = (projectId, userId, requestId) => `artifact-import:${projectId}:${userId}:${requestId}`;
+  const canImport = (member, user) => WRITE_ROLES.includes(member.role) && !user.is_demo_guest && !config.demoMode();
+  async function importTransaction(userId, projectId, requestId, callback, write = false) {
+    const client = await (await db.connect()).connect(); let committing = false, destroy = false;
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [importLock(projectId, userId, requestId)]);
+      const user = (await client.query('SELECT id,is_demo_guest FROM users WHERE id=$1 FOR KEY SHARE', [userId])).rows[0];
+      if (!user) notFound();
+      if (!(await client.query(`SELECT id FROM projects WHERE id=$1 FOR ${write ? 'UPDATE' : 'SHARE'}`, [projectId])).rowCount) notFound();
+      const member = (await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId])).rows[0];
+      if (!member || !READ_ROLES.includes(member.role)) notFound();
+      const result = await callback(client, member, user);
+      committing = true; await client.query('COMMIT'); committing = false;
+      return result;
+    } catch (error) {
+      destroy = committing;
+      try { await client.query('ROLLBACK'); } catch { destroy = true; }
+      throw error;
+    } finally { client.release(destroy); }
+  }
+  function acceptance(row) {
+    return { artifactId: row.artifact_id, versionId: row.version_id, versionNumber: Number(row.version_number),
+      previousVersionId: row.previous_version_id, sha256: row.checksum_sha256, sizeBytes: Number(row.size_bytes), createdAt: canonicalTime(row.created_at) };
+  }
+  async function importReceipt(client, row, allowed) {
+    const found = (await client.query('SELECT * FROM managed_artifact_versions WHERE id=$1 AND project_id=$2 AND owner_user_id=$3',
+      [row.version_id, row.project_id, row.owner_user_id])).rows[0];
+    let available = false;
+    if (found && found.artifact_id === row.artifact_id && found.checksum_sha256 === row.checksum_sha256
+        && Number(found.size_bytes) === Number(row.size_bytes) && found.storage_key === row.storage_key
+        && storage.isProjectStorageKey(row.storage_key, { projectId: row.project_id, kind: 'artifacts' })) {
+      try {
+        const stat = await fs.promises.lstat(provider.resolveKey(row.storage_key));
+        available = stat.isFile() && !stat.isSymbolicLink() && stat.size === Number(row.size_bytes);
+      } catch { /* Acceptance survives unavailable source/storage. */ }
+    }
+    return { requestId: row.request_id, status: 'succeeded', canImport: allowed, requestSha256: row.request_sha256, request: row.request_json, acceptance: acceptance(row),
+      availability: available ? 'recorded' : 'unavailable', version: available ? await display(managed(found)) : null };
+  }
+  async function getImportReceipt(userId, projectId, requestId) {
+    if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) throw artifactError('ARTIFACT_IMPORT_NOT_FOUND', 'No accepted import receipt is available to this account. Keep the original request and file; a missing receipt does not rule out an in-flight upload.', 404);
+    return importTransaction(userId, projectId, requestId.toLowerCase(), async (client, member, user) => {
+      const row = (await client.query('SELECT * FROM managed_artifact_import_receipts WHERE project_id=$1 AND owner_user_id=$2 AND request_id=$3',
+        [projectId, userId, requestId.toLowerCase()])).rows[0];
+      if (!row) throw artifactError('ARTIFACT_IMPORT_NOT_FOUND', 'No accepted import receipt is available to this account. Keep the original request and file; a missing receipt does not rule out an in-flight upload.', 404);
+      return importReceipt(client, row, canImport(member, user));
+    });
+  }
+  async function cleanupImportAttempt(userId, projectId, requestId, versionId, key) {
+    // A new connection must wait out the original transaction. A lost COMMIT
+    // acknowledgement is never proof that its durable version was rolled back.
+    let expired = false, timer;
+    const acquisition = Promise.resolve().then(async () => (await db.connect()).connect()).then(client => {
+      if (expired) { client.release(true); return null; }
+      return client;
+    });
+    const client = await Promise.race([acquisition, new Promise((_, reject) => {
+      timer = setTimeout(() => { expired = true; reject(new Error('Cleanup database acquisition timed out.')); }, 3000);
+    })]).finally(() => clearTimeout(timer));
+    let destroy = false;
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL lock_timeout='2s'");
+      await client.query("SET LOCAL statement_timeout='5s'");
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [importLock(projectId, userId, requestId)]);
+      const retained = await client.query(`SELECT 1 FROM managed_artifact_versions WHERE storage_key=$1 OR id=$2
+        UNION ALL SELECT 1 FROM managed_artifact_import_receipts WHERE storage_key=$1 OR version_id=$2 LIMIT 1`, [key, versionId]);
+      if (!retained.rowCount) await provider.remove(key);
+      await client.query('COMMIT');
+    } catch {
+      destroy = true;
+      try { await client.query('ROLLBACK'); } catch { /* Unknown cleanup leaves the owned bytes untouched. */ }
+    } finally { client.release(destroy); }
+  }
   async function display(row, ownerName) {
     if (!ownerName) ownerName = (await db.query('SELECT display_name FROM users WHERE id=$1', [row.ownerId])).rows[0]?.display_name || 'Researcher';
     let capabilities = previews.previewCapabilities(row.type, row.format, row.size);
@@ -313,43 +391,73 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     if (!file || typeof file.path !== 'string') throw artifactError('INVALID_ARTIFACT_FILE', 'Select a file to import.');
     const originalFilename = safeFilename(file.originalFilename);
     const name = safeName(file.name, originalFilename);
+    const explicitRequest = file.requestId !== undefined;
+    if (explicitRequest && (typeof file.requestId !== 'string' || !REQUEST_ID.test(file.requestId))) throw artifactError('INVALID_ARTIFACT_IMPORT_REQUEST', 'Keep one original request UUID when importing or recovering this exact file.');
+    if (file.expectedRequestSha256 !== undefined && (!explicitRequest || typeof file.expectedRequestSha256 !== 'string'
+        || !/^[a-f0-9]{64}$/.test(file.expectedRequestSha256))) throw artifactError('INVALID_ARTIFACT_IMPORT_REQUEST', 'The expected import checksum requires the original UUID and a valid SHA-256 value.');
+    const requestId = explicitRequest ? file.requestId.toLowerCase() : crypto.randomUUID();
     if (file.artifactType && !['auto', 'sample-sheet'].includes(file.artifactType)) throw artifactError('INVALID_ARTIFACT_TYPE', 'Choose automatic format detection or a CSV/TSV sample sheet.');
     const spec = await previews.inspectImportedFile({ ...file, originalFilename }, file.artifactType);
     const format = { id: spec.id, version: '1', ...(Object.keys(spec.metadata).length ? { metadata: spec.metadata } : {}) };
     try { (await analysisContract).validateArtifactFormat(format); }
     catch { throw artifactError('INVALID_ARTIFACT_FORMAT', 'Artifact inspection metadata exceeds its supported bounds. Use smaller table headers or a private analysis runtime.', 413); }
-    let previous = null;
-    if (previousVersionId) {
-      previous = await internal(userId, projectId, previousVersionId);
-      if (previous.sourceKind !== 'managed-file') throw artifactError('ARTIFACT_VERSION_READ_ONLY', 'Create a new managed artifact to edit an imported result or saved analysis. Existing result versions remain immutable.', 409);
-      if (previous.type !== spec.type || previous.format.id !== spec.id) throw artifactError('ARTIFACT_FORMAT_CHANGED', 'A replacement version must retain the artifact format. Import a separate artifact for a different format.', 409);
-    }
-    const versionId = id('av'); const artifactId = previous?.artifactId || id('af');
+    const versionId = id('av');
     const extension = { 'org.ietf.csv': 'csv', 'org.iana.tsv': 'tsv', 'org.ietf.json': 'json', 'org.ietf.text': 'txt', 'org.w3.png': 'png', 'org.iso.jpeg': 'jpg', 'org.r-project.rds': 'rds' }[spec.id] || 'bin';
     const key = storage.projectStorageFileKey(projectId, 'artifacts', versionId, `content.${extension}`);
     let stored; let committed = false;
     try {
       stored = await provider.putFileFromPath(file.path, key);
-      const client = await (await db.connect()).connect();
+      // Reinspect the durable snapshot, not a path that could have changed
+      // between the initial bounded validation and the complete copy.
+      const opened = await provider.openVerifiedRead(key, { checksumSha256: stored.checksumSha256, sizeBytes: stored.sizeBytes });
       try {
-        await client.query('BEGIN');
-        await client.query('SELECT id FROM projects WHERE id=$1 FOR UPDATE', [projectId]);
-        const membership = (await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId])).rows[0];
-        if (!membership) notFound();
-        if (!WRITE_ROLES.includes(membership.role)) throw artifactError('FORBIDDEN', 'Your project role cannot import artifact versions.', 403);
+        const inspected = await previews.inspectImportedHandle({ handle: opened.handle, stat: opened.stat, originalFilename }, file.artifactType);
+        if (inspected.id !== spec.id || inspected.type !== spec.type || JSON.stringify(inspected.metadata) !== JSON.stringify(spec.metadata)) throw artifactError('ARTIFACT_IMPORT_SOURCE_CHANGED', 'The selected file changed while being copied. Keep the original request and choose the exact file again.', 409);
+      } finally { await opened.handle.close(); }
+      const request = { schema: 'traceomics.artifact-import.v1', projectId: String(projectId), ownerUserId: Number(userId), requestId,
+        originalFilename, name, artifactType: file.artifactType || 'auto', previousVersionId,
+        sha256: stored.checksumSha256, sizeBytes: stored.sizeBytes };
+      const requestHash = crypto.createHash('sha256').update(JSON.stringify(request), 'utf8').digest('hex');
+      const expectedChanged = () => { if (file.expectedRequestSha256 !== undefined && file.expectedRequestSha256 !== requestHash) throw artifactError('ARTIFACT_IMPORT_SOURCE_CHANGED', 'The uploaded file or import settings do not match the confirmed request. Nothing new was accepted; choose the original file and settings before retrying.', 409); };
+      const result = await importTransaction(userId, projectId, requestId, async (client, member, user) => {
+        if (explicitRequest) {
+          const accepted = (await client.query('SELECT * FROM managed_artifact_import_receipts WHERE project_id=$1 AND owner_user_id=$2 AND request_id=$3', [projectId, userId, requestId])).rows[0];
+          if (accepted) {
+            if (accepted.request_sha256 !== requestHash) throw artifactError('ARTIFACT_IMPORT_REQUEST_CONFLICT', 'This request already accepted different file bytes or import settings. Recover its original receipt before starting another import.', 409);
+            expectedChanged();
+            return { receipt: await importReceipt(client, accepted, canImport(member, user)), replayed: true };
+          }
+        }
+        expectedChanged();
+        if (!canImport(member, user)) throw artifactError('FORBIDDEN', 'Your current project role or deployment policy does not allow artifact imports.', 403);
         await assertCapacity(client, userId, projectId, stored.sizeBytes);
-        if (previous) {
-          const latest = await internal(userId, projectId, previousVersionId);
-          if (latest.checksum !== previous.checksum) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The previous artifact version changed during import.', 409);
+        let artifactId = id('af');
+        if (previousVersionId) {
+          // Recovery of an accepted UUID does not depend on the continued
+          // existence of the old version selected before its original upload.
+          const previous = await internal(userId, projectId, previousVersionId, { membershipChecked: true });
+          if (previous.sourceKind !== 'managed-file') throw artifactError('ARTIFACT_VERSION_READ_ONLY', 'Create a new managed artifact to edit an imported result or saved analysis. Existing result versions remain immutable.', 409);
+          if (previous.type !== spec.type || previous.format.id !== spec.id) throw artifactError('ARTIFACT_FORMAT_CHANGED', 'A replacement version must retain the artifact format. Import a separate artifact for a different format.', 409);
+          artifactId = previous.artifactId;
         }
         const next = (await client.query('SELECT COALESCE(MAX(version_number),0)+1 AS version FROM managed_artifact_versions WHERE artifact_id=$1', [artifactId])).rows[0];
         const inserted = await client.query(`INSERT INTO managed_artifact_versions (id,artifact_id,project_id,owner_user_id,name,version_number,previous_version_id,artifact_type,format_json,mime_type,checksum_sha256,size_bytes,storage_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [versionId, artifactId, projectId, userId, name, Number(next.version), previousVersionId, spec.type, format, spec.mime, stored.checksumSha256, stored.sizeBytes, key]);
-        await client.query('COMMIT'); committed = true;
-        return display(managed(inserted.rows[0]));
-      } catch (error) { await client.query('ROLLBACK'); throw error; }
-      finally { client.release(); }
+        const row = inserted.rows[0];
+        if (!explicitRequest) return { row };
+        const receipt = (await client.query(`INSERT INTO managed_artifact_import_receipts
+          (project_id,owner_user_id,request_id,request_sha256,request_json,version_id,artifact_id,version_number,previous_version_id,checksum_sha256,size_bytes,storage_key,created_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [projectId, userId, requestId, requestHash, request,
+          row.id, row.artifact_id, row.version_number, row.previous_version_id, row.checksum_sha256, row.size_bytes, row.storage_key, row.created_at])).rows[0];
+        return { row, receipt: { requestId, status: 'succeeded', canImport: true, requestSha256: requestHash, request, acceptance: acceptance(receipt), availability: 'recorded' } };
+      }, true);
+      committed = !result.replayed;
+      if (result.replayed) {
+        const { version, ...received } = result.receipt;
+        return { ...(version || { version: null }), importRequest: { ...received, replayed: true } };
+      }
+      return { ...await display(managed(result.row)), ...(result.receipt ? { importRequest: { ...result.receipt, replayed: false } } : {}) };
     } finally {
-      if (stored && !committed) await provider.remove(key);
+      if (stored && !committed) await cleanupImportAttempt(userId, projectId, requestId, versionId, key).catch(() => {});
     }
   }
 
@@ -428,7 +536,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       [value.versionId,value.artifactId,projectId,userId,safeName(value.name),Number(next.version),value.previousVersionId||null,value.type,value.format,value.mimeType,value.checksumSha256,value.sizeBytes,value.key,value.publicationId,value.provenance]);
     return inserted.rows[0];
   }
-  return { list, get, preview, readVerifiedImage, importFile, resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
+  return { list, get, preview, readVerifiedImage, importFile, getImportReceipt, resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

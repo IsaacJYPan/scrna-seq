@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261023, now())
+VALUES ('traceomics.runtime', 20261024, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -678,6 +678,33 @@ CREATE TABLE IF NOT EXISTS managed_artifact_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_managed_artifact_versions_project_owner
   ON managed_artifact_versions(project_id, owner_user_id, created_at DESC, id DESC);
+
+-- An accepted local upload is independent of later source/version lifecycle.
+-- These source-free receipts never cause a retry to create replacement bytes.
+CREATE TABLE IF NOT EXISTS managed_artifact_import_receipts (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  request_json JSONB NOT NULL CHECK(jsonb_typeof(request_json)='object' AND octet_length(request_json::text)<=4096),
+  version_id TEXT NOT NULL CHECK(version_id ~ '^av_[a-f0-9]{24}$'),
+  artifact_id TEXT NOT NULL CHECK(artifact_id ~ '^af_[a-f0-9]{24}$'),
+  version_number INTEGER NOT NULL CHECK(version_number>0),
+  previous_version_id TEXT,
+  checksum_sha256 TEXT NOT NULL CHECK(checksum_sha256 ~ '^[a-f0-9]{64}$'),
+  size_bytes BIGINT NOT NULL CHECK(size_bytes>=0),
+  storage_key TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(project_id,owner_user_id,request_id)
+);
+CREATE OR REPLACE FUNCTION protect_managed_artifact_import_receipt() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Accepted artifact imports are immutable' USING ERRCODE='55000';
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_managed_artifact_import_receipt ON managed_artifact_import_receipts;
+CREATE TRIGGER trg_managed_artifact_import_receipt BEFORE UPDATE OR DELETE ON managed_artifact_import_receipts
+  FOR EACH ROW EXECUTE FUNCTION protect_managed_artifact_import_receipt();
 
 -- ── Analysis object lineage edges (DAG-ready parent→child model) ─────────────
 CREATE TABLE IF NOT EXISTS analysis_object_edges (
