@@ -266,7 +266,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
         {error && (
           <div
             role="alert"
-            className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300"
+            className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300"
           >
             {error}
           </div>
@@ -288,7 +288,7 @@ export default function StudyDesign({ currentWs, datasetInfo, userId, callApi })
           </div>
         )}
         {conditionComparisonStarted && (
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">
             Condition comparison started. Track it in Runs &amp; Results.
           </div>
         )}
