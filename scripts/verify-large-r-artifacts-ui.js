@@ -165,7 +165,7 @@ cat("Payload bytes:",length(large_object$payload),"; label:",large_object$label)
     const version = saved.value.version;
     const savedPreview = consoleUi.getByRole('region', { name: 'Saved R artifact preview', exact: true });
     await savedPreview.getByRole('heading', { name: 'Large private payload · v1', exact: true }).waitFor();
-    await savedPreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    await savedPreview.getByText('Checksum verified for this saved version', { exact: true }).waitFor();
     assert(version.sizeBytes > 200 * 1024 ** 2 && version.sizeBytes <= 256 * 1024 ** 2,
       'The saved RDS bytes do not satisfy the actual configured large-object envelope.');
     assert((await savedPreview.innerText()).includes(version.sizeBytes.toLocaleString() + ' bytes'),
@@ -209,7 +209,7 @@ cat("Payload bytes:",length(large_object$payload),"; label:",large_object$label)
     assert(afterFailure.sha256 === physical.sha256 && afterFailure.sizeBytes === physical.sizeBytes,
       'The failed replacement changed immutable saved bytes.');
     await consoleUi.getByRole('button', { name: 'Inspect Large private payload · v1', exact: true }).click();
-    await savedPreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    await savedPreview.getByText('Checksum verified for this saved version', { exact: true }).waitFor();
     await savedPreview.screenshot({ path: path.join(directory, 'large-rds-retained-after-quota-failure.png') });
     check('A real quota rejection explains the failure and preserves the original complete RDS version, checksum and inspectable metadata.');
 

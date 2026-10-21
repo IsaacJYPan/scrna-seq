@@ -34,7 +34,7 @@ it('loads only the requested exact version, verifies response evidence, and requ
   render(<RetainedArtifactView {...props} />);
   expect(await screen.findByRole('columnheader', { name: 'gene' })).toBeVisible();
   expect(screen.getByText('Saved checksum verified · preview from this exact version')).toBeVisible();
-  expect(screen.getByText(/scans a bounded portion/)).toBeVisible();
+  expect(screen.getByText(/Showing part of the table/)).toBeVisible();
   expect(getArtifactVersion).toHaveBeenCalledWith('project', versionId, expect.any(AbortSignal));
   fireEvent.click(screen.getByRole('button', { name: 'Next rows' }));
   await waitFor(() => expect(previewArtifactVersion).toHaveBeenLastCalledWith('project', versionId, expect.objectContaining({ offset: 25, limit: 25 })));
@@ -77,7 +77,7 @@ it('shows authorized opaque metadata without reading or hashing a full analysis 
 it('distinguishes a verified but unrenderable saved table from metadata whose bytes were not inspected', async () => {
   previewArtifactVersion.mockResolvedValueOnce(result({ family: 'metadata', message: 'The complete table exceeds the browser preview budget.' }));
   render(<RetainedArtifactView {...props} />);
-  expect(await screen.findByText(/saved bytes match this version, but no bounded browser preview/)).toBeVisible();
+  expect(await screen.findByText(/checksum matches this version, but no browser preview/)).toBeVisible();
   expect(screen.getByText(/Saved checksum verified/)).toBeVisible();
   expect(screen.queryByText(/contents have not been read or verified/)).not.toBeInTheDocument();
 });
@@ -192,7 +192,7 @@ it('revokes an already rendered image as soon as its target disconnects', async 
 it('rejects unsupported pointers without making reads and delegates optional inspection explicitly', async () => {
   const onInspect = vi.fn();
   const view = render(<RetainedArtifactView {...props} reference={{ kind: 'path', path: '/private' }} />);
-  expect(screen.getByRole('alert')).toHaveTextContent('supported exact saved-result reference');
+  expect(screen.getByRole('alert')).toHaveTextContent('saved result with a version and checksum');
   expect(getArtifactVersion).not.toHaveBeenCalled();
   view.rerender(<RetainedArtifactView {...props} onInspect={onInspect} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Inspect result' }));

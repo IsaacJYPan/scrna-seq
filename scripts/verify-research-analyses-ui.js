@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const { waitFor } = require('./browser-helpers');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -15,14 +16,7 @@ const assert = (value, message) => { if (!value) throw new Error(message); };
 const identity = prefix => prefix + '_' + crypto.randomBytes(12).toString('hex');
 const checksum = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const regex = value => new RegExp('^' + value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-async function waitFor(check, message, timeout = 30000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  throw new Error(message);
-}
+
 function ownedPath(storageRoot, key) {
   const directory = path.resolve(storageRoot);
   const filename = path.resolve(directory, ...key.split('/'));

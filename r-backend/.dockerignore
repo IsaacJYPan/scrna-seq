@@ -13,3 +13,5 @@
 !private-kernel-init.R
 !generate-demo-template.R
 !sample_data.csv
+!lib/
+!lib/*.R

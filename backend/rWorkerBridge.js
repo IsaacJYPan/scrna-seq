@@ -1,1759 +1,86 @@
-// ── Worker-to-R bridge ───────────────────────────────────────────────────────
-//
-// The safe seam that lets a job worker invoke the R backend through
-// SERVER-CONTROLLED, explicitly allowlisted operations. It started with
-// metadata-only runtime/inspection checks and now also carries selected
-// owner-verified scientific workflow handlers. It still opens no dynamic route
-// to arbitrary R.
-//
-// HARD BOUNDARIES (do not weaken):
-//   - This is NOT an HTTP route. It is an internal module called only by the
-//     trusted worker handler. There is no public "run R bridge" endpoint.
-//   - Only operations in R_BRIDGE_OPERATIONS may run. The operation NAME is the
-//     only thing the caller chooses; the HTTP method + path are taken from the
-//     server-defined spec, NEVER from caller input.
-//   - No arbitrary R code, no client-controlled R path/endpoint/method/URL, no
-//     client-controlled R state key. Per-operation payloads are rebuilt by this
-//     module from validated, server-derived inputs; smuggling a `code` / `path` /
-//     `endpoint` / `method` / `stateKey` field does nothing.
-//   - Job/project/object identity is derived from the trusted `job` row, not from
-//     caller input.
-//   - Errors are sanitized before they can reach job logs / artifacts: raw R error
-//     text, stacks, and internal URLs/hosts never escape (see sanitizeRBridgeError
-//     and the default caller's catch). Thrown errors always carry a SAFE message.
-//
-// SCOPE: fixed allowlisted operations only.
-//   - `r.runtime.check` — a read-only call to the R `/health` endpoint recording
-//     sanitized runtime metadata. Touches NO analysis object.
-//   - `r.object.inspect` — a read-only inspection of ONE existing live analysis
-//     object via the R `/object/inspect` endpoint. The object is identified by a
-//     SERVER-DERIVED state key (X-Object-ID); the caller cannot choose it. It reads
-//     a sanitized object summary (class/dimensions/assay+reduction+metadata-field
-//     NAMES, runtime versions) and records it as metadata. It returns NO cell/gene/
-//     expression/embedding data, mutates NOTHING in R, creates NO checkpoint/result
-//     object, and produces NO download.
-//   - `r.pbmc.pipeline.v1`, `r.checkpoint.load.v1`, and `r.deg.find_markers.v1`
-//     are selected owner-verified workflow handlers with server-built payloads and
-//     sanitized outputs. They are not a general execution/eval mechanism.
-// Object access is gated by
-// the worker handler BEFORE the bridge is reached: only the live-R object owner may
-// trigger an inspection (see jobWorker.js — verifyAnalysisObjectOwner). The bridge
-// receives object context only as SERVER-DERIVED `objectContext` ({ objectId,
-// stateKey }); `input` / job parameters can never choose the object, state key,
-// method, or path.
+// Worker-to-R requests use fixed operations and server-derived object context.
+// Handlers authorize object access; the bridge rebuilds payloads and sanitizes responses.
+// Request policy and completion recovery live in rBridge/operations and rBridge/completionReceipts.
 
-const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const storage = require('./storage');
 const { PBMC_PIPELINE_PARAM_NAMES } = require('./pbmcPipeline');
 const { DEG_FIND_MARKERS_PARAM_NAMES } = require('./degFindMarkers');
 const { ENRICHMENT_GSEA_PARAM_NAMES } = require('./enrichmentGsea');
-const {
-  CELLCHAT_INFERENCE_PARAM_NAMES,
-  MAX_CELLCHAT_RESULT_ROWS,
-} = require('./cellChatInference');
+const { CELLCHAT_INFERENCE_PARAM_NAMES, MAX_CELLCHAT_RESULT_ROWS } = require('./cellChatInference');
 const { SEURAT_PIPELINE_PARAM_NAMES } = require('./seuratPipeline');
 const { EXPLORATORY_ANALYSIS_PARAM_NAMES } = require('./exploratoryAnalysis');
+const {
+  codedError,
+  sanitizeRBridgeError,
+  markRSideEffectsPossible,
+  sanitizeRDiagnosticCode,
+} = require('./rBridge/errors');
+const {
+  isAllowedRBridgeTarget,
+  isAllowedRBridgeOperation,
+  R_BRIDGE_OPERATIONS,
+  R_BRIDGE_ALLOWED_TARGETS,
+} = require('./rBridge/operations');
+const {
+  verifyCompletionReceiptEnvelope,
+  buildCompletionReceiptBinding,
+  isPlainObject,
+  createCompletionReceiptEnvelope,
+  descriptorFromCompletionReceipt,
+} = require('./rBridge/completionReceipts');
+const {
+  sanitizePipelineSummary,
+  sanitizeCheckpointInfo,
+  sanitizeLoadSummary,
+  sanitizeDegSummary,
+  sanitizeDegResultInfo,
+  sanitizeExplorationSummary,
+  sanitizeEnrichmentSummary,
+  sanitizeEnrichmentResultInfo,
+  sanitizeConditionComparisonSummary,
+  sanitizeCellChatSummary,
+  sanitizeCellChatResultInfo,
+  isCompleteCellChatSummary,
+  sanitizeNameList,
+  sanitizeInspectionSummary,
+  sanitizeRuntimeField,
+  sanitizeCount,
+  sanitizeChecksum,
+  sanitizeStatNumber,
+  sanitizeCellChatGroup,
+} = require('./rBridge/summaries');
 
-/** Coded error helper (mirrors database.js so callers can branch on err.code). */
-function codedError(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  return err;
-}
-
-/**
- * Receipt-backed R calls cross a point after which every response-side failure is
- * ambiguous: R may already have committed its output and receipt before Node sees
- * a disconnect, oversized/malformed response, or non-200 status. Keep that fact
- * non-enumerable so callers can choose bounded recovery without exposing internal
- * execution state in serialized errors.
- */
-function markRSideEffectsPossible(error) {
-  const err = error instanceof Error
-    ? error
-    : codedError('R_BRIDGE_ERROR', 'R bridge operation failed.');
-  Object.defineProperty(err, 'rSideEffectsPossible', {
-    value: true,
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
-  return err;
-}
-
-function sanitizeRDiagnosticCode(value) {
-  if (typeof value !== 'string') return null;
-  const cleaned = value.replace(/[^a-z0-9_.:-]/gi, '').slice(0, 80);
-  return cleaned || null;
-}
-
-// Default per-call timeout. Explicit and bounded so a hung/unreachable R backend
-// can never wedge a worker tick indefinitely.
 const DEFAULT_R_BRIDGE_TIMEOUT_MS = 10000;
-// Hard ceiling for any single bridge call (incl. the longer pipeline op), so even a
-// caller-supplied timeout can never make a worker tick unbounded.
+
 const MAX_R_BRIDGE_TIMEOUT_MS = 600000;
-const COMPLETION_RECEIPT_SIGNED_MAX_BYTES = 96 * 1024;
-const COMPLETION_RECEIPT_ALGORITHM = 'hmac-sha256';
-const COMPLETION_JOB_TO_R_OPERATION = Object.freeze({
-  'pbmc.pipeline.v1': 'r.pbmc.pipeline.v1',
-  'seurat.pipeline.v1': 'r.seurat.pipeline.v1',
-  'seurat.multisample.v1': 'r.seurat.multisample.v1',
-  'spatial.seurat.v1': 'r.spatial.seurat.v1',
-  'checkpoint.save.v1': 'r.checkpoint.save.v1',
-  'deg.find_markers.v1': 'r.deg.find_markers.v1',
-  'enrichment.gsea.v1': 'r.enrichment.gsea.v1',
-  'cellchat.infer.v1': 'r.cellchat.infer.v1',
-  'condition.pseudobulk_de.v1': 'r.condition.pseudobulk_de.v1',
-  'checkpoint.load.v1': 'r.checkpoint.load.v1',
-  'checkpoint.fork.v1': 'r.checkpoint.load.v1',
-});
 
-// ── Operation allowlist ──────────────────────────────────────────────────────
-// The ONLY operations the bridge will run. Each entry fully describes the
-// server-controlled request; nothing here is derived from caller input. To add an
-// operation you must add an explicit, reviewed entry — there is no dynamic/
-// pass-through path. `touchesAnalysisObject` documents (and is asserted in tests)
-// that this op does not read or mutate analysis-object/live-R state.
-const R_BRIDGE_OPERATIONS = Object.freeze({
-  'r.runtime.check': Object.freeze({
-    method: 'GET',
-    path: '/health',
-    artifactType: 'r_runtime_check',
-    artifactName: 'R runtime check',
-    artifactDescription:
-      'Operational R runtime connectivity/health check. Metadata only — not a scientific result, no analysis-object data.',
-    touchesAnalysisObject: false,
-    requiresObjectContext: false,
-    readOnly: true,
-  }),
-  // Read-only inspection of ONE existing live analysis object. The object is
-  // addressed by a SERVER-DERIVED state key (X-Object-ID) supplied via
-  // `objectContext`; it reads a sanitized summary only and mutates nothing. The
-  // worker handler verifies live-R object ownership BEFORE this runs, so project
-  // membership alone never reaches another user's live object.
-  'r.object.inspect': Object.freeze({
-    method: 'GET',
-    path: '/object/inspect',
-    artifactType: 'r_object_inspection',
-    artifactName: 'R object inspection',
-    artifactDescription:
-      'Read-only inspection of a live analysis object. Metadata only — a sanitized object summary '
-      + '(class, dimensions, assay/reduction/metadata-field names, runtime versions). Not a scientific '
-      + 'result: no expression matrices, cell/gene data, embeddings, or serialized object contents.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    readOnly: true,
-  }),
-  // The first MUTATING bridge operation: run the existing PBMC/Seurat preprocessing
-  // pipeline on a COPY of one live analysis object (the parent is never mutated) and
-  // persist a durable checkpoint RDS to a SERVER-allocated internal vault key. The
-  // request method/path are fixed; the X-Object-ID (parent) is server-derived; the
-  // body is reconstructed by the bridge from ONLY the allowlisted, server-validated
-  // params + the server-allocated checkpoint key (`carriesParams`). It returns a
-  // sanitized, bounded summary — never matrices/cells/genes/embeddings. The worker
-  // handler validates params + ownership BEFORE this runs; there is NO arbitrary R.
-  'r.pbmc.pipeline.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/pbmc-pipeline',
-    artifactType: 'pipeline_summary',
-    artifactName: 'PBMC pipeline summary',
-    artifactDescription:
-      'Sanitized summary of a PBMC/Seurat preprocessing run (normalize → variable features → scale → '
-      + 'PCA → neighbors → clusters → UMAP) executed on a copy of the input object. Bounded counts, '
-      + 'reduction names, resolved parameters, and runtime versions only — no expression matrices, '
-      + 'cell/gene tables, embeddings, paths, or state keys.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesParams: true,
-    mutating: true,
-    readOnly: false,
-    // Pipeline runs are far longer than a health/inspect call — explicit but bounded
-    // so a hung R run can never wedge a worker indefinitely.
-    defaultTimeoutMs: 120000,
-  }),
-  // Checkpoint load / reattach: load a COMPLETED durable internal checkpoint RDS back
-  // into the OWNER's private live R session under the canonical object key, so later
-  // jobs can use it as live input. The request method/path are fixed; the X-Object-ID
-  // (the owner's canonical object key) is server-derived; the body is reconstructed by
-  // the bridge from ONLY the SERVER-selected checkpoint coordinates (`carriesCheckpoint`)
-  // — the internal storage key + expected checksum/size, never any client input. It
-  // mutates ONLY the target live object key and returns a sanitized, bounded summary
-  // (never matrices/cells/genes/embeddings/path/state-key). The worker handler verifies
-  // OWNERSHIP + selects the checkpoint BEFORE this runs; there is NO arbitrary R/path.
-  'r.checkpoint.load.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/checkpoint-load',
-    artifactType: 'checkpoint_load',
-    artifactName: 'Checkpoint load summary',
-    artifactDescription:
-      'Sanitized summary of loading a durable internal checkpoint back into the owner\'s private live R '
-      + 'session (reattach). Bounded object summary (class, dimensions, assay/reduction/metadata-field '
-      + 'names), checksum-verification flag, and runtime versions only — no expression matrices, '
-      + 'cell/gene tables, embeddings, storage path/key, or R state key.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesCheckpoint: true,
-    mutating: true,
-    readOnly: false,
-    // A checkpoint load reads + deserializes an RDS bundle and rebuilds the live object;
-    // explicit but bounded so a hung load can never wedge a worker indefinitely.
-    defaultTimeoutMs: 120000,
-  }),
-  // DEG / marker finding: run the existing FindAllMarkers path over ONE existing live
-  // analysis object (the OWNER's, addressed by a SERVER-DERIVED X-Object-ID) and write the
-  // full marker table to a SERVER-allocated internal vault key. DEG is an OUTPUT-producing
-  // analysis, NOT a mutating transformation: it does NOT mutate the live object (any
-  // temporary identity change is restored R-side) and creates NO new object. The request
-  // method/path are fixed; the body is reconstructed by the bridge from ONLY the allowlisted,
-  // server-validated params + the server-allocated result key (`carriesDegParams`). It returns
-  // a sanitized, bounded marker SUMMARY (group counts, per-group counts, top-N preview with
-  // safe columns) + the result-file integrity (saved/checksum/size) — never raw expression
-  // matrices, cell metadata, embeddings, the storage path/key, or the R state key. The worker
-  // handler verifies OWNERSHIP + validates params BEFORE this runs; there is NO arbitrary R.
-  'r.deg.find_markers.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/deg-find-markers',
-    artifactType: 'deg_summary',
-    artifactName: 'DEG marker summary',
-    artifactDescription:
-      'Sanitized, bounded summary of a DEG / FindAllMarkers run over an existing analysis object: '
-      + 'resolved parameters, groups/clusters detected, total marker count + per-group counts, and a '
-      + 'bounded top-N-per-group preview with safe columns only (group, gene, avg_log2FC, pct.1, pct.2, '
-      + 'adjusted p-value, rank) plus runtime versions. No expression matrices, cell/gene tables, '
-      + 'embeddings, storage path/key, or R state key.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesDegParams: true,
-    // DEG does NOT mutate the live object (idents restored R-side); it only reads the object
-    // and writes a separate output file. Marked non-mutating so the live-state invariant is
-    // explicit and asserted in tests.
-    mutating: false,
-    readOnly: false,
-    // FindAllMarkers over many clusters can run long; explicit but bounded so a hung run can
-    // never wedge a worker indefinitely.
-    defaultTimeoutMs: 120000,
-  }),
-  // Snapshot the owner-verified current live object without accepting code,
-  // paths, or transformation parameters. The worker allocates the exact output
-  // key and publishes the immutable child/checkpoint records only after R has
-  // atomically saved the bundle.
-  'r.checkpoint.save.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/checkpoint-save',
-    artifactType: 'checkpoint_save',
-    artifactName: 'Saved analysis summary',
-    artifactDescription:
-      'Sanitized summary of an explicit durable save of the owner\'s current private analysis state. '
-      + 'No expression matrix, cell-level table, storage path, or live-state key is exposed.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesCheckpointSave: true,
-    mutating: true,
-    readOnly: false,
-    defaultTimeoutMs: 120000,
-  }),
-  // Idempotent job-scoped hydration for isolated compute runtimes. Unlike the
-  // user-visible checkpoint-load job, this auxiliary operation does not publish
-  // a completion receipt or durable artifact; it only prepares a private runtime
-  // immediately before an allowlisted analysis.
-  'r.checkpoint.hydrate.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/checkpoint-load',
-    artifactType: 'checkpoint_load',
-    artifactName: 'Private compute hydration',
-    artifactDescription: 'Private job-scoped checkpoint hydration for isolated compute.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesCheckpoint: true,
-    auxiliary: true,
-    mutating: true,
-    readOnly: false,
-    defaultTimeoutMs: 120000,
-  }),
-  // Ranked GO enrichment for one selected identity versus all remaining cells. The
-  // worker owns the object context, validated scientific parameters, and output key;
-  // the browser cannot choose an R function, endpoint, path, or live-state key.
-  'r.enrichment.gsea.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/enrichment-gsea',
-    artifactType: 'enrichment_summary',
-    artifactName: 'Ranked pathway-enrichment summary',
-    artifactDescription:
-      'Sanitized, bounded summary of a cluster-versus-rest ranked Gene Ontology Biological Process enrichment run. '
-      + 'The complete pathway table remains in private project storage; no expression matrix, cell-level data, '
-      + 'storage key, R state key, or public download is included.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesEnrichmentParams: true,
-    mutating: false,
-    readOnly: false,
-    defaultTimeoutMs: 300000,
-  }),
-  // Cell-cell communication inference is a fixed, single-context CellChat v2
-  // workflow. It only reads the owner-verified object, samples cells under
-  // server-enforced caps, writes a private candidate table, and returns a
-  // bounded summary. It is deliberately not a cross-condition comparison or
-  // an arbitrary metadata/code execution surface.
-  'r.cellchat.infer.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/cellchat-infer',
-    artifactType: 'cellchat_summary',
-    artifactName: 'Cell-cell communication summary',
-    artifactDescription:
-      'Sanitized, bounded summary of predicted ligand-receptor signaling candidates from one selected biological context. '
-      + 'The complete candidate table remains in private project storage; no expression matrix, cell-level data, storage key, '
-      + 'R state key, causal claim, or public download is included.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesCellChatParams: true,
-    mutating: false,
-    readOnly: false,
-    defaultTimeoutMs: 600000,
-  }),
-  'r.explore.summarize.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/explore-summary',
-    artifactType: 'exploration_summary',
-    artifactName: 'Exploratory analysis summary',
-    artifactDescription:
-      'Bounded aggregate exploratory-analysis output from a reviewed recipe. No raw matrix, cell table, code, path, or state key.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesExplorationParams: true,
-    mutating: false,
-    readOnly: true,
-    defaultTimeoutMs: 120000,
-  }),
-  'r.condition.pseudobulk_de.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/condition-pseudobulk-de',
-    artifactType: 'condition_de_summary',
-    artifactName: 'Replicate-aware condition comparison',
-    artifactDescription: 'Sanitized summary of an edgeR pseudobulk condition comparison. The complete table remains in private project storage.',
-    touchesAnalysisObject: true,
-    requiresObjectContext: true,
-    carriesConditionComparison: true,
-    mutating: false,
-    readOnly: false,
-    defaultTimeoutMs: 600000,
-  }),
-  // Dataset-backed Seurat pipeline: load one server-resolved 10x HDF5 dataset,
-  // create a Seurat object, run QC/preprocessing/clustering/UMAP, and save a
-  // server-allocated checkpoint. Dataset and checkpoint storage keys are rebuilt
-  // from trusted worker inputs only; clients cannot choose a path or R function.
-  'r.seurat.pipeline.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/seurat-pipeline',
-    artifactType: 'pipeline_summary',
-    artifactName: 'Seurat pipeline summary',
-    artifactDescription:
-      'Sanitized summary of a dataset-backed Seurat preprocessing run over one uploaded 10x HDF5 dataset. '
-      + 'Bounded counts, reduction names, resolved parameters, warnings, and runtime versions only - no '
-      + 'expression matrices, cell/gene tables, embeddings, paths, or state keys.',
-    touchesAnalysisObject: false,
-    requiresObjectContext: false,
-    carriesSeuratDatasetParams: true,
-    mutating: true,
-    readOnly: false,
-    // A normal PBMC3K preprocessing run can exceed two minutes on the bounded
-    // deployment CPUs. Keep the deadline explicit and finite, but give this
-    // full-pipeline operation the same ten-minute ceiling as the other heavy
-    // scientific operations so successful work does not enter receipt recovery.
-    defaultTimeoutMs: 600000,
-  }),
-  'r.seurat.multisample.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/seurat-pipeline',
-    artifactType: 'pipeline_summary',
-    artifactName: 'Multi-sample Seurat pipeline summary',
-    artifactDescription:
-      'Sanitized summary of a reviewed multi-sample Seurat preprocessing run over server-selected 10x HDF5 datasets. '
-      + 'Bounded counts, sample and condition names, resolved parameters, warnings, and runtime versions only.',
-    touchesAnalysisObject: false,
-    requiresObjectContext: false,
-    carriesMultiSampleSeuratParams: true,
-    mutating: true,
-    readOnly: false,
-    defaultTimeoutMs: 600000,
-  }),
-  'r.spatial.seurat.v1': Object.freeze({
-    method: 'POST',
-    path: '/object/spatial-seurat-pipeline',
-    artifactType: 'pipeline_summary',
-    artifactName: 'Spatial Seurat pipeline summary',
-    artifactDescription:
-      'Sanitized summary of a classic 10x Visium Space Ranger bundle loaded with Seurat. '
-      + 'The durable checkpoint retains the spatial assay, tissue image, and spot coordinates; '
-      + 'public metadata contains only bounded counts, reductions, parameters, and warnings.',
-    touchesAnalysisObject: false,
-    requiresObjectContext: false,
-    carriesSpatialDatasetParams: true,
-    mutating: true,
-    readOnly: false,
-    defaultTimeoutMs: 600000,
-  }),
-});
-
-// Defense-in-depth target allowlist for the default R caller: the EXACT
-// "METHOD PATH" pairs the bridge is ever allowed to issue, derived from the
-// operation specs above. The caller refuses anything else before any HTTP, so even
-// a buggy/abused caller invocation cannot reach an arbitrary R endpoint/method.
-const R_BRIDGE_ALLOWED_TARGETS = Object.freeze(
-  new Set(Object.values(R_BRIDGE_OPERATIONS).map((s) => `${s.method} ${s.path}`))
-);
-
-function isAllowedRBridgeOperation(operation) {
-  return typeof operation === 'string'
-    && Object.prototype.hasOwnProperty.call(R_BRIDGE_OPERATIONS, operation);
-}
-
-function isAllowedRBridgeTarget(method, path) {
-  return R_BRIDGE_ALLOWED_TARGETS.has(`${method} ${path}`);
-}
-
-// ── Sanitization ─────────────────────────────────────────────────────────────
-
-// Reduce an arbitrary value to a short, safe descriptive string: keep only a
-// conservative character set and cap the length, so an R response field can never
-// carry a path, URL, stack, or oversized blob into public artifact metadata.
-function sanitizeRuntimeField(value, maxLen = 64) {
-  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
-    return null;
-  }
-  const cleaned = String(value).replace(/[^A-Za-z0-9 ._:+-]/g, '').trim().slice(0, maxLen);
-  return cleaned === '' ? null : cleaned;
-}
-
-// Reduce a non-negative count to a bounded integer, or null. Guards against
-// non-numbers, negatives, NaN/Infinity, and absurd values so a hostile/garbage R
-// response can never inject a huge or non-numeric "dimension" into metadata.
-function sanitizeCount(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  const n = Math.floor(value);
-  if (n < 0 || n > 1e12) return null;
-  return n;
-}
-
-// Reduce an array of names (assays/reductions/metadata fields) to a bounded list of
-// short, safe strings. Caps BOTH the number of items and each item's length, and
-// drops anything non-scalar/unsafe — so a name list can never carry oversized,
-// path-like, or hostile content (or a huge gene list) into artifact metadata.
-function sanitizeNameList(value, maxItems = 64, maxLen = 64) {
-  if (!Array.isArray(value)) return [];
-  const out = [];
-  for (const v of value) {
-    const s = sanitizeRuntimeField(v, maxLen);
-    if (s) out.push(s);
-    if (out.length >= maxItems) break;
-  }
-  return out;
-}
-
-/**
- * Build a SAFE, bounded, metadata-only summary of an inspected analysis object from
- * the raw R `/object/inspect` body. Only a small allowlist of known structural fields
- * is kept; every value is sanitized and capped. Deliberately NEVER includes
- * expression matrices, cell-level rows, gene lists, embeddings, raw sample values,
- * file paths, the R state key, or serialized object contents — even if the R response
- * tried to include them, they are dropped because they are not on this allowlist.
- */
-function sanitizeInspectionSummary(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const summary = { exists: b.exists === true };
-  if (!summary.exists) return summary;
-
-  const cls = sanitizeRuntimeField(b.class);
-  if (cls) summary.class = cls;
-
-  const nCells = sanitizeCount(b.n_cells);
-  if (nCells !== null) summary.nCells = nCells;
-  const nFeatures = sanitizeCount(b.n_features);
-  if (nFeatures !== null) summary.nFeatures = nFeatures;
-
-  const assays = sanitizeNameList(b.assays);
-  if (assays.length) summary.assays = assays;
-  const reductions = sanitizeNameList(b.reductions);
-  if (reductions.length) summary.reductions = reductions;
-
-  const nMeta = sanitizeCount(b.n_meta_fields);
-  if (nMeta !== null) summary.nMetaFields = nMeta;
-  const metaFields = sanitizeNameList(b.meta_fields);
-  if (metaFields.length) summary.metaFields = metaFields;
-
-  const sv = sanitizeRuntimeField(b.seurat_version);
-  if (sv) summary.seuratVersion = sv;
-  const rv = sanitizeRuntimeField(b.r_version);
-  if (rv) summary.rVersion = rv;
-
-  return summary;
-}
-
-// A 64-char lowercase hex sha256, or null. Guards the checkpoint checksum so a garbage
-// R response can never inject a non-hex / oversized value into artifact metadata.
-function sanitizeChecksum(value) {
-  if (typeof value !== 'string') return null;
-  const s = value.trim().toLowerCase();
-  return /^[0-9a-f]{64}$/.test(s) ? s : null;
-}
-
-/**
- * Build a SAFE, bounded, metadata-only summary of a PBMC pipeline run from the raw R
- * body. Only a small allowlist of structural counts / names survives; every value is
- * sanitized and capped. Deliberately NEVER includes expression matrices, per-cell or
- * per-gene tables, embeddings, raw sample values, file paths, or the R state key —
- * even if the R response tried to include them, they are dropped (not on the allowlist).
- */
-function sanitizePipelineSummary(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
-  const out = {};
-
-  const nCells = sanitizeCount(s.n_cells);
-  if (nCells !== null) out.nCells = nCells;
-  const nFeatures = sanitizeCount(s.n_features);
-  if (nFeatures !== null) out.nFeatures = nFeatures;
-  const preFilterCells = sanitizeCount(s.pre_filter_cells);
-  if (preFilterCells !== null) out.preFilterCells = preFilterCells;
-  const postFilterCells = sanitizeCount(s.post_filter_cells);
-  if (postFilterCells !== null) out.postFilterCells = postFilterCells;
-  if (typeof s.percent_mt_available === 'boolean') out.percentMtAvailable = s.percent_mt_available;
-  const nVar = sanitizeCount(s.n_variable_features);
-  if (nVar !== null) out.nVariableFeatures = nVar;
-  const nPcs = sanitizeCount(s.n_pcs);
-  if (nPcs !== null) out.nPcs = nPcs;
-  const nClusters = sanitizeCount(s.n_clusters);
-  if (nClusters !== null) out.nClusters = nClusters;
-  const nSamples = sanitizeCount(s.n_samples);
-  if (nSamples !== null) out.nSamples = nSamples;
-  const conditions = sanitizeNameList(s.conditions, 48, 80);
-  if (conditions.length) out.conditions = conditions;
-  if (Array.isArray(s.samples_per_condition)) {
-    const counts = [];
-    for (const row of s.samples_per_condition) {
-      if (!row || typeof row !== 'object') continue;
-      const condition = sanitizeRuntimeField(row.condition, 80);
-      const n = sanitizeCount(row.n);
-      if (condition && n !== null) counts.push({ condition, n });
-      if (counts.length >= 48) break;
-    }
-    if (counts.length) out.samplesPerCondition = counts;
-  }
-
-  const reductions = sanitizeNameList(s.reductions);
-  if (reductions.length) out.reductions = reductions;
-  const assays = sanitizeNameList(s.assays);
-  if (assays.length) out.assays = assays;
-
-  // Cluster sizes: a bounded list of non-negative counts (never per-cell data).
-  if (Array.isArray(s.cluster_sizes)) {
-    const sizes = [];
-    for (const v of s.cluster_sizes) {
-      const n = sanitizeCount(v);
-      if (n !== null) sizes.push(n);
-      if (sizes.length >= 256) break;
-    }
-    if (sizes.length) out.clusterSizes = sizes;
-  }
-
-  const method = sanitizeRuntimeField(s.normalization_method);
-  if (method) out.normalizationMethod = method;
-  const res = (typeof s.resolution === 'number' && Number.isFinite(s.resolution)) ? s.resolution : null;
-  if (res !== null) out.resolution = res;
-
-  const sv = sanitizeRuntimeField(b.seurat_version || (b.versions && b.versions.seurat_version));
-  if (sv) out.seuratVersion = sv;
-  const rv = sanitizeRuntimeField(b.r_version || (b.versions && b.versions.r_version));
-  if (rv) out.rVersion = rv;
-
-  const usedSeed = sanitizeCount(s.used_seed);
-  if (usedSeed !== null) out.usedSeed = usedSeed;
-
-  return out;
-}
-
-/**
- * Build a SAFE checkpoint descriptor from the raw R body: did R save a durable
- * checkpoint, and (if so) its sanitized checksum + size. NEVER includes the storage
- * path/key — the worker already holds the SERVER-allocated key and records it
- * internally (stripped from public responses); R only echoes save success + integrity.
- */
-function sanitizeCheckpointInfo(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const c = b.checkpoint && typeof b.checkpoint === 'object' ? b.checkpoint : {};
-  return {
-    saved: c.saved === true,
-    checksumSha256: sanitizeChecksum(c.checksum_sha256),
-    sizeBytes: sanitizeCount(c.size_bytes),
-  };
-}
-
-/**
- * Build a SAFE, bounded, metadata-only summary of a checkpoint LOAD/reattach from the
- * raw R body. Like sanitizeInspectionSummary, only a small allowlist of structural
- * fields survives; every value is sanitized and capped. It records WHETHER the load
- * succeeded, whether the checksum was verified, and a bounded object summary — NEVER
- * expression matrices, per-cell/gene tables, embeddings, raw sample values, the storage
- * path/key, or the R state key (none of those are on the allowlist, so even a hostile R
- * response cannot smuggle them through).
- */
-function sanitizeLoadSummary(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const out = { loaded: b.loaded === true };
-  // Whether R re-verified the checkpoint file checksum before deserializing.
-  out.checksumVerified = b.checksum_verified === true;
-  if (!out.loaded) return out;
-
-  const runtimeInstanceId = sanitizeRuntimeField(b.runtime_instance_id);
-  if (runtimeInstanceId) {
-    out.runtimeInstanceHash = crypto.createHash('sha256').update(runtimeInstanceId).digest('hex');
-  }
-
-  const cls = sanitizeRuntimeField(b.class);
-  if (cls) out.class = cls;
-
-  const nCells = sanitizeCount(b.n_cells);
-  if (nCells !== null) out.nCells = nCells;
-  const nFeatures = sanitizeCount(b.n_features);
-  if (nFeatures !== null) out.nFeatures = nFeatures;
-
-  const assays = sanitizeNameList(b.assays);
-  if (assays.length) out.assays = assays;
-  const reductions = sanitizeNameList(b.reductions);
-  if (reductions.length) out.reductions = reductions;
-
-  const nMeta = sanitizeCount(b.n_meta_fields);
-  if (nMeta !== null) out.nMetaFields = nMeta;
-  const metaFields = sanitizeNameList(b.meta_fields);
-  if (metaFields.length) out.metaFields = metaFields;
-
-  const sv = sanitizeRuntimeField(b.seurat_version);
-  if (sv) out.seuratVersion = sv;
-  const rv = sanitizeRuntimeField(b.r_version);
-  if (rv) out.rVersion = rv;
-
-  return out;
-}
-
-// A finite number kept to ~6 significant figures, or null. Guards numeric marker stats
-// (avg_log2FC / pct / p-value) so a garbage R response can never inject NaN/Infinity or
-// an oversized value into public summary metadata. We use significant figures (not fixed
-// decimals) so very small adjusted p-values (e.g. 1e-12) are preserved rather than rounded
-// to zero, while float noise is still trimmed.
-function sanitizeStatNumber(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  if (Math.abs(value) > 1e12) return null;
-  if (value === 0) return 0;
-  return Number(value.toPrecision(6));
-}
-
-/**
- * Build a SAFE, bounded, metadata-only DEG marker SUMMARY from the raw R body. Only a
- * small allowlist of structural counts / safe stat columns survives; every value is
- * sanitized and capped. Deliberately NEVER includes raw expression matrices, full cell
- * metadata, embeddings, the storage path/key, or the R state key — even if the R response
- * tried to include them, they are dropped (not on this allowlist). The top-N preview is
- * doubly bounded: per-group by the validated topMarkersPerCluster and overall by a hard
- * row cap, so an unbounded marker table can never reach public metadata.
- */
-function sanitizeDegSummary(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
-  const out = {};
-
-  const groupBy = sanitizeRuntimeField(s.group_by);
-  if (groupBy) out.groupBy = groupBy;
-  const testUse = sanitizeRuntimeField(s.test_use);
-  if (testUse) out.testUse = testUse;
-  const assay = sanitizeRuntimeField(s.assay);
-  if (assay) out.assay = assay;
-
-  const nGroups = sanitizeCount(s.n_groups);
-  if (nGroups !== null) out.nGroups = nGroups;
-  // Group LABELS only (e.g. cluster ids) — bounded list of short safe strings.
-  const groups = sanitizeNameList(s.groups, 256);
-  if (groups.length) out.groups = groups;
-
-  const nMarkersTotal = sanitizeCount(s.n_markers_total);
-  if (nMarkersTotal !== null) out.nMarkersTotal = nMarkersTotal;
-
-  // Per-group marker counts: a bounded list of { group, n } (never per-cell data).
-  if (Array.isArray(s.markers_per_group)) {
-    const perGroup = [];
-    for (const row of s.markers_per_group) {
-      if (!row || typeof row !== 'object') continue;
-      const g = sanitizeRuntimeField(row.group);
-      const n = sanitizeCount(row.n);
-      if (g !== null && n !== null) perGroup.push({ group: g, n });
-      if (perGroup.length >= 256) break;
-    }
-    if (perGroup.length) out.markersPerGroup = perGroup;
-  }
-
-  // Top-N markers per group: SAFE columns only, doubly bounded (per-row sanitize + a hard
-  // overall row cap). group/gene are name-safe strings; the rest are bounded numbers.
-  if (Array.isArray(s.top_markers)) {
-    const rows = [];
-    // Must match R completion_receipt_safe_value() so normal publication and
-    // receipt recovery persist the exact same bounded scientific summary.
-    const MAX_TOP_ROWS = 256;
-    for (const r of s.top_markers) {
-      if (!r || typeof r !== 'object') continue;
-      const group = sanitizeRuntimeField(r.group);
-      const gene = sanitizeRuntimeField(r.gene);
-      if (group === null || gene === null) continue;
-      const safeRow = { group, gene };
-      const avg = sanitizeStatNumber(r.avg_log2FC);
-      if (avg !== null) safeRow.avgLog2FC = avg;
-      const p1 = sanitizeStatNumber(r.pct_1);
-      if (p1 !== null) safeRow.pct1 = p1;
-      const p2 = sanitizeStatNumber(r.pct_2);
-      if (p2 !== null) safeRow.pct2 = p2;
-      const padj = sanitizeStatNumber(r.p_val_adj);
-      if (padj !== null) safeRow.pValAdj = padj;
-      const rank = sanitizeCount(r.rank);
-      if (rank !== null) safeRow.rank = rank;
-      rows.push(safeRow);
-      if (rows.length >= MAX_TOP_ROWS) break;
-    }
-    if (rows.length) out.topMarkers = rows;
-  }
-
-  const sv = sanitizeRuntimeField(b.seurat_version || (b.versions && b.versions.seurat_version));
-  if (sv) out.seuratVersion = sv;
-  const rv = sanitizeRuntimeField(b.r_version || (b.versions && b.versions.r_version));
-  if (rv) out.rVersion = rv;
-
-  return out;
-}
-
-/**
- * Build a SAFE descriptor of the DEG full-table result FILE from the raw R body: did R
- * write the marker table, and (if so) its sanitized checksum + size + row count. Like
- * sanitizeCheckpointInfo it NEVER includes the storage path/key — the worker already holds
- * the SERVER-allocated key and records it internally (stripped from public responses).
- */
-function sanitizeDegResultInfo(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const r = b.result && typeof b.result === 'object' ? b.result : {};
-  return {
-    saved: r.saved === true,
-    checksumSha256: sanitizeChecksum(r.checksum_sha256),
-    sizeBytes: sanitizeCount(r.size_bytes),
-    nRows: sanitizeCount(r.n_rows),
-  };
-}
-
-function sanitizeExplorationSummary(body) {
-  const source = body && typeof body === 'object' ? body : {};
-  const recipe = sanitizeRuntimeField(source.recipe, 64);
-  const out = {
-    recipe: ['overview', 'feature_by_group', 'metadata_distribution'].includes(recipe)
-      ? recipe : 'overview',
-    panels: [],
-  };
-  const nCells = sanitizeCount(source.n_cells);
-  const nFeatures = sanitizeCount(source.n_features);
-  if (nCells !== null) out.nCells = nCells;
-  if (nFeatures !== null) out.nFeatures = nFeatures;
-  out.metadataFields = sanitizeNameList(source.metadata_fields, 128, 128);
-
-  const panels = Array.isArray(source.panels) ? source.panels : [];
-  for (const panel of panels.slice(0, 24)) {
-    if (!panel || typeof panel !== 'object') continue;
-    const type = sanitizeRuntimeField(panel.type, 32);
-    if (!['histogram', 'bar', 'feature_group'].includes(type)) continue;
-    const safe = {
-      type,
-      title: sanitizeRuntimeField(panel.title, 160) || 'Exploratory summary',
-      rows: [],
-    };
-    const field = sanitizeRuntimeField(panel.field, 128);
-    if (field) safe.field = field;
-    const rows = Array.isArray(panel.rows) ? panel.rows : [];
-    for (const row of rows.slice(0, 512)) {
-      if (!row || typeof row !== 'object') continue;
-      const clean = {};
-      for (const key of ['label', 'feature', 'group']) {
-        const value = sanitizeRuntimeField(row[key], 128);
-        if (value) clean[key] = value;
-      }
-      for (const key of ['start', 'end', 'count', 'average', 'pct_detected', 'q25', 'median', 'q75']) {
-        const value = sanitizeStatNumber(row[key]);
-        if (value !== null) clean[key === 'pct_detected' ? 'pctDetected' : key] = value;
-      }
-      if (Object.keys(clean).length > 0) safe.rows.push(clean);
-    }
-    if (safe.rows.length > 0) out.panels.push(safe);
-  }
-  return out;
-}
-
-/**
- * Keep only a small, bounded pathway-enrichment preview. Full pathway and leading-
- * edge gene tables stay in the local_internal CSV artifact and never enter public
- * metadata. Unknown fields from R are dropped.
- */
-function sanitizeEnrichmentSummary(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
-  const out = {};
-
-  for (const [source, target] of [
-    ['method', 'method'],
-    ['group_by', 'groupBy'],
-    ['assay', 'assay'],
-    ['species', 'species'],
-    ['gene_set_collection', 'geneSetCollection'],
-    ['rank_metric', 'rankMetric'],
-  ]) {
-    const value = sanitizeRuntimeField(s[source], 80);
-    if (value) out[target] = value;
-  }
-
-  if (s.comparison && typeof s.comparison === 'object') {
-    const targetGroup = sanitizeRuntimeField(s.comparison.target_group, 80);
-    const reference = sanitizeRuntimeField(s.comparison.reference, 80);
-    if (targetGroup || reference) {
-      out.comparison = {};
-      if (targetGroup) out.comparison.targetGroup = targetGroup;
-      if (reference) out.comparison.reference = reference;
-    }
-  }
-
-  for (const [source, target] of [
-    ['input_gene_count', 'inputGeneCount'],
-    ['mapped_gene_count', 'mappedGeneCount'],
-    ['tested_pathway_count', 'testedPathwayCount'],
-    ['significant_pathway_count', 'significantPathwayCount'],
-  ]) {
-    const value = sanitizeCount(s[source]);
-    if (value !== null) out[target] = value;
-  }
-  const mappingRate = sanitizeStatNumber(s.mapping_rate);
-  if (mappingRate !== null && mappingRate >= 0 && mappingRate <= 1) {
-    out.mappingRate = mappingRate;
-  }
-
-  if (s.package_versions && typeof s.package_versions === 'object') {
-    const versions = {};
-    for (const [source, target] of [
-      ['r', 'r'],
-      ['seurat', 'seurat'],
-      ['annotation_dbi', 'annotationDbi'],
-      ['go_db', 'goDb'],
-      ['cluster_profiler', 'clusterProfiler'],
-      ['fgsea', 'fgsea'],
-      ['organism_db', 'organismDb'],
-    ]) {
-      const value = sanitizeRuntimeField(s.package_versions[source], 64);
-      if (value) versions[target] = value;
-    }
-    if (Object.keys(versions).length) out.packageVersions = versions;
-  }
-
-  if (Array.isArray(s.top_pathways)) {
-    const rows = [];
-    for (const row of s.top_pathways) {
-      if (!row || typeof row !== 'object') continue;
-      const id = sanitizeRuntimeField(row.pathway_id, 80);
-      const rawName = typeof row.pathway_name === 'string' ? row.pathway_name : '';
-      const pathLikeName = /(?:[A-Za-z]:[\\/]|[\\/]|https?:|file:)/i.test(rawName);
-      const name = pathLikeName ? null : sanitizeRuntimeField(rawName, 160);
-      if (!id || !name) continue;
-      const safe = { id, name };
-      const nes = sanitizeStatNumber(row.normalized_enrichment_score);
-      const pValue = sanitizeStatNumber(row.p_value);
-      const adjustedPValue = sanitizeStatNumber(row.adjusted_p_value);
-      const setSize = sanitizeCount(row.set_size);
-      if (nes !== null) safe.normalizedEnrichmentScore = nes;
-      if (pValue !== null && pValue >= 0 && pValue <= 1) safe.pValue = pValue;
-      if (adjustedPValue !== null && adjustedPValue >= 0 && adjustedPValue <= 1) {
-        safe.adjustedPValue = adjustedPValue;
-      }
-      if (setSize !== null) safe.setSize = setSize;
-      if (typeof row.significant === 'boolean') safe.significant = row.significant;
-      const direction = sanitizeRuntimeField(row.direction, 16);
-      if (direction === 'positive' || direction === 'negative' || direction === 'neutral') {
-        safe.direction = direction;
-      }
-      rows.push(safe);
-      if (rows.length >= 25) break;
-    }
-    if (rows.length) out.topPathways = rows;
-  }
-  out.warnings = sanitizeNameList(s.warnings, 32, 160);
-  return out;
-}
-
-function sanitizeEnrichmentResultInfo(body) {
-  const result = sanitizeDegResultInfo(body);
-  if (result.sizeBytes !== null && result.sizeBytes > 50 * 1024 * 1024) {
-    result.saved = false;
-  }
-  if (result.nRows !== null && result.nRows > 100000) result.saved = false;
-  return result;
-}
-
-function sanitizeConditionComparisonSummary(body) {
-  const source = body && typeof body === 'object' && body.summary && typeof body.summary === 'object'
-    ? body.summary : {};
-  const top = Array.isArray(source.top_results) ? source.top_results.slice(0, 50) : [];
-  return {
-    method: sanitizeRuntimeField(source.method, 40),
-    cellTypeColumn: sanitizeRuntimeField(source.cell_type_column, 64),
-    unitOfReplication: sanitizeRuntimeField(source.unit_of_replication, 20),
-    paired: source.paired === true,
-    modelFormula: ['~ condition', '~ donor + condition'].includes(source.model_formula)
-      ? source.model_formula : null,
-    sampleCount: sanitizeCount(source.sample_count, 1000),
-    testedCellTypeCount: sanitizeCount(source.tested_cell_type_count, 1000),
-    testedGeneCount: sanitizeCount(source.tested_gene_count, 100000),
-    significantResultCount: sanitizeCount(source.significant_result_count, 500000),
-    skippedCellTypes: sanitizeNameList(source.skipped_cell_types, 128, 100),
-    warnings: sanitizeNameList(source.warnings, 32, 160),
-    packageVersions: {
-      r: sanitizeRuntimeField(source.package_versions && source.package_versions.r, 40),
-      seurat: sanitizeRuntimeField(source.package_versions && source.package_versions.seurat, 40),
-      edgeR: sanitizeRuntimeField(source.package_versions && source.package_versions.edger, 40),
-      limma: sanitizeRuntimeField(source.package_versions && source.package_versions.limma, 40),
-    },
-    topResults: top.map((row) => ({
-      cellType: sanitizeRuntimeField(row && row.cell_type, 100),
-      gene: sanitizeRuntimeField(row && row.gene, 100),
-      logFc: sanitizeStatNumber(row && row.log_fc),
-      pValue: sanitizeStatNumber(row && row.p_value),
-      fdr: sanitizeStatNumber(row && row.fdr),
-    })).filter((row) => row.cellType && row.gene),
-  };
-}
-
-function sanitizeCellChatEnum(value, allowed) {
-  return typeof value === 'string' && allowed.includes(value) ? value : null;
-}
-
-function sanitizeCellChatText(value, maxLen = 80) {
-  // Unlike a generic runtime label, this content can appear in the public
-  // CellChat preview. Reject path/URL-shaped source values outright rather than
-  // merely stripping separators and retaining an accidental secret segment.
-  if (typeof value === 'string' && /(?:[A-Za-z]:[\\/]|[\\/]|https?:|file:)/i.test(value)) {
-    return null;
-  }
-  return sanitizeRuntimeField(value, maxLen);
-}
-
-// Raw grouping/identity labels are intentionally absent from durable CellChat
-// output. Unlike pathway or ligand names, every persisted source/target/group
-// identifier must be the exact opaque presentation token produced by the R
-// helper. Keep this check at the Node boundary too so an accidental R change or
-// even a valid signed receipt cannot republish a safe-looking raw identity.
-function sanitizeCellChatGroup(value) {
-  if (typeof value !== 'string') return null;
-  const match = /^Group ([1-9]\d*)$/.exec(value);
-  if (!match) return null;
-  const index = Number(match[1]);
-  if (!Number.isSafeInteger(index) || index > 32) return null;
-  return `Group ${index}`;
-}
-
-function sanitizeCellChatProbability(value) {
-  const n = sanitizeStatNumber(value);
-  return n !== null && n >= 0 ? n : null;
-}
-
-function sanitizeCellChatPValue(value) {
-  const n = sanitizeStatNumber(value);
-  return n !== null && n >= 0 && n <= 1 ? n : null;
-}
-
-function sanitizeCellChatWarnings(value) {
-  if (!Array.isArray(value)) return [];
-  const warnings = [];
-  for (const item of value) {
-    const text = sanitizeCellChatText(item, 160);
-    if (text) warnings.push(text);
-    if (warnings.length >= 32) break;
-  }
-  return warnings;
-}
-
-// CellChat summaries are deliberately narrower than the private CSV result.
-// The fields below are all aggregate counts, package versions, or a small,
-// safe preview of predicted candidates. Unknown R fields never escape this
-// boundary, so an accidental R-side response change cannot expose cell metadata,
-// storage paths, state keys, or a large candidate table through the public
-// artifact projection.
-function sanitizeCellChatSummary(body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const s = b.summary && typeof b.summary === 'object' ? b.summary : {};
-  const out = {};
-
-  const method = sanitizeCellChatText(s.method, 80);
-  if (method) out.method = method;
-  const analysisIntent = sanitizeCellChatEnum(s.analysis_intent, ['single_context']);
-  if (analysisIntent) out.analysisIntent = analysisIntent;
-  const groupBy = sanitizeCellChatEnum(s.group_by, ['seurat_clusters', 'ident']);
-  if (groupBy) out.groupBy = groupBy;
-  const assay = sanitizeCellChatEnum(s.assay, ['RNA']);
-  if (assay) out.assay = assay;
-  const species = sanitizeCellChatEnum(s.species, ['human', 'mouse']);
-  if (species) out.species = species;
-  const databaseCategory = sanitizeCellChatEnum(s.database_category, [
-    'all', 'secreted_signaling', 'ecm_receptor', 'cell_cell_contact',
-  ]);
-  if (databaseCategory) out.databaseCategory = databaseCategory;
-  const pValueCutoff = sanitizeCellChatPValue(s.p_value_cutoff);
-  if (pValueCutoff !== null && pValueCutoff >= 0.000001 && pValueCutoff <= 0.1) {
-    out.pValueCutoff = pValueCutoff;
-  }
-
-  for (const [source, target] of [
-    ['input_cell_count', 'inputCellCount'],
-    ['analyzed_cell_count', 'analyzedCellCount'],
-    ['input_group_count', 'inputGroupCount'],
-    ['analyzed_group_count', 'analyzedGroupCount'],
-    ['excluded_group_count', 'excludedGroupCount'],
-    ['candidate_interaction_count', 'candidateInteractionCount'],
-    ['retained_interaction_count', 'retainedInteractionCount'],
-    ['retained_pathway_count', 'retainedPathwayCount'],
-  ]) {
-    const value = sanitizeCount(s[source]);
-    if (value !== null) out[target] = value;
-  }
-
-  const groups = [];
-  if (Array.isArray(s.groups)) {
-    for (const row of s.groups) {
-      if (!row || typeof row !== 'object') continue;
-      const group = sanitizeCellChatGroup(row.group);
-      const inputCells = sanitizeCount(row.input_cells);
-      const analyzedCells = sanitizeCount(row.analyzed_cells);
-      if (group && inputCells !== null && analyzedCells !== null && analyzedCells <= inputCells) {
-        groups.push({ group, inputCells, analyzedCells });
-      }
-      if (groups.length >= 64) break;
-    }
-  }
-  out.groups = groups;
-
-  const excludedGroups = [];
-  if (Array.isArray(s.excluded_groups)) {
-    for (const row of s.excluded_groups) {
-      if (!row || typeof row !== 'object') continue;
-      const group = sanitizeCellChatGroup(row.group);
-      const inputCells = sanitizeCount(row.input_cells);
-      const reason = sanitizeCellChatText(row.reason, 80);
-      if (group && inputCells !== null && reason) excludedGroups.push({ group, inputCells, reason });
-      if (excludedGroups.length >= 64) break;
-    }
-  }
-  out.excludedGroups = excludedGroups;
-
-  const versions = {};
-  if (s.package_versions && typeof s.package_versions === 'object') {
-    for (const key of ['r', 'seurat', 'cellchat', 'cellchat_db']) {
-      const value = sanitizeCellChatText(s.package_versions[key], 80);
-      if (value) versions[key === 'cellchat_db' ? 'cellchatDb' : key] = value;
-    }
-  }
-  out.packageVersions = versions;
-
-  const topInteractions = [];
-  if (Array.isArray(s.top_interactions)) {
-    for (const row of s.top_interactions) {
-      if (!row || typeof row !== 'object') continue;
-      const source = sanitizeCellChatGroup(row.source);
-      const target = sanitizeCellChatGroup(row.target);
-      const interaction = sanitizeCellChatText(row.interaction, 160);
-      const pathway = sanitizeCellChatText(row.pathway, 160);
-      const probability = sanitizeCellChatProbability(row.probability);
-      const pValue = sanitizeCellChatPValue(row.p_value);
-      const category = sanitizeCellChatEnum(row.category, [
-        'all', 'secreted_signaling', 'ecm_receptor', 'cell_cell_contact',
-      ]);
-      if (source && target && interaction && pathway && probability !== null
-          && pValue !== null && pValue <= pValueCutoff && category) {
-        topInteractions.push({ source, target, interaction, pathway, probability, pValue, category });
-      }
-      if (topInteractions.length >= 100) break;
-    }
-  }
-  out.topInteractions = topInteractions;
-
-  const topPathways = [];
-  if (Array.isArray(s.top_pathways)) {
-    for (const row of s.top_pathways) {
-      if (!row || typeof row !== 'object') continue;
-      const source = sanitizeCellChatGroup(row.source);
-      const target = sanitizeCellChatGroup(row.target);
-      const pathway = sanitizeCellChatText(row.pathway, 160);
-      const probability = sanitizeCellChatProbability(row.probability);
-      const pValue = sanitizeCellChatPValue(row.p_value);
-      if (source && target && pathway && probability !== null
-          && pValue !== null && pValue <= pValueCutoff) {
-        topPathways.push({ source, target, pathway, probability, pValue });
-      }
-      if (topPathways.length >= 100) break;
-    }
-  }
-  out.topPathways = topPathways;
-  out.warnings = sanitizeCellChatWarnings(s.warnings);
-  return out;
-}
-
-function isCompleteCellChatSummary(summary) {
-  if (!summary || typeof summary !== 'object') return false;
-  const scalarKeys = [
-    'method', 'analysisIntent', 'groupBy', 'assay', 'species', 'databaseCategory', 'pValueCutoff',
-    'inputCellCount', 'analyzedCellCount', 'inputGroupCount', 'analyzedGroupCount',
-    'excludedGroupCount', 'candidateInteractionCount', 'retainedInteractionCount',
-    'retainedPathwayCount',
-  ];
-  if (scalarKeys.some((key) => !Object.prototype.hasOwnProperty.call(summary, key))) return false;
-  if (!Array.isArray(summary.groups) || !Array.isArray(summary.excludedGroups)
-      || !Array.isArray(summary.topInteractions) || !Array.isArray(summary.topPathways)
-      || !Array.isArray(summary.warnings) || !summary.packageVersions
-      || typeof summary.packageVersions !== 'object') return false;
-  if (summary.inputCellCount < summary.analyzedCellCount
-      || summary.inputGroupCount < summary.analyzedGroupCount
-      || summary.excludedGroupCount !== summary.excludedGroups.length
-      || summary.analyzedGroupCount !== summary.groups.length
-      || summary.inputGroupCount !== summary.analyzedGroupCount + summary.excludedGroupCount
-      || summary.inputGroupCount < 2 || summary.inputGroupCount > 32
-      || summary.analyzedGroupCount < 2 || summary.analyzedGroupCount > 32
-      || summary.candidateInteractionCount < summary.retainedInteractionCount
-      || summary.retainedInteractionCount > MAX_CELLCHAT_RESULT_ROWS
-      || !summary.groups.every((row) => sanitizeCellChatGroup(row.group) === row.group)
-      || !summary.excludedGroups.every((row) => sanitizeCellChatGroup(row.group) === row.group)
-      || !summary.topInteractions.every((row) =>
-        sanitizeCellChatGroup(row.source) === row.source
-          && sanitizeCellChatGroup(row.target) === row.target
-          && row.pValue <= summary.pValueCutoff)
-      || !summary.topPathways.every((row) =>
-        sanitizeCellChatGroup(row.source) === row.source
-          && sanitizeCellChatGroup(row.target) === row.target
-          && row.pValue <= summary.pValueCutoff)
-      || (summary.retainedInteractionCount > 0 && summary.topInteractions.length === 0)
-      || (summary.retainedPathwayCount > 0 && summary.topPathways.length === 0)) return false;
-  // A pathway-level aggregation can legitimately contain more retained
-  // source/target rows than the interaction-level table after CellChat's
-  // respective filters. It is therefore not a safe invariant to compare
-  // `retainedPathwayCount` with `candidateInteractionCount` here.
-  return ['r', 'seurat', 'cellchat', 'cellchatDb']
-    .every((key) => typeof summary.packageVersions[key] === 'string');
-}
-
-function sanitizeCellChatResultInfo(body) {
-  const result = sanitizeDegResultInfo(body);
-  if (result.sizeBytes !== null && result.sizeBytes > 50 * 1024 * 1024) result.saved = false;
-  if (result.nRows !== null && result.nRows > MAX_CELLCHAT_RESULT_ROWS) result.saved = false;
-  return result;
-}
-
-const COMPLETION_RECEIPT_BINDING_KEYS = Object.freeze([
-  'version',
-  'job_id',
-  'job_type',
-  'r_operation',
-  'project_id',
-  'receipt_storage_key',
-  'source_analysis_object_id',
-  'source_dataset_id',
-  'source_checkpoint_artifact_id',
-  'target_analysis_object_id',
-  'output_storage_key',
-]);
-const COMPLETION_RECEIPT_KEYS = Object.freeze([
-  ...COMPLETION_RECEIPT_BINDING_KEYS,
-  'payload',
-]);
-// Printable domain separation is intentionally shared byte-for-byte with R.
-// Avoid an embedded NUL because R character values cannot safely represent it.
-const COMPLETION_RECEIPT_HMAC_DOMAIN = 'TRACEOMICS_R_COMPLETION_RECEIPT_V1:';
-
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-    && Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function assertExactObjectKeys(value, keys, code = 'R_COMPLETION_RECEIPT_INVALID') {
-  if (!isPlainObject(value)) throw codedError(code, 'Completion receipt is invalid.');
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length
-      || actual.some((key, index) => key !== expected[index])) {
-    throw codedError(code, 'Completion receipt is invalid.');
-  }
-}
-
-function assertAllowedObjectKeys(value, allowed, required = []) {
-  if (!isPlainObject(value)) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  const allowedSet = new Set(allowed);
-  if (Object.keys(value).some((key) => !allowedSet.has(key))
-      || required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-}
-
-function createCompletionReceiptEnvelope(receipt, secret) {
-  if (!isPlainObject(receipt) || typeof secret !== 'string' || secret.length === 0) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  const signedReceipt = JSON.stringify(receipt);
-  if (Buffer.byteLength(signedReceipt, 'utf8') > COMPLETION_RECEIPT_SIGNED_MAX_BYTES) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  const signature = crypto.createHmac('sha256', secret)
-    .update(COMPLETION_RECEIPT_HMAC_DOMAIN, 'utf8')
-    .update(signedReceipt, 'utf8')
-    .digest('hex');
-  return {
-    algorithm: COMPLETION_RECEIPT_ALGORITHM,
-    signed_receipt: signedReceipt,
-    signature,
-  };
-}
-
-function verifyCompletionReceiptEnvelope(envelope, secret) {
-  assertExactObjectKeys(
-    envelope,
-    ['algorithm', 'signed_receipt', 'signature'],
-    'R_COMPLETION_RECEIPT_INVALID'
-  );
-  if (envelope.algorithm !== COMPLETION_RECEIPT_ALGORITHM
-      || typeof envelope.signed_receipt !== 'string'
-      || Buffer.byteLength(envelope.signed_receipt, 'utf8') === 0
-      || Buffer.byteLength(envelope.signed_receipt, 'utf8') > COMPLETION_RECEIPT_SIGNED_MAX_BYTES
-      || typeof envelope.signature !== 'string'
-      || !/^[0-9a-f]{64}$/.test(envelope.signature)
-      || typeof secret !== 'string' || secret.length === 0) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  const supplied = Buffer.from(envelope.signature, 'hex');
-  const expected = crypto.createHmac('sha256', secret)
-    .update(COMPLETION_RECEIPT_HMAC_DOMAIN, 'utf8')
-    .update(envelope.signed_receipt, 'utf8')
-    .digest();
-  if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  let receipt;
-  try {
-    receipt = JSON.parse(envelope.signed_receipt);
-  } catch {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  if (!isPlainObject(receipt)) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  return receipt;
-}
-
-function buildCompletionReceiptBinding(job, operation, args = {}) {
-  const jobType = job && job.jobType;
-  const expectedOperation = COMPLETION_JOB_TO_R_OPERATION[jobType];
-  if (!expectedOperation) return null;
-  const operationSpec = R_BRIDGE_OPERATIONS[operation];
-  if (operationSpec && operationSpec.auxiliary === true) return null;
-  if (operation !== expectedOperation
-      || typeof job.id !== 'string' || job.id === ''
-      || typeof job.projectId !== 'string' || job.projectId === '') {
-    throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
-  }
-
-  let outputStorageKey = null;
-  let outputKind = null;
-  let sourceCheckpointArtifactId = null;
-  let targetAnalysisObjectId = null;
-  if (jobType === 'pbmc.pipeline.v1') {
-    outputStorageKey = args.pipeline && args.pipeline.checkpointStorageKey;
-    outputKind = 'checkpoints';
-  } else if (jobType === 'checkpoint.save.v1') {
-    outputStorageKey = args.checkpointSave && args.checkpointSave.checkpointStorageKey;
-    outputKind = 'checkpoints';
-  } else if (jobType === 'seurat.pipeline.v1') {
-    outputStorageKey = args.seuratPipeline && args.seuratPipeline.checkpointStorageKey;
-    outputKind = 'checkpoints';
-  } else if (jobType === 'seurat.multisample.v1') {
-    outputStorageKey = args.multiSampleSeuratPipeline && args.multiSampleSeuratPipeline.checkpointStorageKey;
-    outputKind = 'checkpoints';
-  } else if (jobType === 'spatial.seurat.v1') {
-    outputStorageKey = args.spatialPipeline && args.spatialPipeline.checkpointStorageKey;
-    outputKind = 'checkpoints';
-  } else if (jobType === 'deg.find_markers.v1') {
-    outputStorageKey = args.deg && args.deg.resultStorageKey;
-    outputKind = 'artifacts';
-  } else if (jobType === 'enrichment.gsea.v1') {
-    outputStorageKey = args.enrichment && args.enrichment.resultStorageKey;
-    outputKind = 'artifacts';
-  } else if (jobType === 'cellchat.infer.v1') {
-    outputStorageKey = args.cellChat && args.cellChat.resultStorageKey;
-    outputKind = 'artifacts';
-  } else if (jobType === 'condition.pseudobulk_de.v1') {
-    outputStorageKey = args.conditionComparison && args.conditionComparison.resultStorageKey;
-    outputKind = 'artifacts';
-  } else {
-    sourceCheckpointArtifactId = args.checkpoint && args.checkpoint.checkpointArtifactId;
-    targetAnalysisObjectId = args.objectContext && args.objectContext.objectId;
-  }
-  if (outputKind && !storage.isProjectStorageKey(outputStorageKey, {
-    projectId: job.projectId,
-    kind: outputKind,
-  })) {
-    throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
-  }
-  if ((jobType === 'checkpoint.load.v1' || jobType === 'checkpoint.fork.v1')
-      && (typeof sourceCheckpointArtifactId !== 'string' || sourceCheckpointArtifactId === ''
-        || typeof targetAnalysisObjectId !== 'string' || targetAnalysisObjectId === '')) {
-    throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
-  }
-
-  return {
-    version: storage.COMPLETION_RECEIPT_VERSION,
-    job_id: job.id,
-    job_type: jobType,
-    r_operation: operation,
-    project_id: job.projectId,
-    receipt_storage_key: storage.completionReceiptKey(job.projectId, job.id),
-    source_analysis_object_id: job.analysisObjectId || null,
-    source_dataset_id: job.datasetId || null,
-    source_checkpoint_artifact_id: sourceCheckpointArtifactId,
-    target_analysis_object_id: targetAnalysisObjectId,
-    output_storage_key: outputStorageKey,
-  };
-}
-
-function validateBoundedReceiptValue(value, depth = 0, state = { nodes: 0 }) {
-  state.nodes += 1;
-  if (depth > 7 || state.nodes > 6000) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  if (value === null || typeof value === 'boolean') return;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    return;
-  }
-  if (typeof value === 'string') {
-    if (Buffer.byteLength(value, 'utf8') > 160 || !/^[A-Za-z0-9 ._:+-]*$/.test(value)) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    if (value.length > 256) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    for (const item of value) validateBoundedReceiptValue(item, depth + 1, state);
-    return;
-  }
-  if (!isPlainObject(value) || Object.keys(value).length > 64) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  for (const [key, child] of Object.entries(value)) {
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(key)) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    validateBoundedReceiptValue(child, depth + 1, state);
-  }
-}
-
-function validateReceiptPayloadSchema(jobType, payload) {
-  validateBoundedReceiptValue(payload);
-  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
-    const topKeys = ['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)
-      ? ['ok', 'summary', 'checkpoint', 'versions', 'warnings']
-      : ['ok', 'summary', 'checkpoint', 'versions'];
-    assertExactObjectKeys(payload, topKeys);
-    if (payload.ok !== true) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    assertAllowedObjectKeys(payload.summary, [
-      'n_cells', 'n_features', 'pre_filter_cells', 'post_filter_cells',
-      'percent_mt_available', 'n_variable_features', 'n_pcs', 'n_clusters',
-      'cluster_sizes', 'reductions', 'normalization_method', 'resolution', 'used_seed',
-      'assays',
-      'n_samples', 'conditions', 'samples_per_condition',
-    ], ['n_cells', 'n_features']);
-    assertExactObjectKeys(payload.checkpoint, ['saved', 'checksum_sha256', 'size_bytes']);
-    assertExactObjectKeys(payload.versions, ['seurat_version', 'r_version']);
-    if (['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)
-        && !Array.isArray(payload.warnings)) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    if (jobType === 'seurat.multisample.v1') {
-      if (!Array.isArray(payload.summary.conditions) || !Array.isArray(payload.summary.samples_per_condition)) {
-        throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-      }
-      for (const row of payload.summary.samples_per_condition) {
-        assertExactObjectKeys(row, ['condition', 'n']);
-      }
-    }
-    return;
-  }
-  if (jobType === 'deg.find_markers.v1') {
-    assertExactObjectKeys(payload, ['ok', 'summary', 'result', 'versions']);
-    if (payload.ok !== true) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    assertExactObjectKeys(payload.summary, [
-      'group_by', 'test_use', 'assay', 'n_groups', 'groups',
-      'n_markers_total', 'markers_per_group', 'top_markers',
-    ]);
-    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
-    assertExactObjectKeys(payload.versions, ['seurat_version', 'r_version']);
-    if (!Array.isArray(payload.summary.groups)
-        || !Array.isArray(payload.summary.markers_per_group)
-        || !Array.isArray(payload.summary.top_markers)) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    for (const row of payload.summary.markers_per_group) assertExactObjectKeys(row, ['group', 'n']);
-    for (const row of payload.summary.top_markers) {
-      assertExactObjectKeys(row, ['group', 'gene', 'avg_log2FC', 'pct_1', 'pct_2', 'p_val_adj', 'rank']);
-    }
-    return;
-  }
-  if (jobType === 'enrichment.gsea.v1') {
-    assertExactObjectKeys(payload, ['ok', 'summary', 'result']);
-    if (payload.ok !== true) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    assertExactObjectKeys(payload.summary, [
-      'method', 'comparison', 'group_by', 'assay', 'species',
-      'gene_set_collection', 'rank_metric', 'input_gene_count',
-      'mapped_gene_count', 'mapping_rate', 'tested_pathway_count',
-      'significant_pathway_count', 'package_versions', 'top_pathways', 'warnings',
-    ]);
-    assertExactObjectKeys(payload.summary.comparison, ['target_group', 'reference']);
-    assertExactObjectKeys(payload.summary.package_versions, [
-      'r', 'seurat', 'annotation_dbi', 'go_db', 'cluster_profiler', 'fgsea',
-      'organism_db',
-    ]);
-    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
-    if (!Array.isArray(payload.summary.top_pathways)
-        || !Array.isArray(payload.summary.warnings)
-        || payload.summary.top_pathways.length > 25) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    for (const row of payload.summary.top_pathways) {
-      assertExactObjectKeys(row, [
-        'pathway_id', 'pathway_name', 'normalized_enrichment_score', 'p_value',
-        'adjusted_p_value', 'set_size', 'significant', 'direction',
-      ]);
-    }
-    return;
-  }
-  if (jobType === 'cellchat.infer.v1') {
-    assertExactObjectKeys(payload, ['ok', 'summary', 'result']);
-    if (payload.ok !== true) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    assertExactObjectKeys(payload.summary, [
-      'method', 'analysis_intent', 'group_by', 'assay', 'species', 'database_category',
-      'p_value_cutoff', 'input_cell_count', 'analyzed_cell_count', 'input_group_count',
-      'analyzed_group_count', 'excluded_group_count', 'candidate_interaction_count',
-      'retained_interaction_count', 'retained_pathway_count', 'groups', 'excluded_groups',
-      'package_versions', 'top_interactions', 'top_pathways', 'warnings',
-    ]);
-    assertExactObjectKeys(payload.summary.package_versions, ['r', 'seurat', 'cellchat', 'cellchat_db']);
-    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
-    if (!Array.isArray(payload.summary.groups) || !Array.isArray(payload.summary.excluded_groups)
-        || !Array.isArray(payload.summary.top_interactions) || !Array.isArray(payload.summary.top_pathways)
-        || !Array.isArray(payload.summary.warnings)
-        || payload.summary.groups.length > 64 || payload.summary.excluded_groups.length > 64
-        || payload.summary.top_interactions.length > 100 || payload.summary.top_pathways.length > 100
-        || payload.summary.warnings.length > 32) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    for (const row of payload.summary.groups) {
-      assertExactObjectKeys(row, ['group', 'input_cells', 'analyzed_cells']);
-    }
-    for (const row of payload.summary.excluded_groups) {
-      assertExactObjectKeys(row, ['group', 'input_cells', 'reason']);
-    }
-    for (const row of payload.summary.top_interactions) {
-      assertExactObjectKeys(row, [
-        'source', 'target', 'interaction', 'pathway', 'probability', 'p_value', 'category',
-      ]);
-    }
-    for (const row of payload.summary.top_pathways) {
-      assertExactObjectKeys(row, ['source', 'target', 'pathway', 'probability', 'p_value']);
-    }
-    return;
-  }
-  if (jobType === 'condition.pseudobulk_de.v1') {
-    assertExactObjectKeys(payload, ['ok', 'summary', 'result']);
-    if (payload.ok !== true) throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    assertExactObjectKeys(payload.summary, [
-      'method', 'cell_type_column', 'unit_of_replication', 'paired', 'model_formula', 'sample_count',
-      'tested_cell_type_count', 'tested_gene_count', 'significant_result_count',
-      'skipped_cell_types', 'top_results', 'package_versions', 'warnings',
-    ]);
-    assertExactObjectKeys(payload.summary.package_versions, ['r', 'seurat', 'edger', 'limma']);
-    assertExactObjectKeys(payload.result, ['saved', 'checksum_sha256', 'size_bytes', 'n_rows']);
-    if (!Array.isArray(payload.summary.skipped_cell_types)
-        || !Array.isArray(payload.summary.top_results)
-        || !Array.isArray(payload.summary.warnings)
-        || payload.summary.top_results.length > 50) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    for (const row of payload.summary.top_results) {
-      assertExactObjectKeys(row, ['cell_type', 'gene', 'log_fc', 'p_value', 'fdr']);
-    }
-    return;
-  }
-  assertExactObjectKeys(payload, [
-    'loaded', 'runtime_instance_id', 'checksum_verified', 'class', 'n_cells',
-    'n_features', 'assays', 'reductions', 'n_meta_fields', 'meta_fields',
-    'seurat_version', 'r_version',
-  ]);
-  if (payload.loaded !== true || payload.checksum_verified !== true) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  if (!Array.isArray(payload.assays) || !Array.isArray(payload.reductions)
-      || !Array.isArray(payload.meta_fields)
-      || typeof payload.runtime_instance_id !== 'string'
-      || payload.runtime_instance_id.length === 0) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-}
-
-function descriptorFromCompletionReceipt(job, receipt, expected = {}) {
-  assertExactObjectKeys(receipt, COMPLETION_RECEIPT_KEYS);
-  const jobType = job && job.jobType;
-  const rOperation = COMPLETION_JOB_TO_R_OPERATION[jobType];
-  const receiptKey = storage.completionReceiptKey(job.projectId, job.id);
-  const parsedReceiptKey = storage.parseProjectStorageKey(receipt.receipt_storage_key);
-  const commonMatches = receipt.version === storage.COMPLETION_RECEIPT_VERSION
-    && receipt.job_id === job.id
-    && receipt.job_type === jobType
-    && receipt.r_operation === rOperation
-    && receipt.project_id === job.projectId
-    && receipt.receipt_storage_key === receiptKey
-    && parsedReceiptKey && parsedReceiptKey.projectId === job.projectId
-    && parsedReceiptKey.kind === 'artifacts' && parsedReceiptKey.resourceId === job.id
-    && receipt.source_analysis_object_id === (job.analysisObjectId || null)
-    && receipt.source_dataset_id === (job.datasetId || null)
-    && receipt.source_checkpoint_artifact_id === (expected.sourceCheckpointArtifactId || null)
-    && receipt.target_analysis_object_id === (expected.targetAnalysisObjectId || null)
-    && receipt.output_storage_key === (expected.outputStorageKey || null);
-  if (!commonMatches) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  validateReceiptPayloadSchema(jobType, receipt.payload);
-  const body = receipt.payload;
-  const spec = R_BRIDGE_OPERATIONS[rOperation];
-  if (['pbmc.pipeline.v1', 'seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1', 'checkpoint.save.v1'].includes(jobType)) {
-    const summary = sanitizePipelineSummary(body);
-    const checkpoint = sanitizeCheckpointInfo(body);
-    if (!checkpoint.saved || !checkpoint.checksumSha256 || checkpoint.sizeBytes === null) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    return {
-      operation: rOperation,
-      artifactType: spec.artifactType,
-      name: spec.artifactName,
-      description: spec.artifactDescription,
-      resultObjectType: 'seurat',
-      summary,
-      checkpoint,
-      metadata: {
-        operation: rOperation,
-        kind: 'pipeline',
-        scientific_output: true,
-        ranAt: new Date().toISOString(),
-        ...(job.analysisObjectId ? { objectId: job.analysisObjectId } : {}),
-        summary,
-        ...(['seurat.pipeline.v1', 'seurat.multisample.v1', 'spatial.seurat.v1'].includes(jobType)
-          ? { warnings: sanitizeNameList(body.warnings, 32, 160) } : {}),
-      },
-    };
-  }
-  if (jobType === 'enrichment.gsea.v1') {
-    const summary = sanitizeEnrichmentSummary(body);
-    const result = sanitizeEnrichmentResultInfo(body);
-    if (!result.saved || !result.checksumSha256 || result.sizeBytes === null
-        || result.nRows === null) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    return {
-      operation: rOperation,
-      artifactType: spec.artifactType,
-      name: spec.artifactName,
-      description: spec.artifactDescription,
-      objectId: job.analysisObjectId,
-      summary,
-      result,
-      metadata: {
-        operation: rOperation,
-        kind: 'enrichment_summary',
-        scientific_output: true,
-        downloadable: false,
-        ranAt: new Date().toISOString(),
-        objectId: job.analysisObjectId,
-        summary,
-      },
-    };
-  }
-  if (jobType === 'cellchat.infer.v1') {
-    const summary = sanitizeCellChatSummary(body);
-    const result = sanitizeCellChatResultInfo(body);
-    if (!isCompleteCellChatSummary(summary) || !result.saved || !result.checksumSha256
-        || result.sizeBytes === null || result.nRows === null) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    return {
-      operation: rOperation,
-      artifactType: spec.artifactType,
-      name: spec.artifactName,
-      description: spec.artifactDescription,
-      objectId: job.analysisObjectId,
-      summary,
-      result,
-      metadata: {
-        operation: rOperation,
-        kind: 'cellchat_summary',
-        scientific_output: true,
-        downloadable: false,
-        ranAt: new Date().toISOString(),
-        objectId: job.analysisObjectId,
-        summary,
-      },
-    };
-  }
-  if (jobType === 'condition.pseudobulk_de.v1') {
-    const summary = sanitizeConditionComparisonSummary(body);
-    const result = sanitizeEnrichmentResultInfo(body);
-    if (!result.saved || !result.checksumSha256 || result.sizeBytes === null || result.nRows === null) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    return {
-      operation: rOperation, artifactType: spec.artifactType,
-      name: spec.artifactName, description: spec.artifactDescription,
-      objectId: job.analysisObjectId, summary, result,
-      metadata: {
-        operation: rOperation, kind: 'condition_de_summary', scientific_output: true,
-        downloadable: false, ranAt: new Date().toISOString(),
-        objectId: job.analysisObjectId, summary,
-      },
-    };
-  }
-  if (jobType === 'deg.find_markers.v1') {
-    const summary = sanitizeDegSummary(body);
-    const result = sanitizeDegResultInfo(body);
-    if (!result.saved || !result.checksumSha256 || result.sizeBytes === null
-        || result.nRows === null) {
-      throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-    }
-    return {
-      operation: rOperation,
-      artifactType: spec.artifactType,
-      name: spec.artifactName,
-      description: spec.artifactDescription,
-      objectId: job.analysisObjectId,
-      summary,
-      result,
-      metadata: {
-        operation: rOperation,
-        kind: 'deg_summary',
-        scientific_output: true,
-        downloadable: false,
-        ranAt: new Date().toISOString(),
-        objectId: job.analysisObjectId,
-        summary,
-      },
-    };
-  }
-  const loaded = sanitizeLoadSummary(body);
-  if (!loaded.loaded || !loaded.checksumVerified || !loaded.runtimeInstanceHash) {
-    throw codedError('R_COMPLETION_RECEIPT_INVALID', 'Completion receipt is invalid.');
-  }
-  return {
-    operation: rOperation,
-    artifactType: spec.artifactType,
-    storageKind: 'metadata_only',
-    name: spec.artifactName,
-    description: spec.artifactDescription,
-    objectId: expected.targetAnalysisObjectId,
-    loaded,
-    metadata: {
-      operation: rOperation,
-      kind: 'checkpoint_load',
-      scientific_output: false,
-      live_state_mutation: true,
-      loadedAt: new Date().toISOString(),
-      objectId: expected.targetAnalysisObjectId,
-      loaded,
-    },
-  };
-}
-
-/**
- * Map any thrown bridge/caller error to a SAFE { code, message } pair. Known coded
- * errors get a stable, generic message; anything else collapses to a single generic
- * message. We never echo err.message verbatim from lower layers, so a raw R error
- * string, internal URL/host, or stack can never leak through job logs/artifacts.
- */
-function sanitizeRBridgeError(err) {
-  const code = err && typeof err.code === 'string' ? err.code : 'R_BRIDGE_ERROR';
-  const SAFE_MESSAGES = {
-    UNSUPPORTED_R_OPERATION: 'Requested R bridge operation is not allowlisted.',
-    R_BRIDGE_TARGET_REJECTED: 'Requested R bridge target is not allowlisted.',
-    R_BRIDGE_MISCONFIGURED: 'R bridge is not configured.',
-    R_OBJECT_CONTEXT_REQUIRED: 'Server-derived object context is required for object inspection.',
-    R_PIPELINE_PARAMS_REQUIRED: 'Server-validated pipeline parameters are required.',
-    R_DEG_PARAMS_REQUIRED: 'Server-validated DEG parameters and result key are required.',
-    R_ENRICHMENT_PARAMS_REQUIRED: 'Server-validated pathway-enrichment parameters and result key are required.',
-    R_CELLCHAT_PARAMS_REQUIRED: 'Server-validated cell-communication parameters and result key are required.',
-    R_CHECKPOINT_REQUIRED: 'A server-selected checkpoint is required for a checkpoint load.',
-    R_TIMEOUT: 'R runtime did not respond before the timeout.',
-    R_RESPONSE_TOO_LARGE: 'R runtime response exceeded its safe limit.',
-    R_RESPONSE_INVALID: 'R runtime returned an invalid response.',
-    R_UNREACHABLE: 'R runtime is unreachable.',
-    R_RUNTIME_CHECK_FAILED: 'R runtime check failed.',
-    R_OBJECT_INSPECT_FAILED: 'R object inspection failed.',
-    R_PBMC_PIPELINE_FAILED: 'R PBMC pipeline run failed.',
-    R_CHECKPOINT_LOAD_FAILED: 'R checkpoint load failed.',
-    R_DEG_FIND_MARKERS_FAILED: 'R DEG / marker finding run failed.',
-    R_ENRICHMENT_GSEA_FAILED: 'R ranked pathway-enrichment run failed.',
-    R_CELLCHAT_INFERENCE_FAILED: 'R cell-communication inference run failed.',
-    R_SEURAT_PIPELINE_FAILED: 'R Seurat pipeline run failed.',
-    R_BRIDGE_ERROR: 'R bridge operation failed.',
-  };
-  return { code, message: SAFE_MESSAGES[code] || SAFE_MESSAGES.R_BRIDGE_ERROR };
-}
-
-// ── Default R caller (real HTTP) ─────────────────────────────────────────────
-//
-// Builds the function the bridge uses to actually reach R. It is intentionally
-// narrow: it can only issue one of the server-defined { method, path } TARGETS
-// (R_BRIDGE_ALLOWED_TARGETS) against the local Plumber backend with the API token,
-// on a bounded timeout. Defense-in-depth: any non-allowlisted method/path is refused
-// BEFORE any HTTP, so even a buggy/abused invocation can never reach an arbitrary R
-// endpoint. The X-Object-ID header is sent ONLY when a server-derived `objectStateKey`
-// is supplied (for r.object.inspect); the caller never accepts a client/raw state key,
-// and r.runtime.check is always sent without one (it cannot touch per-object live R
-// state). Every low-level failure (ECONNREFUSED, socket/host details, timeouts) is
-// sanitized into a coded error with NO host/URL/stack, so nothing internal leaks.
 function createDefaultRCaller(config = {}) {
   let endpoint = null;
   try {
     endpoint = new URL(
-      config.baseUrl || process.env.R_BACKEND_URL
-      || `http://127.0.0.1:${Number(config.port) || Number(process.env.PLUMBER_PORT) || 8000}`
+      config.baseUrl ||
+        process.env.R_BACKEND_URL ||
+        `http://127.0.0.1:${Number(config.port) || Number(process.env.PLUMBER_PORT) || 8000}`
     );
-    if (!['http:', 'https:'].includes(endpoint.protocol)
-        || endpoint.username || endpoint.password || endpoint.search || endpoint.hash
-        || (endpoint.pathname && endpoint.pathname !== '/')) {
+    if (
+      !['http:', 'https:'].includes(endpoint.protocol) ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.search ||
+      endpoint.hash ||
+      (endpoint.pathname && endpoint.pathname !== '/')
+    ) {
       endpoint = null;
     }
   } catch {
     endpoint = null;
   }
   const token = config.token || process.env.API_TOKEN || '';
-  const maxResponseBytes = Number.isInteger(Number(config.maxResponseBytes))
-    && Number(config.maxResponseBytes) > 0
-    ? Math.min(Number(config.maxResponseBytes), 4 * 1024 * 1024)
-    : 1024 * 1024;
+  const maxResponseBytes =
+    Number.isInteger(Number(config.maxResponseBytes)) && Number(config.maxResponseBytes) > 0
+      ? Math.min(Number(config.maxResponseBytes), 4 * 1024 * 1024)
+      : 1024 * 1024;
 
   const callR = function callR({ method, path, timeoutMs, objectStateKey, body }) {
     return new Promise((resolve, reject) => {
@@ -1763,7 +90,9 @@ function createDefaultRCaller(config = {}) {
       }
       // Defense-in-depth: only the known bridge targets may ever be issued.
       if (!isAllowedRBridgeTarget(method, path)) {
-        reject(codedError('R_BRIDGE_TARGET_REJECTED', 'Requested R bridge target is not allowlisted.'));
+        reject(
+          codedError('R_BRIDGE_TARGET_REJECTED', 'Requested R bridge target is not allowlisted.')
+        );
         return;
       }
       let settled = false;
@@ -1819,7 +148,9 @@ function createDefaultRCaller(config = {}) {
               responseBytes += c.length;
               if (responseBytes > maxResponseBytes) {
                 req.destroy();
-                finishErr(codedError('R_RESPONSE_TOO_LARGE', 'R runtime response exceeded its safe limit.'));
+                finishErr(
+                  codedError('R_RESPONSE_TOO_LARGE', 'R runtime response exceeded its safe limit.')
+                );
                 return;
               }
               chunks.push(c);
@@ -1828,7 +159,11 @@ function createDefaultRCaller(config = {}) {
               if (settled) return;
               const raw = Buffer.concat(chunks).toString('utf8');
               let resBody = null;
-              try { resBody = raw ? JSON.parse(raw) : null; } catch { resBody = null; }
+              try {
+                resBody = raw ? JSON.parse(raw) : null;
+              } catch {
+                resBody = null;
+              }
               finishOk({ status: res.statusCode, body: resBody });
             });
           }
@@ -1841,10 +176,13 @@ function createDefaultRCaller(config = {}) {
 
       // Total wall-clock deadline, not merely an idle-socket timeout. A peer that
       // slowly streams bytes therefore cannot keep a heavy-job claim alive forever.
-      deadline = setTimeout(() => {
-        req.destroy();
-        finishErr(codedError('R_TIMEOUT', 'R runtime did not respond before the timeout.'));
-      }, Number(timeoutMs) || DEFAULT_R_BRIDGE_TIMEOUT_MS);
+      deadline = setTimeout(
+        () => {
+          req.destroy();
+          finishErr(codedError('R_TIMEOUT', 'R runtime did not respond before the timeout.'));
+        },
+        Number(timeoutMs) || DEFAULT_R_BRIDGE_TIMEOUT_MS
+      );
       if (typeof deadline.unref === 'function') deadline.unref();
       // Collapse every transport-level error to a generic, host/URL-free code.
       req.on('error', () => finishErr(codedError('R_UNREACHABLE', 'R runtime is unreachable.')));
@@ -1863,31 +201,6 @@ function createDefaultRCaller(config = {}) {
   return callR;
 }
 
-// ── The bridge ───────────────────────────────────────────────────────────────
-
-/**
- * Run one allowlisted R-backed operation and return a SAFE descriptor describing
- * what to record. Does NOT write to the database itself — the worker handler
- * creates artifacts/results through claim-guarded helpers — so the bridge stays a
- * pure, testable seam.
- *
- * @param {object}   args
- * @param {object}   args.job           trusted job row (source of jobId/projectId/owner)
- * @param {string}   args.operation     MUST be an allowlisted operation name
- * @param {object}   [args.actor]       server-derived actor info (informational)
- * @param {object}   [args.input]       IGNORED for choosing op/path/method/key (server-derived)
- * @param {object}   [args.objectContext] SERVER-DERIVED { objectId, stateKey } for object
- *                                       operations. Required when spec.requiresObjectContext.
- *                                       Never sourced from input/job parameters — the worker
- *                                       handler builds it from the trusted job + owner-verified
- *                                       state-key derivation.
- * @param {object}   [args.claimContext] e.g. { workerId } (informational; never recorded)
- * @param {object}   [args.logger]      { info, warn, error }
- * @param {function} args.callR         injected R caller (default built per worker)
- * @param {number}   [args.timeoutMs]   explicit per-call timeout
- * @returns {Promise<{artifactType,storageKind,name,description,metadata}>}
- * @throws  coded, SAFE-message errors only (see sanitizeRBridgeError codes).
- */
 async function runRBridgeOperation(args = {}) {
   const { job, operation, callR } = args;
   const logger = args.logger || console;
@@ -1911,10 +224,12 @@ async function runRBridgeOperation(args = {}) {
   // Timeout: an explicit caller value wins, else the op's own default (the pipeline op
   // is longer), else the global default — always clamped to a hard ceiling so no call
   // can run unbounded.
-  const requestedTimeout = Number.isInteger(args.timeoutMs) && args.timeoutMs > 0
-    ? args.timeoutMs
-    : (Number.isInteger(spec.defaultTimeoutMs) && spec.defaultTimeoutMs > 0
-      ? spec.defaultTimeoutMs : DEFAULT_R_BRIDGE_TIMEOUT_MS);
+  const requestedTimeout =
+    Number.isInteger(args.timeoutMs) && args.timeoutMs > 0
+      ? args.timeoutMs
+      : Number.isInteger(spec.defaultTimeoutMs) && spec.defaultTimeoutMs > 0
+        ? spec.defaultTimeoutMs
+        : DEFAULT_R_BRIDGE_TIMEOUT_MS;
   const timeoutMs = Math.min(requestedTimeout, MAX_R_BRIDGE_TIMEOUT_MS);
   const request = { method: spec.method, path: spec.path, timeoutMs };
 
@@ -1924,11 +239,18 @@ async function runRBridgeOperation(args = {}) {
   let objectContext = null;
   if (spec.requiresObjectContext) {
     objectContext = args.objectContext;
-    if (!objectContext || typeof objectContext !== 'object'
-      || typeof objectContext.stateKey !== 'string' || objectContext.stateKey === ''
-      || typeof objectContext.objectId !== 'string' || objectContext.objectId === '') {
-      throw codedError('R_OBJECT_CONTEXT_REQUIRED',
-        'Server-derived object context is required for object inspection.');
+    if (
+      !objectContext ||
+      typeof objectContext !== 'object' ||
+      typeof objectContext.stateKey !== 'string' ||
+      objectContext.stateKey === '' ||
+      typeof objectContext.objectId !== 'string' ||
+      objectContext.objectId === ''
+    ) {
+      throw codedError(
+        'R_OBJECT_CONTEXT_REQUIRED',
+        'Server-derived object context is required for object inspection.'
+      );
     }
     request.objectStateKey = objectContext.stateKey;
   }
@@ -1942,10 +264,18 @@ async function runRBridgeOperation(args = {}) {
   if (spec.carriesParams) {
     const pipeline = args.pipeline;
     const params = pipeline && typeof pipeline === 'object' ? pipeline.params : null;
-    const checkpointStorageKey = pipeline && typeof pipeline === 'object' ? pipeline.checkpointStorageKey : null;
-    if (!params || typeof params !== 'object'
-      || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
-      throw codedError('R_PIPELINE_PARAMS_REQUIRED', 'Server-validated pipeline parameters are required.');
+    const checkpointStorageKey =
+      pipeline && typeof pipeline === 'object' ? pipeline.checkpointStorageKey : null;
+    if (
+      !params ||
+      typeof params !== 'object' ||
+      typeof checkpointStorageKey !== 'string' ||
+      checkpointStorageKey === ''
+    ) {
+      throw codedError(
+        'R_PIPELINE_PARAMS_REQUIRED',
+        'Server-validated pipeline parameters are required.'
+      );
     }
     const safeParams = {};
     for (const name of PBMC_PIPELINE_PARAM_NAMES) {
@@ -1960,8 +290,7 @@ async function runRBridgeOperation(args = {}) {
   // and a server-allocated project checkpoint key. No client parameter or path
   // is forwarded to R.
   if (spec.carriesCheckpointSave) {
-    const checkpointStorageKey = args.checkpointSave
-      && args.checkpointSave.checkpointStorageKey;
+    const checkpointStorageKey = args.checkpointSave && args.checkpointSave.checkpointStorageKey;
     if (typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
       throw codedError(
         'R_CHECKPOINT_SAVE_REQUIRED',
@@ -1981,9 +310,11 @@ async function runRBridgeOperation(args = {}) {
   if (spec.carriesCheckpoint) {
     const cp = args.checkpoint;
     const storageKey = cp && typeof cp === 'object' ? cp.internalStorageKey : null;
-    if (!cp || typeof cp !== 'object'
-      || typeof storageKey !== 'string' || storageKey === '') {
-      throw codedError('R_CHECKPOINT_REQUIRED', 'A server-selected checkpoint is required for a checkpoint load.');
+    if (!cp || typeof cp !== 'object' || typeof storageKey !== 'string' || storageKey === '') {
+      throw codedError(
+        'R_CHECKPOINT_REQUIRED',
+        'A server-selected checkpoint is required for a checkpoint load.'
+      );
     }
     // `storage_key` is the TOP-LEVEL body field R confines via validate_path() and the
     // Node proxy's R_PROXY_VALIDATED_PATH_FIELDS allowlist already covers.
@@ -2007,9 +338,16 @@ async function runRBridgeOperation(args = {}) {
     const deg = args.deg;
     const params = deg && typeof deg === 'object' ? deg.params : null;
     const resultStorageKey = deg && typeof deg === 'object' ? deg.resultStorageKey : null;
-    if (!params || typeof params !== 'object'
-      || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
-      throw codedError('R_DEG_PARAMS_REQUIRED', 'Server-validated DEG parameters and result key are required.');
+    if (
+      !params ||
+      typeof params !== 'object' ||
+      typeof resultStorageKey !== 'string' ||
+      resultStorageKey === ''
+    ) {
+      throw codedError(
+        'R_DEG_PARAMS_REQUIRED',
+        'Server-validated DEG parameters and result key are required.'
+      );
     }
     const safeParams = {};
     for (const name of DEG_FIND_MARKERS_PARAM_NAMES) {
@@ -2025,10 +363,14 @@ async function runRBridgeOperation(args = {}) {
   if (spec.carriesEnrichmentParams) {
     const enrichment = args.enrichment;
     const params = enrichment && typeof enrichment === 'object' ? enrichment.params : null;
-    const resultStorageKey = enrichment && typeof enrichment === 'object'
-      ? enrichment.resultStorageKey : null;
-    if (!params || typeof params !== 'object'
-        || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
+    const resultStorageKey =
+      enrichment && typeof enrichment === 'object' ? enrichment.resultStorageKey : null;
+    if (
+      !params ||
+      typeof params !== 'object' ||
+      typeof resultStorageKey !== 'string' ||
+      resultStorageKey === ''
+    ) {
       throw codedError(
         'R_ENRICHMENT_PARAMS_REQUIRED',
         'Server-validated pathway-enrichment parameters and result key are required.'
@@ -2048,10 +390,14 @@ async function runRBridgeOperation(args = {}) {
   if (spec.carriesCellChatParams) {
     const cellChat = args.cellChat;
     const params = cellChat && typeof cellChat === 'object' ? cellChat.params : null;
-    const resultStorageKey = cellChat && typeof cellChat === 'object'
-      ? cellChat.resultStorageKey : null;
-    if (!params || typeof params !== 'object'
-        || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
+    const resultStorageKey =
+      cellChat && typeof cellChat === 'object' ? cellChat.resultStorageKey : null;
+    if (
+      !params ||
+      typeof params !== 'object' ||
+      typeof resultStorageKey !== 'string' ||
+      resultStorageKey === ''
+    ) {
       throw codedError(
         'R_CELLCHAT_PARAMS_REQUIRED',
         'Server-validated cell-communication parameters and result key are required.'
@@ -2068,7 +414,10 @@ async function runRBridgeOperation(args = {}) {
     const exploration = args.exploration;
     const params = exploration && typeof exploration === 'object' ? exploration.params : null;
     if (!params || typeof params !== 'object') {
-      throw codedError('R_EXPLORATION_PARAMS_REQUIRED', 'Server-validated exploratory-analysis parameters are required.');
+      throw codedError(
+        'R_EXPLORATION_PARAMS_REQUIRED',
+        'Server-validated exploratory-analysis parameters are required.'
+      );
     }
     const safeParams = {};
     for (const name of EXPLORATORY_ANALYSIS_PARAM_NAMES) {
@@ -2083,12 +432,23 @@ async function runRBridgeOperation(args = {}) {
     const contrast = design && design.contrast;
     const samples = design && design.samples;
     const resultStorageKey = comparison && comparison.resultStorageKey;
-    if (!contrast || !Array.isArray(samples) || samples.length < 4 || samples.length > 1000
-        || typeof resultStorageKey !== 'string' || resultStorageKey === '') {
-      throw codedError('R_CONDITION_COMPARISON_REQUIRED', 'Server-resolved condition comparison is required.');
+    if (
+      !contrast ||
+      !Array.isArray(samples) ||
+      samples.length < 4 ||
+      samples.length > 1000 ||
+      typeof resultStorageKey !== 'string' ||
+      resultStorageKey === ''
+    ) {
+      throw codedError(
+        'R_CONDITION_COMPARISON_REQUIRED',
+        'Server-resolved condition comparison is required.'
+      );
     }
-    if (contrast.blockingFactor
-        || (Array.isArray(contrast.covariates) && contrast.covariates.length > 0)) {
+    if (
+      contrast.blockingFactor ||
+      (Array.isArray(contrast.covariates) && contrast.covariates.length > 0)
+    ) {
       throw codedError(
         'R_CONDITION_MODEL_UNSUPPORTED',
         'Unsupported condition-model terms cannot cross the trusted R boundary.'
@@ -2119,15 +479,25 @@ async function runRBridgeOperation(args = {}) {
   if (spec.carriesSeuratDatasetParams) {
     const seurat = args.seuratPipeline;
     const params = seurat && typeof seurat === 'object' ? seurat.params : null;
-    const datasetStorageKey = seurat && typeof seurat === 'object' ? seurat.datasetStorageKey : null;
+    const datasetStorageKey =
+      seurat && typeof seurat === 'object' ? seurat.datasetStorageKey : null;
     const datasetFileType = seurat && typeof seurat === 'object' ? seurat.datasetFileType : null;
-    const checkpointStorageKey = seurat && typeof seurat === 'object' ? seurat.checkpointStorageKey : null;
-    if (!params || typeof params !== 'object'
-      || typeof datasetStorageKey !== 'string' || datasetStorageKey === ''
-      || typeof datasetFileType !== 'string' || datasetFileType === ''
-      || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
-      throw codedError('R_SEURAT_PIPELINE_PARAMS_REQUIRED',
-        'Server-validated Seurat pipeline parameters and storage keys are required.');
+    const checkpointStorageKey =
+      seurat && typeof seurat === 'object' ? seurat.checkpointStorageKey : null;
+    if (
+      !params ||
+      typeof params !== 'object' ||
+      typeof datasetStorageKey !== 'string' ||
+      datasetStorageKey === '' ||
+      typeof datasetFileType !== 'string' ||
+      datasetFileType === '' ||
+      typeof checkpointStorageKey !== 'string' ||
+      checkpointStorageKey === ''
+    ) {
+      throw codedError(
+        'R_SEURAT_PIPELINE_PARAMS_REQUIRED',
+        'Server-validated Seurat pipeline parameters and storage keys are required.'
+      );
     }
     const safeParams = {};
     for (const name of SEURAT_PIPELINE_PARAM_NAMES) {
@@ -2146,9 +516,17 @@ async function runRBridgeOperation(args = {}) {
     const multi = args.multiSampleSeuratPipeline;
     const params = multi && typeof multi === 'object' ? multi.params : null;
     const inputs = multi && Array.isArray(multi.inputs) ? multi.inputs : null;
-    const checkpointStorageKey = multi && typeof multi === 'object' ? multi.checkpointStorageKey : null;
-    if (!params || typeof params !== 'object' || !inputs || inputs.length < 2 || inputs.length > 48
-        || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
+    const checkpointStorageKey =
+      multi && typeof multi === 'object' ? multi.checkpointStorageKey : null;
+    if (
+      !params ||
+      typeof params !== 'object' ||
+      !inputs ||
+      inputs.length < 2 ||
+      inputs.length > 48 ||
+      typeof checkpointStorageKey !== 'string' ||
+      checkpointStorageKey === ''
+    ) {
       throw codedError(
         'R_MULTI_SAMPLE_SEURAT_PARAMS_REQUIRED',
         'Server-validated multi-sample Seurat parameters and storage keys are required.'
@@ -2159,11 +537,17 @@ async function runRBridgeOperation(args = {}) {
       if (Object.prototype.hasOwnProperty.call(params, name)) safeParams[name] = params[name];
     }
     const datasetInputs = inputs.map((input) => {
-      if (!input || typeof input !== 'object'
-          || typeof input.datasetStorageKey !== 'string' || input.datasetStorageKey === ''
-          || input.datasetFileType !== 'tenx_h5'
-          || typeof input.sampleName !== 'string' || input.sampleName === ''
-          || typeof input.conditionName !== 'string' || input.conditionName === '') {
+      if (
+        !input ||
+        typeof input !== 'object' ||
+        typeof input.datasetStorageKey !== 'string' ||
+        input.datasetStorageKey === '' ||
+        input.datasetFileType !== 'tenx_h5' ||
+        typeof input.sampleName !== 'string' ||
+        input.sampleName === '' ||
+        typeof input.conditionName !== 'string' ||
+        input.conditionName === ''
+      ) {
         throw codedError(
           'R_MULTI_SAMPLE_SEURAT_PARAMS_REQUIRED',
           'Server-validated multi-sample Seurat parameters and storage keys are required.'
@@ -2189,15 +573,24 @@ async function runRBridgeOperation(args = {}) {
   if (spec.carriesSpatialDatasetParams) {
     const spatial = args.spatialPipeline;
     const params = spatial && typeof spatial === 'object' ? spatial.params : null;
-    const datasetStorageKey = spatial && typeof spatial === 'object' ? spatial.datasetStorageKey : null;
+    const datasetStorageKey =
+      spatial && typeof spatial === 'object' ? spatial.datasetStorageKey : null;
     const datasetFileType = spatial && typeof spatial === 'object' ? spatial.datasetFileType : null;
-    const checkpointStorageKey = spatial && typeof spatial === 'object' ? spatial.checkpointStorageKey : null;
-    if (!params || typeof params !== 'object'
-        || typeof datasetStorageKey !== 'string' || datasetStorageKey === ''
-        || datasetFileType !== 'visium_zip'
-        || typeof checkpointStorageKey !== 'string' || checkpointStorageKey === '') {
-      throw codedError('R_SPATIAL_PIPELINE_PARAMS_REQUIRED',
-        'Server-validated spatial pipeline parameters and storage keys are required.');
+    const checkpointStorageKey =
+      spatial && typeof spatial === 'object' ? spatial.checkpointStorageKey : null;
+    if (
+      !params ||
+      typeof params !== 'object' ||
+      typeof datasetStorageKey !== 'string' ||
+      datasetStorageKey === '' ||
+      datasetFileType !== 'visium_zip' ||
+      typeof checkpointStorageKey !== 'string' ||
+      checkpointStorageKey === ''
+    ) {
+      throw codedError(
+        'R_SPATIAL_PIPELINE_PARAMS_REQUIRED',
+        'Server-validated spatial pipeline parameters and storage keys are required.'
+      );
     }
     const safeParams = {};
     for (const name of SEURAT_PIPELINE_PARAM_NAMES) {
@@ -2219,14 +612,19 @@ async function runRBridgeOperation(args = {}) {
   const completionReceipt = buildCompletionReceiptBinding(job, operation, args);
   if (completionReceipt) {
     if (!request.body || typeof request.body !== 'object') {
-      throw codedError('R_COMPLETION_RECEIPT_CONTEXT_REQUIRED', 'Completion receipt context is invalid.');
+      throw codedError(
+        'R_COMPLETION_RECEIPT_CONTEXT_REQUIRED',
+        'Completion receipt context is invalid.'
+      );
     }
     request.body.completion_receipt = completionReceipt;
   }
 
   if (logger && typeof logger.info === 'function') {
     // NB: never log the state key (an R state key); only the safe method/path.
-    logger.info(`[r-bridge] running allowlisted operation '${operation}' (${spec.method} ${spec.path}).`);
+    logger.info(
+      `[r-bridge] running allowlisted operation '${operation}' (${spec.method} ${spec.path}).`
+    );
   }
 
   // 3. Persist the no-safe-retry boundary immediately before the actual HTTP
@@ -2254,7 +652,9 @@ async function runRBridgeOperation(args = {}) {
     // Server-side diagnostic: the low-level code (timeout/ECONNREFUSED/etc.) for the
     // operation. Never the raw error text; the thrown/public message stays sanitized.
     if (logger && typeof logger.warn === 'function') {
-      logger.warn(`[r-bridge] operation '${operation}' (${spec.method} ${spec.path}) call failed: ${safe.code}.`);
+      logger.warn(
+        `[r-bridge] operation '${operation}' (${spec.method} ${spec.path}) call failed: ${safe.code}.`
+      );
     }
     const bridgeError = codedError(safe.code, safe.message);
     throw completionReceipt ? markRSideEffectsPossible(bridgeError) : bridgeError;
@@ -2272,7 +672,8 @@ async function runRBridgeOperation(args = {}) {
     else if (spec.carriesExplorationParams) failCode = 'R_EXPLORATION_FAILED';
     else if (spec.carriesConditionComparison) failCode = 'R_CONDITION_COMPARISON_FAILED';
     else if (spec.carriesSeuratDatasetParams) failCode = 'R_SEURAT_PIPELINE_FAILED';
-    else if (spec.carriesMultiSampleSeuratParams) failCode = 'R_MULTI_SAMPLE_SEURAT_PIPELINE_FAILED';
+    else if (spec.carriesMultiSampleSeuratParams)
+      failCode = 'R_MULTI_SAMPLE_SEURAT_PIPELINE_FAILED';
     else if (spec.carriesSpatialDatasetParams) failCode = 'R_SPATIAL_PIPELINE_FAILED';
     else if (spec.requiresObjectContext) failCode = 'R_OBJECT_INSPECT_FAILED';
     // Server-side diagnostic: the R HTTP status + our coded reason (never the R body,
@@ -2281,7 +682,9 @@ async function runRBridgeOperation(args = {}) {
     const rStatus = response ? response.status : null;
     const rCode = sanitizeRDiagnosticCode(response && response.body && response.body.code);
     if (logger && typeof logger.warn === 'function') {
-      logger.warn(`[r-bridge] operation '${operation}' (${spec.method} ${spec.path}) got R status ${rStatus || 'none'}${rCode ? ` (${rCode})` : ''} -> ${failCode}.`);
+      logger.warn(
+        `[r-bridge] operation '${operation}' (${spec.method} ${spec.path}) got R status ${rStatus || 'none'}${rCode ? ` (${rCode})` : ''} -> ${failCode}.`
+      );
     }
     const err = codedError(failCode, sanitizeRBridgeError({ code: failCode }).message);
     err.rStatus = rStatus;
@@ -2293,10 +696,9 @@ async function runRBridgeOperation(args = {}) {
   // 4. Build SAFE, metadata-only artifact metadata. Only a small, sanitized allowlist
   //    of fields is kept; everything else from the R response is dropped.
   if (completionReceipt && !isPlainObject(response.body)) {
-    throw markRSideEffectsPossible(codedError(
-      'R_RESPONSE_INVALID',
-      'R runtime returned an invalid response.'
-    ));
+    throw markRSideEffectsPossible(
+      codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+    );
   }
   const body = response.body && typeof response.body === 'object' ? response.body : {};
 
@@ -2307,10 +709,9 @@ async function runRBridgeOperation(args = {}) {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
-      throw markRSideEffectsPossible(codedError(
-        'R_RESPONSE_INVALID',
-        'R runtime returned an invalid response.'
-      ));
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2340,12 +741,13 @@ async function runRBridgeOperation(args = {}) {
     // only load success + verification + a bounded object summary — never the storage
     // path/key (the worker already holds it internally and keeps it private).
     const loaded = sanitizeLoadSummary(body);
-    if (loaded.loaded === true && (loaded.checksumVerified !== true
-        || !loaded.runtimeInstanceHash)) {
-      throw markRSideEffectsPossible(codedError(
-        'R_RESPONSE_INVALID',
-        'R runtime returned an invalid response.'
-      ));
+    if (
+      loaded.loaded === true &&
+      (loaded.checksumVerified !== true || !loaded.runtimeInstanceHash)
+    ) {
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2377,10 +779,9 @@ async function runRBridgeOperation(args = {}) {
     const summary = sanitizeDegSummary(body);
     const result = sanitizeDegResultInfo(body);
     if (result.saved === true && !result.checksumSha256) {
-      throw markRSideEffectsPossible(codedError(
-        'R_RESPONSE_INVALID',
-        'R runtime returned an invalid response.'
-      ));
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2407,10 +808,9 @@ async function runRBridgeOperation(args = {}) {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
-      throw markRSideEffectsPossible(codedError(
-        'R_RESPONSE_INVALID',
-        'R runtime returned an invalid response.'
-      ));
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2464,12 +864,13 @@ async function runRBridgeOperation(args = {}) {
   if (operation === 'r.enrichment.gsea.v1') {
     const summary = sanitizeEnrichmentSummary(body);
     const result = sanitizeEnrichmentResultInfo(body);
-    if (result.saved === true && (!result.checksumSha256
-        || result.sizeBytes === null || result.nRows === null)) {
-      throw markRSideEffectsPossible(codedError(
-        'R_RESPONSE_INVALID',
-        'R runtime returned an invalid response.'
-      ));
+    if (
+      result.saved === true &&
+      (!result.checksumSha256 || result.sizeBytes === null || result.nRows === null)
+    ) {
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2494,18 +895,30 @@ async function runRBridgeOperation(args = {}) {
   if (operation === 'r.condition.pseudobulk_de.v1') {
     const summary = sanitizeConditionComparisonSummary(body);
     const result = sanitizeEnrichmentResultInfo(body);
-    if (result.saved === true && (!result.checksumSha256
-        || result.sizeBytes === null || result.nRows === null)) {
-      throw markRSideEffectsPossible(codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.'));
+    if (
+      result.saved === true &&
+      (!result.checksumSha256 || result.sizeBytes === null || result.nRows === null)
+    ) {
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
-      operation, artifactType: spec.artifactType, name: spec.artifactName,
-      description: spec.artifactDescription, objectId: objectContext.objectId,
-      summary, result,
+      operation,
+      artifactType: spec.artifactType,
+      name: spec.artifactName,
+      description: spec.artifactDescription,
+      objectId: objectContext.objectId,
+      summary,
+      result,
       metadata: {
-        operation, kind: 'condition_de_summary', scientific_output: true,
-        downloadable: false, ranAt: new Date().toISOString(),
-        objectId: objectContext.objectId, summary,
+        operation,
+        kind: 'condition_de_summary',
+        scientific_output: true,
+        downloadable: false,
+        ranAt: new Date().toISOString(),
+        objectId: objectContext.objectId,
+        summary,
       },
     };
   }
@@ -2513,13 +926,14 @@ async function runRBridgeOperation(args = {}) {
   if (operation === 'r.cellchat.infer.v1') {
     const summary = sanitizeCellChatSummary(body);
     const result = sanitizeCellChatResultInfo(body);
-    if (!isCompleteCellChatSummary(summary)
-        || (result.saved === true && (!result.checksumSha256
-          || result.sizeBytes === null || result.nRows === null))) {
-      throw markRSideEffectsPossible(codedError(
-        'R_RESPONSE_INVALID',
-        'R runtime returned an invalid response.'
-      ));
+    if (
+      !isCompleteCellChatSummary(summary) ||
+      (result.saved === true &&
+        (!result.checksumSha256 || result.sizeBytes === null || result.nRows === null))
+    ) {
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2545,10 +959,9 @@ async function runRBridgeOperation(args = {}) {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
-      throw markRSideEffectsPossible(codedError(
-        'R_RESPONSE_INVALID',
-        'R runtime returned an invalid response.'
-      ));
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2573,7 +986,9 @@ async function runRBridgeOperation(args = {}) {
     const summary = sanitizePipelineSummary(body);
     const checkpoint = sanitizeCheckpointInfo(body);
     if (checkpoint.saved === true && !checkpoint.checksumSha256) {
-      throw markRSideEffectsPossible(codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.'));
+      throw markRSideEffectsPossible(
+        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+      );
     }
     return {
       operation,
@@ -2584,8 +999,12 @@ async function runRBridgeOperation(args = {}) {
       summary,
       checkpoint,
       metadata: {
-        operation, kind: 'spatial_pipeline', modality: 'spatial',
-        scientific_output: true, ranAt: new Date().toISOString(), summary,
+        operation,
+        kind: 'spatial_pipeline',
+        modality: 'spatial',
+        scientific_output: true,
+        ranAt: new Date().toISOString(),
+        summary,
         warnings: sanitizeNameList(body.warnings, 32, 160),
       },
     };

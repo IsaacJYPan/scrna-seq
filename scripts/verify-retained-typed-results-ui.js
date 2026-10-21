@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
+const { waitFor, unusedPort: freePort } = require('./browser-helpers');
 const fs = require('node:fs');
 const path = require('node:path');
-const net = require('node:net');
 const crypto = require('node:crypto');
 const { chromium } = require('playwright');
 const { Client } = require('pg');
@@ -12,12 +12,8 @@ const { prepareRetainedTypedFixture } = require('./retained-typed-ui-fixture.cjs
 const root = path.resolve(__dirname, '..');
 const assert = (value, message) => { if (!value) throw new Error(message); };
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-async function waitFor(check, message, timeout = 30000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 100)); }
-  throw new Error(message);
-}
-async function freePort() { const server = net.createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const port = server.address().port; await new Promise(resolve => server.close(resolve)); return port; }
+
+
 
 async function main() {
   const image = process.env.EXPERT_R_SANDBOX_IMAGE;

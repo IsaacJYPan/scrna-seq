@@ -2,9 +2,9 @@
 'use strict';
 
 // Real workflow execution/save/open/fork acceptance. No scientific success is simulated.
+const { waitFor: until, unusedPort: port } = require('./browser-helpers');
 const fs = require('node:fs');
 const path = require('node:path');
-const net = require('node:net');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -17,12 +17,8 @@ const assert = (value, message) => { if (!value) throw new Error(message); };
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const identity = prefix => prefix + '_' + crypto.randomBytes(12).toString('hex');
 const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-async function until(check, message, timeout = 30000) {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 100)); }
-  throw new Error(message);
-}
-async function port() { const socket = net.createServer(); await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve)); const value = socket.address().port; await new Promise(resolve => socket.close(resolve)); return value; }
+
+
 
 async function main({ artifactDirectory } = {}) {
   const image = process.env.EXPERT_R_SANDBOX_IMAGE;

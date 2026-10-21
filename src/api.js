@@ -578,15 +578,10 @@ export const electronAPI = {
 
   // Provenance
   saveProvenance: async (envelope) => req('/api/db/provenance', { method: 'POST', body: JSON.stringify(envelope) }),
-  dbSaveProvenance: async (envelope) => req('/api/db/provenance', { method: 'POST', body: JSON.stringify(envelope) }),
   getProvenance: async (id) => req(`/api/db/provenance/${id}`),
-  dbGetProvenance: async (id) => req(`/api/db/provenance/${id}`),
   getAllProvenance: async () => req('/api/db/provenance'),
-  dbGetAllProvenance: async () => req('/api/db/provenance'),
   getProvenanceChain: async (id) => req(`/api/db/provenance-chain/${id}`),
-  dbGetProvenanceChain: async (id) => req(`/api/db/provenance-chain/${id}`),
   deleteProvenance: async (id) => req(`/api/db/provenance/${id}`, { method: 'DELETE' }),
-  dbDeleteProvenance: async (id) => req(`/api/db/provenance/${id}`, { method: 'DELETE' }),
 
   // Analysis Objects (durable, ownership-scoped object identity)
   createAnalysisObject: async (payload) => req('/api/analysis-objects', { method: 'POST', body: JSON.stringify(payload || {}) }),

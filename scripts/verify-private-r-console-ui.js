@@ -243,14 +243,14 @@ async function main() {
     await context.setOffline(true);
     try {
       await consoleUi.getByRole('button', { name: 'Refresh session status', exact: true }).click();
-      await consoleUi.getByText('Session inspection is unconfirmed. Previously confirmed evidence remains visible; inspect status before running or saving.', { exact: true }).waitFor();
+      await consoleUi.getByText('Session inspection is unconfirmed. Previous results remain visible; inspect status before running or saving.', { exact: true }).waitFor();
       assert(!await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).isEnabled(),
         'An unavailable status inspection left R execution enabled.');
       assert(!await consoleUi.getByRole('button', { name: 'Save object', exact: true }).isEnabled(),
         'An unavailable status inspection left object serialization enabled.');
       assert(await editor.inputValue() === retainedDraft, 'A temporary outage erased edited R source.');
       await output.getByRole('cell', { name: 'a', exact: true }).waitFor();
-      await consoleUi.getByText('Session inspection is unconfirmed. Previously confirmed evidence remains visible; inspect status before running or saving.', { exact: true }).scrollIntoViewIfNeeded();
+      await consoleUi.getByText('Session inspection is unconfirmed. Previous results remain visible; inspect status before running or saving.', { exact: true }).scrollIntoViewIfNeeded();
       await page.screenshot({ path: path.join(directory, 'unavailable-session-retains-draft-output.png') });
       await editor.screenshot({ path: path.join(directory, 'unavailable-retained-edited-source.png') });
       await output.screenshot({ path: path.join(directory, 'unavailable-retained-command-output.png') });
@@ -475,7 +475,7 @@ cat("Loaded cells:", ncol(obj), "features:", nrow(obj))`, 1);
         'The explicit R output save did not complete with a durable artifact reference.');
       const preview = consoleUi.getByRole('region', { name: 'Saved R artifact preview', exact: true });
       await preview.getByRole('heading', { name: name + ' · v' + value.version.versionNumber, exact: true }).waitFor();
-      await preview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+      await preview.getByText('Checksum verified for this saved version', { exact: true }).waitFor();
       assert(value.version.sha256 === value.version.reference.sha256, 'The publication reference differs from its artifact bytes.');
       return value;
     }
@@ -514,7 +514,7 @@ cat("Loaded cells:", ncol(obj), "features:", nrow(obj))`, 1);
     assert(fs.readFileSync(firstObjectPath).equals(originalObjectBytes), 'Replacement modified the original immutable RDS bytes.');
     await consoleUi.getByRole('button', { name: 'Inspect Control cells · v1', exact: true }).click();
     await tablePreview.getByRole('heading', { name: 'Control cells · v1', exact: true }).waitFor();
-    await tablePreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    await tablePreview.getByText('Checksum verified for this saved version', { exact: true }).waitFor();
     await consoleUi.screenshot({ path: path.join(directory, 'published-immutable-object-versions.png') });
     check('Saving a revised Seurat binding retains the original RDS bytes and creates an inspectable second version with its own source/order/checksum.');
     const tableRow = (await database.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1', [table.version.versionId])).rows[0];
@@ -529,11 +529,11 @@ cat("Loaded cells:", ncol(obj), "features:", nrow(obj))`, 1);
       && fs.readFileSync(savedTablePath).equals(originalTableBytes), 'CSV replacement changed the original file or failed to preserve its logical identity and format.');
     await consoleUi.getByRole('button', { name: 'Inspect Condition counts · v1', exact: true }).click();
     await tablePreview.getByRole('heading', { name: 'Condition counts · v1', exact: true }).waitFor();
-    await tablePreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    await tablePreview.getByText('Checksum verified for this saved version', { exact: true }).waitFor();
     assert(await tablePreview.getByRole('cell', { name: '6', exact: true }).count() === 2, 'The original six-cell table did not remain inspectable after replacement.');
     await tablePreview.screenshot({ path: path.join(directory, 'published-immutable-table-original.png') });
     const evidenceCard = consoleUi.getByRole('region', { name: 'Saved R outputs', exact: true }).locator(':scope > div').first();
-    await evidenceCard.getByText('Publication evidence', { exact: true }).click();
+    await evidenceCard.getByText('Save details', { exact: true }).click();
     await evidenceCard.screenshot({ path: path.join(directory, 'published-source-input-environment-lineage.png') });
     check('CSV replacement preserves the original complete table, retains CSV format, and records independent version/source/input/environment evidence.');
     const published = [plot, firstObject, table, revisedObject, revisedTable];
@@ -582,10 +582,10 @@ cat("Original checkpoint restored:",ncol(obj),"cells; original input rows:",nrow
       'A fresh restart did not restore the original checkpoint and CSV without replaying old analysis cells.');
     await consoleUi.getByRole('button', { name: 'Inspect previous session', exact: true }).click();
     await consoleUi.getByRole('button', { name: 'Inspect previous Condition counts · v1', exact: true }).click();
-    await tablePreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    await tablePreview.getByText('Checksum verified for this saved version', { exact: true }).waitFor();
     assert(await tablePreview.getByRole('cell', { name: '6', exact: true }).count() === 2, 'Restart changed the earlier immutable saved table.');
     await consoleUi.getByRole('button', { name: 'Inspect previous Control cells · v1', exact: true }).click();
-    await tablePreview.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    await tablePreview.getByText('Checksum verified for this saved version', { exact: true }).waitFor();
     await consoleUi.getByRole('button', { name: 'Inspect previous Condition plot · v1', exact: true }).click();
     await tablePreview.getByRole('img', { name: 'Saved figure Condition plot', exact: true }).evaluate(element => element.decode());
     await consoleUi.getByRole('region', { name: 'Previous R session evidence', exact: true }).screenshot({ path: path.join(directory, 'restarted-original-inputs-retained-outputs.png') });
@@ -687,7 +687,7 @@ cat("Restored original cells:", ncol(restored_obj)); display_table(restored_tabl
       const changed = await apiGet(page, '/api/artifact-versions/' + service.project.id + '/' + table.version.versionId + '/preview');
       assert(changed.status === 409 && changed.value.code === 'ARTIFACT_INTEGRITY_FAILED', 'Changed publication bytes were accepted as a saved preview.');
       await inspector.getByRole('button', { name: /^Condition counts · v1/ }).click();
-      await inspector.getByRole('alert').filter({ hasText: 'integrity check failed' }).waitFor();
+      await inspector.getByRole('alert').filter({ hasText: 'could not be verified against its saved version and checksum' }).waitFor();
       assert(await inspector.getByRole('table').count() === 0 && await inspector.getByRole('img').count() === 0, 'Tampered saved contents remained visible in the inspector.');
       await inspector.screenshot({ path: path.join(directory, 'published-tamper-rejected.png') });
     } finally { fs.writeFileSync(savedTablePath, originalTableBytes); }

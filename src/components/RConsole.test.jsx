@@ -88,7 +88,7 @@ it('saves an exact named binding, verifies saved bytes, retains evidence and ref
   fireEvent.click(screen.getByRole('button',{name:'Save object',exact:true}));await screen.findByRole('region',{name:'Saved R artifact preview'});
   expect(api.publishPrivateROutput).toHaveBeenCalledWith('project_one','pk_one',{requestId:expect.any(String),type:'object',name:'Saved cells',binding:'cells with spaces'});
   expect(getArtifactVersion).toHaveBeenCalledWith('project_one','av_saved');expect(previewArtifactVersion).toHaveBeenCalledWith('project_one','av_saved',{limit:25});
-  expect(screen.getByText('Saved checksum verified · preview from this exact version')).toBeVisible();expect(screen.getByText(/Source SHA-256/)).toHaveTextContent(publication.sourceSha256);expect(screen.getByText(/Source command 2/)).toBeInTheDocument();
+  expect(screen.getByText('Checksum verified for this saved version')).toBeVisible();expect(screen.getByText(/Source SHA-256/)).toHaveTextContent(publication.sourceSha256);expect(screen.getByText(/Source command 2/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button',{name:'Stop session',exact:true}));fireEvent.click(screen.getByRole('button',{name:'Stop and discard unsaved memory'}));await screen.findByText('Session stopped · unsaved memory lost');
   expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();fireEvent.click(screen.getByLabelText('Use Saved cells'));fireEvent.click(screen.getByRole('button',{name:'Start private session',exact:true}));
   await waitFor(()=>expect(api.startPrivateRKernel).toHaveBeenCalledTimes(2));expect(api.startPrivateRKernel.mock.lastCall[1].inputs).toEqual([savedVersion.reference]);
@@ -247,7 +247,7 @@ it('keeps the edited cells and last confirmed output when inspection is unavaila
   api.listPrivateRKernels.mockResolvedValue({items:[kernel]});render(<RConsole {...publishingProps}/>);await screen.findByLabelText('R stdout');
   fireEvent.change(screen.getByLabelText('R console source'),{target:{value:'unsent_draft <- 99'}});fireEvent.change(screen.getByLabelText('Existing R binding'),{target:{value:'n'}});fireEvent.change(screen.getByLabelText('Saved output name'),{target:{value:'Remembered n'}});
   api.getPrivateRKernel.mockRejectedValueOnce(Object.assign(new Error('The service cannot be reached.'),{code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'}));fireEvent.click(screen.getByRole('button',{name:'Refresh session status',exact:true}));
-  await screen.findByText('Session inspection is unconfirmed. Previously confirmed evidence remains visible; inspect status before running or saving.');
+  await screen.findByText('Session inspection is unconfirmed. Previous results remain visible; inspect status before running or saving.');
   expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeDisabled();expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeDisabled();expect(screen.getByLabelText('R console source')).toHaveValue('unsent_draft <- 99');expect(screen.getByLabelText('R stdout')).toHaveTextContent('[1] 3');
   fireEvent.click(screen.getByRole('button',{name:'Refresh session status',exact:true}));await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeEnabled());expect(screen.getByRole('button',{name:'Save object',exact:true})).toBeEnabled();expect(screen.getByLabelText('R console source')).toHaveValue('unsent_draft <- 99');expect(api.executePrivateRKernel).not.toHaveBeenCalled();expect(api.publishPrivateROutput).not.toHaveBeenCalled();
 });

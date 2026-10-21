@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const { waitFor } = require('./browser-helpers');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -11,11 +12,7 @@ const root = path.resolve(__dirname, '..');
 const assert = (value, message) => { if (!value) throw new Error(message); };
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const prefix = value => new RegExp('^' + value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-async function waitFor(check, message) {
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 100)); }
-  throw new Error(message);
-}
+
 
 async function main() {
   const directory = path.join(root, 'playwright', 'report', 'retained-results-' + Date.now());

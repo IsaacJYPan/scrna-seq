@@ -38,7 +38,7 @@ function SharedSourceRecovery({ record, payload, busy, blocked, onCheck, onRetry
   return <section aria-label="Shared source recovery" className="space-y-2 rounded border border-border bg-surface p-3 text-sm">
     <p className="font-medium">{saved ? `Your last submission was saved as version ${record.journal.outcome?.version || 'available'}.`
       : rejected ? 'Your submitted source is available privately.' : 'A shared submission needs confirmation.'}</p>
-    <p className="text-xs leading-relaxed text-textMuted">{saved ? 'Review the saved result to check its exact version. Later shared source and private edits stay separate.'
+    <p className="text-xs leading-relaxed text-textMuted">{saved ? 'Open the saved version to review it. Your later private edits are kept separately.'
       : rejected ? 'A newer shared version prevented this save. Review the submitted source or keep it as a separate document.'
         : record.phase === 'unconfirmed' ? 'Recovery storage has not been confirmed. Keep this window open and retry the original request.'
           : record.loaded ? 'The original request is kept privately. Retry checks that submission; it does not create a replacement.'
@@ -311,7 +311,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
   </div> : inspector?.kind === 'artifact' ? <React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Loading saved material…</p>}>
     <RetainedWorkView projectId={projectId} userId={userId} reference={inspector.reference} compact canWrite={canWrite} onOpenWorkflow={onOpenWorkflow} />
   </React.Suspense> : inspector?.kind === 'links' ? <div className="space-y-3 text-sm">
-    <p className="text-xs text-textMuted">These exact versions keep their original access rules. Inspection does not change or run them.</p>
+    <p className="text-xs text-textMuted">These saved versions keep their original access rules. Opening them does not run the analysis.</p>
     {analysis.references.map(item => <div key={JSON.stringify(item.reference)} className="rounded border border-border p-3"><p className="break-words">{referenceLabel?.(item.reference, item.access) || 'Saved material'}</p>
       {item.access === 'restricted' ? <p className="mt-2 text-xs text-textMuted">Source access is restricted.</p> : <button type="button" className="mt-2 text-xs text-primary underline" onClick={() => setInspector({ kind: 'artifact', reference: item.reference })}>Inspect saved version</button>}
     </div>)}{!analysis.references.length && <p>No material is linked yet. Add saved results from the analysis overview.</p>}

@@ -122,6 +122,7 @@ ARG APP_GID=10001
 # the supported deployment topology).
 WORKDIR /app
 COPY plumber.R run.R expert-runner.R private-kernel-bridge.py private-kernel-init.R generate-demo-template.R sample_data.csv /app/
+COPY lib/ /app/lib/
 
 RUN rm -f /usr/local/bin/install-r-packages /root/.R/Makevars /app/install-r-packages.sh \
     && groupadd --gid "${APP_GID}" appuser \

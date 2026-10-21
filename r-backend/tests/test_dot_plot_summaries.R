@@ -4,17 +4,13 @@
 load_dot_plot_runtime <- function() {
   runtime <- new.env(parent = globalenv())
   file <- file.path("r-backend", "plumber.R")
+  sys.source(file.path(dirname(file), "lib", "publicParameters.R"), envir = runtime)
   expressions <- parse(file)
-  helpers <- c("dot_plot_group_summaries", "public_compute_admission",
-    "public_compute_admission_response", "public_csv_gene_list",
-    "public_gene_identifier", "public_validation_response",
-    "public_identity_levels", "bounded_public_labels",
-    "bounded_group_sample_indices", "bounded_sample_indices")
   for (expression in expressions) {
     if (!is.call(expression) || !identical(expression[[1L]], as.name("<-")) ||
         !is.symbol(expression[[2L]])) next
     name <- as.character(expression[[2L]])
-    if (name %in% helpers || startsWith(name, "MAX_")) eval(expression, runtime)
+    if (name == "dot_plot_group_summaries") eval(expression, runtime)
   }
   lines <- readLines(file, warn = FALSE)
   line <- which(trimws(lines) == "#* @get /dot-plot")
