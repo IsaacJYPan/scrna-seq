@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { createAnalysisAttachment, getAnalysisAttachmentRequest, listAnalysisAttachments, listAnalysisAttachmentOptions } from './analysisAttachmentApi';
+import { createAnalysisAttachment, correctAnalysisAttachment, getAnalysisAttachmentRequest, getAnalysisAttachmentRevision,
+  listAnalysisAttachments, listAnalysisAttachmentOptions, listAnalysisAttachmentRevisions } from './analysisAttachmentApi';
 import { withExecutionTarget } from '../runtime/executionTarget';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -56,4 +57,41 @@ it('rejects unreadable success responses and preserves caller cancellation witho
   const failure = new DOMException('Aborted', 'AbortError'); fetch.mockRejectedValueOnce(failure);
   await expect(listAnalysisAttachmentOptions('project 1', 'analysis 1')).rejects.toBe(failure);
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('posts a correction to its exact attachment with the frozen expected head and normalized content', async () => {
+  const body = { requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', expectedHeadRevisionId: `rar_${'1'.repeat(24)}`,
+    reference: { kind: 'artifact-version', versionId: `av_${'2'.repeat(24)}`, sha256: 'a'.repeat(64) },
+    caption: 'Corrected caption', suppliedOrigin: { origin: null, sourceReference: null, documentReference: null, environmentReference: null } };
+  const signal = new AbortController().signal; const result = { requestId: body.requestId, replayed: false };
+  fetch.mockResolvedValue({ ok: true, json: async () => result });
+  await expect(correctAnalysisAttachment('project 1', 'analysis 1', 'attachment/1', body, { signal })).resolves.toBe(result);
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(endpoint + '/attachment%2F1/revisions', expect.objectContaining({ method: 'POST', credentials: 'include', signal,
+    body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } }));
+  expect(withExecutionTarget).toHaveBeenCalledWith(expect.any(Function), { mutation: true });
+});
+
+it('reads bounded revision history and one exact revision through authenticated source-free GETs', async () => {
+  fetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: false }) });
+  const signal = new AbortController().signal;
+  await listAnalysisAttachmentRevisions('project 1', 'analysis 1', 'attachment/1', { cursor: 'older_page', signal });
+  await getAnalysisAttachmentRevision('project 1', 'analysis 1', 'attachment/1', 'revision/2', { signal });
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    endpoint + '/attachment%2F1/revisions?limit=30&cursor=older_page', endpoint + '/attachment%2F1/revisions/revision%2F2',
+  ]);
+  for (const [, options] of fetch.mock.calls) {
+    expect(options).toMatchObject({ method: 'GET', credentials: 'include', signal }); expect(options).not.toHaveProperty('body');
+  }
+  expect(withExecutionTarget).toHaveBeenNthCalledWith(1, expect.any(Function), { mutation: false });
+  expect(withExecutionTarget).toHaveBeenNthCalledWith(2, expect.any(Function), { mutation: false });
+});
+
+it('preserves a structured CAS rejection so edits can be rebased deliberately without automatically resubmitting', async () => {
+  const attachment = { id: `raa_${'3'.repeat(24)}`, headRevisionId: `rar_${'4'.repeat(24)}` };
+  const submittedExpectedHeadRevisionId = `rar_${'2'.repeat(24)}`;
+  fetch.mockResolvedValue({ ok: false, status: 409, json: async () => ({ code: 'ANALYSIS_ATTACHMENT_HEAD_CONFLICT', error: 'A newer revision is saved.',
+    attachment, submittedExpectedHeadRevisionId }) });
+  await expect(correctAnalysisAttachment('project 1', 'analysis 1', attachment.id, { expectedHeadRevisionId: submittedExpectedHeadRevisionId }))
+    .rejects.toMatchObject({ status: 409, code: 'ANALYSIS_ATTACHMENT_HEAD_CONFLICT', attachment, submittedExpectedHeadRevisionId });
+  expect(fetch).toHaveBeenCalledTimes(1);
 });

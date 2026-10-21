@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261025`. Apply
+This release requires database schema contract `20261026`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. The idempotent migration expands publication
 bounds and requires every completed size to fit its retained reservation;
@@ -242,6 +242,9 @@ draft revisions, keeping scientific artifacts separate from editable notes.
 Completed outside-result attachments have independent append-only caption/origin
 revisions and exact managed-file references. Supplied origin notes are unverified;
 project membership never grants access to another owner's private source bytes.
+Attachment corrections retain an exact predecessor and independent source owner;
+earlier referenced managed files cannot be removed by normal cleanup. Historical
+captions and original request receipts remain readable under current membership.
 Existing versions, source receipts, restart
 links and jobs remain intact. Earlier workflow runs without recorded request
 contents remain visible in history; the service cannot verify that a repeated

@@ -1,7 +1,7 @@
 export const ANALYSIS_ATTACHMENT_SCHEMA = 'traceomics.analysis-attachment.v1';
 export const ANALYSIS_ATTACHMENT_ID = /^raa_[a-f0-9]{24}$/;
 export const ANALYSIS_ATTACHMENT_REVISION_ID = /^rar_[a-f0-9]{24}$/;
-export const ANALYSIS_ATTACHMENT_LIMITS = Object.freeze({ caption: 2000, origin: 2000, attachments: 200, page: 30 });
+export const ANALYSIS_ATTACHMENT_LIMITS = Object.freeze({ caption: 2000, origin: 2000, attachments: 200, page: 30, revisions: 200, analysisRevisions: 2000 });
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const originFields = ['origin', 'sourceReference', 'documentReference', 'environmentReference'];
 function invalid(message) {
@@ -46,4 +46,19 @@ export function canonicalAnalysisAttachmentContent(input) {
   // clients can compare an immutable revision without fabricating an identity.
   const { reference, caption, suppliedOrigin } = normalizeAnalysisAttachmentCreate({ ...input, requestId: '00000000-0000-4000-8000-000000000000' });
   return JSON.stringify({ reference, caption, suppliedOrigin });
+}
+export function normalizeAnalysisAttachmentCorrection(input) {
+  fields(input, ['requestId', 'expectedHeadRevisionId', 'reference', 'caption', 'suppliedOrigin']);
+  if (typeof input.expectedHeadRevisionId !== 'string' || !ANALYSIS_ATTACHMENT_REVISION_ID.test(input.expectedHeadRevisionId)) {
+    invalid('Keep the exact current attachment revision before saving a correction.');
+  }
+  const { requestId, reference, caption, suppliedOrigin } = normalizeAnalysisAttachmentCreate({ requestId: input.requestId,
+    reference: input.reference, caption: input.caption, suppliedOrigin: input.suppliedOrigin });
+  return { requestId, expectedHeadRevisionId: input.expectedHeadRevisionId, reference, caption, suppliedOrigin };
+}
+export function canonicalAnalysisAttachmentCorrection(attachmentId, input) {
+  if (typeof attachmentId !== 'string' || !ANALYSIS_ATTACHMENT_ID.test(attachmentId)) invalid('Keep the original attachment identity for this correction.');
+  fields(input, ['requestId', 'expectedHeadRevisionId', 'reference', 'caption', 'suppliedOrigin']);
+  const { expectedHeadRevisionId, reference, caption, suppliedOrigin } = normalizeAnalysisAttachmentCorrection({ ...input, requestId: '00000000-0000-4000-8000-000000000000' });
+  return JSON.stringify({ action: 'correct', attachmentId, expectedHeadRevisionId, reference, caption, suppliedOrigin });
 }

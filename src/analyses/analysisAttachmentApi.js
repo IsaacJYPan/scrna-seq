@@ -10,7 +10,8 @@ async function request(endpoint, { signal, body } = {}) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const result = await response.json().catch(() => null);
-    if (!response.ok) throw Object.assign(new Error(result?.error || 'Outside results could not be loaded.'), { status: response.status, code: result?.code });
+    if (!response.ok) throw Object.assign(new Error(result?.error || 'Outside results could not be loaded.'), { status: response.status, code: result?.code,
+      attachment: result?.attachment, submittedExpectedHeadRevisionId: result?.submittedExpectedHeadRevisionId });
     if (!result || typeof result !== 'object') throw new Error('The attachment service returned an unreadable response.');
     return result;
   }, { mutation: body !== undefined });
@@ -24,3 +25,7 @@ export const listAnalysisAttachments = (projectId, analysisId, { cursor, signal 
 export const listAnalysisAttachmentOptions = (projectId, analysisId, { cursor, signal } = {}) => request(`${path(projectId, analysisId)}/options?${pageQuery(cursor)}`, { signal });
 export const createAnalysisAttachment = (projectId, analysisId, body, { signal } = {}) => request(path(projectId, analysisId), { body, signal });
 export const getAnalysisAttachmentRequest = (projectId, analysisId, requestId, { signal } = {}) => request(`${path(projectId, analysisId)}/requests/${encodeURIComponent(requestId)}`, { signal });
+const revisions = (projectId, analysisId, attachmentId) => `${path(projectId, analysisId)}/${encodeURIComponent(attachmentId)}/revisions`;
+export const correctAnalysisAttachment = (projectId, analysisId, attachmentId, body, { signal } = {}) => request(revisions(projectId, analysisId, attachmentId), { body, signal });
+export const listAnalysisAttachmentRevisions = (projectId, analysisId, attachmentId, { cursor, signal } = {}) => request(`${revisions(projectId, analysisId, attachmentId)}?${pageQuery(cursor)}`, { signal });
+export const getAnalysisAttachmentRevision = (projectId, analysisId, attachmentId, revisionId, { signal } = {}) => request(`${revisions(projectId, analysisId, attachmentId)}/${encodeURIComponent(revisionId)}`, { signal });

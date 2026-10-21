@@ -83,19 +83,9 @@ describe.skipIf(!process.env.DATABASE_URL)('analysis attachment PostgreSQL/HTTP/
   const reference = value => ({ kind: 'artifact-version', versionId: value.versionId, sha256: value.sha256 });
   const count = async table => (await db.query(`SELECT COUNT(*)::int AS n FROM ${table}`)).rows[0].n;
   async function appendForFutureCorrection(attachment, request) {
-    const parsed = normalizeAnalysisAttachmentCreate(request), head = attachment.attachment, revisionId = id('rar');
-    const client = await (await db.connect()).connect();
-    try {
-      await client.query('BEGIN');
-      await client.query(`INSERT INTO research_analysis_attachment_revisions
-        (id,attachment_id,project_id,analysis_id,revision_number,actor_user_id,request_id,request_sha256,reference_json,caption,supplied_origin_json)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [revisionId, head.id, project.id, analysis.id,
-        head.revision.revisionNumber + 1, owner.user.id, parsed.requestId, sha(canonicalAnalysisAttachmentContent(parsed)), parsed.reference, parsed.caption, parsed.suppliedOrigin]);
-      await client.query(`UPDATE research_analysis_attachments SET head_revision_id=$2,revision_number=revision_number+1,updated_at=clock_timestamp() WHERE id=$1`, [head.id, revisionId]);
-      await client.query('COMMIT');
-    } catch (failure) { await client.query('ROLLBACK'); throw failure; }
-    finally { client.release(); }
-    return revisionId;
+    const head = attachment.attachment;
+    return (await service.correct(owner.user.id, project.id, analysis.id, head.id,
+      { ...request, expectedHeadRevisionId: head.headRevisionId })).acceptedRevision.id;
   }
 
   it('adds a captioned exact owned result without changing analysis CAS or fabricating execution/provenance', async () => {
@@ -166,7 +156,14 @@ describe.skipIf(!process.env.DATABASE_URL)('analysis attachment PostgreSQL/HTTP/
     await createResearchAnalysisService().patch(owner.user.id, project.id, analysis.id, { expectedVersion: 1, status: 'archived' });
     await db.query("UPDATE project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2", [project.id, owner.user.id]);
     const row = (await db.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1', [saved.versionId])).rows[0];
-    await unlink(provider.resolveKey(row.storage_key)); await db.query('DELETE FROM managed_artifact_versions WHERE id=$1', [saved.versionId]);
+    await unlink(provider.resolveKey(row.storage_key));
+    // Deliberate owned-fixture disaster setup bypasses the new normal retention
+    // guard, so the original source-independent receipt remains covered.
+    const cleanup = await (await db.connect()).connect();
+    try {
+      await cleanup.query('BEGIN'); await cleanup.query("SET LOCAL app.demo_cleanup='on'");
+      await cleanup.query('DELETE FROM managed_artifact_versions WHERE id=$1', [saved.versionId]); await cleanup.query('COMMIT');
+    } finally { cleanup.release(); }
     for (const response of [await post(value), await get(`/requests/${value.requestId}`)]) {
       expect(response.status).toBe(200); expect(response.data).toMatchObject({ canWrite: false, replayed: true,
         acceptedRevision: first.data.acceptedRevision, attachment: { headRevisionId: newer, sourceAccess: 'unavailable', revision: { revisionNumber: 2, caption: 'Later corrected caption' } } });
@@ -237,8 +234,8 @@ describe.skipIf(!process.env.DATABASE_URL)('analysis attachment PostgreSQL/HTTP/
         await client.query('INSERT INTO research_analysis_attachments(id,project_id,analysis_id,created_by_user_id,head_revision_id,revision_number) VALUES($1,$2,$3,$4,$5,1)',
           [attachmentId, project.id, analysis.id, owner.user.id, revisionId]);
         await client.query(`INSERT INTO research_analysis_attachment_revisions
-          (id,attachment_id,project_id,analysis_id,revision_number,actor_user_id,request_id,request_sha256,reference_json,caption,supplied_origin_json)
-          VALUES($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10)`, [revisionId, attachmentId, project.id, analysis.id, owner.user.id, randomUUID(),
+          (id,attachment_id,project_id,analysis_id,revision_number,actor_user_id,source_owner_user_id,request_id,request_sha256,reference_json,caption,supplied_origin_json)
+          VALUES($1,$2,$3,$4,1,$5,$5,$6,$7,$8,$9,$10)`, [revisionId, attachmentId, project.id, analysis.id, owner.user.id, randomUUID(),
           sha(canonicalAnalysisAttachmentContent(value)), value.reference, value.caption, value.suppliedOrigin]);
       }
       await client.query('COMMIT');
@@ -264,6 +261,6 @@ describe.skipIf(!process.env.DATABASE_URL)('analysis attachment PostgreSQL/HTTP/
     expect(await db.deleteExpiredDemoGuest(owner.user.id)).toBe(true);
     expect(await count('research_analysis_attachments')).toBe(1); expect(await count('research_analysis_attachment_revisions')).toBe(1);
     expect((await service.getRequest(colleague.user.id, retainedProject.id, retainedAnalysis.id, retainedBody.requestId)).canWrite).toBe(true);
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261025);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261026);
   });
 });

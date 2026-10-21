@@ -213,6 +213,9 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
           ...(Object.hasOwn(failure, 'workingInstance') ? { workingInstance: failure.workingInstance } : {}),
           ...(failure.code === 'ANALYSIS_VERSION_CONFLICT' ? {
             analysis: failure.analysis, submittedExpectedVersion: failure.submittedExpectedVersion,
+          } : {}),
+          ...(failure.code === 'ANALYSIS_ATTACHMENT_HEAD_CONFLICT' ? {
+            attachment: failure.attachment, submittedExpectedHeadRevisionId: failure.submittedExpectedHeadRevisionId,
           } : {}) });
       }
       const code = String(failure.code || 'REQUEST_FAILED').replace(/[^A-Z0-9_]/gi, '').slice(0, 64);
@@ -229,6 +232,12 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.get('/:analysisId/attachments', route(req => attachments.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/options', route(req => attachments.options(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/requests/:requestId', route(req => attachments.getRequest(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
+  router.get('/:analysisId/attachments/:attachmentId/revisions', route(req => attachments.history(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.query)));
+  router.get('/:analysisId/attachments/:attachmentId/revisions/:revisionId', route(req => attachments.getRevision(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.params.revisionId)));
+  router.post('/:analysisId/attachments/:attachmentId/revisions', route(async req => {
+    const result = await attachments.correct(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.body);
+    return { ...result, created: !result.replayed };
+  }));
   router.post('/:analysisId/attachments', route(async req => {
     const result = await attachments.create(req.user.id, req.params.projectId, req.params.analysisId, req.body);
     return { ...result, created: !result.replayed };

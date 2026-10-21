@@ -1,5 +1,6 @@
 import { ANALYSIS_ATTACHMENT_ID, ANALYSIS_ATTACHMENT_LIMITS, ANALYSIS_ATTACHMENT_REVISION_ID,
-  canonicalAnalysisAttachmentContent, normalizeAnalysisAttachmentCreate } from '../../shared/analysisAttachment.mjs';
+  canonicalAnalysisAttachmentContent, canonicalAnalysisAttachmentCorrection, normalizeAnalysisAttachmentCreate,
+  normalizeAnalysisAttachmentCorrection } from '../../shared/analysisAttachment.mjs';
 
 const managedVersionId = /^av_[a-f0-9]{24}$/;
 const analysisId = /^ra_[a-f0-9]{24}$/;
@@ -8,6 +9,11 @@ const supportedFormats = new Set(['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 
 const placeholderRequestId = '00000000-0000-4000-8000-000000000000';
 const fail = () => { throw Object.assign(new Error('The attachment response could not be confirmed. Keep the original request and check again.'), { code: 'INVALID_ANALYSIS_ATTACHMENT_RESPONSE' }); };
 const positiveInteger = value => Number.isSafeInteger(value) && value > 0 && value < 2147483647;
+const sourceAccess = value => {
+  if (!['available', 'restricted', 'unavailable'].includes(value)) fail();
+  return value;
+};
+const canonicalContent = value => canonicalAnalysisAttachmentContent({ reference: value.reference, caption: value.caption, suppliedOrigin: value.suppliedOrigin });
 
 function record(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -43,23 +49,26 @@ function content(value) {
       || value.caption !== normalized.caption || Object.keys(normalized.suppliedOrigin).some(key => value.suppliedOrigin[key] !== normalized.suppliedOrigin[key])) fail();
   return { reference: normalized.reference, caption: normalized.caption, suppliedOrigin: normalized.suppliedOrigin };
 }
-function revision(value, attachmentId) {
+function revision(value, attachmentId, requireLineage = false) {
   record(value);
   if (typeof value.id !== 'string' || !ANALYSIS_ATTACHMENT_REVISION_ID.test(value.id)
       || typeof value.attachmentId !== 'string' || !ANALYSIS_ATTACHMENT_ID.test(value.attachmentId)
       || attachmentId !== undefined && value.attachmentId !== attachmentId || !positiveInteger(value.revisionNumber)
+      || value.revisionNumber > (ANALYSIS_ATTACHMENT_LIMITS.revisions ?? 200)
       || !Number.isSafeInteger(value.createdByUserId) || value.createdByUserId < 1) fail();
+  const hasPrevious = Object.hasOwn(value, 'previousRevisionId');
+  if (requireLineage && !hasPrevious || hasPrevious && (value.revisionNumber === 1 ? value.previousRevisionId !== null
+    : typeof value.previousRevisionId !== 'string' || !ANALYSIS_ATTACHMENT_REVISION_ID.test(value.previousRevisionId) || value.previousRevisionId === value.id)) fail();
   return { id: value.id, attachmentId: value.attachmentId, revisionNumber: value.revisionNumber, ...content(value),
-    createdByUserId: value.createdByUserId, createdAt: timestamp(value.createdAt) };
+    createdByUserId: value.createdByUserId, createdAt: timestamp(value.createdAt), ...(hasPrevious ? { previousRevisionId: value.previousRevisionId } : {}) };
 }
-function attachment(value) {
+function attachment(value, requireLineage = false) {
   record(value);
   if (typeof value.id !== 'string' || !ANALYSIS_ATTACHMENT_ID.test(value.id)
-      || typeof value.headRevisionId !== 'string' || !ANALYSIS_ATTACHMENT_REVISION_ID.test(value.headRevisionId)
-      || !['available', 'restricted', 'unavailable'].includes(value.sourceAccess)) fail();
-  const saved = revision(value.revision, value.id);
+      || typeof value.headRevisionId !== 'string' || !ANALYSIS_ATTACHMENT_REVISION_ID.test(value.headRevisionId)) fail();
+  const saved = revision(value.revision, value.id, requireLineage);
   if (saved.id !== value.headRevisionId) fail();
-  return { id: value.id, headRevisionId: value.headRevisionId, revision: saved, sourceAccess: value.sourceAccess };
+  return { id: value.id, headRevisionId: value.headRevisionId, revision: saved, sourceAccess: sourceAccess(value.sourceAccess) };
 }
 function page(items, key) {
   if (!Array.isArray(items) || items.length > ANALYSIS_ATTACHMENT_LIMITS.page || Object.keys(items).length !== items.length
@@ -73,7 +82,7 @@ export function validateAttachmentList(result, scope) {
   const common = envelope(result, scope);
   if (!Array.isArray(result.attachments) || result.attachments.length > ANALYSIS_ATTACHMENT_LIMITS.page) fail();
   page(result.attachments, (_item, index) => index);
-  const attachments = result.attachments.map(attachment);
+  const attachments = result.attachments.map(value => attachment(value));
   return { ...common, attachments: page(attachments, item => item.id), nextCursor: cursor(result.nextCursor) };
 }
 
@@ -100,21 +109,81 @@ export function validateAttachmentOptions(result, scope) {
 }
 
 export async function validateAttachmentAcceptance(result, scope, input) {
-  const common = envelope(result, scope);
   let request;
   try { request = normalizeAnalysisAttachmentCreate(input); } catch { fail(); }
-  const bytes = new TextEncoder().encode(canonicalAnalysisAttachmentContent(request));
+  return validateAcceptance(result, scope, request, canonicalAnalysisAttachmentContent(request));
+}
+
+async function validateAcceptance(result, scope, request, canonical, attachmentId) {
+  const common = envelope(result, scope);
+  const correction = attachmentId !== undefined;
+  const bytes = new TextEncoder().encode(canonical);
   let requestSha256;
   try { requestSha256 = [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))].map(byte => byte.toString(16).padStart(2, '0')).join(''); }
   catch { fail(); }
   if (result.requestId !== request.requestId || result.requestSha256 !== requestSha256 || typeof result.replayed !== 'boolean') fail();
-  const acceptedRevision = revision(result.acceptedRevision);
-  const current = attachment(result.attachment);
-  if (acceptedRevision.revisionNumber !== 1 || acceptedRevision.createdByUserId !== Number(scope.userId)
-      || canonicalAnalysisAttachmentContent({ requestId: request.requestId, reference: acceptedRevision.reference,
-        caption: acceptedRevision.caption, suppliedOrigin: acceptedRevision.suppliedOrigin }) !== canonicalAnalysisAttachmentContent(request)
+  const acceptedRevision = revision(result.acceptedRevision, attachmentId, correction);
+  const current = attachment(result.attachment, correction);
+  if ((correction ? acceptedRevision.revisionNumber < 2 || acceptedRevision.previousRevisionId !== request.expectedHeadRevisionId
+      || current.headRevisionId === request.expectedHeadRevisionId : acceptedRevision.revisionNumber !== 1)
+      || acceptedRevision.createdByUserId !== Number(scope.userId) || canonicalContent(acceptedRevision) !== canonicalContent(request)
       || current.id !== acceptedRevision.attachmentId || current.revision.revisionNumber < acceptedRevision.revisionNumber
       || current.revision.revisionNumber === acceptedRevision.revisionNumber && JSON.stringify(current.revision) !== JSON.stringify(acceptedRevision)
+      || current.revision.revisionNumber === acceptedRevision.revisionNumber + 1 && Object.hasOwn(current.revision, 'previousRevisionId')
+        && current.revision.previousRevisionId !== acceptedRevision.id
       || current.revision.id === acceptedRevision.id && JSON.stringify(current.revision) !== JSON.stringify(acceptedRevision)) fail();
-  return { ...common, requestId: result.requestId, requestSha256, replayed: result.replayed, acceptedRevision, attachment: current };
+  const hasAcceptedAccess = Object.hasOwn(result, 'acceptedSourceAccess');
+  if (correction && !hasAcceptedAccess) fail();
+  return { ...common, requestId: result.requestId, requestSha256, replayed: result.replayed, acceptedRevision, attachment: current,
+    ...(hasAcceptedAccess ? { acceptedSourceAccess: sourceAccess(result.acceptedSourceAccess) } : {}) };
+}
+
+export async function validateAttachmentCorrectionAcceptance(result, scope, attachmentId, input) {
+  if (typeof attachmentId !== 'string' || !ANALYSIS_ATTACHMENT_ID.test(attachmentId)) fail();
+  let request, canonical;
+  try { request = normalizeAnalysisAttachmentCorrection(input); canonical = canonicalAnalysisAttachmentCorrection(attachmentId, request); }
+  catch { fail(); }
+  return validateAcceptance(result, scope, request, canonical, attachmentId);
+}
+
+function revisionEnvelope(result, scope, attachmentId) {
+  const common = envelope(result, scope);
+  if (typeof attachmentId !== 'string' || !ANALYSIS_ATTACHMENT_ID.test(attachmentId) || result.attachmentId !== attachmentId
+      || typeof result.headRevisionId !== 'string' || !ANALYSIS_ATTACHMENT_REVISION_ID.test(result.headRevisionId)) fail();
+  return { ...common, attachmentId, headRevisionId: result.headRevisionId };
+}
+function historicalRevision(value, attachmentId) {
+  record(value);
+  return { revision: revision(value.revision, attachmentId, true), sourceAccess: sourceAccess(value.sourceAccess) };
+}
+
+export function validateAttachmentHistory(result, scope, attachmentId) {
+  const common = revisionEnvelope(result, scope, attachmentId);
+  page(result.revisions, (_item, index) => index);
+  const revisions = result.revisions.map(value => historicalRevision(value, attachmentId));
+  page(revisions, value => value.revision.id);
+  for (let index = 0; index < revisions.length; index++) {
+    const current = revisions[index].revision, previous = revisions[index - 1]?.revision;
+    if (current.previousRevisionId === common.headRevisionId || index > 0 && current.id === common.headRevisionId
+        || previous && (previous.revisionNumber !== current.revisionNumber + 1 || previous.previousRevisionId !== current.id)) fail();
+  }
+  const nextCursor = cursor(result.nextCursor);
+  const lastNumber = revisions.at(-1)?.revision.revisionNumber;
+  if (!revisions.length && nextCursor !== null || lastNumber === 1 && nextCursor !== null || lastNumber > 1 && nextCursor === null) fail();
+  return { ...common, revisions, nextCursor };
+}
+
+export function validateAttachmentRevision(result, scope, attachmentId, revisionId, expectedReference) {
+  const common = revisionEnvelope(result, scope, attachmentId);
+  if (typeof revisionId !== 'string' || !ANALYSIS_ATTACHMENT_REVISION_ID.test(revisionId)
+      || Object.hasOwn(result, 'revisions') || Object.hasOwn(result, 'nextCursor')) fail();
+  const value = historicalRevision(result, attachmentId);
+  if (value.revision.id !== revisionId || value.revision.previousRevisionId === common.headRevisionId) fail();
+  if (expectedReference !== undefined) {
+    let reference;
+    try { reference = normalizeAnalysisAttachmentCreate({ requestId: placeholderRequestId, reference: expectedReference, caption: 'Expected source' }).reference; }
+    catch { fail(); }
+    if (value.revision.reference.versionId !== reference.versionId || value.revision.reference.sha256 !== reference.sha256) fail();
+  }
+  return { ...common, ...value };
 }

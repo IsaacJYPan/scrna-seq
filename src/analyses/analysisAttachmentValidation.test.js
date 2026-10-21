@@ -1,7 +1,8 @@
 import { createHash, webcrypto } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { canonicalAnalysisAttachmentContent, normalizeAnalysisAttachmentCreate } from '../../shared/analysisAttachment.mjs';
-import { validateAttachmentAcceptance, validateAttachmentList, validateAttachmentOptions } from './analysisAttachmentValidation';
+import { canonicalAnalysisAttachmentContent, canonicalAnalysisAttachmentCorrection, normalizeAnalysisAttachmentCreate } from '../../shared/analysisAttachment.mjs';
+import { validateAttachmentAcceptance, validateAttachmentCorrectionAcceptance, validateAttachmentHistory, validateAttachmentList,
+  validateAttachmentOptions, validateAttachmentRevision } from './analysisAttachmentValidation';
 
 const scope = { projectId: `proj_${'1'.repeat(24)}`, analysisId: `ra_${'2'.repeat(24)}`, userId: 1 };
 const requestId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -159,4 +160,158 @@ it.each([
 it('does not accept a changed draft merely because the UUID is unchanged', async () => {
   await expect(validateAttachmentAcceptance(acceptance(), scope, { ...input, caption: 'Another draft' })).rejects.toMatchObject(invalid);
   await expect(validateAttachmentAcceptance(acceptance(), scope, { ...input, reference: { ...reference, versionId: `av_${'9'.repeat(24)}` } })).rejects.toMatchObject(invalid);
+});
+
+const secondRevisionId = `rar_${'6'.repeat(24)}`;
+const thirdRevisionId = `rar_${'7'.repeat(24)}`;
+const correctionInput = { ...input, expectedHeadRevisionId: revisionId, caption: 'Corrected treatment response',
+  reference: { ...reference, versionId: `av_${'8'.repeat(24)}`, sha256: 'b'.repeat(64) } };
+const firstRevision = () => revision({ previousRevisionId: null });
+const secondRevision = changes => revision({ id: secondRevisionId, previousRevisionId: revisionId, revisionNumber: 2,
+  reference: { ...correctionInput.reference }, caption: correctionInput.caption, ...changes });
+const thirdRevision = changes => secondRevision({ id: thirdRevisionId, previousRevisionId: secondRevisionId, revisionNumber: 3,
+  caption: 'A newer revision by a colleague', createdByUserId: 2, ...changes });
+const corrected = () => ({ ...common, requestId, requestSha256: sha256(canonicalAnalysisAttachmentCorrection(attachmentId, correctionInput)),
+  replayed: false, acceptedRevision: secondRevision(), acceptedSourceAccess: 'available',
+  attachment: attachment({ headRevisionId: secondRevisionId, revision: secondRevision() }) });
+const history = () => ({ ...common, attachmentId, headRevisionId: thirdRevisionId, revisions: [
+  { revision: thirdRevision(), sourceAccess: 'available' }, { revision: secondRevision(), sourceAccess: 'restricted' },
+  { revision: firstRevision(), sourceAccess: 'unavailable' },
+], nextCursor: null });
+const exactRevision = () => ({ ...common, attachmentId, headRevisionId: thirdRevisionId, revision: secondRevision(), sourceAccess: 'restricted' });
+
+it('keeps create request bytes unchanged and includes action, target and frozen expected head in correction hashing', async () => {
+  const expectedCreate = JSON.stringify({ reference, caption: input.caption, suppliedOrigin });
+  expect(canonicalAnalysisAttachmentContent(input)).toBe(expectedCreate);
+  const create = acceptance(); create.acceptedSourceAccess = 'restricted';
+  await expect(validateAttachmentAcceptance(create, scope, input)).resolves.toMatchObject({ requestSha256: sha256(expectedCreate), acceptedSourceAccess: 'restricted' });
+  const value = await validateAttachmentCorrectionAcceptance(corrected(), scope, attachmentId, correctionInput);
+  expect(value.requestSha256).not.toBe(sha256(expectedCreate));
+  expect(value.requestSha256).toBe(sha256(JSON.stringify({ action: 'correct', attachmentId, expectedHeadRevisionId: revisionId,
+    reference: correctionInput.reference, caption: correctionInput.caption, suppliedOrigin })));
+});
+
+it('allows legacy create/list lineage omission while validating new optional accepted source access and lineage', async () => {
+  await expect(validateAttachmentAcceptance(acceptance(), scope, input)).resolves.not.toHaveProperty('acceptedSourceAccess');
+  const create = acceptance(); create.acceptedSourceAccess = false;
+  await expect(validateAttachmentAcceptance(create, scope, input)).rejects.toMatchObject(invalid);
+  create.acceptedSourceAccess = 'unavailable'; create.acceptedRevision.previousRevisionId = secondRevisionId;
+  await expect(validateAttachmentAcceptance(create, scope, input)).rejects.toMatchObject(invalid);
+  const result = list(); result.attachments.push(attachment({ id: `raa_${'9'.repeat(24)}`, headRevisionId: thirdRevisionId,
+    revision: revision({ id: thirdRevisionId, attachmentId: `raa_${'9'.repeat(24)}` }) }));
+  expect(validateAttachmentList(result, scope).attachments).toHaveLength(2);
+});
+
+it('recovers an older accepted correction under current reader authority without replacing its newer head or source access', async () => {
+  const result = corrected(); result.canWrite = false; result.replayed = true; result.acceptedSourceAccess = 'restricted';
+  result.attachment = attachment({ headRevisionId: thirdRevisionId, revision: thirdRevision(), sourceAccess: 'unavailable' });
+  const value = await validateAttachmentCorrectionAcceptance(result, scope, attachmentId, correctionInput);
+  expect(value).toMatchObject({ canWrite: false, replayed: true, acceptedSourceAccess: 'restricted',
+    acceptedRevision: { id: secondRevisionId, previousRevisionId: revisionId, revisionNumber: 2 },
+    attachment: { headRevisionId: thirdRevisionId, sourceAccess: 'unavailable', revision: { createdByUserId: 2 } } });
+  expect(value.acceptedRevision.reference).toEqual(correctionInput.reference);
+});
+
+it('does not infer source ownership from the correcting actor', async () => {
+  const result = corrected(); result.acceptedRevision.createdByUserId = 2; result.attachment.revision.createdByUserId = 2;
+  result.acceptedSourceAccess = 'restricted'; result.attachment.sourceAccess = 'restricted';
+  await expect(validateAttachmentCorrectionAcceptance(result, { ...scope, userId: 2 }, attachmentId, correctionInput))
+    .resolves.toMatchObject({ acceptedSourceAccess: 'restricted', attachment: { sourceAccess: 'restricted' } });
+  const read = exactRevision(); read.revision.createdByUserId = 2; read.sourceAccess = 'available';
+  expect(validateAttachmentRevision(read, scope, attachmentId, secondRevisionId, correctionInput.reference).sourceAccess).toBe('available');
+});
+
+it.each([
+  ['another attachment', value => { value.acceptedRevision.attachmentId = `raa_${'9'.repeat(24)}`; }],
+  ['another request', value => { value.requestId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'; }],
+  ['create content hash', value => { value.requestSha256 = sha256(canonicalAnalysisAttachmentContent(input)); }],
+  ['another correcting actor', value => { value.acceptedRevision.createdByUserId = 2; }],
+  ['first revision acceptance', value => { value.acceptedRevision.revisionNumber = 1; value.acceptedRevision.previousRevisionId = null; }],
+  ['missing predecessor', value => { delete value.acceptedRevision.previousRevisionId; }],
+  ['different predecessor', value => { value.acceptedRevision.previousRevisionId = thirdRevisionId; }],
+  ['accepted ID reused as predecessor', value => { value.acceptedRevision.previousRevisionId = secondRevisionId; }],
+  ['missing accepted source access', value => { delete value.acceptedSourceAccess; }],
+  ['invalid accepted source access', value => { value.acceptedSourceAccess = 'verified'; }],
+  ['changed accepted source', value => { value.acceptedRevision.reference.sha256 = 'c'.repeat(64); }],
+  ['changed accepted caption', value => { value.acceptedRevision.caption = 'Another correction'; }],
+  ['older current head', value => { value.attachment = attachment({ revision: firstRevision() }); }],
+  ['unrelated direct successor', value => {
+    value.attachment = attachment({ headRevisionId: thirdRevisionId, revision: thirdRevision({ previousRevisionId: revisionId }) });
+  }],
+  ['wrong current attachment', value => { value.attachment.id = `raa_${'9'.repeat(24)}`; value.attachment.revision.attachmentId = value.attachment.id; }],
+])('keeps a correction unconfirmed for %s', async (_label, mutate) => {
+  const result = corrected(); mutate(result);
+  await expect(validateAttachmentCorrectionAcceptance(result, scope, attachmentId, correctionInput)).rejects.toMatchObject(invalid);
+});
+
+it('binds correction recovery to the same frozen target, expected head and normalized content', async () => {
+  await expect(validateAttachmentCorrectionAcceptance(corrected(), scope, `raa_${'9'.repeat(24)}`, correctionInput)).rejects.toMatchObject(invalid);
+  await expect(validateAttachmentCorrectionAcceptance(corrected(), scope, attachmentId, { ...correctionInput, expectedHeadRevisionId: thirdRevisionId })).rejects.toMatchObject(invalid);
+  await expect(validateAttachmentCorrectionAcceptance(corrected(), scope, attachmentId, { ...correctionInput, caption: 'Changed pending draft' })).rejects.toMatchObject(invalid);
+});
+
+it('returns ordered immutable history with independent per-revision source access and current head identity', () => {
+  const result = history(); result.canWrite = false;
+  result.revisions[0].sourcePath = '/private/source.csv';
+  const value = validateAttachmentHistory(result, scope, attachmentId);
+  expect(value.headRevisionId).toBe(thirdRevisionId); expect(value.canWrite).toBe(false);
+  expect(value.revisions.map(item => item.revision.revisionNumber)).toEqual([3, 2, 1]);
+  expect(value.revisions.map(item => item.sourceAccess)).toEqual(['available', 'restricted', 'unavailable']);
+  expect(value.revisions[0]).not.toHaveProperty('sourcePath');
+  expect(result.revisions[0]).toHaveProperty('sourcePath');
+});
+
+it('accepts an older history page while keeping the separately observed current head', () => {
+  const result = history(); result.revisions.shift();
+  const value = validateAttachmentHistory(result, scope, attachmentId);
+  expect(value.headRevisionId).toBe(thirdRevisionId); expect(value.revisions[0].revision.id).toBe(secondRevisionId);
+  result.revisions.pop(); result.nextCursor = 'older_page';
+  expect(validateAttachmentHistory(result, scope, attachmentId).nextCursor).toBe('older_page');
+});
+
+it.each([
+  ['wrong analysis', value => { value.analysisId = `ra_${'9'.repeat(24)}`; }],
+  ['wrong collection target', value => { value.attachmentId = `raa_${'9'.repeat(24)}`; }],
+  ['invalid head', value => { value.headRevisionId = 'latest'; }],
+  ['head older than returned revisions', value => { value.headRevisionId = revisionId; }],
+  ['wrong revision target', value => { value.revisions[0].revision.attachmentId = `raa_${'9'.repeat(24)}`; }],
+  ['missing lineage', value => { delete value.revisions[0].revision.previousRevisionId; }],
+  ['broken chain', value => { value.revisions[0].revision.previousRevisionId = revisionId; }],
+  ['duplicate revisions', value => { value.revisions.push(structuredClone(value.revisions[0])); }],
+  ['unordered revisions', value => { value.revisions.reverse(); }],
+  ['gap in revision numbers', value => { value.revisions[0].revision.revisionNumber = 4; }],
+  ['past the revision bound', value => { value.revisions[0].revision.revisionNumber = 201; }],
+  ['source access widening', value => { value.revisions[1].sourceAccess = 'public'; }],
+  ['oversized page', value => { value.revisions = Array(31).fill(value.revisions[0]); }],
+  ['cursor after the first revision', value => { value.nextCursor = 'more'; }],
+  ['truncated history without continuation', value => { value.revisions.pop(); }],
+  ['invalid cursor', value => { value.revisions.pop(); value.nextCursor = '/private/cursor'; }],
+])('rejects immutable history with %s', (_label, mutate) => {
+  const result = history(); mutate(result);
+  expect(() => validateAttachmentHistory(result, scope, attachmentId)).toThrow(expect.objectContaining(invalid));
+});
+
+it('binds an exact historical read to its attachment, revision and known source without substituting the current head', () => {
+  const result = exactRevision(); result.canWrite = false;
+  const value = validateAttachmentRevision(result, scope, attachmentId, secondRevisionId, correctionInput.reference);
+  expect(value).toMatchObject({ headRevisionId: thirdRevisionId, canWrite: false, sourceAccess: 'restricted',
+    revision: { id: secondRevisionId, attachmentId, previousRevisionId: revisionId, reference: correctionInput.reference } });
+  expect(value.revision.id).not.toBe(value.headRevisionId);
+  expect(validateAttachmentRevision(result, scope, attachmentId, secondRevisionId).revision.id).toBe(secondRevisionId);
+});
+
+it.each([
+  ['wrong scope', value => { value.projectId = 'other-project'; }],
+  ['wrong target', value => { value.attachmentId = `raa_${'9'.repeat(24)}`; }],
+  ['wrong revision', value => { value.revision.id = thirdRevisionId; }],
+  ['missing predecessor', value => { delete value.revision.previousRevisionId; }],
+  ['current head older than selected revision', value => { value.headRevisionId = revisionId; }],
+  ['changed source version', value => { value.revision.reference.versionId = reference.versionId; }],
+  ['changed source hash', value => { value.revision.reference.sha256 = 'c'.repeat(64); }],
+  ['wrong source access', value => { value.sourceAccess = true; }],
+  ['history payload', value => { value.revisions = []; }],
+  ['history cursor', value => { value.nextCursor = null; }],
+])('rejects an exact revision response with %s', (_label, mutate) => {
+  const result = exactRevision(); mutate(result);
+  expect(() => validateAttachmentRevision(result, scope, attachmentId, secondRevisionId, correctionInput.reference)).toThrow(expect.objectContaining(invalid));
 });

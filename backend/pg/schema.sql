@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261025, now())
+VALUES ('traceomics.runtime', 20261026, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1300,6 +1300,32 @@ CREATE TABLE IF NOT EXISTS research_analysis_attachment_revisions (
   UNIQUE(project_id,analysis_id,actor_user_id,request_id),
   FOREIGN KEY(attachment_id,project_id,analysis_id) REFERENCES research_analysis_attachments(id,project_id,analysis_id)
 );
+-- The migration transaction retains the DDL lock until the strict immutable
+-- trigger is restored. Existing initial revisions were admitted only from their
+-- actor's owned source. No runtime setting can permit this backfill again.
+LOCK TABLE research_analysis_attachment_revisions IN ACCESS EXCLUSIVE MODE;
+DROP TRIGGER IF EXISTS trg_analysis_attachment_revision_immutable ON research_analysis_attachment_revisions;
+ALTER TABLE research_analysis_attachment_revisions ADD COLUMN IF NOT EXISTS source_owner_user_id BIGINT REFERENCES users(id);
+ALTER TABLE research_analysis_attachment_revisions ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'create';
+ALTER TABLE research_analysis_attachment_revisions ADD COLUMN IF NOT EXISTS expected_head_revision_id TEXT;
+UPDATE research_analysis_attachment_revisions SET source_owner_user_id=actor_user_id WHERE source_owner_user_id IS NULL;
+ALTER TABLE research_analysis_attachment_revisions ALTER COLUMN source_owner_user_id SET NOT NULL;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_analysis_attachment_revision_identity' AND conrelid='research_analysis_attachment_revisions'::regclass) THEN
+    ALTER TABLE research_analysis_attachment_revisions ADD CONSTRAINT uq_analysis_attachment_revision_identity UNIQUE(attachment_id,id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_analysis_attachment_predecessor' AND conrelid='research_analysis_attachment_revisions'::regclass) THEN
+    ALTER TABLE research_analysis_attachment_revisions ADD CONSTRAINT fk_analysis_attachment_predecessor
+      FOREIGN KEY(attachment_id,expected_head_revision_id) REFERENCES research_analysis_attachment_revisions(attachment_id,id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chk_analysis_attachment_operation' AND conrelid='research_analysis_attachment_revisions'::regclass) THEN
+    ALTER TABLE research_analysis_attachment_revisions ADD CONSTRAINT chk_analysis_attachment_operation CHECK(
+      (action='create' AND revision_number=1 AND expected_head_revision_id IS NULL) OR
+      (action='correct' AND revision_number>1 AND expected_head_revision_id IS NOT NULL AND expected_head_revision_id ~ '^rar_[a-f0-9]{24}$'));
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_analysis_attachment_retained_source
+  ON research_analysis_attachment_revisions(project_id,source_owner_user_id,(reference_json->>'versionId'));
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_analysis_attachment_head' AND conrelid='research_analysis_attachments'::regclass) THEN
     ALTER TABLE research_analysis_attachments ADD CONSTRAINT fk_analysis_attachment_head
@@ -1326,6 +1352,20 @@ CREATE TRIGGER trg_analysis_attachment_head BEFORE UPDATE OR DELETE ON research_
 DROP TRIGGER IF EXISTS trg_analysis_attachment_revision_immutable ON research_analysis_attachment_revisions;
 CREATE TRIGGER trg_analysis_attachment_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_attachment_revisions
   FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
+
+CREATE OR REPLACE FUNCTION protect_attached_managed_artifact() RETURNS TRIGGER AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  IF EXISTS(SELECT 1 FROM research_analysis_attachment_revisions revision
+    WHERE revision.project_id=OLD.project_id AND revision.source_owner_user_id=OLD.owner_user_id
+      AND revision.reference_json->>'versionId'=OLD.id)
+  THEN RAISE EXCEPTION 'Managed source is retained by analysis attachment history' USING ERRCODE='55000'; END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_attached_managed_artifact_retention ON managed_artifact_versions;
+CREATE TRIGGER trg_attached_managed_artifact_retention BEFORE DELETE ON managed_artifact_versions
+  FOR EACH ROW EXECUTE FUNCTION protect_attached_managed_artifact();
 
 CREATE OR REPLACE FUNCTION protect_retained_workflow_snapshot() RETURNS TRIGGER AS $$
 BEGIN

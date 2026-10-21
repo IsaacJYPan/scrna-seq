@@ -32,7 +32,7 @@ function syntheticFigure() {
   return PNG.sync.write(png);
 }
 
-async function main({ artifactDirectory } = {}) {
+async function main({ artifactDirectory, verifyCorrections } = {}) {
   const directory = path.resolve(artifactDirectory || path.join(root, 'playwright/report', 'analysis-attachments-' + Date.now()));
   assert(directory.startsWith(path.join(root, 'playwright/report') + path.sep), 'Evidence must stay in ignored report storage.');
   assert(fs.existsSync(path.join(root, 'dist/index.html')), 'Build production assets before attachment acceptance.');
@@ -40,7 +40,9 @@ async function main({ artifactDirectory } = {}) {
   const frozen = new Map(fs.readdirSync(path.join(root, 'dist/assets')).map(name => [name, sha(fs.readFileSync(path.join(root, 'dist/assets', name)))]));
   const checks = [], screenshots = [], profiles = [], requests = [], browserErrors = [], consoleErrors = [], assets = {}, assetReads = [], accounts = {}, faults = [];
   const expectedDiagnostics = new Set(), responses = [];
+  const faultPaths = new Set();
   let service, database, browser, page, study, otherStudy, table, figure;
+  let extraRevisions = 0;
   const base = () => `/api/projects/${service.project.id}/analyses`;
   const attachmentPath = (analysis = study) => `${base()}/${analysis.id}/attachments`;
   const region = target => target.getByRole('region', { name: 'Outside results', exact: true });
@@ -64,7 +66,7 @@ async function main({ artifactDirectory } = {}) {
       const pathname = new URL(request.url()).pathname;
       if (!pathname.startsWith('/api/')) return;
       const record = { actor, method: request.method(), pathname };
-      if (record.method === 'POST' && /\/attachments$/.test(pathname)) record.input = request.postDataJSON();
+      if (record.method === 'POST' && /\/attachments(?:\/raa_[a-f0-9]{24}\/revisions)?$/.test(pathname)) record.input = request.postDataJSON();
       requests.push(record);
     });
     target.on('response', response => {
@@ -194,6 +196,9 @@ async function main({ artifactDirectory } = {}) {
     assert(await image.evaluate(node => node.complete && node.naturalWidth === 480 && node.naturalHeight === 240), 'Actual saved PNG bytes did not decode at their exact dimensions.');
     await matrix(page, 'attached-raster', () => image.scrollIntoViewIfNeeded()); check('Actual imported PNG bytes decode through the common private retained-result viewer in both themes and laptop/natural phone layouts.');
 
+    if (verifyCorrections) extraRevisions = await verifyCorrections({ service, database, page, study, table, figure, accounts, requests, faults, baselineAttachment: first,
+      region, form, details, api, login, openAnalysis, openOutside, prepare, submit, closeDetails, theme, capture, matrix, until, assert, check, attachmentPath, expectedDiagnostics, faultPaths });
+
     await closeDetails(page); await page.setViewportSize({ width: 1366, height: 768 }); await theme(page, 'light');
     await prepare(page, figure, 'Actual held acknowledgement must preserve the selected table.');
     const held = service.interceptNextResponse({ method: 'POST', pathname: attachmentPath(), mode: 'hold' }); faults.push(held);
@@ -285,7 +290,7 @@ async function main({ artifactDirectory } = {}) {
     await region(page).getByRole('region', { name: 'Attachment confirmed', exact: true }).waitFor();
     await until(() => blockedRefreshes > 0, 'The deliberate post-recovery catalog outage did not occur.');
     await until(async () => await region(page).getByRole('button', { name: 'Refresh results', exact: true }).isEnabled(), 'The catalog outage left its loading control stuck.');
-    await region(page).getByRole('alert').filter({ hasText: /Outside results could not be loaded/ }).waitFor();
+    await region(page).getByRole('alert').filter({ hasText: /Outside results could not be (?:loaded|refreshed)/ }).waitFor();
     assert(await region(page).getByRole('list', { name: 'Attached outside results', exact: true }).getByRole('listitem').count() === 0, 'The catalog outage allowed a successful collection response before the recovery capture.');
     assert(!(await region(page).getByText(/Access to this analysis could not be confirmed/).count()), 'A fresh authorized receipt retained stale access-denial copy after a separate catalog outage.');
     assert(!(await region(page).getByRole('button', { name: 'Attach outside result', exact: true }).count()), 'Recovering a restored current reader request enabled new attachment writes.');
@@ -293,7 +298,7 @@ async function main({ artifactDirectory } = {}) {
     check('After access is restored, an authenticated original receipt clears stale denial while a separate catalog outage preserves the confirmed result and current reader limits.');
 
     const count = (await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_attachment_revisions')).rows[0].n;
-    assert(count === 6, 'Attachment admission or recovery duplicated immutable revisions.');
+    assert(count === 6 + extraRevisions, 'Attachment admission or recovery duplicated immutable revisions.');
     assert((await database.query('SELECT version FROM research_analyses WHERE id=$1', [study.id])).rows[0].version === 1, 'Attachments mutated unrelated analysis revisions.');
     for (const tableName of ['jobs', 'private_r_kernels', 'private_r_executions']) assert(Number((await database.query(`SELECT COUNT(*) AS n FROM ${tableName}`)).rows[0].n) === 0, 'An attachment operation executed science.');
     assert(sha(fs.readFileSync(path.resolve(service.storageRoot, ...(await database.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1', [table.versionId])).rows[0].storage_key.split('/')))) === sha(csv), 'Attachment operations changed the original table bytes.');
@@ -302,7 +307,7 @@ async function main({ artifactDirectory } = {}) {
       let url; try { url = new URL(entry.url); } catch { return true; }
       const status = /status of (\d+)/.exec(entry.text)?.[1];
       if (status === '401' && url.pathname === '/api/auth/session' || status === '404' && url.pathname === '/api/r/session-id' || expectedDiagnostics.has(`${status} ${url.pathname}${url.search}`) || expectedDiagnostics.has(`${status} ${url.pathname}`)) return false;
-      if (/^Failed to load resource: net::ERR_(?:FAILED|CONTENT_LENGTH_MISMATCH|EMPTY_RESPONSE|INCOMPLETE_CHUNKED_ENCODING|CONNECTION_CLOSED|CONNECTION_RESET)/.test(entry.text) && url.pathname === attachmentPath()) return false;
+      if (/^Failed to load resource: net::ERR_(?:FAILED|CONTENT_LENGTH_MISMATCH|EMPTY_RESPONSE|INCOMPLETE_CHUNKED_ENCODING|CONNECTION_CLOSED|CONNECTION_RESET)/.test(entry.text) && (url.pathname === attachmentPath() || faultPaths.has(url.pathname))) return false;
       return true;
     });
     assert(browserErrors.length === 0 && unexpectedConsole.length === 0, 'Unexpected production UI error occurred.');

@@ -87,6 +87,7 @@
     "test:artifact-import-recovery-browser": "npm run build && node scripts/verify-artifact-import-recovery-ui.js",
     "test:research-analyses-browser": "npm run build && node scripts/verify-research-analyses-ui.js",
     "test:analysis-attachments-browser": "npm run build && node scripts/verify-analysis-attachments-ui.js",
+    "test:analysis-attachment-corrections-browser": "npm run build && node scripts/verify-analysis-attachment-corrections-ui.js",
     "test:existing-work-browser": "npm run build && node scripts/verify-existing-work-ui.js",
     "test:retained-workflows-browser": "npm run build && node scripts/verify-retained-workflows-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",
