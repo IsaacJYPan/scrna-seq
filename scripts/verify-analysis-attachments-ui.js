@@ -32,7 +32,7 @@ function syntheticFigure() {
   return PNG.sync.write(png);
 }
 
-async function main({ artifactDirectory, verifyCorrections } = {}) {
+async function main({ artifactDirectory, verifyCorrections, verifyIntakes } = {}) {
   const directory = path.resolve(artifactDirectory || path.join(root, 'playwright/report', 'analysis-attachments-' + Date.now()));
   assert(directory.startsWith(path.join(root, 'playwright/report') + path.sep), 'Evidence must stay in ignored report storage.');
   assert(fs.existsSync(path.join(root, 'dist/index.html')), 'Build production assets before attachment acceptance.');
@@ -41,6 +41,7 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
   const checks = [], screenshots = [], profiles = [], requests = [], browserErrors = [], consoleErrors = [], assets = {}, assetReads = [], accounts = {}, faults = [];
   const expectedDiagnostics = new Set(), responses = [];
   const faultPaths = new Set();
+  const browserRestarts = [];
   let service, database, browser, page, study, otherStudy, table, figure;
   let extraRevisions = 0, expectedAnalysisVersion = 1;
   const base = () => `/api/projects/${service.project.id}/analyses`;
@@ -66,7 +67,7 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
       const pathname = new URL(request.url()).pathname;
       if (!pathname.startsWith('/api/')) return;
       const record = { actor, method: request.method(), pathname };
-      if (record.method === 'POST' && /\/attachments(?:\/raa_[a-f0-9]{24}\/revisions(?:\/rar_[a-f0-9]{24}\/comments)?)?$/.test(pathname)) record.input = request.postDataJSON();
+      if (record.method === 'POST' && /\/attachments(?:\/local-intakes|\/raa_[a-f0-9]{24}\/revisions(?:\/rar_[a-f0-9]{24}\/comments)?)?$/.test(pathname)) record.input = request.postDataJSON();
       requests.push(record);
     });
     target.on('response', response => {
@@ -90,6 +91,9 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
     await nav(target, /^Data workspace,/);
     await target.getByRole('button', { name: new RegExp('^' + escape(service.project.name) + '(?:$|\\s)') }).click();
     await nav(target, 'Analyses');
+    const outside = region(target);
+    if (await outside.isVisible()) await outside.getByRole('button', { name: 'Back to analysis', exact: true }).click();
+    const all = target.getByRole('button', { name: 'All analyses', exact: true }); if (await all.isVisible()) await all.click();
     await target.getByRole('list', { name: 'Analysis list', exact: true }).getByRole('button', { name: new RegExp('^' + escape(analysis.name)) }).click();
     await target.getByRole('region', { name: 'Selected analysis', exact: true }).waitFor();
   }
@@ -144,6 +148,16 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
       if (width === 1366) { const expand = target.getByRole('button', { name: 'Expand sidebar', exact: true }); if (await expand.isVisible()) await expand.click(); if (focus) await focus(); await capture(target, `${prefix}-dark-${width}-expanded-sidebar`); }
     }
   }
+  async function launchBrowser() {
+    const leaf = new crypto.X509Certificate(fs.readFileSync(service.certificatePath));
+    return chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP ' + new URL(service.endpoint).hostname + ' 127.0.0.1', '--ignore-certificate-errors-spki-list=' + Buffer.from(sha(leaf.publicKey.export({ type: 'spki', format: 'der' })), 'hex').toString('base64')] });
+  }
+  async function restartBrowser() {
+    await Promise.all(assetReads); const previous = browser; await previous.close();
+    assert(!previous.isConnected(), 'The previous browser process remained connected.');
+    browser = await launchBrowser(); assert(browser.isConnected(), 'The replacement browser process failed to start.');
+    browserRestarts.push({ previousClosed: true, replacementConnected: true }); page = await login(); return page;
+  }
   try {
     service = await createDesktopTunnelServiceFixture({ artifactDirectory: directory, webEnvironment: { AUTH_RATE_LIMIT_MAX: '100' }, configureProjectEnvironment: async ({ env, account, project }) => {
       const client = new Client({ connectionString: env.DATABASE_URL }); await client.connect();
@@ -159,7 +173,7 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
     database = new Client({ connectionString: service.databaseUrl }); await database.connect();
     const leaf = new crypto.X509Certificate(fs.readFileSync(service.certificatePath)), ca = new crypto.X509Certificate(fs.readFileSync(service.caCertificatePath));
     assert(leaf.verify(ca.publicKey) && leaf.checkHost(new URL(service.endpoint).hostname), 'The owned fixture TLS identity failed verification.');
-    browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP ' + new URL(service.endpoint).hostname + ' 127.0.0.1', '--ignore-certificate-errors-spki-list=' + Buffer.from(sha(leaf.publicKey.export({ type: 'spki', format: 'der' })), 'hex').toString('base64')] });
+    browser = await launchBrowser();
     page = await login();
     study = (await api(page, base(), { method: 'POST', body: { requestId: crypto.randomUUID(), name: 'Outside evidence study', description: 'Keep the research question separate from attachment saves.' }, expected: 201 })).analysis;
     otherStudy = (await api(page, base(), { method: 'POST', body: { requestId: crypto.randomUUID(), name: 'Unrelated draft study', description: '' }, expected: 201 })).analysis;
@@ -302,6 +316,15 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
     await capture(page, 'restored-reader-original-receipt-catalog-offline'); await page.unroute('**/attachments?**', abortRefresh);
     check('After access is restored, an authenticated original receipt clears stale denial while a separate catalog outage preserves the confirmed result and current reader limits.');
 
+    if (verifyIntakes) {
+      const extension = await verifyIntakes({ service, database, page, study, otherStudy, table, figure, accounts, requests, faults,
+        region, details, api, login, openAnalysis, openOutside, closeDetails, theme, capture, matrix, until, assert, check, attachmentPath,
+        expectedDiagnostics, faultPaths, restartBrowser, analysisVersion: expectedAnalysisVersion });
+      assert(Number.isSafeInteger(extension.extraRevisions) && extension.extraRevisions >= 0, 'The intake extension did not account for its genuine accepted revisions.');
+      extraRevisions += extension.extraRevisions;
+      expectedAnalysisVersion = extension.analysisVersion;
+    }
+
     const count = (await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_attachment_revisions')).rows[0].n;
     assert(count === 6 + extraRevisions, 'Attachment admission or recovery duplicated immutable revisions.');
     assert((await database.query('SELECT version FROM research_analyses WHERE id=$1', [study.id])).rows[0].version === expectedAnalysisVersion, 'Attachments mutated unrelated analysis revisions beyond the explicit versioned archive/restoration actions.');
@@ -317,7 +340,7 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
     });
     assert(browserErrors.length === 0 && unexpectedConsole.length === 0, 'Unexpected production UI error occurred.');
     check('All journeys used frozen production assets and genuine private storage/auth with no scientific jobs, kernels, execution or unexpected browser errors.');
-    const result = { passed: true, checks, screenshots, profiles, compiledAssets: assets, responses, requests, browserErrors, consoleErrors, fixture: 'Owned disposable production HTTPS/auth/PostgreSQL/storage; health-only R stub, synthetic table/PNG, deliberate upstream abort and genuine accepted lost reply.', limitations: ['No real scientific execution, remote SSH or large-file performance claim.', 'Captions and context are project metadata; private source permission is checked separately.'] };
+    const result = { passed: true, checks, screenshots, profiles, compiledAssets: assets, responses, requests, browserRestarts, browserErrors, consoleErrors, fixture: 'Owned disposable production HTTPS/auth/PostgreSQL/storage; health-only R stub, synthetic table/PNG, deliberate upstream abort and genuine accepted lost reply.', limitations: ['No real scientific execution, remote SSH or large-file performance claim.', 'Captions and context are project metadata; private source permission is checked separately.'] };
     fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify(result, null, 2) + '\n'); console.log('Analysis attachments acceptance: ' + directory); return result;
   } catch (failure) {
     await page?.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true }).catch(() => {});

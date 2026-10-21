@@ -33,3 +33,6 @@ const comments = (projectId, analysisId, attachmentId, revisionId) => `${revisio
 export const listAnalysisAttachmentComments = (projectId, analysisId, attachmentId, revisionId, { cursor, signal } = {}) => request(`${comments(projectId, analysisId, attachmentId, revisionId)}?${pageQuery(cursor)}`, { signal });
 export const createAnalysisAttachmentComment = (projectId, analysisId, attachmentId, revisionId, body, { signal } = {}) => request(comments(projectId, analysisId, attachmentId, revisionId), { body, signal });
 export const getAnalysisAttachmentCommentRequest = (projectId, analysisId, requestId, { signal } = {}) => request(`${path(projectId, analysisId)}/comment-requests/${encodeURIComponent(requestId)}`, { signal });
+export const listAnalysisLocalIntakes = (projectId, analysisId, { cursor, signal } = {}) => request(`${path(projectId, analysisId)}/local-intakes?${pageQuery(cursor)}`, { signal });
+export const createAnalysisLocalIntake = (projectId, analysisId, body, { signal } = {}) => request(`${path(projectId, analysisId)}/local-intakes`, { body, signal });
+export const getAnalysisLocalIntake = (projectId, analysisId, requestId, { signal } = {}) => request(`${path(projectId, analysisId)}/local-intakes/${encodeURIComponent(requestId)}`, { signal });

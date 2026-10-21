@@ -270,6 +270,7 @@ function createAnalysisAttachmentService(database = db, provider = storage.creat
     }, true);
   }
   const discussion = require('./analysisAttachmentComments').createAnalysisAttachmentCommentService({ transaction, head });
-  return { create, correct, getRequest, list, options, history, getRevision, ...discussion };
+  const localIntakes = require('./analysisLocalIntakes').createAnalysisLocalIntakeService({ database, provider, transaction, writable, attachmentResult: result, head, item });
+  return { create, correct, getRequest, list, options, history, getRevision, ...discussion, ...localIntakes };
 }
 module.exports = { createAnalysisAttachmentService };

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261027, now())
+VALUES ('traceomics.runtime', 20261028, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1263,6 +1263,33 @@ END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_research_analysis_revision_immutable ON research_analysis_revisions;
 CREATE TRIGGER trg_research_analysis_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_revisions
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
+
+-- Owner-private, metadata-only local intake recipes are acknowledged before a
+-- client may upload bytes. Outcomes remain in the existing import and attachment
+-- receipts; neither discovery nor admission transfers or attaches anything.
+CREATE TABLE IF NOT EXISTS research_analysis_local_intakes (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  owner_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  attachment_request_id UUID NOT NULL,
+  service_id TEXT NOT NULL CHECK(service_id ~ '^svc_[a-f0-9]{32}$'),
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  recipe_json JSONB NOT NULL CHECK(jsonb_typeof(recipe_json)='object' AND octet_length(recipe_json::text)<=65536),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id,owner_user_id,request_id),
+  UNIQUE(project_id,analysis_id,owner_user_id,attachment_request_id),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id),
+  CHECK(request_id<>attachment_request_id),
+  CHECK(recipe_json->>'requestId'=request_id::text AND recipe_json->>'serviceId'=service_id
+    AND recipe_json->'importRequest'->>'requestId'=request_id::text
+    AND recipe_json->'attachment'->>'requestId'=attachment_request_id::text)
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_local_intake_owner
+  ON research_analysis_local_intakes(project_id,analysis_id,owner_user_id,created_at DESC,request_id DESC);
+DROP TRIGGER IF EXISTS trg_analysis_local_intake_immutable ON research_analysis_local_intakes;
+CREATE TRIGGER trg_analysis_local_intake_immutable BEFORE UPDATE OR DELETE ON research_analysis_local_intakes
   FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
 
 -- Completed outside results are independent of the editable analysis draft.

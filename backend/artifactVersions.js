@@ -536,7 +536,8 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       [value.versionId,value.artifactId,projectId,userId,safeName(value.name),Number(next.version),value.previousVersionId||null,value.type,value.format,value.mimeType,value.checksumSha256,value.sizeBytes,value.key,value.publicationId,value.provenance]);
     return inserted.rows[0];
   }
-  return { list, get, preview, readVerifiedImage, importFile, getImportReceipt, resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
+  return { list, get, preview, readVerifiedImage, importFile, getImportReceipt, serializeImportReceipt: importReceipt,
+    resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

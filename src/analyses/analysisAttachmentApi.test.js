@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createAnalysisAttachment, correctAnalysisAttachment, getAnalysisAttachmentRequest, getAnalysisAttachmentRevision,
   listAnalysisAttachments, listAnalysisAttachmentOptions, listAnalysisAttachmentRevisions, listAnalysisAttachmentComments,
-  createAnalysisAttachmentComment, getAnalysisAttachmentCommentRequest } from './analysisAttachmentApi';
+  createAnalysisAttachmentComment, getAnalysisAttachmentCommentRequest, listAnalysisLocalIntakes, createAnalysisLocalIntake,
+  getAnalysisLocalIntake } from './analysisAttachmentApi';
 import { withExecutionTarget } from '../runtime/executionTarget';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -130,3 +131,26 @@ it.each([[404, 'ANALYSIS_ATTACHMENT_COMMENT_REQUEST_NOT_FOUND'], [409, 'ANALYSIS
     await expect(getAnalysisAttachmentCommentRequest('project 1', 'analysis 1', 'original')).rejects.toMatchObject({ status, code });
     expect(fetch).toHaveBeenCalledTimes(1); expect(fetch.mock.calls[0][1].method).toBe('GET');
   });
+
+it('reads private bounded intake discovery and exact original recipes without uploading or mutating', async () => {
+  fetch.mockResolvedValue({ ok: true, json: async () => ({ canUpload: false, canAttach: false }) });
+  const signal = new AbortController().signal;
+  await listAnalysisLocalIntakes('project 1', 'analysis 1', { cursor: 'next_page', signal });
+  await getAnalysisLocalIntake('project 1', 'analysis 1', 'original/request', { signal });
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([endpoint + '/local-intakes?limit=30&cursor=next_page', endpoint + '/local-intakes/original%2Frequest']);
+  for (const [, options] of fetch.mock.calls) {
+    expect(options).toMatchObject({ method: 'GET', credentials: 'include', signal }); expect(options).not.toHaveProperty('body');
+  }
+  expect(withExecutionTarget).toHaveBeenNthCalledWith(1, expect.any(Function), { mutation: false });
+  expect(withExecutionTarget).toHaveBeenNthCalledWith(2, expect.any(Function), { mutation: false });
+});
+
+it('persists the original intake recipe as authenticated JSON independently from the later multipart upload', async () => {
+  const body = { requestId: 'original', serviceId: 'server', importRequest: { requestId: 'original', sha256: 'a'.repeat(64) },
+    attachment: { requestId: 'separate-attachment', action: 'create', caption: 'A result' } };
+  const signal = new AbortController().signal; fetch.mockResolvedValue({ ok: true, json: async () => ({ requestId: body.requestId }) });
+  await createAnalysisLocalIntake('project 1', 'analysis 1', body, { signal });
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(endpoint + '/local-intakes', expect.objectContaining({ method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }));
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: true });
+});

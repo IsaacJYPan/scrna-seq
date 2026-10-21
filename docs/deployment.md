@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261027`. Apply
+This release requires database schema contract `20261028`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. The idempotent migration expands publication
 bounds and requires every completed size to fit its retained reservation;
@@ -248,6 +248,16 @@ captions and original request receipts remain readable under current membership.
 Current project readers can discuss exact attachment revisions in active analyses
 without receiving edit or private-file access. Discussion retains immutable text,
 contributor labels, timestamps and submission receipts; audits omit comment text.
+Local evidence intake adds bounded owner-private metadata recipes before upload.
+The persisted installation identity, exact file checksum/settings, intended
+analysis action and separate attachment request UUID survive reconnection and
+app restart. Current project readers can recover their own original admissions
+and accepted outcomes; fresh upload/attachment requires current write access to
+an active non-demo analysis. Recovery never transfers or attaches automatically,
+and recipes contain no file bytes or local file paths. Import acceptance remains
+recorded when a source is unavailable; a missing receipt is unconfirmed. Retain
+these immutable recipes and existing import/attachment receipts together during
+backup and restore. Scoped demo cleanup removes recipes before analysis rows.
 Existing versions, source receipts, restart
 links and jobs remain intact. Earlier workflow runs without recorded request
 contents remain visible in history; the service cannot verify that a repeated

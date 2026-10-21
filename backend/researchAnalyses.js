@@ -231,6 +231,12 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.post('/workflow-snapshots/:snapshotId/open', route(req => service.openWorkflowSnapshot(req.user.id, req.params.projectId, req.params.snapshotId, req.body)));
   router.get('/:analysisId/attachments', route(req => attachments.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/options', route(req => attachments.options(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/:analysisId/attachments/local-intakes', route(req => attachments.listLocalIntakes(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/:analysisId/attachments/local-intakes/:requestId', route(req => attachments.getLocalIntake(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
+  router.post('/:analysisId/attachments/local-intakes', route(async req => {
+    const result = await attachments.admitLocalIntake(req.user.id, req.params.projectId, req.params.analysisId, req.body);
+    return { ...result, created: !result.replayed };
+  }));
   router.get('/:analysisId/attachments/requests/:requestId', route(req => attachments.getRequest(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
   router.get('/:analysisId/attachments/comment-requests/:requestId', route(req => attachments.getCommentRequest(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
   router.get('/:analysisId/attachments/:attachmentId/revisions/:revisionId/comments', route(req => attachments.listComments(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.params.revisionId, req.query)));

@@ -8,6 +8,7 @@ import AttachmentRevisionHistory from './AttachmentRevisionHistory';
 import RevisionDiscussion from './RevisionDiscussion';
 
 const RetainedArtifactView = React.lazy(() => import('../components/RetainedArtifactView'));
+const LocalEvidenceIntake = React.lazy(() => import('./LocalEvidenceIntake'));
 const noteLabels = { origin: 'Where this result came from', sourceReference: 'Code or method reference', documentReference: 'Supporting document reference', environmentReference: 'Environment reference' };
 const blankContext = () => Object.fromEntries(Object.keys(noteLabels).map(key => [key, '']));
 const denied = failure => [401, 403].includes(failure.status) || failure.status === 404
@@ -46,6 +47,7 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
   const pendingOperation = useRef(null), draftCache = useRef(new Map()), revisionRequest = useRef(null), revisionGeneration = useRef(0);
   const captionInput = useRef(null);
   const commentDrafts = useRef(new Map());
+  const [intakeOpen, setIntakeOpen] = useState(false), [intakeVisited, setIntakeVisited] = useState(false), [intakeSeed, setIntakeSeed] = useState({ key: 0 });
   const canWrite = ['owner', 'admin', 'analyst'].includes(role) && analysis.status === 'active' && authority !== false;
   const available = isActive && !connection.blocked;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; listRequest.current?.abort(); optionRequest.current?.abort(); actionRequest.current?.abort(); revisionRequest.current?.abort(); }; }, []);
@@ -175,13 +177,20 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
   const rememberDraft = () => { if (formOpen) draftCache.current.set(editing?.attachmentId || 'create', { editing, chosen, caption, context }); };
   const beginForm = item => {
     if (pendingRef.current || inFlight.current || !canWrite) return;
-    rememberDraft(); const saved = draftCache.current.get(item?.id || 'create');
+    rememberDraft(); setIntakeOpen(false); const saved = draftCache.current.get(item?.id || 'create');
     setEditing(saved?.editing || (item ? { attachmentId: item.id, expectedHeadRevisionId: item.headRevisionId, base: item.revision } : null));
     setChosen(saved?.chosen || (item ? { reference: item.revision.reference, name: 'Current attached source' } : null));
     setCaption(saved?.caption ?? item?.revision.caption ?? ''); setContext(saved?.context || (item ? contextFor(item.revision) : blankContext()));
     setFormOpen(true); setConflict(null); setError(''); setSelection(null); revisionGeneration.current += 1; revisionRequest.current?.abort(); setRevisionLoading(false);
     if (list.current) list.current.scrollTop = 0;
     if (item) requestAnimationFrame(() => { if (mounted.current && available) captionInput.current?.focus({ preventScroll: true }); });
+  };
+  const openIntake = fromForm => {
+    if (fromForm && (inFlight.current || pendingRef.current)) return;
+    rememberDraft(); setIntakeVisited(true); setIntakeOpen(true); setFormOpen(false);
+    if (fromForm) setIntakeSeed(previous => ({ key: previous.key + 1, attachmentId: editing?.attachmentId || null,
+      expectedHeadRevisionId: editing?.expectedHeadRevisionId || null, caption, suppliedOrigin: { ...context } }));
+    if (list.current) list.current.scrollTop = 0;
   };
   const inspect = value => { revisionGeneration.current += 1; revisionRequest.current?.abort(); setRevisionLoading(false); inspectTrigger.current = document.activeElement; listPosition.current = list.current?.scrollTop || 0; setSelection(value); };
   const openRevision = async (attachmentId, revision) => {
@@ -218,10 +227,15 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
         <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
           <h3 className="text-sm font-semibold">Attached results</h3><div className="flex flex-wrap gap-2">
             <button type="button" className="btn btn-secondary text-xs" disabled={loading || connection.blocked} onClick={() => void load()}><RefreshCw size={14} className="mr-1 inline" />Refresh results</button>
+            <button type="button" className="btn btn-secondary text-xs" disabled={connection.blocked} onClick={() => intakeOpen ? setIntakeOpen(false) : openIntake(false)}>{intakeOpen ? 'Close imports' : canWrite ? 'Import files' : 'Saved imports'}</button>
             {canWrite && <button ref={formButton} type="button" className="btn btn-primary text-xs" disabled={busy || !!pending || connection.blocked} onClick={() => { if (formOpen && !editing) { rememberDraft(); setFormOpen(false); } else beginForm(null); setError(''); }}><Plus size={14} className="mr-1 inline" />{formOpen && !editing ? 'Close attachment form' : 'Attach outside result'}</button>}
           </div>
         </div>
         <div ref={list} tabIndex={0} aria-label="Outside results and attachment form" className="min-h-0 min-w-0 flex-1 space-y-4 overflow-auto rounded focus-visible:ring-2 focus-visible:ring-primary">
+          {intakeVisited && <div hidden={!intakeOpen}><React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Opening import requests…</p>}><LocalEvidenceIntake key={JSON.stringify([connection.identity, connection.epoch, projectId, analysis.id, userId])}
+            projectId={projectId} analysisId={analysis.id} userId={userId} active={analysis.status === 'active'} canWrite={canWrite} available={available && intakeOpen && !readDenied} seed={intakeSeed}
+            onClose={() => setIntakeOpen(false)} onDenied={clearAccess} onAuthority={restrictWrites} onAttached={() => void load()}
+            onInspect={revision => void openRevision(revision.attachmentId, revision)} onPreview={version => inspect({ kind: 'candidate', item: { reference: { kind: 'artifact-version', versionId: version.versionId, sha256: version.sha256 }, name: version.name } })} /></React.Suspense></div>}
           {pending && <section aria-label="Attachment recovery" className="space-y-3 rounded-lg border border-border bg-surface p-4">
             <h3 className="text-sm font-semibold">{busy ? 'Checking the original attachment request…' : 'Attachment completion is unconfirmed'}</h3>
             <p className="whitespace-pre-wrap break-words text-sm">{pending.caption}</p>
@@ -247,8 +261,9 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
               setEditing({ attachmentId: conflict.id, expectedHeadRevisionId: conflict.headRevisionId, base: latest }); setConflict(null); setError('');
             }}>Keep my edits with latest revision</button></div><p className="text-xs text-textMuted">Untouched context uses the latest revision; your edits are kept. Review the result before saving.</p></section>}
             <button type="button" className="btn btn-secondary text-xs" disabled={optionsLoading || !!pending || busy || !canWrite || connection.blocked} onClick={() => void findOptions()}>Choose saved file</button>
+            <button type="button" className="btn btn-secondary ml-2 text-xs" disabled={!!pending || busy || !canWrite || connection.blocked} onClick={() => openIntake(true)}>Import local file instead</button>
             {optionsLoading && <p role="status" className="text-xs text-textMuted">Finding your saved files…</p>}
-            {optionsLoaded && !options.length && !readDenied && <p className="text-sm text-textMuted">No supported files are available to your account. Import a table or figure in Runs &amp; Results first.</p>}
+            {optionsLoaded && !options.length && !readDenied && <p className="text-sm text-textMuted">No supported files are available to your account. Import a local table or figure here to continue.</p>}
             {!!options.length && <fieldset disabled={!!pending || busy || !canWrite || connection.blocked} className="min-w-0"><legend className="mb-2 text-sm">Your saved files</legend><div tabIndex={0} aria-label="Saved files for attachment" className="max-h-60 space-y-2 overflow-auto rounded border border-border p-2 focus-visible:ring-2 focus-visible:ring-primary">{options.map(option => <div key={option.reference.versionId} className="flex min-w-0 items-start gap-2 rounded border border-border p-3">
               <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 text-sm"><input type="radio" name={`attachment-source-${analysis.id}`} checked={chosen?.reference.versionId === option.reference.versionId} onChange={() => setChosen(option)} className="mt-1" /><span className="min-w-0 break-words">{option.name}<span className="mt-1 block text-xs text-textMuted">{formatName(option.format)} · {compactId(option.reference)}</span></span></label>
               <button type="button" className="shrink-0 text-xs text-primary underline" aria-label={`Preview ${option.name}`} onClick={() => inspect({ kind: 'candidate', item: option })}>Preview</button>
