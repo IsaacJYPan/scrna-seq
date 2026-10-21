@@ -10,7 +10,7 @@ import { getNotebookVersion } from './notebookApi';
 import { publicErrorMessage } from '../publicError';
 import { copyScriptToNotebook, exportScriptDocument, scriptDocumentInfo } from '../../shared/scriptDocument.mjs';
 
-const RetainedArtifactView = React.lazy(() => import('../components/RetainedArtifactView'));
+const RetainedWorkView = React.lazy(() => import('../analyses/RetainedWorkView'));
 const cellLabel = cell => cell.type === 'markdown' ? 'Markdown' : cell.language === 'python' ? 'Python' : 'R';
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const newCell = (type, language) => ({ id: crypto.randomUUID(), type, source: '', metadata: {}, collapsed: false,
@@ -101,7 +101,7 @@ const NotebookCell = memo(function NotebookCell({
 });
 
 export default function NotebookWorkspace({ projectId, projectName, analysis, role, userId, theme = 'light', isActive, connection,
-  onOpenOverview, onOpenAdvanced, referenceLabel }) {
+  onOpenOverview, onOpenAdvanced, onOpenWorkflow, referenceLabel }) {
   const canWrite = WRITE_ROLES.has(role) && analysis?.status === 'active';
   const docs = useNotebookDocuments({ projectId, analysisId: analysis?.id, userId, isActive, blocked: connection.blocked, canWrite });
   const editDocument = docs.edit;
@@ -251,7 +251,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     <dl className="space-y-2 break-all text-xs"><dt className="text-textMuted">Version</dt><dd>{inspector.document.versionId}</dd><dt className="text-textMuted">SHA-256</dt><dd className="font-mono">{inspector.document.sha256}</dd></dl>
     {inspector.document.content.cells.filter(cell => !inspector.cellId || cell.id === inspector.cellId).map(cell => <div key={cell.id}><p className="mb-2 text-xs font-semibold">Cell {inspector.document.content.cells.findIndex(item => item.id === cell.id) + 1} · {cellLabel(cell)} source</p><pre className="max-h-80 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-xs">{cell.source || '(empty source)'}</pre></div>)}
   </div> : inspector?.kind === 'artifact' ? <React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Loading saved material…</p>}>
-    <RetainedArtifactView projectId={projectId} userId={userId} reference={inspector.reference} compact />
+    <RetainedWorkView projectId={projectId} userId={userId} reference={inspector.reference} compact canWrite={canWrite} onOpenWorkflow={onOpenWorkflow} />
   </React.Suspense> : inspector?.kind === 'links' ? <div className="space-y-3 text-sm">
     <p className="text-xs text-textMuted">These exact versions keep their original access rules. Inspection does not change or run them.</p>
     {analysis.references.map(item => <div key={JSON.stringify(item.reference)} className="rounded border border-border p-3"><p className="break-words">{referenceLabel?.(item.reference, item.access) || 'Saved material'}</p>

@@ -1,11 +1,14 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import RetainedArtifactView from './RetainedArtifactView';
 import { invalidatedWorkflowSteps, workflowAvailability } from '../../shared/workflowState.mjs';
 import { workflowParameters } from '../../shared/workflowPackage.mjs';
 import { workflowRequest, workflowUrl } from '../pipelines/workflowApi';
 import { useWorkflowRequest } from '../pipelines/useWorkflowRequest';
 import useExecutionTarget from '../runtime/useExecutionTarget';
-import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
+import { getExecutionTargetSnapshot, TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
+import { getWorkflowSnapshot, openWorkflowSnapshot } from '../analyses/researchAnalysisApi';
+import RetainedWorkflowSnapshotView from '../analyses/RetainedWorkflowSnapshotView';
+import { validateWorkflowRestoration } from '../analyses/workflowSnapshotClient';
 
 const inputClassName = 'w-full rounded-md border border-border bg-background px-3 py-2 text-text';
 
@@ -79,6 +82,19 @@ export default function WorkflowWorkbench({ instance, projectId, userId, activeT
   const [snapshots, setSnapshots] = useState([]);
   const [busy, setBusy] = useState(false);
   const [restoration, setRestoration] = useState(0);
+  const [openingSnapshot, setOpeningSnapshot] = useState(null);
+  const [writeAccess, setWriteAccess] = useState(true);
+  const mounted = useRef(false), discovery = useRef(null), openingSlot = useRef({ epoch: 0 });
+  const scope = useRef(null);
+  scope.current = { projectId, instanceId: instance.id, userId };
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; discovery.current?.abort(); openingSlot.current = { epoch: openingSlot.current.epoch + 1 }; };
+  }, []);
+  useEffect(() => {
+    discovery.current?.abort(); openingSlot.current = { epoch: openingSlot.current.epoch + 1 };
+    setOpeningSnapshot(null);
+  }, [projectId, instance.id, userId]);
   const request = useWorkflowRequest(projectId, instance.id);
   const tab = instance.package.tabs.find(tab => `workflow:${tab.id}` === activeTab) || instance.package.tabs[0];
   useEffect(() => {
@@ -87,17 +103,18 @@ export default function WorkflowWorkbench({ instance, projectId, userId, activeT
       try {
         const updated = await request(`instances/${instance.id}`);
         if (active) onUpdate(updated);
-      } catch (error) { if (error.name !== 'AbortError') setError(error.message); }
+      } catch (error) { if (active && error.name !== 'AbortError') setError(error.message); }
       if (active) timer = setTimeout(refresh, 2000);
     };
-    if (!blocked) refresh();
+    if (!blocked && writeAccess) refresh();
     return () => { active = false; clearTimeout(timer); };
-  }, [request, instance.id, onUpdate, blocked]);
+  }, [request, instance.id, onUpdate, blocked, writeAccess]);
   useEffect(() => {
+    if (!writeAccess) return undefined;
     const controller = new AbortController();
-    workflowRequest(projectId, 'snapshots', 'GET', undefined, controller.signal).then(setSnapshots).catch(error => { if (error.name !== 'AbortError') setError(error.message); });
+    workflowRequest(projectId, `snapshots?analysisObjectId=${encodeURIComponent(instance.analysisObjectId)}`, 'GET', undefined, controller.signal).then(value => { if (!controller.signal.aborted) setSnapshots(value); }).catch(error => { if (!controller.signal.aborted && error.name !== 'AbortError') setError(error.message); });
     return () => controller.abort();
-  }, [projectId, notice]);
+  }, [projectId, instance.analysisObjectId, notice, writeAccess]);
   const action = async callback => {
     setBusy(true); setError(''); setNotice('');
     try { await callback(); } catch (error) { if (error.name !== 'AbortError') setError(error.message); } finally { setBusy(false); }
@@ -108,11 +125,12 @@ export default function WorkflowWorkbench({ instance, projectId, userId, activeT
     {blocked && <p role="status" className="rounded border border-amber-300 p-3 text-sm">{TARGET_DISCONNECTED_MESSAGE} Reconnect to the same workspace for a fresh authorized read of retained results. No analysis runtime is started and no recipe step is rerun automatically.</p>}
     {instance.state.error && <p role="alert" className="text-danger">{instance.state.error}</p>}
     {notice && <p role="status">{notice}</p>}
+    {!writeAccess && <p role="status" className="text-sm text-textMuted">Your current project role allows inspection only. Reload the workspace after any access change.</p>}
     <div className="flex flex-wrap items-end gap-3">
       <label className="grid gap-1 text-sm">Snapshot name<input className={inputClassName} value={name} maxLength={100} onChange={event => setName(event.target.value)} /></label>
-      <button className="btn btn-secondary" disabled={busy || !!instance.state.active || !name.trim()} onClick={() => action(async () => { await request(`instances/${instance.id}/save`, 'POST', { name }); setNotice(`Saved ${name}.`); })}>Save workflow</button>
-      {instance.state.active && <button className="btn btn-secondary" disabled={busy} onClick={() => action(async () => onUpdate(await request(`instances/${instance.id}/cancel`, 'POST', {})))}>Cancel run</button>}
-      <button className="btn btn-secondary" disabled={busy || !!instance.state.active} onClick={() => {
+      <button className="btn btn-secondary" disabled={!writeAccess || busy || !!instance.state.active || !name.trim()} onClick={() => action(async () => { await request(`instances/${instance.id}/save`, 'POST', { name }); setNotice(`Saved ${name}.`); })}>Save workflow</button>
+      {instance.state.active && <button className="btn btn-secondary" disabled={!writeAccess || busy} onClick={() => action(async () => onUpdate(await request(`instances/${instance.id}/cancel`, 'POST', {})))}>Cancel run</button>}
+      <button className="btn btn-secondary" disabled={!writeAccess || busy || !!instance.state.active} onClick={() => {
         if (window.confirm('Discard this workflow’s working results? Saved snapshots will remain available.')) action(async () => {
           await request(`instances/${instance.id}`, 'DELETE');
           onExit();
@@ -120,18 +138,24 @@ export default function WorkflowWorkbench({ instance, projectId, userId, activeT
       }}>Discard working results</button>
     </div>
     <details className="text-sm">
-      <summary>Saved workflows for this analysis</summary>
+      <summary>Recent saved workflows for this analysis</summary>
       <ul className="mt-3 space-y-2">{snapshots.filter(snapshot => snapshot.analysisObjectId === instance.analysisObjectId).map(snapshot => <li key={snapshot.id} className="flex gap-3">
         <span>{snapshot.name}</span>
         <button className="text-primary" disabled={busy || !!instance.state.active} onClick={() => {
-          if (window.confirm('Open this snapshot and replace its current working results? Saved snapshots will remain unchanged.')) action(async () => {
-            const restored = await request(`snapshots/${snapshot.id}/open`, 'POST', {});
-            setRestoration(value => value + 1);
-            onUpdate(restored, { replace: true });
-            setNotice(`Opened ${snapshot.name}.`);
+          action(async () => {
+            const before = { ...scope.current }, target = getExecutionTargetSnapshot(), epoch = openingSlot.current.epoch + 1;
+            discovery.current?.abort(); const controller = new AbortController(); discovery.current = controller;
+            openingSlot.current = { epoch, id: snapshot.id };
+            const result = await getWorkflowSnapshot(projectId, snapshot.id, { signal: controller.signal });
+            const after = scope.current, currentTarget = getExecutionTargetSnapshot();
+            if (!mounted.current || controller.signal.aborted || openingSlot.current.epoch !== epoch || after.projectId !== before.projectId
+                || after.instanceId !== before.instanceId || after.userId !== before.userId
+                || currentTarget.identity !== target.identity || currentTarget.epoch !== target.epoch || currentTarget.blocked) return;
+            openingSlot.current = { epoch, id: snapshot.id, sha256: result.snapshot.sha256 };
+            setOpeningSnapshot(result.snapshot);
           });
         }}>Open</button>
-        <button disabled={busy} onClick={() => {
+        <button disabled={!writeAccess || busy} onClick={() => {
           if (window.confirm(`Delete saved workflow “${snapshot.name}”?`)) action(async () => {
             await request(`snapshots/${snapshot.id}`, 'DELETE');
             setNotice('Snapshot deleted.');
@@ -139,6 +163,25 @@ export default function WorkflowWorkbench({ instance, projectId, userId, activeT
         }}>Delete</button>
       </li>)}</ul>
     </details>
-    {[tab.step, ...tab.plots].map(id => <StepPanel key={`${instance.id}:${restoration}:${id}`} step={instance.package.steps.find(step => step.id === id)} instance={instance} projectId={projectId} userId={userId} update={onUpdate} enabled={enabled && !blocked} request={request} />)}
+    {openingSnapshot && <section aria-label="Open retained workflow" className="space-y-4 rounded border border-border bg-surface p-4">
+      <button type="button" className="text-xs text-primary underline" onClick={() => { discovery.current?.abort(); openingSlot.current = { epoch: openingSlot.current.epoch + 1 }; setOpeningSnapshot(null); }}>Close saved workflow details</button>
+      <RetainedWorkflowSnapshotView key={openingSnapshot.id} projectId={projectId} userId={userId} initialSnapshot={openingSnapshot}
+        reference={{ kind: 'workflow-snapshot', snapshotId: openingSnapshot.id, sha256: openingSnapshot.sha256 }} canWrite={writeAccess}
+        onOpenWorkflow={async ({ snapshot, request: input, isCurrent = () => true }) => {
+          const before = { ...scope.current }, target = getExecutionTargetSnapshot(), slot = { ...openingSlot.current };
+          const current = () => mounted.current && isCurrent() && scope.current.projectId === before.projectId
+            && scope.current.instanceId === before.instanceId && scope.current.userId === before.userId
+            && openingSlot.current.epoch === slot.epoch && openingSlot.current.id === snapshot.id && openingSlot.current.sha256 === snapshot.sha256
+            && getExecutionTargetSnapshot().identity === target.identity && getExecutionTargetSnapshot().epoch === target.epoch
+            && !getExecutionTargetSnapshot().blocked;
+          if (!current()) throw Object.assign(new Error('The saved workflow view changed.'), { code: 'TARGET_CHANGED' });
+          const result = validateWorkflowRestoration(await openWorkflowSnapshot(projectId, snapshot.id, input), snapshot, input);
+          if (!current()) return { ...result, navigationNote: 'The original open is confirmed. Your current view was kept; the saved snapshot was not applied again.' };
+          if (!result.canEditWorking) setWriteAccess(false);
+          if (result.currentInstance && result.canEditWorking) { setRestoration(value => value + 1); onUpdate(result.currentInstance, { replace: true }); }
+          return result;
+        }} />
+    </section>}
+    {[tab.step, ...tab.plots].map(id => <StepPanel key={`${instance.id}:${restoration}:${id}`} step={instance.package.steps.find(step => step.id === id)} instance={instance} projectId={projectId} userId={userId} update={onUpdate} enabled={enabled && !blocked && writeAccess} request={request} />)}
   </div>;
 }

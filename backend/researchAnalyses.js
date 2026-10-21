@@ -22,7 +22,7 @@ const SOURCE_SQL = `
     WHERE artifact.project_id=$1 AND job.project_id=$1 AND artifact.created_by_user_id=$2
       AND artifact.storage_kind='local_internal' AND artifact.status='available' AND job.status='completed'`;
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const cleanReference = ref => ref.kind === 'analysis-object'
+const cleanReference = ref => ref.kind === 'workflow-snapshot' ? { kind: ref.kind, snapshotId: ref.snapshotId, sha256: ref.sha256 } : ref.kind === 'analysis-object'
   ? { kind: ref.kind, analysisObjectId: ref.analysisObjectId, checkpointVersionId: ref.checkpointVersionId, sha256: ref.sha256 }
   : { kind: ref.kind, versionId: ref.versionId, sha256: ref.sha256 };
 const referenceKey = ref => JSON.stringify(cleanReference(ref));
@@ -54,17 +54,18 @@ function createResearchAnalysisService(database = db) {
   // resolver later using their own explicit source permission, not membership.
   async function accessibleReferences(client, userId, projectId, references) {
     if (!references.length) return new Set();
-    const ids = [...new Set(references.map(ref => ref.versionId || ref.checkpointVersionId))];
+    const snapshots = await require('./retainedWorkflowSnapshots').authorizedWorkflowSnapshotReferences(client, userId, projectId, references);
+    const ids = [...new Set(references.filter(ref => ref.kind !== 'workflow-snapshot').map(ref => ref.versionId || ref.checkpointVersionId))];
     const rows = (await client.query(`SELECT * FROM (${SOURCE_SQL}) source WHERE id=ANY($3::text[])`, [projectId, userId, ids])).rows;
     const byId = new Map(rows.filter(row => /^[a-f0-9]{64}$/.test(row.sha || '') && Number.isSafeInteger(Number(row.bytes))
       && Number(row.bytes) >= 0 && storage.isProjectStorageKey(row.key, { projectId })).map(row => [row.id, row]));
     const objectIds = [...new Set(references.filter(ref => ref.kind === 'analysis-object').map(ref => ref.analysisObjectId))];
     const ownedObjects = objectIds.length ? new Set((await client.query('SELECT id FROM analysis_objects WHERE project_id=$1 AND owner_user_id=$2 AND id=ANY($3::text[])', [projectId, userId, objectIds])).rows.map(row => row.id)) : new Set();
-    return new Set(references.filter(ref => {
+    return new Set([...snapshots, ...references.filter(ref => {
       const source = byId.get(ref.versionId || ref.checkpointVersionId);
       return source && source.sha === ref.sha256 && (ref.kind !== 'analysis-object'
         || source.checkpoint && source.object_id === ref.analysisObjectId && ownedObjects.has(ref.analysisObjectId));
-    }).map(referenceKey));
+    })].map(referenceKey));
   }
   function fromRow(row, allowed) {
     return { id: row.id, projectId: row.project_id, createdByUserId: Number(row.created_by_user_id),
@@ -191,9 +192,11 @@ function createResearchAnalysisService(database = db) {
       return { analysis: (await display(client, userId, projectId, [updated]))[0] };
     });
   }
-  const existingWork = require('./existingWorkCatalog').createExistingWorkCatalog({ sourceSql: SOURCE_SQL,
+  const workflowSnapshots = require('./retainedWorkflowSnapshots').createRetainedWorkflowSnapshotService(database);
+  const existingWork = require('./existingWorkCatalog').createExistingWorkCatalog({ sourceSql: SOURCE_SQL, workflows: workflowSnapshots.list,
     transaction: (userId, projectId, action) => transaction(userId, projectId, READ_ROLES, action) });
-  return { create, list, get, patch, referenceOptions, listExistingWork: existingWork.list };
+  return { create, list, get, patch, referenceOptions, listExistingWork: existingWork.list,
+    getWorkflowSnapshot: workflowSnapshots.get, openWorkflowSnapshot: workflowSnapshots.open };
 }
 function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   const router = require('express').Router({ mergeParams: true });
@@ -204,8 +207,9 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
       const { created, ...result } = await action(req);
       res.status(created === true ? 201 : 200).json(result);
     } catch (failure) {
-      if ([400, 403, 404, 409].includes(failure.status)) {
+      if ([400, 403, 404, 409, 413].includes(failure.status)) {
         return res.status(failure.status).json({ error: failure.message, code: failure.code,
+          ...(Object.hasOwn(failure, 'workingInstance') ? { workingInstance: failure.workingInstance } : {}),
           ...(failure.code === 'ANALYSIS_VERSION_CONFLICT' ? {
             analysis: failure.analysis, submittedExpectedVersion: failure.submittedExpectedVersion,
           } : {}) });
@@ -219,6 +223,8 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.post('/', route(req => service.create(req.user.id, req.params.projectId, req.body)));
   router.get('/reference-options', route(req => service.referenceOptions(req.user.id, req.params.projectId, req.query)));
   router.get('/existing-work', route(req => service.listExistingWork(req.user.id, req.params.projectId, req.query)));
+  router.get('/workflow-snapshots/:snapshotId', route(req => service.getWorkflowSnapshot(req.user.id, req.params.projectId, req.params.snapshotId, req.query.sha256)));
+  router.post('/workflow-snapshots/:snapshotId/open', route(req => service.openWorkflowSnapshot(req.user.id, req.params.projectId, req.params.snapshotId, req.body)));
   router.get('/:analysisId', route(req => service.get(req.user.id, req.params.projectId, req.params.analysisId)));
   router.patch('/:analysisId', route(req => service.patch(req.user.id, req.params.projectId, req.params.analysisId, req.body)));
   return router;

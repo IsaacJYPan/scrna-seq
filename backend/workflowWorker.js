@@ -17,7 +17,8 @@ async function runWorkflowJob(db, ctx, workerId, claimToken, provider) {
   await authorize(db, userId, projectId, true);
   await ctx.getOwnedAnalysisObject();
   const checkpoint = await ctx.getHydrationCheckpoint();
-  if (checkpoint.checksumSha256 !== instance.state_json.root.sha256) throw new Error('Workflow input checkpoint changed. Reopen the workflow.');
+  if (checkpoint.checkpointArtifactId !== instance.state_json.root.id || checkpoint.checksumSha256 !== instance.state_json.root.sha256
+      || checkpoint.sizeBytes !== instance.state_json.root.sizeBytes) throw new Error('The exact workflow input changed. Review its saved source before starting another step.');
   const run = instance.state_json.active;
   const compiled = compileStep(instance.package_json, instance.state_json);
   if (ctx.job.parameters.script !== compiled.script) throw new Error('Workflow source does not match its pinned package.');

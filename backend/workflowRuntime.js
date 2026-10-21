@@ -126,6 +126,11 @@ ${workflow.files[step.entry]}`;
 }
 
 function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider(), { getEnvironment = getExpertREnvironment } = {}) {
+  async function lockSnapshotWriter(client, userId, projectId) {
+    await client.query('SELECT id FROM projects WHERE id=$1 FOR SHARE', [projectId]);
+    const member = (await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId])).rows[0];
+    if (!['owner', 'admin', 'analyst'].includes(member?.role)) throw error('Your project role does not allow changing saved workflows.', 403);
+  }
   async function open(userId, projectId, analysisObjectId, source) {
     await authorize(db, userId, projectId);
     const api = await contract; const workflow = api.parseLegacyExecutableWorkflowPackage(source, { environmentProfiles: [EXPERT_R_PROFILE.id] });
@@ -187,7 +192,9 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
         ...(row.state_json.environment ? { environment: row.state_json.environment } : {}) }, environmentManifest));
       state.environment = parameters.environment;
       state.active.environment = parameters.environment;
-      await db.getLoadableCheckpointForAnalysisObject(projectId, row.analysis_object_id, userId);
+      const exactCheckpoint = await db.getLoadableCheckpointForAnalysisObject(projectId, row.analysis_object_id, userId);
+      if (exactCheckpoint.checkpointArtifactId !== row.state_json.root.id || exactCheckpoint.checksumSha256 !== row.state_json.root.sha256
+          || exactCheckpoint.sizeBytes !== row.state_json.root.sizeBytes) throw Object.assign(error('The exact workflow input changed. Review its saved source before starting another step.', 409), { code: 'WORKFLOW_ROOT_UNAVAILABLE' });
       await client.query(`WITH new_job AS (INSERT INTO jobs
         (id,owner_user_id,project_id,analysis_object_id,job_type,status,parameters_json,max_attempts)
         VALUES ($1,$2,$3,$4,'expert.r.v1','queued',$5,1) RETURNING *), retained_source AS (
@@ -223,9 +230,17 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
     if (typeof name !== 'string' || !name.trim() || name.length > 100) throw error('A snapshot name of 1–100 characters is required.');
     return transaction(db, async client => {
       await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [userId]);
+      await lockSnapshotWriter(client, userId, projectId);
       const row = await refreshRun(client, await lockedInstance(client, userId, projectId, id));
       const state = (await contract).snapshotWorkflowState(row.state_json);
-      const count = await client.query('SELECT COUNT(*)::int AS count FROM workflow_snapshots WHERE owner_user_id=$1', [userId]);
+      // Analysis-retained captures are scientific evidence, not reclaimable
+      // entries in the bounded temporary snapshot library.
+      const count = await client.query(`SELECT COUNT(*)::int AS count FROM workflow_snapshots s WHERE owner_user_id=$1 AND NOT EXISTS(
+        SELECT 1 FROM (
+          SELECT project_id,jsonb_array_elements(references_json) AS reference FROM research_analyses
+          UNION ALL SELECT project_id,jsonb_array_elements(snapshot_json->'references') FROM research_analysis_revisions
+        ) saved WHERE saved.project_id=s.project_id AND reference->>'kind'='workflow-snapshot' AND reference->>'snapshotId'=s.id
+      )`, [userId]);
       if (count.rows[0].count >= 40) throw error('Remove an unused workflow snapshot before saving more than 40.', 409);
       const snapshotId = identifier('wfs');
       await client.query('INSERT INTO workflow_snapshots (id,owner_user_id,project_id,analysis_object_id,name,package_digest,package_json,state_json) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
@@ -233,28 +248,16 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
       return { id: snapshotId, name: name.trim() };
     });
   }
-  async function snapshots(userId, projectId) {
+  async function snapshots(userId, projectId, options = {}) {
     await authorize(db, userId, projectId);
-    return (await db.query('SELECT id,name,analysis_object_id AS "analysisObjectId",created_at AS "createdAt" FROM workflow_snapshots WHERE owner_user_id=$1 AND project_id=$2 ORDER BY created_at DESC', [userId, projectId])).rows;
+    if (options.analysisObjectId !== undefined && (typeof options.analysisObjectId !== 'string' || !/^ao_[a-f0-9]{16,40}$/.test(options.analysisObjectId))) throw error('Choose a valid analysis object.');
+    return (await db.query(`SELECT id,name,analysis_object_id AS "analysisObjectId",created_at AS "createdAt" FROM workflow_snapshots
+      WHERE owner_user_id=$1 AND project_id=$2 ${options.analysisObjectId ? 'AND analysis_object_id=$3' : ''}
+      ORDER BY created_at DESC,id DESC LIMIT 40`, [userId, projectId, ...(options.analysisObjectId ? [options.analysisObjectId] : [])])).rows;
   }
-  async function restore(userId, projectId, snapshotId) {
-    await authorize(db, userId, projectId);
-    const restored = await transaction(db, async client => {
-      await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [userId]);
-      const { rows } = await client.query('SELECT * FROM workflow_snapshots WHERE id=$1 AND owner_user_id=$2 AND project_id=$3', [snapshotId, userId, projectId]);
-      const saved = rows[0]; if (!saved) throw error('Snapshot not found.', 404);
-      const existing = await client.query('SELECT * FROM workflow_instances WHERE owner_user_id=$1 AND project_id=$2 AND analysis_object_id=$3 AND package_digest=$4 FOR UPDATE', [userId, projectId, saved.analysis_object_id, saved.package_digest]);
-      if (existing.rows[0]) await refreshRun(client, existing.rows[0]);
-      if (existing.rows[0]?.state_json.active) throw error('Wait for the active run before opening a snapshot.', 409);
-      if (!existing.rows[0]) {
-        const count = await client.query('SELECT COUNT(*)::int AS count FROM workflow_instances WHERE owner_user_id=$1', [userId]);
-        if (count.rows[0].count >= 20) throw error('Close an existing working workflow before opening more than 20.', 409);
-      }
-      const state = { ...saved.state_json, active: null, generation: (existing.rows[0]?.state_json.generation || 0) + 1 };
-      const result = await client.query('INSERT INTO workflow_instances (id,owner_user_id,project_id,analysis_object_id,package_digest,package_json,state_json) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (owner_user_id,project_id,analysis_object_id,package_digest) DO UPDATE SET state_json=EXCLUDED.state_json,updated_at=now() RETURNING *',
-        [identifier('wfi'), userId, projectId, saved.analysis_object_id, saved.package_digest, saved.package_json, state]);
-      return publicInstance(result.rows[0]);
-    });
+  async function restore(userId, projectId, snapshotId, input) {
+    if (!input?.requestId) throw Object.assign(error('Review the exact saved workflow and current working generation before reopening it.', 409), { code: 'WORKFLOW_RESTORE_CONFIRMATION_REQUIRED' });
+    const restored = await require('./retainedWorkflowSnapshots').createRetainedWorkflowSnapshotService(db).open(userId, projectId, snapshotId, input);
     await cleanup(userId, projectId).catch(() => console.warn('[workflow] Output cleanup will be retried.'));
     return restored;
   }
@@ -262,6 +265,9 @@ function createWorkflowRuntime(db, provider = storage.createLocalStorageProvider
     await authorize(db, userId, projectId);
     await transaction(db, async client => {
       await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [userId]);
+      await lockSnapshotWriter(client, userId, projectId);
+      if (!(await client.query('SELECT id FROM workflow_snapshots WHERE id=$1 AND owner_user_id=$2 AND project_id=$3 FOR UPDATE', [id, userId, projectId])).rowCount) return;
+      if (await require('./retainedWorkflowSnapshots').snapshotIsReferenced(client, projectId, id)) throw error('This saved workflow is retained by an analysis version. Its captured source cannot be deleted.', 409);
       await client.query('DELETE FROM workflow_snapshots WHERE id=$1 AND owner_user_id=$2 AND project_id=$3', [id, userId, projectId]);
     });
     await cleanup(userId, projectId);

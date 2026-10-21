@@ -31,6 +31,13 @@ describe('deliberate original history navigation', () => {
     await expect(result).rejects.toMatchObject({ code: 'UNSAVED_LIVE_WORK' });
     expect(state.scope.objectId).toBe('ao_current');
   });
+  it('allows a pending receipt check to read metadata while leaving navigation decisions and dirty work to the caller', async () => {
+    const state = setup(); state.scope.unsavedLiveChanges = true;
+    const result = prepareOriginalObjectHistory({ api: state.api, objectId: 'ao_saved', getScope: () => state.scope,
+      getTarget: () => state.target, getSelection: () => state.select.version, allowDirtyRead: true });
+    state.finish(); expect(await result).toMatchObject({ projectId: 'proj_one', selectObject: true });
+    expect(state.scope.objectId).toBe('ao_current'); expect(state.scope.unsavedLiveChanges).toBe(true);
+  });
   it.each(['userId', 'projectId', 'workspaceId', 'activeTab', 'objectId'])('rejects a late response after %s changes', async field => {
     const state = setup(), result = state.run(); state.scope[field] = 'different'; state.finish();
     await expect(result).rejects.toMatchObject({ code: 'TARGET_CHANGED' });

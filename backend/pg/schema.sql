@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261022, now())
+VALUES ('traceomics.runtime', 20261023, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -883,6 +883,23 @@ CREATE TABLE IF NOT EXISTS workflow_snapshots (
 CREATE INDEX IF NOT EXISTS idx_workflow_artifacts_owner ON workflow_artifacts(owner_user_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_snapshots_owner ON workflow_snapshots(owner_user_id, project_id);
 
+-- Source-free reopen receipts outlive a mutable working instance. They never
+-- hold another copy of captured code/state or turn a replay into a new restore.
+CREATE TABLE IF NOT EXISTS workflow_restoration_receipts (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  owner_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  snapshot_id TEXT NOT NULL CHECK(snapshot_id ~ '^wfs_[a-f0-9]{24}$'),
+  snapshot_sha256 TEXT NOT NULL CHECK(snapshot_sha256 ~ '^[a-f0-9]{64}$'),
+  analysis_object_id TEXT NOT NULL,
+  package_digest TEXT NOT NULL CHECK(package_digest ~ '^[a-f0-9]{64}$'),
+  instance_id TEXT NOT NULL CHECK(instance_id ~ '^wfi_[a-f0-9]{24}$'),
+  accepted_generation INTEGER NOT NULL CHECK(accepted_generation>0 AND accepted_generation<2147483647),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(project_id,owner_user_id,request_id)
+);
+
 -- Private persistent R sessions and immutable command evidence.
 CREATE TABLE IF NOT EXISTS private_r_kernels (
   id TEXT PRIMARY KEY CHECK (id ~ '^pk_[a-f0-9]{24}$'),
@@ -1220,6 +1237,31 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_research_analysis_revision_immutable ON research_analysis_revisions;
 CREATE TRIGGER trg_research_analysis_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_revisions
   FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
+
+CREATE OR REPLACE FUNCTION protect_retained_workflow_snapshot() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'Captured workflow source is immutable' USING ERRCODE='55000'; END IF;
+  IF EXISTS(SELECT 1 FROM (
+    SELECT jsonb_array_elements(references_json) AS reference FROM research_analyses WHERE project_id=OLD.project_id
+    UNION ALL SELECT jsonb_array_elements(snapshot_json->'references') FROM research_analysis_revisions WHERE project_id=OLD.project_id
+  ) saved WHERE reference->>'kind'='workflow-snapshot' AND reference->>'snapshotId'=OLD.id) THEN
+    RAISE EXCEPTION 'Captured workflow is retained by an analysis version' USING ERRCODE='55000';
+  END IF;
+  RETURN OLD;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_retained_workflow_snapshot ON workflow_snapshots;
+CREATE TRIGGER trg_retained_workflow_snapshot BEFORE UPDATE OR DELETE ON workflow_snapshots
+  FOR EACH ROW EXECUTE FUNCTION protect_retained_workflow_snapshot();
+
+CREATE OR REPLACE FUNCTION protect_workflow_restoration_receipt() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Workflow reopen receipts are immutable' USING ERRCODE='55000';
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_workflow_restoration_receipt ON workflow_restoration_receipts;
+CREATE TRIGGER trg_workflow_restoration_receipt BEFORE UPDATE OR DELETE ON workflow_restoration_receipts
+  FOR EACH ROW EXECUTE FUNCTION protect_workflow_restoration_receipt();
 
 -- Authored notebooks are explicitly shared project documents. Source remains
 -- separate from private execution records; saving never executes code.

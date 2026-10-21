@@ -3,15 +3,16 @@ import { ArrowLeft, FileText, RefreshCw } from 'lucide-react';
 import { listExistingWork } from './researchAnalysisApi';
 import { normalizeResearchAnalysisCreate, validateResearchAnalysisReference } from '../../shared/researchAnalysis.mjs';
 import { publicErrorMessage } from '../publicError';
+import { savedReferenceId } from './savedWorkReference';
 
-const RetainedArtifactView = React.lazy(() => import('../components/RetainedArtifactView'));
-const version = item => item.reference?.versionId || item.reference?.checkpointVersionId;
+const RetainedWorkView = React.lazy(() => import('./RetainedWorkView'));
+const version = item => savedReferenceId(item.reference);
 const time = value => new Date(value).toLocaleDateString();
 const unreadable = () => new Error('The saved-work list could not be read. Refresh to try again.');
 function validate(result, kind, projectId, userId) {
   if (result?.projectId !== projectId || result.kind !== kind || !Array.isArray(result.items) || result.items.length > 30) throw unreadable();
   for (const item of result.items) {
-    if (!item || typeof item.id !== 'string' || !['analysis-object', 'artifact-version'].includes(item.kind)
+    if (!item || typeof item.id !== 'string' || !['analysis-object', 'artifact-version', 'workflow-snapshot'].includes(item.kind)
         || typeof item.label !== 'string' || typeof item.type !== 'string' || !Number.isSafeInteger(item.ownerUserId)
         || !['yours', 'colleague'].includes(item.ownership) || !['recorded', 'not-recorded', 'restricted'].includes(item.savedState)
         || item.ownerUserId < 1 || item.ownership === 'yours' && item.ownerUserId !== userId
@@ -22,7 +23,7 @@ function validate(result, kind, projectId, userId) {
   return result;
 }
 
-export default function ExistingWorkBrowser({ projectId, userId, projectName, canWrite, blocked, isActive, onClose, onAdopt, onOpenOriginal }) {
+export default function ExistingWorkBrowser({ projectId, userId, projectName, canWrite, blocked, isActive, onClose, onAdopt, onOpenOriginal, onOpenWorkflow }) {
   const [kind, setKind] = useState('objects'), [items, setItems] = useState([]), [selectedId, setSelectedId] = useState(null);
   const [cursor, setCursor] = useState(null), [loaded, setLoaded] = useState(false), [loading, setLoading] = useState(false);
   const [error, setError] = useState(''), [names, setNames] = useState({}), [busy, setBusy] = useState(false);
@@ -125,7 +126,7 @@ export default function ExistingWorkBrowser({ projectId, userId, projectName, ca
     {blocked && <p role="status" className="mx-auto mb-4 w-full max-w-6xl text-sm text-textMuted">Reconnect to browse this project's saved work.</p>}
     <div ref={layout} className="mx-auto grid min-h-0 w-full max-w-6xl flex-1 gap-6" style={{ gridTemplateColumns: wide ? 'minmax(230px,0.8fr) minmax(0,1.6fr)' : 'minmax(0,1fr)' }}>
       <div className="min-h-0 flex-col" style={{ display: !wide && detailOpen ? 'none' : 'flex' }}>
-        <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3"><label className="text-sm">Show<select aria-label="Saved work category" className="ml-2 rounded border border-border bg-surface p-2" disabled={!!pending || busy} value={kind} onChange={event => setKind(event.target.value)}><option value="objects">Saved objects</option><option value="results">Saved results and files</option></select></label>
+        <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3"><label className="text-sm">Show<select aria-label="Saved work category" className="ml-2 rounded border border-border bg-surface p-2" disabled={!!pending || busy} value={kind} onChange={event => setKind(event.target.value)}><option value="objects">Saved objects</option><option value="results">Saved results and files</option><option value="workflows">Saved workflows</option></select></label>
           <button type="button" aria-label="Refresh saved work" className="btn btn-secondary p-2" disabled={blocked || loading || busy || !!pending} onClick={() => void load()}><RefreshCw size={16} /></button></div>
         <ul ref={list} aria-label="Saved work list" tabIndex={0} className={`min-h-0 divide-y divide-border overflow-auto rounded focus-visible:ring-2 focus-visible:ring-primary ${items.length ? 'flex-1' : 'shrink-0'}`}>
           {items.map(item => <li key={item.id}><button ref={element => { if (element) rows.current.set(item.id, element); else rows.current.delete(item.id); }} type="button" aria-pressed={selectedId === item.id} disabled={!!pending || busy} onClick={() => choose(item)}
@@ -135,7 +136,7 @@ export default function ExistingWorkBrowser({ projectId, userId, projectName, ca
           </button></li>)}
         </ul>
         {loading && <p role="status" className="py-4 text-sm text-textMuted">Finding saved work…</p>}
-        {loaded && !error && !items.length && <div className="py-6 text-sm"><p className="font-medium">No {kind === 'objects' ? 'analysis objects' : 'saved results or files'} yet</p><p className="mt-2 text-textMuted">Save work in Data workspace, or start an analysis and import an ordinary script.</p></div>}
+        {loaded && !error && !items.length && <div className="py-6 text-sm"><p className="font-medium">No {kind === 'objects' ? 'analysis objects' : kind === 'workflows' ? 'saved workflows' : 'saved results or files'} yet</p><p className="mt-2 text-textMuted">{kind === 'workflows' ? 'Save a workflow in Pipelines to retain its method source, settings and results here.' : 'Save work in Data workspace, or start an analysis and import an ordinary script.'}</p></div>}
         {cursor && <button type="button" className="btn btn-secondary mt-3 shrink-0 text-sm" disabled={loading || blocked || !!pending} onClick={() => void load(cursor)}>More saved work</button>}
       </div>
       <div ref={detail} className="min-h-0 overflow-auto pb-6 pr-1" style={{ display: !wide && !detailOpen ? 'none' : 'block' }}>
@@ -145,14 +146,14 @@ export default function ExistingWorkBrowser({ projectId, userId, projectName, ca
           <p className="text-sm text-textMuted">{selected.ownership === 'yours' ? 'Owned by your account.' : 'Project metadata is visible; the source belongs to a colleague.'} Live compute state has not been checked.</p>
           {selected.reference ? <>
             <p className="text-sm">An exact saved version is recorded. Inspect its metadata and supported previews.</p>
-            <p className="text-xs text-textMuted">No notebook source is linked here. Starting an analysis does not recreate code or run this result.</p>
+            <p className="text-xs text-textMuted">{selected.kind === 'workflow-snapshot' ? 'Inspect the captured method source and saved settings below. No notebook source is reconstructed, and opening does not run an analysis step.' : 'No notebook source is linked here. Starting an analysis does not recreate code or run this result.'}</p>
             {selected.origin?.jobId && <details className="text-xs text-textMuted"><summary className="cursor-pointer">Recorded origin</summary><dl className="mt-2 space-y-1 break-all"><dt>Run</dt><dd className="font-mono">{selected.origin.jobId}</dd>{selected.origin.package && <><dt>Method</dt><dd>{selected.origin.package.id} · {selected.origin.package.version}</dd><dt>Package checksum</dt><dd className="font-mono">{selected.origin.package.digest}</dd></>}</dl>{!selected.origin.package && <p className="mt-2">A pinned method package is not available in this source record.</p>}</details>}
             <div className="flex flex-wrap gap-3"><button type="button" className="btn btn-secondary text-sm" disabled={blocked} onClick={() => setInspecting(value => !value)}>{inspecting ? 'Close saved version' : 'Inspect saved version'}</button>
               {onOpenOriginal && (selected.kind === 'analysis-object' || selected.reference.analysisObjectId || selected.origin?.analysisObjectId) && <button type="button" className="text-sm text-primary underline" disabled={blocked || opening} onClick={() => void original()}>{opening ? 'Opening…' : 'Open original object history'}</button>}</div>
             {(canWrite || pending) && <form aria-label="Start from saved work" className="space-y-3 border-t border-border pt-4" onSubmit={adopt}><label className="block text-sm">Analysis name<input aria-label="Adopted analysis name" required maxLength={160} className="input mt-2 w-full" disabled={busy || !!pending} value={pending?.name ?? names[selected.id] ?? selected.label} onChange={event => setNames(previous => ({ ...previous, [selected.id]: event.target.value }))} /></label>
               <button type="submit" className="btn btn-primary" disabled={blocked || busy}>{busy ? 'Creating…' : pending ? 'Retry analysis creation' : 'Start analysis with this saved version'}</button>
               {pending && !busy && <p role="status" className="text-xs text-textMuted">Retry checks the same request. Keep this window open until creation is confirmed.</p>}</form>}
-            {inspecting && isActive && !blocked && <React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Opening saved version…</p>}><RetainedArtifactView key={version(selected)} projectId={projectId} userId={userId} reference={selected.reference} /></React.Suspense>}
+            {inspecting && isActive && !blocked && <React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Opening saved version…</p>}><RetainedWorkView key={version(selected)} projectId={projectId} userId={userId} reference={selected.reference} canWrite={canWrite} onOpenWorkflow={onOpenWorkflow} /></React.Suspense>}
           </> : <div className="space-y-4 border-t border-border pt-4"><p className="text-sm text-textMuted">{selected.savedState === 'restricted' ? 'Your project role does not grant access to this colleague’s private saved source. Ask its owner to publish the evidence they want to share.' : 'No usable saved version is recorded. Open the original object history to review it, or save a version in Data workspace first.'}</p>
             {onOpenOriginal && selected.kind === 'analysis-object' && <button type="button" className="btn btn-secondary text-sm" disabled={blocked || opening} onClick={() => void original()}>Open original object history</button>}</div>}
         </div>}

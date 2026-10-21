@@ -18,6 +18,13 @@ function workflowRoutes({ db, provider, requireAuth }) {
   const route = handler => async (req, res) => {
     try { await handler(req, res); }
     catch (error) {
+      if (['WORKFLOW_RESTORE_CONFIRMATION_REQUIRED', 'WORKFLOW_WORKING_CONFLICT', 'WORKFLOW_RESTORATION_REQUEST_CONFLICT',
+        'WORKFLOW_SNAPSHOT_CONFLICT', 'WORKFLOW_SOURCE_UNSUPPORTED', 'WORKFLOW_STATE_UNSUPPORTED', 'WORKFLOW_ROOT_UNAVAILABLE',
+        'WORKFLOW_EVIDENCE_UNAVAILABLE', 'WORKFLOW_SNAPSHOT_NOT_FOUND', 'INVALID_WORKFLOW_RESTORATION', 'WORKFLOW_SOURCE_TOO_LARGE',
+        'WORKFLOW_WORKSPACE_FULL', 'INVALID_WORKFLOW_SNAPSHOT_HASH'].includes(error.code)) {
+        return res.status(error.status || 400).json({ error: error.message, code: error.code,
+          ...(Object.hasOwn(error, 'workingInstance') ? { workingInstance: error.workingInstance } : {}) });
+      }
       if (error.code === 'WORKFLOW_EXECUTOR_UNAVAILABLE' && error.status === 422) {
         return res.status(422).json({ error: error.message, code: error.code, details: error.details });
       }
@@ -36,8 +43,8 @@ function workflowRoutes({ db, provider, requireAuth }) {
     }
   };
   router.post('/:projectId/open', route(async (req, res) => res.json(await runtime.open(req.user.id, req.params.projectId, req.body.analysisObjectId, req.body.source))));
-  router.get('/:projectId/snapshots', route(async (req, res) => res.json(await runtime.snapshots(req.user.id, req.params.projectId))));
-  router.post('/:projectId/snapshots/:snapshotId/open', route(async (req, res) => res.json(await runtime.restore(req.user.id, req.params.projectId, req.params.snapshotId))));
+  router.get('/:projectId/snapshots', route(async (req, res) => { res.setHeader('Cache-Control', 'private, no-store'); res.json(await runtime.snapshots(req.user.id, req.params.projectId, req.query)); }));
+  router.post('/:projectId/snapshots/:snapshotId/open', route(async (req, res) => res.json(await runtime.restore(req.user.id, req.params.projectId, req.params.snapshotId, req.body))));
   router.delete('/:projectId/snapshots/:snapshotId', route(async (req, res) => { await runtime.removeSnapshot(req.user.id, req.params.projectId, req.params.snapshotId); res.json({ ok: true }); }));
   router.get('/:projectId/instances/:instanceId', route(async (req, res) => res.json(await runtime.get(req.user.id, req.params.projectId, req.params.instanceId))));
   router.get('/:projectId/instances/:instanceId/submissions/:requestId', route(async (req, res) => {

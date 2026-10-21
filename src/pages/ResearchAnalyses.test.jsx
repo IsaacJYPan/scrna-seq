@@ -43,6 +43,15 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('durable project analyses', () => {
+  it('labels an exact workflow snapshot without treating its identity as an artifact version', async () => {
+    const snapshot = { kind: 'workflow-snapshot', snapshotId: 'wfs_' + '9'.repeat(24), sha256: '8'.repeat(64) };
+    savedAnalyses = [{ ...first, references: [{ reference: snapshot, access: 'restricted' }] }, second];
+    render(<ResearchAnalyses {...defaults} />); await open(first.name);
+    expect(within(panel()).getByText('Restricted saved source · 99999999')).toBeVisible();
+    fireEvent.click(within(panel()).getByText('Version details'));
+    expect(within(panel()).getByText(snapshot.snapshotId, { exact: true })).toBeVisible();
+    expect(within(panel()).getByText('Source access is restricted')).toBeVisible();
+  });
   it('adopts an exact saved version through the analysis entry without losing another question draft', async () => {
     render(<ResearchAnalyses {...defaults} />); await open(first.name);
     fireEvent.change(editor('Research question or notes'), { target: { value: 'Keep this unsaved question.' } });

@@ -21,7 +21,9 @@ import {
 import { saveAndOpenCurrentAnalysis } from './liveCheckpointSave';
 import { publicErrorMessage } from './publicError';
 import { getExecutionTargetSnapshot } from './runtime/executionTarget';
-import { prepareOriginalObjectHistory } from './analyses/openOriginalHistory';
+import { originalHistoryScopeChanged, prepareOriginalObjectHistory } from './analyses/openOriginalHistory';
+import { openWorkflowSnapshot } from './analyses/researchAnalysisApi';
+import { validateWorkflowRestoration } from './analyses/workflowSnapshotClient';
 import { buildProjectProvenancePayload } from './projectProvenance';
 
 import {
@@ -171,6 +173,8 @@ const CLOSED_DEPLOYMENT_POLICY = Object.freeze({
 export default function App() {
   const [activeTab, setActiveTab] = useState('workspace');
   const [activeWorkflow, setActiveWorkflow] = useState(null);
+  const workflowNavigation = React.useRef(null);
+  const [savedWorkflowNotice, setSavedWorkflowNotice] = useState('');
   const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
   const [deploymentPolicy, setDeploymentPolicy] = useState(CLOSED_DEPLOYMENT_POLICY);
 
@@ -347,7 +351,11 @@ export default function App() {
     if (replace) setActiveTab(current => current.startsWith('workflow:') && !instance.package.tabs.some(tab => current === `workflow:${tab.id}`) ? `workflow:${instance.package.tabs[0].id}` : current);
   }, [workflowContext]);
   useEffect(() => {
+    const incoming = workflowNavigation.current;
+    workflowNavigation.current = null;
+    if (incoming && incoming.userId === user?.id && incoming.projectId === activeProjectIdForPipeline && incoming.objectId === datasetInfo?.id) return;
     setActiveWorkflow(null);
+    setSavedWorkflowNotice('');
     setActiveTab(current => current.startsWith('workflow:') ? 'pipeline-manager' : current);
   }, [user?.id, activeProjectIdForPipeline, datasetInfo?.id]);
   const currentProvId = currentWs.branches[currentWs.activeBranch];
@@ -644,6 +652,38 @@ export default function App() {
     patchActiveWorkspace(ws => ({ objects: reconcileAnalysisObjectMetadata(ws.objects, state.objects) }));
     if (state.selectObject) handleSelectAnalysisObject(state.projectId, objectId);
     setActiveTab('history');
+  }, [patchActiveWorkspace, handleSelectAnalysisObject]);
+
+  const openRetainedWorkflow = useCallback(async ({ snapshot, request, retry = false, isCurrent = () => true }) => {
+    const before = { ...savedWorkScope.current }, target = getExecutionTargetSnapshot(), selection = checkpointSaveRequestRef.current;
+    if (before.userId !== snapshot.ownerUserId || before.projectId !== snapshot.projectId) throw Object.assign(new Error('Choose the original saved workflow project before opening it.'), { code: 'TARGET_CHANGED' });
+    const prepare = () => prepareOriginalObjectHistory({ api: window.electronAPI, objectId: snapshot.analysisObjectId,
+      getScope: () => savedWorkScope.current, getTarget: getExecutionTargetSnapshot,
+      getSelection: () => checkpointSaveRequestRef.current, allowDirtyRead: retry });
+    let state = retry ? null : await prepare();
+    if (!isCurrent()) throw Object.assign(new Error('The saved workflow view changed.'), { code: 'TARGET_CHANGED' });
+    const result = validateWorkflowRestoration(await openWorkflowSnapshot(snapshot.projectId, snapshot.id, request), snapshot, request);
+    const accepted = result?.restoration, instance = result?.currentInstance;
+    if (!isCurrent()) return { ...result, navigationNote: 'The original open is confirmed. Your current view was kept; the saved snapshot was not applied again.' };
+    if (!result.canEditWorking) return { ...result, navigationNote: 'The original open is confirmed. Your current project role allows inspection only; the working workflow was kept.' };
+    if (retry) {
+      try { state = await prepare(); }
+      catch { return { ...result, navigationNote: 'The original open is confirmed. Its object could not be read for navigation; your current workspace and working workflow were kept.' }; }
+    }
+    const after = savedWorkScope.current;
+    if (!isCurrent() || originalHistoryScopeChanged(before, after, target, getExecutionTargetSnapshot(), selection, checkpointSaveRequestRef.current)
+        || after.unsavedLiveChanges && after.objectId !== snapshot.analysisObjectId) {
+      return { ...result, navigationNote: 'The original open is confirmed. Your current workspace and unsaved live work were kept. Return to the saved workflow when ready.' };
+    }
+    if (!instance) return result;
+    if (state.selectObject) workflowNavigation.current = { userId: before.userId, projectId: before.projectId, objectId: snapshot.analysisObjectId };
+    patchActiveWorkspace(ws => ({ objects: reconcileAnalysisObjectMetadata(ws.objects, state.objects) }));
+    if (state.selectObject) handleSelectAnalysisObject(state.projectId, snapshot.analysisObjectId);
+    setActiveWorkflow(instance); setActiveTab(`workflow:${instance.package.tabs[0].id}`);
+    setSavedWorkflowNotice(instance.state.generation !== accepted.generation
+      ? 'The original saved-workflow open is confirmed. Its newer working state was kept; the snapshot was not reapplied.'
+      : 'Opened the exact saved workflow. No analysis step was run.');
+    return result;
   }, [patchActiveWorkspace, handleSelectAnalysisObject]);
 
   const handleSaveLiveAnalysis = useCallback(async () => {
@@ -1390,6 +1430,7 @@ export default function App() {
             onOpenWorkspace={() => setActiveTab('workspace')}
             onOpenAdvanced={() => setActiveTab('expert-r')}
             onOpenOriginal={openOriginalObjectHistory}
+            onOpenWorkflow={openRetainedWorkflow}
           />
         </TabContent></ErrorBoundary>
         <ErrorBoundary key="pipeline-manager"><TabContent id="pipeline-manager" activeTab={activeTab}>
@@ -1466,13 +1507,16 @@ export default function App() {
         <h1 className="sr-only">TraceOmics Workbench — {TAB_TITLES[activeTab] || 'Current view'}</h1>
         <ExecutionTargetIndicator deploymentPolicy={deploymentPolicy} userId={user?.id} projectId={activeProjectIdForPipeline} />
         <SubmissionRecoveryNotice userId={user?.id} projectId={activeProjectIdForPipeline} onOpen={() => setActiveTab('history')} />
+        {savedWorkflowNotice && activeTab.startsWith('workflow:') && <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
+          {savedWorkflowNotice}<button type="button" className="ml-2 underline" onClick={() => setSavedWorkflowNotice('')}>Dismiss workflow notice</button>
+        </div>}
         {historyPersistenceNotice && (
           <div role="alert" className="mx-4 mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-text">
             {historyPersistenceNotice}
             <button type="button" onClick={() => setHistoryPersistenceNotice('')} className="btn btn-secondary ml-2 text-xs">Dismiss history notice</button>
           </div>
         )}
-        {liveRecoveryNotice && (
+        {liveRecoveryNotice && !activeTab.startsWith('workflow:') && (
           <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
             {liveRecoveryNotice}
             <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>

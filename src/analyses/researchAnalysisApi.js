@@ -46,3 +46,9 @@ export function listExistingWork(projectId, { kind = 'objects', cursor, signal }
   if (cursor) query.set('cursor', cursor);
   return request(`${projectPath(projectId)}/existing-work?${query}`, { signal });
 }
+
+const workflowSnapshotPath = (projectId, snapshotId) => `${projectPath(projectId)}/workflow-snapshots/${encodeURIComponent(snapshotId)}`;
+export const getWorkflowSnapshot = (projectId, snapshotId, { sha256, signal } = {}) =>
+  request(`${workflowSnapshotPath(projectId, snapshotId)}${sha256 ? `?sha256=${encodeURIComponent(sha256)}` : ''}`, { signal });
+export const openWorkflowSnapshot = (projectId, snapshotId, body) =>
+  request(`${workflowSnapshotPath(projectId, snapshotId)}/open`, { method: 'POST', body });

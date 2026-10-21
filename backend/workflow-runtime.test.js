@@ -79,6 +79,13 @@ describe.skipIf(!configured)('workflow runtime', () => {
     instance = await runtime.get(user.id, project.id, instance.id);
     return result;
   }
+  async function restore(snapshotId, targetRuntime = runtime) {
+    const service = require('./retainedWorkflowSnapshots').createRetainedWorkflowSnapshotService(db);
+    const { snapshot } = await service.get(user.id, project.id, snapshotId);
+    const expected = snapshot.workingInstance;
+    return (await targetRuntime.restore(user.id, project.id, snapshotId, { requestId: crypto.randomUUID(), sha256: snapshot.sha256,
+      expectedInstance: expected ? { id: expected.id, generation: expected.generation } : null, replace: !!expected })).currentInstance;
+  }
 
   it('runs through the existing queue without saving an analysis object for every step', async () => {
     expect(await execute('qc')).toMatchObject({ status: 'completed' });
@@ -134,7 +141,7 @@ describe.skipIf(!configured)('workflow runtime', () => {
     const saved = await runtime.save(user.id, project.id, instance.id, 'Before filtering');
     const state = instance.state;
     replacement = 'changed'; await execute('qc');
-    const restored = await runtime.restore(user.id, project.id, saved.id);
+    const restored = await restore(saved.id);
     expect(restored.state.results).toEqual(state.results);
     await runtime.cleanup(user.id, project.id);
     const output = restored.state.results.normalize.outputs.analysis;
@@ -146,7 +153,7 @@ describe.skipIf(!configured)('workflow runtime', () => {
     const saved=await runtime.save(user.id,project.id,instance.id,'Exact environment');
     await runtime.close(user.id,project.id,instance.id);
     const changed=createWorkflowRuntime(db,provider,{getEnvironment:async()=>environmentFixture('b').manifest});
-    const restored=await changed.restore(user.id,project.id,saved.id);
+    const restored=await restore(saved.id,changed);
     expect(restored.state.environment).toEqual(exactEnvironment.reference);
     await expect(changed.run(user.id,project.id,restored.id,{requestId:crypto.randomUUID(),stepId:'qc'})).rejects.toMatchObject({code:'R_ENVIRONMENT_MISMATCH'});
     expect((await changed.get(user.id,project.id,restored.id)).state.results).toEqual(restored.state.results);
@@ -187,6 +194,19 @@ describe.skipIf(!configured)('workflow runtime', () => {
     expect(opened.status).toBe(200);
     expect(opened.data.id).toBe(instance.id);
     expect((await db.query("SELECT COUNT(*)::int AS count FROM jobs WHERE job_type='expert.r.v1'")).rows[0].count).toBe(0);
+  });
+  it('refuses a different checkpoint identity at admission even when its bytes have the same checksum', async () => {
+    await db.query('UPDATE job_artifacts SET id=$2 WHERE id=$1', [instance.state.root.id, db.genId('art')]);
+    await expect(runtime.run(user.id, project.id, instance.id, { requestId: crypto.randomUUID(), stepId: 'qc' })).rejects.toMatchObject({ code: 'WORKFLOW_ROOT_UNAVAILABLE' });
+    expect((await db.query("SELECT COUNT(*)::int AS n FROM jobs WHERE status='queued'")).rows[0].n).toBe(0);
+  });
+  it('refuses checkpoint identity replacement between admission and worker execution before sandbox contact', async () => {
+    instance = await runtime.run(user.id, project.id, instance.id, { requestId: crypto.randomUUID(), stepId: 'qc' });
+    await db.query('UPDATE job_artifacts SET id=$2 WHERE id=$1', [instance.state.root.id, db.genId('art')]);
+    let dispatched = 0;
+    const worker = createJobWorker({ db, storageProvider: provider, allowedJobTypes: ['expert.r.v1'], runExpertSandbox: async value => { dispatched += 1; return fakeSandbox(value); }, logger: { info() {}, warn() {}, error() {} } });
+    expect((await worker.runOnce()).status).toBe('failed'); expect(dispatched).toBe(0);
+    expect((await runtime.get(user.id, project.id, instance.id)).state.results).toEqual({});
   });
   it('keeps workflow state and output routes private even from another project analyst', async () => {
     await execute('qc');
@@ -239,6 +259,6 @@ describe.skipIf(!configured)('workflow runtime', () => {
     await db.query("UPDATE workflow_instances SET updated_at=now()-interval '8 days'");
     await runtime.expire();
     await expect(runtime.get(user.id, project.id, instance.id)).rejects.toMatchObject({ status: 404 });
-    expect((await runtime.restore(user.id, project.id, saved.id)).state.results.qc).toBeTruthy();
+    expect((await restore(saved.id)).state.results.qc).toBeTruthy();
   });
 });

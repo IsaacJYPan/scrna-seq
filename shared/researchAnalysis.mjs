@@ -1,7 +1,7 @@
 export const RESEARCH_ANALYSIS_SCHEMA = 'traceomics.research-analysis.v1';
 export const RESEARCH_ANALYSIS_LIMITS = Object.freeze({ name: 160, description: 8000, references: 50, page: 100 });
 export const RESEARCH_ANALYSIS_ID = /^ra_[a-f0-9]{24}$/;
-export const RESEARCH_ANALYSIS_REFERENCE_KINDS = Object.freeze(['artifact-version', 'analysis-object']);
+export const RESEARCH_ANALYSIS_REFERENCE_KINDS = Object.freeze(['artifact-version', 'analysis-object', 'workflow-snapshot']);
 // A later document service must bind these identifiers to an authorized immutable
 // revision. Reserving a kind is not evidence that its source can be resolved now.
 export const RESERVED_RESEARCH_REFERENCE_KINDS = Object.freeze(['document-version', 'study-design-version']);
@@ -38,6 +38,12 @@ function text(value, name, maximum, multiline = false) {
 export function validateResearchAnalysisReference(value) {
   if (RESERVED_RESEARCH_REFERENCE_KINDS.includes(value?.kind)) {
     invalid('This reference requires a versioned document or study-design source that is not available yet.', 'ANALYSIS_REFERENCE_UNSUPPORTED');
+  }
+  if (value?.kind === 'workflow-snapshot') {
+    fields(value, ['kind', 'snapshotId', 'sha256']);
+    if (typeof value.snapshotId !== 'string' || !/^wfs_[a-f0-9]{24}$/.test(value.snapshotId)
+        || typeof value.sha256 !== 'string' || !HASH.test(value.sha256)) invalid('Select an exact saved workflow snapshot and its SHA-256 checksum.');
+    return { kind: value.kind, snapshotId: value.snapshotId, sha256: value.sha256 };
   }
   if (value?.kind === 'artifact-version') {
     fields(value, ['kind', 'versionId', 'sha256']);

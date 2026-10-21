@@ -10,7 +10,7 @@ const reference = row => row.checkpoint && row.object_id
   ? { kind: 'analysis-object', analysisObjectId: row.object_id, checkpointVersionId: row.id, sha256: row.sha }
   : { kind: 'artifact-version', versionId: row.id, sha256: row.sha };
 
-function createExistingWorkCatalog({ transaction, sourceSql }) {
+function createExistingWorkCatalog({ transaction, sourceSql, workflows }) {
   async function origins(client, projectId, userId, ids) {
     if (!ids.length) return new Map();
     const rows = (await client.query(`SELECT a.id,j.id AS job_id,COALESCE(a.result_analysis_object_id,a.analysis_object_id,j.result_analysis_object_id,j.analysis_object_id) AS object_id,
@@ -26,7 +26,8 @@ function createExistingWorkCatalog({ transaction, sourceSql }) {
   }
   async function list(userId, projectId, options = {}) {
     const kind = options.kind ?? 'objects', limit = Number(options.limit ?? 30);
-    if (!['objects', 'results'].includes(kind) || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw invalid();
+    if (!['objects', 'results', 'workflows'].includes(kind) || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw invalid();
+    if (kind === 'workflows') return workflows(userId, projectId, options);
     let cursor;
     if (options.cursor !== undefined) {
       try {

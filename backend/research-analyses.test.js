@@ -301,7 +301,7 @@ describe.skipIf(!configured)('durable project research analyses on PostgreSQL', 
     await db.query("UPDATE app_schema_contract SET schema_version=20261016 WHERE schema_key='traceomics.runtime'");
     await db.initSchema({ force: true });
     await db.initSchema({ force: true });
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261022);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261023);
     expect((await service.get(owner.user.id, project.id, analysis.id)).analysis.version).toBe(1);
     expect((await db.query('SELECT COUNT(*)::int AS n FROM research_analysis_revisions')).rows[0].n).toBe(1);
   });

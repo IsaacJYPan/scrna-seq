@@ -4,6 +4,7 @@ import useExecutionTarget from '../runtime/useExecutionTarget';
 import { publicErrorMessage } from '../publicError';
 import { createAnalysis, getAnalysis, listAnalyses, listReferenceOptions, updateAnalysis } from '../analyses/researchAnalysisApi';
 import { RESEARCH_ANALYSIS_ID, RESEARCH_ANALYSIS_LIMITS } from '../../shared/researchAnalysis.mjs';
+import { savedReferenceId, savedReferenceTitle } from '../analyses/savedWorkReference';
 
 const NotebookWorkspace = React.lazy(() => import('../notebooks/NotebookWorkspace'));
 const ExistingWorkBrowser = React.lazy(() => import('../analyses/ExistingWorkBrowser'));
@@ -16,8 +17,8 @@ const draftFor = analysis => ({
   references: cleanReferences(analysis), baseName: analysis.name,
   baseDescription: analysis.description || '', baseReferences: cleanReferences(analysis),
 });
-const referenceTitle = reference => reference.kind === 'analysis-object' ? 'Saved analysis object' : 'Saved artifact version';
-const versionId = reference => reference.versionId || reference.checkpointVersionId;
+const referenceTitle = savedReferenceTitle;
+const versionId = savedReferenceId;
 function rebaseDraft(draft, latest) {
   const latestDraft = draftFor(latest);
   const originalKeys = new Set(draft.baseReferences.map(referenceKey));
@@ -37,7 +38,7 @@ const describeTime = value => {
   return Number.isNaN(date.getTime()) ? 'Saved in this project' : `Updated ${date.toLocaleDateString()}`;
 };
 
-function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive, onOpenWorkspace, onOpenAdvanced, onOpenOriginal, connection }) {
+function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive, onOpenWorkspace, onOpenAdvanced, onOpenOriginal, onOpenWorkflow, connection }) {
   const [items, setItems] = useState([]);
   const [status, setStatus] = useState('active');
   const [nextCursor, setNextCursor] = useState(null);
@@ -332,13 +333,14 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
       <React.Suspense fallback={<p role="status" className="p-8 text-sm text-textMuted">Opening notebooks…</p>}>
         <NotebookWorkspace projectId={projectId} projectName={projectName} analysis={selected} role={role} userId={userId} theme={theme}
           connection={connection} isActive={isActive && notebookOpen} onOpenOverview={() => setNotebookOpen(false)}
-          onOpenAdvanced={onOpenAdvanced} referenceLabel={labelForReference} />
+          onOpenAdvanced={onOpenAdvanced} onOpenWorkflow={onOpenWorkflow} referenceLabel={labelForReference} />
       </React.Suspense>
     </div>}
     {adoptionVisited && <div hidden={!adoptionOpen} className="absolute inset-0">
       <React.Suspense fallback={<p role="status" className="p-8 text-sm text-textMuted">Finding saved work…</p>}>
         <ExistingWorkBrowser projectId={projectId} projectName={projectName} userId={userId} canWrite={canWrite}
           blocked={connection.blocked} isActive={isActive && adoptionOpen} onClose={closeAdoption} onAdopt={adopt}
+          onOpenWorkflow={onOpenWorkflow}
           onOpenOriginal={onOpenOriginal ? async id => { await onOpenOriginal(id); setAdoptionOpen(false); } : undefined} />
       </React.Suspense>
     </div>}
