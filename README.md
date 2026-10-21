@@ -1,16 +1,20 @@
 # TraceOmics
 
-TraceOmics is a browser application for single-cell and spatial transcriptomic
-analysis. Organize datasets into projects, run Seurat workflows, explore plots,
-and share saved analyses with collaborators. Each saved analysis records its
-inputs, parameters, and history.
+TraceOmics is a web app for single-cell and spatial transcriptomic analysis with
+Seurat. Projects keep datasets, saved analyses, plots, and run history together.
+You can share a saved analysis or fork one to try different settings.
+
+The guided PBMC3k demo starts with counts from 2,700 cells. Work through QC,
+normalization, PCA, clustering, and UMAP using your own settings. Each stage runs
+Seurat. Guest sessions expire, and uploads and custom R are disabled. See
+[demo setup](docs/demo.md) to host it.
 
 ## Run locally
 
 You need Node.js 22.15–24, Docker Desktop with Linux containers running, and R
-with the analysis packages installed. The release image uses R 4.5.3; its
-required packages are listed in [the R image definition](r-backend/Dockerfile).
-For a containerized installation, use the [deployment guide](docs/deployment.md).
+with the analysis packages installed. The release image uses R 4.5.3; see the
+[R image definition](r-backend/Dockerfile) for packages and installation commands.
+`Rscript` must be on your PATH, or set `RSCRIPT_PATH` to its full path.
 
 From PowerShell:
 
@@ -29,106 +33,48 @@ Open [localhost:5173](http://localhost:5173) and create a development account.
 `npm run dev` starts the frontend, API, local R service, and job worker. Stop them
 with `Ctrl+C`; stop the database separately with `docker compose stop postgres`.
 
-## What you can do
+## Analysis tools
 
-- Prepare single-sample or multi-sample 10x datasets and classic Space Ranger
-  Visium datasets with Seurat.
-- Inspect quality metrics, normalize expression, cluster cells, and explore
-  PCA, UMAP, gene expression, heatmaps, and marker genes.
-- Run ranked pathway enrichment, replicate-aware pseudobulk comparisons, and
+- Seurat preprocessing for single-sample and multi-sample 10x data, plus classic
+  Space Ranger Visium data.
+- QC, PCA, UMAP, gene expression, heatmaps, and marker finding.
+- Ranked pathway enrichment, replicate-aware pseudobulk comparisons, and
   single-context CellChat candidate analysis.
-- Save analysis checkpoints, view run history, export selected results, and
-  fork a collaborator's saved analysis into your own workspace.
-- Choose a pipeline from the shared catalog, or import a versioned R pipeline
-  and run it through the private isolated runner. See [sharing pipelines](docs/pipelines.md).
-- Install [workflows with their own tabs](docs/workflow-pipelines.md), dependency
-  locks, custom R plots, and explicitly saved workflow snapshots.
+- [Shared pipelines](docs/pipelines.md), [custom workflow steps](docs/workflow-pipelines.md),
+  and a private R console on installations with the isolated R runtime configured.
 
 Cell annotation, cross-condition CellChat, and publication report generation
 are not yet available. See [analysis workflows](docs/analysis-workflows.md) for
 the supported methods and their interpretation.
 
-## Project structure
+## Development
 
-| Directory | Contents |
-| --- | --- |
-| `src/` | React pages, shared UI, workspace state, and API client |
-| `backend/` | Authentication, projects, job workers, storage, and PostgreSQL schema |
-| `r-backend/` | Plumber API and scientific analysis functions |
-| `shared/` | Contracts used by the frontend and backend |
-| `scripts/` | Development tools, administration, and integration checks |
-| `deploy/` | Production and demo Compose profiles |
-| `desktop/` | Electron shell for connecting to a hosted server |
+The React app is in `src/`, the Express API and workers in `backend/`, and the
+Plumber service and analysis functions in `r-backend/`. `deploy/` holds the
+Compose profiles; `desktop/` is the Electron client for hosted installations.
 
-## Verify changes
+Start with the JavaScript checks:
 
 ```powershell
 npm run lint
 npm run test:frontend
 npm run test:tools
-npm run test:unit
 npm run build
 ```
 
-Backend tests reset their database. Set `DATABASE_URL` to a separate PostgreSQL
-database reserved for tests before running `npm run test:backend`.
-`npm run test:visual:smoke` checks browser layout and interactions with simulated
-API responses. `npm run test:deployment:browser` uses a real API and PostgreSQL
-with a deterministic R test service.
+`npm run test:unit` runs the R checks. Backend tests reset their database: use a
+separate test database before running `npm run test:backend`. The [testing guide](docs/testing.md)
+covers database setup, browser checks, recordings, and which suites use simulated
+services.
 
-`npm run test:ui-interactions` records pointer paths, keyboard navigation, and
-touch workflows with simulated API responses. Recordings, screenshots, and the
-acceptance report are saved in `playwright/report/ui-interactions/`. To check
-the production build, run `npm run build` and then
-`npm run test:ui-interactions -- --production`.
+## Deployment
 
-`npm run build` followed by `npm run test:workbench-ui` checks the full
-authenticated workbench at desktop and phone widths in both themes. It records
-navigation and real cursor paths, tests data-point hover and empty-space behavior,
-and checks keyboard input, layout, and accessibility. The deterministic frontend
-fixtures do not require R or change research data. Recordings and results are
-saved in `playwright/report/full-workbench/after/`.
+The [deployment guide](docs/deployment.md) covers Docker Compose, HTTPS, storage,
+backups, and the [Windows desktop client](docs/deployment.md#windows-desktop-application).
+R and PostgreSQL run alongside the web server. Keep both on the private network;
+Express handles accounts and project access. Shared results are saved checkpoints,
+not another user's live R session.
 
-For the expanded 26-page review with measured PBMC3k plots, export an existing
-prepared checkpoint using `Rscript scripts/export-ui-review-pbmc.R <checkpoint.rds>
-<output.json>` (Seurat and jsonlite required). Set `UI_REVIEW_PBMC_DATA` to that JSON
-path, or save it as `playwright/report/ui-audit/data/pbmc-ui-data.json`. Then run
-`npm run build`, `npm run test:app-ui-tour`, `npm run test:app-ui-hover`, and
-`npm run test:app-ui-auth`. These checks record both themes at 1440px and 390px,
-return to earlier tabs, and check drafts, scroll, job submissions, cursor hover,
-zoom, export, dialogs, and authentication forms. The measured plot values are
-replayed; application services and job admission are simulated. Recordings,
-screenshots, and acceptance reports go to `playwright/report/ui-audit/`.
-`npm run record:app-ui` creates a single paced video of all 26 full-app pages,
-sign-in/signup, secondary plot views, dialogs, and a dark-theme preview. It uses
-the same prepared data and simulated services. The video and chapter timestamps
-are saved in `playwright/report/ui-audit/walkthrough/`.
-`node scripts/verify-app-ui-tour.js --pipeline-layout` records the two analysis
-approaches, responsive step rows, keyboard and hover states, conditional settings,
-multi-condition design, and navigation to and from each inspection step. Its
-screenshots, videos, and checks are saved in `playwright/report/ui-audit/pipeline-layout/`.
-Graph pixels are inspected visually; the automated accessibility scan covers
-controls and labels while excluding bulk scatter/heatmap graphics. Native
-`test:desktop:ssh-ui` and `test:desktop:tunnel-ui` use disposable real SSH services.
-
-## Deploy a demo
-
-Start with the [student demo guide](docs/demo.md). The [deployment guide](docs/deployment.md) covers a Linux host with Docker Compose,
-HTTPS, persistent storage, backups, and a small public tutorial. The constrained
-demo profile uses synthetic data and disables uploads; it targets a host with
-2 OCPUs and 12 GB RAM. Hosting availability and student credits depend on the
-provider and account. This is not a static-site deployment: R and PostgreSQL
-must remain available alongside the web server.
-
-For a private deployment, the operator manages accounts and recovery. Keep R
-and PostgreSQL on the private network; Express handles user authentication and
-project access. Shared results are saved checkpoints, not another user's live
-R session.
-
-## Further reading
-
-- [Analysis workflows and interpretation](docs/analysis-workflows.md)
-- [Pipeline registry](docs/pipelines.md)
-- [Student demo setup](docs/demo.md)
-- [Deployment and operations](docs/deployment.md)
-- [Windows desktop distribution](docs/deployment.md#windows-desktop-application)
+The default demo fixture uses synthetic data. Set `DEMO_DATASET=pbmc3k` for the
+guided experience described above; the [demo guide](docs/demo.md) covers hosting
+and the browser check to run before sharing a deployment.

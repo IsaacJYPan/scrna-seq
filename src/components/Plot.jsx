@@ -1,9 +1,16 @@
 import React from 'react';
 
-// Plotly is the largest browser dependency in the application. Load the
-// curated renderer only when a chart is actually mounted so the workspace and
-// non-visual workflows do not pay its parse/startup cost.
-const PlotlyPlot = React.lazy(() => import('./PlotlyRenderer'));
+let rendererPromise;
+
+export function preloadPlotlyRenderer() {
+  if (!rendererPromise) {
+    rendererPromise = import('./PlotlyRenderer');
+    rendererPromise.catch(() => { rendererPromise = null; });
+  }
+  return rendererPromise;
+}
+
+const PlotlyPlot = React.lazy(preloadPlotlyRenderer);
 
 // Plotly's WebGL trace types provide a useful performance win in browsers that
 // support them. Electron can run with GPU acceleration disabled, however, and

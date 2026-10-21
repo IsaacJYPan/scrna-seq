@@ -118,6 +118,26 @@ describe('public analysis demo', () => {
     expect(await screen.findByText('50.0%')).toBeVisible(); expect(screen.getByText('1.50')).toBeVisible();
     expect(expressionSummary([0, 2, NaN, Infinity])).toEqual({ mean: 1, percent: 50, count: 2 });
   });
+  it('reuses marker values until a new embedding is computed', async () => {
+    openDemo.mockResolvedValue(complete);
+    readDemoGene.mockResolvedValue({ expression: [0, 2], u1: [1, 2], u2: [2, 3] });
+    clusterDemo.mockResolvedValue({ ...complete, context: { ...complete.context, currentObjectId: 'ao_new' } });
+    render(<DemoExperience />);
+    fireEvent.click(await screen.findByRole('button', { name: 'MS4A1' }));
+    await screen.findByRole('heading', { name: 'MS4A1 expression' });
+    fireEvent.click(screen.getByRole('button', { name: 'CD3D' }));
+    await screen.findByRole('heading', { name: 'CD3D expression' });
+    fireEvent.click(screen.getByRole('button', { name: 'MS4A1' }));
+    expect(screen.getByRole('heading', { name: 'MS4A1 expression' })).toBeVisible();
+    expect(readDemoGene).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Run clustering & UMAP' }));
+    await screen.findByText('Clustering complete: 9 clusters.');
+    fireEvent.click(screen.getByRole('button', { name: 'MS4A1' }));
+    await screen.findByRole('heading', { name: 'MS4A1 expression' });
+    expect(readDemoGene).toHaveBeenCalledTimes(3);
+    expect(readDemoGene).toHaveBeenLastCalledWith(expect.objectContaining({ currentObjectId: 'ao_new' }), 'MS4A1');
+    expect(screen.queryByText('Clustering complete: 9 clusters.')).not.toBeInTheDocument();
+  });
   it('resets to counts, disables downstream steps, and keeps saved plots on a failed request', async () => {
     openDemo.mockResolvedValue(complete); resetDemo.mockRejectedValueOnce(new Error('Server busy')).mockResolvedValueOnce(input);
     render(<DemoExperience />);

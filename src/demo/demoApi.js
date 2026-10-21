@@ -107,9 +107,9 @@ async function submitJob(context, type, objectId, nextState, progress) {
 async function loadCheckpoint(context, objectId = context.currentObjectId, progress) {
   await submitJob(context, 'checkpoint.load.v1', objectId, null, progress);
 }
-async function readCurrent(context) {
+async function readCurrent(context, currentQC) {
   const info = await demoRequest('/api/r/object-info', { objectId: context.currentObjectId });
-  const qc = await demoRequest('/api/r/qc-distributions', { objectId: context.currentObjectId });
+  const qc = currentQC || await demoRequest('/api/r/qc-distributions', { objectId: context.currentObjectId });
   return { context, info, qc, baseline: context.baseline, pca: context.pca || null, map: context.map || null };
 }
 async function persist(context, nextState, progress, workingObjectId = context.currentObjectId) {
@@ -146,7 +146,7 @@ async function startFromCounts(context) {
   const baseline = await demoRequest('/api/r/qc-distributions', { objectId: context.originalObjectId });
   if (!Array.isArray(baseline.nFeature_RNA) || baseline.n_cells !== baseline.nFeature_RNA.length) throw new Error('The complete input QC metrics are unavailable. Please retry.');
   Object.assign(context, { currentObjectId: context.originalObjectId, stage: 'input', baseline, appliedQC: null, processing: null, clustering: null, pca: null, map: null });
-  remember(context); return readCurrent(context);
+  remember(context); return readCurrent(context, baseline);
 }
 async function prepareDemo() {
   let user;

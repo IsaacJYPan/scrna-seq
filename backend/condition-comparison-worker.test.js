@@ -17,6 +17,10 @@ describe('condition pseudobulk worker contract', () => {
       .toBe('projects/proj_abc/artifacts/job_def/condition-pseudobulk-de.csv');
   });
 
+  it.each([null, [], 'contrast_a1b2', {}, { contrastId: 'contrast_a1b2', '': true }])('rejects malformed comparison input: %j', input => {
+    expect(() => validateConditionComparisonParams(input)).toThrow();
+  });
+
   it('rebuilds a fixed worker-only R request and sanitizes the public summary', async () => {
     expect(R_BRIDGE_OPERATIONS['r.condition.pseudobulk_de.v1']).toMatchObject({
       path: '/object/condition-pseudobulk-de', carriesConditionComparison: true,

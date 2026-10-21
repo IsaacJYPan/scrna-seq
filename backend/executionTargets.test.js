@@ -15,6 +15,48 @@ describe('execution target contracts', () => {
     }
     expect(() => targets.validateExecutionReceiptInput({...input,environment:{precision:'pinned-request',reference:null}})).toThrow();
   });
+  it('allows an omitted runtime generation on input but requires an explicit value in retained targets', () => {
+    const withoutGeneration = { ...input };
+    delete withoutGeneration.runtimeGeneration;
+    expect(targets.validateExecutionReceiptInput(withoutGeneration).runtimeGeneration).toBe(null);
+    const target = {
+      kind: 'service', id: 'svc_' + 'b'.repeat(32), label: 'Lab server',
+      generation: 'c'.repeat(64), precision: 'recorded-executor', runtimeKind: 'guided-r',
+    };
+    expect(() => targets.validateExecutionTarget(target)).toThrow();
+    expect(targets.validateExecutionTarget({ ...target, runtimeGeneration: null }).runtimeGeneration).toBe(null);
+    expect(() => targets.validateExecutionReceiptInput({ ...input, runtimeGeneration: '' })).toThrow();
+  });
+  it('converts a retained dispatch row and rejects invalid counters or timestamps', () => {
+    const target = {
+      kind: 'service', id: 'svc_' + 'b'.repeat(32), label: 'Lab server',
+      generation: 'c'.repeat(64), precision: 'recorded-executor', runtimeKind: 'guided-r', runtimeGeneration: null,
+    };
+    const row = {
+      dispatch_id: 'd'.repeat(64), attempt: '2', dispatch_at: '2030-01-01T00:00:00.000Z',
+      operation: input.operation, target_json: target, environment_json: input.environment,
+    };
+    expect(targets.rowToExecutionReceipt(row)).toEqual({
+      dispatchId: row.dispatch_id, attempt: 2, dispatchAt: row.dispatch_at,
+      operation: input.operation, target, environment: input.environment,
+    });
+    for (const change of [
+      { dispatch_id: 'worker-address' }, { attempt: 0 }, { attempt: 1.5 },
+      { attempt: Number.MAX_SAFE_INTEGER + 1 }, { dispatch_at: null }, { dispatch_at: 'yesterday' },
+      { environment_json: { precision: 'unavailable', reference: { path: '/private' } } },
+    ]) {
+      expect(() => targets.rowToExecutionReceipt({ ...row, ...change })).toThrow();
+    }
+  });
+  it('requires complete installation metadata when a private kernel records its service identity', () => {
+    const target = { kind: 'service', id: 'private-r', generation: 'a'.repeat(64) };
+    expect(targets.validatePrivateKernelTarget({ ...target, token: 'private' })).toEqual(target);
+    const recorded = { ...target, serviceId: 'svc_' + 'b'.repeat(32), serviceLabel: 'Lab server', runtimeKind: 'private-r' };
+    expect(targets.validatePrivateKernelTarget(recorded)).toEqual(recorded);
+    for (const change of [{ serviceId: 'https://lab.example' }, { serviceLabel: undefined }, { runtimeKind: 'guided-r' }]) {
+      expect(() => targets.validatePrivateKernelTarget({ ...recorded, ...change })).toThrow();
+    }
+  });
 });
 describe.skipIf(!process.env.DATABASE_URL)('immutable dispatch receipts with real PostgreSQL claims', () => {
   let owner, job;

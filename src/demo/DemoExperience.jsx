@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, Check, Dna, Info, Loader2, RotateCcw } from 'lucide-react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowRight, Check, Info, Loader2, RotateCcw } from 'lucide-react';
 import Plot from '../components/Plot';
+import DemoLoading, { DemoBrand as Brand } from './DemoLoading';
 import { openDemo, applyDemoQC, processDemo, clusterDemo, resetDemo, readDemoGene,
   DEFAULT_QC, DEFAULT_PROCESSING, DEFAULT_CLUSTERING } from './demoApi';
 import './demo.css';
@@ -25,15 +26,6 @@ const numericParameters = parameters => Object.fromEntries(Object.entries(parame
 const sameParameters = (left, right) => Object.keys(left).every(key => left[key] === right[key]);
 const inRange = (value, min, max, integer = false) => Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value));
 
-function Brand() {
-  return <div className="demo-brand"><Dna size={23} /><span>TraceOmics</span><span className="demo-badge">DEMO</span></div>;
-}
-export function DemoLoading({ error, onRetry }) {
-  return <div className="demo-shell demo-loading"><Brand /><main>
-    {error ? <><h1>Unable to load analysis</h1><p role="alert">{error}</p><button className="demo-primary" onClick={onRetry}>Retry <ArrowRight size={16} /></button></>
-      : <><Loader2 className="demo-spin" size={26} /><h1>Loading PBMC3k</h1><p role="status">Loading counts and QC metrics…</p></>}
-  </main></div>;
-}
 export function expressionSummary(expression) {
   const values = expression.filter(value => typeof value === 'number' && Number.isFinite(value));
   if (!values.length) return null;
@@ -63,7 +55,15 @@ function Chart({ data, layout, label, height = 290, compact = false }) {
 function EmptyPlot({ title, children }) {
   return <div className="demo-empty"><h3>{title}</h3><p>{children}</p></div>;
 }
-function QCPlots({ metrics, parameters, view }) {
+const QCDistribution = memo(function QCDistribution({ values, title, lower, upper }) {
+  return <div><h3>{title}</h3><Chart compact label={title + ' distribution'} height={340}
+    data={[{ type: 'violin', y: values, name: 'Cells', points: false, box: { visible: true }, meanline: { visible: false },
+      line: { color: '#397e79', width: 1.5 }, fillcolor: '#bcd7d2', hovertemplate: '%{y}<extra></extra>' }]}
+    layout={{ margin: { l: 45, r: 12, t: 18, b: 20 }, xaxis: { showticklabels: false, showgrid: false },
+      yaxis: { zeroline: false, gridcolor: '#eef1f4' }, shapes: [lower, upper].filter(Number.isFinite).map(y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y,
+        line: { color: '#bd6974', dash: 'dot', width: 1 } })) }} /></div>;
+});
+const QCPlots = memo(function QCPlots({ metrics, parameters, view }) {
   if (view === 'scatter') return <Chart label="QC scatter plot" height={440} data={[{ type: 'scatter', mode: 'markers',
     x: metrics.nCount_RNA, y: metrics.nFeature_RNA, marker: { size: 4, opacity: 0.65, color: metrics.percent_mt,
       colorscale: [[0, '#8cb9b1'], [1, '#bc6170']], colorbar: { title: { text: '% MT' }, thickness: 10 } },
@@ -73,17 +73,18 @@ function QCPlots({ metrics, parameters, view }) {
       shapes: [parameters.min_features, parameters.max_features].filter(Number.isFinite).map(y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y, line: { color: '#bd6974', dash: 'dot', width: 1 } })),
     }} />;
   const series = [
-    { key: 'nFeature_RNA', title: 'Detected genes', lines: [parameters.min_features, parameters.max_features].filter(Number.isFinite) },
-    { key: 'nCount_RNA', title: 'RNA counts', lines: Number.isFinite(parameters.min_counts) && parameters.min_counts ? [parameters.min_counts] : [] },
-    { key: 'percent_mt', title: 'Mitochondrial counts (%)', lines: Number.isFinite(parameters.mt_threshold) ? [parameters.mt_threshold] : [] },
+    { key: 'nFeature_RNA', title: 'Detected genes', lower: parameters.min_features, upper: parameters.max_features },
+    { key: 'nCount_RNA', title: 'RNA counts', lower: parameters.min_counts || undefined },
+    { key: 'percent_mt', title: 'Mitochondrial counts (%)', upper: parameters.mt_threshold },
   ];
-  return <div className="demo-qc-plots">{series.map(item => <div key={item.key}><h3>{item.title}</h3><Chart compact label={item.title + ' distribution'} height={340}
-    data={[{ type: 'violin', y: metrics[item.key], name: 'Cells', points: false, box: { visible: true }, meanline: { visible: false },
-      line: { color: '#397e79', width: 1.5 }, fillcolor: '#bcd7d2', hovertemplate: '%{y}<extra></extra>' }]}
-    layout={{ margin: { l: 45, r: 12, t: 18, b: 20 }, xaxis: { showticklabels: false, showgrid: false },
-      yaxis: { zeroline: false, gridcolor: '#eef1f4' }, shapes: item.lines.filter(Number.isFinite).map(y => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, y0: y, y1: y,
-        line: { color: '#bd6974', dash: 'dot', width: 1 } })) }} /></div>)}</div>;
-}
+  return <div className="demo-qc-plots">{series.map(item => <QCDistribution key={item.key} values={metrics[item.key]} title={item.title} lower={item.lower} upper={item.upper} />)}</div>;
+}, (previous, next) => previous.metrics === next.metrics && previous.view === next.view
+  && Object.keys(previous.parameters).every(key => Object.is(previous.parameters[key], next.parameters[key])));
+
+const EmbeddingPlot = memo(function EmbeddingPlot({ traces, geneView, objectId }) {
+  return <Chart label="UMAP cell embedding" height={440} data={traces} layout={{ margin: { l: 48, r: geneView ? 75 : 24, t: 20, b: 40 }, dragmode: 'pan',
+    xaxis: { title: { text: 'UMAP 1' }, showgrid: false, zeroline: false, showticklabels: false, constrain: 'domain' }, yaxis: { title: { text: 'UMAP 2' }, showgrid: false, zeroline: false, showticklabels: false, scaleanchor: 'x', scaleratio: 1 }, uirevision: objectId }} />;
+});
 
 export default function DemoExperience() {
   const [result, setResult] = useState(null);
@@ -102,6 +103,7 @@ export default function DemoExperience() {
   const [gene, setGene] = useState('');
   const [geneData, setGeneData] = useState(null);
   const [selectedCluster, setSelectedCluster] = useState(null);
+  const geneCache = useRef(new Map());
   const workflowTabRefs = useRef({});
   useEffect(() => {
     let active = true;
@@ -143,6 +145,7 @@ export default function DemoExperience() {
     setBusy('Loading analysis…'); setError(''); setNotice('');
     try {
       const next = await action(context, parameters, setBusy);
+      geneCache.current.clear();
       setResult(next); setGeneData(null); setGene(''); setView('clusters'); setSelectedCluster(null);
       setNotice(completed(next)); if (nextStep) setStep(nextStep);
     } catch (e) { setError(e.message); }
@@ -150,10 +153,17 @@ export default function DemoExperience() {
   };
   const selectGene = async requested => {
     if (busy || !map) return;
-    setBusy(`Loading ${requested} expression…`); setError('');
+    setError(''); setNotice('');
+    const cached = geneCache.current.get(requested);
+    if (cached) {
+      setGeneData(cached); setGene(requested); setView('gene'); setSelectedCluster(null);
+      return;
+    }
+    setBusy(`Loading ${requested} expression…`);
     try {
       const values = await readDemoGene(context, requested);
       if (!Array.isArray(values.expression) || values.expression.length !== values.u1?.length || values.expression.length !== values.u2?.length) throw new Error('Gene expression could not be displayed. Please retry.');
+      geneCache.current.set(requested, values);
       setGeneData(values); setGene(requested); setView('gene'); setSelectedCluster(null);
     } catch (e) { setError(e.message); } finally { setBusy(''); }
   };
@@ -162,13 +172,14 @@ export default function DemoExperience() {
     setBusy('Loading original counts…'); setError(''); setNotice('');
     try {
       setResult(await resetDemo(context)); setQC({ ...DEFAULT_QC }); setProcessing({ ...DEFAULT_PROCESSING }); setClustering({ ...DEFAULT_CLUSTERING });
+      geneCache.current.clear();
       setStep('qc'); setQCSource('input'); setGeneData(null); setGene(''); setView('clusters'); setSelectedCluster(null);
       setNotice('Analysis reset to input counts.');
     } catch (e) { setError(e.message); } finally { setBusy(''); }
   };
-  const updateQC = key => value => setQC(old => ({ ...old, [key]: value }));
-  const updateProcessing = key => value => setProcessing(old => ({ ...old, [key]: value }));
-  const updateClustering = key => value => setClustering(old => ({ ...old, [key]: value }));
+  const updateQC = key => value => { setNotice(''); setQC(old => ({ ...old, [key]: value })); };
+  const updateProcessing = key => value => { setNotice(''); setProcessing(old => ({ ...old, [key]: value })); };
+  const updateClustering = key => value => { setNotice(''); setClustering(old => ({ ...old, [key]: value })); };
   const validQC = parsedQC.max_features > parsedQC.min_features && Number.isInteger(parsedQC.min_features) && Number.isInteger(parsedQC.max_features)
     && parsedQC.min_features >= 0 && parsedQC.min_features <= 2500 && parsedQC.max_features >= 1000 && parsedQC.max_features <= 6000
     && parsedQC.mt_threshold >= 0.5 && parsedQC.mt_threshold <= 30 && parsedQC.min_counts >= 0 && parsedQC.min_counts <= 20000 && preview >= 60;
@@ -270,8 +281,7 @@ export default function DemoExperience() {
             {pca?.gene_loadings && <section className="demo-plot-card demo-loadings"><h2>Leading genes by component</h2><table><thead><tr><th>PC</th><th>Positive and negative loadings</th></tr></thead><tbody>{Object.entries(pca.gene_loadings).map(([key, genes]) => <tr key={key}><td>{key}</td><td>{genes.join(', ')}</td></tr>)}</tbody></table></section>}</>}
           {step === 'clustering' && <section className="demo-plot-card"><div className="demo-plot-header"><div><h2>{view === 'gene' && gene ? `${gene} expression` : 'UMAP'}</h2><p>{map ? `${number(map.n_cells)} cells · ${map.n_clusters} clusters · Resolution ${context.clustering.resolution}` : 'Embedding is computed after clustering'}</p></div>
             {map && <div className="demo-view-switch"><button aria-pressed={view === 'clusters'} disabled={!!busy} onClick={() => { setView('clusters'); setSelectedCluster(null); }}>Clusters</button><button aria-pressed={view === 'gene'} disabled={!!busy} onClick={() => geneData ? setView('gene') : selectGene('CD3D')}>Gene expression</button></div>}</div>
-            {map ? <><Chart label="UMAP cell embedding" height={440} data={traces} layout={{ margin: { l: 48, r: view === 'gene' ? 75 : 24, t: 20, b: 40 }, dragmode: 'pan',
-              xaxis: { title: { text: 'UMAP 1' }, showgrid: false, zeroline: false, showticklabels: false, constrain: 'domain' }, yaxis: { title: { text: 'UMAP 2' }, showgrid: false, zeroline: false, showticklabels: false, scaleanchor: 'x', scaleratio: 1 }, uirevision: context.currentObjectId }} />
+            {map ? <><EmbeddingPlot traces={traces} geneView={view === 'gene'} objectId={context.currentObjectId} />
               {view === 'clusters' ? <div className="demo-cluster-key" aria-label="Cluster sizes">{map.trace_data.map((trace, i) => <button key={trace.name} disabled={!!busy} aria-pressed={selectedCluster === trace.name} onClick={() => setSelectedCluster(selectedCluster === trace.name ? null : trace.name)}><i style={{ background: COLORS[i % COLORS.length] }} />{trace.name}<span>{number(trace.x.length)}</span></button>)}</div>
                 : summary && <div className="demo-expression-stats"><span><strong>{summary.percent.toFixed(1)}%</strong> of cells expressing {gene}</span><span><strong>{summary.mean.toFixed(2)}</strong> mean log-normalized expression</span></div>}
               <p className="demo-plot-caption">Each point represents a cell. Numeric clusters are not cell-type annotations. Plot controls provide zoom, pan, and PNG export.</p></>

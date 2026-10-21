@@ -38,6 +38,8 @@ describe('count-based isolated demo workflow', () => {
     const [a, b] = await Promise.all([openDemo(), openDemo()]);
     expect(a).toBe(b); expect(a.context.stage).toBe('input'); expect(a.map).toBeNull();
     expect(fetch.mock.calls.filter(([url]) => url.endsWith('/demo-guest'))).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/qc-distributions'))).toHaveLength(1);
+    expect(a.qc).toEqual(a.baseline);
     const qc = fetch.mock.calls.find(([url]) => url.endsWith('/qc'));
     expect(JSON.parse(qc[1].body)).toEqual({ min_features: 0, max_features: 0, mt_threshold: 100, min_counts: 0 });
     expect(qc[1].headers['X-Object-ID']).toBe('ao_1'); expect(qc[1].credentials).toBe('include');
