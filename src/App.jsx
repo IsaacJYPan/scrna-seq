@@ -1516,7 +1516,7 @@ export default function App() {
             <button type="button" onClick={() => setHistoryPersistenceNotice('')} className="btn btn-secondary ml-2 text-xs">Dismiss history notice</button>
           </div>
         )}
-        {liveRecoveryNotice && !activeTab.startsWith('workflow:') && (
+        {liveRecoveryNotice && !['analyses', 'pipeline-manager'].includes(activeTab) && !activeTab.startsWith('workflow:') && (
           <div role="status" className="shrink-0 border-b border-border bg-surface px-4 py-2 text-xs text-text">
             {liveRecoveryNotice}
             <button type="button" className="ml-2 font-bold underline" onClick={() => setActiveTab('history')}>Open Runs &amp; Results</button>

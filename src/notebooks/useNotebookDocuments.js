@@ -19,7 +19,7 @@ const errorMessage = error => {
   };
   return messages[error.code] || publicErrorMessage(error, 'The document request could not be confirmed. Your draft is kept here.');
 };
-const localErrorMessage = error => ['INVALID_NOTEBOOK_DOCUMENT', 'NOTEBOOK_DOCUMENT_TOO_LARGE'].includes(error.code)
+const localErrorMessage = error => ['INVALID_NOTEBOOK_DOCUMENT', 'NOTEBOOK_DOCUMENT_TOO_LARGE', 'INVALID_NOTEBOOK_INTERCHANGE', 'NOTEBOOK_INTERCHANGE_TOO_LARGE'].includes(error.code)
   ? error.message : errorMessage(error);
 const draftFor = document => ({ title: document.title, content: document.content, baseVersion: document.version,
   baseVersionId: document.versionId, dirty: false });

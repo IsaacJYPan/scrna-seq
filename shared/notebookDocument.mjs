@@ -1,3 +1,5 @@
+import { NOTEBOOK_INTERCHANGE_SCHEMA, normalizeNotebookInterchangeContent } from './notebookInterchangeFields.mjs';
+
 export const NOTEBOOK_DOCUMENT_SCHEMA = 'traceomics.notebook.v1';
 export const NOTEBOOK_DOCUMENT_ID = /^doc_[a-f0-9]{24}$/;
 export const NOTEBOOK_VERSION_ID = /^dv_[a-f0-9]{24}$/;
@@ -128,6 +130,12 @@ function metadata(value, limit, label, budget) {
 
 /** Normalize source/structure only. Source whitespace and line endings are exact. */
 export function normalizeNotebookContent(input) {
+  // Validate ordinary data fields before reading the schema discriminator. The
+  // v1 branch stays byte-for-byte canonical for existing versions and receipts.
+  plainRecord(input, 'Notebook content');
+  if (input.schema === NOTEBOOK_INTERCHANGE_SCHEMA) {
+    return normalizeNotebookInterchangeContent(input, normalizeNotebookContent);
+  }
   fields(input, ['schema', 'defaultLanguage', 'cells', 'metadata'], 'Notebook content');
   if (input.schema !== NOTEBOOK_DOCUMENT_SCHEMA) invalid('Choose the supported notebook content schema.');
   if (!LANGUAGES.has(input.defaultLanguage)) invalid('Notebook default language must be R or python.');

@@ -88,6 +88,7 @@
     "test:existing-work-browser": "npm run build && node scripts/verify-existing-work-ui.js",
     "test:retained-workflows-browser": "npm run build && node scripts/verify-retained-workflows-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",
+    "test:notebook-interchange-browser": "npm run build && node scripts/verify-notebook-interchange-ui.js",
     "test:notebook-pending-browser": "npm run build && node scripts/verify-notebook-pending-ui.js",
     "test:retained-results-browser": "npm run build && node scripts/verify-retained-results-ui.js",
     "test:execution-history-browser": "node scripts/verify-execution-history-ui.js",

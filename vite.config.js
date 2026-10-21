@@ -48,6 +48,15 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Keep the editor libraries independently cacheable as notebook tools
+        // grow. This dependency is loaded with the lazy document workspace.
+        manualChunks(id) {
+          if (/node_modules[\\/](?:@codemirror|@lezer|style-mod|w3c-keyname|crelt)[\\/]/.test(id)) return 'notebook-editor';
+        },
+      },
+    },
     // Plotly is intentionally isolated behind a dynamic import and has its own
     // stricter named budget above. Vite's global warning threshold can therefore
     // acknowledge that one lazy scientific-visualization vendor chunk without

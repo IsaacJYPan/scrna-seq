@@ -1,21 +1,33 @@
-import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Copy, FileText, Plus, Trash2, Upload } from 'lucide-react';
 import AnalysisShell from '../components/AnalysisShell';
 import CodeEditor from './CodeEditor';
 import ScriptEditor from './ScriptEditor';
 import ScriptImport from './ScriptImport';
+import NotebookImport from './NotebookImport';
+import ImportedNotebookOutputs from './ImportedNotebookOutputs';
+import { notebookMarkdownComponents, notebookMarkdownUrlTransform } from './NotebookAttachment';
 import useNotebookDocuments from './useNotebookDocuments';
 import { getNotebookVersion } from './notebookApi';
 import { publicErrorMessage } from '../publicError';
 import { copyScriptToNotebook, exportScriptDocument, scriptDocumentInfo } from '../../shared/scriptDocument.mjs';
+import { exportNotebookFile, NOTEBOOK_INTERCHANGE_SCHEMA } from '../../shared/notebookInterchange.mjs';
 
 const RetainedWorkView = React.lazy(() => import('../analyses/RetainedWorkView'));
-const cellLabel = cell => cell.type === 'markdown' ? 'Markdown' : cell.language === 'python' ? 'Python' : 'R';
+const cellLabel = cell => cell.type === 'markdown' ? 'Markdown' : cell.type === 'raw' ? 'Raw text' : cell.language === 'python' ? 'Python' : 'R';
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const newCell = (type, language) => ({ id: crypto.randomUUID(), type, source: '', metadata: {}, collapsed: false,
   ...(type === 'code' ? { language } : {}) });
-const scriptInfo = content => { try { return scriptDocumentInfo(content); } catch { return null; } };
+const scriptInfo = content => { if (content?.schema === NOTEBOOK_INTERCHANGE_SCHEMA) return null; try { return scriptDocumentInfo(content); } catch { return null; } };
+
+function NotebookExportFeedback({ feedback }) {
+  if (!feedback) return null;
+  return <section aria-label="Notebook export notes" role={feedback.error ? 'alert' : 'status'} className={`space-y-2 rounded border border-border p-3 text-xs ${feedback.error ? 'text-danger' : 'text-textMuted'}`}>
+    <p>{feedback.error || `${feedback.source} · ${feedback.filename} prepared for download.`}</p>
+    {feedback.warnings?.length > 0 && <ul className="space-y-1">{feedback.warnings.map(item => <li key={item.code}>{item.message}</li>)}</ul>}
+  </section>;
+}
 
 function SharedSourceRecovery({ record, payload, busy, blocked, onCheck, onRetry, onReviewSaved, onReviewSource, onCopy, onReviewUnsubmitted, onCopyUnsubmitted, pending }) {
   if (!record || record.phase === 'resolved' && !record.unsubmittedPayload) return null;
@@ -55,6 +67,10 @@ const NotebookCell = memo(function NotebookCell({
   const collapsed = canEdit ? cell.collapsed : viewCollapsed ?? cell.collapsed;
   const label = `${cellLabel(cell)} cell ${index + 1}`;
   const stateKey = `${documentId}:${cell.id}`;
+  const markdownComponents = useMemo(() => ({
+    a: ({ children, href, title }) => <a href={href} title={title} target="_blank" rel="noreferrer" className="text-primary underline">{children}</a>,
+    ...notebookMarkdownComponents(cell.imported?.attachments),
+  }), [cell.imported?.attachments]);
   useEffect(() => {
     if (!active || collapsed) return;
     section.current?.querySelector('.cm-content, textarea')?.focus({ preventScroll: true });
@@ -88,15 +104,17 @@ const NotebookCell = memo(function NotebookCell({
     {collapsed ? <p className="text-xs text-textMuted">Source hidden · {cell.source.split('\n').length} lines</p>
       : cell.type === 'markdown' ? <>
         <textarea hidden={!active} aria-label={`${label} source`} readOnly={!canEdit} className="min-h-36 w-full rounded border border-border bg-background p-3 font-mono text-sm leading-relaxed" value={cell.source} onChange={event => onEdit(cell.id, { source: event.target.value })} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onActivate(-1); editButton.current?.focus(); } }} />
-        {!active && <div className="notebook-narrative text-sm leading-relaxed">{cell.source ? <ReactMarkdown skipHtml components={{
-          a: ({ children, href, title }) => <a href={href} title={title} target="_blank" rel="noreferrer" className="text-primary underline">{children}</a>,
-          img: ({ alt }) => <span className="text-xs text-textMuted">Image reference: {alt || 'image'} (images are not loaded automatically)</span>,
-        }}>{cell.source}</ReactMarkdown> : <p className="text-textMuted">Add a note, explanation, or scientific question.</p>}</div>}
+        {!active && <div className="notebook-narrative text-sm leading-relaxed">{cell.source ? <ReactMarkdown skipHtml urlTransform={notebookMarkdownUrlTransform} components={markdownComponents}>{cell.source}</ReactMarkdown> : <p className="text-textMuted">Add a note, explanation, or scientific question.</p>}</div>}
       </>
+      : cell.type === 'raw' ? active
+        ? <textarea aria-label={`${label} source`} readOnly={!canEdit} className="min-h-36 w-full rounded border border-border bg-background p-3 font-mono text-sm leading-relaxed text-text" value={cell.source}
+          onChange={event => onEdit(cell.id, { source: event.target.value })} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); editButton.current?.focus(); } }} />
+        : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background p-3 font-mono text-[13px] leading-relaxed">{cell.source || '(empty raw text)'}</pre>
       : active ? <CodeEditor key={stateKey} value={cell.source} language={cell.language} theme={theme} label={`${label} source`} readOnly={!canEdit}
         initialState={editorStates.current.get(stateKey)} onStateChange={state => editorStates.current.set(stateKey, state)}
         onChange={source => onEdit(cell.id, { source })} onEscape={() => editButton.current?.focus()} />
         : <pre className="max-h-72 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-[13px] leading-relaxed">{cell.source || <span className="text-textMuted">Write {cellLabel(cell)} here.</span>}</pre>}
+    <ImportedNotebookOutputs cell={cell} scopeKey={stateKey} />
   </section>;
 });
 
@@ -119,6 +137,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
   const [removed, setRemoved] = useState({});
   const [inspector, setInspector] = useState(null);
   const [inspectionError, setInspectionError] = useState('');
+  const [exportNotice, setExportNotice] = useState(null);
   const editorStates = useRef(new Map());
   const downloads = useRef(new Set());
   const body = useRef(null);
@@ -130,7 +149,9 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
   selectionRef.current = selectedId;
   const script = scriptInfo(draft?.content);
   const pendingScript = scriptInfo(docs.pendingCreateInfo?.content);
-  const importOpen = !!imports[analysis?.id] || !!pendingScript;
+  const pendingNotebook = docs.pendingCreateInfo?.content?.schema === NOTEBOOK_INTERCHANGE_SCHEMA;
+  const pendingImportKind = pendingNotebook ? 'notebook' : pendingScript ? 'script' : null;
+  const importOpen = !!imports[analysis?.id] || !!pendingImportKind;
   const titleLabel = script ? 'Script title' : 'Notebook title';
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -142,7 +163,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
 
   useEffect(() => {
     inspectRequest.current += 1;
-    setInspector(null); setInspectionError('');
+    setInspector(null); setInspectionError(''); setExportNotice(null);
     return () => { inspectRequest.current += 1; };
   }, [analysis?.id, isActive, selectedId]);
   useEffect(() => {
@@ -166,15 +187,32 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     return () => { clearTimeout(timer); area.removeEventListener('scroll', changed); };
   }, [selectedId, analysis?.id, isActive, editUiState]);
 
+  const download = (filename, value, mimeType) => {
+    const url = URL.createObjectURL(new Blob([value], { type: mimeType }));
+    downloads.current.add(url);
+    const release = () => { if (downloads.current.delete(url)) URL.revokeObjectURL(url); };
+    const link = document.createElement('a'); link.href = url; link.download = filename;
+    try { document.body.appendChild(link); link.click(); }
+    catch (failure) { release(); throw failure; }
+    finally { link.remove(); }
+    setTimeout(release, 1000);
+  };
   const exportScript = () => {
     try {
       const { filename, bytes } = exportScriptDocument(draft.content);
-      const url = URL.createObjectURL(new Blob([bytes], { type: 'text/plain;charset=utf-8' }));
-      downloads.current.add(url);
-      const link = document.createElement('a'); link.href = url; link.download = filename;
-      document.body.appendChild(link); link.click(); link.remove();
-      setTimeout(() => { URL.revokeObjectURL(url); downloads.current.delete(url); }, 1000);
+      download(filename, bytes, 'text/plain;charset=utf-8');
     } catch { setInspectionError('This script could not be exported. Its current source is still here.'); }
+  };
+  const exportNotebook = (content, source, versionId = null) => {
+    setInspectionError(''); setExportNotice(null);
+    try {
+      const result = exportNotebookFile(content);
+      download(result.filename, result.text, result.mimeType);
+      setExportNotice({ filename: result.filename, source, versionId, warnings: result.warnings.filter((item, index, items) => items.findIndex(other => other.code === item.code) === index) });
+    } catch (failure) {
+      const safe = ['INVALID_NOTEBOOK_INTERCHANGE', 'NOTEBOOK_INTERCHANGE_TOO_LARGE', 'INVALID_NOTEBOOK_DOCUMENT', 'NOTEBOOK_DOCUMENT_TOO_LARGE'].includes(failure.code);
+      setExportNotice({ source, versionId, error: safe ? `Notebook export could not be prepared. ${failure.message}` : 'This notebook could not be exported. Its current source is still here.' });
+    }
   };
 
   const editCell = useCallback((id, change) => {
@@ -221,10 +259,27 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
         missingCell: !wholeDocument && !!activeId && !cellExists });
     } catch (error) { if (request === inspectRequest.current) setInspectionError(publicErrorMessage(error, 'The saved source could not be opened. Your draft is still here.')); }
   };
+  const importPanel = (scope, mode) => {
+    const kind = scope === analysis.id && pendingImportKind ? pendingImportKind : mode === 'notebook' ? 'notebook' : 'script';
+    const hasPending = scope === analysis.id && pendingImportKind === kind;
+    const Panel = kind === 'notebook' ? NotebookImport : ScriptImport;
+    const pending = hasPending ? { filename: kind === 'notebook' ? docs.pendingCreateInfo.content.interchange?.filename : pendingScript.filename,
+      title: docs.pendingCreateInfo.title, content: docs.pendingCreateInfo.content } : null;
+    return <Panel theme={theme} busy={scope === analysis.id && docs.creating}
+      disabled={scope !== analysis.id || connection.blocked || !canWrite && !pending || docs.pendingCreate && !pending}
+      error={scope === analysis.id ? docs.creationProblem?.message || '' : ''} pending={pending}
+      onCancel={() => setImportOpen(scope, false)} onImport={async input => {
+        if (scope !== analysis.id) return null;
+        const created = await docs.create(input.title, input.content.defaultLanguage, input.content);
+        if (created) setImportOpen(scope, false);
+        return created;
+      }} />;
+  };
   const outline = <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-semibold text-textMuted">Documents</p>
       {canWrite && <button type="button" aria-label="New notebook" disabled={docs.creating || docs.pendingCreate} className="rounded p-1 text-primary focus-visible:ring-2 focus-visible:ring-primary" onClick={() => { setImportOpen(analysis.id, false); setCreation({ analysisId: analysis.id, title: '', language: 'R' }); }}><Plus size={16} /></button>}</div>
-    {canWrite && <button type="button" className="inline-flex items-center gap-2 text-xs text-primary underline" disabled={docs.creating || docs.pendingCreate || connection.blocked} onClick={() => { setCreation(null); setImportOpen(analysis.id, true); }}><Upload size={13} />Import script</button>}
+    {canWrite && <button type="button" className="inline-flex items-center gap-2 text-xs text-primary underline" disabled={docs.creating || docs.pendingCreate || connection.blocked} onClick={() => { setCreation(null); setImportOpen(analysis.id, 'script'); }}><Upload size={13} />Import script</button>}
+    {canWrite && <button type="button" className="inline-flex items-center gap-2 text-xs text-primary underline" disabled={docs.creating || docs.pendingCreate || connection.blocked} onClick={() => { setCreation(null); setImportOpen(analysis.id, 'notebook'); }}><Upload size={13} />Import notebook</button>}
     {docs.index.loading && <p role="status" className="text-xs text-textMuted">Loading documents…</p>}
     {docs.index.error && <p role="alert" className="text-xs text-danger">{docs.index.error}</p>}
     <ul className="space-y-1">{docs.index.items.map(item => <li key={item.id}><button type="button" aria-current={selectedId === item.id ? 'page' : undefined}
@@ -247,9 +302,12 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     {inspector.document.content.cells.map((cell, index) => <div key={cell.id}><p className="mb-2 text-xs font-semibold">Cell {index + 1} · {cellLabel(cell)} source</p><pre className="max-h-80 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-xs">{cell.source || '(empty source)'}</pre></div>)}
   </div> : inspector?.kind === 'source' ? <div className="space-y-4 text-sm">
     <p className="font-semibold">{inspector.document.title}</p><p className="text-xs text-textMuted">Saved source version {inspector.document.version}. This snapshot records saved code, not an execution.</p>
+    {!scriptInfo(inspector.document.content) && <button type="button" className="text-xs text-primary underline" onClick={() => exportNotebook(inspector.document.content, `Saved source version ${inspector.document.version}`, inspector.document.versionId)}>Export saved notebook</button>}
+    {exportNotice?.versionId === inspector.document.versionId && <NotebookExportFeedback feedback={exportNotice} />}
     {inspector.missingCell && <p className="text-xs text-textMuted">The selected draft cell is absent from this saved version. Showing the saved document.</p>}
     <dl className="space-y-2 break-all text-xs"><dt className="text-textMuted">Version</dt><dd>{inspector.document.versionId}</dd><dt className="text-textMuted">SHA-256</dt><dd className="font-mono">{inspector.document.sha256}</dd></dl>
-    {inspector.document.content.cells.filter(cell => !inspector.cellId || cell.id === inspector.cellId).map(cell => <div key={cell.id}><p className="mb-2 text-xs font-semibold">Cell {inspector.document.content.cells.findIndex(item => item.id === cell.id) + 1} · {cellLabel(cell)} source</p><pre className="max-h-80 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-xs">{cell.source || '(empty source)'}</pre></div>)}
+    {inspector.document.content.cells.filter(cell => !inspector.cellId || cell.id === inspector.cellId).map(cell => <div key={cell.id}><p className="mb-2 text-xs font-semibold">Cell {inspector.document.content.cells.findIndex(item => item.id === cell.id) + 1} · {cellLabel(cell)} source</p><pre className="max-h-80 overflow-auto whitespace-pre rounded border border-border bg-background p-3 font-mono text-xs">{cell.source || '(empty source)'}</pre>
+      <ImportedNotebookOutputs cell={cell} scopeKey={`${inspector.document.versionId}:${cell.id}`} /></div>)}
   </div> : inspector?.kind === 'artifact' ? <React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Loading saved material…</p>}>
     <RetainedWorkView projectId={projectId} userId={userId} reference={inspector.reference} compact canWrite={canWrite} onOpenWorkflow={onOpenWorkflow} />
   </React.Suspense> : inspector?.kind === 'links' ? <div className="space-y-3 text-sm">
@@ -265,6 +323,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
     inspector={inspectorContent} inspectorTitle={inspector?.kind === 'source' ? 'Saved source' : inspector?.kind === 'submission-source' ? inspector.unsubmitted ? 'Unsubmitted source' : 'Submitted source' : inspector?.kind === 'private-source' ? 'Private draft' : 'Linked material'} onCloseInspector={() => setInspector(null)}
     toolbar={<>{selected && <button type="button" className="btn btn-secondary text-xs" onClick={() => void inspectSaved(selected.versionId)}>Saved source</button>}
       {script && <button type="button" className="btn btn-secondary text-xs" title="Export the current edited script source" onClick={exportScript}>Export script</button>}
+      {selected && draft && !script && <button type="button" className="btn btn-secondary text-xs" title="Export the current notebook draft as a conventional .ipynb file" onClick={() => exportNotebook(draft.content, 'Current notebook draft')}>Export notebook</button>}
       {selected && (canWrite || docs.pendingSave) && <button type="button" className="btn btn-primary text-sm" disabled={docs.busy || connection.blocked || !draft?.dirty && !docs.pendingSave || !!docs.problem?.currentHead && !docs.pendingSave} onClick={() => void docs.save()}>{docs.busy ? 'Saving…' : docs.pendingSave ? 'Retry save' : script ? 'Save script' : 'Save notebook'}</button>}</>}>
     <div ref={body} className="mx-auto max-w-4xl space-y-5 px-4 py-6 sm:px-7">
       {connection.blocked && <p role="status" className="rounded border border-border p-3 text-sm text-textMuted">Reconnect to save changes. Your current document draft is kept here.</p>}
@@ -280,20 +339,8 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
             docs.clearUnsubmitted(null, input.requestId); setImportOpen(analysis.id, false); setCreation(null);
           }
         } : undefined} />}
-      {Object.entries(imports).filter(([, open]) => open).map(([scope]) => <div key={scope} hidden={scope !== analysis.id}>
-        <ScriptImport theme={theme} busy={scope === analysis.id && docs.creating} disabled={scope !== analysis.id || connection.blocked || !canWrite && !pendingScript || docs.pendingCreate && !pendingScript}
-          error={scope === analysis.id ? docs.creationProblem?.message || '' : ''}
-          pending={scope === analysis.id && pendingScript ? { filename: pendingScript.filename, title: docs.pendingCreateInfo.title, content: docs.pendingCreateInfo.content } : null}
-          onCancel={() => setImportOpen(scope, false)} onImport={async input => {
-            if (scope !== analysis.id) return null;
-            const created = await docs.create(input.title, input.content.defaultLanguage, input.content);
-            if (created) setImportOpen(scope, false);
-            return created;
-          }} />
-      </div>)}
-      {pendingScript && !imports[analysis.id] && <ScriptImport theme={theme} busy={docs.creating} disabled={connection.blocked}
-        error={docs.creationProblem?.message || ''} pending={{ filename: pendingScript.filename, title: docs.pendingCreateInfo.title, content: docs.pendingCreateInfo.content }}
-        onCancel={() => {}} onImport={input => docs.create(input.title, input.content.defaultLanguage, input.content)} />}
+      {Object.entries(imports).filter(([, mode]) => mode).map(([scope, mode]) => <div key={scope} hidden={scope !== analysis.id}>{importPanel(scope, mode)}</div>)}
+      {pendingImportKind && !imports[analysis.id] && importPanel(analysis.id, pendingImportKind)}
       {creatingHere && <form aria-label="New notebook" className="space-y-4 rounded-lg border border-border bg-surface p-5" onSubmit={async event => {
         event.preventDefault();
         const created = await docs.create(creation?.title || '', creation?.language || 'R');
@@ -312,6 +359,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
             {canWrite && draft?.dirty && <button type="button" className="btn btn-secondary text-xs" disabled={docs.creating || connection.blocked} onClick={() => void docs.create(`${[...draft.title].slice(0, 150).join('')} (copy)`, draft.content.defaultLanguage, draft.content)}>{script ? 'Save my draft as a new script' : 'Save my draft as a new notebook'}</button>}</div></>}
       </div>}
       {inspectionError && <p role="alert" className="text-sm text-danger">{inspectionError}</p>}
+      {!(inspector?.kind === 'source' && exportNotice?.versionId === inspector.document.versionId) && <NotebookExportFeedback feedback={exportNotice} />}
       {docs.notice && <p role="status" className="text-sm text-success">{docs.notice}</p>}
       <SharedSourceRecovery record={docs.sharedRecovery} payload={docs.pendingSaveInfo || docs.sharedRecovery?.journal?.payload}
         busy={docs.busy} blocked={connection.blocked} pending={docs.pendingCreate || docs.pendingSave} onCheck={() => void docs.refreshSubmission(selectedId)}
@@ -355,10 +403,14 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
           <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-textMuted"><p>{draft.dirty ? 'Your private working copy · Shared saved source is unchanged' : 'Shared with this project'} · {canWrite ? 'Editable source' : 'View access'}</p>{!script && <label>New cells use<select aria-label="Notebook default language" disabled={sourceFrozen} className="ml-2 rounded border border-border bg-surface px-2 py-1" value={draft.content.defaultLanguage} onChange={event => docs.edit(selectedId, current => ({ ...current, content: { ...current.content, defaultLanguage: event.target.value } }))}><option value="R">R</option><option value="python">Python</option></select></label>}</div>
           {newerHead && !docs.problem?.currentHead && <p role="status" className="text-xs text-textMuted">A newer saved version exists. Your draft stays separate.</p>}
           <p className="text-xs leading-relaxed text-textMuted">{script ? 'Script editing is source only. ' : 'Notebook cells are source only. '}{onOpenAdvanced && <button type="button" className="text-primary underline" onClick={onOpenAdvanced}>Open Advanced analysis for R</button>}</p>
+          {draft.content.interchange && <details className="text-xs text-textMuted"><summary className="cursor-pointer">Imported notebook metadata</summary>
+            <p className="my-2">Editing does not run or configure the imported kernel. Original metadata is retained for export; imported outputs remain historical after source edits.</p>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background p-3">{JSON.stringify(draft.content.interchange.metadata, null, 2)}</pre>
+          </details>}
           {!script && draft.content.metadata?.traceomics?.kind === 'script' && <p role="status" className="text-xs text-textMuted">This document has incompatible script metadata. Its source is available in the notebook view.</p>}
         </div>
         {script ? <ScriptEditor documentId={selectedId} content={draft.content} info={script} canEdit={!sourceFrozen} theme={theme} editorStates={editorStates}
-          onChange={source => editCell(draft.content.cells[0].id, { source })} /> : <div className="space-y-4">{draft.content.cells.map((cell, index) => <div key={cell.id} id={`notebook-cell-${cell.id}`}><NotebookCell cell={cell} index={index} count={draft.content.cells.length} documentId={selectedId}
+          onChange={source => editCell(draft.content.cells[0].id, { source })} /> : <div className="space-y-4">{draft.content.cells.map((cell, index) => <div key={`${selectedId}:${cell.id}`} id={`notebook-cell-${cell.id}`}><NotebookCell cell={cell} index={index} count={draft.content.cells.length} documentId={selectedId}
           active={activeId === cell.id} canEdit={!sourceFrozen} theme={theme} editorStates={editorStates}
           onEdit={editCell} onActivate={activate} onMove={move} onDuplicate={duplicate} onRemove={remove} /></div>)}</div>}
         {removed[selectedId] && <p role="status" className="flex flex-wrap items-center gap-3 text-xs text-textMuted">Cell removed.
@@ -368,7 +420,7 @@ export default function NotebookWorkspace({ projectId, projectName, analysis, ro
             setRemoved(previous => ({ ...previous, [selectedId]: null }));
           }}>Undo removal</button></p>}
         {canWrite && <div className="flex flex-wrap gap-3 border-t border-border pt-4">{script ? <button type="button" className="btn btn-secondary text-sm" disabled={sourceFrozen || docs.creating || docs.pendingCreate} onClick={() => void docs.create(`${[...draft.title].slice(0, 149).join('')} (notebook)`, script.language, copyScriptToNotebook(draft.content))}>Copy to a notebook</button> : <><button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" disabled={sourceFrozen} onClick={() => add('code')}><Plus size={15} />Add code cell</button><button type="button" className="btn btn-secondary text-sm" disabled={sourceFrozen} onClick={() => add('markdown')}>Add Markdown</button></>}</div>}
-      </> : selectedId ? !docs.problem && <p role="status" className="py-10 text-sm text-textMuted">Loading document…</p> : !creatingHere && <div className="py-12 text-center"><FileText size={30} className="mx-auto mb-4 text-textMuted" /><h3 className="text-xl font-semibold">Write alongside your research question</h3><p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-textMuted">Import an ordinary R or Python script, or keep code and Markdown in a notebook. Saved versions remain part of this analysis.</p>
+      </> : selectedId ? !docs.problem && <p role="status" className="py-10 text-sm text-textMuted">Loading document…</p> : !creatingHere && <div className="py-12 text-center"><FileText size={30} className="mx-auto mb-4 text-textMuted" /><h3 className="text-xl font-semibold">Write alongside your research question</h3><p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-textMuted">Import a Jupyter notebook or ordinary R or Python script, or keep code and Markdown in a notebook. Saved versions remain part of this analysis.</p>
         {canWrite && <button type="button" className="btn btn-primary mt-6" onClick={() => setCreation({ analysisId: analysis.id, title: '', language: 'R' })}>Create a notebook</button>}</div>}
     </div>
   </AnalysisShell>;
