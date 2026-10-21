@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261024, now())
+VALUES ('traceomics.runtime', 20261025, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1263,6 +1263,68 @@ END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_research_analysis_revision_immutable ON research_analysis_revisions;
 CREATE TRIGGER trg_research_analysis_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_revisions
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
+
+-- Completed outside results are independent of the editable analysis draft.
+-- Revisions retain supplied notes and exact identities, never source bytes or
+-- an inferred filename/path. A missing managed source cannot erase this history.
+CREATE TABLE IF NOT EXISTS research_analysis_attachments (
+  id TEXT PRIMARY KEY CHECK(id ~ '^raa_[a-f0-9]{24}$'),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  head_revision_id TEXT NOT NULL CHECK(head_revision_id ~ '^rar_[a-f0-9]{24}$'),
+  revision_number INTEGER NOT NULL CHECK(revision_number > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(id,project_id,analysis_id),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_attachment_created
+  ON research_analysis_attachments(project_id,analysis_id,created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS research_analysis_attachment_revisions (
+  id TEXT PRIMARY KEY CHECK(id ~ '^rar_[a-f0-9]{24}$'),
+  attachment_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  revision_number INTEGER NOT NULL CHECK(revision_number > 0),
+  actor_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  reference_json JSONB NOT NULL CHECK(jsonb_typeof(reference_json)='object' AND octet_length(reference_json::text)<=512),
+  caption TEXT NOT NULL CHECK(char_length(caption) BETWEEN 1 AND 2000),
+  supplied_origin_json JSONB NOT NULL CHECK(jsonb_typeof(supplied_origin_json)='object' AND octet_length(supplied_origin_json::text)<=65536),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(attachment_id,revision_number),
+  UNIQUE(attachment_id,id,revision_number),
+  UNIQUE(project_id,analysis_id,actor_user_id,request_id),
+  FOREIGN KEY(attachment_id,project_id,analysis_id) REFERENCES research_analysis_attachments(id,project_id,analysis_id)
+);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_analysis_attachment_head' AND conrelid='research_analysis_attachments'::regclass) THEN
+    ALTER TABLE research_analysis_attachments ADD CONSTRAINT fk_analysis_attachment_head
+      FOREIGN KEY(id,head_revision_id,revision_number) REFERENCES research_analysis_attachment_revisions(attachment_id,id,revision_number)
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $$;
+CREATE OR REPLACE FUNCTION protect_analysis_attachment_head() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    IF current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+    RAISE EXCEPTION 'Analysis attachment history is retained' USING ERRCODE='55000';
+  END IF;
+  IF ROW(NEW.id,NEW.project_id,NEW.analysis_id,NEW.created_by_user_id,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.project_id,OLD.analysis_id,OLD.created_by_user_id,OLD.created_at)
+    OR NEW.revision_number<>OLD.revision_number+1 OR NEW.head_revision_id=OLD.head_revision_id
+  THEN RAISE EXCEPTION 'Analysis attachment updates require an appended revision' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_analysis_attachment_head ON research_analysis_attachments;
+CREATE TRIGGER trg_analysis_attachment_head BEFORE UPDATE OR DELETE ON research_analysis_attachments
+  FOR EACH ROW EXECUTE FUNCTION protect_analysis_attachment_head();
+DROP TRIGGER IF EXISTS trg_analysis_attachment_revision_immutable ON research_analysis_attachment_revisions;
+CREATE TRIGGER trg_analysis_attachment_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_attachment_revisions
   FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
 
 CREATE OR REPLACE FUNCTION protect_retained_workflow_snapshot() RETURNS TRIGGER AS $$

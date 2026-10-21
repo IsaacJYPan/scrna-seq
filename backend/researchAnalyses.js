@@ -201,6 +201,7 @@ function createResearchAnalysisService(database = db) {
 function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   const router = require('express').Router({ mergeParams: true });
   const service = createResearchAnalysisService(database);
+  const attachments = require('./analysisAttachments').createAnalysisAttachmentService(database);
   const route = action => async (req, res) => {
     res.setHeader('Cache-Control', 'private, no-store');
     try {
@@ -225,6 +226,13 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.get('/existing-work', route(req => service.listExistingWork(req.user.id, req.params.projectId, req.query)));
   router.get('/workflow-snapshots/:snapshotId', route(req => service.getWorkflowSnapshot(req.user.id, req.params.projectId, req.params.snapshotId, req.query.sha256)));
   router.post('/workflow-snapshots/:snapshotId/open', route(req => service.openWorkflowSnapshot(req.user.id, req.params.projectId, req.params.snapshotId, req.body)));
+  router.get('/:analysisId/attachments', route(req => attachments.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/:analysisId/attachments/options', route(req => attachments.options(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/:analysisId/attachments/requests/:requestId', route(req => attachments.getRequest(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
+  router.post('/:analysisId/attachments', route(async req => {
+    const result = await attachments.create(req.user.id, req.params.projectId, req.params.analysisId, req.body);
+    return { ...result, created: !result.replayed };
+  }));
   router.get('/:analysisId', route(req => service.get(req.user.id, req.params.projectId, req.params.analysisId)));
   router.patch('/:analysisId', route(req => service.patch(req.user.id, req.params.projectId, req.params.analysisId, req.body)));
   return router;

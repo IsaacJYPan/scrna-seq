@@ -8,6 +8,7 @@ import { savedReferenceId, savedReferenceTitle } from '../analyses/savedWorkRefe
 
 const NotebookWorkspace = React.lazy(() => import('../notebooks/NotebookWorkspace'));
 const ExistingWorkBrowser = React.lazy(() => import('../analyses/ExistingWorkBrowser'));
+const AnalysisAttachments = React.lazy(() => import('../analyses/AnalysisAttachments'));
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const cleanReferences = analysis => (analysis.references || []).map(item => item.reference);
@@ -48,6 +49,8 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
   const [detailOpen, setDetailOpen] = useState(false);
   const [notebookVisited, setNotebookVisited] = useState(false);
   const [notebookOpen, setNotebookOpen] = useState(false);
+  const [attachmentsVisited, setAttachmentsVisited] = useState(false), [attachmentsOpen, setAttachmentsOpen] = useState(false);
+  const attachmentsButton = useRef(null);
   const [adoptionOpen, setAdoptionOpen] = useState(false), [adoptionVisited, setAdoptionVisited] = useState(false);
   const adoptionButton = useRef(null), adoptionVisible = useRef(false);
   adoptionVisible.current = adoptionOpen;
@@ -133,6 +136,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
 
   const open = async item => {
     setNotebookOpen(false);
+    setAttachmentsOpen(false);
     listScroll.current = scrollContainer.current?.scrollTop || 0;
     if (window.innerWidth >= 1024 && detailScroller.current) detailScroller.current.scrollTop = 0;
     const requestId = ++selectionRequest.current;
@@ -241,7 +245,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
     <button type="button" className="btn btn-primary mt-5" onClick={onOpenWorkspace}>Choose a project</button></div>;
 
   return <div className="relative h-full min-w-0">
-    <div ref={scrollContainer} hidden={notebookOpen || adoptionOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
+    <div ref={scrollContainer} hidden={notebookOpen || adoptionOpen || attachmentsOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
     <div className="mx-auto w-full max-w-6xl lg:flex lg:h-full lg:min-h-0 lg:flex-col">
       <header className="mb-7 flex shrink-0 flex-wrap items-start justify-between gap-4">
         <div><p className="mb-1 text-xs text-textMuted">{projectName || 'Current project'}</p><h2 className="text-2xl font-semibold tracking-tight">Analyses</h2>
@@ -284,6 +288,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
             <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-textMuted">Version {selected.version} · {selected.status === 'archived' ? 'Archived' : 'Project analysis'}</span>
               {!canWrite && <span className="text-xs text-textMuted">View access</span>}{dirty && <span role="status" className="text-xs text-primary">Draft edited</span>}</div>
             <button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => { setNotebookVisited(true); setNotebookOpen(true); }}><FileText size={15} />Open documents</button>
+            <button ref={attachmentsButton} type="button" className="btn btn-secondary ml-2 inline-flex items-center gap-2 text-sm" onClick={() => { setAttachmentsVisited(true); setAttachmentsOpen(true); }}><Link2 size={15} />Outside results</button>
             {conflict && <section aria-label="Newer saved version" className="space-y-3 rounded border border-border bg-surface p-4">
               <h3 className="text-sm font-semibold">Latest saved version {conflict.version}</h3><p className="break-words text-sm">{conflict.name}</p><p className="whitespace-pre-wrap break-words text-sm text-textMuted">{conflict.description}</p>
               <p className="text-xs text-textMuted">Linked material in this version: {conflict.references.length}</p>
@@ -334,6 +339,12 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
         <NotebookWorkspace projectId={projectId} projectName={projectName} analysis={selected} role={role} userId={userId} theme={theme}
           connection={connection} isActive={isActive && notebookOpen} onOpenOverview={() => setNotebookOpen(false)}
           onOpenAdvanced={onOpenAdvanced} onOpenWorkflow={onOpenWorkflow} referenceLabel={labelForReference} />
+      </React.Suspense>
+    </div>}
+    {attachmentsVisited && selected && <div hidden={!attachmentsOpen} className="absolute inset-0">
+      <React.Suspense fallback={<p role="status" className="p-8 text-sm text-textMuted">Opening outside results…</p>}>
+        <AnalysisAttachments projectId={projectId} projectName={projectName} analysis={selected} role={role} userId={userId}
+          connection={connection} isActive={isActive && attachmentsOpen} onClose={() => { setAttachmentsOpen(false); requestAnimationFrame(() => attachmentsButton.current?.focus({ preventScroll: true })); }} />
       </React.Suspense>
     </div>}
     {adoptionVisited && <div hidden={!adoptionOpen} className="absolute inset-0">
