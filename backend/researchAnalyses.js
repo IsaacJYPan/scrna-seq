@@ -232,6 +232,12 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.get('/:analysisId/attachments', route(req => attachments.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/options', route(req => attachments.options(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/requests/:requestId', route(req => attachments.getRequest(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
+  router.get('/:analysisId/attachments/comment-requests/:requestId', route(req => attachments.getCommentRequest(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
+  router.get('/:analysisId/attachments/:attachmentId/revisions/:revisionId/comments', route(req => attachments.listComments(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.params.revisionId, req.query)));
+  router.post('/:analysisId/attachments/:attachmentId/revisions/:revisionId/comments', route(async req => {
+    const result = await attachments.addComment(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.params.revisionId, req.body);
+    return { ...result, created: !result.replayed };
+  }));
   router.get('/:analysisId/attachments/:attachmentId/revisions', route(req => attachments.history(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.query)));
   router.get('/:analysisId/attachments/:attachmentId/revisions/:revisionId', route(req => attachments.getRevision(req.user.id, req.params.projectId, req.params.analysisId, req.params.attachmentId, req.params.revisionId)));
   router.post('/:analysisId/attachments/:attachmentId/revisions', route(async req => {

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261026, now())
+VALUES ('traceomics.runtime', 20261027, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1351,6 +1351,28 @@ CREATE TRIGGER trg_analysis_attachment_head BEFORE UPDATE OR DELETE ON research_
   FOR EACH ROW EXECUTE FUNCTION protect_analysis_attachment_head();
 DROP TRIGGER IF EXISTS trg_analysis_attachment_revision_immutable ON research_analysis_attachment_revisions;
 CREATE TRIGGER trg_analysis_attachment_revision_immutable BEFORE UPDATE OR DELETE ON research_analysis_attachment_revisions
+  FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
+
+CREATE TABLE IF NOT EXISTS research_analysis_attachment_comments (
+  id TEXT PRIMARY KEY CHECK(id ~ '^rac_[a-f0-9]{24}$'),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  attachment_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  author_user_id BIGINT NOT NULL REFERENCES users(id),
+  author_display_name TEXT NOT NULL CHECK(char_length(author_display_name) BETWEEN 1 AND 160),
+  body TEXT NOT NULL CHECK(char_length(body) BETWEEN 1 AND 4000),
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(project_id,analysis_id,author_user_id,request_id),
+  FOREIGN KEY(attachment_id,project_id,analysis_id) REFERENCES research_analysis_attachments(id,project_id,analysis_id),
+  FOREIGN KEY(attachment_id,revision_id) REFERENCES research_analysis_attachment_revisions(attachment_id,id)
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_attachment_comment_revision
+  ON research_analysis_attachment_comments(project_id,analysis_id,revision_id,created_at DESC,id DESC);
+DROP TRIGGER IF EXISTS trg_analysis_attachment_comment_immutable ON research_analysis_attachment_comments;
+CREATE TRIGGER trg_analysis_attachment_comment_immutable BEFORE UPDATE OR DELETE ON research_analysis_attachment_comments
   FOR EACH ROW EXECUTE FUNCTION enforce_research_analysis_revision_immutable();
 
 CREATE OR REPLACE FUNCTION protect_attached_managed_artifact() RETURNS TRIGGER AS $$

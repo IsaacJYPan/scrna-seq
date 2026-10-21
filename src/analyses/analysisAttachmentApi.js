@@ -29,3 +29,7 @@ const revisions = (projectId, analysisId, attachmentId) => `${path(projectId, an
 export const correctAnalysisAttachment = (projectId, analysisId, attachmentId, body, { signal } = {}) => request(revisions(projectId, analysisId, attachmentId), { body, signal });
 export const listAnalysisAttachmentRevisions = (projectId, analysisId, attachmentId, { cursor, signal } = {}) => request(`${revisions(projectId, analysisId, attachmentId)}?${pageQuery(cursor)}`, { signal });
 export const getAnalysisAttachmentRevision = (projectId, analysisId, attachmentId, revisionId, { signal } = {}) => request(`${revisions(projectId, analysisId, attachmentId)}/${encodeURIComponent(revisionId)}`, { signal });
+const comments = (projectId, analysisId, attachmentId, revisionId) => `${revisions(projectId, analysisId, attachmentId)}/${encodeURIComponent(revisionId)}/comments`;
+export const listAnalysisAttachmentComments = (projectId, analysisId, attachmentId, revisionId, { cursor, signal } = {}) => request(`${comments(projectId, analysisId, attachmentId, revisionId)}?${pageQuery(cursor)}`, { signal });
+export const createAnalysisAttachmentComment = (projectId, analysisId, attachmentId, revisionId, body, { signal } = {}) => request(comments(projectId, analysisId, attachmentId, revisionId), { body, signal });
+export const getAnalysisAttachmentCommentRequest = (projectId, analysisId, requestId, { signal } = {}) => request(`${path(projectId, analysisId)}/comment-requests/${encodeURIComponent(requestId)}`, { signal });

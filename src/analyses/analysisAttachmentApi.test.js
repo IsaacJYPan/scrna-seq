@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createAnalysisAttachment, correctAnalysisAttachment, getAnalysisAttachmentRequest, getAnalysisAttachmentRevision,
-  listAnalysisAttachments, listAnalysisAttachmentOptions, listAnalysisAttachmentRevisions } from './analysisAttachmentApi';
+  listAnalysisAttachments, listAnalysisAttachmentOptions, listAnalysisAttachmentRevisions, listAnalysisAttachmentComments,
+  createAnalysisAttachmentComment, getAnalysisAttachmentCommentRequest } from './analysisAttachmentApi';
 import { withExecutionTarget } from '../runtime/executionTarget';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -95,3 +96,37 @@ it('preserves a structured CAS rejection so edits can be rebased deliberately wi
     .rejects.toMatchObject({ status: 409, code: 'ANALYSIS_ATTACHMENT_HEAD_CONFLICT', attachment, submittedExpectedHeadRevisionId });
   expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+it('reads bounded exact-revision comments and source-free original comment receipts as authenticated non-mutations', async () => {
+  const result = { canComment: true }; fetch.mockResolvedValue({ ok: true, json: async () => result });
+  const signal = new AbortController().signal;
+  await listAnalysisAttachmentComments('project 1', 'analysis 1', 'attachment/1', 'revision/2', { cursor: 'older_page', signal });
+  await getAnalysisAttachmentCommentRequest('project 1', 'analysis 1', 'original/request', { signal });
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    endpoint + '/attachment%2F1/revisions/revision%2F2/comments?limit=30&cursor=older_page',
+    endpoint + '/comment-requests/original%2Frequest',
+  ]);
+  for (const [, options] of fetch.mock.calls) {
+    expect(options).toMatchObject({ method: 'GET', credentials: 'include', signal }); expect(options).not.toHaveProperty('body');
+  }
+  expect(withExecutionTarget).toHaveBeenNthCalledWith(1, expect.any(Function), { mutation: false });
+  expect(withExecutionTarget).toHaveBeenNthCalledWith(2, expect.any(Function), { mutation: false });
+});
+
+it('posts only the frozen comment body and UUID to its exact attachment revision without a head CAS or file bytes', async () => {
+  const body = Object.freeze({ requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', body: 'Explain this result.\nA second line.' });
+  fetch.mockResolvedValue({ ok: true, json: async () => ({ requestId: body.requestId }) });
+  const signal = new AbortController().signal;
+  await createAnalysisAttachmentComment('project 1', 'analysis 1', 'attachment/1', 'revision/2', body, { signal });
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(endpoint + '/attachment%2F1/revisions/revision%2F2/comments', expect.objectContaining({
+    method: 'POST', credentials: 'include', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }));
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: true });
+});
+
+it.each([[404, 'ANALYSIS_ATTACHMENT_COMMENT_REQUEST_NOT_FOUND'], [409, 'ANALYSIS_ATTACHMENT_COMMENT_REQUEST_CONFLICT'], [409, 'ANALYSIS_ARCHIVED']])(
+  'preserves comment receipt status %i and %s without retrying or turning a lookup into a write', async (status, code) => {
+    fetch.mockResolvedValue({ ok: false, status, json: async () => ({ code, error: 'The comment request could not be confirmed.' }) });
+    await expect(getAnalysisAttachmentCommentRequest('project 1', 'analysis 1', 'original')).rejects.toMatchObject({ status, code });
+    expect(fetch).toHaveBeenCalledTimes(1); expect(fetch.mock.calls[0][1].method).toBe('GET');
+  });

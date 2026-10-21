@@ -5,6 +5,7 @@ import { createAnalysisAttachment, correctAnalysisAttachment, getAnalysisAttachm
 import { validateAttachmentAcceptance, validateAttachmentCorrectionAcceptance, validateAttachmentRevision, validateAttachmentList, validateAttachmentOptions } from './analysisAttachmentValidation';
 import { publicErrorMessage } from '../publicError';
 import AttachmentRevisionHistory from './AttachmentRevisionHistory';
+import RevisionDiscussion from './RevisionDiscussion';
 
 const RetainedArtifactView = React.lazy(() => import('../components/RetainedArtifactView'));
 const noteLabels = { origin: 'Where this result came from', sourceReference: 'Code or method reference', documentReference: 'Supporting document reference', environmentReference: 'Environment reference' };
@@ -44,6 +45,7 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
   const inspectTrigger = useRef(null), overviewBack = useRef(null);
   const pendingOperation = useRef(null), draftCache = useRef(new Map()), revisionRequest = useRef(null), revisionGeneration = useRef(0);
   const captionInput = useRef(null);
+  const commentDrafts = useRef(new Map());
   const canWrite = ['owner', 'admin', 'analyst'].includes(role) && analysis.status === 'active' && authority !== false;
   const available = isActive && !connection.blocked;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; listRequest.current?.abort(); optionRequest.current?.abort(); actionRequest.current?.abort(); revisionRequest.current?.abort(); }; }, []);
@@ -273,6 +275,10 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
         {revisionLoading && <p role="status" className="text-xs text-textMuted">Opening the exact saved revision…</p>}
         {available && sourceAllowed ? <React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Opening the saved result…</p>}><RetainedArtifactView key={`${selectedReference.versionId}:${selectedReference.sha256}`} projectId={projectId} userId={userId} reference={selectedReference} compact /></React.Suspense>
           : <p className="text-sm leading-relaxed text-textMuted">{connection.blocked ? 'Reconnect to inspect this saved source.' : selection.item.sourceAccess === 'restricted' ? 'This source remains private to its owner. The attachment has not granted access to the file.' : 'The original source is unavailable. Its exact identity, caption and supplied context are retained.'}</p>}
+        {selectedRevision && <RevisionDiscussion key={JSON.stringify([connection.identity, connection.epoch, projectId, userId, selectedRevision.id])}
+          projectId={projectId} analysisId={analysis.id} userId={userId} attachmentId={selection.item.id} revisionId={selectedRevision.id} revisionNumber={selectedRevision.revisionNumber}
+          active={analysis.status === 'active'} available={available && !readDenied} cache={commentDrafts.current}
+          cacheId={JSON.stringify([connection.identity, projectId, analysis.id, userId, selection.item.id, selectedRevision.id])} onDenied={clearAccess} />}
       </section>}
     </div>
   </section>;

@@ -4,8 +4,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import AnalysisAttachments from './AnalysisAttachments';
 import { createAnalysisAttachment, correctAnalysisAttachment, getAnalysisAttachmentRequest, getAnalysisAttachmentRevision,
-  listAnalysisAttachments, listAnalysisAttachmentOptions, listAnalysisAttachmentRevisions } from './analysisAttachmentApi';
+  listAnalysisAttachments, listAnalysisAttachmentOptions, listAnalysisAttachmentRevisions, listAnalysisAttachmentComments,
+  createAnalysisAttachmentComment } from './analysisAttachmentApi';
 import { canonicalAnalysisAttachmentContent, canonicalAnalysisAttachmentCorrection } from '../../shared/analysisAttachment.mjs';
+import { canonicalAnalysisAttachmentComment } from '../../shared/analysisAttachmentComment.mjs';
 
 const preview = vi.hoisted(() => ({ render: vi.fn() }));
 vi.mock('../components/RetainedArtifactView', () => ({ default: props => {
@@ -14,7 +16,8 @@ vi.mock('../components/RetainedArtifactView', () => ({ default: props => {
 } }));
 vi.mock('./analysisAttachmentApi', () => ({ createAnalysisAttachment: vi.fn(), getAnalysisAttachmentRequest: vi.fn(),
   listAnalysisAttachments: vi.fn(), listAnalysisAttachmentOptions: vi.fn(), correctAnalysisAttachment: vi.fn(),
-  getAnalysisAttachmentRevision: vi.fn(), listAnalysisAttachmentRevisions: vi.fn() }));
+  getAnalysisAttachmentRevision: vi.fn(), listAnalysisAttachmentRevisions: vi.fn(), listAnalysisAttachmentComments: vi.fn(),
+  createAnalysisAttachmentComment: vi.fn(), getAnalysisAttachmentCommentRequest: vi.fn() }));
 
 const projectId = `proj_${'1'.repeat(24)}`;
 const analysis = { id: `ra_${'2'.repeat(24)}`, name: 'Treatment response', status: 'active' };
@@ -86,6 +89,8 @@ beforeEach(() => {
   vi.resetAllMocks(); vi.stubGlobal('crypto', webcrypto);
   listAnalysisAttachments.mockImplementation(async (_project, selectedAnalysis) => ({ ...common, analysisId: selectedAnalysis, attachments: [], nextCursor: null }));
   listAnalysisAttachmentOptions.mockResolvedValue({ ...common, items: [option], nextCursor: null });
+  listAnalysisAttachmentComments.mockImplementation(async (projectId, analysisId, attachmentId, revisionId) => ({ projectId, analysisId,
+    attachmentId, revisionId, headRevisionId: revisionId, canComment: true, comments: [], nextCursor: null }));
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -99,6 +104,41 @@ it.each(['restricted', 'unavailable'])('retains imported caption and unknown sup
   expect(inside().getAllByText('Unknown / not supplied')).toHaveLength(4);
   expect(preview.render).not.toHaveBeenCalled();
   expect(inside().queryByRole('button', { name: 'Attach outside result', exact: true })).not.toBeInTheDocument();
+});
+
+it('lets a current project reader discuss a private source revision while keeping attachment correction and private preview unavailable', async () => {
+  listAnalysisAttachments.mockResolvedValue({ ...common, canWrite: false, attachments: [{ ...originalItem, sourceAccess: 'restricted' }], nextCursor: null });
+  createAnalysisAttachmentComment.mockImplementationOnce(async (projectId, analysisId, attachmentId, revisionId, input) => ({
+    projectId, analysisId, attachmentId, revisionId, headRevisionId: revisionId, canComment: true, requestId: input.requestId,
+    requestSha256: createHash('sha256').update(canonicalAnalysisAttachmentComment(attachmentId, revisionId, input)).digest('hex'), replayed: false,
+    comment: { id: `rac_${'c'.repeat(24)}`, attachmentId, revisionId, body: input.body, authorUserId: 1,
+      authorDisplayName: 'Current reader', createdAt: '2026-10-20T12:00:00.000Z' },
+  }));
+  render(<AnalysisAttachments {...props} role="viewer" />);
+  fireEvent.click(await inside().findByRole('button', { name: 'Inspect result and context' }));
+  const text = await inside().findByRole('textbox', { name: 'Comment on this revision' }); await waitFor(() => expect(text).toBeEnabled());
+  fireEvent.change(text, { target: { value: 'Question about the supplied caption, without source access.' } });
+  fireEvent.click(inside().getByRole('button', { name: 'Post comment' }));
+  expect(await inside().findByText('Your comment is saved on revision 1.')).toBeVisible();
+  expect(createAnalysisAttachmentComment).toHaveBeenCalledWith(projectId, analysis.id, originalItem.id, originalItem.headRevisionId,
+    expect.objectContaining({ body: 'Question about the supplied caption, without source access.' }), expect.any(Object));
+  expect(preview.render).not.toHaveBeenCalled(); expect(correctAnalysisAttachment).not.toHaveBeenCalled();
+  expect(inside().queryByRole('button', { name: 'Correct caption or source' })).not.toBeInTheDocument();
+});
+
+it('keeps revision discussion drafts independent when selecting another attached result and returning', async () => {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 1100 });
+  savedItems([originalItem, secondItem]); render(<AnalysisAttachments {...props} />);
+  const choose = async caption => {
+    const row = within(await inside().findByRole('list', { name: 'Attached outside results' })).getAllByRole('listitem').find(item => item.textContent.includes(caption));
+    fireEvent.click(within(row).getByRole('button', { name: 'Inspect result and context' }));
+    const text = await inside().findByRole('textbox', { name: 'Comment on this revision' }); await waitFor(() => expect(text).toBeEnabled()); return text;
+  };
+  fireEvent.change(await choose(originalItem.revision.caption), { target: { value: 'Original revision question' } });
+  fireEvent.change(await choose(secondItem.revision.caption), { target: { value: 'Independent other revision question' } });
+  expect(await choose(originalItem.revision.caption)).toHaveValue('Original revision question');
+  expect(await choose(secondItem.revision.caption)).toHaveValue('Independent other revision question');
+  expect(createAnalysisAttachmentComment).not.toHaveBeenCalled();
 });
 
 it('freezes a normalized attachment request through an unknown result, explicit missing-receipt check and deliberate retry', async () => {
@@ -196,12 +236,12 @@ it('keeps a newer inspected attachment when an earlier create finishes late', as
 
 it('preserves a caption and supplied context while navigating between analyses without copying the selected source', async () => {
   const view = render(<AnalysisAttachments {...props} />); await fillForm('An unsaved caption');
-  view.rerender(<AnalysisAttachments {...props} analysis={otherAnalysis} />);
+  await act(async () => view.rerender(<AnalysisAttachments {...props} analysis={otherAnalysis} />));
   await inside().findByText('No outside results attached');
   fireEvent.click(inside().getByRole('button', { name: 'Attach outside result', exact: true }));
   expect(inside().getByLabelText('Result caption')).toHaveValue('');
   expect(inside().queryByText(/Selected: scores.csv/)).not.toBeInTheDocument();
-  view.rerender(<AnalysisAttachments {...props} />);
+  await act(async () => view.rerender(<AnalysisAttachments {...props} />));
   expect(inside().getByLabelText('Result caption')).toHaveValue('An unsaved caption');
   expect(inside().getByLabelText('Where this result came from')).toHaveValue('  External lab  ');
   expect(inside().getByText(/Selected: scores.csv/)).toBeVisible();
@@ -274,12 +314,12 @@ it('keeps a pending request in its original analysis and ignores its late respon
   const completion = deferred(); createAnalysisAttachment.mockReturnValueOnce(completion.promise);
   const view = render(<AnalysisAttachments {...props} />); await fillForm(); const body = await submit();
   const signal = createAnalysisAttachment.mock.calls[0][3].signal;
-  view.rerender(<AnalysisAttachments {...props} analysis={otherAnalysis} />);
+  await act(async () => view.rerender(<AnalysisAttachments {...props} analysis={otherAnalysis} />));
   expect(signal.aborted).toBe(true);
   await act(async () => completion.resolve(accepted(body)));
   expect(inside().queryByRole('region', { name: 'Attachment recovery' })).not.toBeInTheDocument();
   expect(inside().queryByRole('region', { name: 'Attachment confirmed' })).not.toBeInTheDocument();
-  view.rerender(<AnalysisAttachments {...props} />);
+  await act(async () => view.rerender(<AnalysisAttachments {...props} />));
   const recovery = inside().getByRole('region', { name: 'Attachment recovery' });
   expect(within(recovery).getByText(body.requestId)).toBeInTheDocument();
   expect(within(recovery).getByRole('button', { name: 'Check attachment outcome' })).toBeEnabled();

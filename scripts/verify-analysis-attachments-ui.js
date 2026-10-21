@@ -42,7 +42,7 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
   const expectedDiagnostics = new Set(), responses = [];
   const faultPaths = new Set();
   let service, database, browser, page, study, otherStudy, table, figure;
-  let extraRevisions = 0;
+  let extraRevisions = 0, expectedAnalysisVersion = 1;
   const base = () => `/api/projects/${service.project.id}/analyses`;
   const attachmentPath = (analysis = study) => `${base()}/${analysis.id}/attachments`;
   const region = target => target.getByRole('region', { name: 'Outside results', exact: true });
@@ -66,7 +66,7 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
       const pathname = new URL(request.url()).pathname;
       if (!pathname.startsWith('/api/')) return;
       const record = { actor, method: request.method(), pathname };
-      if (record.method === 'POST' && /\/attachments(?:\/raa_[a-f0-9]{24}\/revisions)?$/.test(pathname)) record.input = request.postDataJSON();
+      if (record.method === 'POST' && /\/attachments(?:\/raa_[a-f0-9]{24}\/revisions(?:\/rar_[a-f0-9]{24}\/comments)?)?$/.test(pathname)) record.input = request.postDataJSON();
       requests.push(record);
     });
     target.on('response', response => {
@@ -196,8 +196,13 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
     assert(await image.evaluate(node => node.complete && node.naturalWidth === 480 && node.naturalHeight === 240), 'Actual saved PNG bytes did not decode at their exact dimensions.');
     await matrix(page, 'attached-raster', () => image.scrollIntoViewIfNeeded()); check('Actual imported PNG bytes decode through the common private retained-result viewer in both themes and laptop/natural phone layouts.');
 
-    if (verifyCorrections) extraRevisions = await verifyCorrections({ service, database, page, study, table, figure, accounts, requests, faults, baselineAttachment: first,
-      region, form, details, api, login, openAnalysis, openOutside, prepare, submit, closeDetails, theme, capture, matrix, until, assert, check, attachmentPath, expectedDiagnostics, faultPaths });
+    if (verifyCorrections) {
+      const extension = await verifyCorrections({ service, database, page, study, table, figure, accounts, requests, faults, baselineAttachment: first,
+        region, form, details, api, login, openAnalysis, openOutside, prepare, submit, closeDetails, theme, capture, matrix, until, assert, check, attachmentPath, expectedDiagnostics, faultPaths });
+      extraRevisions = typeof extension === 'number' ? extension : extension.extraRevisions;
+      expectedAnalysisVersion = typeof extension === 'number' ? 1 : extension.analysisVersion;
+      assert(Number.isSafeInteger(extraRevisions) && extraRevisions >= 0 && Number.isSafeInteger(expectedAnalysisVersion) && expectedAnalysisVersion >= 1, 'The extension did not account for its intended evidence and explicit analysis edits.');
+    }
 
     await closeDetails(page); await page.setViewportSize({ width: 1366, height: 768 }); await theme(page, 'light');
     await prepare(page, figure, 'Actual held acknowledgement must preserve the selected table.');
@@ -299,7 +304,7 @@ async function main({ artifactDirectory, verifyCorrections } = {}) {
 
     const count = (await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_attachment_revisions')).rows[0].n;
     assert(count === 6 + extraRevisions, 'Attachment admission or recovery duplicated immutable revisions.');
-    assert((await database.query('SELECT version FROM research_analyses WHERE id=$1', [study.id])).rows[0].version === 1, 'Attachments mutated unrelated analysis revisions.');
+    assert((await database.query('SELECT version FROM research_analyses WHERE id=$1', [study.id])).rows[0].version === expectedAnalysisVersion, 'Attachments mutated unrelated analysis revisions beyond the explicit versioned archive/restoration actions.');
     for (const tableName of ['jobs', 'private_r_kernels', 'private_r_executions']) assert(Number((await database.query(`SELECT COUNT(*) AS n FROM ${tableName}`)).rows[0].n) === 0, 'An attachment operation executed science.');
     assert(sha(fs.readFileSync(path.resolve(service.storageRoot, ...(await database.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1', [table.versionId])).rows[0].storage_key.split('/')))) === sha(csv), 'Attachment operations changed the original table bytes.');
     await Promise.all(assetReads);

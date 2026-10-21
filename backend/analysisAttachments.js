@@ -28,7 +28,7 @@ function createAnalysisAttachmentService(database = db, provider = storage.creat
     const client = await (await database.connect()).connect(); let committing = false, destroy = false;
     try {
       await client.query('BEGIN');
-      const user = (await client.query('SELECT id,is_demo_guest FROM users WHERE id=$1 FOR KEY SHARE', [userId])).rows[0];
+      const user = (await client.query('SELECT id,is_demo_guest,display_name FROM users WHERE id=$1 FOR KEY SHARE', [userId])).rows[0];
       if (!user) notFound();
       if (!(await client.query('SELECT id FROM projects WHERE id=$1 FOR SHARE', [projectId])).rowCount) notFound();
       const member = (await client.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId])).rows[0];
@@ -269,6 +269,7 @@ function createAnalysisAttachmentService(database = db, provider = storage.creat
         revision: revision(row), sourceAccess: await sourceAccess(client, userId, projectId, row) };
     }, true);
   }
-  return { create, correct, getRequest, list, options, history, getRevision };
+  const discussion = require('./analysisAttachmentComments').createAnalysisAttachmentCommentService({ transaction, head });
+  return { create, correct, getRequest, list, options, history, getRevision, ...discussion };
 }
 module.exports = { createAnalysisAttachmentService };

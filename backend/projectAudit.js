@@ -6,9 +6,9 @@ const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const ACTIONS = new Set([
   'branch.created', 'branch.advanced', 'branch.published',
   'review.requested', 'review.commented', 'review.decided', 'canonical.promoted',
-  'artifact.downloaded', 'reproducibility.exported',
+  'artifact.downloaded', 'reproducibility.exported', 'attachment.commented',
 ]);
-const TARGET_TYPES = new Set(['branch', 'review', 'analysis_object', 'artifact', 'project']);
+const TARGET_TYPES = new Set(['branch', 'review', 'analysis_object', 'artifact', 'project', 'attachment_revision']);
 const DETAIL_KEYS = new Set([
   'artifactType', 'branchVisibility', 'canonicalVersion', 'decision',
   'fromAnalysisObjectId', 'toAnalysisObjectId', 'manifestVersion',

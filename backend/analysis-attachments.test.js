@@ -261,6 +261,6 @@ describe.skipIf(!process.env.DATABASE_URL)('analysis attachment PostgreSQL/HTTP/
     expect(await db.deleteExpiredDemoGuest(owner.user.id)).toBe(true);
     expect(await count('research_analysis_attachments')).toBe(1); expect(await count('research_analysis_attachment_revisions')).toBe(1);
     expect((await service.getRequest(colleague.user.id, retainedProject.id, retainedAnalysis.id, retainedBody.requestId)).canWrite).toBe(true);
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261026);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261027);
   });
 });
