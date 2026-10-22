@@ -28,7 +28,7 @@ async function until(check, message, timeout = 30000) {
   throw new Error(message);
 }
 
-async function main({ artifactDirectory } = {}) {
+async function main({ artifactDirectory, configureServerData, verifyServerImports } = {}) {
   const directory = path.resolve(artifactDirectory || path.join(root, 'playwright/report', 'artifact-import-recovery-' + Date.now()));
   assert(directory.startsWith(path.join(root, 'playwright/report') + path.sep), 'Acceptance evidence must stay in ignored report storage.');
   assert(fs.existsSync(path.join(root, 'dist/index.html')), 'A coordinated frozen production build is required.');
@@ -36,6 +36,8 @@ async function main({ artifactDirectory } = {}) {
   const frozenAssets = new Map(fs.readdirSync(path.join(root, 'dist/assets')).map(name => [name, sha(fs.readFileSync(path.join(root, 'dist/assets', name)))]));
   const checks = [], screenshots = [], profiles = [], requests = [], uploads = [], browserErrors = [], consoleErrors = [], assets = {}, receipts = [], accounts = {};
   const expectedHttpDiagnostics = new Set(), assetReads = [], faults = [];
+  const browserRestarts = [], additionalFaultPaths = new Set();
+  let additionalNetworkFaults = 0;
   let service, database, browser, page;
   const check = message => { checks.push(message); console.log('PASS: ' + message); };
   const base = () => '/api/artifact-versions/' + service.project.id;
@@ -88,7 +90,9 @@ async function main({ artifactDirectory } = {}) {
     target.on('request', request => {
       const pathname = new URL(request.url()).pathname;
       if (!pathname.startsWith('/api/')) return;
-      requests.push({ actor, method: request.method(), pathname });
+      const observed = { actor, method: request.method(), pathname };
+      if (request.method() === 'POST' && /^\/api\/server-data\/[^/]+\/imports$/.test(pathname)) observed.input = request.postDataJSON();
+      requests.push(observed);
     });
     target.on('response', response => {
       const pathname = new URL(response.url()).pathname;
@@ -104,6 +108,18 @@ async function main({ artifactDirectory } = {}) {
     await target.getByRole('button', { name: /Open Workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor();
     return target;
+  }
+  async function launchBrowser() {
+    const leaf = new crypto.X509Certificate(fs.readFileSync(service.certificatePath));
+    return chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP ' + new URL(service.endpoint).hostname + ' 127.0.0.1',
+      '--ignore-certificate-errors-spki-list=' + Buffer.from(sha(leaf.publicKey.export({ type: 'spki', format: 'der' })), 'hex').toString('base64')] });
+  }
+  async function restartBrowser() {
+    await Promise.all(assetReads);
+    const previous = browser; await previous.close(); assert(!previous.isConnected(), 'The previous browser process remained connected.');
+    browser = await launchBrowser(); assert(browser.isConnected(), 'The replacement browser did not start.');
+    browserRestarts.push({ previousClosed: true, replacementConnected: true });
+    page = await login(); return page;
   }
   async function nav(target, name) {
     const expand = target.getByRole('button', { name: 'Expand sidebar', exact: true });
@@ -227,14 +243,14 @@ async function main({ artifactDirectory } = {}) {
         accounts.colleague = { id: Number(colleague.id), email };
         await seed.query("INSERT INTO organization_members(organization_id,user_id,role) VALUES($1,$2,'member')", [organization.organization_id, colleague.id]);
         await seed.query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,'viewer')", [project.id, colleague.id]);
+        if (configureServerData) return await configureServerData({ env, account, project, accounts, database: seed });
       } finally { await seed.end(); }
       return {};
     } });
     database = new Client({ connectionString: service.databaseUrl }); await database.connect();
     const leaf = new crypto.X509Certificate(fs.readFileSync(service.certificatePath)), ca = new crypto.X509Certificate(fs.readFileSync(service.caCertificatePath));
     assert(leaf.verify(ca.publicKey) && leaf.checkHost(new URL(service.endpoint).hostname), 'The owned fixture TLS identity could not be verified.');
-    browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP ' + new URL(service.endpoint).hostname + ' 127.0.0.1',
-      '--ignore-certificate-errors-spki-list=' + Buffer.from(sha(leaf.publicKey.export({ type: 'spki', format: 'der' })), 'hex').toString('base64')] });
+    browser = await launchBrowser();
     page = await login(); await openArtifacts(page);
     const first = await normalImport(page, original, 'Immutable sample sheet');
     assert(await region(page).getByRole('cell', { name: 'one, two', exact: true }).isVisible(), 'Actual quoted CSV bytes did not receive a checked table preview.');
@@ -356,11 +372,17 @@ async function main({ artifactDirectory } = {}) {
     const firstStored = (await database.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1', [first.versionId])).rows[0];
     const firstPath = path.resolve(service.storageRoot, ...firstStored.storage_key.split('/'));
     assert(firstPath.startsWith(path.resolve(service.storageRoot) + path.sep) && sha(fs.readFileSync(firstPath)) === sha(original), 'Later uploads or recovery changed original immutable bytes.');
+    if (verifyServerImports) {
+      const extended = await verifyServerImports({ service, database, page, accounts, requests, faults, api, login, openArtifacts,
+        select, selectedIs, reference, setTheme, capture, matrix, region, restartBrowser, expectedHttpDiagnostics,
+        faultPaths: additionalFaultPaths, until, assert, check });
+      additionalNetworkFaults = extended?.networkFaults || 0;
+    }
     for (const table of ['jobs', 'private_r_kernels', 'private_r_executions']) assert(await countRows(table) === 0, 'Artifact import recovery admitted scientific execution.');
     const science = requests.filter(item => item.method === 'POST' && (/^\/api\/r\//.test(item.pathname) || /^\/api\/private-r-kernels(?:\/|$)/.test(item.pathname) || /^\/api\/projects\/[^/]+\/jobs$/.test(item.pathname)));
     assert(science.length === 0, 'An artifact recovery operation dispatched scientific computation.');
     await Promise.all(assetReads);
-    const faultPaths = new Set([base(), appendPath]);
+    const faultPaths = new Set([base(), appendPath, ...additionalFaultPaths]);
     const networkFault = entry => /^Failed to load resource: net::ERR_(?:FAILED|CONTENT_LENGTH_MISMATCH|EMPTY_RESPONSE|INCOMPLETE_CHUNKED_ENCODING|CONNECTION_CLOSED|CONNECTION_RESET)/.test(entry.text)
       && faultPaths.has(new URL(entry.url).pathname);
     const allowedHttp = entry => {
@@ -369,10 +391,10 @@ async function main({ artifactDirectory } = {}) {
       return status === '401' && pathname === '/api/auth/session' || status === '404' && pathname === '/api/r/session-id'
         || expectedHttpDiagnostics.has(`${status} ${pathname}`);
     };
-    assert(consoleErrors.filter(networkFault).length <= 2, 'Network failures occurred beyond the deliberate upstream abort and accepted lost reply.');
+    assert(consoleErrors.filter(networkFault).length <= 2 + additionalNetworkFaults, 'Network failures occurred beyond the deliberate fixture boundaries.');
     assert(browserErrors.length === 0 && consoleErrors.every(entry => networkFault(entry) || allowedHttp(entry)), 'The production UI raised an unexpected browser/React/transport error or changed compiled assets.');
     check('All checks use unchanged production assets and real auth/storage; zero scientific jobs, kernels or execution requests and no unexpected browser errors.');
-    const result = { passed: true, checks, screenshots, profiles, compiledAssets: assets, receipts, uploads, browserErrors, consoleErrors,
+    const result = { passed: true, checks, screenshots, profiles, compiledAssets: assets, receipts, uploads, browserRestarts, browserErrors, consoleErrors,
       explicitlyExpectedHttpDiagnostics: [...expectedHttpDiagnostics], scientificDispatchCount: science.length,
       fixture: 'Owned disposable production HTTPS/auth/PostgreSQL/storage with health-only R stub; synthetic CSV files, one pre-upstream browser abort, one real held acknowledgement and one genuine accepted-response drop.',
       limitations: ['No scientific execution, SSH transport or large-file performance claim.', 'Acceptance receipt proves recorded import identity; only separate successful inspection verifies current bytes.'] };

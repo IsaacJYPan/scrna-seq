@@ -194,12 +194,15 @@ function ArtifactInspectorScope({ projectId, canWrite = false, userId }) {
       </details>
     </section>}
     {!pending && !confirmation && importError && <p role="alert" className="text-danger text-sm">{importError}</p>}
-    {writer && <ServerDataImporter projectId={projectId} userId={userId} onImported={async version => {
+    <ServerDataImporter projectId={projectId} userId={userId} canWrite={writer} onOutcome={async outcome => {
+      if (!outcome || outcome.status === 'succeeded' && !outcome.version) { setServerImported(null); await refresh(); }
+    }} onImported={async version => {
       const refreshed = await refresh();
       if (refreshed && mounted.current && projectRef.current === projectId) setServerImported(version);
-    }} />}
+    }} />
     {serverImported && <div role="status" className="space-y-2 rounded border border-border p-3 text-sm">
       <p>Server file imported. Your current artifact selection was kept.</p>
+      <p className="break-words [overflow-wrap:anywhere]">{serverImported.name} · v{serverImported.versionNumber}</p>
       <button type="button" className="text-primary underline" onClick={() => inspect(serverImported)}>Inspect imported server version</button>
     </div>}
     {error && <p role="alert" className="text-danger text-sm">{error}</p>}
@@ -208,7 +211,7 @@ function ArtifactInspectorScope({ projectId, canWrite = false, userId }) {
         <span className="block font-medium text-sm break-words">{item.name}{item.versionNumber ? ` · v${item.versionNumber}` : ''}</span>
         <span className="block text-xs text-textMuted">{item.type} · {bytesLabel(item.sizeBytes)}</span><span className="block text-xs text-textMuted break-all">{item.versionId}</span>
       </button>)}
-        {!loading && items.length === 0 && <p className="text-sm text-textMuted">No saved artifact files are available for your workspace yet.</p>}
+        {!loading && !error && items.length === 0 && <p className="text-sm text-textMuted">No saved artifact files are available for your workspace yet.</p>}
         {nextCursor && <button className="btn btn-secondary text-sm" disabled={loading} onClick={() => refresh(nextCursor)}>More artifact versions</button>}
       </div>
       <div className="min-w-0 space-y-3">{selected ? <RetainedArtifactView key={`${selected.versionId}:${inspection}`} projectId={projectId} userId={userId}

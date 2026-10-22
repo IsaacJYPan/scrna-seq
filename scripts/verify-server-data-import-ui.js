@@ -218,6 +218,7 @@ async function main() {
       const row = (await database.query('SELECT * FROM managed_artifact_versions WHERE project_id=$1 AND owner_user_id=$2 AND name=$3',
         [project.id, owner.id, name])).rows[0];
       assert(row, 'The UI import did not persist its private managed artifact.');
+      await artifacts.getByRole('button', { name: 'Inspect imported server version', exact: true }).click();
       await artifacts.getByText(row.checksum_sha256, { exact: true }).waitFor();
       return row;
     }
@@ -254,7 +255,8 @@ async function main() {
       // Discard one genuine admission receipt, leaving actual server I/O untouched.
       const original = Response.prototype.json;
       Response.prototype.json = function (...args) {
-        if (new URL(this.url).pathname === importPath) {
+        const address = new URL(this.url);
+        if (address.pathname === importPath && !address.search) {
           Response.prototype.json = original;
           return Promise.reject(new SyntaxError('Disposable unreadable admission receipt.'));
         }

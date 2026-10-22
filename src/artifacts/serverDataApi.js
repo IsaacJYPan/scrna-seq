@@ -1,5 +1,6 @@
 import { apiUrl } from '../api';
 import { withExecutionTarget } from '../runtime/executionTarget';
+import { validateServerDataImport, validateServerDataImportList } from './serverDataImportValidation';
 
 const base = projectId => `/api/server-data/${encodeURIComponent(projectId)}`;
 
@@ -39,17 +40,18 @@ export function listServerDataFiles(projectId, rootId, { path = '', cursor, limi
   return request(`${base(projectId)}/roots/${encodeURIComponent(rootId)}/files?${query}`, { signal });
 }
 
-export function importServerData(projectId, input, signal) {
-  return request(`${base(projectId)}/imports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal }).then(value => validateReceipt(value, input.requestId, projectId, true));
+export function importServerData(projectId, input, signal, scope = {}) {
+  return request(`${base(projectId)}/imports`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal }).then(async value => {
+    try { return await validateServerDataImport(value, { ...scope, projectId, requestId: input.requestId }, input); }
+    catch { throw Object.assign(new Error('The saved import receipt could not be confirmed. Check this import request before submitting another import.'), { code: 'SERVER_DATA_IMPORT_UNCONFIRMED' }); }
+  });
 }
 
-export function getServerDataImport(projectId, requestId, signal) {
-  return request(`${base(projectId)}/imports/${encodeURIComponent(requestId)}`, { signal }).then(value => validateReceipt(value, requestId, projectId));
+export function getServerDataImport(projectId, requestId, signal, scope = {}) {
+  return request(`${base(projectId)}/imports/${encodeURIComponent(requestId)}`, { signal }).then(value => validateServerDataImport(value, { ...scope, projectId, requestId }));
 }
 
-function validateReceipt(value, requestId, projectId, mutation = false) {
-  const valid = value && value.requestId === requestId && ['pending', 'succeeded', 'failed'].includes(value.status)
-    && (value.status !== 'succeeded' || value.version?.projectId === String(projectId) && typeof value.version.versionId === 'string' && /^[a-f0-9]{64}$/.test(value.version.sha256));
-  if (!valid) throw Object.assign(new Error('The saved import receipt could not be confirmed. Check this import request before submitting another import.'), { code: mutation ? 'SERVER_DATA_IMPORT_UNCONFIRMED' : 'SERVER_DATA_RESPONSE_INVALID' });
-  return value;
+export function listServerDataImports(projectId, { cursor, limit = 30, signal, userId, serviceId } = {}) {
+  const query = new URLSearchParams({ limit: String(limit), ...(cursor ? { cursor } : {}) });
+  return request(`${base(projectId)}/imports?${query}`, { signal }).then(value => validateServerDataImportList(value, { projectId, userId, serviceId }));
 }

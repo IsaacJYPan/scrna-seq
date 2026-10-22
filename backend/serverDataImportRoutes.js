@@ -21,6 +21,7 @@ function serverDataImportRoutes({ db, provider, requireAuth, service: suppliedSe
   };
   router.get('/:projectId/roots', route(async (req, res) => res.json(await service.roots(req.user.id, req.params.projectId))));
   router.get('/:projectId/roots/:rootId/files', route(async (req, res) => res.json(await service.list(req.user.id, req.params.projectId, req.params.rootId, req.query))));
+  router.get('/:projectId/imports', route(async (req, res) => res.json(await service.listImports(req.user.id, req.params.projectId, req.query))));
   router.post('/:projectId/imports', route(async (req, res) => {
     const result = await service.start(req.user.id, req.params.projectId, req.body);
     res.status(result.status === 'pending' ? 202 : 200).json(result);

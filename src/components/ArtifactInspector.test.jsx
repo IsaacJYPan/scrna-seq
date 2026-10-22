@@ -101,6 +101,7 @@ it('does not expose a preview after checksum failure and clears private details 
   fireEvent.click(screen.getByRole('button', { name: 'Refresh artifacts' }));
   await waitFor(() => expect(screen.queryByText('Researcher')).not.toBeInTheDocument());
   expect(screen.queryByRole('button', { name: /Gene scores · v1/ })).not.toBeInTheDocument();
+  expect(screen.queryByText('No saved artifact files are available for your workspace yet.')).not.toBeInTheDocument();
 });
 
 it('ignores stale inspection responses after the active project changes', async () => {

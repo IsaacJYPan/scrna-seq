@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261028`. Apply
+This release requires database schema contract `20261029`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. The idempotent migration expands publication
 bounds and requires every completed size to fit its retained reservation;
@@ -258,6 +258,19 @@ and recipes contain no file bytes or local file paths. Import acceptance remains
 recorded when a source is unavailable; a missing receipt is unconfirmed. Retain
 these immutable recipes and existing import/attachment receipts together during
 backup and restore. Scoped demo cleanup removes recipes before analysis rows.
+Granted server-file imports retain their normalized request and exact final
+acceptance in the existing durable import journal. Owner-private bounded history
+and exact recovery require current project membership; fresh imports separately
+require current write/deployment permission and the current source-root grant.
+Earlier accepted imports remain recorded after a managed source row or file is
+unavailable, without reopening a source or restarting transfer. The migration
+backfills older completed acceptance only from matching retained managed metadata;
+missing older evidence is explicitly legacy-unrecorded. Keep the import journal
+with its managed storage during backup; normal cleanup cannot delete its receipts.
+Fresh server imports are bounded to 2000 retained requests per project and owner;
+exact replay precedes that bound. Discovery pages contain at most 30 metadata
+records and perform no file hashing or source-file checks. Request metadata is
+limited to 8 KiB in compact and PostgreSQL JSONB form; terminal acceptance is 2 KiB.
 Existing versions, source receipts, restart
 links and jobs remain intact. Earlier workflow runs without recorded request
 contents remain visible in history; the service cannot verify that a repeated

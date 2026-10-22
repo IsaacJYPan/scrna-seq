@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261028, now())
+VALUES ('traceomics.runtime', 20261029, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1178,29 +1178,80 @@ CREATE INDEX IF NOT EXISTS idx_server_data_import_owner
   ON server_data_imports(project_id,owner_user_id,created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_server_data_import_active
   ON server_data_imports(status,expires_at) WHERE status IN ('reserved','running','unknown');
+-- A completed import retains the exact accepted version independently of its
+-- mutable managed-file row. The DDL transaction holds the table lock throughout
+-- this one-time metadata backfill; there is no runtime update bypass.
+LOCK TABLE server_data_imports IN ACCESS EXCLUSIVE MODE;
+ALTER TABLE server_data_imports ADD COLUMN IF NOT EXISTS request_json JSONB;
+ALTER TABLE server_data_imports ADD COLUMN IF NOT EXISTS acceptance_json JSONB;
+DROP TRIGGER IF EXISTS trg_server_data_import_identity ON server_data_imports;
+UPDATE server_data_imports operation SET acceptance_json=jsonb_build_object(
+  'artifactId',version.artifact_id,'versionId',version.id,'versionNumber',version.version_number,
+  'previousVersionId',version.previous_version_id,'sha256',version.checksum_sha256,'sizeBytes',version.size_bytes,
+  'createdAt',to_char(version.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+FROM managed_artifact_versions version
+WHERE operation.status='completed' AND operation.acceptance_json IS NULL
+  AND version.id=operation.version_id AND version.artifact_id=operation.artifact_id
+  AND version.project_id=operation.project_id AND version.owner_user_id=operation.owner_user_id
+  AND version.storage_key=operation.storage_key AND version.name=operation.name
+  AND version.previous_version_id IS NOT DISTINCT FROM operation.previous_version_id
+  AND version.size_bytes=operation.reserved_bytes AND operation.bytes_copied=operation.reserved_bytes
+  AND version.checksum_sha256 ~ '^[a-f0-9]{64}$'
+  AND version.provenance_json->>'kind'='server-import'
+  AND version.provenance_json->>'importId'=operation.id
+  AND version.provenance_json->>'rootId'=operation.root_id
+  AND version.provenance_json->>'relativePath'=operation.relative_path
+  AND version.provenance_json->>'sourceSha256'=version.checksum_sha256
+  AND version.provenance_json->>'serviceId'=operation.source_metadata_json->>'serviceId';
+ALTER TABLE server_data_imports DROP CONSTRAINT IF EXISTS server_import_request_bound;
+ALTER TABLE server_data_imports ADD CONSTRAINT server_import_request_bound CHECK(request_json IS NULL OR
+  (jsonb_typeof(request_json)='object' AND octet_length(request_json::text)<=8192
+    AND request_json->>'requestId'=request_id::text AND request_json->>'rootId'=root_id
+    AND request_json->>'relativePath'=relative_path AND request_json->>'name'=name AND request_json->>'artifactType'=artifact_type));
+ALTER TABLE server_data_imports DROP CONSTRAINT IF EXISTS server_import_acceptance_bound;
+ALTER TABLE server_data_imports ADD CONSTRAINT server_import_acceptance_bound CHECK(acceptance_json IS NULL OR
+  (status='completed' AND jsonb_typeof(acceptance_json)='object' AND octet_length(acceptance_json::text)<=2048
+    AND acceptance_json ?& ARRAY['artifactId','versionId','versionNumber','previousVersionId','sha256','sizeBytes','createdAt']
+    AND acceptance_json - ARRAY['artifactId','versionId','versionNumber','previousVersionId','sha256','sizeBytes','createdAt']='{}'::jsonb
+    AND acceptance_json->>'artifactId'=artifact_id AND acceptance_json->>'versionId'=version_id
+    AND acceptance_json->'previousVersionId'=COALESCE(to_jsonb(previous_version_id),'null'::jsonb)
+    AND acceptance_json->>'sha256' ~ '^[a-f0-9]{64}$'
+    AND jsonb_typeof(acceptance_json->'versionNumber')='number' AND acceptance_json->>'versionNumber' ~ '^[1-9][0-9]{0,9}$'
+    AND jsonb_typeof(acceptance_json->'sizeBytes')='number' AND (acceptance_json->>'sizeBytes')::bigint=reserved_bytes
+    AND acceptance_json->>'createdAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'));
+ALTER TABLE server_data_imports DROP CONSTRAINT IF EXISTS server_import_completed_acceptance;
+ALTER TABLE server_data_imports ADD CONSTRAINT server_import_completed_acceptance
+  CHECK(status<>'completed' OR request_json IS NULL OR acceptance_json IS NOT NULL);
 CREATE OR REPLACE FUNCTION enforce_server_data_import_identity() RETURNS TRIGGER AS $$
 BEGIN
+  IF TG_OP='DELETE' THEN
+    IF current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+    RAISE EXCEPTION 'Server import receipts are immutable' USING ERRCODE='55000';
+  END IF;
   IF ROW(NEW.id,NEW.project_id,NEW.owner_user_id,NEW.request_id,NEW.request_sha256,
          NEW.root_id,NEW.relative_path,NEW.name,NEW.artifact_type,NEW.previous_version_id,
          NEW.version_id,NEW.artifact_id,NEW.storage_key,NEW.source_identity_json,
-         NEW.source_metadata_json,NEW.reserved_bytes,NEW.process_id,NEW.expires_at,NEW.created_at)
+         NEW.source_metadata_json,NEW.reserved_bytes,NEW.process_id,NEW.expires_at,NEW.created_at,NEW.request_json)
      IS DISTINCT FROM
      ROW(OLD.id,OLD.project_id,OLD.owner_user_id,OLD.request_id,OLD.request_sha256,
          OLD.root_id,OLD.relative_path,OLD.name,OLD.artifact_type,OLD.previous_version_id,
          OLD.version_id,OLD.artifact_id,OLD.storage_key,OLD.source_identity_json,
-         OLD.source_metadata_json,OLD.reserved_bytes,OLD.process_id,OLD.expires_at,OLD.created_at)
+         OLD.source_metadata_json,OLD.reserved_bytes,OLD.process_id,OLD.expires_at,OLD.created_at,OLD.request_json)
   THEN RAISE EXCEPTION 'Server data import identity is immutable' USING ERRCODE='55000'; END IF;
   IF NEW.bytes_copied < OLD.bytes_copied
   THEN RAISE EXCEPTION 'Server data import progress cannot decrease' USING ERRCODE='55000'; END IF;
+  IF NEW.acceptance_json IS DISTINCT FROM OLD.acceptance_json
+     AND (OLD.acceptance_json IS NOT NULL OR OLD.status NOT IN ('reserved','running','unknown') OR NEW.status<>'completed' OR NEW.acceptance_json IS NULL)
+  THEN RAISE EXCEPTION 'Accepted server import evidence is immutable' USING ERRCODE='55000'; END IF;
   IF OLD.status IN ('completed','failed') AND
-     ROW(NEW.status,NEW.bytes_copied,NEW.error_code,NEW.error_message,NEW.completed_at)
-     IS DISTINCT FROM ROW(OLD.status,OLD.bytes_copied,OLD.error_code,OLD.error_message,OLD.completed_at)
+     ROW(NEW.status,NEW.bytes_copied,NEW.error_code,NEW.error_message,NEW.completed_at,NEW.acceptance_json)
+     IS DISTINCT FROM ROW(OLD.status,OLD.bytes_copied,OLD.error_code,OLD.error_message,OLD.completed_at,OLD.acceptance_json)
   THEN RAISE EXCEPTION 'Terminal server data import evidence is immutable' USING ERRCODE='55000'; END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_server_data_import_identity ON server_data_imports;
-CREATE TRIGGER trg_server_data_import_identity BEFORE UPDATE ON server_data_imports
+CREATE TRIGGER trg_server_data_import_identity BEFORE UPDATE OR DELETE ON server_data_imports
   FOR EACH ROW EXECUTE FUNCTION enforce_server_data_import_identity();
 
 

@@ -340,7 +340,7 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
     expect((await service.getCommentRequest(viewer.user.id, project.id, analysis.id, comment.requestId)).comment).toEqual(comment.comment);
     await expect(db.query('DELETE FROM managed_artifact_versions WHERE id=$1', [imported.versionId])).rejects.toMatchObject({ code: '55000' });
     expect((await post(value)).status).toBe(201); expect((await get(value.requestId)).data.attachmentOutcome.status).toBe('accepted');
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261028);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261029);
   });
 
   it('removes recipes and receipts before scoped demo analysis cleanup without affecting another owner workspace', async () => {

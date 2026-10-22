@@ -95,14 +95,15 @@ describe.skipIf(!configured)('server data imports with PostgreSQL and immutable 
     await expect(service.start(user.id, project.id, wrong)).rejects.toMatchObject({ code: 'ARTIFACT_FORMAT_CHANGED' });
   });
   it('retains completed artifact bytes when the commit succeeds before the database response is lost', async () => {
-    let commits = 0;
+    let finalWrite = false, lost = false;
     const uncertainDb = { ...db, async connect() {
       const pool = await db.connect();
       return { async connect() {
         const client = await pool.connect();
         return { release: () => client.release(), async query(sql, ...args) {
           const result = await client.query(sql, ...args);
-          if (sql === 'COMMIT' && ++commits === 2) throw new Error('Database response lost after successful commit');
+          if (sql.startsWith("UPDATE server_data_imports SET status='completed'")) finalWrite = true;
+          if (sql === 'COMMIT' && finalWrite && !lost) { lost = true; throw new Error('Database response lost after successful commit'); }
           return result;
         } };
       } };

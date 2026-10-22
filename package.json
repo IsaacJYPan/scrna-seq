@@ -83,6 +83,7 @@
     "test:remote-compute-browser": "npm run build && node scripts/verify-remote-compute-ui.js",
     "test:runtime-monitor-browser": "npm run build && node scripts/verify-remote-compute-ui.js",
     "test:server-data-import-browser": "npm run build && node scripts/verify-server-data-import-ui.js",
+    "test:server-import-recovery-browser": "npm run build && node scripts/verify-server-import-recovery-ui.js",
     "test:artifact-versions-browser": "node scripts/verify-artifact-versions-ui.js",
     "test:artifact-import-recovery-browser": "npm run build && node scripts/verify-artifact-import-recovery-ui.js",
     "test:research-analyses-browser": "npm run build && node scripts/verify-research-analyses-ui.js",

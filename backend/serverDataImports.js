@@ -6,11 +6,12 @@ const path = require('node:path');
 const config = require('./config');
 const storage = require('./storage');
 const previews = require('./artifactPreviews');
-const { createArtifactVersionService, VERSION_PATTERN } = require('./artifactVersions');
+const { createArtifactVersionService } = require('./artifactVersions');
 const { getServiceExecutionIdentity } = require('./executionTargets');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const { serverDataImportRoots, relativeSelection, importLimits, importError, ROOT_ID } = require('./serverDataImportConfig');
 const analysisContract = import('../shared/analysisModel.mjs');
+const requestContract = import('../shared/serverDataImport.mjs');
 const READ_ROLES = ['owner', 'admin', 'analyst', 'viewer'];
 const WRITE_ROLES = ['owner', 'admin', 'analyst'];
 const REQUEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -21,7 +22,6 @@ const time = value => new Date(value).toISOString();
 const missing = () => importError('SERVER_IMPORT_NOT_FOUND', 'Server data source or import request not found.', 404);
 const changed = () => importError('SERVER_IMPORT_SOURCE_CHANGED', 'The source file changed. Refresh the server file list and select it again.', 409);
 const unsafe = () => importError('SERVER_IMPORT_PATH_UNSAFE', 'Only ordinary files inside the authorized data root can be imported.', 400);
-const line = (value, maximum) => typeof value === 'string' && value.trim().length > 0 && value.length <= maximum && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
 function identity(stat) {
   return { dev: String(stat.dev), ino: String(stat.ino), size: Number(stat.size), mtimeNs: String(stat.mtimeNs ?? Math.round(stat.mtimeMs * 1e6)),
     ctimeNs: String(stat.ctimeNs ?? Math.round(stat.ctimeMs * 1e6)), nlink: Number(stat.nlink) };
@@ -94,6 +94,8 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
   const processId = crypto.randomBytes(32).toString('hex');
   const signingKey = options.signingKey || sha(`server-data-import:${env.SESSION_SECRET || crypto.randomBytes(32).toString('hex')}`);
   const tasks = new Set();
+  const permitted = (member, user) => WRITE_ROLES.includes(member.role) && !user.is_demo_guest
+    && !config.demoMode() && !['demo', 'public'].includes(env.APP_DEPLOYMENT_MODE);
   const sign = value => crypto.createHmac('sha256', signingKey).update(JSON.stringify(value)).digest('hex');
   function matches(left, right) { return typeof left === 'string' && HASH.test(left) && crypto.timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex')); }
   async function access(userId, projectId, write = false) {
@@ -153,19 +155,34 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
     } finally { if (directory) await directory.close().catch(() => {}); await opened.close(); }
   }
   async function transaction(callback) {
-    const connection = await (await db.connect()).connect();
-    try { await connection.query('BEGIN'); const result = await callback(connection); await connection.query('COMMIT'); return result; }
-    catch (error) { await connection.query('ROLLBACK'); throw error; } finally { connection.release(); }
+    const connection = await (await db.connect()).connect(); let committing = false, destroy = false;
+    try {
+      await connection.query('BEGIN'); const result = await callback(connection);
+      committing = true; await connection.query('COMMIT'); committing = false; return result;
+    } catch (error) {
+      destroy = committing;
+      try { await connection.query('ROLLBACK'); } catch { destroy = true; }
+      throw error;
+    } finally { connection.release(destroy); }
   }
-  async function lockedAccess(connection, userId, projectId) {
+  async function lockedAccess(connection, userId, projectId, write = false) {
+    const scopeMissing = () => importError('NOT_FOUND', 'Project not found.', 404);
+    const user = (await connection.query('SELECT id,is_demo_guest FROM users WHERE id=$1 FOR KEY SHARE', [userId])).rows[0];
+    if (!user) throw scopeMissing();
+    if (!(await connection.query(`SELECT id FROM projects WHERE id=$1 FOR ${write ? 'UPDATE' : 'SHARE'}`, [projectId])).rowCount) throw scopeMissing();
     const membership = (await connection.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2 FOR SHARE', [projectId, userId])).rows[0];
-    if (!membership) throw missing();
-    if (!WRITE_ROLES.includes(membership.role)) throw importError('FORBIDDEN', 'Your current project role cannot import server data.', 403);
+    if (!membership || !READ_ROLES.includes(membership.role)) throw scopeMissing();
+    const serviceId = (await connection.query('SELECT service_id FROM service_execution_identity WHERE singleton=TRUE')).rows[0]?.service_id
+      || (await getServiceExecutionIdentity(connection)).id;
+    return { membership, user, serviceId, canImport: permitted(membership, user) };
   }
-  async function expire(userId, projectId) {
-    const expired = (await db.query(`UPDATE server_data_imports SET status='failed',error_code='SERVER_IMPORT_INTERRUPTED',error_message='The server import did not finish before its deadline. Its source has not been replayed. Start a new import explicitly.',completed_at=NOW(),updated_at=NOW()
+  function assertWritable(context) {
+    if (!WRITE_ROLES.includes(context.membership.role)) throw importError('FORBIDDEN', 'Your current project role cannot import server data.', 403);
+    if (!context.canImport) throw importError('SERVER_IMPORT_UNAVAILABLE', 'Server data imports are unavailable for this account or deployment.', 403);
+  }
+  async function expire(userId, projectId, connection = db) {
+    return (await connection.query(`UPDATE server_data_imports SET status='failed',error_code='SERVER_IMPORT_INTERRUPTED',error_message='The server import did not finish before its deadline. Its source has not been replayed. Start a new import explicitly.',completed_at=NOW(),updated_at=NOW()
       WHERE project_id=$1 AND owner_user_id=$2 AND status IN ('reserved','running','unknown') AND expires_at<NOW() RETURNING *`, [projectId, userId])).rows;
-    for (const row of expired) await cleanupFailed(row);
   }
   async function cleanupFailed(row) {
     // A connection can be lost after COMMIT succeeded. The in-memory flag is
@@ -173,41 +190,111 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
     // with no durable version permits cleanup of its exact owned keys.
     try {
       const failed = (await db.query(`SELECT storage_key FROM server_data_imports operation
-        WHERE operation.id=$1 AND operation.storage_key=$2 AND operation.status='failed'
+        WHERE operation.id=$1 AND operation.storage_key=$2 AND operation.status='failed' AND operation.acceptance_json IS NULL
           AND NOT EXISTS(SELECT 1 FROM managed_artifact_versions version WHERE version.id=operation.version_id OR version.storage_key=operation.storage_key)`, [row.id, row.storage_key])).rows[0];
       if (failed) await provider.removeImportSnapshot(failed.storage_key);
     } catch { /* Unknown commit outcomes retain their bytes until receipts resolve. */ }
   }
-  async function owned(userId, projectId, requestId) {
-    if (!REQUEST_ID.test(requestId || '')) throw missing();
-    await expire(userId, projectId);
-    const row = (await db.query('SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2 AND request_id=$3', [projectId, userId, requestId])).rows[0];
-    if (!row) throw importError('SERVER_DATA_IMPORT_NOT_FOUND', 'Server import request not found. Its source has not been replayed.', 404);
-    if (row.status === 'failed') await cleanupFailed(row);
-    return row;
+  async function recovery(userId, projectId, action) {
+    let expired = [];
+    const result = await transaction(async connection => {
+      const context = await lockedAccess(connection, userId, projectId);
+      expired = await expire(userId, projectId, connection);
+      return action(connection, context);
+    });
+    for (const row of expired) await cleanupFailed(row);
+    return result;
   }
-  async function display(row) {
-    const status = row.status === 'completed' ? 'succeeded' : row.status === 'failed' ? 'failed' : 'pending';
-    return { requestId: row.request_id, status, source: { rootId: row.root_id, relativePath: row.relative_path, name: path.posix.basename(row.relative_path), serviceId: row.source_metadata_json.serviceId, serviceLabel: row.source_metadata_json.serviceLabel, ...(row.source_metadata_json.sampleMetadata ? { sampleMetadata: row.source_metadata_json.sampleMetadata } : {}) },
-      reservedBytes: Number(row.reserved_bytes), bytesCopied: Number(row.bytes_copied), createdAt: time(row.created_at), updatedAt: time(row.updated_at), expiresAt: time(row.expires_at),
-      ...(status === 'pending' ? { message: 'The server is creating an immutable snapshot. Closing this connection does not restart the import. If the server process stops, this request expires without replaying its source.' } : {}),
-      ...(status === 'succeeded' ? { version: await artifacts.get(row.owner_user_id, row.project_id, row.version_id) } : {}),
-      ...(status === 'failed' ? { error: { code: row.error_code, message: row.error_message } } : {}) };
-  }
-  async function get(userId, projectId, requestId) { await access(userId, projectId); return display(await owned(userId, projectId, requestId)); }
-  function request(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['requestId', 'rootId', 'relativePath', 'selectionToken', 'name', 'artifactType', 'previousVersionId', 'sampleMetadata'].includes(key))
-        || !REQUEST_ID.test(value.requestId || '') || !ROOT_ID.test(value.rootId || '') || !HASH.test(value.selectionToken || '')) throw importError('SERVER_IMPORT_REQUEST_INVALID', 'Select an authorized server file with its current selection token and a request ID.');
-    const relativePath = relativeSelection(value.relativePath); const name = value.name ?? path.posix.basename(relativePath);
-    if (!line(name, 160)) throw importError('INVALID_ARTIFACT_NAME', 'Artifact name must contain 1–160 characters on one line.');
-    const artifactType = value.artifactType || 'auto';
-    if (!['auto', 'sample-sheet'].includes(artifactType) || value.previousVersionId != null && !VERSION_PATTERN.test(value.previousVersionId)) throw importError('SERVER_IMPORT_REQUEST_INVALID', 'Select a supported artifact type and an exact previous version.');
-    let sampleMetadata;
-    if (value.sampleMetadata !== undefined) {
-      if (!value.sampleMetadata || typeof value.sampleMetadata !== 'object' || Array.isArray(value.sampleMetadata) || Object.keys(value.sampleMetadata).some(key => !['sampleId', 'condition', 'tissue', 'species', 'replicate'].includes(key) || !line(value.sampleMetadata[key], 120))) throw importError('SERVER_IMPORT_METADATA_INVALID', 'Sample annotations accept sample ID, condition, tissue, species, and replicate as short single-line values.');
-      sampleMetadata = Object.fromEntries(Object.entries(value.sampleMetadata).sort(([a], [b]) => a.localeCompare(b)).map(([key, text]) => [key, text.trim()]));
+  function plainLabel(value, maximum = 80, fallback = 'Analysis server') {
+    if (typeof value !== 'string' || !value.isWellFormed()) return fallback;
+    let result = '';
+    for (const char of value.replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim()) {
+      if (result.length + char.length > maximum) break;
+      result += char;
     }
-    return { requestId: value.requestId.toLowerCase(), rootId: value.rootId, relativePath, selectionToken: value.selectionToken, name: name.trim(), artifactType, previousVersionId: value.previousVersionId || null, ...(sampleMetadata ? { sampleMetadata } : {}) };
+    return result.trim() || fallback;
+  }
+  function acceptance(row) {
+    const accepted = row.acceptance_json;
+    if (accepted === null || accepted === undefined) return null;
+    if (!accepted || Object.keys(accepted).length !== 7 || accepted.artifactId !== row.artifact_id || accepted.versionId !== row.version_id
+        || !/^af_[a-f0-9]{24}$/.test(accepted.artifactId) || !/^av_[a-f0-9]{24}$/.test(accepted.versionId)
+        || !Number.isSafeInteger(accepted.versionNumber) || accepted.versionNumber < 1 || accepted.previousVersionId !== row.previous_version_id
+        || typeof accepted.sha256 !== 'string' || !HASH.test(accepted.sha256) || !Number.isSafeInteger(accepted.sizeBytes)
+        || accepted.sizeBytes !== Number(row.reserved_bytes) || accepted.sizeBytes !== Number(row.bytes_copied)
+        || typeof accepted.createdAt !== 'string' || !Number.isFinite(Date.parse(accepted.createdAt)) || time(accepted.createdAt) !== accepted.createdAt) {
+      throw importError('SERVER_DATA_IMPORT_RECEIPT_UNAVAILABLE', 'The original accepted import receipt could not be confirmed. Keep its request and check again.', 500);
+    }
+    return accepted;
+  }
+  function summary(row) {
+    const status = row.status === 'completed' ? 'succeeded' : row.status === 'failed' ? 'failed' : 'pending';
+    const accepted = status === 'succeeded' ? acceptance(row) : null;
+    return { id: row.id, requestId: row.request_id, requestSha256: row.request_sha256, name: row.name, status,
+      source: { rootId: row.root_id, relativePath: row.relative_path, name: path.posix.basename(row.relative_path), serviceId: row.source_metadata_json.serviceId,
+        serviceLabel: plainLabel(row.source_metadata_json.serviceLabel), ...(row.source_metadata_json.sampleMetadata ? { sampleMetadata: row.source_metadata_json.sampleMetadata } : {}) },
+      reservedBytes: Number(row.reserved_bytes), bytesCopied: Number(row.bytes_copied), createdAt: time(row.created_at), updatedAt: time(row.updated_at), expiresAt: time(row.expires_at),
+      acceptanceState: status !== 'succeeded' ? 'not-accepted' : accepted ? 'recorded' : 'legacy-unrecorded', acceptance: accepted,
+      availability: status === 'succeeded' ? 'not-checked' : 'not-recorded',
+      error: status === 'failed' ? { code: row.error_code, message: row.error_message } : null };
+  }
+  async function display(connection, context, row, replayed) {
+    const record = summary(row), schema = await requestContract;
+    let request = null;
+    if (row.request_json !== null) {
+      request = schema.normalizeServerDataImportRequest(row.request_json);
+      if (sha(schema.canonicalServerDataImportRequest(request)) !== row.request_sha256) throw importError('SERVER_DATA_IMPORT_RECEIPT_UNAVAILABLE', 'The original import request metadata could not be confirmed. Keep its UUID and check again.', 500);
+    }
+    let available = null;
+    if (record.acceptance) {
+      const accepted = record.acceptance;
+      available = await artifacts.serializeImportReceipt(connection, { ...row, artifact_id: accepted.artifactId, version_id: accepted.versionId,
+        version_number: accepted.versionNumber, previous_version_id: accepted.previousVersionId, checksum_sha256: accepted.sha256,
+        size_bytes: accepted.sizeBytes, created_at: accepted.createdAt }, context.canImport);
+      if (available.version?.owner) available.version.owner.displayName = plainLabel(available.version.owner.displayName, 200, 'Researcher');
+      if (available.version?.sourceImport) {
+        available.version.sourceImport.serviceLabel = record.source.serviceLabel;
+        available.version.sourceImport.rootLabel = plainLabel(available.version.sourceImport.rootLabel, 80, 'Server data');
+      }
+    }
+    return { projectId: row.project_id, ownerUserId: Number(row.owner_user_id), serviceId: context.serviceId, ...record, request,
+      canImport: context.canImport, replayed, availability: record.status === 'succeeded' ? available?.availability || 'unavailable' : 'not-recorded',
+      version: available?.version || null, message: record.status === 'pending'
+        ? 'The server is creating an immutable snapshot. Closing this connection does not restart the import. If the server process stops, this request expires without replaying its source.' : null };
+  }
+  async function get(userId, projectId, requestId) {
+    if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) throw missing();
+    let failed;
+    const result = await recovery(userId, projectId, async (connection, context) => {
+      const row = (await connection.query('SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2 AND request_id=$3', [projectId, userId, requestId.toLowerCase()])).rows[0];
+      if (!row) throw importError('SERVER_DATA_IMPORT_NOT_FOUND', 'The original server import has not been confirmed. A missing receipt does not rule out an in-flight request; keep its UUID and check again before starting another import.', 404);
+      if (row.status === 'failed') failed = row;
+      return display(connection, context, row, true);
+    });
+    if (failed) await cleanupFailed(failed);
+    return result;
+  }
+  async function listImports(userId, projectId, query = {}) {
+    if (Object.keys(query).some(key => !['limit', 'cursor'].includes(key))) throw importError('SERVER_IMPORT_PAGE_INVALID', 'Use bounded server import history page controls.');
+    const limit = Number(query.limit ?? 30); let cursor = null;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 30) throw importError('SERVER_IMPORT_PAGE_INVALID', 'Server import history page size must be 1–30.');
+    if (query.cursor !== undefined) {
+      try {
+        if (typeof query.cursor !== 'string' || !query.cursor || query.cursor.length > 256 || !/^[A-Za-z0-9_-]+$/.test(query.cursor)) throw new Error();
+        cursor = JSON.parse(Buffer.from(query.cursor, 'base64url').toString('utf8'));
+        if (!Array.isArray(cursor) || cursor.length !== 4 || cursor[0] !== projectId || cursor[1] !== Number(userId)
+            || typeof cursor[2] !== 'string' || !Number.isFinite(Date.parse(cursor[2])) || time(cursor[2]) !== cursor[2]
+            || typeof cursor[3] !== 'string' || !/^sdi_[a-f0-9]{24}$/.test(cursor[3])) throw new Error();
+      } catch { throw importError('SERVER_IMPORT_PAGE_INVALID', 'Keep the original server import cursor for this project and account.'); }
+    }
+    return recovery(userId, projectId, async (connection, context) => {
+      const rows = (await connection.query(`SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2
+        AND ($3::timestamptz IS NULL OR (date_trunc('milliseconds',created_at),id)<($3::timestamptz,$4::text))
+        ORDER BY date_trunc('milliseconds',created_at) DESC,id DESC LIMIT $5`, [projectId, userId, cursor?.[2] || null, cursor?.[3] || null, limit + 1])).rows;
+      const selected = rows.slice(0, limit), last = selected.at(-1);
+      return { projectId, ownerUserId: Number(userId), serviceId: context.serviceId, canImport: context.canImport, items: selected.map(summary),
+        nextCursor: rows.length > limit ? Buffer.from(JSON.stringify([projectId, Number(userId), time(last.created_at), last.id])).toString('base64url') : null };
+    });
   }
   function publicFailure(error) {
     if (error?.code === 'STORAGE_SOURCE_CHANGED') return { code: 'SERVER_IMPORT_SOURCE_CHANGED', message: 'The source file changed during its snapshot. Refresh the server file list and select it again.' };
@@ -237,15 +324,18 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
       await validateSource(); await access(row.owner_user_id, row.project_id, true);
       if (rootFingerprint(authorizedRoot(row.owner_user_id, row.project_id, row.root_id)) !== row.source_identity_json.rootFingerprint) throw changed();
       await transaction(async connection => {
-        await connection.query('SELECT id FROM projects WHERE id=$1 FOR UPDATE', [row.project_id]); await lockedAccess(connection, row.owner_user_id, row.project_id);
+        const context = await lockedAccess(connection, row.owner_user_id, row.project_id, true); assertWritable(context);
         const live = (await connection.query("SELECT * FROM server_data_imports WHERE id=$1 AND process_id=$2 AND status='running' AND expires_at>NOW() FOR UPDATE", [row.id, processId])).rows[0];
         if (!live) throw importError('SERVER_IMPORT_INTERRUPTED', 'The server import deadline passed. Its source has not been replayed.', 409);
         if (controller.signal.aborted) throw importError('SERVER_IMPORT_INTERRUPTED', 'The server import deadline passed. Its source has not been replayed.', 409);
-        await artifacts.registerProduced(connection, row.owner_user_id, row.project_id, { importId: row.id, versionId: row.version_id, artifactId: row.artifact_id, previousVersionId: row.previous_version_id,
+        if (rootFingerprint(authorizedRoot(row.owner_user_id, row.project_id, row.root_id)) !== row.source_identity_json.rootFingerprint) throw changed();
+        const accepted = await artifacts.registerProduced(connection, row.owner_user_id, row.project_id, { importId: row.id, versionId: row.version_id, artifactId: row.artifact_id, previousVersionId: row.previous_version_id,
           name: row.name, type: spec.type, format: spec.format, mimeType: spec.mime, key: row.storage_key, checksumSha256: stored.checksumSha256, sizeBytes: stored.sizeBytes,
           provenance: { kind: 'server-import', importId: row.id, rootId: row.root_id, rootLabel: row.source_metadata_json.root.label, relativePath: row.relative_path, sourceSha256: stored.checksumSha256,
             serviceId: row.source_metadata_json.serviceId, serviceLabel: row.source_metadata_json.serviceLabel, importedAt: new Date().toISOString(), ...(row.source_metadata_json.sampleMetadata ? { sampleMetadata: row.source_metadata_json.sampleMetadata } : {}) } });
-        await connection.query("UPDATE server_data_imports SET status='completed',bytes_copied=$2,completed_at=NOW(),updated_at=NOW() WHERE id=$1", [row.id, stored.sizeBytes]);
+        const receipt = { artifactId: accepted.artifact_id, versionId: accepted.id, versionNumber: Number(accepted.version_number),
+          previousVersionId: accepted.previous_version_id, sha256: accepted.checksum_sha256, sizeBytes: Number(accepted.size_bytes), createdAt: time(accepted.created_at) };
+        await connection.query("UPDATE server_data_imports SET status='completed',bytes_copied=$2,acceptance_json=$3,completed_at=NOW(),updated_at=NOW() WHERE id=$1", [row.id, stored.sizeBytes, receipt]);
       }); committed = true;
     } catch (error) {
       const failure = publicFailure(controller.signal.aborted ? importError('SERVER_IMPORT_INTERRUPTED', 'The server import did not finish before its deadline. Start a new import explicitly.', 409) : error);
@@ -256,10 +346,23 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
     }
   }
   async function start(userId, projectId, raw) {
-    await access(userId, projectId, true); const value = request(raw); const requestSha256 = sha(JSON.stringify(value));
-    await expire(userId, projectId);
-    const existing = (await db.query('SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2 AND request_id=$3', [projectId, userId, value.requestId])).rows[0];
-    if (existing) { if (existing.request_sha256 !== requestSha256) throw importError('SERVER_IMPORT_REQUEST_CONFLICT', 'This request ID already describes a different server import. Check its status before starting another.', 409); return display(existing); }
+    const schema = await requestContract, value = schema.normalizeServerDataImportRequest(raw), requestSha256 = sha(schema.canonicalServerDataImportRequest(value));
+    const recovered = await recovery(userId, projectId, async (connection, context) => {
+      const existing = (await connection.query('SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2 AND request_id=$3', [projectId, userId, value.requestId])).rows[0];
+      if (!existing) return null;
+      if (existing.request_sha256 !== requestSha256) throw importError('SERVER_IMPORT_REQUEST_CONFLICT', 'This request ID already describes a different server import. Check its status before starting another.', 409);
+      return display(connection, context, existing, true);
+    });
+    if (recovered) return recovered;
+    await access(userId, projectId, true);
+    if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 8192) throw importError('SERVER_IMPORT_METADATA_INVALID', 'The exact server import request exceeds its 8 KiB metadata limit.', 413);
+    let requestBytes;
+    try { requestBytes = Number((await db.query('SELECT octet_length($1::jsonb::text)::int AS bytes', [value])).rows[0].bytes); }
+    catch (error) {
+      if (['22P02', '22021'].includes(error?.code)) throw importError('SERVER_IMPORT_METADATA_INVALID', 'The exact server import request cannot be retained as bounded Unicode JSON.', 413);
+      throw error;
+    }
+    if (requestBytes > 8192) throw importError('SERVER_IMPORT_METADATA_INVALID', 'The exact server import request exceeds its 8 KiB retained metadata limit.', 413);
     const root = authorizedRoot(userId, projectId, value.rootId); const opened = await openSelection(root, value.relativePath); let handedOff = false;
     try {
       if (!matches(value.selectionToken, selectionToken(root, userId, projectId, value.relativePath, opened.identity))) throw changed();
@@ -276,9 +379,13 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
       const retainedMetadataBytes = Number((await db.query('SELECT octet_length($1::jsonb::text)::int AS bytes', [sourceMetadata])).rows[0].bytes);
       if (retainedMetadataBytes > 4096) throw importError('SERVER_IMPORT_METADATA_INVALID', 'The combined server file path and sample annotations exceed the 4 KiB metadata limit. Use shorter annotations or a shorter relative path.', 413);
       const row = await transaction(async connection => {
-        await connection.query('SELECT id FROM projects WHERE id=$1 FOR UPDATE', [projectId]); await lockedAccess(connection, userId, projectId);
+        const context = await lockedAccess(connection, userId, projectId, true);
         const duplicate = (await connection.query('SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2 AND request_id=$3', [projectId, userId, value.requestId])).rows[0];
-        if (duplicate) { if (duplicate.request_sha256 !== requestSha256) throw importError('SERVER_IMPORT_REQUEST_CONFLICT', 'This request ID already describes a different server import.', 409); return { duplicate }; }
+        if (duplicate) { if (duplicate.request_sha256 !== requestSha256) throw importError('SERVER_IMPORT_REQUEST_CONFLICT', 'This request ID already describes a different server import.', 409); return { duplicate: await display(connection, context, duplicate, true) }; }
+        assertWritable(context);
+        const historyCount = (await connection.query('SELECT COUNT(*)::int AS total FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2', [projectId, userId])).rows[0].total;
+        if (historyCount >= 2000) throw importError('SERVER_IMPORT_HISTORY_LIMIT', 'This account has reached its 2000 retained server import requests in this project. Original receipts remain available; save new work in another project.', 409);
+        if (rootFingerprint(authorizedRoot(userId, projectId, root.id)) !== rootFingerprint(root)) throw changed();
         await connection.query('SELECT pg_advisory_xact_lock(74108,1)');
         const active = (await connection.query("SELECT COUNT(*)::int AS total,COUNT(*) FILTER (WHERE owner_user_id=$1)::int AS owner FROM server_data_imports WHERE status IN ('reserved','running','unknown') AND expires_at>NOW()", [userId])).rows[0];
         if (Number(active.total) >= 4 || Number(active.owner) >= 2) throw importError('SERVER_IMPORT_BUSY', 'Server imports are busy. Wait for an existing import to finish before starting another.', 409);
@@ -297,19 +404,19 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
         const extension = { 'org.r-project.rds': 'rds', 'org.ietf.csv': 'csv', 'org.iana.tsv': 'tsv', 'org.ietf.json': 'json', 'org.ietf.text': 'txt', 'org.w3.png': 'png', 'org.iso.jpeg': 'jpg' }[spec.id] || 'bin';
         const key = storage.projectStorageFileKey(projectId, 'artifacts', versionId, `content.${extension}`);
         const inserted = await connection.query(`INSERT INTO server_data_imports
-          (id,project_id,owner_user_id,request_id,request_sha256,status,root_id,relative_path,name,artifact_type,previous_version_id,version_id,artifact_id,storage_key,source_identity_json,source_metadata_json,reserved_bytes,process_id,expires_at)
-          VALUES($1,$2,$3,$4,$5,'reserved',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()+($18::text||' seconds')::interval) RETURNING *`,
+          (id,project_id,owner_user_id,request_id,request_sha256,status,root_id,relative_path,name,artifact_type,previous_version_id,version_id,artifact_id,storage_key,source_identity_json,source_metadata_json,reserved_bytes,process_id,expires_at,request_json)
+          VALUES($1,$2,$3,$4,$5,'reserved',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()+($18::text||' seconds')::interval,$19) RETURNING *`,
         [importId, projectId, userId, value.requestId, requestSha256, root.id, value.relativePath, value.name, value.artifactType, value.previousVersionId, versionId, plan.artifactId, key,
-          { rootFingerprint: rootFingerprint(root), file: opened.identity }, sourceMetadata, opened.stat.size, processId, limits.transferTimeoutSeconds]);
+          { rootFingerprint: rootFingerprint(root), file: opened.identity }, sourceMetadata, opened.stat.size, processId, limits.transferTimeoutSeconds, value]);
         return inserted.rows[0];
       });
-      if (row.duplicate) return display(row.duplicate);
+      if (row.duplicate) return row.duplicate;
       handedOff = true;
       const task = snapshot(row, root, opened, spec); tasks.add(task); task.finally(() => tasks.delete(task)).catch(() => {});
-      return display(row);
+      return recovery(userId, projectId, (connection, context) => display(connection, context, row, false));
     } finally { if (!handedOff) await opened.close(); }
   }
-  return { roots, list, start, get, waitForIdle: async () => { await Promise.all([...tasks]); } };
+  return { roots, list, start, get, listImports, waitForIdle: async () => { await Promise.all([...tasks]); } };
 }
 
 module.exports = { createServerDataImportService, openSelection, identity };

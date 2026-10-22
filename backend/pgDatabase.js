@@ -70,7 +70,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261028;
+const SCHEMA_CONTRACT_VERSION = 20261029;
 
 let pool = null;
 
