@@ -39,7 +39,7 @@ function demoCapabilityPolicy(isDemoMode) {
     const allowedR = qc || (req.method === 'GET' && (READ_ROUTES.has(path) || allowedCompute(path, req.query)));
     const disabledR = path.startsWith('/api/r/') && !allowedR;
     const allowedWrite = qc || (req.method === 'POST' && (
-      ['/api/auth/demo-guest', '/api/auth/logout'].includes(path) || /^\/api\/projects\/[^/]+\/jobs$/.test(path)));
+      ['/api/auth/demo-guest', '/api/auth/logout', '/api/runtime/activity'].includes(path) || /^\/api\/projects\/[^/]+\/jobs$/.test(path)));
     const disabledWrite = !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !allowedWrite;
     if (disabledR || disabledWrite) return res.status(403).json({ error: 'This capability is disabled for the demo.' });
     return next();

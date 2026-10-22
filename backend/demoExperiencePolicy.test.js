@@ -20,8 +20,14 @@ describe('analysis demo capability policy', () => {
   it.each([
     ['GET', '/api/r/feature-values'], ['GET', '/api/r/object-info'], ['GET', '/api/r/qc-distributions'], ['POST', '/api/r/qc'],
     ['POST', '/api/projects/proj_1/jobs'], ['POST', '/api/auth/demo-guest'], ['GET', '/api/projects'],
+    ['POST', '/api/runtime/activity'],
   ])('admits the analysis workflow: %s %s', (method, path) => {
     const next = vi.fn(); demoCapabilityPolicy(() => true)({ method, path }, {}, next); expect(next).toHaveBeenCalledOnce();
+  });
+  it.each(['PUT', 'DELETE'])('keeps unsupported activity methods blocked: %s', method => {
+    const next = vi.fn(); const res = response();
+    demoCapabilityPolicy(() => true)({ method, path: '/api/runtime/activity' }, res, next);
+    expect(res.status).toHaveBeenCalledWith(403); expect(next).not.toHaveBeenCalled();
   });
   it.each([
     ['/api/r/normalize', { method: 'LogNormalize', scale_factor: '10000', nfeatures: '1500' }, 'nfeatures', '10000'],
