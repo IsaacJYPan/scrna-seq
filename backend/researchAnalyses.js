@@ -232,6 +232,14 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.get('/:analysisId/attachments', route(req => attachments.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/options', route(req => attachments.options(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/local-intakes', route(req => attachments.listLocalIntakes(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/:analysisId/attachments/intakes', route(req => attachments.listIntakes(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/:analysisId/attachments/intakes/:requestId', route(req => attachments.getIntake(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
+  router.get('/:analysisId/attachments/server-intakes', route(req => attachments.listServerIntakes(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
+  router.get('/:analysisId/attachments/server-intakes/:requestId', route(req => attachments.getServerIntake(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
+  router.post('/:analysisId/attachments/server-intakes', route(async req => {
+    const result = await attachments.admitServerIntake(req.user.id, req.params.projectId, req.params.analysisId, req.body);
+    return { ...result, created: !result.replayed };
+  }));
   router.get('/:analysisId/attachments/local-intakes/:requestId', route(req => attachments.getLocalIntake(req.user.id, req.params.projectId, req.params.analysisId, req.params.requestId)));
   router.post('/:analysisId/attachments/local-intakes', route(async req => {
     const result = await attachments.admitLocalIntake(req.user.id, req.params.projectId, req.params.analysisId, req.body);

@@ -173,8 +173,8 @@ async function main() {
     const artifacts = workspace.getByRole('region', { name: 'Artifact versions', exact: true });
     const importer = artifacts.getByRole('region', { name: 'Import server data', exact: true });
     await importer.getByRole('button', { name: 'Browse server data', exact: true }).click();
-    await importer.getByLabel('Authorized data root', { exact: true }).waitFor();
-    assert(await importer.getByLabel('Authorized data root').locator('option').count() === 1,
+    await importer.getByLabel('Server folder', { exact: true }).waitFor();
+    assert(await importer.getByLabel('Server folder', { exact: true }).locator('option').count() === 1,
       'The native server-data UI exposed a data root without an explicit owner grant.');
     assert(await importer.getByRole('button', { name: 'Open folder escape', exact: true }).count() === 0,
       'The server browser exposed a symlink/junction directory.');

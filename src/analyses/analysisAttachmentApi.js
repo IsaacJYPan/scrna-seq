@@ -36,3 +36,6 @@ export const getAnalysisAttachmentCommentRequest = (projectId, analysisId, reque
 export const listAnalysisLocalIntakes = (projectId, analysisId, { cursor, signal } = {}) => request(`${path(projectId, analysisId)}/local-intakes?${pageQuery(cursor)}`, { signal });
 export const createAnalysisLocalIntake = (projectId, analysisId, body, { signal } = {}) => request(`${path(projectId, analysisId)}/local-intakes`, { body, signal });
 export const getAnalysisLocalIntake = (projectId, analysisId, requestId, { signal } = {}) => request(`${path(projectId, analysisId)}/local-intakes/${encodeURIComponent(requestId)}`, { signal });
+export const listAnalysisIntakes = (projectId, analysisId, { cursor, signal } = {}) => request(`${path(projectId, analysisId)}/intakes?${pageQuery(cursor)}`, { signal });
+export const getAnalysisIntake = (projectId, analysisId, requestId, { signal } = {}) => request(`${path(projectId, analysisId)}/intakes/${encodeURIComponent(requestId)}`, { signal });
+export const createAnalysisServerIntake = (projectId, analysisId, body, { signal } = {}) => request(`${path(projectId, analysisId)}/server-intakes`, { body, signal });

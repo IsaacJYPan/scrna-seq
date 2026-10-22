@@ -61,6 +61,18 @@ const rehash = value => { value.requestSha256 = sha256(canonicalAnalysisLocalInt
 beforeEach(() => vi.stubGlobal('crypto', webcrypto));
 afterEach(() => vi.unstubAllGlobals());
 
+it.each(['R'.repeat(161), 'R'.repeat(200), '🧬'.repeat(100)])('recovers accepted local evidence for a valid account display label of %s', async displayName => {
+  const result = complete(), originalHash = result.requestSha256, originalAcceptance = structuredClone(result.importOutcome.receipt.acceptance);
+  result.importOutcome.receipt.version.owner.displayName = displayName;
+  const value = await validateAnalysisLocalIntake(result, scope);
+  expect(value.importOutcome.receipt.version.owner.displayName).toBe(displayName);
+  expect(value.requestSha256).toBe(originalHash); expect(value.importOutcome.receipt.acceptance).toEqual(originalAcceptance);
+});
+it.each(['R'.repeat(201), '🧬'.repeat(101), 'R'.repeat(199) + '🧬', 'Research\0name', 'Research\nname', 'Research\u007fname', '  '])('rejects an invalid returned profile label %s without weakening saved evidence identity', async displayName => {
+  const result = complete(); result.importOutcome.receipt.version.owner.displayName = displayName;
+  await expect(validateAnalysisLocalIntake(result, scope)).rejects.toMatchObject(invalid);
+});
+
 it('discovers a bounded private list under current owner/project/analysis, learning service identity only when no prior service is bound', () => {
   const discovery = { projectId: scope.projectId, analysisId: scope.analysisId, userId: '7' };
   const result = list(), value = validateAnalysisLocalIntakeList(result, discovery);

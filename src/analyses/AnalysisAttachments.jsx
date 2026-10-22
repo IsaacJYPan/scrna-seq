@@ -8,7 +8,7 @@ import AttachmentRevisionHistory from './AttachmentRevisionHistory';
 import RevisionDiscussion from './RevisionDiscussion';
 
 const RetainedArtifactView = React.lazy(() => import('../components/RetainedArtifactView'));
-const LocalEvidenceIntake = React.lazy(() => import('./LocalEvidenceIntake'));
+const EvidenceIntake = React.lazy(() => import('./EvidenceIntake'));
 const noteLabels = { origin: 'Where this result came from', sourceReference: 'Code or method reference', documentReference: 'Supporting document reference', environmentReference: 'Environment reference' };
 const blankContext = () => Object.fromEntries(Object.keys(noteLabels).map(key => [key, '']));
 const denied = failure => [401, 403].includes(failure.status) || failure.status === 404
@@ -232,7 +232,7 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
           </div>
         </div>
         <div ref={list} tabIndex={0} aria-label="Outside results and attachment form" className="min-h-0 min-w-0 flex-1 space-y-4 overflow-auto rounded focus-visible:ring-2 focus-visible:ring-primary">
-          {intakeVisited && <div hidden={!intakeOpen}><React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Opening import requests…</p>}><LocalEvidenceIntake key={JSON.stringify([connection.identity, connection.epoch, projectId, analysis.id, userId])}
+          {intakeVisited && <div hidden={!intakeOpen}><React.Suspense fallback={<p role="status" className="text-sm text-textMuted">Opening import requests…</p>}><EvidenceIntake key={JSON.stringify([connection.identity, connection.epoch, projectId, analysis.id, userId])}
             projectId={projectId} analysisId={analysis.id} userId={userId} active={analysis.status === 'active'} canWrite={canWrite} available={available && intakeOpen && !readDenied} seed={intakeSeed}
             onClose={() => setIntakeOpen(false)} onDenied={clearAccess} onAuthority={restrictWrites} onAttached={() => void load()}
             onInspect={revision => void openRevision(revision.attachmentId, revision)} onPreview={version => inspect({ kind: 'candidate', item: { reference: { kind: 'artifact-version', versionId: version.versionId, sha256: version.sha256 }, name: version.name } })} /></React.Suspense></div>}
@@ -261,7 +261,7 @@ function AttachmentCollection({ projectId, projectName, analysis, userId, role, 
               setEditing({ attachmentId: conflict.id, expectedHeadRevisionId: conflict.headRevisionId, base: latest }); setConflict(null); setError('');
             }}>Keep my edits with latest revision</button></div><p className="text-xs text-textMuted">Untouched context uses the latest revision; your edits are kept. Review the result before saving.</p></section>}
             <button type="button" className="btn btn-secondary text-xs" disabled={optionsLoading || !!pending || busy || !canWrite || connection.blocked} onClick={() => void findOptions()}>Choose saved file</button>
-            <button type="button" className="btn btn-secondary ml-2 text-xs" disabled={!!pending || busy || !canWrite || connection.blocked} onClick={() => openIntake(true)}>Import local file instead</button>
+            <button type="button" className="btn btn-secondary ml-2 text-xs" disabled={!!pending || busy || !canWrite || connection.blocked} onClick={() => openIntake(true)}>Import a file instead</button>
             {optionsLoading && <p role="status" className="text-xs text-textMuted">Finding your saved files…</p>}
             {optionsLoaded && !options.length && !readDenied && <p className="text-sm text-textMuted">No supported files are available to your account. Import a local table or figure here to continue.</p>}
             {!!options.length && <fieldset disabled={!!pending || busy || !canWrite || connection.blocked} className="min-w-0"><legend className="mb-2 text-sm">Your saved files</legend><div tabIndex={0} aria-label="Saved files for attachment" className="max-h-60 space-y-2 overflow-auto rounded border border-border p-2 focus-visible:ring-2 focus-visible:ring-primary">{options.map(option => <div key={option.reference.versionId} className="flex min-w-0 items-start gap-2 rounded border border-border p-3">

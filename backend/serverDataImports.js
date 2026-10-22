@@ -18,6 +18,7 @@ const REQUEST_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-
 const HASH = /^[a-f0-9]{64}$/;
 const id = prefix => `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
+const ephemeralSigningKey = crypto.randomBytes(32).toString('hex');
 const time = value => new Date(value).toISOString();
 const missing = () => importError('SERVER_IMPORT_NOT_FOUND', 'Server data source or import request not found.', 404);
 const changed = () => importError('SERVER_IMPORT_SOURCE_CHANGED', 'The source file changed. Refresh the server file list and select it again.', 409);
@@ -92,7 +93,7 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
   const env = options.env || process.env;
   const artifacts = createArtifactVersionService(db, provider);
   const processId = crypto.randomBytes(32).toString('hex');
-  const signingKey = options.signingKey || sha(`server-data-import:${env.SESSION_SECRET || crypto.randomBytes(32).toString('hex')}`);
+  const signingKey = options.signingKey || (env.SESSION_SECRET ? sha(`server-data-import:${env.SESSION_SECRET}`) : ephemeralSigningKey);
   const tasks = new Set();
   const permitted = (member, user) => WRITE_ROLES.includes(member.role) && !user.is_demo_guest
     && !config.demoMode() && !['demo', 'public'].includes(env.APP_DEPLOYMENT_MODE);
@@ -110,6 +111,31 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
     if (!root) throw missing(); return root;
   }
   const selectionToken = (root, userId, projectId, relativePath, statIdentity) => sign([rootFingerprint(root), Number(userId), String(projectId), relativePath, statIdentity]);
+  function hasSourceGrant(userId, projectId, request) {
+    if (config.demoMode() || ['demo', 'public'].includes(env.APP_DEPLOYMENT_MODE)) return false;
+    try { authorizedRoot(userId, projectId, request.rootId); return true; }
+    catch (error) {
+      if (['SERVER_IMPORT_NOT_FOUND', 'SERVER_IMPORT_CONFIG_INVALID'].includes(error?.code)) return false;
+      throw error;
+    }
+  }
+  async function inspectSelection(userId, projectId, input, { sizeBytes, maximumBytes } = {}) {
+    await access(userId, projectId, true);
+    const request = (await requestContract).normalizeServerDataImportRequest(input);
+    const root = authorizedRoot(userId, projectId, request.rootId), opened = await openSelection(root, request.relativePath);
+    try {
+      if (!matches(request.selectionToken, selectionToken(root, userId, projectId, request.relativePath, opened.identity))) throw changed();
+      const limit = Math.min(importLimits(env).maxFileBytes, maximumBytes);
+      if (request.artifactType !== 'auto' || request.previousVersionId !== null || !/\.(?:csv|tsv|png|jpe?g)$/i.test(request.relativePath)
+          || !Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || opened.stat.size !== sizeBytes || sizeBytes > limit) {
+        throw importError('SERVER_INTAKE_SOURCE_SELECTION_INVALID', 'Choose a new CSV, TSV, PNG or JPEG snapshot within the server and attachment size limits.', 400);
+      }
+      await previews.inspectImportedHandle({ handle: opened.handle, stat: opened.stat, originalFilename: path.posix.basename(request.relativePath) }, 'auto', { maxBytes: limit });
+      await opened.revalidate?.();
+      if (!sameIdentity(identity(await opened.handle.stat({ bigint: true })), opened.identity)) throw changed();
+      return { sizeBytes, serviceId: (await getServiceExecutionIdentity(db)).id };
+    } finally { await opened.close(); }
+  }
   async function roots(userId, projectId) {
     await access(userId, projectId);
     return { roots: serverDataImportRoots(env, options.configOptions).filter(root => root.grants.some(grant => grant.projectId === String(projectId) && grant.ownerUserId === Number(userId))).map(root => ({ id: root.id, label: root.label })), limits: importLimits(env) };
@@ -416,7 +442,14 @@ function createServerDataImportService(db, provider = storage.createLocalStorage
       return recovery(userId, projectId, (connection, context) => display(connection, context, row, false));
     } finally { if (!handedOff) await opened.close(); }
   }
-  return { roots, list, start, get, listImports, waitForIdle: async () => { await Promise.all([...tasks]); } };
+  async function settleImports(userId, projectId, requestIds = []) {
+    const failed = await recovery(userId, projectId, async connection => requestIds.length
+      ? (await connection.query("SELECT * FROM server_data_imports WHERE project_id=$1 AND owner_user_id=$2 AND request_id=ANY($3::uuid[]) AND status='failed'", [projectId, userId, requestIds])).rows : []);
+    for (const row of failed) await cleanupFailed(row);
+  }
+  return { roots, list, start, get, listImports, hasSourceGrant, inspectSelection, settleImports, canImportPolicy: permitted,
+    journalAcceptance: acceptance, journalSummary: summary, serializeJournal: display, displayLabel: plainLabel,
+    waitForIdle: async () => { await Promise.all([...tasks]); } };
 }
 
 module.exports = { createServerDataImportService, openSelection, identity };

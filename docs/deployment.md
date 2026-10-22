@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261029`. Apply
+This release requires database schema contract `20261030`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. The idempotent migration expands publication
 bounds and requires every completed size to fit its retained reservation;
@@ -271,6 +271,22 @@ Fresh server imports are bounded to 2000 retained requests per project and owner
 exact replay precedes that bound. Discovery pages contain at most 30 metadata
 records and perform no file hashing or source-file checks. Request metadata is
 limited to 8 KiB in compact and PostgreSQL JSONB form; terminal acceptance is 2 KiB.
+Analysis evidence admissions now share `research_analysis_intakes`, with an
+immutable local or server source kind. The migration renames the earlier local
+journal before creating or extending it; it preserves existing recipes, hashes,
+UUIDs and timestamps. Back up this one journal with both import journals and
+attachment history. Existing local-intake API aliases remain source-filtered.
+The two source kinds share the 2000-admission bound per analysis and the original
+import/attachment UUID uniqueness rules. Server evidence intake supports new
+automatic CSV, TSV, PNG and JPEG snapshots up to the smaller of the configured
+server limit and 200 MiB. Admission records a signed selection and size, not an
+invented pre-copy checksum; only the existing completed copy supplies acceptance.
+Source preflight occurs before analysis locks, and transfer uses the existing
+server importer. Recovery does not reopen original source paths, start copies
+or attach results automatically. Loss of a source grant can disable copying
+while an already accepted owned snapshot remains eligible for attachment under
+the analysis's current write permission. Expired copy operations are reconciled
+outside analysis transactions with the existing proof-based cleanup.
 Existing versions, source receipts, restart
 links and jobs remain intact. Earlier workflow runs without recorded request
 contents remain visible in history; the service cannot verify that a repeated

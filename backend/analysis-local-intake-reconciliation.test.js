@@ -85,7 +85,7 @@ function serviceFor({ row, imported, attached }, queryError) {
   const client = {
     async query(sql) {
       if (sql.includes('service_execution_identity')) return { rows: [{ service_id: serviceId }] };
-      if (sql.includes('research_analysis_local_intakes')) return { rows: [row] };
+      if (sql.includes('research_analysis_intakes')) return { rows: [row] };
       if (queryError) throw queryError;
       if (sql.includes('managed_artifact_import_receipts'))
         return { rows: imported ? [imported] : [] };

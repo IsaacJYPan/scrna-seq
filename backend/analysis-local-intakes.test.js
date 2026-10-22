@@ -114,7 +114,7 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
     } }) };
   }
   async function seed(values, actor = owner) {
-    await db.query(`INSERT INTO research_analysis_local_intakes
+    await db.query(`INSERT INTO research_analysis_intakes
       (project_id,analysis_id,owner_user_id,request_id,attachment_request_id,service_id,request_sha256,recipe_json,created_at)
       SELECT $1,$2,$3,request_id,attachment_request_id,$4,request_sha256,recipe_json,'2026-01-01T00:00:00Z'
       FROM jsonb_to_recordset($5::jsonb) AS x(request_id uuid,attachment_request_id uuid,request_sha256 text,recipe_json jsonb)`,
@@ -158,7 +158,7 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
     await db.query('DELETE FROM managed_artifact_versions WHERE id=$1', [imported.versionId]);
     const response = await get(value.requestId); expect(response.status).toBe(200);
     expect(response.data.importOutcome).toMatchObject({ status: 'accepted', receipt: { acceptance: { versionId: imported.versionId, sha256: value.importRequest.sha256 }, availability: 'unavailable', version: null } });
-    expect(response.data.attachmentOutcome.status).toBe('unconfirmed'); expect(await count('research_analysis_local_intakes')).toBe(1);
+    expect(response.data.attachmentOutcome.status).toBe('unconfirmed'); expect(await count('research_analysis_intakes')).toBe(1);
   });
 
   it('keeps owner recipes private under current membership, with archive/demo and current reader recovery distinct from fresh write', async () => {
@@ -180,7 +180,7 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
 
   it('serializes UUID races, freezes context and enforces separate import and attachment identities across analysis scopes', async () => {
     const value = recipe(), race = await Promise.all([post(value), post(value)]);
-    expect(race.map(result => result.status).sort()).toEqual([200, 201]); expect(await count('research_analysis_local_intakes')).toBe(1);
+    expect(race.map(result => result.status).sort()).toEqual([200, 201]); expect(await count('research_analysis_intakes')).toBe(1);
     expect((await post({ ...value, attachment: { ...value.attachment, caption: 'Changed after admission' } })).data.code).toBe('ANALYSIS_LOCAL_INTAKE_REQUEST_CONFLICT');
     const second = recipe(); second.attachment.requestId = value.attachment.requestId;
     expect((await post(second)).data.code).toBe('ANALYSIS_LOCAL_INTAKE_REQUEST_CONFLICT');
@@ -203,13 +203,13 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
     const reopened = createAnalysisAttachmentService(db, provider), discovery = await reopened.listLocalIntakes(owner.user.id, project.id, analysis.id);
     expect(discovery.items).toHaveLength(1); expect(discovery.items[0].requestId).toBe(value.requestId);
     expect((await reopened.getLocalIntake(owner.user.id, project.id, analysis.id, value.requestId)).recipe).toEqual(normalizeAnalysisLocalIntake(value));
-    expect((await post(value)).status).toBe(200); expect(await count('research_analysis_local_intakes')).toBe(1); expect(await count('managed_artifact_versions')).toBe(0);
+    expect((await post(value)).status).toBe(200); expect(await count('research_analysis_intakes')).toBe(1); expect(await count('managed_artifact_versions')).toBe(0);
   });
 
   it('binds stable installation identity and never conflates absent admission with rejection or another workspace', async () => {
     const value = recipe(); expect((await get(value.requestId)).data.code).toBe('ANALYSIS_LOCAL_INTAKE_NOT_FOUND');
     const changed = { ...value, serviceId: 'svc_' + 'f'.repeat(32) };
-    expect((await post(changed)).data.code).toBe('ANALYSIS_LOCAL_INTAKE_SERVICE_CHANGED'); expect(await count('research_analysis_local_intakes')).toBe(0);
+    expect((await post(changed)).data.code).toBe('ANALYSIS_LOCAL_INTAKE_SERVICE_CHANGED'); expect(await count('research_analysis_intakes')).toBe(0);
     await post(value);
     const sameService = await db.getServiceExecutionIdentity(); expect(sameService.id).toBe(serviceId);
     expect((await get(value.requestId)).data.serviceId).toBe(serviceId);
@@ -310,7 +310,7 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
     const values = Array.from({ length: 1999 }, () => recipe()); await seed(values);
     const requests = [recipe(), recipe(colleague)], race = await Promise.all([post(requests[0]), post(requests[1], colleague)]);
     expect(race.map(result => result.status).sort()).toEqual([201, 409]); expect(race.find(result => result.status === 409).data.code).toBe('ANALYSIS_LOCAL_INTAKE_LIMIT');
-    expect(await count('research_analysis_local_intakes')).toBe(2000); expect((await post(values[0])).status).toBe(200);
+    expect(await count('research_analysis_intakes')).toBe(2000); expect((await post(values[0])).status).toBe(200);
   });
 
   it('paginates owner-only source-free metadata deterministically, including completed and conflicted admissions', async () => {
@@ -330,17 +330,17 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
     const value = recipe(); await post(value); const imported = await upload(value), attached = await attach(value, imported);
     const comment = await service.addComment(viewer.user.id, project.id, analysis.id, attached.attachment.id, attached.acceptedRevision.id, { requestId: randomUUID(), body: 'Keep exact evidence' });
     for (const update of ["request_sha256='" + 'f'.repeat(64) + "'", "recipe_json='{}'::jsonb", 'created_at=now()', "service_id='svc_" + 'f'.repeat(32) + "'"]) {
-      await expect(db.query(`UPDATE research_analysis_local_intakes SET ${update} WHERE request_id=$1`, [value.requestId])).rejects.toMatchObject({ code: '55000' });
+      await expect(db.query(`UPDATE research_analysis_intakes SET ${update} WHERE request_id=$1`, [value.requestId])).rejects.toMatchObject({ code: '55000' });
     }
-    await expect(db.query('DELETE FROM research_analysis_local_intakes WHERE request_id=$1', [value.requestId])).rejects.toMatchObject({ code: '55000' });
-    await db.query('DROP TABLE research_analysis_local_intakes'); await db.query("UPDATE app_schema_contract SET schema_version=20261027 WHERE schema_key='traceomics.runtime'");
+    await expect(db.query('DELETE FROM research_analysis_intakes WHERE request_id=$1', [value.requestId])).rejects.toMatchObject({ code: '55000' });
+    await db.query('DROP TABLE research_analysis_intakes'); await db.query("UPDATE app_schema_contract SET schema_version=20261027 WHERE schema_key='traceomics.runtime'");
     await db.initSchema({ force: true }); await db.initSchema({ force: true });
     expect((await artifacts.getImportReceipt(owner.user.id, project.id, value.requestId)).acceptance.versionId).toBe(imported.versionId);
     expect((await service.getRequest(owner.user.id, project.id, analysis.id, value.attachment.requestId)).acceptedRevision).toEqual(attached.acceptedRevision);
     expect((await service.getCommentRequest(viewer.user.id, project.id, analysis.id, comment.requestId)).comment).toEqual(comment.comment);
     await expect(db.query('DELETE FROM managed_artifact_versions WHERE id=$1', [imported.versionId])).rejects.toMatchObject({ code: '55000' });
     expect((await post(value)).status).toBe(201); expect((await get(value.requestId)).data.attachmentOutcome.status).toBe('accepted');
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261029);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261030);
   });
 
   it('removes recipes and receipts before scoped demo analysis cleanup without affecting another owner workspace', async () => {
@@ -351,7 +351,7 @@ describe.skipIf(!process.env.DATABASE_URL)('local evidence intake PostgreSQL, up
     const retained = recipe(colleague); retained.importRequest.projectId = retainedProject.id;
     await service.admitLocalIntake(colleague.user.id, retainedProject.id, retainedAnalysis.id, retained);
     await db.query("UPDATE users SET is_demo_guest=TRUE,expires_at=NOW()-INTERVAL '1 second' WHERE id=$1", [owner.user.id]);
-    expect(await db.deleteExpiredDemoGuest(owner.user.id)).toBe(true); expect(await count('research_analysis_local_intakes')).toBe(1);
+    expect(await db.deleteExpiredDemoGuest(owner.user.id)).toBe(true); expect(await count('research_analysis_intakes')).toBe(1);
     expect((await service.getLocalIntake(colleague.user.id, retainedProject.id, retainedAnalysis.id, retained.requestId)).recipe).toEqual(normalizeAnalysisLocalIntake(retained));
     expect(await count('managed_artifact_import_receipts')).toBe(0);
   });

@@ -12,17 +12,17 @@ async function verifyIntakes(env) {
   const { service, database, study, otherStudy, accounts, requests, faults, region, details, api, login, openAnalysis, openOutside,
     closeDetails, theme, capture, matrix, until, assert, check, attachmentPath, expectedDiagnostics, faultPaths, restartBrowser, analysisVersion } = env;
   let page = env.page;
-  const intakePath = `${attachmentPath()}/local-intakes`, uploadPath = `/api/artifact-versions/${service.project.id}`;
-  const panel = target => region(target).getByRole('region', { name: 'Local result intake', exact: true });
-  const saved = target => panel(target).getByRole('region', { name: 'Saved local import request', exact: true });
-  const intakeForm = target => panel(target).getByRole('form', { name: 'Import local evidence', exact: true });
-  const library = target => panel(target).getByRole('region', { name: 'Your saved local imports', exact: true });
+  const intakePath = `${attachmentPath()}/intakes`, admissionPath = `${attachmentPath()}/local-intakes`, uploadPath = `/api/artifact-versions/${service.project.id}`;
+  const panel = target => region(target).getByRole('region', { name: 'Result intake', exact: true });
+  const saved = target => panel(target).getByRole('region', { name: 'Saved import request', exact: true });
+  const intakeForm = target => panel(target).getByRole('form', { name: 'Import evidence', exact: true });
+  const library = target => panel(target).getByRole('region', { name: 'Your saved imports', exact: true });
   const card = (target, name) => library(target).getByRole('listitem').filter({ has: target.getByText(name, { exact: true }) });
   const acceptedRevisions = new Set();
   const csv = Buffer.from('sample,condition,note\r\nsample-a,control,"local, quoted"\r\nsample-b,treated,"line one\nline two"\r\n');
   const file = { name: 'local-result.csv', mimeType: 'text/csv', buffer: csv };
   const uploads = () => requests.filter(item => item.actor === 'owner' && item.method === 'POST' && item.pathname === uploadPath);
-  const admissions = () => requests.filter(item => item.actor === 'owner' && item.method === 'POST' && item.pathname === intakePath);
+  const admissions = () => requests.filter(item => item.actor === 'owner' && item.method === 'POST' && item.pathname === admissionPath);
   const latestRecipe = () => admissions().at(-1)?.input;
   async function openPanel(target) {
     await closeDetails(target);
@@ -67,7 +67,7 @@ async function verifyIntakes(env) {
   await prepare(firstName, firstCaption);
   await intakeForm(page).locator('summary').click();
   await intakeForm(page).getByRole('textbox', { name: 'Where this result came from', exact: true }).fill('Synthetic laptop result; no execution was reconstructed.');
-  const heldAdmission = service.interceptNextResponse({ method: 'POST', pathname: intakePath, mode: 'hold' }); faults.push(heldAdmission); faultPaths.add(intakePath);
+  const heldAdmission = service.interceptNextResponse({ method: 'POST', pathname: admissionPath, mode: 'hold' }); faults.push(heldAdmission); faultPaths.add(admissionPath);
   const beforeAdmissionUploads = uploads().length;
   await intakeForm(page).getByRole('button', { name: 'Import local file', exact: true }).click();
   await until(() => heldAdmission.observation(), 'The actual committed admission reply was not held.');
@@ -145,7 +145,7 @@ async function verifyIntakes(env) {
   const correction = region(page).getByRole('form', { name: 'Correct outside result', exact: true });
   const imageCaption = 'Deliberate local PNG source correction retains the original CSV and discussion.';
   await correction.getByRole('textbox', { name: 'Result caption', exact: true }).fill(imageCaption);
-  await correction.getByRole('button', { name: 'Import local file instead', exact: true }).click();
+  await correction.getByRole('button', { name: 'Import a file instead', exact: true }).click();
   await until(async () => await intakeForm(page).getByRole('textbox', { name: 'Result caption', exact: true }).inputValue() === imageCaption, 'Opening local replacement intake lost the parent correction draft.');
   const png = new PNG({ width: 64, height: 32 }); png.data.fill(180);
   for (let index = 3; index < png.data.length; index += 4) png.data[index] = 255;
@@ -169,14 +169,14 @@ async function verifyIntakes(env) {
   check('Local intake also replaces an exact existing source with a genuine PNG upload, keeping the researcher caption and expected predecessor; final inspection decodes the accepted raster while original CSV history remains retained.');
 
   await closeDetails(page); await prepare('Metadata admitted before a current-reader fence', 'This request must never upload after a newer read-only observation.');
-  const held = service.interceptNextResponse({ method: 'POST', pathname: intakePath, mode: 'hold' }); faults.push(held);
+  const held = service.interceptNextResponse({ method: 'POST', pathname: admissionPath, mode: 'hold' }); faults.push(held);
   const beforeFence = uploads().length;
   await intakeForm(page).getByRole('button', { name: 'Import local file', exact: true }).click(); await until(() => held.observation(), 'The final admission acknowledgement was not genuinely held.');
   const fencedRecipe = latestRecipe();
   await database.query("UPDATE project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2", [service.project.id, accounts.owner.id]);
   await refresh(); held.release(); await page.waitForTimeout(350);
   assert(uploads().length === beforeFence, 'An older admission acknowledgement uploaded after a fresh current-reader observation.');
-  const fenced = await checkSaved(fencedRecipe); assert(fenced.canUpload === false && fenced.importOutcome.status === 'unconfirmed', 'Read-only admission recovery falsely reported file acceptance.');
+  const fenced = await checkSaved(fencedRecipe); assert(fenced.canStartImport === false && fenced.importOutcome.status === 'unconfirmed', 'Read-only admission recovery falsely reported file acceptance.');
   await matrix(page, 'current-reader-fences-local-admission-reply', () => saved(page).scrollIntoViewIfNeeded());
   check('A fresh real reader downgrade fences an older committed admission reply before any bytes are uploaded, while its original saved request remains discoverable and explicitly recoverable.');
 
@@ -190,7 +190,7 @@ async function verifyIntakes(env) {
   await matrix(page, 'private-intake-discovery-current-reader', () => library(page).scrollIntoViewIfNeeded());
   const persistence = await page.evaluate(() => Object.values(localStorage).concat(Object.values(sessionStorage)).join('\n'));
   assert(!persistence.includes(firstRecipe.requestId) && !persistence.includes(firstCaption) && !persistence.includes('local, quoted'), 'Private recipe or scientific bytes leaked into browser persistence.');
-  const rows = (await database.query('SELECT request_id FROM research_analysis_local_intakes WHERE analysis_id=$1', [study.id])).rows;
+  const rows = (await database.query("SELECT request_id FROM research_analysis_intakes WHERE analysis_id=$1 AND source_kind='local'", [study.id])).rows;
   assert(rows.length === 4 && acceptedRevisions.size === 3, 'Intake recovery duplicated an admission or accepted scientific revision.');
   assert((await database.query('SELECT version FROM research_analyses WHERE id=$1', [study.id])).rows[0].version === analysisVersion, 'Local intake mutated the independent analysis draft.');
   check('Private intake discovery is isolated from another account and analysis, all four recipes and three accepted revisions remain unique, and reopened recovery stores neither scientific bytes nor private recipe bodies in browser persistence.');

@@ -285,7 +285,7 @@ describe.skipIf(!process.env.DATABASE_URL)('durable owner-private server import 
     for (const input of [second, third]) expect(await service.get(owner.user.id, project.id, input.requestId)).toMatchObject({ request: null, status: 'succeeded', acceptanceState: 'legacy-unrecorded', acceptance: null, availability: 'unavailable', version: null });
     const localRecovered = await localService.getLocalIntake(owner.user.id, project.id, analysis.id, local.requestId);
     expect(localRecovered.requestSha256).toBe(localAccepted.requestSha256); expect(localRecovered.recipe).toEqual(localAccepted.recipe);
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261029);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261030);
     await expect(db.query('DELETE FROM server_data_imports WHERE request_id=$1', [first.requestId])).rejects.toMatchObject({ code: '55000' });
   });
 

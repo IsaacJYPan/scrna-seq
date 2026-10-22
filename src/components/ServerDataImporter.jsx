@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { getServerDataImport, importServerData, listServerDataFiles, listServerDataImports, listServerDataRoots } from '../artifacts/serverDataApi';
+import { getServerDataImport, importServerData, listServerDataImports } from '../artifacts/serverDataApi';
 import { normalizeServerDataImportRequest } from '../../shared/serverDataImport.mjs';
 import { artifactBytesLabel } from '../artifacts/privateRArtifactPolicy';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import { TARGET_DISCONNECTED_MESSAGE } from '../runtime/executionTarget';
+import ServerDataFilePicker from './ServerDataFilePicker';
 
 const unconfirmed = 'Import completion is unconfirmed. Reconnect to the same server and check this import request. No import will be submitted again automatically.';
 const uncertainCodes = ['SERVER_DATA_IMPORT_UNCONFIRMED', 'TARGET_EXECUTION_UNCONFIRMED'];
@@ -11,13 +12,9 @@ const uncertainCodes = ['SERVER_DATA_IMPORT_UNCONFIRMED', 'TARGET_EXECUTION_UNCO
 export default function ServerDataImporter({ projectId, userId, canWrite = false, onImported, onOutcome }) {
   const connection = useExecutionTarget();
   const [open, setOpen] = useState(false);
-  const [roots, setRoots] = useState([]);
-  const [limits, setLimits] = useState(null);
   const [rootId, setRootId] = useState('');
-  const [directory, setDirectory] = useState('');
-  const [files, setFiles] = useState([]);
-  const [nextCursor, setNextCursor] = useState(null);
-  const [listingNotice, setListingNotice] = useState('');
+  const [rootLabel, setRootLabel] = useState('');
+  const [pickerRefresh, setPickerRefresh] = useState(0);
   const [selected, setSelected] = useState(null);
   const [name, setName] = useState('');
   const [artifactType, setArtifactType] = useState('auto');
@@ -37,7 +34,6 @@ export default function ServerDataImporter({ projectId, userId, canWrite = false
   const [missingChecked, setMissingChecked] = useState(false);
   const scope = `${projectId}:${userId || ''}:${connection.identity}`;
   const currentScope = useRef(scope); currentScope.current = scope;
-  const browseRequest = useRef(null);
   const importRequest = useRef(null);
   const postStarted = useRef(false);
   const statusRequest = useRef(null);
@@ -59,7 +55,7 @@ export default function ServerDataImporter({ projectId, userId, canWrite = false
   const pendingRef = useRef(pending); pendingRef.current = pending;
 
   function clearPrivate() {
-    setRoots([]); setLimits(null); setRootId(''); setDirectory(''); setFiles([]); setNextCursor(null); setListingNotice('');
+    setOpen(false); setRootId(''); setRootLabel('');
     setSelected(null); setName(''); setArtifactType('auto'); setSampleMetadata({}); setReceipt(null); setUncertain(false);
     setLoading(false); setImporting(false); setChecking(false); requestId.current = null; notified.current = null;
     setSavedItems([]); setSavedCursor(null); setSavedLoaded(false); setSavedLoading(false); setMissingChecked(false);
@@ -70,7 +66,7 @@ export default function ServerDataImporter({ projectId, userId, canWrite = false
     setError(failure.message);
     if ([401, 403, 404].includes(failure.status)) {
       readEpoch.current++; writeEpoch.current++;
-      browseRequest.current?.abort(); importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort();
+      importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort();
       clearPrivate();
       onOutcomeRef.current?.(null);
     }
@@ -88,8 +84,8 @@ export default function ServerDataImporter({ projectId, userId, canWrite = false
   function fenceWrites() {
     const inFlight = postStarted.current && importRequest.current && !importRequest.current.signal.aborted && requestId.current;
     writeEpoch.current++;
-    browseRequest.current?.abort(); importRequest.current?.abort();
-    setRoots([]); setFiles([]); setSelected(null); setLimits(null); setNextCursor(null); setLoading(false); setImporting(false);
+    importRequest.current?.abort();
+    setOpen(false); setSelected(null); setLoading(false); setImporting(false);
     if (inFlight) { wasUnconfirmed.current = true; setUncertain(true); setError(unconfirmed); }
   }
   function accept(value, controller) {
@@ -104,9 +100,9 @@ export default function ServerDataImporter({ projectId, userId, canWrite = false
 
   useEffect(() => {
     readEpoch.current++; writeEpoch.current++;
-    browseRequest.current?.abort(); importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort();
+    importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort();
     clearPrivate(); setOpen(false); setSavedOpen(false); setImportAllowed(true); setError(''); serviceId.current = null;
-    return () => { browseRequest.current?.abort(); importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort(); };
+    return () => { importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort(); };
   }, [scope]);
 
   useEffect(() => { if (!canWrite) fenceWrites(); }, [canWrite]);
@@ -114,48 +110,15 @@ export default function ServerDataImporter({ projectId, userId, canWrite = false
   useEffect(() => {
     if (blocked) {
       readEpoch.current++; writeEpoch.current++;
-      browseRequest.current?.abort(); importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort();
+      setOpen(false); importRequest.current?.abort(); statusRequest.current?.abort(); savedRequest.current?.abort();
       setLoading(false); setImporting(false); setChecking(false); setSavedLoading(false);
       if (requestId.current && pendingRef.current) { wasUnconfirmed.current = true; setUncertain(true); setError(unconfirmed); }
     }
   }, [blocked]);
 
-  async function browse(nextRoot, path = '', cursor) {
-    if (blocked || !writer) return;
-    browseRequest.current?.abort();
-    const controller = new AbortController(); browseRequest.current = controller;
-    const submittedScope = scope;
-    setLoading(true); setError('');
-    if (!cursor) { setSelected(null); setFiles([]); setNextCursor(null); setListingNotice(''); setDirectory(path); setRootId(nextRoot); }
-    try {
-      const value = await listServerDataFiles(projectId, nextRoot, { path, cursor, signal: controller.signal });
-      if (controller.signal.aborted || currentScope.current !== submittedScope) return;
-      setDirectory(value.path);
-      setFiles(current => cursor ? [...current, ...value.items.filter(item => !current.some(existing => existing.relativePath === item.relativePath))] : value.items);
-      setNextCursor(value.nextCursor);
-      setListingNotice(value.scanLimitReached ? 'This directory exceeds the bounded listing. Organize files into smaller subdirectories to browse the remaining sources.' : '');
-    } catch (failure) { if (!controller.signal.aborted && currentScope.current === submittedScope) showFailure(failure); }
-    finally { if (!controller.signal.aborted && currentScope.current === submittedScope) setLoading(false); }
-  }
-
-  async function openBrowser() {
-    if (blocked || !canWrite) return;
-    setOpen(true); setLoading(true); setError('');
-    browseRequest.current?.abort();
-    const controller = new AbortController(); browseRequest.current = controller;
-    const submittedScope = scope;
-    const epoch = writeEpoch.current;
-    try {
-      const discovery = await listServerDataImports(projectId, { userId, serviceId: serviceId.current || undefined, signal: controller.signal });
-      if (controller.signal.aborted || currentScope.current !== submittedScope || writeEpoch.current !== epoch) return;
-      authority(discovery, controller);
-      if (!discovery.canImport || !writerRef.current) return;
-      const value = await listServerDataRoots(projectId, controller.signal);
-      if (controller.signal.aborted || currentScope.current !== submittedScope) return;
-      setRoots(value.roots); setLimits(value.limits || null);
-      if (value.roots[0]) await browse(value.roots[0].id);
-    } catch (failure) { if (!controller.signal.aborted && currentScope.current === submittedScope) showFailure(failure); }
-    finally { if (!controller.signal.aborted && currentScope.current === submittedScope) setLoading(false); }
+  function openBrowser() {
+    if (blocked || !writer || pending) return;
+    setOpen(true); setError(''); setPickerRefresh(value => value + 1);
   }
 
   async function loadSaved(cursor) {
@@ -257,25 +220,17 @@ export default function ServerDataImporter({ projectId, userId, canWrite = false
       {savedCursor && <button type="button" className="btn btn-secondary text-xs" disabled={blocked || savedLoading} onClick={() => loadSaved(savedCursor)}>More saved imports</button>}
     </section>}
     {open && <>
-      {roots.length > 0 && <>
-        <div className="flex flex-wrap gap-3 items-center"><label className="text-sm">Authorized data root<select aria-label="Authorized data root" className="input ml-2" value={rootId} disabled={blocked || loading || pending} onChange={event => browse(event.target.value)}>{roots.map(root => <option key={root.id} value={root.id}>{root.label}</option>)}</select></label>
-          <button type="button" className="btn btn-secondary text-xs" disabled={blocked || loading || pending} onClick={() => browse(rootId, directory)}>Refresh server folder</button>
-          <button type="button" className="btn btn-secondary text-xs" disabled={blocked || loading || pending || !directory} onClick={() => browse(rootId, directory.split('/').slice(0, -1).join('/'))}>Parent folder</button>
-        </div>
-        <p className="text-xs break-all" aria-label="Server folder">Folder: {directory || '/'}</p>
-        <div aria-label="Available server files" className="max-h-64 overflow-auto space-y-1">{files.map(file => <button key={file.relativePath} type="button" className={`w-full border rounded p-2 text-left text-sm ${selected?.relativePath === file.relativePath ? 'border-primary bg-primary/5' : 'border-border'}`} disabled={blocked || loading || pending || file.kind === 'file' && !file.selectionToken} onClick={() => {
-          if (file.kind === 'directory') browse(rootId, file.relativePath);
-          else { setSelected(file); setName(file.name); setArtifactType('auto'); setSampleMetadata({}); setReceipt(null); setError(''); requestId.current = null; originalRequest.current = null; wasUnconfirmed.current = false; }
-        }} aria-label={`${file.kind === 'directory' ? 'Open folder' : 'Select server file'} ${file.name}`}><span className="block break-all">{file.name}{file.kind === 'directory' ? ' /' : ''}</span>{file.kind === 'file' && <span className="text-xs text-textMuted">{artifactBytesLabel(file.sizeBytes)}{file.modifiedAt ? ` · ${new Date(file.modifiedAt).toLocaleString()}` : ''}</span>}</button>)}</div>
-        {!loading && files.length === 0 && <p className="text-sm text-textMuted">No supported files or folders are available here.</p>}
-        {nextCursor && <button type="button" className="btn btn-secondary text-xs" disabled={blocked || loading || pending} onClick={() => browse(rootId, directory, nextCursor)}>More server files</button>}
-        {listingNotice && <p role="status" className="text-sm text-textMuted">{listingNotice}</p>}
-      </>}
-      {loading && <p role="status" className="text-xs text-textMuted">Loading authorized server files…</p>}
-      {writer && !loading && roots.length === 0 && !error && <p className="text-sm text-textMuted">No authorized server data roots are configured for this project. A server administrator can grant access to a data folder.</p>}
-      {limits && <p className="text-xs text-textMuted">Server import limit: {artifactBytesLabel(limits.maxFileBytes)} per file · managed artifact quota {artifactBytesLabel(limits.managedQuotaBytes)}.</p>}
+      <ServerDataFilePicker projectId={projectId} userId={userId} serviceId={serviceId.current || undefined} available={!blocked && canWrite} disabled={pending} refreshKey={pickerRefresh}
+        onLoading={setLoading} onError={failure => setError(failure?.message || '')} onDenied={showFailure}
+        onAuthority={(allowed, info) => authority({ ...info, canImport: allowed })} onSelect={value => {
+          setSelected(value?.file || null); setRootId(value?.rootId || ''); setRootLabel(value?.rootLabel || '');
+          if (!value) return;
+          serviceId.current = value.serviceId;
+          setName(value.file.name); setArtifactType('auto'); setSampleMetadata({}); setReceipt(null); setError('');
+          requestId.current = null; originalRequest.current = null; wasUnconfirmed.current = false;
+        }} />
       {selected && writer && <form aria-label="Save server file snapshot" onSubmit={submit} className="border-t border-border pt-3 space-y-3">
-        <p className="text-xs break-all">Selected source: {roots.find(root => root.id === rootId)?.label} / {selected.relativePath} · {artifactBytesLabel(selected.sizeBytes)}{Number.isSafeInteger(selected.sizeBytes) ? ` · ${selected.sizeBytes.toLocaleString()} bytes` : ''}</p>
+        <p className="text-xs break-all">Selected source: {rootLabel} / {selected.relativePath} · {artifactBytesLabel(selected.sizeBytes)}{selected.sizeBytes >= 1024 ? ` · ${selected.sizeBytes.toLocaleString()} bytes` : ''}</p>
         <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm">Server artifact name<input aria-label="Server artifact name" className="input block w-full mt-1" value={name} maxLength={160} disabled={blocked || pending} onChange={event => setName(event.target.value)} /></label>
           <label className="text-sm">Server artifact purpose<select aria-label="Server artifact purpose" className="input block w-full mt-1" value={artifactType} disabled={blocked || pending} onChange={event => setArtifactType(event.target.value)}><option value="auto">Detect from file</option><option value="sample-sheet">Sample sheet (CSV/TSV)</option></select></label></div>
         <details className="text-sm"><summary className="cursor-pointer">Sample details (optional)</summary><p className="mt-2 text-xs text-textMuted">Retain a sample description with this saved input. These annotations do not alter file contents.</p><div className="mt-2 grid gap-3 sm:grid-cols-2">{[['sampleId', 'Sample ID'], ['condition', 'Condition'], ['tissue', 'Tissue'], ['species', 'Species'], ['replicate', 'Replicate']].map(([key, label]) => <label key={key} className="text-xs">{label}<input aria-label={`Server sample ${label.toLowerCase()}`} className="input block w-full mt-1" value={sampleMetadata[key] || ''} maxLength={120} disabled={blocked || pending} onChange={event => setSampleMetadata(current => ({ ...current, [key]: event.target.value.replace(/[\r\n]/g, '') }))} /></label>)}</div></details>

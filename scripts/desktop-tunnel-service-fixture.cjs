@@ -101,20 +101,25 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
     return { observation: () => fault.observation, release };
   }
   fs.mkdirSync(privateDirectory, { recursive: true });
+  const stopWeb = async () => {
+    const current = web;
+    if (!current || current.exitCode !== null) return;
+    const exited = new Promise(resolve => current.once('exit', resolve));
+    if (process.platform === 'win32' && current.connected) current.send({ type: 'traceomics:shutdown' });
+    else current.kill('SIGTERM');
+    let timer;
+    await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => { current.kill(); resolve(); }, 12_000); })]);
+    clearTimeout(timer);
+    if (current.exitCode === null) {
+      let forced;
+      await Promise.race([exited, new Promise((_, reject) => { forced = setTimeout(() => reject(new Error('The owned application did not stop.')), 3000); })]).finally(() => clearTimeout(forced));
+    }
+  };
   const stop = async () => {
     if (stopped) return; stopped = true;
     for (const fault of responseFaults) fault.release(); responseFaults.clear();
     await closeServer(ingress);
-    if (web && web.exitCode === null) {
-      const exited = new Promise(resolve => web.once('exit', resolve));
-      if (process.platform === 'win32' && web.connected) web.send({ type: 'traceomics:shutdown' });
-      else web.kill('SIGTERM');
-      let timer;
-      await Promise.race([exited, new Promise(resolve => {
-        timer = setTimeout(() => { web.kill(); resolve(); }, 12_000);
-      })]);
-      clearTimeout(timer);
-    }
+    await stopWeb();
     await closeServer(fakeR);
     if (databaseStarted) await command('docker', ['stop', databaseName]);
     const resolved = path.resolve(privateDirectory);
@@ -228,6 +233,7 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
     if (configureEnvironment) Object.assign(env, await configureEnvironment({ env, privateDirectory }));
     const project = await seed({ ...env, NODE_ENV: 'test', DATABASE_SCHEMA_MANAGED_EXTERNALLY: 'false' }, account);
     if (configureProjectEnvironment) Object.assign(env, await configureProjectEnvironment({ env, project, account, privateDirectory }));
+    const launchWeb = async () => {
     web = spawn(process.execPath, [path.join(root, 'server.js')], { cwd: root, env, shell: false,
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     let diagnostics = '';
@@ -248,9 +254,18 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
       }
       throw new Error('Disposable application startup failed: ' + diagnostics.trim().slice(-2000));
     }
+    };
+    await launchWeb();
     return { endpoint, httpsPort: selectedHttpsPort, caCertificatePath, certificatePath, privateKeyPath,
       account, project, databaseUrl, storageRoot: env.STORAGE_ROOT, stop,
       interceptNextResponse,
+      async restartServerDataRoots(roots) {
+        if (stopped || !Array.isArray(roots) || Buffer.byteLength(JSON.stringify(roots)) > 65536) throw new Error('Use bounded root configuration for the owned service restart.');
+        await stopWeb();
+        env.SERVER_DATA_IMPORT_ROOTS = JSON.stringify(roots);
+        await launchWeb();
+        return { restarted: true };
+      },
       setCompatibilityResponse(value, status = 200) {
         compatibilityOverride = value == null ? null : { value, status };
       },

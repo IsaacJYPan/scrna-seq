@@ -134,7 +134,7 @@ function importReceipt(value) {
     if (Object.hasOwn(value.version, 'owner')) {
       fields(value.version.owner, ['id', 'displayName']);
       if (value.version.owner.id !== value.version.ownerId || typeof value.version.owner.displayName !== 'string'
-          || !value.version.owner.displayName.trim() || [...value.version.owner.displayName].length > 160 || /\p{Cc}/u.test(value.version.owner.displayName)) fail();
+          || !value.version.owner.displayName.trim() || value.version.owner.displayName.length > 200 || /\p{Cc}/u.test(value.version.owner.displayName)) fail();
     }
     if (Object.hasOwn(value.version, 'source')) {
       fields(value.version.source, ['kind', 'id']);

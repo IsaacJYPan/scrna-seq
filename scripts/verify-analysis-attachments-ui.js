@@ -32,7 +32,7 @@ function syntheticFigure() {
   return PNG.sync.write(png);
 }
 
-async function main({ artifactDirectory, verifyCorrections, verifyIntakes } = {}) {
+async function main({ artifactDirectory, verifyCorrections, verifyIntakes, configureServerData } = {}) {
   const directory = path.resolve(artifactDirectory || path.join(root, 'playwright/report', 'analysis-attachments-' + Date.now()));
   assert(directory.startsWith(path.join(root, 'playwright/report') + path.sep), 'Evidence must stay in ignored report storage.');
   assert(fs.existsSync(path.join(root, 'dist/index.html')), 'Build production assets before attachment acceptance.');
@@ -67,7 +67,8 @@ async function main({ artifactDirectory, verifyCorrections, verifyIntakes } = {}
       const pathname = new URL(request.url()).pathname;
       if (!pathname.startsWith('/api/')) return;
       const record = { actor, method: request.method(), pathname };
-      if (record.method === 'POST' && /\/attachments(?:\/local-intakes|\/raa_[a-f0-9]{24}\/revisions(?:\/rar_[a-f0-9]{24}\/comments)?)?$/.test(pathname)) record.input = request.postDataJSON();
+      if (record.method === 'POST' && (/\/attachments(?:\/(?:local|server)-intakes|\/raa_[a-f0-9]{24}\/revisions(?:\/rar_[a-f0-9]{24}\/comments)?)?$/.test(pathname)
+        || /^\/api\/server-data\/[^/]+\/imports$/.test(pathname))) record.input = request.postDataJSON();
       requests.push(record);
     });
     target.on('response', response => {
@@ -168,6 +169,7 @@ async function main({ artifactDirectory, verifyCorrections, verifyIntakes } = {}
         accounts.colleague = { id: Number(colleague.id), email: 'unused' }; accounts.colleague.email = (await client.query('SELECT email FROM users WHERE id=$1', [colleague.id])).rows[0].email;
         await client.query("INSERT INTO organization_members(organization_id,user_id,role) VALUES($1,$2,'member')", [organization.organization_id, colleague.id]);
         await client.query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,'viewer')", [project.id, colleague.id]);
+        if (configureServerData) return await configureServerData({ env, account, project, accounts, database: client });
       } finally { await client.end(); } return {};
     } });
     database = new Client({ connectionString: service.databaseUrl }); await database.connect();

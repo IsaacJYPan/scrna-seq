@@ -6,7 +6,8 @@ import { getServerDataImport, importServerData, listServerDataFiles, listServerD
 
 vi.mock('../artifacts/serverDataApi', () => ({ getServerDataImport: vi.fn(), importServerData: vi.fn(), listServerDataFiles: vi.fn(), listServerDataImports: vi.fn(), listServerDataRoots: vi.fn() }));
 const roots = { roots: [{ id: 'lab-data', label: 'Lab data' }], limits: { maxFileBytes: 512 * 1024 ** 2, managedQuotaBytes: 5 * 1024 ** 3 } };
-const file = { name: 'cells.rds', relativePath: 'study/cells.rds', kind: 'file', sizeBytes: 3400, selectionToken: 'a'.repeat(64), modifiedAt: '2026-10-08T01:00:00Z' };
+const file = { name: 'cells.rds', relativePath: 'cells.rds', kind: 'file', sizeBytes: 3400, selectionToken: 'a'.repeat(64), modifiedAt: '2026-10-08T01:00:00Z' };
+const folderCursor = 'eyJvZmZzZXQiOjF9.' + 'a'.repeat(64);
 const serviceId = `svc_${'1'.repeat(32)}`, requestId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const version = { name: 'cells.rds', versionId: `av_${'2'.repeat(24)}`, sizeBytes: 3400, sha256: 'b'.repeat(64) };
 const complete = { requestId, id: `sdi_${'3'.repeat(24)}`, status: 'succeeded', name: 'cells.rds', version, serviceId, canImport: true,
@@ -27,7 +28,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   listServerDataImports.mockResolvedValue(discovery());
   listServerDataRoots.mockResolvedValue(roots);
-  listServerDataFiles.mockResolvedValue({ path: '', items: [{ kind: 'directory', name: 'study', relativePath: 'study' }, file], nextCursor: null });
+  listServerDataFiles.mockResolvedValue({ root: roots.roots[0], path: '', items: [{ kind: 'directory', name: 'study', relativePath: 'study' }, file], nextCursor: null });
   importServerData.mockImplementation(async (_project, input) => ({ ...complete, requestId: input.requestId, name: input.name, version: { ...version, name: input.name } }));
   getServerDataImport.mockImplementation(async (_project, requested) => ({ ...complete, requestId: requested }));
 });
@@ -48,19 +49,20 @@ it('browses authorized folders, edits the name and sends only immutable source s
   fireEvent.change(screen.getByLabelText('Server artifact name'), { target: { value: 'Saved cells' } });
   fireEvent.click(screen.getByRole('button', { name: 'Import selected server file' }));
   expect(await screen.findByText('Server file saved as an immutable artifact version.')).toBeVisible();
-  expect(importServerData).toHaveBeenCalledWith(props.projectId, { requestId: expect.any(String), rootId: 'lab-data', relativePath: 'study/cells.rds', selectionToken: file.selectionToken, name: 'Saved cells', artifactType: 'auto', previousVersionId: null }, expect.any(AbortSignal), { userId: 1, serviceId });
+  expect(importServerData).toHaveBeenCalledWith(props.projectId, { requestId: expect.any(String), rootId: 'lab-data', relativePath: file.relativePath, selectionToken: file.selectionToken, name: 'Saved cells', artifactType: 'auto', previousVersionId: null }, expect.any(AbortSignal), { userId: 1, serviceId });
   expect(onImported).toHaveBeenCalledExactlyOnceWith({ ...version, name: 'Saved cells' });
   expect(screen.getByText('SHA-256 ' + version.sha256)).toBeVisible();
 });
 
 it('pages directories, clears file selections on navigation and sends sample-sheet purpose explicitly', async () => {
   render(<ServerDataImporter {...props} />); await browseAndSelect();
-  listServerDataFiles.mockResolvedValueOnce({ path: 'study', items: [file], nextCursor: 'next' });
+  listServerDataFiles.mockResolvedValueOnce({ root: roots.roots[0], path: 'study', items: [{ ...file, relativePath: 'study/cells.rds' }], nextCursor: folderCursor });
   fireEvent.click(screen.getByRole('button', { name: 'Open folder study' }));
   expect(await screen.findByRole('button', { name: 'More server files' })).toBeVisible();
   expect(screen.queryByLabelText('Server artifact name')).not.toBeInTheDocument();
+  listServerDataFiles.mockResolvedValueOnce({ root: roots.roots[0], path: 'study', items: [], nextCursor: null });
   fireEvent.click(screen.getByRole('button', { name: 'More server files' }));
-  await waitFor(() => expect(listServerDataFiles).toHaveBeenLastCalledWith(props.projectId, 'lab-data', expect.objectContaining({ path: 'study', cursor: 'next' })));
+  await waitFor(() => expect(listServerDataFiles).toHaveBeenLastCalledWith(props.projectId, 'lab-data', expect.objectContaining({ path: 'study', cursor: folderCursor })));
   fireEvent.click(screen.getByRole('button', { name: 'Select server file cells.rds' }));
   fireEvent.change(screen.getByLabelText('Server artifact purpose'), { target: { value: 'sample-sheet' } });
   fireEvent.click(screen.getByRole('button', { name: 'Import selected server file' }));
@@ -132,7 +134,7 @@ it('removes private folder and artifact details after membership is revoked', as
   listServerDataFiles.mockRejectedValueOnce(Object.assign(new Error('Project access is unavailable.'), { status: 403 }));
   fireEvent.click(screen.getByRole('button', { name: 'Refresh server folder' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Project access is unavailable.');
-  expect(screen.queryByLabelText('Authorized data root')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Server folder', { exact: true })).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Server artifact name')).not.toBeInTheDocument();
 });
 
@@ -145,7 +147,7 @@ it('blocks new imports while disconnected and preserves a confirmed saved versio
   await screen.findByText('Server file saved as an immutable artifact version.');
   act(() => notify({ ...target, status: 'disconnected', sshTunnel: { state: 'disconnected' } }));
   expect(screen.getByText('Server file saved as an immutable artifact version.')).toBeVisible();
-  expect(screen.getByRole('button', { name: 'Import selected server file' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Import selected server file' })).not.toBeInTheDocument();
   expect(screen.getByText(/selected server is disconnected/)).toBeVisible();
   expect(importServerData).toHaveBeenCalledOnce();
 });
@@ -165,7 +167,7 @@ it('stops pending status polling after a native loss and requires an explicit st
   expect(getServerDataImport).not.toHaveBeenCalled();
   expect(importServerData).toHaveBeenCalledOnce();
   expect(screen.getByRole('button', { name: 'Check server import status' })).toBeEnabled();
-  expect(screen.getByRole('button', { name: 'Import selected server file' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Import selected server file' })).not.toBeInTheDocument();
 });
 
 it('rediscovers an accepted original after remount as a reader and checks it without browsing, copying or repeating notification', async () => {
