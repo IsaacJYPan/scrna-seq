@@ -13,6 +13,10 @@ disabled for this focused experience. Private installations keep their full UI.
 The default local demo fixture is a small synthetic tutorial and retains the
 fixture workbench. The guided experience is enabled for demo deployments with
 `DEMO_DATASET=pbmc3k`.
+For the guided demo, bootstrap with `DEMO_TEMPLATE_STAGE=input` to retain only
+the original counts. This avoids copying and loading the prepared tutorial's
+scaled matrix on each visit. Existing templates remain available; creating a
+new template does not alter saved guest analyses.
 It needs a Linux VM, Docker Compose, HTTPS, and persistent storage. It cannot
 run as a static site or fit on a typical 512 MiB free web service.
 

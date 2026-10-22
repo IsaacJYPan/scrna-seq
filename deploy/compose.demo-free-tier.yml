@@ -125,6 +125,8 @@ services:
       NODE_ENV: production
       HOME: /tmp
       APP_DEPLOYMENT_MODE: demo
+      DEMO_DATASET: ${DEMO_DATASET:-synthetic}
+      DEMO_TEMPLATE_STAGE: ${DEMO_TEMPLATE_STAGE:-processed}
       PGHOST: 127.0.0.1
       PGPORT: "5432"
       PGUSER: ${POSTGRES_USER:?Set POSTGRES_USER}
@@ -157,6 +159,7 @@ services:
     environment:
       HOME: /tmp
       STORAGE_ROOT: /app/storage-volume/data
+      DEMO_DATASET: ${DEMO_DATASET:-synthetic}
     volumes:
       - durable-storage:/app/storage-volume
     depends_on:

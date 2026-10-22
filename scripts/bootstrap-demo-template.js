@@ -14,6 +14,11 @@ const PENDING_FILE = '.demo-template-bootstrap.json';
 const dataset = process.env.DEMO_DATASET || 'synthetic';
 if (!['synthetic', 'pbmc3k'].includes(dataset)) throw new Error('Unsupported demo dataset.');
 const pbmc = dataset === 'pbmc3k';
+const stage = process.env.DEMO_TEMPLATE_STAGE || 'processed';
+if (!['processed', 'input'].includes(stage) || (stage === 'input' && !pbmc)) {
+  throw new Error('Input templates require the PBMC3k dataset.');
+}
+const inputOnly = stage === 'input';
 const sourceType = pbmc ? 'pbmc3k_demo' : 'synthetic_pbmc_demo';
 const tutorialUrl = 'https://satijalab.org/seurat/articles/pbmc3k_tutorial';
 
@@ -34,7 +39,8 @@ function validatePending(value) {
       || typeof value.checkpointKey !== 'string'
       || value.checkpointKey !== storage.projectStorageFileKey(
         value.projectId, 'checkpoints', value.jobId, 'checkpoint.rds'
-      ) || ((value.dataset || 'synthetic') !== dataset)) {
+      ) || ((value.dataset || 'synthetic') !== dataset)
+      || (value.stage || 'processed') !== stage) {
     fail('The pending demo-template bootstrap record is invalid.');
   }
   return value;
@@ -62,7 +68,7 @@ async function prepare() {
   });
   const object = await db.createProjectAnalysisObject(owner.id, project.id, {
     objectType: 'seurat',
-    displayName: pbmc ? 'PBMC3k · Seurat tutorial' : 'Synthetic PBMC-like tutorial',
+    displayName: inputOnly ? 'PBMC3k · input counts' : pbmc ? 'PBMC3k · Seurat tutorial' : 'Synthetic PBMC-like tutorial',
     metadata: {
       sourceType,
       synthetic: !pbmc,
@@ -70,7 +76,8 @@ async function prepare() {
       ...(pbmc ? { tutorialUrl, dataset: 'pbmc3k', singleSample: true,
         sourceUrl: 'https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz',
         sourceSha256: '847d6ebd9a1ec9a768f2be7e40ca42cbfe75ebeb6d76a4c24167041699dc28b5' } : {}),
-      summary: pbmc ? { cells: 2638, features: 13714 } : { cells: 800, features: 200 },
+      ...(inputOnly ? { inputOnly: true } : {}),
+      summary: pbmc ? { cells: inputOnly ? 2700 : 2638, features: 13714 } : { cells: 800, features: 200 },
     },
   });
   if (pbmc) {
@@ -110,6 +117,7 @@ async function prepare() {
   const pending = {
     version: 1,
     dataset,
+    stage,
     ownerUserId: Number(owner.id),
     projectId: project.id,
     objectId: object.id,

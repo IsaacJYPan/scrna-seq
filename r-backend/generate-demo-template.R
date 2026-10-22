@@ -32,6 +32,11 @@ if (file.exists(destination)) stop("Demo checkpoint already exists; refusing to 
 precomputed_dir <- Sys.getenv("DEMO_PRECOMPUTED_DIR", unset="")
 dataset <- Sys.getenv("DEMO_DATASET", unset="synthetic")
 if (!dataset %in% c("synthetic", "pbmc3k")) stop("Unsupported demo dataset.")
+stage <- if (is.null(pending$stage)) "processed" else pending$stage
+if (!stage %in% c("processed", "input") || (stage == "input" && dataset != "pbmc3k")) {
+  stop("Input templates require the PBMC3k dataset.")
+}
+input_only <- identical(stage, "input")
 if (nzchar(precomputed_dir)) {
   manifest <- fromJSON(file.path(precomputed_dir, "manifest.json"))
   source <- file.path(precomputed_dir, "checkpoint.rds")
@@ -49,8 +54,23 @@ if (nzchar(precomputed_dir)) {
     stop("The precomputed synthetic template failed verification.")
   }
   temporary <- paste0(destination, ".tmp-", Sys.getpid())
-  if (!file.copy(source, temporary, overwrite=FALSE)) stop("Could not stage the verified template.")
-  if (!identical(digest::digest(file=temporary, algo="sha256"), manifest$checksumSha256) ||
+  if (input_only) {
+    # The guided demo starts from counts. Loading the prepared tutorial's dense
+    # scaled matrix just to discard it during QC costs time on every visit.
+    suppressPackageStartupMessages(library(Seurat))
+    bundle <- readRDS(source)
+    raw <- bundle$raw
+    if (!inherits(raw, "Seurat") || ncol(raw) != 2700L || nrow(raw) != 13714L ||
+        length(raw@reductions) != 0L || "seurat_clusters" %in% colnames(raw[[]]) ||
+        !identical(Layers(raw), "counts")) stop("PBMC3k input counts failed validation.")
+    raw@misc$traceomics_demo <- manifest$source
+    saveRDS(list(global=raw, raw=raw), temporary, compress="gzip")
+    expected_cells <- 2700L
+  } else if (!file.copy(source, temporary, overwrite=FALSE)) {
+    stop("Could not stage the verified template.")
+  }
+  checksum <- digest::digest(file=temporary, algo="sha256")
+  if ((!input_only && !identical(checksum, manifest$checksumSha256)) ||
       !file.link(temporary, destination)) {
     unlink(temporary)
     stop("Could not publish the verified template without overwriting an existing file.")
@@ -58,8 +78,9 @@ if (nzchar(precomputed_dir)) {
   unlink(temporary)
   Sys.chmod(destination, mode="0600")
   cat(toJSON(list(checkpointKey=checkpoint_key, cells=expected_cells, features=expected_features,
-    reductions=c("pca", "umap"), synthetic=dataset == "synthetic", dataset=dataset, precomputed=TRUE,
-    checksumSha256=manifest$checksumSha256), auto_unbox=TRUE), "\n", sep="")
+    reductions=if (input_only) character() else c("pca", "umap"),
+    synthetic=dataset == "synthetic", dataset=dataset, precomputed=TRUE,
+    checksumSha256=checksum), auto_unbox=TRUE), "\n", sep="")
   quit(save="no", status=0L)
 }
 
@@ -116,6 +137,10 @@ object <- FindClusters(object, resolution=0.5, random.seed=20260808, verbose=FAL
 object <- RunUMAP(object, dims=1:10, n.neighbors=20, min.dist=0.25, seed.use=20260808, verbose=FALSE)
 }
 
+if (input_only) {
+  raw_object@misc$traceomics_demo <- object@misc$traceomics_demo
+  object <- raw_object
+}
 temporary <- paste0(destination, ".tmp-", Sys.getpid())
 on.exit(if (file.exists(temporary)) unlink(temporary), add=TRUE)
 saveRDS(list(global=object, raw=raw_object), temporary, compress="gzip")
