@@ -16,7 +16,7 @@ function usePlotTheme() {
 
 // This component receives a validated bounded projection. It never opens a
 // source file or starts a runtime; plots and exports use these retained points.
-export default function RetainedEmbedding({ preview, pointLimit, onPointLimitChange, loading }) {
+export default function RetainedEmbedding({ preview, pointLimit, onPointLimitChange, loading, fixedView = false }) {
   const theme = usePlotTheme(), dark = theme === 'dark';
   const [revision, setRevision] = useState(0), [ready, setReady] = useState(false), [exporting, setExporting] = useState(false), [error, setError] = useState('');
   const graph = useRef(null), active = useRef(true);
@@ -60,7 +60,7 @@ export default function RetainedEmbedding({ preview, pointLimit, onPointLimitCha
       {preview.sampling.budgetLimited && ' Fewer points fit within the response byte limit.'}
       {preview.ids === null && ' Point identities are positions in this exact source version, not cell identifiers.'}</p>
     <div className="flex flex-wrap items-center gap-3 text-xs">
-      <label>Maximum points<select aria-label="Maximum points" className="input ml-2" value={pointLimit} disabled={loading} onChange={event => onPointLimitChange(Number(event.target.value))}>{[500, 1000, 2000, 5000].map(value => <option key={value} value={value}>{value.toLocaleString()}</option>)}</select></label>
+      {!fixedView && <label>Maximum points<select aria-label="Maximum points" className="input ml-2" value={pointLimit} disabled={loading} onChange={event => onPointLimitChange(Number(event.target.value))}>{[500, 1000, 2000, 5000].map(value => <option key={value} value={value}>{value.toLocaleString()}</option>)}</select></label>}
       <button type="button" className="btn btn-secondary text-xs" disabled={!ready} onClick={() => setRevision(value => value + 1)}>Reset plot view</button>
       <button type="button" className="btn btn-secondary text-xs" disabled={!ready || exporting} onClick={exportImage}>{exporting ? 'Exporting retained plot…' : 'Export plot PNG'}</button>
     </div>

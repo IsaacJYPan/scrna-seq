@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261030, now())
+VALUES ('traceomics.runtime', 20261031, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1733,3 +1733,77 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_research_document_pending_request_identity ON research_document_pending_requests;
 CREATE TRIGGER trg_research_document_pending_request_identity BEFORE UPDATE OR DELETE ON research_document_pending_requests
   FOR EACH ROW EXECUTE FUNCTION enforce_research_document_pending_request_identity();
+
+-- Private review packages retain only bounded, selected views and saved source.
+-- Ready blobs and their exact metadata commit atomically; no publication grant
+-- or live execution state is created by these records.
+CREATE TABLE IF NOT EXISTS research_analysis_snapshot_preparations (
+  id TEXT PRIMARY KEY CHECK(id ~ '^asp_[a-f0-9]{24}$'),
+  service_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  analysis_version INTEGER NOT NULL CHECK(analysis_version>0),
+  owner_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  recipe_json JSONB,
+  analysis_snapshot_json JSONB,
+  object_plan_json JSONB NOT NULL CHECK(jsonb_typeof(object_plan_json)='array' AND jsonb_array_length(object_plan_json)<=10),
+  state TEXT NOT NULL CHECK(state IN ('preparing','ready','failed','deleted')),
+  generation INTEGER NOT NULL DEFAULT 0 CHECK(generation>=0),
+  package_json JSONB,
+  snapshot_sha256 TEXT CHECK(snapshot_sha256 IS NULL OR snapshot_sha256 ~ '^[a-f0-9]{64}$'),
+  failure_json JSONB,
+  reserved_bytes BIGINT NOT NULL CHECK(reserved_bytes BETWEEN 0 AND 16777216),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(project_id,owner_user_id,request_id),
+  UNIQUE(id,project_id,analysis_id,owner_user_id),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id),
+  FOREIGN KEY(analysis_id,analysis_version) REFERENCES research_analysis_revisions(analysis_id,version),
+  CHECK((state IN ('preparing','failed') AND recipe_json IS NOT NULL AND package_json IS NULL AND snapshot_sha256 IS NULL)
+    OR (state='ready' AND recipe_json IS NOT NULL AND package_json IS NOT NULL AND snapshot_sha256 IS NOT NULL)
+    OR (state='deleted' AND recipe_json IS NULL AND analysis_snapshot_json IS NULL AND package_json IS NULL AND reserved_bytes=0)),
+  CHECK((state='failed')=(failure_json IS NOT NULL)),
+  CHECK(recipe_json IS NULL OR (jsonb_typeof(recipe_json)='object' AND octet_length(recipe_json::text)<=98304)),
+  CHECK(package_json IS NULL OR (jsonb_typeof(package_json)='object' AND octet_length(package_json::text)<=393216))
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_snapshot_preparation_owner
+  ON research_analysis_snapshot_preparations(project_id,analysis_id,owner_user_id,created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS research_analysis_snapshot_blobs (
+  preparation_id TEXT NOT NULL REFERENCES research_analysis_snapshot_preparations(id),
+  id TEXT NOT NULL CHECK(id ~ '^asv_[a-f0-9]{24}$'),
+  kind TEXT NOT NULL CHECK(kind IN ('result','document')),
+  sha256 TEXT NOT NULL CHECK(sha256 ~ '^[a-f0-9]{64}$'),
+  size_bytes INTEGER NOT NULL CHECK(size_bytes BETWEEN 1 AND 5242880),
+  content BYTEA NOT NULL CHECK(octet_length(content)=size_bytes),
+  PRIMARY KEY(preparation_id,id)
+);
+CREATE OR REPLACE FUNCTION protect_analysis_snapshot_preparation() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    IF current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+    RAISE EXCEPTION 'Preparation request identities are retained' USING ERRCODE='55000';
+  END IF;
+  IF ROW(NEW.id,NEW.service_id,NEW.project_id,NEW.analysis_id,NEW.analysis_version,NEW.owner_user_id,NEW.request_id,NEW.request_sha256,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.service_id,OLD.project_id,OLD.analysis_id,OLD.analysis_version,OLD.owner_user_id,OLD.request_id,OLD.request_sha256,OLD.created_at)
+    OR (OLD.state='deleted' AND NEW.state<>'deleted')
+    OR (OLD.state='ready' AND NEW.state NOT IN ('ready','deleted'))
+    OR (OLD.snapshot_sha256 IS NOT NULL AND NEW.snapshot_sha256 IS DISTINCT FROM OLD.snapshot_sha256)
+    OR (NEW.state<>'deleted' AND (NEW.recipe_json IS DISTINCT FROM OLD.recipe_json OR NEW.analysis_snapshot_json IS DISTINCT FROM OLD.analysis_snapshot_json OR NEW.object_plan_json IS DISTINCT FROM OLD.object_plan_json))
+    OR (OLD.package_json IS NOT NULL AND NEW.state<>'deleted' AND NEW.package_json IS DISTINCT FROM OLD.package_json)
+  THEN RAISE EXCEPTION 'Preparation identity and accepted contents are immutable' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_analysis_snapshot_preparation ON research_analysis_snapshot_preparations;
+CREATE TRIGGER trg_analysis_snapshot_preparation BEFORE UPDATE OR DELETE ON research_analysis_snapshot_preparations
+  FOR EACH ROW EXECUTE FUNCTION protect_analysis_snapshot_preparation();
+CREATE OR REPLACE FUNCTION protect_analysis_snapshot_blob() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND (current_setting('app.demo_cleanup',true)='on' OR EXISTS(
+    SELECT 1 FROM research_analysis_snapshot_preparations WHERE id=OLD.preparation_id AND state='deleted')) THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Prepared view bytes are immutable until preparation deletion' USING ERRCODE='55000';
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_analysis_snapshot_blob ON research_analysis_snapshot_blobs;
+CREATE TRIGGER trg_analysis_snapshot_blob BEFORE UPDATE OR DELETE ON research_analysis_snapshot_blobs
+  FOR EACH ROW EXECUTE FUNCTION protect_analysis_snapshot_blob();

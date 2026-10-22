@@ -51,3 +51,27 @@ it('shows declared entity meaning separately from version-scoped identifiers and
   view.rerender(<RetainedEmbedding preview={preview} pointLimit={2000} onPointLimitChange={vi.fn()} />);
   expect(screen.getByText(/Point entity type is not declared/)).toBeVisible();
 });
+
+it('keeps local zoom/reset/export over fixed retained points without offering a new source point-limit request', async () => {
+  const onPointLimitChange = vi.fn(), points = { ...preview, sampling: { sourceCount: 50, returnedCount: 1, sampled: true, budgetLimited: true } };
+  render(<RetainedEmbedding preview={points} fixedView pointLimit={2000} onPointLimitChange={onPointLimitChange} />);
+  expect(screen.queryByRole('combobox', { name: 'Maximum points' })).not.toBeInTheDocument();
+  expect(screen.getByText('Showing 1 of 50 source points.')).toBeVisible();
+  expect(screen.getByText(/Deterministic checksum-bound sample/)).toHaveTextContent('Fewer points fit within the response byte limit.');
+  const graph = screen.getByTestId('plot'); fireEvent.click(graph);
+  const before = Plot.mock.calls.at(-1)[0], retainedData = before.data; before.layout.xaxis.range = [-10, 10];
+  fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' }));
+  await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledExactlyOnceWith(graph, expect.objectContaining({ format: 'png' })));
+  expect(Plot.mock.calls.at(-1)[0].data).toBe(retainedData); expect(Plot.mock.calls.at(-1)[0].layout.xaxis.range).toEqual([-10, 10]);
+  const revision = Plot.mock.calls.at(-1)[0].layout.uirevision; fireEvent.click(screen.getByRole('button', { name: 'Reset plot view' }));
+  expect(Plot.mock.calls.at(-1)[0].layout.uirevision).toBe(revision + 1); expect(Plot.mock.calls.at(-1)[0].data).toBe(retainedData);
+  expect(onPointLimitChange).not.toHaveBeenCalled();
+});
+
+it('preserves the source point-limit selector by default and removes it when switching to a fixed view', () => {
+  const onPointLimitChange = vi.fn(), view = render(<RetainedEmbedding preview={preview} pointLimit={2000} onPointLimitChange={onPointLimitChange} />);
+  fireEvent.change(screen.getByRole('combobox', { name: 'Maximum points' }), { target: { value: '500' } });
+  expect(onPointLimitChange).toHaveBeenCalledExactlyOnceWith(500);
+  view.rerender(<RetainedEmbedding preview={preview} fixedView pointLimit={2000} onPointLimitChange={onPointLimitChange} />);
+  expect(screen.queryByRole('combobox', { name: 'Maximum points' })).not.toBeInTheDocument();
+});

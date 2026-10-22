@@ -32,7 +32,7 @@ function syntheticFigure() {
   return PNG.sync.write(png);
 }
 
-async function main({ artifactDirectory, verifyCorrections, verifyIntakes, configureServerData } = {}) {
+async function main({ artifactDirectory, verifyCorrections, verifyIntakes, verifyPreparations, configureServerData } = {}) {
   const directory = path.resolve(artifactDirectory || path.join(root, 'playwright/report', 'analysis-attachments-' + Date.now()));
   assert(directory.startsWith(path.join(root, 'playwright/report') + path.sep), 'Evidence must stay in ignored report storage.');
   assert(fs.existsSync(path.join(root, 'dist/index.html')), 'Build production assets before attachment acceptance.');
@@ -68,7 +68,7 @@ async function main({ artifactDirectory, verifyCorrections, verifyIntakes, confi
       if (!pathname.startsWith('/api/')) return;
       const record = { actor, method: request.method(), pathname };
       if (record.method === 'POST' && (/\/attachments(?:\/(?:local|server)-intakes|\/raa_[a-f0-9]{24}\/revisions(?:\/rar_[a-f0-9]{24}\/comments)?)?$/.test(pathname)
-        || /^\/api\/server-data\/[^/]+\/imports$/.test(pathname))) record.input = request.postDataJSON();
+        || /^\/api\/server-data\/[^/]+\/imports$/.test(pathname) || /\/snapshot-preparations(?:\/asp_[a-f0-9]{24}\/resume)?$/.test(pathname))) record.input = request.postDataJSON();
       requests.push(record);
     });
     target.on('response', response => {
@@ -318,8 +318,8 @@ async function main({ artifactDirectory, verifyCorrections, verifyIntakes, confi
     await capture(page, 'restored-reader-original-receipt-catalog-offline'); await page.unroute('**/attachments?**', abortRefresh);
     check('After access is restored, an authenticated original receipt clears stale denial while a separate catalog outage preserves the confirmed result and current reader limits.');
 
-    if (verifyIntakes) {
-      const extension = await verifyIntakes({ service, database, page, study, otherStudy, table, figure, accounts, requests, faults,
+    for (const verify of [verifyIntakes, verifyPreparations].filter(Boolean)) {
+      const extension = await verify({ service, database, page, study, otherStudy, table, figure, accounts, requests, faults, importFile,
         region, details, api, login, openAnalysis, openOutside, closeDetails, theme, capture, matrix, until, assert, check, attachmentPath,
         expectedDiagnostics, faultPaths, restartBrowser, analysisVersion: expectedAnalysisVersion });
       assert(Number.isSafeInteger(extension.extraRevisions) && extension.extraRevisions >= 0, 'The intake extension did not account for its genuine accepted revisions.');

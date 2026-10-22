@@ -386,6 +386,30 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     finally { await opened.handle.close(); }
   }
 
+  // Private preparation may select several fixed windows of one owned table.
+  // Verify the complete original once, then apply the existing bounded parser
+  // to each window without granting another caller or source any access.
+  async function prepareFixedTableViews(userId, projectId, versionId, selections) {
+    if (!Array.isArray(selections) || selections.length < 1 || selections.length > 8) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'Choose at most eight fixed table views.');
+    const version = await get(userId, projectId, versionId);
+    if (!['org.ietf.csv', 'org.iana.tsv'].includes(version.format.id)) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'Choose an exact saved CSV or TSV table.');
+    const opened = await resolveVerified(userId, projectId, version.reference);
+    try {
+      const result = [];
+      for (const selection of selections) {
+        const content = await previews.buildPreview(opened, version, selection);
+        if (content.family !== 'table') throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The selected table cannot supply a fixed view.');
+        result.push(content);
+      }
+      const currentStat = await opened.handle.stat();
+      if (!currentStat.isFile() || ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].some(key => currentStat[key] !== opened.stat[key])) {
+        throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The selected table changed while its fixed views were read.', 409);
+      }
+      await recheckOpened(userId, projectId, opened);
+      return result;
+    } finally { await opened.handle.close(); }
+  }
+
   async function importFile(userId, projectId, file, previousVersionId = null) {
     await db.requireProjectRole(userId, projectId, WRITE_ROLES);
     if (!file || typeof file.path !== 'string') throw artifactError('INVALID_ARTIFACT_FILE', 'Select a file to import.');
@@ -537,7 +561,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     return inserted.rows[0];
   }
   return { list, get, preview, readVerifiedImage, importFile, getImportReceipt, serializeImportReceipt: importReceipt,
-    resolveVerified, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
+    resolveVerified, prepareFixedTableViews, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

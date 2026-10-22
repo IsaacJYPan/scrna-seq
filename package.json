@@ -92,6 +92,7 @@
     "test:analysis-attachment-discussion-browser": "npm run build && node scripts/verify-analysis-attachment-discussion-ui.js",
     "test:analysis-local-intake-browser": "npm run build && node scripts/verify-analysis-local-intake-ui.js",
     "test:analysis-server-intake-browser": "npm run build && node scripts/verify-analysis-server-intake-ui.js",
+    "test:analysis-snapshot-preparations-browser": "npm run build && node scripts/verify-analysis-snapshot-preparations-ui.js",
     "test:existing-work-browser": "npm run build && node scripts/verify-existing-work-ui.js",
     "test:retained-workflows-browser": "npm run build && node scripts/verify-retained-workflows-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",

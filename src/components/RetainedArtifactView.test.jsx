@@ -44,6 +44,48 @@ it('loads only the requested exact version, verifies response evidence, and requ
   expect(screen.queryByLabelText('Artifact file')).not.toBeInTheDocument();
 });
 
+it('renders only the fixed retained table window without original-source paging or extra transport', () => {
+  const onPageChange = vi.fn(), onPageSizeChange = vi.fn();
+  render(<RetainedResultContent preview={{ ...table, offset: 25, rows: [['Retained gene', 0], ['Other gene', false]], truncated: false }}
+    fixedView pageSize={25} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />);
+  expect(screen.getByRole('cell', { name: 'Retained gene' })).toBeVisible(); expect(screen.getByRole('cell', { name: '0' })).toBeVisible();
+  expect(screen.getByLabelText('Fixed retained table excerpt')).toHaveTextContent('source rows 26–27');
+  expect(screen.getByText('Other source rows are outside this retained view.')).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Next rows' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Previous rows' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('combobox', { name: 'Rows per page' })).not.toBeInTheDocument();
+  expect(onPageChange).not.toHaveBeenCalled(); expect(onPageSizeChange).not.toHaveBeenCalled();
+  expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+});
+
+it('discloses bounded scans honestly and never invents row numbers for an empty retained window', () => {
+  const view = render(<RetainedResultContent fixedView preview={{ ...table, offset: 100, rows: [], hasMore: false, truncated: true }} />);
+  expect(screen.getByText('Fixed retained excerpt · no rows are included from the selected source window.')).toBeVisible();
+  expect(screen.getByText('Source inspection reached its scan limit; the complete source row count is unknown.')).toBeVisible();
+  expect(screen.queryByText(/source rows 101–100/)).not.toBeInTheDocument(); expect(screen.queryByText(/More rows are saved/)).not.toBeInTheDocument();
+  view.rerender(<RetainedResultContent fixedView preview={{ ...table, hasMore: false, truncated: false }} />);
+  expect(screen.getByLabelText('Fixed retained table excerpt')).toHaveTextContent('source rows 1–1');
+  expect(screen.queryByText('Other source rows are outside this retained view.')).not.toBeInTheDocument();
+  expect(screen.queryByText(/complete source row count is unknown/)).not.toBeInTheDocument();
+});
+
+it('keeps legacy source paging by default and enables its callbacks only outside fixed mode', () => {
+  const onPageChange = vi.fn(), onPageSizeChange = vi.fn();
+  const view = render(<RetainedResultContent preview={table} pageSize={25} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Next rows' })); expect(onPageChange).toHaveBeenCalledExactlyOnceWith(25);
+  fireEvent.change(screen.getByRole('combobox', { name: 'Rows per page' }), { target: { value: '10' } });
+  expect(onPageSizeChange).toHaveBeenCalledExactlyOnceWith(10); expect(screen.queryByLabelText('Fixed retained table excerpt')).not.toBeInTheDocument();
+  view.rerender(<RetainedResultContent preview={table} fixedView pageSize={25} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />);
+  expect(screen.queryByRole('button', { name: 'Next rows' })).not.toBeInTheDocument();
+});
+
+it('opens fixed raster inspection from the supplied retained image bytes without using the original artifact loader', () => {
+  render(<RetainedResultContent fixedView preview={{ family: 'image', width: 40, height: 20 }} name="Reviewed figure" imageUrl="blob:reviewed-retained-image" />);
+  expect(screen.getByRole('img', { name: 'Preview of Reviewed figure' })).toHaveAttribute('src', 'blob:reviewed-retained-image');
+  expect(screen.getByRole('link', { name: 'Open full-size image' })).toHaveAttribute('href', 'blob:reviewed-retained-image');
+  expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+});
+
 it('rejects mismatched metadata before requesting bytes and rejects a mismatched preview version', async () => {
   getArtifactVersion.mockResolvedValueOnce({ ...metadata(), sha256: 'b'.repeat(64) });
   const view = render(<RetainedArtifactView {...props} />);
@@ -253,4 +295,16 @@ it('requests bounded deterministic embedding projections and changes limits with
   fireEvent.change(screen.getByRole('combobox', { name: 'Maximum points' }), { target: { value: '500' } });
   await waitFor(() => expect(previewArtifactVersion).toHaveBeenLastCalledWith('project', versionId, expect.objectContaining({ pointLimit: 500 })));
   expect(await screen.findByText('Showing 2 of 10,000 source points.')).toBeVisible();
+});
+
+it('forwards fixed-view disclosure to the shared embedding renderer without providing source controls', () => {
+  const preview = { family: 'embedding', source: typedSource,
+    semantics: { role: 'primary', title: 'Reviewed coordinates', entityType: 'cell', axes: { x: { label: null, unit: null }, y: { label: null, unit: null } } },
+    x: [1], y: [2], ids: null, sourceIndices: [7], identity: { kind: 'source-row-positions', scope: 'exact-source-version', indexBase: 0 },
+    sampling: { method: 'sha256-priority-v1', sourceCount: 10, returnedCount: 1, requestedLimit: 500, sampled: true, aggregated: false, stratified: false, budgetLimited: false } };
+  render(<RetainedResultContent fixedView preview={preview} />);
+  expect(screen.getByRole('heading', { name: 'Reviewed coordinates' })).toBeVisible(); expect(screen.getByText('Showing 1 of 10 source points.')).toBeVisible();
+  expect(screen.queryByRole('combobox', { name: 'Maximum points' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reset plot view' })).toBeInTheDocument(); expect(screen.getByRole('button', { name: 'Export plot PNG' })).toBeInTheDocument();
+  expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(getArtifactVersion).not.toHaveBeenCalled();
 });

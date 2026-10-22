@@ -98,6 +98,7 @@ function RetainedResultBody({
   onPageChange,
   onPageSizeChange,
   onImageError,
+  fixedView = false,
   pointLimit = 2000,
   onPointLimitChange,
 }) {
@@ -172,6 +173,7 @@ function RetainedResultBody({
         pointLimit={pointLimit}
         onPointLimitChange={onPointLimitChange}
         loading={loading}
+        fixedView={fixedView}
       />
     );
   if (preview.family === 'table' && validTablePreview(preview))
@@ -205,12 +207,20 @@ function RetainedResultBody({
             </tbody>
           </table>
         </div>
-        {preview.truncated && (
+        {fixedView ? (
+          <div aria-label="Fixed retained table excerpt" className="space-y-1 text-xs text-textMuted">
+            <p>{preview.rows.length
+              ? `Fixed retained excerpt · source rows ${preview.offset + 1}–${preview.offset + preview.rows.length}. Only the displayed rows are included in this view.`
+              : 'Fixed retained excerpt · no rows are included from the selected source window.'}</p>
+            {(preview.hasMore || preview.offset > 0) && <p>Other source rows are outside this retained view.</p>}
+            {preview.truncated && <p>Source inspection reached its scan limit; the complete source row count is unknown.</p>}
+          </div>
+        ) : preview.truncated && (
           <p className="text-xs text-textMuted">
             Showing part of the table. More rows are saved in the full file.
           </p>
         )}
-        <div className="flex flex-wrap items-center gap-3 text-xs">
+        {!fixedView && <div className="flex flex-wrap items-center gap-3 text-xs">
           <button
             type="button"
             className="btn btn-secondary text-xs"
@@ -247,7 +257,7 @@ function RetainedResultBody({
               ))}
             </select>
           </label>
-        </div>
+        </div>}
       </>
     );
   return (

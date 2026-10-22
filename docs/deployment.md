@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261030`. Apply
+This release requires database schema contract `20261031`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. The idempotent migration expands publication
 bounds and requires every completed size to fit its retained reservation;
@@ -287,6 +287,29 @@ or attach results automatically. Loss of a source grant can disable copying
 while an already accepted owned snapshot remains eligible for attachment under
 the analysis's current write permission. Expired copy operations are reconciled
 outside analysis transactions with the existing proof-based cleanup.
+
+Private snapshot preparations retain exact selected CSV/TSV/PNG/JPEG attachment
+views and optional saved script/notebook versions. They do not publish results,
+change branch visibility, grant other members file access, or run a scientific
+runtime. Original source reads use the existing verified storage provider; the
+small retained views and source copies are bounded PostgreSQL bytea records.
+Back up these database records with their immutable package metadata. Each
+preparation is limited to eight result views, two saved source versions (1 MiB
+each), 200 MiB of distinct original result sources, and 16 MiB of retained bytes
+including metadata. Capacity is bounded to ten live preparations and 128 MiB per
+owner/project, plus 512 MiB per project; include this database and backup growth
+in deployment sizing. Failed or interrupted preparations retain their reservation
+until explicit resume or deletion. At most 2000 original request identities per
+owner/project, including source-free deleted tombstones, are retained.
+Ready blobs, metadata and exact checksums commit atomically. Owner-private
+deletion invalidates pending builders, removes retained blobs and releases quota
+in one transaction. Current project readers can recover and remove their own
+preparations, including from archived analyses; fresh preparation/resume requires
+current write access to an active non-demo analysis. Reading a record never builds,
+repairs, publishes or executes it. Missing retained bytes preserve the original
+recorded package/hash and are reported unavailable. Raster copies retain their
+original complete file bytes, including embedded metadata; no EXIF removal or
+restriction against saving displayed data is claimed.
 Existing versions, source receipts, restart
 links and jobs remain intact. Earlier workflow runs without recorded request
 contents remain visible in history; the service cannot verify that a repeated
