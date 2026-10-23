@@ -70,7 +70,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261031;
+const SCHEMA_CONTRACT_VERSION = 20261032;
 
 let pool = null;
 
@@ -751,6 +751,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
       research_analysis_snapshot_blobs, research_analysis_snapshot_preparations,
       managed_artifact_import_receipts, workflow_restoration_receipts, research_document_pending, research_document_pending_requests,
       research_document_draft_receipts, research_document_drafts,
@@ -1551,6 +1552,9 @@ async function deleteExpiredDemoGuest(userId) {
     const projectIds = projectRows.rows.map((row) => row.id);
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
+      await client.query('DELETE FROM research_analysis_snapshot_publication_blobs WHERE publication_id IN (SELECT id FROM research_analysis_snapshot_publications WHERE project_id=ANY($1::text[]))', [projectIds]);
+      await client.query('DELETE FROM research_analysis_snapshot_publication_requests WHERE project_id=ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM research_analysis_snapshot_publications WHERE project_id=ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_blobs WHERE preparation_id IN (SELECT id FROM research_analysis_snapshot_preparations WHERE project_id=ANY($1::text[]))', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_preparations WHERE project_id=ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_analysis_intakes WHERE project_id = ANY($1::text[])', [projectIds]);

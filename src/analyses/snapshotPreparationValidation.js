@@ -162,6 +162,37 @@ export function validateSnapshotPreparationOptions(input, expectedScope, kind) {
   } catch { fail(); }
 }
 
+async function verifySnapshotPackage(pkg, binding) {
+  fields(binding, ['serviceId', 'projectId', 'analysisId', 'ownerUserId', 'preparationId', 'snapshotSha256']);
+  pattern(binding.serviceId, SERVICE); pattern(binding.projectId, PROJECT); pattern(binding.analysisId, ANALYSIS);
+  integer(binding.ownerUserId, 1, Number.MAX_SAFE_INTEGER); pattern(binding.preparationId, PREPARATION); pattern(binding.snapshotSha256, SHA);
+  const canonical = canonicalAnalysisSnapshotPackage(pkg);
+  if (pkg.serviceId !== binding.serviceId || pkg.projectId !== binding.projectId || pkg.analysisId !== binding.analysisId
+      || pkg.ownerUserId !== binding.ownerUserId || pkg.preparationId !== binding.preparationId
+      || new TextEncoder().encode(canonical).byteLength + pkg.results.reduce((sum, item) => sum + item.view.blobBytes, 0)
+        + pkg.documents.reduce((sum, item) => sum + item.blobBytes, 0) > L.retainedBytes
+      || await digest(canonical) !== binding.snapshotSha256) fail();
+  for (const item of pkg.results) {
+    const { viewSha256, ...view } = item.view;
+    if (await digest(canonicalAnalysisSnapshotResultView({ ...view, source: { artifactId: item.source.artifactId,
+      versionId: item.source.versionId, projectId: pkg.projectId, sha256: item.source.sha256 } })) !== viewSha256) fail();
+  }
+  for (const item of pkg.documents) {
+    if (await digest(canonicalAnalysisSnapshotDocumentSource({ schema: FIXED_DOCUMENT_SOURCE_SCHEMA,
+      source: { documentId: item.documentId, versionId: item.versionId, sha256: item.sha256 },
+      blobSha256: item.blobSha256, blobBytes: item.blobBytes })) !== item.viewSha256) fail();
+  }
+  return pkg;
+}
+// Neutral scientific-package validation binds its publisher, not the current
+// viewer or an action actor. Private preparation intent is checked separately.
+export async function validateSnapshotPackage(input, expectedBinding) {
+  try {
+    const pkg = capture(input, L.packageBytes), binding = capture(expectedBinding, L.requestBytes);
+    return await verifySnapshotPackage(pkg, binding);
+  } catch { fail(); }
+}
+
 function availability(value, pkg) {
   fields(value, ['status', 'views', 'documents']);
   if (!['available', 'unavailable'].includes(value.status)) fail();
@@ -203,20 +234,18 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
         || canonicalSnapshotJson(pkg.notes) !== canonicalSnapshotJson(recipe.notes)
         || canonicalSnapshotJson(pkg.prerequisites.items) !== canonicalSnapshotJson(recipe.prerequisites)
         || new TextEncoder().encode(canonical).byteLength + new TextEncoder().encode(canonicalAnalysisSnapshotPreparation(recipe)).byteLength
-          + pkg.results.reduce((sum, item) => sum + item.view.blobBytes, 0) + pkg.documents.reduce((sum, item) => sum + item.blobBytes, 0) > L.retainedBytes
-        || await digest(canonical) !== value.snapshotSha256) fail();
+          + pkg.results.reduce((sum, item) => sum + item.view.blobBytes, 0) + pkg.documents.reduce((sum, item) => sum + item.blobBytes, 0) > L.retainedBytes) fail();
+    await verifySnapshotPackage(pkg, { serviceId: value.serviceId, projectId: value.projectId, analysisId: value.analysisId,
+      ownerUserId: value.ownerUserId, preparationId: value.preparationId, snapshotSha256: value.snapshotSha256 });
     for (let i = 0; i < pkg.results.length; i++) {
-      const item = pkg.results[i], chosen = recipe.results[i], { viewSha256, ...view } = item.view;
+      const item = pkg.results[i], chosen = recipe.results[i], view = item.view;
       if (item.attachment.attachmentId !== chosen.attachmentId || item.attachment.revisionId !== chosen.revisionId
           || item.source.versionId !== chosen.reference.versionId || item.source.sha256 !== chosen.reference.sha256
-          || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)
-          || await digest(canonicalAnalysisSnapshotResultView({ ...view, source: { artifactId: item.source.artifactId, versionId: item.source.versionId, projectId: pkg.projectId, sha256: item.source.sha256 } })) !== viewSha256) fail();
+          || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)) fail();
     }
     for (let i = 0; i < pkg.documents.length; i++) {
       const item = pkg.documents[i], chosen = recipe.documents[i];
-      if (item.documentId !== chosen.documentId || item.versionId !== chosen.versionId || item.sha256 !== chosen.sha256
-          || await digest(canonicalAnalysisSnapshotDocumentSource({ schema: FIXED_DOCUMENT_SOURCE_SCHEMA,
-            source: { documentId: item.documentId, versionId: item.versionId, sha256: item.sha256 }, blobSha256: item.blobSha256, blobBytes: item.blobBytes })) !== item.viewSha256) fail();
+      if (item.documentId !== chosen.documentId || item.versionId !== chosen.versionId || item.sha256 !== chosen.sha256) fail();
     }
     availability(value.availability, pkg); return value;
   } catch { fail(); }

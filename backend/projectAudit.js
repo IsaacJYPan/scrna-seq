@@ -7,11 +7,13 @@ const ACTIONS = new Set([
   'branch.created', 'branch.advanced', 'branch.published',
   'review.requested', 'review.commented', 'review.decided', 'canonical.promoted',
   'artifact.downloaded', 'reproducibility.exported', 'attachment.commented',
+  'snapshot.published', 'snapshot.withdrawn',
 ]);
-const TARGET_TYPES = new Set(['branch', 'review', 'analysis_object', 'artifact', 'project', 'attachment_revision']);
+const TARGET_TYPES = new Set(['branch', 'review', 'analysis_object', 'artifact', 'project', 'attachment_revision', 'snapshot_publication']);
 const DETAIL_KEYS = new Set([
   'artifactType', 'branchVisibility', 'canonicalVersion', 'decision',
   'fromAnalysisObjectId', 'toAnalysisObjectId', 'manifestVersion',
+  'snapshotSha256', 'policyVersion', 'resultCount', 'documentCount',
 ]);
 
 function codedError(code, message) {
@@ -30,7 +32,7 @@ function sanitizeDetails(details = {}) {
   const safe = {};
   for (const key of DETAIL_KEYS) {
     if (!(key in details)) continue;
-    if (key === 'canonicalVersion' || key === 'manifestVersion') {
+    if (['canonicalVersion', 'manifestVersion', 'policyVersion', 'resultCount', 'documentCount'].includes(key)) {
       const value = Number(details[key]);
       if (Number.isSafeInteger(value) && value >= 0) safe[key] = value;
     } else {

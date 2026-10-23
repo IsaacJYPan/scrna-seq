@@ -1,0 +1,59 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createHash, webcrypto } from 'node:crypto';
+import { listSnapshotPublications, listSnapshotPublicationRequests, getSnapshotPublication, getSnapshotPublicationRequest,
+  publishAnalysisSnapshot, withdrawAnalysisSnapshot, readSnapshotPublicationView, readSnapshotPublicationDocument } from './snapshotPublicationApi';
+import { withExecutionTarget } from '../runtime/executionTarget';
+
+vi.mock('../api', () => ({ apiUrl: value => value }));
+vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
+const base = '/api/projects/project%201/analyses/analysis%201/snapshot-publications';
+const bytes = new TextEncoder().encode('{"selected":"fixed"}');
+const blob = { blobBytes: bytes.byteLength, blobSha256: createHash('sha256').update(bytes).digest('hex') };
+const result = { viewId: 'asv_selected', source: { format: { id: 'org.ietf.csv' } }, view: { family: 'table', ...blob } };
+beforeEach(() => { vi.clearAllMocks(); vi.stubGlobal('crypto', webcrypto); vi.stubGlobal('fetch', vi.fn()); });
+afterEach(() => vi.unstubAllGlobals());
+
+it('separates current-reader publication discovery from actor-private accepted request discovery without writes', async () => {
+  fetch.mockImplementation(async () => new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+  await listSnapshotPublications('project 1', 'analysis 1', { cursor: 'older/page' });
+  await listSnapshotPublicationRequests('project 1', 'analysis 1');
+  await getSnapshotPublication('project 1', 'analysis 1', 'published/1');
+  await getSnapshotPublicationRequest('project 1', 'analysis 1', 'own/request');
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([base + '?limit=30&cursor=older%2Fpage', base + '/requests?limit=30', base + '/published%2F1', base + '/requests/own%2Frequest']);
+  for (const [, options] of withExecutionTarget.mock.calls) expect(options).toEqual({ mutation: false });
+});
+it('sends only explicit publish and withdrawal intents once through the mutation boundary', async () => {
+  fetch.mockImplementation(async () => new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+  const publish = { requestId: 'own-original', snapshotSha256: 'a'.repeat(64) }, withdraw = { requestId: 'own-withdrawal', publicationId: 'published/1' };
+  await publishAnalysisSnapshot('project 1', 'analysis 1', publish);
+  await withdrawAnalysisSnapshot('project 1', 'analysis 1', 'published/1', withdraw);
+  expect(fetch.mock.calls.map(([url, options]) => [url, options.method, JSON.parse(options.body)])).toEqual([[base, 'POST', publish], [base + '/published%2F1/withdrawals', 'POST', withdraw]]);
+  for (const [, options] of withExecutionTarget.mock.calls) expect(options).toEqual({ mutation: true });
+});
+it('reads only the exact selected publication view/source routes and checks their bytes without original-source queries', async () => {
+  fetch.mockImplementation(async () => new Response(bytes, { headers: { 'Content-Type': 'application/json' } }));
+  expect(Array.from((await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_a', result)).bytes)).toEqual(Array.from(bytes));
+  await readSnapshotPublicationDocument('project 1', 'analysis 1', 'aspub_a', { viewId: 'asv_source', ...blob });
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([base + '/aspub_a/views/asv_selected', base + '/aspub_a/documents/asv_source']);
+});
+it.each(['checksum', 'mime', 'length'])('refuses %s mismatch before returning retained bytes', async kind => {
+  fetch.mockResolvedValue(new Response(kind === 'length' ? bytes.slice(1) : bytes, { headers: { 'Content-Type': kind === 'mime' ? 'text/html' : 'application/json' } }));
+  await expect(readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_a', kind === 'checksum' ? { ...result, view: { ...result.view, blobSha256: 'f'.repeat(64) } } : result)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' });
+  expect(fetch).toHaveBeenCalledOnce();
+});
+it('keeps withdrawal distinct from global scope denial and never exposes a server exception', async () => {
+  fetch.mockResolvedValue(new Response(JSON.stringify({ error: 'private/source/path', code: 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN' }), { status: 409 }));
+  const error = await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_a', result).catch(value => value);
+  expect(error).toMatchObject({ status: 409, code: 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN' }); expect(error.message).not.toContain('private/source/path');
+});
+it('retains only a bounded closed already-published summary for later identity validation, without inventing acceptance', async () => {
+  const publication = { publicationId: 'aspub_existing', snapshotSha256: 'a'.repeat(64) };
+  fetch.mockResolvedValue(new Response(JSON.stringify({ error: 'Already published', code: 'ANALYSIS_SNAPSHOT_ALREADY_PUBLISHED', publication }), { status: 409 }));
+  const error = await publishAnalysisSnapshot('project 1', 'analysis 1', {}).catch(value => value);
+  expect(error.publication).toEqual(publication); expect(error.acceptance).toBeUndefined();
+});
+it('discards an error summary with extra private fields', async () => {
+  fetch.mockResolvedValue(new Response(JSON.stringify({ error: 'Already published', code: 'ANALYSIS_SNAPSHOT_ALREADY_PUBLISHED', publication: {}, privatePath: 'private/source/path' }), { status: 409 }));
+  const error = await publishAnalysisSnapshot('project 1', 'analysis 1', {}).catch(value => value);
+  expect(error.publication).toBeUndefined(); expect(error.message).not.toContain('private/source/path');
+});

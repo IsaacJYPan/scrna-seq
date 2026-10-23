@@ -301,7 +301,7 @@ describe.skipIf(!process.env.DATABASE_URL)('attachment corrections/history again
     expect(after.source_owner_user_id).toBe(before.actor_user_id); expect(after.action).toBe('create'); expect(after.expected_head_revision_id).toBeNull();
     expect((await service.create(owner.user.id, project.id, analysis.id, first.input)).acceptedRevision).toEqual(first.result.acceptedRevision);
     await expect(db.query('UPDATE research_analysis_attachment_revisions SET source_owner_user_id=actor_user_id WHERE id=$1', [before.id])).rejects.toMatchObject({ code: '55000' });
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261031);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261032);
   });
 
   it('deletes full correction/predecessor/source-owner cycles only in scoped expired-demo cleanup', async () => {

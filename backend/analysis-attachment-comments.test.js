@@ -270,7 +270,7 @@ describe.skipIf(!process.env.DATABASE_URL)('revision discussion PostgreSQL/HTTP 
     expect((await service.getRequest(owner.user.id, project.id, analysis.id, corrected.requestId)).acceptedRevision).toEqual(revision);
     await expect(db.query('DELETE FROM managed_artifact_versions WHERE id=$1', [artifact.version.versionId])).rejects.toMatchObject({ code: '55000' });
     expect((await post(input(), viewer, corrected.attachment)).status).toBe(201);
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261031);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261032);
   });
 
   it('removes discussion/receipt/audit cycles only through scoped expired-demo cleanup while retaining another project', async () => {

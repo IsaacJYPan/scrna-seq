@@ -158,7 +158,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       budget(count.requests + 1, L.requests, 'This account has reached its retained preparation request limit in this project.');
       budget(count.live + 1, L.live, 'Remove an earlier private preparation before preparing another in this project.');
       budget(Number(count.owner_bytes) + L.retainedBytes, L.ownerBytes, 'Remove an earlier private preparation to free your project preparation capacity.');
-      budget(Number(count.project_bytes) + L.retainedBytes, L.projectBytes, 'This project has reached its retained preparation capacity.');
+      budget(await require('./analysisSnapshotPublications').projectSnapshotUsage(client, projectId) + L.retainedBytes, L.projectBytes, 'This project has reached its retained preparation capacity.');
       const preparationId = id('asp'), plan = [...recipe.results.map((_, index) => ({ viewId: id('asv'), kind: 'result', index })), ...recipe.documents.map((_, index) => ({ viewId: id('asv'), kind: 'document', index }))];
       await client.query(`INSERT INTO research_analysis_snapshot_preparations(id,service_id,project_id,analysis_id,analysis_version,owner_user_id,request_id,request_sha256,recipe_json,analysis_snapshot_json,object_plan_json,state,reserved_bytes)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'preparing',$12)`, [preparationId, context.serviceId, projectId, analysisId, recipe.analysisVersion, userId, recipe.requestId, requestSha, recipe, analysis, JSON.stringify(plan), L.retainedBytes]);
@@ -280,7 +280,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       if (current.request_id !== input.requestId.toLowerCase() || current.request_sha256 !== input.requestSha256) throw error('REQUEST_CONFLICT', 'This action does not identify the original preparation.');
       if (remove && current.state !== 'deleted') {
         await client.query(`UPDATE research_analysis_snapshot_preparations SET state='deleted',generation=generation+1,recipe_json=NULL,analysis_snapshot_json=NULL,object_plan_json='[]',package_json=NULL,failure_json=NULL,reserved_bytes=0,updated_at=clock_timestamp() WHERE id=$1`, [preparationId]);
-        await client.query('DELETE FROM research_analysis_snapshot_blobs WHERE preparation_id=$1', [preparationId]);
+        await require('./analysisSnapshotPublications').deleteUnreferencedSnapshotBlobs(client, preparationId);
       } else if (!remove && !['ready', 'deleted'].includes(current.state)) assertWritable(context);
       return current;
     });

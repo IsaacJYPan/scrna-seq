@@ -170,7 +170,7 @@ async function verifyPreparations(env) {
   } catch (error) { await database.query('ROLLBACK'); throw error; }
   await checkOriginal();
   await review(page).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: fixtures[3].caption }).click();
-  await review(page).getByText('This retained view is unavailable. Its exact preparation is kept and has not been regenerated.', { exact: true }).waitFor();
+  await review(page).getByText('This retained view is unavailable. Its exact saved identity is kept and has not been regenerated.', { exact: true }).waitFor();
   assert(!(await review(page).getByRole('img').count()), 'Actual retained byte loss left a stale verified image visible.');
   const missing = await original(recipe);
   assert(missing.state === 'ready' && missing.snapshotSha256 === packageSha && missing.availability.status === 'unavailable' && !missing.canResume, 'Missing retained bytes changed acceptance or enabled silent regeneration.');
@@ -179,7 +179,7 @@ async function verifyPreparations(env) {
   check('Actual retained JPEG byte loss preserves the immutable ready package and exact identity, removes the image, and reports unavailability without regeneration or source fallback.');
   await review(page).getByRole('button', { name: 'Remove private preparation', exact: true }).click();
   const dropDelete = service.interceptNextResponse({ method: 'DELETE', pathname: `${prepPath}/${retained.preparationId}`, mode: 'drop' }); faults.push(dropDelete); faultPaths.add(`${prepPath}/${retained.preparationId}`);
-  await review(page).getByRole('button', { name: 'Remove retained copies', exact: true }).click(); await until(() => dropDelete.observation(), 'The accepted deletion reply was not interrupted.');
+  await review(page).getByRole('button', { name: 'Remove private preparation', exact: true }).click(); await until(() => dropDelete.observation(), 'The accepted deletion reply was not interrupted.');
   assert(dropDelete.observation().status === 200 && dropDelete.observation().value.state === 'deleted', 'The genuine private deletion was not accepted.'); await checkOriginal();
   await review(page).getByRole('heading', { name: 'Private preparation removed', exact: true }).waitFor();
   const tombstone = await original(recipe);

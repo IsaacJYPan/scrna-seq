@@ -211,7 +211,7 @@ describe.skipIf(!process.env.DATABASE_URL)('one evidence intake journal with loc
     await db.initSchema({ force: true }); await db.initSchema({ force: true });
     const recovered = await service.getLocalIntake(owner.user.id, project.id, analysis.id, input.requestId), row = (await db.query('SELECT * FROM research_analysis_intakes')).rows[0];
     expect(recovered).toEqual({ ...accepted, replayed: true }); expect(row).toEqual({ ...before, source_kind: 'local' });
-    expect((await db.query("SELECT to_regclass('research_analysis_local_intakes') AS old, (SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime') AS version")).rows[0]).toEqual({ old: null, version: 20261031 });
+    expect((await db.query("SELECT to_regclass('research_analysis_local_intakes') AS old, (SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime') AS version")).rows[0]).toEqual({ old: null, version: 20261032 });
     await expect(db.query("UPDATE research_analysis_intakes SET source_kind='server' WHERE request_id=$1", [input.requestId])).rejects.toMatchObject({ code: '55000' });
     const remote = await recipe(); expect((await post(remote)).status).toBe(201);
     const oldList = (await http.api(server, `${base()}/local-intakes`, { token: owner.token })).data;

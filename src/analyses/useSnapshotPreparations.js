@@ -4,7 +4,7 @@ import * as api from './snapshotPreparationApi';
 import { validateSnapshotPreparation, validateSnapshotPreparationList, validateSnapshotPreparationOptions } from './snapshotPreparationValidation';
 import { publicErrorMessage } from '../publicError';
 
-const missing = error => error.code === 'ANALYSIS_SNAPSHOT_PREPARATION_NOT_FOUND';
+const missing = error => error?.status === 404 && error.code === 'ANALYSIS_SNAPSHOT_PREPARATION_NOT_FOUND';
 const sourceFailure = error => /^(?:ANALYSIS_SNAPSHOT_SOURCE_|ARTIFACT_|SERVER_IMPORT_)/.test(error.code || '');
 const writerFailure = error => ['ANALYSIS_SNAPSHOT_WRITE_REQUIRED', 'ANALYSIS_SNAPSHOT_ANALYSIS_ARCHIVED', 'FORBIDDEN', 'PROJECT_ROLE_REQUIRED'].includes(error.code);
 const denied = error => error.status === 401 || !sourceFailure(error) && !writerFailure(error) && (error.status === 403 || error.status === 404 && !missing(error));

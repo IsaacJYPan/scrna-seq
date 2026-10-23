@@ -122,3 +122,75 @@ it('keeps an unavailable retained document stable through parent checking and re
   await act(async () => {}); expect(readSnapshotPreparationDocument).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole('button', { name: 'Retry supporting source' })); await screen.findByLabelText('Retained saved source'); expect(readSnapshotPreparationDocument).toHaveBeenCalledTimes(2);
 });
+
+it('uses only the injected publication source reader after an explicit action, retaining lazy state through equal descriptor refresh', async () => {
+  const value = fixture(), resourceId = 'aspub_' + 'b'.repeat(24), readDocument = vi.fn().mockResolvedValue(value);
+  const props = { ...value.props, userId: 8, audience: 'project-publication', resourceId, readDocument, snapshotSha256: 'b'.repeat(64) };
+  const view = render(<PreparedSnapshotSource {...props} />); expect(readDocument).not.toHaveBeenCalled(); open(); await screen.findByLabelText('Retained saved source');
+  expect(readDocument).toHaveBeenCalledExactlyOnceWith(snapshotScope.projectId, snapshotScope.analysisId, resourceId, value.props.descriptor, { signal: expect.any(AbortSignal) });
+  expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+  view.rerender(<PreparedSnapshotSource {...props} descriptor={structuredClone(props.descriptor)} onUnavailable={vi.fn()} />);
+  await act(async () => {}); expect(readDocument).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ['unknown namespace', { audience: 'public' }], ['private id in public namespace', { audience: 'project-publication' }],
+  ['public id without transport', { audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24) }],
+  ['public id in private namespace', { resourceId: 'aspub_' + 'b'.repeat(24) }],
+])('does not load or expose a source action for %s', async (_label, changed) => {
+  const value = fixture(); render(<PreparedSnapshotSource {...value.props} {...changed} />);
+  expect(screen.getByRole('alert')).toHaveTextContent('scope could not be verified'); expect(screen.queryByRole('button', { name: 'View supporting source' })).not.toBeInTheDocument();
+  await act(async () => {}); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('closes private source when switching to the same saved descriptor in a public audience and requires a fresh explicit source action', async () => {
+  const value = fixture(), completion = deferred(), readDocument = vi.fn().mockResolvedValue(value);
+  readSnapshotPreparationDocument.mockReturnValue(completion.promise); const view = render(<PreparedSnapshotSource {...value.props} />); open();
+  await waitFor(() => expect(readSnapshotPreparationDocument).toHaveBeenCalledOnce()); const signal = readSnapshotPreparationDocument.mock.calls[0][4].signal;
+  view.rerender(<PreparedSnapshotSource {...value.props} audience="project-publication" resourceId={'aspub_' + 'b'.repeat(24)} readDocument={readDocument} />);
+  expect(signal.aborted).toBe(true); await act(async () => completion.resolve(value));
+  expect(screen.queryByLabelText('Retained saved source')).not.toBeInTheDocument(); expect(readDocument).not.toHaveBeenCalled();
+  open(); expect(await screen.findByLabelText('Retained saved source')).toBeVisible(); expect(readDocument).toHaveBeenCalledOnce();
+});
+
+it('aborts a held source from a replaced transport without changing the exact saved descriptor', async () => {
+  const value = fixture(), completion = deferred(), replacement = deferred(), readDocument = vi.fn().mockReturnValue(replacement.promise);
+  readSnapshotPreparationDocument.mockReturnValue(completion.promise); const view = render(<PreparedSnapshotSource {...value.props} />); open();
+  await waitFor(() => expect(readSnapshotPreparationDocument).toHaveBeenCalledOnce()); const signal = readSnapshotPreparationDocument.mock.calls[0][4].signal;
+  view.rerender(<PreparedSnapshotSource {...value.props} readDocument={readDocument} />); expect(signal.aborted).toBe(true);
+  await act(async () => completion.resolve(value)); expect(screen.queryByLabelText('Retained saved source')).not.toBeInTheDocument();
+  await act(async () => replacement.resolve(value)); expect(await screen.findByLabelText('Retained saved source')).toBeVisible();
+});
+
+it.each([
+  [404, 'ANALYSIS_SNAPSHOT_PUBLICATION_NOT_FOUND', false, true], [409, 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN', false, true],
+  [404, 'ANALYSIS_SNAPSHOT_SCOPE_NOT_FOUND', true, false], [403, 'FORBIDDEN', true, false],
+  [403, 'ANALYSIS_SNAPSHOT_SOURCE_READ_REQUIRED', false, true], [403, 'ANALYSIS_SNAPSHOT_WITHDRAW_REQUIRED', false, false],
+  [0, 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE', false, true],
+])('keeps public saved-source %s/%s distinct from project scope denial', async (status, code, revokes, missing) => {
+  const value = fixture(), failure = Object.assign(new Error('private host detail'), { status, code }), readDocument = vi.fn().mockRejectedValue(failure);
+  render(<PreparedSnapshotSource {...value.props} audience="project-publication" resourceId={'aspub_' + 'b'.repeat(24)} readDocument={readDocument} />); open(); await screen.findByRole('alert');
+  expect(value.props.onDenied).toHaveBeenCalledTimes(revokes ? 1 : 0); expect(value.props.onUnavailable).toHaveBeenCalledTimes(missing ? 1 : 0);
+  expect(screen.queryByText('private host detail')).not.toBeInTheDocument(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('does not offer a source retry after withdrawal or reload on a refreshed old active descriptor', async () => {
+  const value = fixture(), readDocument = vi.fn().mockRejectedValue(Object.assign(new Error('withdrawn'), { status: 409, code: 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN' }));
+  const props = { ...value.props, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readDocument };
+  const view = render(<PreparedSnapshotSource {...props} />); open(); await screen.findByRole('alert');
+  expect(screen.queryByRole('button', { name: 'Retry supporting source' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'View supporting source' })).not.toBeInTheDocument(); expect(screen.queryByRole('button', { name: 'Hide supporting source' })).not.toBeInTheDocument();
+  view.rerender(<PreparedSnapshotSource {...props} descriptor={structuredClone(props.descriptor)} />);
+  await act(async () => {}); expect(readDocument).toHaveBeenCalledOnce(); expect(screen.queryByLabelText('Retained saved source')).not.toBeInTheDocument();
+  const replacement = vi.fn().mockResolvedValue(value); view.rerender(<PreparedSnapshotSource {...props} readDocument={replacement} />);
+  await act(async () => {}); expect(replacement).not.toHaveBeenCalled(); expect(screen.getByRole('alert')).toHaveTextContent('has been withdrawn');
+});
+
+it('requires a new explicit private source action after leaving the same retained source in a public audience', async () => {
+  const value = fixture(), completion = deferred(), readDocument = vi.fn().mockReturnValue(completion.promise);
+  const view = render(<PreparedSnapshotSource {...value.props} audience="project-publication" resourceId={'aspub_' + 'b'.repeat(24)} readDocument={readDocument} />); open();
+  await waitFor(() => expect(readDocument).toHaveBeenCalledOnce()); const signal = readDocument.mock.calls[0][4].signal;
+  view.rerender(<PreparedSnapshotSource {...value.props} />); expect(signal.aborted).toBe(true); await act(async () => completion.resolve(value));
+  expect(readSnapshotPreparationDocument).not.toHaveBeenCalled(); expect(screen.queryByLabelText('Retained saved source')).not.toBeInTheDocument();
+  readSnapshotPreparationDocument.mockResolvedValue(value); open(); expect(await screen.findByLabelText('Retained saved source')).toBeVisible();
+});

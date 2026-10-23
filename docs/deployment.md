@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261031`. Apply
+This release requires database schema contract `20261032`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. The idempotent migration expands publication
 bounds and requires every completed size to fit its retained reservation;
@@ -302,7 +302,7 @@ in deployment sizing. Failed or interrupted preparations retain their reservatio
 until explicit resume or deletion. At most 2000 original request identities per
 owner/project, including source-free deleted tombstones, are retained.
 Ready blobs, metadata and exact checksums commit atomically. Owner-private
-deletion invalidates pending builders, removes retained blobs and releases quota
+deletion invalidates pending builders, removes unshared retained blobs and releases private quota
 in one transaction. Current project readers can recover and remove their own
 preparations, including from archived analyses; fresh preparation/resume requires
 current write access to an active non-demo analysis. Reading a record never builds,
@@ -310,6 +310,31 @@ repairs, publishes or executes it. Missing retained bytes preserve the original
 recorded package/hash and are reported unavailable. Raster copies retain their
 original complete file bytes, including embedded metadata; no EXIF removal or
 restriction against saving displayed data is claimed.
+
+Explicit snapshot publication makes one acknowledged ready package's fixed
+findings and selected saved supporting source readable to current project
+members. It does not change branch visibility or ordinary original-file,
+SSH, execution or edit permissions. At most one publication per private
+preparation can be active. Publication copies bounded immutable manifest metadata
+and references the same retained BYTEA rows; it does not duplicate scientific
+payloads. Removing the private preparation keeps bytes needed by an active
+publication. Withdrawal blocks subsequent shared reads, retains acceptance/audit
+history and removes payloads only when no ready private preparation or active
+publication needs them. Already delivered data cannot be revoked.
+The existing 512 MiB project limit covers private reservations, distinct retained
+payloads and publication metadata together. Each publication charges its bounded
+manifest plus 8 KiB reserved operation/audit allowance, including its first
+withdrawal receipt. At most 2000 publication acceptances per project, including
+withdrawn history, are retained; the corresponding action journal has at most
+4000 accepted records. Capacity exhaustion blocks new publication, never
+withdrawal. These logical budgets exclude PostgreSQL indexes, WAL, TOAST and
+backup overhead. Preserve database records together in backups; never remove
+BYTEA rows or references manually to free space. Private accepted action
+discovery supports recovery after a lost response/browser restart without
+putting scientific request data in browser storage. Unaccepted in-memory actions
+cannot be discovered after restart. Readers must still be current project
+members; publisher downgrade or archive does not prevent withdrawal by the
+publisher, and current project owner/admin can withdraw on the project's behalf.
 Existing versions, source receipts, restart
 links and jobs remain intact. Earlier workflow runs without recorded request
 contents remain visible in history; the service cannot verify that a repeated

@@ -230,6 +230,7 @@ function researchAnalysisRoutes({ database = db, logger = console } = {}) {
   router.get('/workflow-snapshots/:snapshotId', route(req => service.getWorkflowSnapshot(req.user.id, req.params.projectId, req.params.snapshotId, req.query.sha256)));
   router.post('/workflow-snapshots/:snapshotId/open', route(req => service.openWorkflowSnapshot(req.user.id, req.params.projectId, req.params.snapshotId, req.body)));
   router.use('/:analysisId/snapshot-preparations', require('./analysisSnapshotPreparations').analysisSnapshotPreparationRoutes({ database, logger }));
+  router.use('/:analysisId/snapshot-publications', require('./analysisSnapshotPublications').analysisSnapshotPublicationRoutes({ database, logger }));
   router.get('/:analysisId/attachments', route(req => attachments.list(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/options', route(req => attachments.options(req.user.id, req.params.projectId, req.params.analysisId, req.query)));
   router.get('/:analysisId/attachments/local-intakes', route(req => attachments.listLocalIntakes(req.user.id, req.params.projectId, req.params.analysisId, req.query)));

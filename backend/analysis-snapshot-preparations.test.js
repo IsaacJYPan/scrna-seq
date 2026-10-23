@@ -182,10 +182,10 @@ describe.skipIf(!process.env.DATABASE_URL)('private exact retained snapshot prep
     const resumed = await service.resume(owner.user.id, project.id, analysis.id, saved.preparationId, operation(saved)); expect(resumed.state).toBe('ready');
   });
 
-  it('applies schema31 twice without mutating exact accepted package/blob hashes or earlier intake schemas', async () => {
+  it('applies the current schema twice without mutating exact accepted package/blob hashes or earlier intake schemas', async () => {
     const input = await recipe(), saved = await service.prepare(owner.user.id, project.id, analysis.id, input); await db.initSchema(); await db.initSchema();
     const recovered = await service.get(owner.user.id, project.id, analysis.id, saved.preparationId); expect(recovered.package).toEqual(saved.package); expect(recovered.snapshotSha256).toBe(saved.snapshotSha256);
-    expect(recovered.availability.status).toBe('available'); expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261031);
+    expect(recovered.availability.status).toBe('available'); expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261032);
     expect(hash(canonicalSnapshotJson(recovered.package))).toBe(saved.snapshotSha256);
   });
 

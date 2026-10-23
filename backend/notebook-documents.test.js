@@ -273,7 +273,7 @@ describe.skipIf(!configured)('project notebook documents through actual HTTP and
     await db.initSchema({ force: true }); await db.initSchema({ force: true });
     expect((await api(server, endpoint() + '/' + original.id, { token: viewer.token })).data.document).toEqual(second);
     expect((await api(server, endpoint() + '/' + original.id + '/versions/' + original.versionId, { token: viewer.token })).data.document).toEqual(original);
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261031);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261032);
   });
 
   it('deletes an expired guest notebook head/version/receipt cycle while preserving another project', async () => {

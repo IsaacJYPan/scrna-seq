@@ -57,7 +57,7 @@ it.each(['wrong checksum', 'wrong fixed window', 'noncanonical bytes'])('refuses
     value.props.descriptor.view.blobSha256 = hash(value.bytes); value.props.descriptor.view.blobBytes = value.bytes.byteLength;
   }
   readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
-  expect(await screen.findByRole('alert')).toHaveTextContent('original preparation is kept');
+  expect(await screen.findByRole('alert')).toHaveTextContent('exact saved identity is kept');
   expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(screen.queryByText(/checksum verified/)).not.toBeInTheDocument();
   expect(value.props.onUnavailable).toHaveBeenCalledOnce(); expect(value.props.onDenied).not.toHaveBeenCalled();
 });
@@ -142,4 +142,79 @@ it('never creates an object URL from a late raster body after scope loss', async
   const view = render(<PreparedSnapshotResult {...value.props} />); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledOnce());
   view.rerender(<PreparedSnapshotResult {...value.props} available={false} />); await act(async () => completion.resolve(value));
   expect(URL.createObjectURL).not.toHaveBeenCalled(); expect(screen.queryByRole('img')).not.toBeInTheDocument();
+});
+
+it('uses an explicit stable publication reader and current viewer without falling back to private preparation routes', async () => {
+  const value = fixture(), readView = vi.fn().mockResolvedValue(value), resourceId = 'aspub_' + 'b'.repeat(24);
+  const props = { ...value.props, userId: 8, audience: 'project-publication', resourceId, readView, snapshotSha256: 'b'.repeat(64) };
+  const view = render(<PreparedSnapshotResult {...props} />); await screen.findByRole('table');
+  expect(readView).toHaveBeenCalledExactlyOnceWith(snapshotScope.projectId, snapshotScope.analysisId, resourceId, value.props.descriptor, { signal: expect.any(AbortSignal) });
+  expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+  view.rerender(<PreparedSnapshotResult {...props} descriptor={structuredClone(props.descriptor)} onUnavailable={vi.fn()} />);
+  await act(async () => {}); expect(readView).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ['unknown namespace', { audience: 'public' }], ['private id in public namespace', { audience: 'project-publication' }],
+  ['public id without transport', { audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24) }],
+  ['public id in private namespace', { resourceId: 'aspub_' + 'b'.repeat(24) }],
+])('fails closed for %s instead of resolving another audience', async (_label, changed) => {
+  const value = fixture(); render(<PreparedSnapshotResult {...value.props} {...changed} />);
+  expect(screen.getByRole('alert')).toHaveTextContent('scope could not be verified');
+  await act(async () => {}); expect(readSnapshotPreparationView).not.toHaveBeenCalled(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+});
+
+it.each(['audience', 'transport', 'snapshot'])('aborts a held response after a %s change even when the retained descriptor is identical', async change => {
+  const value = fixture(), completion = deferred(), replacement = deferred(), readView = vi.fn().mockReturnValue(replacement.promise);
+  readSnapshotPreparationView.mockReturnValue(completion.promise);
+  const view = render(<PreparedSnapshotResult {...value.props} />); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledOnce());
+  const signal = readSnapshotPreparationView.mock.calls[0][4].signal;
+  const changed = change === 'audience' ? { audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView }
+    : change === 'transport' ? { readView } : { snapshotSha256: 'b'.repeat(64) };
+  if (change === 'snapshot') readSnapshotPreparationView.mockReturnValue(replacement.promise);
+  view.rerender(<PreparedSnapshotResult {...value.props} {...changed} />); expect(signal.aborted).toBe(true);
+  await act(async () => completion.resolve(value)); expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  await act(async () => replacement.resolve(value)); expect(await screen.findByRole('table')).toBeVisible();
+});
+
+it('revokes the displayed private raster before inspecting the same descriptor through a public capability', async () => {
+  const value = fixture({ image: true }), completion = deferred(), readView = vi.fn().mockReturnValue(completion.promise);
+  readSnapshotPreparationView.mockResolvedValue(value); const view = render(<PreparedSnapshotResult {...value.props} />); await screen.findByRole('img');
+  view.rerender(<PreparedSnapshotResult {...value.props} audience="project-publication" resourceId={'aspub_' + 'b'.repeat(24)} readView={readView} />);
+  expect(screen.queryByRole('img')).not.toBeInTheDocument(); expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:retained-1');
+  await act(async () => completion.resolve(value)); expect(await screen.findByRole('img')).toHaveAttribute('src', 'blob:retained-2');
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+});
+
+it.each([
+  [404, 'ANALYSIS_SNAPSHOT_PUBLICATION_NOT_FOUND', false, true], [409, 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN', false, true],
+  [404, 'ANALYSIS_SNAPSHOT_SCOPE_NOT_FOUND', true, false], [403, 'FORBIDDEN', true, false],
+  [403, 'ANALYSIS_SNAPSHOT_WITHDRAW_REQUIRED', false, false], [403, 'ANALYSIS_SNAPSHOT_SOURCE_READ_REQUIRED', false, true],
+  [0, 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE', false, true],
+])('classifies public retained %s/%s independently from global scope', async (status, code, revokes, missing) => {
+  const value = fixture(), failure = Object.assign(new Error('private server path'), { status, code }), readView = vi.fn().mockRejectedValue(failure);
+  render(<PreparedSnapshotResult {...value.props} audience="project-publication" resourceId={'aspub_' + 'b'.repeat(24)} readView={readView} />);
+  await screen.findByRole('alert');
+  expect(value.props.onDenied).toHaveBeenCalledTimes(revokes ? 1 : 0); expect(value.props.onUnavailable).toHaveBeenCalledTimes(missing ? 1 : 0);
+  expect(screen.queryByText('private server path')).not.toBeInTheDocument(); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+});
+
+it('does not offer raw view retry or reload after a withdrawn observation and an equal earlier active descriptor refresh', async () => {
+  const value = fixture(), readView = vi.fn().mockRejectedValue(Object.assign(new Error('withdrawn'), { status: 409, code: 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN' }));
+  const props = { ...value.props, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView };
+  const view = render(<PreparedSnapshotResult {...props} />); await screen.findByRole('alert');
+  expect(screen.queryByRole('button', { name: 'Retry retained view' })).not.toBeInTheDocument();
+  view.rerender(<PreparedSnapshotResult {...props} descriptor={structuredClone(props.descriptor)} />);
+  await act(async () => {}); expect(readView).toHaveBeenCalledOnce(); expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  const replacement = vi.fn().mockResolvedValue(value); view.rerender(<PreparedSnapshotResult {...props} readView={replacement} />);
+  await act(async () => {}); expect(replacement).not.toHaveBeenCalled(); expect(screen.getByRole('alert')).toHaveTextContent('has been withdrawn');
+});
+
+it('fences a held public response when returning to the private audience without treating the shared descriptor as prior authority', async () => {
+  const value = fixture(), completion = deferred(), readView = vi.fn().mockReturnValue(completion.promise);
+  const view = render(<PreparedSnapshotResult {...value.props} audience="project-publication" resourceId={'aspub_' + 'b'.repeat(24)} readView={readView} />);
+  await waitFor(() => expect(readView).toHaveBeenCalledOnce()); const signal = readView.mock.calls[0][4].signal;
+  readSnapshotPreparationView.mockRejectedValue(new Error('Private preparation unavailable.')); view.rerender(<PreparedSnapshotResult {...value.props} />);
+  expect(signal.aborted).toBe(true); await act(async () => completion.resolve(value)); expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
 });

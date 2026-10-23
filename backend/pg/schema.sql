@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261031, now())
+VALUES ('traceomics.runtime', 20261032, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1807,3 +1807,133 @@ END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_analysis_snapshot_blob ON research_analysis_snapshot_blobs;
 CREATE TRIGGER trg_analysis_snapshot_blob BEFORE UPDATE OR DELETE ON research_analysis_snapshot_blobs
   FOR EACH ROW EXECUTE FUNCTION protect_analysis_snapshot_blob();
+
+-- Project publications retain only the exact acknowledged preparation package.
+-- Active references share its immutable bounded bytes without granting access
+-- through ordinary private-source routes or duplicating scientific payloads.
+CREATE TABLE IF NOT EXISTS research_analysis_snapshot_publications (
+  id TEXT PRIMARY KEY CHECK(id ~ '^aspub_[a-f0-9]{24}$'),
+  service_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  publisher_user_id BIGINT NOT NULL REFERENCES users(id),
+  preparation_id TEXT NOT NULL,
+  request_id UUID NOT NULL,
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  package_json JSONB NOT NULL CHECK(jsonb_typeof(package_json)='object' AND octet_length(package_json::text)<=393216),
+  snapshot_sha256 TEXT NOT NULL CHECK(snapshot_sha256 ~ '^[a-f0-9]{64}$'),
+  metadata_bytes BIGINT NOT NULL CHECK(metadata_bytes BETWEEN 8192 AND 270336),
+  published_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  state TEXT NOT NULL DEFAULT 'published' CHECK(state IN ('published','withdrawn')),
+  policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2)),
+  withdrawn_at TIMESTAMPTZ,
+  withdrawn_by_user_id BIGINT REFERENCES users(id),
+  UNIQUE(project_id,publisher_user_id,request_id),
+  UNIQUE(id,preparation_id),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id),
+  FOREIGN KEY(preparation_id,project_id,analysis_id,publisher_user_id) REFERENCES research_analysis_snapshot_preparations(id,project_id,analysis_id,owner_user_id),
+  CHECK((state='published' AND policy_version=1 AND withdrawn_at IS NULL AND withdrawn_by_user_id IS NULL)
+    OR (state='withdrawn' AND policy_version=2 AND withdrawn_at IS NOT NULL AND withdrawn_by_user_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_snapshot_one_active ON research_analysis_snapshot_publications(preparation_id) WHERE state='published';
+CREATE INDEX IF NOT EXISTS idx_analysis_snapshot_publication_list ON research_analysis_snapshot_publications(project_id,analysis_id,published_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS research_analysis_snapshot_publication_blobs (
+  publication_id TEXT NOT NULL,
+  preparation_id TEXT NOT NULL,
+  view_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('result','document')),
+  PRIMARY KEY(publication_id,view_id),
+  FOREIGN KEY(publication_id,preparation_id) REFERENCES research_analysis_snapshot_publications(id,preparation_id),
+  FOREIGN KEY(preparation_id,view_id) REFERENCES research_analysis_snapshot_blobs(preparation_id,id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_snapshot_blob_lease ON research_analysis_snapshot_publication_blobs(preparation_id,view_id);
+CREATE TABLE IF NOT EXISTS research_analysis_snapshot_publication_requests (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  analysis_id TEXT NOT NULL,
+  actor_user_id BIGINT NOT NULL REFERENCES users(id),
+  request_id UUID NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('publish','withdraw')),
+  request_json JSONB NOT NULL CHECK(jsonb_typeof(request_json)='object' AND octet_length(request_json::text)<=3072),
+  request_sha256 TEXT NOT NULL CHECK(request_sha256 ~ '^[a-f0-9]{64}$'),
+  publication_id TEXT NOT NULL REFERENCES research_analysis_snapshot_publications(id),
+  snapshot_sha256 TEXT NOT NULL CHECK(snapshot_sha256 ~ '^[a-f0-9]{64}$'),
+  accepted_policy_version INTEGER NOT NULL CHECK(accepted_policy_version IN (1,2)),
+  accepted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  audit_event_id TEXT NOT NULL REFERENCES project_audit_events(id),
+  PRIMARY KEY(project_id,actor_user_id,request_id),
+  UNIQUE(publication_id,action),
+  FOREIGN KEY(analysis_id,project_id) REFERENCES research_analyses(id,project_id),
+  CHECK((action='publish' AND accepted_policy_version=1) OR (action='withdraw' AND accepted_policy_version=2))
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_snapshot_request_list ON research_analysis_snapshot_publication_requests(project_id,analysis_id,actor_user_id,accepted_at DESC,request_id DESC);
+CREATE OR REPLACE FUNCTION protect_analysis_snapshot_publication() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    IF current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+    RAISE EXCEPTION 'Publication acceptance identities are retained' USING ERRCODE='55000';
+  END IF;
+  IF ROW(NEW.id,NEW.service_id,NEW.project_id,NEW.analysis_id,NEW.publisher_user_id,NEW.preparation_id,NEW.request_id,NEW.request_sha256,NEW.package_json,NEW.snapshot_sha256,NEW.metadata_bytes,NEW.published_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.service_id,OLD.project_id,OLD.analysis_id,OLD.publisher_user_id,OLD.preparation_id,OLD.request_id,OLD.request_sha256,OLD.package_json,OLD.snapshot_sha256,OLD.metadata_bytes,OLD.published_at)
+    OR OLD.state<>'published' OR NEW.state<>'withdrawn' OR NEW.policy_version<>2
+  THEN RAISE EXCEPTION 'Publication acceptance is immutable and withdrawal is final' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_analysis_snapshot_publication ON research_analysis_snapshot_publications;
+CREATE TRIGGER trg_analysis_snapshot_publication BEFORE UPDATE OR DELETE ON research_analysis_snapshot_publications
+  FOR EACH ROW EXECUTE FUNCTION protect_analysis_snapshot_publication();
+CREATE OR REPLACE FUNCTION protect_analysis_snapshot_publication_request() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND current_setting('app.demo_cleanup',true)='on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Publication action receipts are immutable' USING ERRCODE='55000';
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_analysis_snapshot_publication_request ON research_analysis_snapshot_publication_requests;
+CREATE TRIGGER trg_analysis_snapshot_publication_request BEFORE UPDATE OR DELETE ON research_analysis_snapshot_publication_requests
+  FOR EACH ROW EXECUTE FUNCTION protect_analysis_snapshot_publication_request();
+CREATE OR REPLACE FUNCTION protect_analysis_snapshot_publication_lease() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP='DELETE' AND (current_setting('app.demo_cleanup',true)='on' OR EXISTS(
+    SELECT 1 FROM research_analysis_snapshot_publications WHERE id=OLD.publication_id AND state='withdrawn')) THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Active publication references cannot be changed' USING ERRCODE='55000';
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_analysis_snapshot_publication_lease ON research_analysis_snapshot_publication_blobs;
+CREATE TRIGGER trg_analysis_snapshot_publication_lease BEFORE UPDATE OR DELETE ON research_analysis_snapshot_publication_blobs
+  FOR EACH ROW EXECUTE FUNCTION protect_analysis_snapshot_publication_lease();
+CREATE OR REPLACE FUNCTION check_analysis_snapshot_publication_leases() RETURNS TRIGGER AS $$
+DECLARE publication_key TEXT; publication_row research_analysis_snapshot_publications;
+BEGIN
+  IF current_setting('app.demo_cleanup',true)='on' THEN RETURN NULL; END IF;
+  IF TG_TABLE_NAME='research_analysis_snapshot_publications' THEN publication_key:=NEW.id;
+  ELSIF TG_OP='DELETE' THEN publication_key:=OLD.publication_id;
+  ELSE publication_key:=NEW.publication_id; END IF;
+  SELECT * INTO publication_row FROM research_analysis_snapshot_publications WHERE id=publication_key;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF publication_row.state='withdrawn' THEN
+    IF EXISTS(SELECT 1 FROM research_analysis_snapshot_publication_blobs WHERE publication_id=publication_key) THEN
+      RAISE EXCEPTION 'Withdrawn publication cannot retain active view grants' USING ERRCODE='55000';
+    END IF;
+    RETURN NULL;
+  END IF;
+  IF EXISTS(
+    WITH expected AS (
+      SELECT item->>'viewId' AS view_id,'result'::text AS kind,item->'view'->>'blobSha256' AS sha,(item->'view'->>'blobBytes')::integer AS bytes
+        FROM jsonb_array_elements(publication_row.package_json->'results') item
+      UNION ALL
+      SELECT item->>'viewId','document',item->>'blobSha256',(item->>'blobBytes')::integer
+        FROM jsonb_array_elements(publication_row.package_json->'documents') item
+    ), actual AS (
+      SELECT lease.view_id,lease.kind,blob.sha256 AS sha,blob.size_bytes AS bytes FROM research_analysis_snapshot_publication_blobs lease
+      JOIN research_analysis_snapshot_blobs blob ON blob.preparation_id=lease.preparation_id AND blob.id=lease.view_id
+      WHERE lease.publication_id=publication_key AND blob.kind=lease.kind
+    )
+    SELECT 1 FROM expected FULL JOIN actual USING(view_id,kind,sha,bytes) WHERE expected.view_id IS NULL OR actual.view_id IS NULL
+  ) OR (SELECT COUNT(*) FROM research_analysis_snapshot_publication_blobs WHERE publication_id=publication_key) NOT BETWEEN 1 AND 10 THEN
+    RAISE EXCEPTION 'Publication grants must match its exact immutable retained package' USING ERRCODE='55000';
+  END IF;
+  RETURN NULL;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_analysis_snapshot_publication_complete ON research_analysis_snapshot_publications;
+CREATE CONSTRAINT TRIGGER trg_analysis_snapshot_publication_complete AFTER INSERT OR UPDATE ON research_analysis_snapshot_publications
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION check_analysis_snapshot_publication_leases();
+DROP TRIGGER IF EXISTS trg_analysis_snapshot_publication_lease_complete ON research_analysis_snapshot_publication_blobs;
+CREATE CONSTRAINT TRIGGER trg_analysis_snapshot_publication_lease_complete AFTER INSERT OR UPDATE OR DELETE ON research_analysis_snapshot_publication_blobs
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION check_analysis_snapshot_publication_leases();

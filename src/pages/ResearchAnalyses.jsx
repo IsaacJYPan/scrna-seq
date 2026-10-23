@@ -10,6 +10,7 @@ const NotebookWorkspace = React.lazy(() => import('../notebooks/NotebookWorkspac
 const ExistingWorkBrowser = React.lazy(() => import('../analyses/ExistingWorkBrowser'));
 const AnalysisAttachments = React.lazy(() => import('../analyses/AnalysisAttachments'));
 const AnalysisSnapshotPreparations = React.lazy(() => import('../analyses/AnalysisSnapshotPreparations'));
+const AnalysisSnapshotPublications = React.lazy(() => import('../analyses/AnalysisSnapshotPublications'));
 
 const WRITE_ROLES = new Set(['owner', 'admin', 'analyst']);
 const cleanReferences = analysis => (analysis.references || []).map(item => item.reference);
@@ -54,6 +55,8 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
   const attachmentsButton = useRef(null);
   const [preparationOpen, setPreparationOpen] = useState(false), [preparationAnalyses, setPreparationAnalyses] = useState({});
   const preparationButton = useRef(null), saveChangesButton = useRef(null);
+  const [publicationsOpen, setPublicationsOpen] = useState(false), [publicationAnalyses, setPublicationAnalyses] = useState({});
+  const publicationsButton = useRef(null), publicationSeed = useRef(0);
   const [adoptionOpen, setAdoptionOpen] = useState(false), [adoptionVisited, setAdoptionVisited] = useState(false);
   const adoptionButton = useRef(null), adoptionVisible = useRef(false);
   adoptionVisible.current = adoptionOpen;
@@ -141,6 +144,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
     setNotebookOpen(false);
     setAttachmentsOpen(false);
     setPreparationOpen(false);
+    setPublicationsOpen(false);
     listScroll.current = scrollContainer.current?.scrollTop || 0;
     if (window.innerWidth >= 1024 && detailScroller.current) detailScroller.current.scrollTop = 0;
     const requestId = ++selectionRequest.current;
@@ -249,7 +253,7 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
     <button type="button" className="btn btn-primary mt-5" onClick={onOpenWorkspace}>Choose a project</button></div>;
 
   return <div className="relative h-full min-w-0">
-    <div ref={scrollContainer} hidden={notebookOpen || adoptionOpen || attachmentsOpen || preparationOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
+    <div ref={scrollContainer} hidden={notebookOpen || adoptionOpen || attachmentsOpen || preparationOpen || publicationsOpen} className="h-full overflow-auto bg-background px-4 py-6 text-text sm:px-8 sm:py-8 lg:overflow-hidden">
     <div className="mx-auto w-full max-w-6xl lg:flex lg:h-full lg:min-h-0 lg:flex-col">
       <header className="mb-7 flex shrink-0 flex-wrap items-start justify-between gap-4">
         <div><p className="mb-1 text-xs text-textMuted">{projectName || 'Current project'}</p><h2 className="text-2xl font-semibold tracking-tight">Analyses</h2>
@@ -295,6 +299,9 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
               <button type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => { setNotebookVisited(true); setNotebookOpen(true); }}><FileText size={15} />Open documents</button>
               <button ref={attachmentsButton} type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => { setAttachmentsVisited(true); setAttachmentsOpen(true); }}><Link2 size={15} />Outside results</button>
               <button ref={preparationButton} type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => { setPreparationAnalyses(previous => ({ ...previous, [selected.id]: selected })); setPreparationOpen(true); }}><FileText size={15} />{canWrite && selected.status === 'active' ? 'Prepare sharing' : 'Saved preparations'}</button>
+              <button ref={publicationsButton} type="button" className="btn btn-secondary inline-flex items-center gap-2 text-sm" onClick={() => {
+                setPublicationAnalyses(previous => ({ ...previous, [selected.id]: { analysis: selected, seed: null, returnToPreparation: false } })); setPublicationsOpen(true);
+              }}><FileText size={15} />Published snapshots</button>
             </div>
             {conflict && <section aria-label="Newer saved version" className="space-y-3 rounded border border-border bg-surface p-4">
               <h3 className="text-sm font-semibold">Latest saved version {conflict.version}</h3><p className="break-words text-sm">{conflict.name}</p><p className="whitespace-pre-wrap break-words text-sm text-textMuted">{conflict.description}</p>
@@ -360,7 +367,26 @@ function ProjectAnalyses({ projectId, projectName, role, userId, theme, isActive
       return <div key={kept.id} hidden={!visible} className="absolute inset-0"><React.Suspense fallback={<p role="status" className="p-8 text-sm text-textMuted">Opening private preparations…</p>}>
         <AnalysisSnapshotPreparations projectId={projectId} analysisId={kept.id} userId={userId} savedAnalysis={current ? selected : kept}
           overviewDirty={current && dirty} canWrite={canWrite} available={!connection.blocked} isActive={isActive && visible}
+          onPublish={(preparation, restoreFocus) => {
+            const token = ++publicationSeed.current;
+            setPublicationAnalyses(previous => ({ ...previous, [kept.id]: { analysis: current ? selected : kept,
+              seed: { token, preparation }, returnToPreparation: true, restoreFocus } }));
+            setPreparationOpen(false); setPublicationsOpen(true);
+          }}
           onBack={close} onReturnToSave={() => { setPreparationOpen(false); requestAnimationFrame(() => saveChangesButton.current?.focus()); }} />
+      </React.Suspense></div>;
+    })}
+    {Object.values(publicationAnalyses).map(entry => {
+      const kept = entry.analysis, current = selected?.id === kept.id, visible = publicationsOpen && current;
+      const close = () => {
+        setPublicationsOpen(false);
+        if (entry.returnToPreparation) { setPreparationOpen(true); requestAnimationFrame(() => entry.restoreFocus?.()); }
+        else requestAnimationFrame(() => publicationsButton.current?.focus({ preventScroll: true }));
+      };
+      return <div key={kept.id} hidden={!visible} className="absolute inset-0"><React.Suspense fallback={<p role="status" className="p-8 text-sm text-textMuted">Opening published snapshots…</p>}>
+        <AnalysisSnapshotPublications projectId={projectId} analysisId={kept.id} userId={userId} savedAnalysis={current ? selected : kept}
+          canWrite={canWrite} available={!connection.blocked} isActive={isActive && visible} seed={entry.seed}
+          returnToPreparation={entry.returnToPreparation} onBack={close} />
       </React.Suspense></div>;
     })}
     {adoptionVisited && <div hidden={!adoptionOpen} className="absolute inset-0">

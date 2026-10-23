@@ -98,7 +98,7 @@ it('creates only an exact owner/service-bound private recipe and keeps selected 
   expect(recipe).toMatchObject({ serviceId: scope.serviceId, projectId: scope.projectId, analysisId: scope.analysisId, ownerUserId: scope.userId, analysisVersion: 2,
     results: [{ attachmentId: snapshotResultOption().attachmentId, revisionId: snapshotResultOption().revisionId, reference: snapshotResultOption().reference, view: { family: 'table', offset: 0, limit: 25 } }],
     notes: { summary: 'Measured observations\nfor review', decisions: null, limitations: null } });
-  expect(recipe.documents).toHaveLength(1); expect(screen.getByText('Private preparation. Nothing has been shared.')).toBeVisible();
+  expect(recipe.documents).toHaveLength(1); expect(screen.getByText('Private preparation. Publishing is a separate action.')).toBeVisible();
   expect(writes('resume')).toHaveLength(0); expect(writes('delete')).toHaveLength(0); expect(storage).not.toHaveBeenCalled();
   expect(state.requests.every(request => request.pathname.startsWith(base))).toBe(true);
   expect(screen.queryByRole('button', { name: /publish|run|execute/i })).not.toBeInTheDocument();
@@ -129,6 +129,22 @@ it('recovers an admitted original after lost acknowledgement without another pre
   await frame(); await choose(); await submit(); await screen.findByRole('alert');
   fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' })); await screen.findByTestId('prepared-result');
   expect(writes()).toHaveLength(1); expect(writes('resume')).toHaveLength(0);
+});
+
+it('requires an actual 404 with the exact missing code before retrying an original preparation', async () => {
+  state.onPrepare = request => {
+    if (writes().length === 1) throw new Error('Lost before acceptance.');
+    const value = snapshotRecord(request.body); state.records.set(value.requestId, value); return value;
+  };
+  state.onRead = () => failure(500, 'ANALYSIS_SNAPSHOT_PREPARATION_NOT_FOUND');
+  await frame(); await choose(); const original = await submit(); await screen.findByRole('alert');
+  fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' }));
+  await waitFor(() => expect(state.requests.filter(request => request.pathname === base + '/requests/' + original.requestId)).toHaveLength(1));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Check original preparation' })).toBeEnabled());
+  expect(screen.queryByRole('button', { name: 'Retry original preparation' })).not.toBeInTheDocument(); expect(writes()).toHaveLength(1);
+  state.onRead = undefined; fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry original preparation' })); await screen.findByTestId('prepared-result');
+  expect(writes()).toHaveLength(2); expect(writes()[1].body).toEqual(original);
 });
 
 it.each(['result', 'document'])('keeps exact ready identity while blocking an unavailable retained %s body', async kind => {
@@ -208,7 +224,7 @@ it('fences a held resume acknowledgement after current access becomes read-only'
 it('allows a current reader to delete only their retained private copies', async () => {
   state.allowed = false; const value = snapshotRecord(snapshotRecipe(), { canPrepare: false }); state.records.set(value.requestId, value);
   await reviewSaved(propsFor({ canWrite: false })); await screen.findByTestId('prepared-result');
-  fireEvent.click(screen.getByRole('button', { name: 'Remove private preparation' })); fireEvent.click(screen.getByRole('button', { name: 'Remove retained copies' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove private preparation' })); fireEvent.click(screen.getByRole('button', { name: 'Remove private preparation' }));
   await screen.findByText('Private preparation removed'); expect(screen.queryByTestId('prepared-result')).not.toBeInTheDocument();
   expect(writes('delete')[0].body).toEqual({ requestId: value.requestId, requestSha256: value.requestSha256 });
   expect(writes()).toHaveLength(0); expect(writes('resume')).toHaveLength(0);
@@ -218,7 +234,7 @@ it('hides old retained bodies while deletion completion is unconfirmed and recov
   const value = snapshotRecord(snapshotRecipe()); state.records.set(value.requestId, value);
   state.onDelete = () => { state.records.set(value.requestId, snapshotRecord(value.recipe, { state: 'deleted' })); throw new Error('Deletion accepted but acknowledgement lost.'); };
   await reviewSaved(); await screen.findByTestId('prepared-result');
-  fireEvent.click(screen.getByRole('button', { name: 'Remove private preparation' })); fireEvent.click(screen.getByRole('button', { name: 'Remove retained copies' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove private preparation' })); fireEvent.click(screen.getByRole('button', { name: 'Remove private preparation' }));
   await screen.findByRole('alert'); expect(screen.queryByTestId('prepared-result')).not.toBeInTheDocument(); expect(screen.queryByText('Measured expression contrast')).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' })); await screen.findByText('Private preparation removed');
   expect(writes('delete')).toHaveLength(1); expect(writes()).toHaveLength(0);
