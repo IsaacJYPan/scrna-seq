@@ -6,7 +6,7 @@ const config = require('./config');
 const audit = require('./projectAudit');
 const { getServiceExecutionIdentity } = require('./executionTargets');
 const contract = import('../shared/analysisSnapshotPublication.mjs');
-const snapshots = import('../shared/analysisSnapshotPreparation.mjs');
+const snapshots = import('../shared/analysisSnapshotPreparationDispatch.mjs');
 const READ = ['owner', 'admin', 'analyst', 'viewer'], WRITE = ['owner', 'admin', 'analyst'];
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');

@@ -8,6 +8,7 @@ import useExecutionTarget from '../runtime/useExecutionTarget';
 import { canonicalSnapshotJson, canonicalAnalysisSnapshotResultView } from '../../shared/analysisSnapshotPreparation.mjs';
 import { canonicalNotebookContent } from '../../shared/notebookDocument.mjs';
 import { savedSnapshotContent, snapshotScope, snapshotRecipe, snapshotRecord } from './snapshotPreparationTestFixtures';
+import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes } from './snapshotLinkedTestFixtures';
 
 vi.mock('./snapshotPreparationApi', () => ({ readSnapshotPreparationView: vi.fn(), readSnapshotPreparationDocument: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
@@ -42,11 +43,20 @@ function fixture({ image = false } = {}) {
   return { value, bodies, source, props: { ...snapshotScope, resourceId: value.preparationId, snapshotSha256: hash(canonicalSnapshotJson(value.package)),
     snapshot: value.package, availability: value.availability, available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() } };
 }
+function linkedFixture({ prerequisites = [], referenceReasons = [], caption = 'Caption supplied for a linked result' } = {}) {
+  const attachment = { kind: 'attachment-revision', ...snapshotRecipe().results[0] };
+  const direct = { kind: 'analysis-reference', reference: linkedReference(), caption, view: { family: 'table', offset: 2, limit: 2 } };
+  const record = linkedRecord(linkedRecipe({ results: [attachment, direct], prerequisites }), { referenceReasons });
+  readSnapshotPreparationView.mockImplementation((_p, _a, _id, result) => Promise.resolve({ bytes: linkedTableBytes(result), type: 'application/json' }));
+  readSnapshotPreparationDocument.mockResolvedValue({ bytes: new TextEncoder().encode(canonicalNotebookContent(savedSnapshotContent)), type: 'application/json' });
+  return { record, props: { ...snapshotScope, resourceId: record.preparationId, snapshotSha256: record.snapshotSha256, snapshot: record.package,
+    availability: record.availability, available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() } };
+}
 beforeEach(() => {
   vi.resetAllMocks(); vi.stubGlobal('crypto', webcrypto); useExecutionTarget.mockReturnValue(connection);
   let sequence = 0; vi.stubGlobal('URL', Object.assign(class extends NativeURL {}, { createObjectURL: vi.fn(() => `blob:shared-${++sequence}`), revokeObjectURL: vi.fn() }));
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it('renders just the selected fixed finding, keeps supporting source lazy, and returns keyboard focus to the finding selection', async () => {
   const value = fixture(); render(<RetainedSnapshotFindings {...value.props} />);
@@ -149,4 +159,92 @@ it.each(['viewer', 'resource', 'snapshot'])('does not carry a prior selected fin
   view.rerender(<RetainedSnapshotFindings {...value.props} {...changed} />);
   await screen.findByRole('cell', { name: 'retained donor 1' }); expect(screen.getByRole('button', { name: /1\. Finding 1 exact caption/ })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.queryByLabelText('Retained saved source')).not.toBeInTheDocument(); expect(readSnapshotPreparationDocument).toHaveBeenCalledOnce();
+});
+
+it.each(['unknown package', 'unknown result origin'])('does not guess historical attachment context for an %s', async invalid => {
+  const value = fixture();
+  if (invalid === 'unknown package') value.props.snapshot.schema = 'traceomics.analysis-snapshot-package.v99';
+  else { value.props.snapshot.schema = 'traceomics.analysis-snapshot-package.v2'; value.props.snapshot.results[0].origin = { kind: 'unsupported-result' }; }
+  render(<RetainedSnapshotFindings {...value.props} />);
+  expect(screen.getByRole('alert')).toHaveTextContent('context could not be verified');
+  expect(screen.queryByLabelText('Retained finding selection')).not.toBeInTheDocument(); await act(async () => {});
+  expect(readSnapshotPreparationView).not.toHaveBeenCalled(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('presents mixed v2 attached and linked findings with honest context and just one checked result body', async () => {
+  const value = linkedFixture(); render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  const historical = value.record.package.results[0].origin.attachment;
+  expect(within(screen.getByLabelText('Retained prepared finding')).getByRole('heading', { name: historical.caption })).toBeVisible();
+  expect(screen.getByText('measured.csv · Saved attachment revision 1')).toBeVisible(); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button', { name: /2\. Caption supplied for a linked result/ }));
+  await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2));
+  const finding = within(screen.getByLabelText('Retained prepared finding'));
+  expect(finding.getByRole('heading', { name: 'Caption supplied for a linked result' })).toBeVisible();
+  expect(finding.getByText('measured.csv · Linked in saved analysis 2')).toBeVisible(); expect(finding.getByText('Caption supplied for this snapshot.')).toBeVisible();
+  expect(finding.queryByText(/Saved attachment revision|Saved revision/)).not.toBeInTheDocument();
+  expect(screen.getAllByLabelText('Retained prepared finding')).toHaveLength(1); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('keeps v2 linked caption text inert and exposes only its exact supplied reference and one source checksum under details', async () => {
+  const caption = '<script>window.runScience()</script>\nA supplied interpretation', value = linkedFixture({ caption });
+  render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  fireEvent.click(screen.getByRole('button', { name: /2\. <script>/ })); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2));
+  const panel = screen.getByLabelText('Retained prepared finding'), finding = within(panel); expect(finding.getByRole('heading').textContent).toBe(caption);
+  expect(panel.querySelector('script')).toBeNull(); const details = finding.getByText('Supplied context and exact view').closest('details');
+  fireEvent.click(finding.getByText('Supplied context and exact view')); details.open = true;
+  expect(finding.getByText(value.record.package.results[1].origin.reference.versionId)).toBeVisible();
+  expect(finding.getAllByText(value.record.package.results[1].source.sha256)).toHaveLength(1);
+  expect(finding.queryByText('Recorded reference SHA-256')).not.toBeInTheDocument();
+});
+
+it('retains direct selection and exact source through equal v2 refreshes without reloading checked bodies', async () => {
+  const value = linkedFixture(), view = render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  fireEvent.click(screen.getByRole('button', { name: /2\. Caption supplied for a linked result/ })); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole('button', { name: 'View supporting source' })); await screen.findByLabelText('Retained saved source');
+  view.rerender(<RetainedSnapshotFindings {...value.props} snapshot={structuredClone(value.props.snapshot)} availability={structuredClone(value.props.availability)} onUnavailable={vi.fn()} />);
+  await act(async () => {}); expect(screen.getByRole('button', { name: /2\. Caption supplied for a linked result/ })).toHaveAttribute('aria-pressed', 'true');
+  expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2); expect(readSnapshotPreparationDocument).toHaveBeenCalledOnce();
+});
+
+it('shows all recorded reference-only reasons and exact checkpoint/workflow identities without granting or reading their contents', async () => {
+  const network = vi.spyOn(globalThis, 'fetch');
+  const prerequisites = [
+    { kind: 'compute', label: 'Supplied computation requirement', detail: 'Use an independently available R environment.' },
+    { kind: 'analysis-reference', reference: linkedReference({ versionId: 'av_' + 'b'.repeat(24), sha256: 'b'.repeat(64) }), label: 'A deliberately omitted linked table', detail: null },
+    { kind: 'analysis-reference', reference: { kind: 'analysis-object', analysisObjectId: 'ao_' + 'c'.repeat(24), checkpointVersionId: 'art_' + 'c'.repeat(24), sha256: 'c'.repeat(64) }, label: 'Saved checkpoint requirement', detail: 'Object contents must be obtained separately.' },
+    { kind: 'analysis-reference', reference: linkedReference({ versionId: 'eri_' + 'd'.repeat(24), sha256: 'd'.repeat(64) }), label: '<img src=x onerror=run()> Supplied restricted reference', detail: 'Availability is not established.' },
+    { kind: 'analysis-reference', reference: { kind: 'workflow-snapshot', snapshotId: 'wfs_' + 'e'.repeat(24), sha256: 'e'.repeat(64) }, label: 'Saved workflow reference', detail: null },
+  ];
+  const value = linkedFixture({ prerequisites, referenceReasons: [null, 'not-included', 'opaque', 'restricted-or-unavailable', 'unsupported-view'] });
+  render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  const section = within(screen.getByLabelText('Reference-only prerequisites'));
+  expect(section.getByText('Contents not included. Integrity not checked. Data access not granted.')).toBeVisible();
+  for (const text of ['Only this saved reference was selected.', 'Object contents are not included.', 'Source access or availability has not been established.', 'This format is not included as a fixed finding.']) expect(section.getByText(text)).toBeVisible();
+  expect(section.getByText('<img src=x onerror=run()> Supplied restricted reference')).toBeVisible(); expect(screen.getByLabelText('Reference-only prerequisites').querySelector('img')).toBeNull();
+  expect(screen.getByText('Supplied computation requirement · compute')).toBeVisible(); expect(section.queryByText(/checksum verified/)).not.toBeInTheDocument();
+  expect(section.queryByRole('button', { name: /Run|Restore|Preview|Download|View/ })).not.toBeInTheDocument();
+  const checkpoint = section.getByText('Saved checkpoint requirement').parentElement, exact = within(checkpoint).getByText('Exact saved reference').closest('details'); exact.open = true;
+  expect(within(checkpoint).getByText('ao_' + 'c'.repeat(24))).toBeVisible(); expect(within(checkpoint).getByText('art_' + 'c'.repeat(24))).toBeVisible();
+  expect(within(checkpoint).getByText('c'.repeat(64))).toBeVisible(); expect(within(checkpoint).getByText('Recorded reference SHA-256')).toBeVisible();
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationView.mock.calls[0][3].viewId).toBe(value.record.package.results[0].viewId);
+  expect(readSnapshotPreparationDocument).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled();
+});
+
+it('keeps an unavailable v2 fixed finding distinct from included metadata rather than replacing it with a reference-only preview', async () => {
+  const value = linkedFixture({ prerequisites: [{ kind: 'analysis-reference', reference: linkedReference(), label: 'Recorded prerequisite only', detail: null }] });
+  value.props.availability.views[1].status = 'unavailable'; render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  fireEvent.click(screen.getByRole('button', { name: /2\. Caption supplied for a linked result/ }));
+  expect(screen.getByText('This retained view is unavailable. Its exact saved identity is kept and has not been regenerated.')).toBeVisible();
+  expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+  expect(within(screen.getByLabelText('Reference-only prerequisites')).getByText('Recorded prerequisite only')).toBeVisible();
+});
+
+it('removes v2 reference-only metadata and fixed bodies together when publication policy withdraws the package', async () => {
+  const value = linkedFixture({ prerequisites: [{ kind: 'analysis-reference', reference: linkedReference(), label: 'Recorded restricted prerequisite', detail: 'Supplied context only.' }] });
+  const readView = vi.fn().mockImplementation((_p, _a, _id, result) => Promise.resolve({ bytes: linkedTableBytes(result), type: 'application/json' }));
+  const props = { ...value.props, audience: 'project-publication', resourceId: publicId, userId: 17, readView };
+  const view = render(<RetainedSnapshotFindings {...props} />); await screen.findByRole('table');
+  expect(screen.getByText('Recorded restricted prerequisite')).toBeVisible(); view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
+  expect(screen.queryByText('Recorded restricted prerequisite')).not.toBeInTheDocument(); expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(screen.queryByLabelText('Reference-only prerequisites')).not.toBeInTheDocument();
+  expect(readView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { canonicalAnalysisSnapshotPreparation, normalizeAnalysisSnapshotPreparation } from '../../shared/analysisSnapshotPreparation.mjs';
+import { canonicalAnalysisSnapshotPreparation, normalizeAnalysisSnapshotPreparation } from '../../shared/analysisSnapshotPreparationDispatch.mjs';
 import * as api from './snapshotPreparationApi';
 import { validateSnapshotPreparation, validateSnapshotPreparationList, validateSnapshotPreparationOptions } from './snapshotPreparationValidation';
 import { publicErrorMessage } from '../publicError';
@@ -10,12 +10,24 @@ const writerFailure = error => ['ANALYSIS_SNAPSHOT_WRITE_REQUIRED', 'ANALYSIS_SN
 const denied = error => error.status === 401 || !sourceFailure(error) && !writerFailure(error) && (error.status === 403 || error.status === 404 && !missing(error));
 const digest = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), value => value.toString(16).padStart(2, '0')).join('');
 const emptyNotes = () => ({ summary: '', decisions: '', limitations: '' });
-const optionKey = (kind, value) => kind === 'analysis-versions' ? value.version : kind === 'results' ? value.revisionId : value.versionId;
+const optionKey = (kind, value) => kind === 'analysis-versions' ? value.version : kind === 'results' ? value.revisionId
+  : kind === 'analysis-references' ? JSON.stringify(value.reference) : value.versionId;
 
 export default function useSnapshotPreparations({ projectId, analysisId, userId, savedAnalysis, canWrite, available, isActive }) {
   const [mode, setMode] = useState(canWrite && savedAnalysis?.status === 'active' ? 'choose' : 'library');
   const [analysisVersion, setAnalysisVersion] = useState(savedAnalysis?.version || 1);
   const [results, setResults] = useState([]), [documents, setDocuments] = useState([]), [notes, setNotes] = useState(emptyNotes), [prerequisites, setPrerequisites] = useState([]);
+  const [linkedDrafts, setLinkedDrafts] = useState({});
+  const linkedResults = linkedDrafts[analysisVersion]?.results || [], linkedPrerequisites = linkedDrafts[analysisVersion]?.prerequisites || [];
+  const versionRef = useRef(analysisVersion); versionRef.current = analysisVersion;
+  const setLinkedResults = update => setLinkedDrafts(previous => {
+    const draft = previous[analysisVersion] || { results: [], prerequisites: [] };
+    return { ...previous, [analysisVersion]: { ...draft, results: typeof update === 'function' ? update(draft.results) : update } };
+  });
+  const setLinkedPrerequisites = update => setLinkedDrafts(previous => {
+    const draft = previous[analysisVersion] || { results: [], prerequisites: [] };
+    return { ...previous, [analysisVersion]: { ...draft, prerequisites: typeof update === 'function' ? update(draft.prerequisites) : update } };
+  });
   const [library, setLibrary] = useState([]), [cursor, setCursor] = useState(null), [loaded, setLoaded] = useState(false), [loading, setLoading] = useState(false);
   const [options, setOptions] = useState({}), [optionLoading, setOptionLoading] = useState({});
   const [selected, setSelected] = useState(null), [original, setOriginal] = useState(null), [lastCheck, setLastCheck] = useState('unconfirmed');
@@ -70,18 +82,22 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
   }, [usable, projectId, analysisId, scope, observe, revoke]);
   const loadOptions = useCallback(async (kind, next = null) => {
     if (!usable || !service.current) return;
-    optionRequests.current.get(kind)?.abort(); const controller = new AbortController(); optionRequests.current.set(kind, controller);
-    const epoch = permissionEpoch.current; setOptionLoading(previous => ({ ...previous, [kind]: true })); setError('');
+    const linked = kind === 'analysis-references', version = analysisVersion, key = linked ? `${kind}:${version}` : kind;
+    optionRequests.current.get(key)?.abort(); const controller = new AbortController(); optionRequests.current.set(key, controller);
+    const epoch = permissionEpoch.current; setOptionLoading(previous => ({ ...previous, [key]: true })); setError('');
     try {
-      const result = validateSnapshotPreparationOptions(await api.listSnapshotPreparationOptions(projectId, analysisId, kind, { cursor: next, signal: controller.signal }), scope(), kind);
-      if (!mounted.current || controller.signal.aborted || optionRequests.current.get(kind) !== controller) return;
+      const result = validateSnapshotPreparationOptions(await api.listSnapshotPreparationOptions(projectId, analysisId, kind,
+        { cursor: next, signal: controller.signal, ...(linked ? { analysisVersion: version } : {}) }), scope(), kind, linked ? version : undefined);
+      if (!mounted.current || controller.signal.aborted || optionRequests.current.get(key) !== controller) return;
       observe(result.canPrepare, controller, epoch);
-      setOptions(previous => ({ ...previous, [kind]: { items: next ? [...new Map([...(previous[kind]?.items || []), ...result.items].map(item => [optionKey(kind, item), item])).values()] : result.items, cursor: result.nextCursor } }));
+      if (linked && versionRef.current !== version) return;
+      setOptions(previous => ({ ...previous, [key]: { items: next ? [...new Map([...(previous[key]?.items || []), ...result.items].map(item => [optionKey(kind, item), item])).values()] : result.items, cursor: result.nextCursor } }));
     } catch (caught) {
-      if (!mounted.current || controller.signal.aborted || optionRequests.current.get(kind) !== controller) return;
-      if (denied(caught)) revoke(); setError(publicErrorMessage(caught, 'Saved material could not be listed. Your current selection is kept.'));
-    } finally { if (mounted.current && optionRequests.current.get(kind) === controller) setOptionLoading(previous => ({ ...previous, [kind]: false })); }
-  }, [usable, projectId, analysisId, scope, observe, revoke]);
+      if (!mounted.current || controller.signal.aborted || optionRequests.current.get(key) !== controller) return;
+      if (denied(caught)) revoke();
+      if (!linked || versionRef.current === version) setError(publicErrorMessage(caught, 'Saved material could not be listed. Your current selection is kept.'));
+    } finally { if (mounted.current && optionRequests.current.get(key) === controller) setOptionLoading(previous => ({ ...previous, [key]: false })); }
+  }, [usable, projectId, analysisId, analysisVersion, scope, observe, revoke]);
   useEffect(() => { if (usable) void load(); }, [usable, load]);
   useEffect(() => {
     if (usable) return;
@@ -100,6 +116,14 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
       if (!options[kind] && !optionLoading[kind] && !error) void loadOptions(kind);
     }
   }, [usable, loaded, mode, options, optionLoading, error, loadOptions]);
+  useEffect(() => {
+    const key = `analysis-references:${analysisVersion}`;
+    for (const [name, controller] of optionRequests.current) if (name.startsWith('analysis-references:') && name !== key) {
+      controller.abort(); optionRequests.current.delete(name);
+      setOptionLoading(previous => previous[name] ? { ...previous, [name]: false } : previous);
+    }
+    if (usable && loaded && mode === 'choose' && !options[key] && !optionLoading[key] && !error) void loadOptions('analysis-references');
+  }, [usable, loaded, mode, analysisVersion, options, optionLoading, error, loadOptions]);
   const refresh = async (requestId, controller, expected) => {
     setLastCheck('unconfirmed'); const epoch = permissionEpoch.current;
     const result = await validateSnapshotPreparation(await api.getSnapshotPreparationRequest(projectId, analysisId, requestId, { signal: controller.signal }), scope(), expected?.recipe);
@@ -132,8 +156,12 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
       if (!valid(controller)) return; observe(access.canPrepare, controller, epoch); if (!access.canPrepare || !allowedRef.current) return;
       let record = originalRef.current;
       if (!record) {
+        const extended = linkedResults.length > 0 || linkedPrerequisites.length > 0;
         const recipe = normalizeAnalysisSnapshotPreparation({ requestId: crypto.randomUUID(), serviceId: service.current, projectId, analysisId,
-          ownerUserId: Number(userId), analysisVersion, results, documents, notes, prerequisites });
+          ...(extended ? { schema: 'traceomics.analysis-snapshot-preparation.v2' } : {}),
+          ownerUserId: Number(userId), analysisVersion,
+          results: extended ? [...results.map(item => ({ kind: 'attachment-revision', ...item })), ...linkedResults] : results,
+          documents, notes, prerequisites: [...prerequisites, ...linkedPrerequisites] });
         record = { recipe, requestSha256: await digest(canonicalAnalysisSnapshotPreparation(recipe)) };
         if (!valid(controller)) return; originalRef.current = record; setOriginal(record);
       }
@@ -173,8 +201,13 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
     if (action.current || originalRef.current && lastCheck === 'unconfirmed') return;
     originalRef.current = null; setOriginal(null); retain(null); setError(''); setNotice(''); setLastCheck('unconfirmed'); setMode('choose');
   };
+  const chooseAnalysisVersion = version => {
+    setAnalysisVersion(version);
+    if (allowedRef.current === true) setError('');
+  };
   const navigate = next => { cancelAction(); setMode(next); };
-  return { mode, setMode: navigate, analysisVersion, setAnalysisVersion, results, setResults, documents, setDocuments, notes, setNotes, prerequisites, setPrerequisites,
+  return { mode, setMode: navigate, analysisVersion, setAnalysisVersion: chooseAnalysisVersion, results, setResults, linkedResults, setLinkedResults,
+    linkedPrerequisites, setLinkedPrerequisites, documents, setDocuments, notes, setNotes, prerequisites, setPrerequisites,
     library, cursor, loaded, loading, options, optionLoading, selected, original, lastCheck, allowed, phase, busy: !!phase, error, notice,
     serviceId: service.current, writer: usable && canWrite && savedAnalysis?.status === 'active' && allowed === true,
     load, loadOptions, check, prepare, resume: () => mutate('resume'), remove: () => mutate('delete'), newPreparation, revoke };

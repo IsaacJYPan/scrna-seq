@@ -21,9 +21,14 @@ export default function PreparedSnapshotResult({ projectId, analysisId, preparat
     || audience === 'project-publication' && /^aspub_[a-f0-9]{24}$/.test(resourceId)) && typeof reader === 'function';
   const usable = available && isActive && !target.blocked && validScope;
   const key = JSON.stringify([audience, resourceId, snapshotSha256, projectId, analysisId, serviceId, userId, target.identity, target.epoch,
-    descriptor?.viewId, descriptor?.view?.viewSha256, descriptor?.view?.blobSha256, descriptor?.view?.blobBytes,
+    descriptor?.viewId, descriptor?.view?.schema, descriptor?.view?.viewSha256, descriptor?.view?.blobSha256, descriptor?.view?.blobBytes,
     descriptor?.view?.family, descriptor?.view?.spec?.offset, descriptor?.view?.spec?.limit, descriptor?.view?.width,
-    descriptor?.view?.height, descriptor?.source?.versionId, descriptor?.source?.sha256, descriptor?.source?.format?.id]);
+    descriptor?.view?.height, descriptor?.source?.artifactId, descriptor?.source?.versionId, descriptor?.source?.ownerUserId,
+    descriptor?.source?.sha256, descriptor?.source?.sizeBytes, descriptor?.source?.format?.id, descriptor?.source?.format?.version,
+    descriptor?.origin?.kind, descriptor?.origin?.reference?.kind, descriptor?.origin?.reference?.versionId, descriptor?.origin?.reference?.sha256,
+    descriptor?.origin?.analysisVersion, descriptor?.origin?.caption, descriptor?.origin?.captionOrigin,
+    descriptor?.origin?.attachment?.attachmentId, descriptor?.origin?.attachment?.revisionId, descriptor?.origin?.attachment?.sourceOwnerUserId,
+    descriptor?.attachment?.attachmentId, descriptor?.attachment?.revisionId, descriptor?.attachment?.sourceOwnerUserId]);
   const [body, setBody] = useState(null), [problem, setProblem] = useState(null), [loading, setLoading] = useState(false), [attempt, setAttempt] = useState(0);
   const [withdrawnKey, setWithdrawnKey] = useState(null), withdrawn = withdrawnKey === key;
   const generation = useRef(0), image = useRef(null), live = useRef(null);

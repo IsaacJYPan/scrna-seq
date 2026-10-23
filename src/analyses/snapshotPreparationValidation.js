@@ -4,9 +4,12 @@ import {
   FIXED_DOCUMENT_SOURCE_SCHEMA, normalizeAnalysisSnapshotPreparation,
   canonicalAnalysisSnapshotPreparation, canonicalSnapshotJson,
   canonicalAnalysisSnapshotPackage, canonicalAnalysisSnapshotResultView,
-  canonicalAnalysisSnapshotDocumentSource,
-} from '../../shared/analysisSnapshotPreparation.mjs';
+  canonicalAnalysisSnapshotDocumentSource, ANALYSIS_SNAPSHOT_PREPARATION_SCHEMA_V2,
+  ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2, FIXED_RESULT_VIEW_SCHEMA_V2, ANALYSIS_SNAPSHOT_LINKED_LIMITS,
+  normalizeAnalysisSnapshotCaptionV2,
+} from '../../shared/analysisSnapshotPreparationDispatch.mjs';
 import { normalizeAnalysisAttachmentCreate } from '../../shared/analysisAttachment.mjs';
+import { validateResearchAnalysisReference } from '../../shared/researchAnalysis.mjs';
 import { canonicalNotebookContent } from '../../shared/notebookDocument.mjs';
 import { scriptDocumentInfo } from '../../shared/scriptDocument.mjs';
 
@@ -101,9 +104,16 @@ function analysis(value) {
   if (!['active', 'archived'].includes(value.status)) fail();
   timestamp(value.createdAt); timestamp(value.updatedAt); if (value.updatedAt < value.createdAt) fail(); pattern(value.revisionSha256, SHA);
 }
-function source(value) {
-  fields(value, sourceKeys); pattern(value.artifactId, AF); pattern(value.versionId, AV); pattern(value.sha256, SHA);
-  integer(value.sizeBytes, 0, L.originalBytes); savedText(value.name, 160); if (value.name.length > 160) fail();
+function source(value, linked = false) {
+  fields(value, linked ? [...sourceKeys, 'ownerUserId'] : sourceKeys);
+  pattern(value.artifactId, linked ? /^(?:af|av|art|eri)_[a-f0-9]{16,40}$/ : AF);
+  pattern(value.versionId, linked ? /^(?:av|art|eri)_[a-f0-9]{16,40}$/ : AV); pattern(value.sha256, SHA);
+  integer(value.sizeBytes, 0, L.originalBytes);
+  if (linked) {
+    integer(value.ownerUserId, 1, Number.MAX_SAFE_INTEGER);
+    if (typeof value.name !== 'string' || !value.name.isWellFormed() || !value.name || value.name !== value.name.trim()
+        || value.name.length > ANALYSIS_SNAPSHOT_LINKED_LIMITS.sourceName || /[\p{Cc}\p{Cf}\\/]/u.test(value.name)) fail();
+  } else { savedText(value.name, 160); if (value.name.length > 160) fail(); }
   fields(value.format, ['id', 'version']);
   if (!['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg'].includes(value.format.id) || value.format.version !== '1') fail();
   return ['org.ietf.csv', 'org.iana.tsv'].includes(value.format.id) ? 'table' : 'image';
@@ -137,11 +147,11 @@ export function validateSnapshotPreparationList(input, expectedScope) {
     descending(value.items, 'createdAt', 'preparationId'); return value;
   } catch { fail(); }
 }
-export function validateSnapshotPreparationOptions(input, expectedScope, kind) {
+export function validateSnapshotPreparationOptions(input, expectedScope, kind, expectedAnalysisVersion) {
   try {
     const value = capture(input, L.listBytes), scope = scopeCopy(expectedScope, true);
-    envelope(value, scope, ['kind', 'items', 'nextCursor']); paging(value);
-    if (!['analysis-versions', 'results', 'documents'].includes(kind) || value.kind !== kind) fail();
+    envelope(value, scope, ['kind', 'items', 'nextCursor', ...(kind === 'analysis-references' ? ['analysisVersion'] : [])]); paging(value);
+    if (!['analysis-versions', 'results', 'documents', 'analysis-references'].includes(kind) || value.kind !== kind) fail();
     if (kind === 'analysis-versions') {
       value.items.forEach(analysis); unique(value.items.map(item => item.version));
       for (let i = 1; i < value.items.length; i++) if (value.items[i - 1].version <= value.items[i].version) fail();
@@ -152,11 +162,22 @@ export function validateSnapshotPreparationOptions(input, expectedScope, kind) {
         if (item.sourceOwnerUserId !== scope.userId || item.integrity !== 'not-checked' || item.reference.versionId !== item.source.versionId
             || item.reference.sha256 !== item.source.sha256 || dense(item.families, 1).length !== 1 || item.families[0] !== family) fail();
       }); unique(value.items.map(item => item.revisionId)); descending(value.items, 'createdAt', 'revisionId');
-    } else {
+    } else if (kind === 'documents') {
       value.items.forEach(item => {
         fields(item, [...documentKeys, 'actorUserId', 'createdAt', 'role', 'producingSource']); documentMetadata(item);
         integer(item.actorUserId, 1, Number.MAX_SAFE_INTEGER); timestamp(item.createdAt);
       }); unique(value.items.map(item => item.versionId)); descending(value.items, 'createdAt', 'versionId');
+    } else {
+      integer(expectedAnalysisVersion, 1, 2147483647); if (value.analysisVersion !== expectedAnalysisVersion) fail();
+      value.items.forEach(item => {
+        fields(item, ['reference', 'label', 'viewFamily', 'referenceOnlyReason', 'integrity', 'availability']);
+        const normalized = validateResearchAnalysisReference(item.reference);
+        if (canonicalSnapshotJson(normalized) !== canonicalSnapshotJson(item.reference) || item.integrity !== 'not-checked' || item.availability !== 'not-checked'
+            || typeof item.label !== 'string' || !item.label.isWellFormed() || !item.label || item.label !== item.label.trim()
+            || item.label.length > ANALYSIS_SNAPSHOT_LINKED_LIMITS.optionLabel || /[\p{Cc}\p{Cf}]/u.test(item.label)) fail();
+        if (item.viewFamily === null) { if (!['opaque', 'unsupported-view', 'restricted-or-unavailable'].includes(item.referenceOnlyReason)) fail(); }
+        else if (!['table', 'image'].includes(item.viewFamily) || item.reference.kind !== 'artifact-version' || item.referenceOnlyReason !== null) fail();
+      }); unique(value.items.map(item => canonicalSnapshotJson(item.reference)));
     }
     return value;
   } catch { fail(); }
@@ -228,18 +249,26 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
     }
     if (value.failure !== null) fail();
     const pkg = value.package, canonical = canonicalAnalysisSnapshotPackage(pkg);
+    const linked = recipe.schema === ANALYSIS_SNAPSHOT_PREPARATION_SCHEMA_V2;
+    if (pkg.schema !== (linked ? ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2 : 'traceomics.analysis-snapshot-package.v1')) fail();
+    const prerequisiteIntent = linked ? pkg.prerequisites.items.map(item => item.kind === 'analysis-reference'
+      ? { kind: item.kind, reference: item.reference, label: item.label, detail: item.detail } : item) : pkg.prerequisites.items;
     if (pkg.serviceId !== value.serviceId || pkg.projectId !== value.projectId || pkg.analysisId !== value.analysisId || pkg.ownerUserId !== value.ownerUserId
         || pkg.preparationId !== value.preparationId || pkg.createdAt !== value.createdAt || pkg.analysis.version !== recipe.analysisVersion
         || pkg.results.length !== recipe.results.length || pkg.documents.length !== recipe.documents.length
         || canonicalSnapshotJson(pkg.notes) !== canonicalSnapshotJson(recipe.notes)
-        || canonicalSnapshotJson(pkg.prerequisites.items) !== canonicalSnapshotJson(recipe.prerequisites)
+        || canonicalSnapshotJson(prerequisiteIntent) !== canonicalSnapshotJson(recipe.prerequisites)
         || new TextEncoder().encode(canonical).byteLength + new TextEncoder().encode(canonicalAnalysisSnapshotPreparation(recipe)).byteLength
           + pkg.results.reduce((sum, item) => sum + item.view.blobBytes, 0) + pkg.documents.reduce((sum, item) => sum + item.blobBytes, 0) > L.retainedBytes) fail();
     await verifySnapshotPackage(pkg, { serviceId: value.serviceId, projectId: value.projectId, analysisId: value.analysisId,
       ownerUserId: value.ownerUserId, preparationId: value.preparationId, snapshotSha256: value.snapshotSha256 });
     for (let i = 0; i < pkg.results.length; i++) {
       const item = pkg.results[i], chosen = recipe.results[i], view = item.view;
-      if (item.attachment.attachmentId !== chosen.attachmentId || item.attachment.revisionId !== chosen.revisionId
+      const origin = linked ? item.origin : { kind: 'attachment-revision', attachment: item.attachment };
+      if (linked && origin.kind !== chosen.kind || origin.kind === 'attachment-revision'
+          && (origin.attachment.attachmentId !== chosen.attachmentId || origin.attachment.revisionId !== chosen.revisionId)
+          || origin.kind === 'analysis-reference' && (canonicalSnapshotJson(origin.reference) !== canonicalSnapshotJson(chosen.reference)
+            || origin.caption !== chosen.caption || origin.analysisVersion !== recipe.analysisVersion)
           || item.source.versionId !== chosen.reference.versionId || item.source.sha256 !== chosen.reference.sha256
           || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)) fail();
     }
@@ -265,11 +294,29 @@ async function raw(bytes, expected, maximum) {
 export async function decodeSnapshotPreparationTable(bytes, resultDescriptor) {
   try {
     const result = capture(resultDescriptor, L.packageBytes);
-    fields(result, ['viewId', 'attachment', 'source', 'view']); pattern(result.viewId, VIEW);
-    if (source(result.source) !== 'table') fail();
+    const linked = result.view?.schema === FIXED_RESULT_VIEW_SCHEMA_V2;
+    fields(result, ['viewId', linked ? 'origin' : 'attachment', 'source', 'view']); pattern(result.viewId, VIEW);
+    if (source(result.source, linked) !== 'table') fail();
+    if (linked) {
+      const origin = result.origin;
+      if (origin?.kind === 'attachment-revision') {
+        fields(origin, ['kind', 'attachment']);
+        fields(origin.attachment, ['attachmentId', 'revisionId', 'revisionNumber', 'caption', 'suppliedOrigin', 'createdByUserId', 'createdAt', 'sourceOwnerUserId']);
+        attachment({ ...origin.attachment, reference: { kind: 'artifact-version', versionId: result.source.versionId, sha256: result.source.sha256 } });
+        if (origin.attachment.sourceOwnerUserId !== result.source.ownerUserId) fail();
+      } else {
+        fields(origin, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin']);
+        const reference = validateResearchAnalysisReference(origin.reference);
+        integer(origin.analysisVersion, 1, 2147483647);
+        if (origin.kind !== 'analysis-reference' || origin.captionOrigin !== 'user-supplied' || reference.kind !== 'artifact-version'
+            || canonicalSnapshotJson(reference) !== canonicalSnapshotJson(origin.reference) || reference.versionId !== result.source.versionId
+            || reference.sha256 !== result.source.sha256 || normalizeAnalysisSnapshotCaptionV2(origin.caption) !== origin.caption) fail();
+      }
+    }
     fields(result.view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height']);
     pattern(result.view.viewSha256, SHA);
-    if (result.view.schema !== 'traceomics.fixed-result-view.v1' || result.view.family !== 'table' || result.view.width !== null || result.view.height !== null) fail();
+    if (result.view.schema !== (linked ? FIXED_RESULT_VIEW_SCHEMA_V2 : 'traceomics.fixed-result-view.v1')
+        || result.view.family !== 'table' || result.view.width !== null || result.view.height !== null) fail();
     fields(result.view.spec, ['offset', 'limit']); integer(result.view.spec.offset, 0, L.tableOffset); integer(result.view.spec.limit, 1, L.tableRows);
     const text = await raw(bytes, result.view, L.tableBytes), table = JSON.parse(text);
     fields(table, ['family', 'columns', 'rows', 'offset', 'limit', 'hasMore', 'scannedRows', 'truncated']);

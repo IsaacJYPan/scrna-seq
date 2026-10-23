@@ -10,7 +10,11 @@ function page(cursor, kind) {
   return new URLSearchParams({ limit: '30', ...(kind ? { kind } : {}), ...(cursor ? { cursor } : {}) });
 }
 export const listSnapshotPreparations = (projectId, analysisId, { cursor, signal } = {}) => request(`${base(projectId, analysisId)}?${page(cursor)}`, { signal }, limits.list);
-export const listSnapshotPreparationOptions = (projectId, analysisId, kind, { cursor, signal } = {}) => request(`${base(projectId, analysisId)}/options?${page(cursor, kind)}`, { signal }, limits.list);
+export const listSnapshotPreparationOptions = (projectId, analysisId, kind, { cursor, signal, analysisVersion } = {}) => {
+  const query = page(cursor, kind);
+  if (analysisVersion !== undefined) query.set('analysisVersion', String(analysisVersion));
+  return request(`${base(projectId, analysisId)}/options?${query}`, { signal }, limits.list);
+};
 export const getSnapshotPreparation = (projectId, analysisId, preparationId, { signal } = {}) => request(path(projectId, analysisId, preparationId), { signal });
 export const getSnapshotPreparationRequest = (projectId, analysisId, requestId, { signal } = {}) => request(`${base(projectId, analysisId)}/requests/${encodeURIComponent(requestId)}`, { signal });
 export const createSnapshotPreparation = (projectId, analysisId, body, { signal } = {}) => request(base(projectId, analysisId), { method: 'POST', body, signal });

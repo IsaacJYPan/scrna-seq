@@ -9,6 +9,7 @@ import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifac
 import { fetchRetainedArtifactImage } from '../artifacts/retainedArtifactApi';
 import { canonicalSnapshotJson, canonicalAnalysisSnapshotResultView } from '../../shared/analysisSnapshotPreparation.mjs';
 import { snapshotScope, snapshotRecipe, snapshotRecord } from './snapshotPreparationTestFixtures';
+import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes, linkedImageResult, linkedImageBytes } from './snapshotLinkedTestFixtures';
 
 vi.mock('./snapshotPreparationApi', () => ({ readSnapshotPreparationView: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
@@ -31,6 +32,14 @@ function fixture({ name = 'donor α', offset = 25, image = false, jpeg = false }
     source: { artifactId: descriptor.source.artifactId, versionId: descriptor.source.versionId, projectId: snapshotScope.projectId, sha256: descriptor.source.sha256 } })) };
   return { props: { ...snapshotScope, preparationId: record.preparationId, descriptor, available: true, isActive: true,
     onDenied: vi.fn(), onUnavailable: vi.fn() }, bytes, type, table };
+}
+function linkedFixture({ prefix = 'art', format = 'org.ietf.csv', image = false } = {}) {
+  const selected = image ? linkedImageResult({ reference: linkedReference({ versionId: prefix + '_' + '4'.repeat(24), sha256: hash(linkedImageBytes()) }) })
+    : { kind: 'analysis-reference', reference: linkedReference({ versionId: prefix + '_' + '4'.repeat(24) }), caption: 'Supplied linked caption', view: { family: 'table', offset: 3, limit: 2 } };
+  const record = linkedRecord(linkedRecipe({ results: [selected] })), descriptor = record.package.results[0];
+  if (!image) descriptor.source.format.id = format;
+  return { props: { ...snapshotScope, preparationId: record.preparationId, descriptor, available: true, isActive: true,
+    onDenied: vi.fn(), onUnavailable: vi.fn() }, bytes: image ? linkedImageBytes() : linkedTableBytes(descriptor), type: image ? 'image/png' : 'application/json' };
 }
 beforeEach(() => {
   vi.resetAllMocks(); vi.stubGlobal('crypto', webcrypto); useExecutionTarget.mockReturnValue(connection);
@@ -217,4 +226,52 @@ it('fences a held public response when returning to the private audience without
   readSnapshotPreparationView.mockRejectedValue(new Error('Private preparation unavailable.')); view.rerender(<PreparedSnapshotResult {...value.props} />);
   expect(signal.aborted).toBe(true); await act(async () => completion.resolve(value)); expect(screen.queryByRole('table')).not.toBeInTheDocument();
   expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+});
+
+it.each(['av', 'art', 'eri'].flatMap(prefix => ['org.ietf.csv', 'org.iana.tsv'].map(format => [prefix, format])))('decodes an exact v2 %s source as %s without original source reads or mutable row controls', async (prefix, format) => {
+  const value = linkedFixture({ prefix, format }); readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
+  expect(await screen.findByRole('cell', { name: 'donor α' })).toBeVisible(); expect(screen.getByLabelText('Fixed retained table excerpt')).toHaveTextContent('source rows 4–4');
+  expect(screen.queryByRole('button', { name: 'Next rows' })).not.toBeInTheDocument(); expect(screen.queryByRole('combobox', { name: 'Rows per page' })).not.toBeInTheDocument();
+  expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+  expect(readSnapshotPreparationView.mock.calls[0][3].source).toMatchObject({ ownerUserId: 7, versionId: prefix + '_' + '4'.repeat(24) });
+});
+
+it('renders a v2 linked PNG using only publication retained bytes for a current viewer distinct from source owner', async () => {
+  const value = linkedFixture({ prefix: 'eri', image: true }), readView = vi.fn().mockResolvedValue(value);
+  render(<PreparedSnapshotResult {...value.props} userId={17} audience="project-publication" resourceId={'aspub_' + 'b'.repeat(24)} readView={readView} />);
+  expect(await screen.findByRole('img')).toHaveAttribute('src', 'blob:retained-1'); expect(screen.getByRole('link', { name: 'Open full-size image' })).toHaveAttribute('href', 'blob:retained-1');
+  expect(readView.mock.calls[0][3].source.ownerUserId).toBe(7); expect(readSnapshotPreparationView).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+});
+
+it('keeps a checked v2 descriptor stable through equal object and callback refreshes', async () => {
+  const value = linkedFixture(); readSnapshotPreparationView.mockResolvedValue(value); const view = render(<PreparedSnapshotResult {...value.props} />); await screen.findByRole('table');
+  view.rerender(<PreparedSnapshotResult {...value.props} descriptor={structuredClone(value.props.descriptor)} onDenied={vi.fn()} onUnavailable={vi.fn()} />);
+  await act(async () => {}); expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(screen.getByRole('table')).toBeVisible();
+});
+
+it.each(['owner', 'origin', 'linked version', 'linked reference', 'view schema'])('fences held bytes when the v2 %s binding changes even if the blob checksum is unchanged', async changed => {
+  const value = linkedFixture({ prefix: 'av' }), completion = deferred(), replacement = deferred(); readSnapshotPreparationView.mockReturnValueOnce(completion.promise).mockReturnValue(replacement.promise);
+  const view = render(<PreparedSnapshotResult {...value.props} />); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledOnce());
+  const signal = readSnapshotPreparationView.mock.calls[0][4].signal, descriptor = structuredClone(value.props.descriptor);
+  if (changed === 'owner') descriptor.source.ownerUserId = 8;
+  else if (changed === 'origin') descriptor.origin = { kind: 'attachment-revision', attachment: snapshotRecord(snapshotRecipe()).package.results[0].attachment };
+  else if (changed === 'linked version') descriptor.origin.analysisVersion++;
+  else if (changed === 'linked reference') descriptor.origin.reference.versionId = 'av_' + 'e'.repeat(24);
+  else descriptor.view.schema = 'traceomics.fixed-result-view.v1';
+  view.rerender(<PreparedSnapshotResult {...value.props} descriptor={descriptor} />); expect(signal.aborted).toBe(true);
+  await act(async () => completion.resolve(value)); expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(value.props.onUnavailable).not.toHaveBeenCalled();
+  view.unmount(); await act(async () => replacement.resolve(value)); expect(URL.createObjectURL).not.toHaveBeenCalled();
+});
+
+it.each(['wrong checksum', 'different fixed rows'])('refuses v2 %s before displaying an unchecked scientific table', async changed => {
+  const value = linkedFixture();
+  if (changed === 'wrong checksum') value.bytes = new TextEncoder().encode('another source');
+  else value.props.descriptor.view.spec.offset++;
+  readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />); await screen.findByRole('alert');
+  expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(screen.queryByText(/checksum verified/)).not.toBeInTheDocument(); expect(value.props.onUnavailable).toHaveBeenCalledOnce();
+});
+
+it('preserves the strict v1 source boundary rather than accepting an art source without a v2 descriptor', async () => {
+  const value = fixture(); value.props.descriptor.source.versionId = 'art_' + '4'.repeat(24); readSnapshotPreparationView.mockResolvedValue(value);
+  render(<PreparedSnapshotResult {...value.props} />); await screen.findByRole('alert'); expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(value.props.onUnavailable).toHaveBeenCalledOnce();
 });

@@ -6,7 +6,8 @@ const storage = require('./storage');
 const config = require('./config');
 const { getServiceExecutionIdentity } = require('./executionTargets');
 const { createArtifactVersionService } = require('./artifactVersions');
-const contract = import('../shared/analysisSnapshotPreparation.mjs');
+const { createLinkedSnapshotSources, isLinkedRecipe, safeSource: linkedSource } = require('./analysisSnapshotLinkedSources');
+const contract = import('../shared/analysisSnapshotPreparationDispatch.mjs');
 const documents = import('../shared/notebookDocument.mjs');
 const READ = ['owner', 'admin', 'analyst', 'viewer'], WRITE = ['owner', 'admin', 'analyst'];
 const formats = ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg'];
@@ -23,6 +24,7 @@ const budget = (value, maximum, message) => { if (value > maximum) throw error('
 
 function createAnalysisSnapshotPreparationService(database = db, provider = storage.createLocalStorageProvider()) {
   const artifacts = createArtifactVersionService(database, provider);
+  const linked = createLinkedSnapshotSources(artifacts, legacySources);
   async function transaction(userId, projectId, analysisId, action) {
     if (!/^proj_[a-f0-9]{16,40}$/.test(projectId || '') || !/^ra_[a-f0-9]{24}$/.test(analysisId || '')) scopeMissing();
     const client = await (await database.connect()).connect(); let committing = false, destroy = false;
@@ -78,6 +80,9 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       revisionSha256: hash((await contract).canonicalSnapshotJson(saved)) };
   }
   async function sources(client, userId, projectId, analysisId, recipe) {
+    return isLinkedRecipe(recipe) ? linked.sources(client, userId, projectId, analysisId, recipe) : legacySources(client, userId, projectId, analysisId, recipe);
+  }
+  async function legacySources(client, userId, projectId, analysisId, recipe) {
     const result = [], sourceBytes = new Map();
     for (const selected of recipe.results) {
       const revision = (await client.query('SELECT * FROM research_analysis_attachment_revisions WHERE id=$1 AND attachment_id=$2 AND project_id=$3 AND analysis_id=$4',
@@ -182,7 +187,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
     }
     for (const planned of value.object_plan_json) {
       if (planned.kind === 'result') {
-        const selected = recipe.results[planned.index], source = captured.results[planned.index], safeSource = fields(source.original);
+        const selected = recipe.results[planned.index], source = captured.results[planned.index], safeSource = isLinkedRecipe(recipe) ? linkedSource(source.original) : fields(source.original);
         const fullReference = { artifactId: safeSource.artifactId, versionId: safeSource.versionId, projectId, sha256: safeSource.sha256 };
         const family = selected.view.family, spec = family === 'table' ? { offset: selected.view.offset, limit: selected.view.limit } : null;
         const cacheKey = `${safeSource.versionId}:${JSON.stringify(spec)}`;
@@ -193,14 +198,14 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
             if (preview.family !== 'table') throw error('VIEW_UNSUPPORTED', 'The exact saved table does not support this bounded retained view.');
             rendered = { bytes: Buffer.from(schema.canonicalSnapshotJson(preview, schema.ANALYSIS_SNAPSHOT_PREPARATION_LIMITS.tableBytes)), width: null, height: null };
           } else {
-            const image = await artifacts.readVerifiedImage(userId, projectId, safeSource.versionId);
+            const image = await (isLinkedRecipe(recipe) ? artifacts.readVerifiedOwnedImage(userId, projectId, safeSource.versionId) : artifacts.readVerifiedImage(userId, projectId, safeSource.versionId));
             rendered = { bytes: image.bytes, width: image.dimensions.width, height: image.dimensions.height };
           }
           cached.set(cacheKey, rendered);
         }
-        const descriptor = { schema: schema.FIXED_RESULT_VIEW_SCHEMA, source: fullReference, family, spec, blobSha256: hash(rendered.bytes), blobBytes: rendered.bytes.length, width: rendered.width, height: rendered.height };
+        const descriptor = { schema: isLinkedRecipe(recipe) ? 'traceomics.fixed-result-view.v2' : schema.FIXED_RESULT_VIEW_SCHEMA, source: fullReference, family, spec, blobSha256: hash(rendered.bytes), blobBytes: rendered.bytes.length, width: rendered.width, height: rendered.height };
         const view = { schema: descriptor.schema, family, spec, blobSha256: descriptor.blobSha256, blobBytes: descriptor.blobBytes, width: descriptor.width, height: descriptor.height };
-        resultItems.push({ viewId: planned.viewId, attachment: attachment(source.revision), source: safeSource,
+        resultItems.push({ viewId: planned.viewId, ...(isLinkedRecipe(recipe) ? { origin: source.origin || { kind: 'attachment-revision', attachment: attachment(source.revision) } } : { attachment: attachment(source.revision) }), source: safeSource,
           view: { ...view, viewSha256: hash(schema.canonicalAnalysisSnapshotResultView(descriptor)) } });
         blobs.push({ viewId: planned.viewId, kind: 'result', bytes: rendered.bytes, sha256: descriptor.blobSha256 });
       } else {
@@ -215,9 +220,9 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       }
       budget(blobs.reduce((sum, blob) => sum + blob.bytes.length, 0), schema.ANALYSIS_SNAPSHOT_PREPARATION_LIMITS.retainedBytes, 'The selected retained views exceed the preparation byte limit.');
     }
-    const snapshot = { schema: schema.ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA, serviceId: value.service_id, projectId, analysisId, ownerUserId: Number(userId),
+    const snapshot = { schema: isLinkedRecipe(recipe) ? 'traceomics.analysis-snapshot-package.v2' : schema.ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA, serviceId: value.service_id, projectId, analysisId, ownerUserId: Number(userId),
       preparationId: value.id, createdAt: iso(value.created_at), analysis: value.analysis_snapshot_json, results: resultItems, documents: documentItems,
-      notes: recipe.notes, prerequisites: { declaration: 'user-supplied', items: recipe.prerequisites },
+      notes: recipe.notes, prerequisites: isLinkedRecipe(recipe) ? { declaration: 'selected-and-user-supplied', items: captured.prerequisites } : { declaration: 'user-supplied', items: recipe.prerequisites },
       reproduction: { status: 'not-checked', producingSource: 'not-established', runtime: 'not-included', dataAccess: 'not-granted' } };
     const canonical = schema.canonicalAnalysisSnapshotPackage(snapshot), bytes = blobs.reduce((sum, blob) => sum + blob.bytes.length, 0) + Buffer.byteLength(canonical) + Buffer.byteLength(schema.canonicalAnalysisSnapshotPreparation(recipe));
     budget(bytes, schema.ANALYSIS_SNAPSHOT_PREPARATION_LIMITS.retainedBytes, 'The selected retained views and metadata exceed the preparation byte limit.');
@@ -247,7 +252,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
           const finalSources = await sources(client, userId, projectId, analysisId, current.recipe_json), schema = await contract;
           for (let index = 0; index < finalSources.results.length; index++) {
             if (finalSources.results[index].original.storage_key !== compiled.originalKeys[index]
-                || schema.canonicalSnapshotJson(fields(finalSources.results[index].original)) !== schema.canonicalSnapshotJson(compiled.snapshot.results[index].source)) throw error('SOURCE_CHANGED', 'A selected exact source changed while its fixed view was being prepared.');
+                || schema.canonicalSnapshotJson(isLinkedRecipe(current.recipe_json) ? linkedSource(finalSources.results[index].original) : fields(finalSources.results[index].original)) !== schema.canonicalSnapshotJson(compiled.snapshot.results[index].source)) throw error('SOURCE_CHANGED', 'A selected exact source changed while its fixed view was being prepared.');
           }
           for (const blob of compiled.blobs) await client.query('INSERT INTO research_analysis_snapshot_blobs(preparation_id,id,kind,sha256,size_bytes,content) VALUES($1,$2,$3,$4,$5,$6)',
             [preparationId, blob.viewId, blob.kind, blob.sha256, blob.bytes.length, blob.bytes]);
@@ -336,6 +341,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
     });
   }
   async function options(userId, projectId, analysisId, input = {}) {
+    if (input.kind === 'analysis-references') return transaction(userId, projectId, analysisId, (client, context) => linked.options(client, context, userId, projectId, analysisId, input, writable(context)));
     const kind = input.kind, scope = cursorScope(userId, projectId, analysisId), page = paging(input, kind, scope);
     if (!['analysis-versions', 'results', 'documents'].includes(kind)) throw error('INVALID_PAGE', 'Choose saved analysis versions, result revisions or supporting source.', 400);
     return transaction(userId, projectId, analysisId, async (client, context) => {

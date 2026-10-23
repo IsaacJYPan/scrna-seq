@@ -18,13 +18,14 @@ async function until(test, message, timeout = 30000) {
   while (Date.now() < end) { if (await test()) return; await new Promise(resolve => setTimeout(resolve, 75)); }
   throw new Error(message);
 }
-async function main() {
-  const directory = path.join(root, 'playwright', 'report', 'analysis-publications-' + Date.now()); fs.mkdirSync(directory, { recursive: true });
+async function main({ linkedResults = false } = {}) {
+  const directory = path.join(root, 'playwright', 'report', (linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
   const frozen = new Map(fs.readdirSync(path.join(root, 'dist/assets')).map(name => [name, sha(fs.readFileSync(path.join(root, 'dist/assets', name)))]));
   const checks = [], screenshots = [], profiles = [], requests = [], browserErrors = [], consoleErrors = [], assetReads = [], faults = [], restarts = [];
   const compiledAssets = {}, accounts = {}, expected = new Set(), faultPaths = new Set();
   const check = message => { checks.push(message); console.log('PASS: ' + message); };
-  let service, database, browser, page, study, findings;
+  let service, database, browser, page, study, findings, linkedInfo;
+  let selectedAnalysisVersion = 1, latestAnalysisVersion = 1;
   const analysisPath = () => `/api/projects/${service.project.id}/analyses/${study.id}`;
   const prepPath = () => analysisPath() + '/snapshot-preparations', publicationPath = () => analysisPath() + '/snapshot-publications';
   const prep = target => target.getByRole('region', { name: 'Private snapshot preparations', exact: true });
@@ -39,6 +40,14 @@ async function main() {
     }, { pathname, method, body });
     assert(response.status === status, 'A genuine sharing API returned unexpected status ' + response.status + ' for ' + pathname); return response.value;
   }
+  async function importFixture(target, name, filename, text) {
+    const response = await target.evaluate(async ({ projectId, name, filename, text, requestId }) => {
+      const body = new FormData(); body.append('file', new File([text], filename)); body.append('name', name); body.append('requestId', requestId);
+      const result = await fetch(`/api/artifact-versions/${projectId}`, { method: 'POST', credentials: 'include', headers: { 'X-Traceomics-Csrf': '1' }, body });
+      return { status: result.status, value: await result.json() };
+    }, { projectId: service.project.id, name, filename, text, requestId: crypto.randomUUID() });
+    assert(response.status === 201, 'A genuine linked prerequisite import did not succeed.'); return response.value;
+  }
   async function launch() {
     const leaf = new crypto.X509Certificate(fs.readFileSync(service.certificatePath));
     return chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP ' + new URL(service.endpoint).hostname + ' 127.0.0.1',
@@ -50,7 +59,7 @@ async function main() {
     target.on('console', value => { if (value.type() === 'error') consoleErrors.push({ text: value.text(), url: value.location().url }); });
     target.on('request', request => {
       const pathname = new URL(request.url()).pathname; if (!pathname.startsWith('/api/')) return;
-      requests.push({ actor, method: request.method(), pathname, ...(request.method() === 'POST' && /\/snapshot-publications(?:\/aspub_[a-f0-9]{24}\/withdrawals)?$/.test(pathname) ? { input: request.postDataJSON() } : {}) });
+      requests.push({ actor, method: request.method(), pathname, ...(request.method() === 'POST' && /\/(?:snapshot-preparations|snapshot-publications(?:\/aspub_[a-f0-9]{24}\/withdrawals)?)$/.test(pathname) ? { input: request.postDataJSON() } : {}) });
     });
     target.on('response', response => {
       const pathname = new URL(response.url()).pathname;
@@ -124,9 +133,25 @@ async function main() {
     } });
     database = new Client({ connectionString: service.databaseUrl }); await database.connect(); browser = await launch(); page = await login();
     findings = await produceSharingFindings((pathname, options) => api(page, pathname, options), service.project.id, service.environment);
-    study = (await api(page, `/api/projects/${service.project.id}/analyses`, { method: 'POST', status: 201, body: { requestId: crypto.randomUUID(), name: 'Shared condition findings', description: 'Compare the two synthetic conditions without sharing a live session.' } })).analysis;
+    const reference = version => ({ kind: 'artifact-version', versionId: version.versionId, sha256: version.sha256 });
+    if (linkedResults) {
+      const opaque = await importFixture(page, 'Owned opaque prerequisite', 'opaque-prerequisite.bin', 'An inert opaque prerequisite.\n');
+      await database.query("UPDATE project_members SET role='analyst' WHERE project_id=$1 AND user_id=$2", [service.project.id, accounts.colleague.id]);
+      const other = await login('colleague');
+      const restricted = await importFixture(other, 'PRIVATE_UNSELECTED_SOURCE_LABEL', 'private-unselected-source.csv', 'private,value\nnot-disclosed,19\n');
+      study = (await api(other, `/api/projects/${service.project.id}/analyses`, { method: 'POST', status: 201, body: { requestId: crypto.randomUUID(),
+        name: 'Shared condition findings', description: 'Compare the two synthetic conditions without sharing a live session.', references: [reference(restricted)] } })).analysis;
+      await other.context().close();
+      await database.query("UPDATE project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2", [service.project.id, accounts.colleague.id]);
+      const refs = [reference(restricted), reference(findings.table), reference(findings.figure), reference(opaque)];
+      study = (await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: 1, references: refs } })).analysis;
+      selectedAnalysisVersion = study.version;
+      study = (await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: study.version, references: refs.filter(item => item.versionId !== findings.table.versionId) } })).analysis;
+      latestAnalysisVersion = study.version; linkedInfo = { opaque, restricted };
+    } else study = (await api(page, `/api/projects/${service.project.id}/analyses`, { method: 'POST', status: 201, body: { requestId: crypto.randomUUID(), name: 'Shared condition findings', description: 'Compare the two synthetic conditions without sharing a live session.' } })).analysis;
     const attached = [];
     for (const [version, caption] of [[findings.table, 'Six control and six treated cells'], [findings.figure, 'Computed condition counts figure']]) {
+      if (linkedResults && version === findings.figure) { attached.push({ caption }); continue; }
       attached.push((await api(page, analysisPath() + '/attachments', { method: 'POST', status: 201, body: { requestId: crypto.randomUUID(),
         reference: { kind: 'artifact-version', versionId: version.versionId, sha256: version.sha256 }, caption,
         suppliedOrigin: { origin: 'Explicitly saved synthetic R output; producing-source linkage is not established by this attachment.' } } })).acceptedRevision);
@@ -138,14 +163,56 @@ async function main() {
     await openAnalysis(page); await page.getByRole('textbox', { name: 'Research question or notes', exact: true }).fill('An unsaved interpretation stays outside the published snapshot.');
     await page.getByRole('button', { name: 'Prepare sharing', exact: true }).click();
     const choices = prep(page).getByRole('form', { name: 'Prepare private snapshot', exact: true });
-    for (const item of attached) {
+    for (const item of linkedResults ? attached.slice(0, 1) : attached) {
       await choices.getByRole('region', { name: 'Choose retained findings', exact: true }).getByRole('listitem').filter({ has: page.getByText(item.caption, { exact: true }) }).getByRole('button', { name: /^(?:Add table excerpt|Add figure)$/ }).click();
     }
-    await choices.getByRole('checkbox', { name: /Supplied condition method/ }).check(); await choices.getByRole('button', { name: 'Prepare private preview', exact: true }).click();
+    if (linkedResults) {
+      const selectVersion = version => choices.getByRole('radio', { name: new RegExp(`Saved version ${version} ·`) }).check();
+      await selectVersion(selectedAnalysisVersion);
+      let linked = choices.getByRole('region', { name: `Linked in saved analysis ${selectedAnalysisVersion}`, exact: true });
+      await linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ has: page.getByText(findings.table.name, { exact: true }) }).getByRole('button', { name: 'Add linked table excerpt', exact: true }).click();
+      await linked.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).fill('A deliberate treated-cell excerpt from the older saved analysis');
+      await linked.getByRole('spinbutton', { name: 'First data row for linked finding 1', exact: true }).fill('2');
+      await linked.getByRole('spinbutton', { name: 'Rows to include for linked finding 1', exact: true }).fill('1');
+      await selectVersion(latestAnalysisVersion);
+      await choices.getByRole('region', { name: `Linked in saved analysis ${latestAnalysisVersion}`, exact: true }).waitFor();
+      assert(!(await choices.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).count()), 'An older version selection leaked into the later saved version.');
+      await selectVersion(selectedAnalysisVersion);
+      linked = choices.getByRole('region', { name: `Linked in saved analysis ${selectedAnalysisVersion}`, exact: true });
+      assert(await linked.getByRole('textbox', { name: 'Caption for linked finding 1', exact: true }).inputValue() === 'A deliberate treated-cell excerpt from the older saved analysis'
+        && await linked.getByRole('spinbutton', { name: 'First data row for linked finding 1', exact: true }).inputValue() === '2', 'Returning to the older saved version lost its deliberate caption or table window.');
+      await linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ has: page.getByText(findings.figure.name, { exact: true }) }).getByRole('button', { name: 'Add linked figure', exact: true }).click();
+      await linked.getByRole('textbox', { name: 'Caption for linked finding 2', exact: true }).fill(attached[1].caption);
+      for (const version of [linkedInfo.opaque, linkedInfo.restricted]) {
+        await linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ hasText: version.versionId }).getByRole('button', { name: 'Include reference only', exact: true }).click();
+      }
+      assert(!(await choices.getByText('PRIVATE_UNSELECTED_SOURCE_LABEL', { exact: true }).count()), 'The linked chooser disclosed a restricted source label.');
+      await matrix(page, 'linked-older-version-caption-and-window', () => linked.getByRole('list', { name: 'Selected linked findings' }).scrollIntoViewIfNeeded());
+      await matrix(page, 'linked-reference-only-prerequisites', () => linked.getByRole('region', { name: 'Selected reference-only prerequisites' }).scrollIntoViewIfNeeded());
+    }
+    await choices.getByRole('checkbox', { name: /Supplied condition method/ }).check();
+    const retainedA = linkedResults ? service.interceptNextResponse({ method: 'POST', pathname: prepPath(), mode: 'hold' }) : null;
+    if (retainedA) faults.push(retainedA);
+    await choices.getByRole('button', { name: 'Prepare private preview', exact: true }).click();
+    if (retainedA) {
+      await until(() => retainedA.observation(), 'The genuine v2 preparation acceptance was not held.');
+      assert(retainedA.observation().value.recipe.schema === 'traceomics.analysis-snapshot-preparation.v2', 'The linked journey did not use the explicit v2 recipe.');
+      await restart(); retainedA.release(); await openAnalysis(page); await page.getByRole('button', { name: 'Prepare sharing', exact: true }).click();
+      await prep(page).getByRole('button', { name: 'Saved preparations', exact: true }).click(); await prep(page).getByRole('button', { name: 'Open private preparation', exact: true }).click();
+    }
     await prep(page).getByRole('heading', { name: 'Ready for private review', exact: true }).waitFor();
     const candidate = (await api(page, prepPath())).items[0]; const originalA = await api(page, prepPath() + '/' + candidate.preparationId);
     const packageSha = originalA.snapshotSha256, physical = (await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_snapshot_blobs WHERE preparation_id=$1', [candidate.preparationId])).rows[0].n;
-    assert(physical === 3, 'The two computed findings and saved source were not independently retained.');
+    assert(physical === (linkedResults ? 4 : 3), 'The computed findings and saved source were not independently retained, or a reference-only prerequisite retained bytes.');
+    if (linkedResults) {
+      assert(originalA.package.schema === 'traceomics.analysis-snapshot-package.v2' && originalA.package.analysis.version === selectedAnalysisVersion
+        && originalA.package.prerequisites.items.length === 2 && originalA.package.results.filter(item => item.origin.kind === 'analysis-reference').length === 2
+        && !JSON.stringify(originalA.package).includes('PRIVATE_UNSELECTED_SOURCE_LABEL'), 'The exact mixed v2 preparation or safe prerequisite projection changed.');
+      await prep(page).getByRole('button', { name: 'Back to analysis', exact: true }).click();
+      await page.getByRole('textbox', { name: 'Research question or notes', exact: true }).fill('An unsaved interpretation stays outside the published snapshot.');
+      await page.getByRole('button', { name: 'Prepare sharing', exact: true }).click();
+      check('An older exact saved analysis keeps separate linked captions/windows and safe opaque/restricted reference-only prerequisites; the genuine mixed v2 preparation survives a lost accepted reply and real browser restart without retaining prerequisite bytes.');
+    }
     await prep(page).getByRole('button', { name: 'Publish to project', exact: true }).click();
     const confirmation = panel(page).getByRole('region', { name: 'Confirm exact snapshot publication', exact: true });
     await confirmation.getByRole('button', { name: 'Publish to project', exact: true }).waitFor();
@@ -153,7 +220,7 @@ async function main() {
     await until(() => prep(page).getByRole('button', { name: 'Publish to project', exact: true }).evaluate(node => node === document.activeElement), 'Back from confirmation did not restore the private review action focus.');
     await prep(page).getByRole('button', { name: 'Back to analysis', exact: true }).click();
     assert(await page.getByRole('textbox', { name: 'Research question or notes', exact: true }).inputValue() === 'An unsaved interpretation stays outside the published snapshot.'
-      && (await database.query('SELECT version FROM research_analyses WHERE id=$1', [study.id])).rows[0].version === 1,
+      && (await database.query('SELECT version FROM research_analyses WHERE id=$1', [study.id])).rows[0].version === latestAnalysisVersion,
     'Publication navigation discarded or silently saved the independent overview draft.');
     await page.getByRole('button', { name: 'Prepare sharing', exact: true }).click(); await prep(page).getByRole('button', { name: 'Publish to project', exact: true }).click();
     await until(() => confirmation.getByRole('button', { name: 'Publish to project', exact: true }).isEnabled(), 'The same acknowledged private snapshot did not reopen for publication.');
@@ -187,12 +254,24 @@ async function main() {
     await prep(page).getByRole('button', { name: 'Remove private preparation', exact: true }).click(); await prep(page).getByRole('heading', { name: 'Private preparation removed', exact: true }).waitFor();
     const tombstone = await api(page, prepPath() + '/' + candidate.preparationId);
     assert(tombstone.recipe === null && tombstone.package === null && (await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_snapshot_blobs WHERE preparation_id=$1', [candidate.preparationId])).rows[0].n === physical, 'Private deletion erased shared bytes or kept private payload authority.');
-    await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: 1, description: 'A later saved interpretation must not change the published findings.' } });
+    await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: latestAnalysisVersion, description: 'A later saved interpretation must not change the published findings.' } });
     const newer = structuredClone(content); newer.cells[0].source = 'stop("A later method is separate from the retained source")\n';
     await api(page, `${analysisPath()}/documents/${saved.id}`, { method: 'PUT', body: { requestId: crypto.randomUUID(), expectedVersion: saved.version, title: saved.title, content: newer } });
     const colleague = await login('colleague'); await openPublications(colleague); await openPublic(colleague);
     await detail(colleague).getByRole('cell', { name: 'control', exact: true }).waitFor(); await detail(colleague).getByRole('cell', { name: 'treated', exact: true }).waitFor();
     await matrix(colleague, 'sharing-colleague-fixed-counts-producer-stopped', () => detail(colleague).getByRole('table').scrollIntoViewIfNeeded());
+    if (linkedResults) {
+      await detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: 'A deliberate treated-cell excerpt from the older saved analysis' }).click();
+      await detail(colleague).getByRole('cell', { name: 'treated', exact: true }).waitFor();
+      assert(!(await detail(colleague).getByRole('cell', { name: 'control', exact: true }).count()), 'The direct linked table expanded its fixed one-row excerpt.');
+      const referenceOnly = detail(colleague).getByRole('region', { name: 'Reference-only prerequisites', exact: true });
+      await referenceOnly.getByText('Contents not included. Integrity not checked. Data access not granted.', { exact: true }).waitFor();
+      assert(await referenceOnly.locator('details').count() === 2 && !(await referenceOnly.locator('img,table,pre').count())
+        && !JSON.stringify(await api(colleague, `${publicationPath()}/${publicationId}`)).includes('PRIVATE_UNSELECTED_SOURCE_LABEL'), 'A reference-only prerequisite disclosed original contents or restricted source metadata.');
+      await matrix(colleague, 'linked-colleague-fixed-direct-excerpt', () => detail(colleague).getByRole('table').scrollIntoViewIfNeeded());
+      await matrix(colleague, 'linked-colleague-reference-only-prerequisites', () => referenceOnly.scrollIntoViewIfNeeded());
+      check('A colleague reads the exact direct one-row excerpt and both inert prerequisite identities with producer stopped, newer heads and original files gone; no private source label or prerequisite contents are disclosed.');
+    }
     await detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: attached[1].caption }).click();
     const image = detail(colleague).getByRole('img', { name: /Computed condition figure/ }); await until(async () => await image.count() && await image.evaluate(node => node.complete && node.naturalWidth > 0), 'The genuine retained R figure did not decode for the colleague.');
     await matrix(colleague, 'sharing-colleague-real-r-figure-producer-stopped', () => image.scrollIntoViewIfNeeded());
@@ -200,7 +279,7 @@ async function main() {
     await source.getByText('Saved supporting source checksum verified', { exact: true }).waitFor(); assert((await source.locator('pre[aria-label="Retained saved source"]').textContent()).includes('set.seed(1919)'), 'The colleague saw a newer or incorrect supporting source.');
     await matrix(colleague, 'sharing-colleague-exact-supporting-source', () => source.scrollIntoViewIfNeeded());
     const publicValue = await api(colleague, `${publicationPath()}/${publicationId}`), publicList = await api(colleague, publicationPath());
-    assert(publicValue.snapshotSha256 === packageSha && publicValue.package.analysis.version === 1 && !JSON.stringify(publicList).includes(intent.requestId), 'Public discovery leaked a private UUID or advanced the retained snapshot.');
+    assert(publicValue.snapshotSha256 === packageSha && publicValue.package.analysis.version === selectedAnalysisVersion && !JSON.stringify(publicList).includes(intent.requestId), 'Public discovery leaked a private UUID or advanced the retained snapshot.');
     await api(colleague, `${prepPath()}/requests/${originalA.requestId}`, { status: 404 }); await api(colleague, `${publicationPath()}/requests/${intent.requestId}`, { status: 404 });
     await api(colleague, `/api/artifact-versions/${service.project.id}/${findings.table.versionId}`, { status: 404 });
     await api(colleague, `/api/private-r-kernels/${service.project.id}/${findings.kernel.id}/executions/${findings.executionId}`, { status: 404 });
@@ -215,7 +294,7 @@ async function main() {
     await matrix(colleague, 'sharing-colleague-revoked-held-response-fenced', () => panel(colleague).scrollIntoViewIfNeeded());
     await database.query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,'viewer')", [service.project.id, accounts.colleague.id]); await refresh(colleague); await openPublic(colleague);
     check('Actual reader membership revocation clears protected publication content and fences a previously authorized held reply; explicit restored access opens the original retained identity.');
-    const broken = publicValue.package.results[1];
+    const broken = publicValue.package.results.find(item => item.view.family === 'image');
     expected.add(`409 ${publicationPath()}/${publicationId}/views/${broken.viewId}`);
     try {
       await database.query('BEGIN'); await database.query("SET LOCAL session_replication_role='replica'");
@@ -252,7 +331,8 @@ async function main() {
       && (await database.query('SELECT COUNT(*)::int AS n FROM private_r_executions')).rows[0].n === scientificCount
       && (await database.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n === 0, 'Sharing duplicated publication or ran additional science.');
     const storage = await page.evaluate(() => Object.values(localStorage).concat(Object.values(sessionStorage)).join('\n'));
-    assert(!storage.includes(intent.requestId) && !storage.includes(findings.source), 'Scientific source or original sharing intent entered Web Storage.');
+    assert(!storage.includes(intent.requestId) && !storage.includes(originalA.requestId) && !storage.includes(findings.source), 'Scientific source or original sharing intent entered Web Storage.');
+    if (linkedResults) assert(requests.filter(item => item.method === 'POST' && item.pathname === prepPath()).length === 1, 'The original v2 preparation was repeated after acceptance/restart.');
     check('A publisher downgraded to reader explicitly withdraws; a real committed lost reply recovers its original acceptance, older active colleague replies cannot restore content, last-reference bytes are released, and original publication replay never reactivates it or runs science.');
     await Promise.all(assetReads);
     const unexpected = consoleErrors.filter(entry => {

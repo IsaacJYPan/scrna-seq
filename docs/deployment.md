@@ -289,7 +289,8 @@ the analysis's current write permission. Expired copy operations are reconciled
 outside analysis transactions with the existing proof-based cleanup.
 
 Private snapshot preparations retain exact selected CSV/TSV/PNG/JPEG attachment
-views and optional saved script/notebook versions. They do not publish results,
+views, owned flat results linked in a chosen saved analysis version, and optional
+saved script/notebook versions. They do not publish results,
 change branch visibility, grant other members file access, or run a scientific
 runtime. Original source reads use the existing verified storage provider; the
 small retained views and source copies are bounded PostgreSQL bytea records.
@@ -310,6 +311,17 @@ repairs, publishes or executes it. Missing retained bytes preserve the original
 recorded package/hash and are reported unavailable. Raster copies retain their
 original complete file bytes, including embedded metadata; no EXIF removal or
 restriction against saving displayed data is claimed.
+
+Linked-result preparation uses the existing artifact resolver for managed files,
+recognized job results and private/workflow files. Ordinary readable or downloadable
+results owned by somebody else do not gain a republishing grant. An exact saved
+analysis reference may instead be included as a reference-only prerequisite:
+its recorded identity and supplied explanation are retained, without reading,
+hashing, deserializing or granting its original contents. The combined declared
+and reference-only prerequisite limit is twenty. At least one actual fixed
+finding is required. Existing preparation and publication identifiers, shared
+quotas and schema contract remain unchanged; explicitly versioned nested packages
+preserve earlier request and scientific fingerprints.
 
 Explicit snapshot publication makes one acknowledged ready package's fixed
 findings and selected saved supporting source readable to current project

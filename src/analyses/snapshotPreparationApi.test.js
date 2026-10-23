@@ -38,6 +38,13 @@ it('sends explicit prepare, exact resume and exact deletion through the mutation
   for (const [, options] of withExecutionTarget.mock.calls) expect(options).toEqual({ mutation: true });
 });
 
+it('binds linked choice discovery to an explicit saved analysis version without changing legacy queries', async () => {
+  fetch.mockImplementation(async () => new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+  await listSnapshotPreparationOptions('project 1', 'analysis 1', 'analysis-references', { analysisVersion: 19, cursor: 'saved/page' });
+  expect(fetch.mock.calls[0][0]).toBe(base + '/options?limit=30&kind=analysis-references&cursor=saved%2Fpage&analysisVersion=19');
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
 it('verifies exact retained bytes before returning them, without adding an offset or reopening private artifacts', async () => {
   fetch.mockResolvedValue(new Response(bytes, { headers: { 'Content-Type': 'application/json; charset=utf-8' } }));
   const result = await readSnapshotPreparationView('project 1', 'analysis 1', 'asp_1', descriptor);

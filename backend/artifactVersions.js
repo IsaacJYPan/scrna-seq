@@ -208,23 +208,33 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     };
   }
 
-  async function internal(userId, projectId, versionId, { membershipChecked = false } = {}) {
-    if (!membershipChecked) await db.requireProjectRole(userId, projectId, READ_ROLES);
+  async function internal(userId, projectId, versionId, { membershipChecked = false, snapshotClient = null } = {}) {
+    const reader = snapshotClient || db;
+    if (!membershipChecked) {
+      if (snapshotClient) {
+        const member = (await reader.query('SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2', [projectId, userId])).rows[0];
+        if (!member || !READ_ROLES.includes(member.role)) notFound();
+      } else await db.requireProjectRole(userId, projectId, READ_ROLES);
+    }
     if (typeof versionId !== 'string' || !VERSION_PATTERN.test(versionId)) notFound();
     let row;
     if (versionId.startsWith('av_')) {
-      const result = await db.query('SELECT * FROM managed_artifact_versions WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
+      const result = await reader.query('SELECT * FROM managed_artifact_versions WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
       if (result.rows[0]) row = managed(result.rows[0]);
     } else if (versionId.startsWith('eri_')) {
-      const input = await db.query('SELECT * FROM expert_r_private_inputs WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
+      const input = await reader.query('SELECT * FROM expert_r_private_inputs WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
       if (input.rows[0]) row = privateInput(input.rows[0]);
       else {
-        const output = await db.query('SELECT * FROM workflow_artifacts WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
+        const output = await reader.query('SELECT * FROM workflow_artifacts WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
         if (output.rows[0]) row = workflowOutput(output.rows[0]);
       }
     } else {
-      const artifact = await db.getProjectArtifactInternal(userId, projectId, versionId);
+      const artifact = await db.getProjectArtifactInternal(userId, projectId, versionId, snapshotClient ? { client: snapshotClient } : undefined);
       if (artifact && artifact.status === 'available' && artifact.storageKind === 'local_internal') {
+        // Metadata preparation must satisfy the ordinary expert-job/environment
+        // visibility policy above AND actual source ownership. Existing shared
+        // read/download permission alone never permits republishing that source.
+        if (snapshotClient && artifact.createdByUserId !== Number(userId)) notFound();
         if (artifact.createdByUserId !== Number(userId)) {
           // Existing downloads have explicit project-sharing checks. Private checkpoints do not inherit metadata visibility.
           if (!DOWNLOADABLE_ARTIFACT_TYPES.has(artifact.artifactType)) notFound();
@@ -238,6 +248,32 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
   }
 
   async function get(userId, projectId, versionId) { return display(await internal(userId, projectId, versionId)); }
+
+  // Trusted server-only metadata seam, using the owning resolver and caller's
+  // current transaction. It does not stat/hash bytes or grant a source to others.
+  async function snapshotSourceMetadata(client, userId, projectId, reference) {
+    if (reference?.kind !== 'artifact-version' || typeof reference.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(reference.sha256)) notFound();
+    const source = await internal(userId, projectId, reference.versionId, { snapshotClient: client });
+    if (Number(source.ownerId) !== Number(userId) || source.checksum !== reference.sha256) notFound();
+    const leaf = String(source.name || '').replace(/\\/g, '/').split('/').pop().replace(/^[A-Za-z]:/, '').replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim(); let label = '';
+    for (const character of leaf) { if (label.length + character.length > 200) break; label += character; }
+    return { ...source, name: label.trim() || 'Saved result', format: { id: source.format.id, version: source.format.version } };
+  }
+
+  async function readVerifiedOwnedImage(userId, projectId, versionId) {
+    const source = await internal(userId, projectId, versionId);
+    if (Number(source.ownerId) !== Number(userId)) notFound();
+    const version = await display(source), opened = await resolveVerified(userId, projectId, version.reference);
+    try {
+      // Older private input records have no stored dimensions. The exact owned
+      // raster can still be checked from bounded verified bytes, as workflow
+      // figures are, without changing ordinary artifact preview permissions.
+      const bytes = await completeBytes(opened, version, previews.PREVIEW_LIMITS.imageBytes), dimensions = raster(bytes, version);
+      await recheckOpened(userId, projectId, opened);
+      if (Number((await internal(userId, projectId, versionId)).ownerId) !== Number(userId)) notFound();
+      return { version, dimensions, bytes };
+    } finally { await opened.handle.close(); }
+  }
 
   async function list(userId, projectId, options = {}) {
     await db.requireProjectRole(userId, projectId, READ_ROLES);
@@ -392,6 +428,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
   async function prepareFixedTableViews(userId, projectId, versionId, selections) {
     if (!Array.isArray(selections) || selections.length < 1 || selections.length > 8) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'Choose at most eight fixed table views.');
     const version = await get(userId, projectId, versionId);
+    if (Number(version.ownerId) !== Number(userId)) notFound();
     if (!['org.ietf.csv', 'org.iana.tsv'].includes(version.format.id)) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'Choose an exact saved CSV or TSV table.');
     const opened = await resolveVerified(userId, projectId, version.reference);
     try {
@@ -406,6 +443,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
         throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The selected table changed while its fixed views were read.', 409);
       }
       await recheckOpened(userId, projectId, opened);
+      if (Number((await internal(userId, projectId, versionId)).ownerId) !== Number(userId)) notFound();
       return result;
     } finally { await opened.handle.close(); }
   }
@@ -561,7 +599,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     return inserted.rows[0];
   }
   return { list, get, preview, readVerifiedImage, importFile, getImportReceipt, serializeImportReceipt: importReceipt,
-    resolveVerified, prepareFixedTableViews, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
+    resolveVerified, prepareFixedTableViews, snapshotSourceMetadata, readVerifiedOwnedImage, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

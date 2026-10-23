@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import AnalysisSnapshotPreparations from './AnalysisSnapshotPreparations';
 import { snapshotScope as scope, snapshotRecipe, snapshotRecord, snapshotList, snapshotOptions,
   snapshotAnalysisOption, snapshotResultOption } from './snapshotPreparationTestFixtures';
+import { linkedRecord } from './snapshotLinkedTestFixtures';
 
 // Keep the actual transport, target fence, canonical helpers and strict validators.
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -29,6 +30,8 @@ function observe(value) {
 }
 async function server(request) {
   if (request.method === 'GET' && request.pathname === base + '/options') {
+    if (request.query.get('kind') === 'analysis-references') return state.onLinkedOptions ? state.onLinkedOptions(request)
+      : snapshotOptions('analysis-references', state.allowed, [], Number(request.query.get('analysisVersion')));
     if (state.onOptions) return state.onOptions(request);
     return snapshotOptions(request.query.get('kind'), state.allowed);
   }
@@ -43,16 +46,19 @@ async function server(request) {
   }
   if (request.method === 'POST' && request.pathname === base) {
     if (state.onPrepare) return state.onPrepare(request);
-    const value = snapshotRecord(request.body, { canPrepare: state.allowed }); state.records.set(value.requestId, value); return value;
+    const factory = request.body.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
+    const value = factory(request.body, { canPrepare: state.allowed }); state.records.set(value.requestId, value); return value;
   }
   if (request.method === 'POST' && request.pathname.endsWith('/resume')) {
     if (state.onResume) return state.onResume(request);
-    const previous = state.records.get(request.body.requestId), value = snapshotRecord(previous.recipe, { canPrepare: state.allowed, preparationId: previous.preparationId });
+    const previous = state.records.get(request.body.requestId), factory = previous.recipe?.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
+    const value = factory(previous.recipe, { canPrepare: state.allowed, preparationId: previous.preparationId });
     state.records.set(value.requestId, value); return value;
   }
   if (request.method === 'DELETE') {
     if (state.onDelete) return state.onDelete(request);
-    const previous = state.records.get(request.body.requestId), value = snapshotRecord(previous.recipe, { state: 'deleted', canPrepare: state.allowed, preparationId: previous.preparationId });
+    const previous = state.records.get(request.body.requestId), factory = previous.recipe?.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
+    const value = factory(previous.recipe, { state: 'deleted', canPrepare: state.allowed, preparationId: previous.preparationId });
     state.records.set(value.requestId, value); return value;
   }
   throw new Error('Unexpected snapshot test request: ' + request.method + ' ' + request.pathname);
@@ -88,6 +94,111 @@ beforeEach(() => {
   }));
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); delete window.desktopShell; });
+
+const linkedOption = (version = 2, changes = {}) => ({ reference: { kind: 'artifact-version', versionId: 'av_' + String(version).repeat(24), sha256: 'a'.repeat(64) },
+  label: `Linked measured result for version ${version}`, viewFamily: 'table', referenceOnlyReason: null,
+  integrity: 'not-checked', availability: 'not-checked', ...changes });
+
+it('keeps linked caption, row window and reference-only selections separate for each saved analysis version', async () => {
+  state.onLinkedOptions = request => {
+    const version = Number(request.query.get('analysisVersion'));
+    return snapshotOptions('analysis-references', true, [linkedOption(version)], version);
+  };
+  const storage = vi.spyOn(Storage.prototype, 'setItem'); await frame();
+  let linked = await screen.findByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
+  fireEvent.change(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: 'Keep my old-version interpretation' } });
+  fireEvent.change(within(linked).getByRole('spinbutton', { name: 'First data row for linked finding 1' }), { target: { value: '8' } });
+  fireEvent.click(within(linked).getByRole('button', { name: 'Include reference only', exact: true }));
+  fireEvent.change(within(linked).getByRole('textbox', { name: 'Note for linked prerequisite 1' }), { target: { value: 'The contents require a separate data agreement.' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ }));
+  linked = screen.getByRole('region', { name: 'Linked in saved analysis 1', exact: true });
+  expect(within(linked).queryByRole('textbox', { name: 'Caption for linked finding 1' })).not.toBeInTheDocument();
+  fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
+  expect(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' })).toHaveValue('Linked measured result for version 1');
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 2/ }));
+  linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  expect(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' })).toHaveValue('Keep my old-version interpretation');
+  expect(within(linked).getByRole('spinbutton', { name: 'First data row for linked finding 1' })).toHaveValue(8);
+  expect(within(linked).getByRole('textbox', { name: 'Note for linked prerequisite 1' })).toHaveValue('The contents require a separate data agreement.');
+  expect(writes()).toHaveLength(0); expect(storage).not.toHaveBeenCalled();
+});
+
+it('fences a late linked-options reply and can explicitly revisit a version whose earlier load was aborted', async () => {
+  const held = deferred(); let olderCalls = 0;
+  state.onLinkedOptions = request => {
+    const version = Number(request.query.get('analysisVersion'));
+    if (version === 2 && ++olderCalls === 1) return held.promise;
+    return snapshotOptions('analysis-references', true, [linkedOption(version)], version);
+  };
+  await frame(); await waitFor(() => expect(olderCalls).toBe(1));
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ }));
+  await screen.findByText('Linked measured result for version 1', { exact: true });
+  await act(async () => held.resolve(snapshotOptions('analysis-references', true, [linkedOption(2)], 2)));
+  expect(screen.queryByText('Linked measured result for version 2', { exact: true })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 2/ }));
+  await screen.findByText('Linked measured result for version 2', { exact: true });
+  expect(olderCalls).toBe(2); expect(writes()).toHaveLength(0);
+});
+
+it('keeps restricted prerequisites inert and requires an actual finding before preparation', async () => {
+  const option = linkedOption(2, { label: 'Saved linked reference', viewFamily: null, referenceOnlyReason: 'restricted-or-unavailable' });
+  state.onLinkedOptions = request => snapshotOptions('analysis-references', true, [option], Number(request.query.get('analysisVersion')));
+  await frame(); const linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  fireEvent.click(await within(linked).findByRole('button', { name: 'Include reference only', exact: true }));
+  expect(within(linked).queryByRole('button', { name: /Add linked/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Prepare private preview', exact: true })).toBeDisabled();
+  expect(within(linked).getByText('Contents not included. Integrity not checked. Data access not granted. These references do not count as retained findings.', { exact: true })).toBeVisible();
+  await choose(); expect(screen.getByRole('button', { name: 'Prepare private preview', exact: true })).toBeEnabled();
+  expect(state.requests.every(request => request.method === 'GET' && (request.pathname === base || request.pathname === base + '/options'))).toBe(true);
+  expect(writes()).toHaveLength(0);
+});
+
+it('loads another saved version after a source-choice service failure while preserving unsent selections', async () => {
+  state.onLinkedOptions = request => {
+    const version = Number(request.query.get('analysisVersion'));
+    return version === 2 ? failure(503, 'TEMPORARY_FAILURE') : snapshotOptions('analysis-references', true, [linkedOption(version)], version);
+  };
+  await frame(); await screen.findByRole('alert'); await choose();
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ }));
+  await screen.findByText('Linked measured result for version 1', { exact: true });
+  expect(screen.getByRole('list', { name: 'Selected snapshot findings' })).toHaveTextContent('measured.csv');
+  expect(screen.getByRole('button', { name: 'Prepare private preview', exact: true })).toBeEnabled();
+  expect(writes()).toHaveLength(0);
+});
+
+it('submits one explicit mixed v2 intent with supplied captions and reference-only prerequisites, keeping attached context exact', async () => {
+  const restricted = linkedOption(4, { label: 'Saved restricted reference', viewFamily: null, referenceOnlyReason: 'restricted-or-unavailable' });
+  state.onLinkedOptions = request => snapshotOptions('analysis-references', true, [linkedOption(2), restricted], Number(request.query.get('analysisVersion')));
+  await frame(); await choose(); const linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
+  fireEvent.change(within(linked).getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: '  Supplied snapshot finding\nwith context  ' } });
+  fireEvent.click(within(screen.getByText('Saved restricted reference', { exact: true }).closest('li')).getByRole('button', { name: 'Include reference only', exact: true }));
+  const intent = await submit(); await screen.findByTestId('prepared-result');
+  expect(intent).toMatchObject({ schema: 'traceomics.analysis-snapshot-preparation.v2', analysisVersion: 2,
+    results: [{ kind: 'attachment-revision', attachmentId: snapshotResultOption().attachmentId },
+      { kind: 'analysis-reference', reference: linkedOption(2).reference, caption: 'Supplied snapshot finding\nwith context', view: { family: 'table', offset: 0, limit: 25 } }],
+    prerequisites: [{ kind: 'analysis-reference', reference: restricted.reference, label: restricted.label, detail: null }] });
+  expect(screen.getByRole('region', { name: 'Reference-only prerequisites', exact: true })).toHaveTextContent('Contents not included. Integrity not checked. Data access not granted.');
+  expect(writes()).toHaveLength(1);
+});
+
+it('retries only the original normalized v2 selection after a genuine missing check with the same UUID and body', async () => {
+  state.onLinkedOptions = request => snapshotOptions('analysis-references', true, [linkedOption(2)], Number(request.query.get('analysisVersion')));
+  state.onPrepare = request => {
+    if (writes().length === 1) throw new Error('The original request did not reach acceptance.');
+    const record = linkedRecord(request.body); state.records.set(record.requestId, record); return record;
+  };
+  await frame(); const linked = screen.getByRole('region', { name: 'Linked in saved analysis 2', exact: true });
+  fireEvent.click(await within(linked).findByRole('button', { name: 'Add linked table excerpt', exact: true }));
+  const original = await submit(); await screen.findByRole('alert');
+  expect(screen.queryByRole('button', { name: 'Retry original preparation', exact: true })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Check original preparation', exact: true }));
+  await screen.findByRole('button', { name: 'Retry original preparation', exact: true });
+  fireEvent.click(screen.getByRole('button', { name: 'Retry original preparation', exact: true })); await screen.findByTestId('prepared-result');
+  expect(writes()).toHaveLength(2); expect(writes()[1].body).toEqual(original);
+  expect(original.schema).toBe('traceomics.analysis-snapshot-preparation.v2');
+});
 
 it('creates only an exact owner/service-bound private recipe and keeps selected source and supplied notes distinct', async () => {
   const storage = vi.spyOn(Storage.prototype, 'setItem'); await frame(); await choose();

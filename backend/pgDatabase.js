@@ -4143,10 +4143,14 @@ async function getProjectArtifact(userId, projectId, artifactId) {
   return toPublicJobArtifact(rowToJobArtifact(rows[0]));
 }
 
-async function getProjectArtifactInternal(userId, projectId, artifactId) {
-  const membership = await requireProjectRole(userId, projectId, ARTIFACT_READ_ROLES);
+async function getProjectArtifactInternal(userId, projectId, artifactId, { client = null } = {}) {
+  // Trusted owning callers can share their existing transaction without
+  // replacing either project-role checks or the authoritative artifact policy.
+  const execute = client ? (...args) => client.query(...args) : query;
+  const requireRole = client ? createProjectStore({ connect, query: execute, genId, codedError }).requireProjectRole : requireProjectRole;
+  const membership = await requireRole(userId, projectId, ARTIFACT_READ_ROLES);
   if (typeof artifactId !== 'string' || artifactId === '') return null;
-  const { rows } = await query(
+  const { rows } = await execute(
     `SELECT artifact.* FROM job_artifacts artifact
       WHERE artifact.id = $1 AND artifact.project_id = $2
         AND ${expertRArtifactVisibilitySql('artifact', '$3')}`,
