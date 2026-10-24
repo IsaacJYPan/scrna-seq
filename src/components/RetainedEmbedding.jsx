@@ -19,10 +19,11 @@ function usePlotTheme() {
 export default function RetainedEmbedding({ preview, pointLimit, onPointLimitChange, loading, fixedView = false }) {
   const theme = usePlotTheme(), dark = theme === 'dark';
   const [revision, setRevision] = useState(0), [ready, setReady] = useState(false), [exporting, setExporting] = useState(false), [error, setError] = useState('');
-  const graph = useRef(null), active = useRef(true);
+  const graph = useRef(null), active = useRef(true), live = useRef(null);
+  live.current = { preview, theme };
   useEffect(() => { active.current = true; return () => { active.current = false; graph.current = null; }; }, []);
-  const initialized = useCallback((figure, element) => { graph.current = element; setReady(true); }, []);
-  const plotFailure = useCallback(() => setError('The retained plot could not be displayed. The exact saved result remains available.'), []);
+  const initialized = useCallback((figure, element) => { if (active.current) { graph.current = element; setReady(true); } }, []);
+  const plotFailure = useCallback(() => { if (active.current) setError('The retained plot could not be displayed. The exact saved result remains available.'); }, []);
   const traces = useMemo(() => {
     const groups = new Map();
     preview.x.forEach((x, index) => {
@@ -46,10 +47,11 @@ export default function RetainedEmbedding({ preview, pointLimit, onPointLimitCha
   const exportImage = async () => {
     if (!graph.current || exporting) return;
     const element = graph.current; setExporting(true); setError('');
+    const current = () => active.current && graph.current === element && element.isConnected && live.current.preview === preview && live.current.theme === theme;
     try {
       const { downloadPlotImage } = await import('./PlotlyRenderer');
-      if (active.current && graph.current === element && element.isConnected) await downloadPlotImage(element, { format: 'png', filename: `retained-embedding-${preview.source.versionId}`, width: 1000, height: 700 });
-    } catch { if (active.current) setError('The retained plot could not be exported. Try again when the figure is ready.'); }
+      if (current()) await downloadPlotImage(element, { format: 'png', filename: `retained-embedding-${preview.source.versionId}`, width: 1000, height: 700 }, current);
+    } catch { if (current()) setError('The retained plot could not be exported. Try again when the figure is ready.'); }
     finally { if (active.current) setExporting(false); }
   };
   return <div className="min-w-0 space-y-3" aria-label="Retained embedding">
@@ -58,7 +60,9 @@ export default function RetainedEmbedding({ preview, pointLimit, onPointLimitCha
       {preview.ids !== null && ' Source identifiers belong to this exact saved version.'}</p>
     <p className="text-xs text-textMuted">{preview.sampling.sampled ? 'Deterministic checksum-bound sample; no stratification or aggregation.' : 'All source points; no sampling or aggregation.'}
       {preview.sampling.budgetLimited && ' Fewer points fit within the response byte limit.'}
+      {preview.sampling.sampled && grouped && ' Groups absent from this sample may still exist in the source.'}
       {preview.ids === null && ' Point identities are positions in this exact source version, not cell identifiers.'}</p>
+    {fixedView && Number.isSafeInteger(preview.sampling.requestedLimit) && <p className="text-xs text-textMuted" aria-label="Fixed retained point bound">Maximum included points: {preview.sampling.requestedLimit.toLocaleString()}. This saved sample cannot be expanded here. PNG export contains only these retained points in the current plot view.</p>}
     <div className="flex flex-wrap items-center gap-3 text-xs">
       {!fixedView && <label>Maximum points<select aria-label="Maximum points" className="input ml-2" value={pointLimit} disabled={loading} onChange={event => onPointLimitChange(Number(event.target.value))}>{[500, 1000, 2000, 5000].map(value => <option key={value} value={value}>{value.toLocaleString()}</option>)}</select></label>}
       <button type="button" className="btn btn-secondary text-xs" disabled={!ready} onClick={() => setRevision(value => value + 1)}>Reset plot view</button>
@@ -66,7 +70,7 @@ export default function RetainedEmbedding({ preview, pointLimit, onPointLimitCha
     </div>
     {error && <p role="alert" className="text-sm text-danger">{error}</p>}
     <div role="img" aria-label={`Retained coordinate plot with ${preview.sampling.returnedCount} displayed source points`} className="min-w-0 overflow-hidden rounded border border-border">
-      <Plot data={traces} layout={layout} config={config} style={{ width: '100%' }} useResizeHandler onInitialized={initialized} onError={plotFailure} />
+      <Plot data={traces} layout={layout} config={config} style={{ width: '100%', height: 400 }} useResizeHandler onInitialized={initialized} onError={plotFailure} />
     </div>
   </div>;
 }

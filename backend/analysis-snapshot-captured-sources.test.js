@@ -141,7 +141,7 @@ describe.skipIf(!process.env.DATABASE_URL)('exact captured workflow findings and
     let opens = 0; const target = createAnalysisSnapshotPreparationService(db, { ...provider, openVerifiedRead: (...args) => { opens++; return provider.openVerifiedRead(...args); } });
     const page = await choices(ref, analysis.version, target);
     expect(page.items.find(value => value.port === 'rds')).toMatchObject({ referenceOnlyReason: 'opaque', descriptor: null, contextOffer: null });
-    expect(page.items.find(value => value.port === 'scatter').referenceOnlyReason).toBe('unsupported-view');
+    expect(page.items.find(value => value.port === 'scatter')).toMatchObject({ viewFamily: 'embedding', referenceOnlyReason: null });
     for (const port of ['table', 'figure']) expect(page.items.find(value => value.port === port)).toMatchObject({ viewFamily: null, descriptor: null, referenceOnlyReason: 'restricted-or-unavailable' });
     expect(opens).toBe(0); const item = page.items.find(value => value.port === 'metrics');
     const input = recipe([selection(ref, item)], { prerequisites: page.items.filter(value => value.port !== 'metrics').map(value => prerequisite(ref, value)) });

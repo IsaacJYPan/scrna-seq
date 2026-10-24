@@ -5,9 +5,9 @@ import RetainedEmbedding from './RetainedEmbedding';
 import Plot from './Plot';
 import { downloadPlotImage } from './PlotlyRenderer';
 
-vi.mock('./Plot', () => ({ default: vi.fn(({ data, layout, onInitialized }) => <button onClick={event => onInitialized({}, event.currentTarget)} data-testid="plot">{JSON.stringify({ data, layout })}</button>), getPlotHoverStyle: theme => ({ theme }) }));
+vi.mock('./Plot', () => ({ default: vi.fn(({ data, layout, style, onInitialized }) => <button style={style} onClick={event => onInitialized({}, event.currentTarget)} data-testid="plot">{JSON.stringify({ data, layout })}</button>), getPlotHoverStyle: theme => ({ theme }) }));
 vi.mock('./PlotlyRenderer', () => ({ downloadPlotImage: vi.fn().mockResolvedValue(undefined) }));
-afterEach(() => { document.documentElement.removeAttribute('data-theme'); vi.clearAllMocks(); });
+afterEach(() => { document.documentElement.removeAttribute('data-theme'); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 const preview = { source: { versionId: 'eri_example' }, x: [0], y: [1], ids: ['source<id>'], groups: ['group<script>'], sourceIndices: [0],
   semantics: { axes: { x: { label: 'Custom <axis>', unit: 'mm' }, y: { label: null, unit: null } } },
   sampling: { sourceCount: 1, returnedCount: 1, sampled: false, budgetLimited: false } };
@@ -24,7 +24,7 @@ it('escapes plot HTML, responds to actual theme changes and offers keyboard-reac
   await act(async () => document.documentElement.setAttribute('data-theme', 'dark'));
   expect(Plot.mock.calls.at(-1)[0].layout.hoverlabel).toEqual({ theme: 'dark' });
   fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' }));
-  await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledWith(screen.getByTestId('plot'), expect.objectContaining({ format: 'png', width: 1000, height: 700 })));
+  await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledWith(screen.getByTestId('plot'), expect.objectContaining({ format: 'png', width: 1000, height: 700 }), expect.any(Function)));
 });
 
 it('preserves Plotly data/layout/config and graph identity through ready/export toolbar state changes', async () => {
@@ -61,7 +61,7 @@ it('keeps local zoom/reset/export over fixed retained points without offering a 
   const graph = screen.getByTestId('plot'); fireEvent.click(graph);
   const before = Plot.mock.calls.at(-1)[0], retainedData = before.data; before.layout.xaxis.range = [-10, 10];
   fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' }));
-  await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledExactlyOnceWith(graph, expect.objectContaining({ format: 'png' })));
+  await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledExactlyOnceWith(graph, expect.objectContaining({ format: 'png' }), expect.any(Function)));
   expect(Plot.mock.calls.at(-1)[0].data).toBe(retainedData); expect(Plot.mock.calls.at(-1)[0].layout.xaxis.range).toEqual([-10, 10]);
   const revision = Plot.mock.calls.at(-1)[0].layout.uirevision; fireEvent.click(screen.getByRole('button', { name: 'Reset plot view' }));
   expect(Plot.mock.calls.at(-1)[0].layout.uirevision).toBe(revision + 1); expect(Plot.mock.calls.at(-1)[0].data).toBe(retainedData);
@@ -74,4 +74,56 @@ it('preserves the source point-limit selector by default and removes it when swi
   expect(onPointLimitChange).toHaveBeenCalledExactlyOnceWith(500);
   view.rerender(<RetainedEmbedding preview={preview} fixedView pointLimit={2000} onPointLimitChange={onPointLimitChange} />);
   expect(screen.queryByRole('combobox', { name: 'Maximum points' })).not.toBeInTheDocument();
+});
+
+it('discloses the fixed requested bound, byte reduction and non-stratified group limits without offering resampling', () => {
+  const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+  const value = { ...preview, sampling: { sourceCount: 100, returnedCount: 1, requestedLimit: 5, sampled: true, budgetLimited: true } };
+  render(<RetainedEmbedding preview={value} fixedView />);
+  expect(screen.getByLabelText('Fixed retained point bound')).toHaveTextContent('Maximum included points: 5.');
+  expect(screen.getByLabelText('Fixed retained point bound')).toHaveTextContent('PNG export contains only these retained points');
+  expect(screen.getByText(/no stratification or aggregation/)).toHaveTextContent('Groups absent from this sample may still exist in the source.');
+  expect(screen.queryByRole('combobox')).not.toBeInTheDocument(); expect(fetch).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+it('keeps absent identifiers as explicit zero-based source positions with unknown axis/entity meaning', () => {
+  render(<RetainedEmbedding fixedView preview={{ ...preview, ids: null, groups: undefined, sourceIndices: [9],
+    semantics: { entityType: null, axes: { x: { label: null, unit: null }, y: { label: null, unit: null } } } }} />);
+  expect(screen.getByTestId('plot')).toHaveTextContent('Source row 9 (zero-based)');
+  expect(screen.getByText(/Point entity type is not declared/)).toBeVisible();
+  expect(screen.getByText(/not cell identifiers/)).toBeVisible();
+  expect(Plot.mock.calls.at(-1)[0].layout.showlegend).toBe(false);
+  expect(Plot.mock.calls.at(-1)[0].layout.xaxis.title.text).toBe('Coordinate 1');
+});
+
+it.each(['unmounted', 'different retained points', 'theme changed'])('invalidates an in-progress retained export when %s', async change => {
+  let finish;
+  downloadPlotImage.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const view = render(<RetainedEmbedding preview={preview} fixedView />); fireEvent.click(screen.getByTestId('plot'));
+  fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' }));
+  await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledOnce());
+  const current = downloadPlotImage.mock.calls[0][2]; expect(current()).toBe(true);
+  if (change === 'unmounted') view.unmount();
+  else if (change === 'different retained points') view.rerender(<RetainedEmbedding preview={{ ...preview, x: [99] }} fixedView />);
+  else await act(async () => document.documentElement.setAttribute('data-theme', 'dark'));
+  expect(current()).toBe(false); await act(async () => finish());
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('does not call the lazy plot export helper after its view unmounts before the import resolves', async () => {
+  const view = render(<RetainedEmbedding preview={preview} fixedView />); fireEvent.click(screen.getByTestId('plot'));
+  fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' })); view.unmount();
+  await act(async () => {}); expect(downloadPlotImage).not.toHaveBeenCalled();
+});
+
+it.each([false, true])('keeps the graph DOM height bounded when autosizing clears Plotly layout height (fixed view: %s)', fixedView => {
+  const view = render(<RetainedEmbedding preview={preview} fixedView={fixedView} pointLimit={2000} onPointLimitChange={vi.fn()} />);
+  const graph = screen.getByTestId('plot'), initial = Plot.mock.calls.at(-1)[0];
+  expect(graph).toHaveStyle({ width: '100%', height: '400px' });
+  // Plotly resize clears mutable layout dimensions; its absolute SVG needs a DOM height.
+  delete initial.layout.height; fireEvent.click(graph);
+  view.rerender(<RetainedEmbedding preview={preview} fixedView={fixedView} pointLimit={2000} onPointLimitChange={vi.fn()} />);
+  expect(screen.getByTestId('plot')).toBe(graph); expect(graph).toHaveStyle({ height: '400px' });
+  expect(Plot.mock.calls.at(-1)[0].layout).toBe(initial.layout); expect(Plot.mock.calls.at(-1)[0].data).toBe(initial.data);
 });

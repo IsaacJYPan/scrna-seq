@@ -5,6 +5,7 @@ import { listSnapshotPublications, listSnapshotPublicationRequests, getSnapshotP
 import { withExecutionTarget } from '../runtime/executionTarget';
 import { typedRecipe, typedRecord, typedMetricsBytes } from './snapshotTypedTestFixtures';
 import { workflowRecipe, workflowRecord } from './snapshotWorkflowTestFixtures';
+import { embeddingRecipe, embeddingRecord, embeddingBytes } from './snapshotEmbeddingTestFixtures';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
 vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
@@ -91,4 +92,24 @@ it('discards an error summary with extra private fields', async () => {
   fetch.mockResolvedValue(new Response(JSON.stringify({ error: 'Already published', code: 'ANALYSIS_SNAPSHOT_ALREADY_PUBLISHED', publication: {}, privatePath: 'private/source/path' }), { status: 409 }));
   const error = await publishAnalysisSnapshot('project 1', 'analysis 1', {}).catch(value => value);
   expect(error.publication).toBeUndefined(); expect(error.message).not.toContain('private/source/path');
+});
+
+it.each([false, true])('reads only exact fixed3 embedding JSON through current publication authority (captured: %s)', async captured => {
+  const record = embeddingRecord(embeddingRecipe({ captured, pointLimit: 5 })), result = record.package.results[0], content = embeddingBytes(result), signal = new AbortController().signal;
+  fetch.mockResolvedValue(new Response(content, { headers: { 'Content-Type': 'application/json; charset=utf-8' } }));
+  const received = await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', result, { signal });
+  expect(Array.from(received.bytes)).toEqual(Array.from(content)); expect(received.type).toBe('application/json');
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(`${base}/aspub_exact/views/${result.viewId}`, expect.objectContaining({ method: 'GET', signal }));
+  expect(fetch.mock.calls[0][1].body).toBeUndefined(); expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it.each(['mime', 'checksum', 'length', 'size', 'schema'])('rejects public embedding %s mismatch before returning plot bytes', async mismatch => {
+  const record = embeddingRecord(), result = record.package.results[0], content = embeddingBytes(result);
+  if (mismatch === 'checksum') result.view.blobSha256 = 'b'.repeat(64);
+  if (mismatch === 'size') result.view.blobBytes = 262145;
+  if (mismatch === 'schema') result.view.schema = 'traceomics.fixed-result-view.v99';
+  fetch.mockResolvedValue(new Response(mismatch === 'length' ? content.subarray(1) : content,
+    { headers: { 'Content-Type': mismatch === 'mime' ? 'image/png' : 'application/json' } }));
+  await expect(readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', result)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' });
+  expect(fetch).toHaveBeenCalledTimes(['size', 'schema'].includes(mismatch) ? 0 : 1);
 });

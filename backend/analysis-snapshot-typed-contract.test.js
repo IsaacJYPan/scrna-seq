@@ -67,7 +67,7 @@ describe('exact retained typed descriptor and fixed representation', () => {
   });
   it.each([
     ['descriptor extra field', value => { value.path = '/private'; }], ['missing field', value => { delete value.profileId; }],
-    ['unknown schema', value => { value.schema += 'x'; }], ['future type', value => { value.type = 'scatter'; }],
+    ['unknown schema', value => { value.schema += 'x'; }], ['future type', value => { value.type = 'density'; }],
     ['unsafe profile', value => { value.profileId = '/private/runtime'; }], ['overbound profile', value => { value.profileId = 'a'.repeat(121); }],
     ['unbound source ID', value => { value.id = 'unknown'; }], ['empty source', value => { value.sizeBytes = 0; }],
     ['too large source', value => { value.sizeBytes = T.sourceBytes + 1; }], ['unknown meaning', value => { value.semantics.privatePath = '/private'; }],

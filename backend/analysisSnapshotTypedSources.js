@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const contract = import('../shared/analysisSnapshotTypedResult.mjs');
-const formats = { table: 'org.traceomics.table', metrics: 'org.ietf.json', figure: 'org.w3.png' };
+const formats = { table: 'org.traceomics.table', metrics: 'org.ietf.json', figure: 'org.w3.png', scatter: 'org.traceomics.coordinates' };
 
 // This is a projection of an already authorized owning source, never another
 // source resolver or a grant inferred from a filename, MIME type or JSON body.
@@ -23,7 +23,7 @@ async function projectTypedSource(source) {
     return null;
   }
   return { descriptor, descriptorSha256: crypto.createHash('sha256').update(schema.canonicalAnalysisSnapshotTypedDescriptor(descriptor)).digest('hex'),
-    family: original.type === 'figure' ? 'image' : original.type };
+    family: original.type === 'figure' ? 'image' : original.type === 'scatter' ? 'embedding' : original.type };
 }
 
 async function typedSnapshotMetadata(artifacts, client, userId, projectId, reference) {

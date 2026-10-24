@@ -172,6 +172,38 @@ async function main() {
     await viewer().getByRole('combobox', { name: 'Maximum points', exact: true }).selectOption('500'); await viewer().getByText('Showing 500 of 10,000 source points.', { exact: true }).waitFor();
     await viewer().getByRole('combobox', { name: 'Maximum points', exact: true }).selectOption('5000'); await viewer().getByText('Showing 5,000 of 10,000 source points.', { exact: true }).waitFor(); await chartReady(viewer());
     assert(responses.filter(value => value.sampling).every(value => value.bytes <= 256 * 1024), 'A typed preview exceeded its whole response byte envelope.'); await capture('synthetic-10k-bounded-stress');
+    await page.setViewportSize({ width: 390, height: 844 });
+    const stressPreviewReads = requests.filter(value => /\/preview$/.test(value.path)).length;
+    const stressStarted = Date.now();
+    for (const stressTheme of ['light', 'dark']) {
+      await setTheme(stressTheme); await chartReady(viewer());
+      await waitFor(async () => graph(viewer()).evaluate(element => element.getBoundingClientRect().height >= 390
+        && Math.abs(element.getBoundingClientRect().width - element._fullLayout.width) <= 2), 'The 5,000-point phone plot did not retain its visible responsive geometry.');
+      assert(await graph(viewer()).evaluate(element => element.data.reduce((count, trace) => count + trace.x.length, 0) === 5000), 'The phone stress plot lost its bounded source points.');
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'The 5,000-point phone plot overflows the viewport.');
+      await capture(`synthetic-10k-5000-points-${stressTheme}-390x844`, stressTheme);
+    }
+    const stressGraph = graph(viewer()); await stressGraph.scrollIntoViewIfNeeded();
+    const stressPoint = await stressGraph.locator('.scatterlayer .point').first().boundingBox();
+    assert(stressPoint, 'The 5,000-point phone plot had no interactive point geometry.');
+    await page.mouse.move(stressPoint.x + stressPoint.width / 2, stressPoint.y + stressPoint.height / 2);
+    await stressGraph.locator('.hoverlayer .hovertext').waitFor(); await capture('synthetic-10k-5000-points-phone-hover', 'dark');
+    const stressRange = await stressGraph.evaluate(element => [...element._fullLayout.xaxis.range]);
+    await stressGraph.locator('.modebar-btn[data-title="Zoom in"]').click();
+    await waitFor(async () => JSON.stringify(await stressGraph.evaluate(element => element._fullLayout.xaxis.range)) !== JSON.stringify(stressRange), 'The 5,000-point phone plot did not zoom.');
+    await viewer().getByRole('button', { name: 'Reset plot view', exact: true }).focus(); await page.keyboard.press('Enter');
+    await waitFor(async () => stressGraph.evaluate((element, original) => element._fullLayout.xaxis.autorange === true
+      && element._fullLayout.xaxis.range.every((value, index) => Math.abs(value - original[index]) <= 1e-8 * Math.max(1, Math.abs(original[index]))), stressRange), 'Keyboard reset did not restore the 5,000-point phone plot.');
+    const stressDownload = page.waitForEvent('download');
+    await viewer().getByRole('button', { name: 'Export plot PNG', exact: true }).focus(); await page.keyboard.press('Enter');
+    const stressExportPath = path.join(directory, 'retained-synthetic-5000-phone-export.png'); await (await stressDownload).saveAs(stressExportPath);
+    const stressPng = fs.readFileSync(stressExportPath);
+    assert(stressPng.subarray(1, 4).toString() === 'PNG' && stressPng.readUInt32BE(16) === 1000 && stressPng.readUInt32BE(20) === 700, 'The phone stress export was not the requested actual PNG.');
+    assert(requests.filter(value => /\/preview$/.test(value.path)).length === stressPreviewReads, 'Local phone plot controls read source previews again.');
+    uiMeasurements.stressPhone = { viewport: page.viewportSize(), sourceCount: 10000, displayedPoints: 5000,
+      synthetic: true, themes: ['light', 'dark'], hover: true, zoom: true, keyboardReset: true, keyboardPngExport: true,
+      observationElapsedMs: Date.now() - stressStarted, referenceHardwareBenchmark: false };
+    check('A separate synthetic 10,000-point source retains 5,000 displayed points at natural phone width in both themes, with actual hover, local zoom, keyboard reset and PNG export without another source preview.');
     check('Persisted declared role/title, metric labels/units and cell/UMAP meaning reach actual views; undeclared stress metadata stays unknown within bounded projections.');
     await select(material.outputs.figure); await waitFor(async () => viewer().getByRole('img').evaluate(element => element.complete && element.naturalWidth === 1000 && element.naturalHeight === 650), 'The actual readable retained PBMC figure did not render.');
     for (const viewport of [{ width: 1366, height: 768 }, { width: 390, height: 844 }]) {

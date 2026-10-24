@@ -11,11 +11,18 @@ import { canonicalSnapshotJson, canonicalAnalysisSnapshotResultView } from '../.
 import { snapshotScope, snapshotRecipe, snapshotRecord } from './snapshotPreparationTestFixtures';
 import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes, linkedImageResult, linkedImageBytes } from './snapshotLinkedTestFixtures';
 import { typedRecipe, typedRecord, typedTableBytes, typedMetricsBytes, typedImageBytes } from './snapshotTypedTestFixtures';
+import { embeddingRecipe, embeddingRecord, embeddingDescriptor, embeddingBytes, embeddingValue } from './snapshotEmbeddingTestFixtures';
+import { workflowSelection } from './snapshotWorkflowTestFixtures';
+import { validateSnapshotPreparation } from './snapshotPreparationValidation';
+import Plot from '../components/Plot';
+import { downloadPlotImage } from '../components/PlotlyRenderer';
 
 vi.mock('./snapshotPreparationApi', () => ({ readSnapshotPreparationView: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
 vi.mock('../artifacts/artifactApi', () => ({ getArtifactVersion: vi.fn(), previewArtifactVersion: vi.fn() }));
 vi.mock('../artifacts/retainedArtifactApi', () => ({ fetchRetainedArtifactImage: vi.fn() }));
+vi.mock('../components/Plot', () => ({ default: vi.fn(({ data, layout, onInitialized }) => <button data-testid="retained-plot" onClick={event => onInitialized({}, event.currentTarget)}>{JSON.stringify({ data, layout })}</button>), getPlotHoverStyle: theme => ({ theme }) }));
+vi.mock('../components/PlotlyRenderer', () => ({ downloadPlotImage: vi.fn().mockResolvedValue(undefined) }));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const connection = { identity: 'workspace-one', epoch: 1, blocked: false };
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
@@ -48,6 +55,13 @@ function typedFixture(family = 'table') {
     available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() },
   bytes: family === 'image' ? typedImageBytes() : family === 'metrics' ? typedMetricsBytes(descriptor) : typedTableBytes(descriptor),
   type: family === 'image' ? 'image/png' : 'application/json' };
+}
+async function embeddingFixture(options = {}) {
+  const value = options.value || embeddingValue(), descriptor = options.descriptor || embeddingDescriptor({ value });
+  const recipe = embeddingRecipe({ ...options, value, descriptor }), record = embeddingRecord(recipe, { values: [value], descriptors: [descriptor] });
+  await validateSnapshotPreparation(record, snapshotScope, recipe);
+  return { props: { ...snapshotScope, preparationId: record.preparationId, descriptor: record.package.results[0], snapshotSha256: record.snapshotSha256,
+    available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() }, bytes: embeddingBytes(record.package.results[0], value), type: 'application/json' };
 }
 beforeEach(() => {
   vi.resetAllMocks(); vi.stubGlobal('crypto', webcrypto); useExecutionTarget.mockReturnValue(connection);
@@ -361,4 +375,111 @@ it('keeps a withdrawn typed publication terminal rather than reloading scientifi
   view.rerender(<PreparedSnapshotResult {...props} descriptor={structuredClone(props.descriptor)} />); await act(async () => {});
   expect(readView).toHaveBeenCalledOnce(); expect(screen.queryByLabelText('Saved scalar metrics')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Retry retained view' })).not.toBeInTheDocument();
+});
+
+it.each([false, true])('strictly decodes a fixed embedding into the shared retained plot without raster or original reads (captured: %s)', async captured => {
+  const value = await embeddingFixture({ captured, pointLimit: 5 }), readView = vi.fn().mockResolvedValue(value);
+  const props = captured ? { ...value.props, userId: 17, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView } : value.props;
+  readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...props} />);
+  expect(await screen.findByLabelText('Retained embedding')).toBeVisible();
+  expect(screen.getByText('Showing 5 of 12 source points.')).toBeVisible();
+  expect(screen.getByLabelText('Fixed retained point bound')).toHaveTextContent('Maximum included points: 5.');
+  expect(screen.getByRole('heading', { name: 'Recorded coordinate map' })).toBeVisible();
+  expect(screen.queryByRole('combobox', { name: 'Maximum points' })).not.toBeInTheDocument();
+  expect(Plot.mock.calls.at(-1)[0].data.reduce((count, trace) => count + trace.x.length, 0)).toBe(5);
+  expect(Plot.mock.calls.at(-1)[0].layout.xaxis.title.text).toBe('PC 1');
+  expect(URL.createObjectURL).not.toHaveBeenCalled();
+  expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+  if (captured) { expect(readView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationView).not.toHaveBeenCalled(); }
+});
+
+it('keeps local plot reset and export over the retained sample without another retained or original request', async () => {
+  const value = await embeddingFixture(); readSnapshotPreparationView.mockResolvedValue(value);
+  render(<PreparedSnapshotResult {...value.props} />); fireEvent.click(await screen.findByTestId('retained-plot'));
+  const data = Plot.mock.calls.at(-1)[0].data, revision = Plot.mock.calls.at(-1)[0].layout.uirevision;
+  fireEvent.click(screen.getByRole('button', { name: 'Reset plot view' }));
+  expect(Plot.mock.calls.at(-1)[0].layout.uirevision).toBe(revision + 1); expect(Plot.mock.calls.at(-1)[0].data).toBe(data);
+  fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' }));
+  await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledOnce());
+  expect(downloadPlotImage.mock.calls[0][2]()).toBe(true); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+  expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+});
+
+it.each(['bound', 'source', 'owner', 'descriptor', 'axes', 'capture', 'step', 'port', 'context'])('aborts held embedding bytes when the %s binding changes even under the same blob hash', async change => {
+  const value = await embeddingFixture({ captured: true }), held = deferred(), replacement = deferred();
+  readSnapshotPreparationView.mockReturnValueOnce(held.promise).mockReturnValueOnce(replacement.promise);
+  const view = render(<PreparedSnapshotResult {...value.props} />); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledOnce());
+  const signal = readSnapshotPreparationView.mock.calls[0][4].signal, descriptor = structuredClone(value.props.descriptor);
+  if (change === 'bound') descriptor.view.spec.pointLimit = 8;
+  else if (change === 'source') descriptor.source.sha256 = 'e'.repeat(64);
+  else if (change === 'owner') descriptor.source.ownerUserId = 8;
+  else if (change === 'descriptor') descriptor.view.descriptorSha256 = 'e'.repeat(64);
+  else if (change === 'axes') descriptor.view.semantics.axes.x.unit = 'mm';
+  else if (change === 'capture') descriptor.origin.snapshotReference.snapshotId = 'wfs_' + 'e'.repeat(24);
+  else if (change === 'step') descriptor.origin.stepId = 'other-step';
+  else if (change === 'port') descriptor.origin.port = 'other-port';
+  else descriptor.origin.contextSha256 = 'e'.repeat(64);
+  view.rerender(<PreparedSnapshotResult {...value.props} descriptor={descriptor} />); expect(signal.aborted).toBe(true);
+  await act(async () => held.resolve(value)); expect(screen.queryByLabelText('Retained embedding')).not.toBeInTheDocument();
+  expect(value.props.onUnavailable).not.toHaveBeenCalled(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+  view.unmount(); await act(async () => replacement.resolve(value)); expect(screen.queryByTestId('retained-plot')).not.toBeInTheDocument();
+});
+
+it('does not reread or reset an embedding on an equal immutable descriptor refresh', async () => {
+  const value = await embeddingFixture(); readSnapshotPreparationView.mockResolvedValue(value);
+  const view = render(<PreparedSnapshotResult {...value.props} />); fireEvent.click(await screen.findByTestId('retained-plot'));
+  const graph = screen.getByTestId('retained-plot'), data = Plot.mock.calls.at(-1)[0].data;
+  view.rerender(<PreparedSnapshotResult {...value.props} descriptor={structuredClone(value.props.descriptor)} onUnavailable={vi.fn()} />);
+  await act(async () => {}); expect(screen.getByTestId('retained-plot')).toBe(graph); expect(Plot.mock.calls.at(-1)[0].data).toBe(data);
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+});
+
+it.each(['bound', 'source', 'counts', 'axes'])('rejects re-sealed embedding %s mismatch before mounting a plot or offering export', async change => {
+  const value = await embeddingFixture(), body = JSON.parse(new TextDecoder().decode(value.bytes));
+  if (change === 'bound') body.sampling.requestedLimit++;
+  else if (change === 'source') body.source.sha256 = 'e'.repeat(64);
+  else if (change === 'counts') body.sampling.returnedCount--;
+  else body.semantics.axes.x.label = 'Unreviewed dimension';
+  value.bytes = new TextEncoder().encode(canonicalSnapshotJson(body)); value.props.descriptor.view.blobSha256 = hash(value.bytes); value.props.descriptor.view.blobBytes = value.bytes.length;
+  readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('exact saved identity is kept');
+  expect(screen.queryByTestId('retained-plot')).not.toBeInTheDocument(); expect(screen.queryByRole('button', { name: 'Export plot PNG' })).not.toBeInTheDocument();
+  expect(value.props.onUnavailable).toHaveBeenCalledOnce(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+});
+
+it.each(['inactive', 'blocked target', 'unmounted'])('fences a queued embedding export when the retained view becomes %s', async change => {
+  const value = await embeddingFixture(); readSnapshotPreparationView.mockResolvedValue(value);
+  const view = render(<PreparedSnapshotResult {...value.props} />); fireEvent.click(await screen.findByTestId('retained-plot'));
+  fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' }));
+  if (change === 'unmounted') view.unmount();
+  else { if (change === 'blocked target') useExecutionTarget.mockReturnValue({ ...connection, blocked: true, epoch: 2 });
+    view.rerender(<PreparedSnapshotResult {...value.props} isActive={change !== 'inactive'} />); }
+  await act(async () => {}); expect(downloadPlotImage).not.toHaveBeenCalled(); expect(screen.queryByTestId('retained-plot')).not.toBeInTheDocument();
+});
+
+it('removes an already displayed public embedding and invalidates a held export when access is revoked', async () => {
+  const value = await embeddingFixture({ captured: true, selection: workflowSelection({ seed: true }) }), readView = vi.fn().mockResolvedValue(value), held = deferred();
+  downloadPlotImage.mockReturnValueOnce(held.promise);
+  const props = { ...value.props, userId: 17, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView };
+  const view = render(<PreparedSnapshotResult {...props} />); fireEvent.click(await screen.findByTestId('retained-plot'));
+  fireEvent.click(screen.getByRole('button', { name: 'Export plot PNG' })); await waitFor(() => expect(downloadPlotImage).toHaveBeenCalledOnce());
+  const current = downloadPlotImage.mock.calls[0][2]; expect(current()).toBe(true);
+  view.rerender(<PreparedSnapshotResult {...props} available={false} />);
+  expect(current()).toBe(false); expect(screen.queryByLabelText('Retained embedding')).not.toBeInTheDocument();
+  await act(async () => held.resolve()); expect(screen.queryByText(/checksum verified/)).not.toBeInTheDocument(); expect(readView).toHaveBeenCalledOnce();
+});
+
+it('keeps an observed withdrawn embedding terminal despite an older equal active descriptor', async () => {
+  const value = await embeddingFixture(), readView = vi.fn().mockRejectedValue(Object.assign(new Error('withdrawn'), { status: 409, code: 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN' }));
+  const props = { ...value.props, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView };
+  const view = render(<PreparedSnapshotResult {...props} />); expect(await screen.findByRole('alert')).toHaveTextContent('withdrawn');
+  view.rerender(<PreparedSnapshotResult {...props} descriptor={structuredClone(props.descriptor)} />); await act(async () => {});
+  expect(readView).toHaveBeenCalledOnce(); expect(screen.queryByTestId('retained-plot')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry retained view' })).not.toBeInTheDocument();
+});
+
+it('refuses an embedding under an unknown fixed schema instead of treating JSON as a raster', async () => {
+  const value = await embeddingFixture(); value.props.descriptor.view.schema = 'traceomics.fixed-result-view.v2';
+  readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
+  await screen.findByRole('alert'); expect(screen.queryByTestId('retained-plot')).not.toBeInTheDocument(); expect(URL.createObjectURL).not.toHaveBeenCalled();
 });

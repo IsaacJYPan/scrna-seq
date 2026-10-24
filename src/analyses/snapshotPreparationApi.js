@@ -25,7 +25,7 @@ export const deleteSnapshotPreparation = (projectId, analysisId, preparationId, 
 // Call only with a descriptor from an independently validated ready package.
 // Scope/generation checks in the caller must precede parsing or making Blob URLs.
 export function readSnapshotPreparationView(projectId, analysisId, preparationId, result, { signal } = {}) {
-  const json = result?.view?.family === 'table' || result?.view?.family === 'metrics' && result?.view?.schema === 'traceomics.fixed-result-view.v3';
+  const json = result?.view?.family === 'table' || ['metrics', 'embedding'].includes(result?.view?.family) && result?.view?.schema === 'traceomics.fixed-result-view.v3';
   const type = json ? 'application/json' : { 'org.w3.png': 'image/png', 'org.iso.jpeg': 'image/jpeg' }[result?.source?.format?.id];
   if (!type || !json && result?.view?.family !== 'image') return Promise.reject(invalid());
   return retainedBytes(`${path(projectId, analysisId, preparationId)}/views/${encodeURIComponent(result.viewId)}`, result.view, type, json ? limits.table : limits.image, signal);

@@ -19,10 +19,11 @@ async function until(test, message, timeout = 30000) {
   while (Date.now() < end) { if (await test()) return; await new Promise(resolve => setTimeout(resolve, 75)); }
   throw new Error(message);
 }
-async function main({ linkedResults = false, typedResults = false, capturedResults = false } = {}) {
+async function main({ linkedResults = false, typedResults = false, capturedResults = false, embeddingResults = false } = {}) {
+  capturedResults ||= embeddingResults;
   typedResults ||= capturedResults;
   linkedResults ||= typedResults;
-  const directory = path.join(root, 'playwright', 'report', (capturedResults ? 'analysis-workflow-publications-' : typedResults ? 'analysis-typed-publications-' : linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
+  const directory = path.join(root, 'playwright', 'report', (embeddingResults ? 'analysis-embedding-publications-' : capturedResults ? 'analysis-workflow-publications-' : typedResults ? 'analysis-typed-publications-' : linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
   const frozen = new Map(fs.readdirSync(path.join(root, 'dist/assets')).map(name => [name, sha(fs.readFileSync(path.join(root, 'dist/assets', name)))]));
   const checks = [], screenshots = [], profiles = [], requests = [], browserErrors = [], consoleErrors = [], assetReads = [], faults = [], restarts = [];
   const compiledAssets = {}, accounts = {}, expected = new Set(), faultPaths = new Set();
@@ -122,6 +123,12 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
   }
   async function capture(target, name) {
     await target.waitForTimeout(350);
+    const graphs = target.locator('.js-plotly-plot');
+    for (let index = 0; index < await graphs.count(); index++) {
+      const graph = graphs.nth(index);
+      if (await graph.isVisible()) await until(async () => graph.evaluate(element => element.getBoundingClientRect().height >= 390
+        && element._fullLayout?.height >= 390 && Math.abs(element.getBoundingClientRect().width - element._fullLayout.width) <= 2), 'The retained plot collapsed or failed to resize in the actual sharing layout.');
+    }
     assert(await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Sharing created whole-page horizontal overflow.');
     await target.screenshot({ path: path.join(directory, name + '.png'), fullPage: true }); screenshots.push(name + '.png');
     profiles.push({ filename: name + '.png', viewport: target.viewportSize(), theme: await target.evaluate(() => document.documentElement.dataset.theme || 'light') });
@@ -160,7 +167,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     database = new Client({ connectionString: service.databaseUrl }); await database.connect(); browser = await launch(); page = await login();
     findings = await produceSharingFindings((pathname, options) => api(page, pathname, options), service.project.id, service.environment);
     if (typedProducer) typedFindings = await typedProducer.produce({ database, service, owner: accounts.owner, colleague: accounts.colleague,
-      api: (pathname, options) => api(page, pathname, options), capture: capturedResults });
+      api: (pathname, options) => api(page, pathname, options), capture: capturedResults, embedding: embeddingResults });
     const reference = version => ({ kind: 'artifact-version', versionId: version.versionId, sha256: version.sha256 });
     const typedReferences = typedFindings ? ['values', 'summary', 'figure'].map(name => typedFindings.outputs[name]).map(output => ({ kind: 'artifact-version', versionId: output.id, sha256: output.sha256 })) : [];
     if (linkedResults) {
@@ -172,7 +179,8 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
         name: 'Shared condition findings', description: 'Compare the two synthetic conditions without sharing a live session.', references: [reference(restricted)] } })).analysis;
       await other.context().close();
       await database.query("UPDATE project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2", [service.project.id, accounts.colleague.id]);
-      const refs = [reference(restricted), reference(findings.table), reference(findings.figure), reference(opaque), ...(capturedResults ? [typedFindings.snapshotReference] : typedReferences)];
+      const refs = [reference(restricted), reference(findings.table), reference(findings.figure), reference(opaque), ...(capturedResults ? [typedFindings.snapshotReference] : typedReferences),
+        ...(embeddingResults ? [{ kind: 'artifact-version', versionId: typedFindings.outputs.embedding.id, sha256: typedFindings.outputs.embedding.sha256 }] : [])];
       study = (await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: 1, references: refs } })).analysis;
       selectedAnalysisVersion = study.version;
       study = (await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: study.version, references: refs.filter(item => item.versionId !== findings.table.versionId) } })).analysis;
@@ -250,6 +258,17 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
         assert(!(await linked.getByText('PRIVATE_UNSELECTED_CAPTURE_NOTE', { exact: true }).count()) && !(await linked.getByText('../PRIVATE_CAPTURE_PATH', { exact: true }).count()), 'Private recorded parameters escaped the captured chooser.');
         await captured.getByRole('list', { name: 'Recorded workflow outputs' }).getByRole('listitem').filter({ hasText: typedFindings.outputs.object.id })
           .getByRole('button', { name: 'Include captured reference only', exact: true }).click();
+        if (embeddingResults) {
+          const direct = linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ hasText: typedFindings.outputs.embedding.id });
+          await direct.getByRole('button', { name: 'Add linked embedding', exact: true }).click();
+          await linked.getByRole('textbox', { name: 'Caption for linked finding 6', exact: true }).fill('Five exact PCA points linked to this saved analysis');
+          await linked.getByRole('spinbutton', { name: 'Maximum included points for linked finding 6', exact: true }).fill('5');
+          await captured.getByRole('list', { name: 'Recorded workflow outputs' }).getByRole('listitem').filter({ hasText: typedFindings.outputs.embedding.id })
+            .getByRole('button', { name: 'Add captured embedding', exact: true }).click();
+          await linked.getByRole('textbox', { name: 'Caption for linked finding 7', exact: true }).fill('Nine exact PCA points from the saved workflow capture');
+          await linked.getByRole('spinbutton', { name: 'Maximum included points for linked finding 7', exact: true }).fill('9');
+          await matrix(page, 'embedding-explicit-direct-and-captured-bounds', () => linked.getByRole('spinbutton', { name: 'Maximum included points for linked finding 7', exact: true }).scrollIntoViewIfNeeded());
+        }
         await matrix(page, 'captured-output-choices-and-opaque-reference', () => captured.scrollIntoViewIfNeeded());
         await matrix(page, 'captured-explicit-recorded-settings-review', () => context.scrollIntoViewIfNeeded());
       }
@@ -275,9 +294,9 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     await prep(page).getByRole('heading', { name: 'Ready for private review', exact: true }).waitFor();
     const candidate = (await api(page, prepPath())).items[0]; const originalA = await api(page, prepPath() + '/' + candidate.preparationId);
     const packageSha = originalA.snapshotSha256, physical = (await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_snapshot_blobs WHERE preparation_id=$1', [candidate.preparationId])).rows[0].n;
-    assert(physical === (typedResults ? 7 : linkedResults ? 4 : 3), 'The computed findings and saved source were not independently retained, or a reference-only prerequisite retained bytes.');
+    assert(physical === (embeddingResults ? 9 : typedResults ? 7 : linkedResults ? 4 : 3), 'The computed findings and saved source were not independently retained, or a reference-only prerequisite retained bytes.');
     if (typedFindings) {
-      const selected = originalA.package.results.filter(item => item.origin.kind === (capturedResults ? 'captured-workflow-output' : 'typed-analysis-reference'));
+      const selected = originalA.package.results.filter(item => item.origin.kind === (capturedResults ? 'captured-workflow-output' : 'typed-analysis-reference') && item.view.family !== 'embedding');
       assert(selected.length === 3 && selected.every(item => item.view.schema === 'traceomics.fixed-result-view.v3'
         && item.view.descriptorSha256 === originalA.recipe.results.find(choice => choice.kind === item.origin.kind && choice.reference.versionId === item.source.versionId)?.descriptorSha256), 'The retained typed descriptors changed after actual R production or original preparation recovery.');
       if (capturedResults) {
@@ -331,7 +350,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
       const row = (await database.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1', [version.versionId])).rows[0];
       const filename = path.resolve(service.storageRoot, ...row.storage_key.split('/')); assert(filename.startsWith(path.resolve(service.storageRoot) + path.sep), 'Source removal escaped the owned fixture.'); fs.unlinkSync(filename);
     }
-    if (typedFindings) for (const name of ['values', 'summary', 'figure']) {
+    if (typedFindings) for (const name of ['values', 'summary', 'figure', ...(embeddingResults ? ['embedding'] : [])]) {
       const output = typedFindings.outputs[name];
       const row = (await database.query('SELECT storage_key FROM workflow_artifacts WHERE id=$1', [output.id])).rows[0];
       const filename = path.resolve(service.storageRoot, ...row.storage_key.split('/'));
@@ -400,6 +419,58 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
       await matrix(colleague, 'typed-colleague-semantic-figure-producer-stopped', () => typedImage.scrollIntoViewIfNeeded());
       for (const reference of typedReferences) await api(colleague, `/api/artifact-versions/${service.project.id}/${reference.versionId}`, { status: 404 });
       check('Actual completed R workflow tables, metrics and PNG retain exact scalar types, labels, units, declared meaning and descriptor identities for a separate colleague after worker/runtime shutdown, original file deletion and private preparation removal.');
+    }
+    if (embeddingResults) {
+      const selected = originalA.package.results.filter(item => item.view.family === 'embedding');
+      assert(selected.length === 2 && selected[0].view.spec.pointLimit === 5 && selected[1].view.spec.pointLimit === 9
+        && selected[0].origin.kind === 'typed-analysis-reference' && selected[1].origin.kind === 'captured-workflow-output', 'The exact direct/captured embedding bounds or origins changed.');
+      const bodies = [];
+      for (const result of selected) {
+        const body = await api(colleague, `${publicationPath()}/${publicationId}/views/${result.viewId}`);
+        const source = { artifactId: result.source.artifactId, versionId: result.source.versionId, projectId: service.project.id, sha256: result.source.sha256 };
+        const expectedBody = require('../backend/retainedTypedPreviews').projectRetainedEmbedding({ source, value: typedFindings.embeddingSource,
+          pointLimit: result.view.spec.pointLimit, semantics: result.view.semantics });
+        const { canonicalSnapshotJson } = await import('../shared/analysisSnapshotPreparationDispatch.mjs');
+        assert(canonicalSnapshotJson(body) === canonicalSnapshotJson(expectedBody), 'The retained embedding differs from the actual completed PCA source and established deterministic sampler.');
+        for (let index = 0; index < body.sourceIndices.length; index++) {
+          const original = body.sourceIndices[index];
+          assert(body.ids[index] === typedFindings.embeddingSource.ids[original] && body.x[index] === typedFindings.embeddingSource.x[original]
+            && body.y[index] === typedFindings.embeddingSource.y[original] && body.groups[index] === typedFindings.embeddingSource.groups[original], 'The retained PCA point identity/coordinates/group lost alignment.');
+        }
+        await api(colleague, `${publicationPath()}/${publicationId}/views/${result.viewId}?pointLimit=5000`, { status: 400 });
+        bodies.push(body);
+        await detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: result.origin.caption }).click();
+        const plot = detail(colleague).getByRole('img', { name: `Retained coordinate plot with ${result.view.spec.pointLimit} displayed source points`, exact: true });
+        await plot.locator('.main-svg').first().waitFor();
+        await detail(colleague).getByText(`Showing ${result.view.spec.pointLimit} of 12 source points.`, { exact: true }).waitFor();
+        assert(!(await detail(colleague).getByRole('combobox', { name: 'Maximum points', exact: true }).count()), 'Published inspection offered source resampling.');
+        const before = requests.length;
+        const graph = plot.locator('.js-plotly-plot'); await graph.scrollIntoViewIfNeeded();
+        const point = await graph.locator('.scatterlayer .point').first().boundingBox();
+        assert(point, 'The real retained PCA point had no interactive geometry.');
+        await colleague.mouse.move(point.x + point.width / 2, point.y + point.height / 2); await graph.locator('.hoverlayer .hovertext').waitFor();
+        const range = () => graph.evaluate(element => [...element._fullLayout.xaxis.range]);
+        const initialRange = await range();
+        await graph.locator('.modebar-btn[data-title="Zoom in"]').click();
+        await until(async () => JSON.stringify(await range()) !== JSON.stringify(initialRange), 'The retained PCA zoom did not change the local view.');
+        const zoomed = await range(); await graph.locator('.modebar-btn[data-title="Pan"]').click();
+        const drag = await graph.locator('.nsewdrag').boundingBox(); assert(drag, 'The retained plot had no local pan surface.');
+        await colleague.mouse.move(drag.x + drag.width * .4, drag.y + drag.height * .5); await colleague.mouse.down();
+        await colleague.mouse.move(drag.x + drag.width * .6, drag.y + drag.height * .5, { steps: 8 }); await colleague.mouse.up();
+        await until(async () => JSON.stringify(await range()) !== JSON.stringify(zoomed), 'The retained PCA pan did not change the local view.');
+        await detail(colleague).getByRole('button', { name: 'Reset plot view', exact: true }).focus(); await colleague.keyboard.press('Enter');
+        await until(async () => (await range()).every((value, index) => Math.abs(value - initialRange[index]) < 1e-8 * Math.max(1, Math.abs(initialRange[index]))), 'Keyboard reset did not restore the fixed retained plot.');
+        const download = colleague.waitForEvent('download'); await detail(colleague).getByRole('button', { name: 'Export plot PNG', exact: true }).focus(); await colleague.keyboard.press('Enter');
+        const exported = await download; const filename = path.join(directory, `retained-pca-${result.view.spec.pointLimit}.png`); await exported.saveAs(filename);
+        assert(fs.readFileSync(filename).subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'The retained PCA export was not a genuine PNG.');
+        const backgroundReads = new Set(['/api/r/session-id', '/api/r/pipeline-state', '/api/r/health', '/api/runtime/compute-status', '/api/jobs']);
+        const unexpectedPlotRequests = requests.slice(before).filter(item => item.method !== 'GET' || !backgroundReads.has(item.pathname));
+        assert(unexpectedPlotRequests.length === 0, 'Local retained plot controls read original or scientific source data: '
+          + unexpectedPlotRequests.map(item => `${item.method} ${item.pathname}`).join(', '));
+        await matrix(colleague, `embedding-colleague-fixed-${result.view.spec.pointLimit}-pca-points-producer-stopped`, () => plot.scrollIntoViewIfNeeded());
+      }
+      assert(JSON.stringify(bodies[0].ids) === JSON.stringify(bodies[1].ids.slice(0, 5)), 'Distinct PCA sample bounds lost the established stable sample prefix.');
+      check('Real Seurat PCA coordinates from twelve synthetic cells retain distinct direct/captured five/nine-point samples with aligned identifiers/groups/axes, exact stable sampling and source-free local reset/PNG export; published queries cannot enlarge either fixed disclosure.');
     }
     await detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: attached[1].caption }).click();
     const image = detail(colleague).getByRole('img', { name: /Computed condition figure/ }); await until(async () => await image.count() && await image.evaluate(node => node.complete && node.naturalWidth > 0), 'The genuine retained R figure did not decode for the colleague.');

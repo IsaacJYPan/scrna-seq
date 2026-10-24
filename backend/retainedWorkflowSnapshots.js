@@ -100,7 +100,7 @@ async function snapshotPublicationOutputs(client, userId, projectId, reference, 
       try {
         if (output.profileId != null && output.profileId !== workflow.runtime.profileId) consistent = false;
         if (Object.hasOwn(declared, 'semantics') && digest(validateResultSemantics(declared.semantics, declared.type)) !== digest(validateResultSemantics(output.semantics ?? {}, output.type))) consistent = false;
-        if (['table', 'metrics', 'figure'].includes(output.type)) descriptor = typed.normalizeAnalysisSnapshotTypedDescriptor({ schema: typed.ANALYSIS_SNAPSHOT_TYPED_DESCRIPTOR_SCHEMA,
+        if (['table', 'metrics', 'figure', 'scatter'].includes(output.type)) descriptor = typed.normalizeAnalysisSnapshotTypedDescriptor({ schema: typed.ANALYSIS_SNAPSHOT_TYPED_DESCRIPTOR_SCHEMA,
           id: output.id, type: output.type, sha256: output.sha256, sizeBytes: output.sizeBytes, profileId: output.profileId ?? null, semantics: output.semantics ?? {} });
       } catch { consistent = false; }
       const parameters = [];

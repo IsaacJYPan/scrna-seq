@@ -6,6 +6,7 @@ import { createSnapshotPreparation, deleteSnapshotPreparation, getSnapshotPrepar
 import { withExecutionTarget } from '../runtime/executionTarget';
 import { typedRecipe, typedRecord, typedMetricsBytes } from './snapshotTypedTestFixtures';
 import { workflowRecipe, workflowRecord, workflowSnapshotReference } from './snapshotWorkflowTestFixtures';
+import { embeddingRecipe, embeddingRecord, embeddingBytes } from './snapshotEmbeddingTestFixtures';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
 vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
@@ -144,4 +145,24 @@ it('checks the exact supporting source bytes using its own retained view ID with
 it('does not dispatch a body read with an unverified oversized document descriptor', async () => {
   await expect(readSnapshotPreparationDocument('project 1', 'analysis 1', 'asp_1', { viewId: 'asv_source', blobBytes: 1048577, blobSha256: 'a'.repeat(64) })).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PREPARATION_RESPONSE' });
   expect(fetch).not.toHaveBeenCalled(); expect(withExecutionTarget).not.toHaveBeenCalled();
+});
+
+it.each([false, true])('reads only exact fixed3 embedding JSON on the private retained route (captured: %s)', async captured => {
+  const record = embeddingRecord(embeddingRecipe({ captured, pointLimit: 9 })), result = record.package.results[0], content = embeddingBytes(result), signal = new AbortController().signal;
+  fetch.mockResolvedValue(new Response(content, { headers: { 'Content-Type': 'application/json; charset=utf-8' } }));
+  const received = await readSnapshotPreparationView('project 1', 'analysis 1', record.preparationId, result, { signal });
+  expect(Array.from(received.bytes)).toEqual(Array.from(content)); expect(received.type).toBe('application/json');
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(`${base}/${record.preparationId}/views/${result.viewId}`, expect.objectContaining({ method: 'GET', signal }));
+  expect(fetch.mock.calls[0][1].body).toBeUndefined(); expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it.each(['mime', 'checksum', 'length', 'size', 'schema'])('rejects private embedding %s mismatch before returning plot bytes', async mismatch => {
+  const record = embeddingRecord(), result = record.package.results[0], content = embeddingBytes(result);
+  if (mismatch === 'checksum') result.view.blobSha256 = 'b'.repeat(64);
+  if (mismatch === 'size') result.view.blobBytes = 262145;
+  if (mismatch === 'schema') result.view.schema = 'traceomics.fixed-result-view.v2';
+  fetch.mockResolvedValue(new Response(mismatch === 'length' ? content.subarray(1) : content,
+    { headers: { 'Content-Type': mismatch === 'mime' ? 'image/png' : 'application/json' } }));
+  await expect(readSnapshotPreparationView('project 1', 'analysis 1', record.preparationId, result)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PREPARATION_RESPONSE' });
+  expect(fetch).toHaveBeenCalledTimes(['size', 'schema'].includes(mismatch) ? 0 : 1);
 });

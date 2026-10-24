@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const storage = require('./storage');
 const config = require('./config');
 const previews = require('./artifactPreviews');
-const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, projectRetainedMetrics, validateRetainedRasterMetadata } = require('./retainedTypedPreviews');
+const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, projectRetainedMetrics, projectRetainedEmbedding, validateRetainedRasterMetadata } = require('./retainedTypedPreviews');
 const { projectTypedSource } = require('./analysisSnapshotTypedSources');
 const snapshotTypedContract = import('../shared/analysisSnapshotTypedResult.mjs');
 const snapshotContract = import('../shared/analysisSnapshotPreparationDispatch.mjs');
@@ -470,9 +470,11 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
         catch { throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The saved typed result must contain complete valid UTF-8 JSON.'); }
         value = typed.parseAnalysisSnapshotScalarJson(text);
       }
-      const result = [];
+      const result = [], projected = new Map();
       for (const selection of selections) {
         if (selection.family !== projection.family) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The selected typed family does not match its descriptor.');
+        const selectionKey = JSON.stringify(selection);
+        if (projected.has(selectionKey)) { result.push(projected.get(selectionKey)); continue; }
         let rendered;
         if (selection.family === 'image') {
           const dimensions = raster(bytes, version);
@@ -480,10 +482,13 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
         } else {
           const body = selection.family === 'table'
             ? typed.projectAnalysisSnapshotJsonTable({ source: version.reference, descriptor: projection.descriptor, value, offset: selection.offset, limit: selection.limit })
-            : projectRetainedMetrics({ source: version.reference, value, semantics: projection.descriptor.semantics });
+            : selection.family === 'embedding'
+              ? projectRetainedEmbedding({ source: version.reference, value, pointLimit: selection.pointLimit, semantics: projection.descriptor.semantics })
+              : projectRetainedMetrics({ source: version.reference, value, semantics: projection.descriptor.semantics });
           rendered = { bytes: Buffer.from(schema.canonicalSnapshotJson(body, previews.PREVIEW_LIMITS.bytes)), width: null, height: null };
         }
-        result.push({ ...rendered, descriptor: projection.descriptor, descriptorSha256 });
+        const fixed = { ...rendered, descriptor: projection.descriptor, descriptorSha256 };
+        projected.set(selectionKey, fixed); result.push(fixed);
       }
       const currentStat = await opened.handle.stat();
       if (!currentStat.isFile() || ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].some(key => currentStat[key] !== opened.stat[key])) throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The typed source changed while its fixed views were read.', 409);

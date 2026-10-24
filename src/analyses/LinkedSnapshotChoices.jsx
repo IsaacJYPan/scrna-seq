@@ -35,6 +35,7 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
     const previousTable = prior.filter(item => item.view.family === 'table').at(-1);
     const view = option.viewFamily === 'table'
       ? { family: 'table', offset: Math.min(limits.tableOffset, previousTable ? previousTable.view.offset + previousTable.view.limit : 0), limit: 25 }
+      : option.viewFamily === 'embedding' ? { family: 'embedding', pointLimit: 2000 }
       : { family: option.viewFamily };
     if (count >= limits.results || prior.some(item => identity(item.view) === identity(view))) return;
     setLinkedResults(previous => [...previous, { kind: option.typed ? 'typed-analysis-reference' : 'analysis-reference', reference: option.reference,
@@ -48,14 +49,15 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
       const included = linkedPrerequisites.some(item => item.kind === 'analysis-reference' && same(item.reference, option.reference));
       return <li key={identity(option.reference)} className="min-w-0 rounded border border-border bg-surface p-3">
         <p className="break-words text-sm font-medium">{option.label}</p>
-        {option.typed && <div className="mt-2 space-y-1 text-xs text-textMuted"><p>Recorded typed {option.viewFamily === 'image' ? 'figure' : option.viewFamily === 'metrics' ? 'metrics' : 'table'} · declared meaning retained</p>
+        {option.typed && <div className="mt-2 space-y-1 text-xs text-textMuted"><p>Recorded typed {option.viewFamily === 'image' ? 'figure' : option.viewFamily === 'metrics' ? 'metrics' : option.viewFamily === 'embedding' ? 'embedding' : 'table'} · declared meaning retained</p>
           {option.descriptor.semantics.title && <p className="break-words">{option.descriptor.semantics.title}</p>}
           <details><summary className="cursor-pointer">Recorded descriptor identity</summary><p className="mt-1 break-all">SHA-256 {option.descriptorSha256}</p><p>Recorded profile: {option.descriptor.profileId || 'Not recorded'}. Runtime availability has not been checked.</p></details></div>}
         {option.referenceOnlyReason && <p className="mt-1 text-xs text-textMuted">{explanation(option.referenceOnlyReason)}</p>}
         <ExactReference reference={option.reference} />
         <div className="mt-3 flex flex-wrap gap-3">{option.viewFamily && <button type="button" className="btn btn-secondary text-xs"
-          disabled={disabled || count >= limits.results || option.viewFamily !== 'table' && linkedResults.some(item => item.kind !== 'captured-workflow-output' && same(item.reference, option.reference))}
-          onClick={() => addFinding(option)}>{option.viewFamily === 'table' ? 'Add linked table excerpt' : option.viewFamily === 'metrics' ? 'Add linked metrics' : 'Add linked figure'}</button>}
+          disabled={disabled || count >= limits.results || option.viewFamily !== 'table' && linkedResults.some(item => item.kind !== 'captured-workflow-output'
+            && same(item.reference, option.reference) && (option.viewFamily !== 'embedding' || item.view.family === 'embedding' && item.view.pointLimit === 2000))}
+          onClick={() => addFinding(option)}>{option.viewFamily === 'table' ? 'Add linked table excerpt' : option.viewFamily === 'metrics' ? 'Add linked metrics' : option.viewFamily === 'embedding' ? 'Add linked embedding' : 'Add linked figure'}</button>}
           <button type="button" className="text-xs text-primary underline" disabled={disabled || included || prerequisiteCount >= limits.prerequisites}
             onClick={() => setLinkedPrerequisites(previous => [...previous, { kind: 'analysis-reference', reference: option.reference, label: initialLabel(option.label), detail: null }])}>
             {included ? 'Reference included' : 'Include reference only'}</button></div>
@@ -70,7 +72,7 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
       {collection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-references', collection.cursor)}>Load more linked references</button>}
       {typedCollection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-typed-references', typedCollection.cursor)}>Load more typed references</button>}</div>
     <ol aria-label="Selected linked findings" className="space-y-3">{linkedResults.map((item, index) => <li key={index} className="space-y-3 rounded border border-border p-3">
-      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : item.view.family === 'metrics' ? 'Metrics' : 'Figure'} · Saved analysis {analysisVersion}</p>
+      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : item.view.family === 'metrics' ? 'Metrics' : item.view.family === 'embedding' ? 'Embedding sample' : 'Figure'} · Saved analysis {analysisVersion}</p>
       <label className="block text-sm">Caption for linked finding {index + 1}<textarea value={item.caption} required maxLength={2000} disabled={disabled} rows={2}
         onChange={event => edit(index, { caption: event.target.value })} className="input mt-2 block w-full" /></label>
       <p className="text-xs text-textMuted">This caption is supplied for this snapshot.</p>
@@ -84,6 +86,12 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
           onChange={event => edit(index, { view: { ...item.view, offset: Number(event.target.value) - 1 } })} className="input mt-1 block w-28" /></label>
         <label className="text-xs">Rows to include<input aria-label={`Rows to include for linked finding ${index + 1}`} type="number" min={1} max={limits.tableRows} value={item.view.limit} disabled={disabled}
           onChange={event => edit(index, { view: { ...item.view, limit: Number(event.target.value) } })} className="input mt-1 block w-28" /></label>
+      </div>}
+      {item.view.family === 'embedding' && <div className="space-y-2"><label className="block text-sm">Maximum included points
+        <input aria-label={`Maximum included points for linked finding ${index + 1}`} type="number" min={1} max={5000} step={1}
+          value={item.view.pointLimit} disabled={disabled} className="input mt-1 block w-36"
+          onChange={event => edit(index, { view: { family: 'embedding', pointLimit: Number(event.target.value) } })} /></label>
+        <p className="text-xs text-textMuted">Review the included point identifiers, groups and coordinates in the private preview. A fixed sample may omit groups and can include fewer points to fit its byte limit.</p>
       </div>}
       <ExactReference reference={item.reference} /><button type="button" className="text-xs text-textMuted underline" disabled={disabled} onClick={() => setLinkedResults(previous => previous.filter((_, position) => position !== index))}>Remove linked finding {index + 1}</button>
     </li>)}</ol>

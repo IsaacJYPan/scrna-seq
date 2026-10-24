@@ -6,7 +6,8 @@ export const FIXED_RESULT_VIEW_SCHEMA_V3 = 'traceomics.fixed-result-view.v3';
 export const ANALYSIS_SNAPSHOT_SCALAR_MODEL = 'finite-ieee754-safe-integers.v1';
 export const ANALYSIS_SNAPSHOT_TYPED_LIMITS = Object.freeze({ sourceBytes: 5 * 1024 * 1024, sourceRows: 50000,
   columns: 100, columnCharacters: 100, cellCharacters: 2000, metrics: 40, metricKeyCharacters: 100,
-  responseBytes: 256 * 1024, rows: 100, offset: 10000, depth: 4, nodes: 1100000 });
+  responseBytes: 256 * 1024, rows: 100, offset: 10000, depth: 4, nodes: 1100000,
+  sourcePoints: 100000, maximumPoints: 5000, defaultPoints: 2000, identifierCharacters: 200, groupCharacters: 100, groups: 40 });
 const T = ANALYSIS_SNAPSHOT_TYPED_LIMITS, SHA = /^[a-f0-9]{64}$/, VERSION = /^(?:av|art|eri)_[a-f0-9]{16,40}$/;
 const ARTIFACT = /^(?:af|av|art|eri)_[a-f0-9]{16,40}$/, PROJECT = /^proj_[a-f0-9]{16,40}$/;
 const reserved = new Set(['__proto__', 'prototype', 'constructor']);
@@ -47,7 +48,7 @@ function semantics(value, type) {
 }
 export function normalizeAnalysisSnapshotTypedDescriptor(input) {
   const value = capture(input); fields(value, ['schema', 'id', 'type', 'sha256', 'sizeBytes', 'profileId', 'semantics']);
-  if (value.schema !== ANALYSIS_SNAPSHOT_TYPED_DESCRIPTOR_SCHEMA || !['table', 'metrics', 'figure'].includes(value.type)) invalid('Choose a supported trusted typed result.');
+  if (value.schema !== ANALYSIS_SNAPSHOT_TYPED_DESCRIPTOR_SCHEMA || !['table', 'metrics', 'figure', 'scatter'].includes(value.type)) invalid('Choose a supported trusted typed result.');
   pattern(value.id, VERSION); pattern(value.sha256, SHA);
   integer(value.sizeBytes, 1, value.type === 'figure' ? L.imageBytes : T.sourceBytes);
   if (value.profileId !== null && (typeof value.profileId !== 'string' || value.profileId.length > 120
@@ -58,12 +59,14 @@ export function normalizeAnalysisSnapshotTypedDescriptor(input) {
 export const canonicalAnalysisSnapshotTypedDescriptor = input => canonicalSnapshotJson(normalizeAnalysisSnapshotTypedDescriptor(input), L.packageBytes);
 export function canonicalAnalysisSnapshotResultViewV3(input) {
   const value = capture(input); fields(value, ['schema', 'source', 'family', 'spec', 'blobSha256', 'blobBytes', 'width', 'height', 'descriptorSha256', 'semantics']);
-  if (value.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || !['table', 'metrics', 'image'].includes(value.family)) invalid('Use the known fixed typed view schema.');
+  if (value.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || !['table', 'metrics', 'image', 'embedding'].includes(value.family)) invalid('Use the known fixed typed view schema.');
   source(value.source); pattern(value.blobSha256, SHA); pattern(value.descriptorSha256, SHA);
-  const type = value.family === 'image' ? 'figure' : value.family, meaning = semantics(value.semantics, type);
+  const type = value.family === 'image' ? 'figure' : value.family === 'embedding' ? 'scatter' : value.family, meaning = semantics(value.semantics, type);
   if (canonicalSnapshotJson(meaning) !== canonicalSnapshotJson(value.semantics)) invalid('Keep the normalized trusted result meaning.');
   if (value.family === 'table') {
     fields(value.spec, ['offset', 'limit']); integer(value.spec.offset, 0, T.offset); integer(value.spec.limit, 1, T.rows);
+  } else if (value.family === 'embedding') {
+    fields(value.spec, ['pointLimit']); integer(value.spec.pointLimit, 1, T.maximumPoints);
   } else if (value.spec !== null) invalid('A fixed metric or raster has no query settings.');
   integer(value.blobBytes, 1, value.family === 'image' ? L.imageBytes : T.responseBytes);
   if (value.family === 'image') {

@@ -18,6 +18,7 @@ export default function CapturedWorkflowChoices({ snapshotReference, state, disa
   const initialView = option => {
     const table = linkedResults.filter(item => selectedFrom(item, snapshotReference, option) && item.view.family === 'table').at(-1);
     return option.viewFamily === 'table' ? { family: 'table', offset: Math.min(limits.tableOffset, table ? table.view.offset + table.view.limit : 0), limit: 25 }
+      : option.viewFamily === 'embedding' ? { family: 'embedding', pointLimit: 2000 }
       : { family: option.viewFamily };
   };
   const duplicate = option => linkedResults.some(item => selectedFrom(item, snapshotReference, option)
@@ -50,7 +51,7 @@ export default function CapturedWorkflowChoices({ snapshotReference, state, disa
           </dl></details>
           <div className="flex flex-wrap gap-3 text-xs">{option.viewFamily && <button type="button" className="btn btn-secondary text-xs"
             disabled={disabled || resultCount >= limits.results || duplicate(option)} onClick={() => add(option)}>
-            {option.viewFamily === 'table' ? 'Add captured table excerpt' : option.viewFamily === 'metrics' ? 'Add captured metrics' : 'Add captured figure'}</button>}
+            {option.viewFamily === 'table' ? 'Add captured table excerpt' : option.viewFamily === 'metrics' ? 'Add captured metrics' : option.viewFamily === 'embedding' ? 'Add captured embedding' : 'Add captured figure'}</button>}
             <button type="button" className="text-primary underline" disabled={disabled || included || prerequisiteCount >= limits.prerequisites}
               onClick={() => setLinkedPrerequisites(previous => [...previous, { kind: 'captured-workflow-reference', snapshotReference, stepId: option.stepId,
                 port: option.port, reference: option.reference, label: option.outputLabel.slice(0, 160).toWellFormed(), detail: null }])}>

@@ -33,7 +33,7 @@ function createTypedSharingProducer(image) {
     }, 'The genuine typed-sharing R service did not become ready.', 90000);
     return { R_BACKEND_URL: `http://127.0.0.1:${port}` };
   }
-  async function produce({ database, service, owner, colleague, api, capture = false }) {
+  async function produce({ database, service, owner, colleague, api, capture = false, embedding = false }) {
     const material = await seedSavedMaterial(database, service, owner, colleague, image);
     const { EXPERT_R_PROFILE } = require('../backend/expertR');
     const source = [
@@ -44,11 +44,21 @@ function createTypedSharingProducer(image) {
       'counts <- data.frame(condition=c("control","treated"),cells=c(6L,6L))',
       'write_output("figure",ggplot2::ggplot(counts,ggplot2::aes(x=condition,y=cells))+ggplot2::geom_col()+ggplot2::labs(title="Actual typed workflow counts"),width=4,height=3)',
       ...(capture ? ['write_output("object",inputs$analysis)'] : []),
+      ...(embedding ? [
+        'pca <- Seurat::NormalizeData(inputs$analysis,verbose=FALSE)',
+        'pca <- Seurat::ScaleData(pca,features=rownames(pca),verbose=FALSE)',
+        'pca <- Seurat::RunPCA(pca,features=rownames(pca),npcs=2,approx=FALSE,verbose=FALSE)',
+        'coordinates <- Seurat::Embeddings(pca,"pca")',
+        'stopifnot(nrow(coordinates)==12L,ncol(coordinates)>=2L,all(is.finite(coordinates)))',
+        'write_output("embedding",list(x=unname(coordinates[,1]),y=unname(coordinates[,2]),ids=rownames(coordinates),groups=as.character(pca$condition)))',
+      ] : []),
     ].join('\n') + '\n';
     const meaning = {
       values: { role: 'primary', title: 'Condition counts with explicit scalar types' },
       summary: { role: 'diagnostic', title: 'Recorded cell summary', metrics: { cells: { label: 'Retained cells', unit: 'cells' }, features: { label: 'Measured features', unit: 'features' } } },
       figure: { role: 'primary', title: 'Condition counts from the typed workflow' },
+      ...(embedding ? { embedding: { role: 'diagnostic', title: 'PCA of the synthetic condition cells', entityType: 'cell',
+        axes: { x: { label: 'PC 1', unit: 'PCA score' }, y: { label: 'PC 2', unit: 'PCA score' } } } } : {}),
     };
     const workflow = { format: 'traceomics-workflow', schemaVersion: 1, id: 'typed-sharing', name: 'Typed sharing acceptance', version: '1.0.0',
       description: 'Actual synthetic R output types and retained meaning; not a biological accuracy benchmark.', runtime: { language: 'r', profileId: EXPERT_R_PROFILE.id }, files: { 'measure.R': source },
@@ -65,6 +75,7 @@ function createTypedSharingProducer(image) {
       ];
       workflow.steps[0].outputs.object = { type: 'rds', label: 'Recorded opaque analysis object' };
     }
+    if (embedding) workflow.steps[0].outputs.embedding = { type: 'scatter', label: 'Recorded synthetic-cell PCA', semantics: meaning.embedding };
     const opened = await api(`/api/workflows/${service.project.id}/open`, { method: 'POST', body: { analysisObjectId: material.checkpoint.reference.analysisObjectId, source: JSON.stringify(workflow) } });
     const jobs = [], executions = capture ? [{ parameters: {}, seed: 1919 }, { parameters: { minimum: 0, normalize: false, mode: 'counts' }, seed: 0 }] : [{ parameters: {}, seed: 1919 }];
     let current, firstOutputs;
@@ -99,7 +110,18 @@ function createTypedSharingProducer(image) {
       assert(fingerprint, 'The genuine saved workflow capture did not have a valid bounded fingerprint.');
       snapshotReference = { kind: 'workflow-snapshot', snapshotId: saved.id, sha256: fingerprint };
     }
-    return { outputs, source, jobId: jobs.at(-1), jobs, workerCompleted: true, meaning, snapshotReference, environmentArtifact, checkpointFilename: material.checkpoint.filename };
+    let embeddingSource = null;
+    if (embedding) {
+      assert(outputs.embedding?.type === 'scatter', 'The actual PCA run did not retain its typed coordinate output.');
+      const row = (await database.query('SELECT storage_key FROM workflow_artifacts WHERE id=$1', [outputs.embedding.id])).rows[0];
+      const filename = path.resolve(service.storageRoot, ...row.storage_key.split('/'));
+      assert(filename.startsWith(path.resolve(service.storageRoot) + path.sep), 'The actual PCA source escaped the owned fixture.');
+      const bytes = fs.readFileSync(filename); assert(crypto.createHash('sha256').update(bytes).digest('hex') === outputs.embedding.sha256, 'The genuine PCA source failed its recorded checksum.');
+      embeddingSource = JSON.parse(bytes.toString('utf8'));
+      assert(embeddingSource.x.length === 12 && new Set(embeddingSource.ids).size === 12 && embeddingSource.groups.includes('control') && embeddingSource.groups.includes('treated'), 'The actual PCA source lost its original cell or condition identities.');
+    }
+    return { outputs, source, jobId: jobs.at(-1), jobs, workerCompleted: true, meaning, snapshotReference, environmentArtifact,
+      checkpointFilename: material.checkpoint.filename, embeddingSource };
   }
   return { configureEnvironment, produce, stop };
 }

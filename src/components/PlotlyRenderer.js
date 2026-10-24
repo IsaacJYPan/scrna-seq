@@ -5,7 +5,19 @@ import Plotly from './plotlyRuntime';
 const PlotlyPlot = createPlotlyComponent(Plotly);
 
 // Keep exports on the same lazy boundary as the curated plotting runtime.
-export function downloadPlotImage(graph, options) { return Plotly.downloadImage(graph, options); }
+export async function downloadPlotImage(graph, options, isCurrent) {
+  if (typeof isCurrent !== 'function') return Plotly.downloadImage(graph, options);
+  if (!isCurrent()) return;
+  const { filename = 'plot', format = 'png', ...imageOptions } = options;
+  const image = await Plotly.toImage(graph, { ...imageOptions, format });
+  // The retained viewer may lose access while Plotly is rendering the image.
+  if (!isCurrent()) return;
+  const link = document.createElement('a');
+  link.href = image; link.download = `${filename}.${format}`;
+  document.body.appendChild(link);
+  try { link.click(); } finally { link.remove(); }
+  return image;
+}
 
 export default function PlotlyRenderer({ onInitialized, useResizeHandler, config, ...props }) {
   const [graph, setGraph] = React.useState(null);

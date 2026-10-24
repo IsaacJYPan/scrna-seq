@@ -56,6 +56,11 @@ function selectedView(value) {
   fields(value, ['family', 'offset', 'limit']); if (value.family !== 'table') invalid('Choose a supported fixed table or image view.');
   return { family: 'table', offset: integer(value.offset, 0, L.tableOffset), limit: integer(value.limit, 1, L.tableRows) };
 }
+function selectedTypedView(value) {
+  if (value?.family === 'embedding') { fields(value, ['family', 'pointLimit']); return { family: 'embedding', pointLimit: integer(value.pointLimit, 1, 5000) }; }
+  if (value?.family === 'metrics') { fields(value, ['family']); return { family: 'metrics' }; }
+  return selectedView(value);
+}
 function selectedResult(value) {
   if (value?.kind === 'attachment-revision') {
     fields(value, ['kind', 'attachmentId', 'revisionId', 'reference', 'view']);
@@ -65,15 +70,13 @@ function selectedResult(value) {
   if (value?.kind === 'captured-workflow-output') {
     fields(value, ['kind', 'snapshotReference', 'stepId', 'port', 'reference', 'descriptorSha256', 'caption', 'view', 'contextSelection', 'contextSha256']);
     const origin = normalizeAnalysisSnapshotWorkflowOutputReference({ snapshotReference: value.snapshotReference, stepId: value.stepId, port: value.port, reference: value.reference });
-    let view; if (value.view?.family === 'metrics') { fields(value.view, ['family']); view = { family: 'metrics' }; } else view = selectedView(value.view);
+    const view = selectedTypedView(value.view);
     return { kind: value.kind, ...origin, descriptorSha256: pattern(value.descriptorSha256, SHA), caption: text(value.caption, B.caption), view,
       contextSelection: normalizeAnalysisSnapshotWorkflowContextSelection(value.contextSelection), contextSha256: pattern(value.contextSha256, SHA) };
   }
   if (value?.kind === 'typed-analysis-reference') {
     fields(value, ['kind', 'reference', 'descriptorSha256', 'caption', 'view']);
-    let view;
-    if (value.view?.family === 'metrics') { fields(value.view, ['family']); view = { family: 'metrics' }; }
-    else view = selectedView(value.view);
+    const view = selectedTypedView(value.view);
     return { kind: value.kind, reference: reference(value.reference, true), descriptorSha256: pattern(value.descriptorSha256, SHA), caption: text(value.caption, B.caption), view };
   }
   fields(value, ['kind', 'reference', 'caption', 'view']); if (value.kind !== 'analysis-reference') invalid('Choose a supported saved-result origin.');
@@ -171,7 +174,7 @@ function savedSource(value, owner, projectId, typed = false) {
   if (value.ownerUserId !== owner) invalid('Fixed findings must retain their original owned source.'); integer(value.sizeBytes, 0, L.originalBytes);
   if (text(value.name, B.sourceName, false, false) !== value.name || /[\\/]/.test(value.name)) invalid('Use a safe bounded source label, not a path.');
   fields(value.format, ['id', 'version']);
-  if (!(typed ? ['org.traceomics.table', 'org.ietf.json', 'org.w3.png'] : ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg']).includes(value.format.id)
+  if (!(typed ? ['org.traceomics.table', 'org.ietf.json', 'org.w3.png', 'org.traceomics.coordinates'] : ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg']).includes(value.format.id)
       || value.format.version !== '1') invalid('Choose a supported source format for this exact adapter.');
 }
 function savedOrigin(value, source, analysisVersion, owner) {
@@ -221,7 +224,7 @@ export function canonicalAnalysisSnapshotPackageV2(input) {
     fields(item.view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height', ...(typed ? ['descriptorSha256', 'semantics'] : [])]);
     const { viewSha256, ...view } = item.view; pattern(viewSha256, SHA);
     (typed ? canonicalAnalysisSnapshotResultViewV3 : canonicalAnalysisSnapshotResultViewV2)({ ...view, source: { artifactId: item.source.artifactId, versionId: item.source.versionId, projectId: value.projectId, sha256: item.source.sha256 } });
-    const family = typed ? { 'org.traceomics.table': 'table', 'org.ietf.json': 'metrics', 'org.w3.png': 'image' }[item.source.format.id]
+    const family = typed ? { 'org.traceomics.table': 'table', 'org.ietf.json': 'metrics', 'org.w3.png': 'image', 'org.traceomics.coordinates': 'embedding' }[item.source.format.id]
       : ['org.ietf.csv', 'org.iana.tsv'].includes(item.source.format.id) ? 'table' : 'image';
     if (typed) {
       if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || item.source.sizeBytes > 5 * 1024 * 1024 || item.source.sizeBytes < 1) invalid('Typed findings retain a complete bounded source.');
@@ -230,7 +233,7 @@ export function canonicalAnalysisSnapshotPackageV2(input) {
       typedDescriptors.set(item.source.versionId, descriptorIdentity);
     }
     if (view.family !== family || family === 'image' && (view.blobBytes !== item.source.sizeBytes || view.blobSha256 !== item.source.sha256)) invalid('A fixed view must match its original source format and raster bytes.');
-    selections.push({ ...origin, view: family === 'table' ? { family, ...view.spec } : { family } });
+    selections.push({ ...origin, view: ['table', 'embedding'].includes(family) ? { family, ...view.spec } : { family } });
     const previous = sources.get(item.source.versionId);
     if (previous && canonicalSnapshotJson(previous) !== canonicalSnapshotJson(item.source)) invalid('One source version must retain one exact identity.');
     sources.set(item.source.versionId, item.source); retained += view.blobBytes;

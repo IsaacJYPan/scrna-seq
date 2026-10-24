@@ -121,7 +121,7 @@ function source(value, linked = false, typedFamily = null) {
   } else { savedText(value.name, 160); if (value.name.length > 160) fail(); }
   fields(value.format, ['id', 'version']);
   if (typedFamily !== null) {
-    if (value.format.id !== { table: 'org.traceomics.table', metrics: 'org.ietf.json', image: 'org.w3.png' }[typedFamily]
+    if (value.format.id !== { table: 'org.traceomics.table', metrics: 'org.ietf.json', image: 'org.w3.png', embedding: 'org.traceomics.coordinates' }[typedFamily]
         || value.format.version !== '1' || value.sizeBytes < 1 || value.sizeBytes > ANALYSIS_SNAPSHOT_TYPED_LIMITS.sourceBytes) fail();
     return typedFamily;
   }
@@ -179,7 +179,7 @@ export function validateSnapshotPreparationOptions(input, expectedScope, kind, e
           const descriptor = normalizeAnalysisSnapshotTypedDescriptor(item.descriptor), offer = normalizeAnalysisSnapshotWorkflowContextOffer(item.contextOffer);
           if (item.referenceOnlyReason !== null || canonicalSnapshotJson(descriptor) !== canonicalSnapshotJson(item.descriptor)
               || canonicalSnapshotJson(offer) !== canonicalSnapshotJson(item.contextOffer) || descriptor.id !== item.reference.versionId || descriptor.sha256 !== item.reference.sha256
-              || item.viewFamily !== { table: 'table', metrics: 'metrics', figure: 'image' }[descriptor.type]
+              || item.viewFamily !== { table: 'table', metrics: 'metrics', figure: 'image', scatter: 'embedding' }[descriptor.type]
               || offer.method !== null && (offer.method.stepLabel !== item.stepLabel || offer.method.outputLabel !== item.outputLabel)) fail();
           pattern(item.descriptorSha256, SHA); checks.push([canonicalAnalysisSnapshotTypedDescriptor(descriptor), item.descriptorSha256]);
         }
@@ -193,7 +193,7 @@ export function validateSnapshotPreparationOptions(input, expectedScope, kind, e
         const reference = validateResearchAnalysisReference(item.reference), descriptor = normalizeAnalysisSnapshotTypedDescriptor(item.descriptor);
         if (reference.kind !== 'artifact-version' || canonicalSnapshotJson(reference) !== canonicalSnapshotJson(item.reference)
             || canonicalSnapshotJson(descriptor) !== canonicalSnapshotJson(item.descriptor) || descriptor.id !== reference.versionId || descriptor.sha256 !== reference.sha256
-            || item.viewFamily !== { table: 'table', metrics: 'metrics', figure: 'image' }[descriptor.type]
+            || item.viewFamily !== { table: 'table', metrics: 'metrics', figure: 'image', scatter: 'embedding' }[descriptor.type]
             || item.integrity !== 'not-checked' || item.availability !== 'not-checked' || typeof item.label !== 'string'
             || !item.label.isWellFormed() || !item.label || item.label !== item.label.trim() || item.label.length > ANALYSIS_SNAPSHOT_LINKED_LIMITS.optionLabel
             || /[\p{Cc}\p{Cf}]/u.test(item.label)) fail();
@@ -329,7 +329,8 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
             || origin.contextSha256 !== chosen.contextSha256 || canonicalSnapshotJson({ method: origin.context.method !== null,
               parameterKeys: origin.context.parameters.map(item => item.key), seed: origin.context.seed !== null, environment: origin.context.environment !== null }) !== canonicalSnapshotJson(chosen.contextSelection))
           || item.source.versionId !== chosen.reference.versionId || item.source.sha256 !== chosen.reference.sha256
-          || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)) fail();
+          || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)
+          || view.family === 'embedding' && view.spec.pointLimit !== chosen.view.pointLimit) fail();
     }
     for (let i = 0; i < pkg.documents.length; i++) {
       const item = pkg.documents[i], chosen = recipe.documents[i];
@@ -401,7 +402,7 @@ export async function decodeSnapshotPreparationTyped(bytes, resultDescriptor) {
     const result = capture(resultDescriptor, L.packageBytes), view = result.view;
     fields(result, ['viewId', 'origin', 'source', 'view']); pattern(result.viewId, VIEW);
     fields(view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height', 'descriptorSha256', 'semantics']);
-    if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || !['table', 'metrics'].includes(view.family)) fail();
+    if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || !['table', 'metrics', 'embedding'].includes(view.family)) fail();
     source(result.source, true, view.family); pattern(view.viewSha256, SHA);
     const origin = result.origin, captured = origin?.kind === 'captured-workflow-output';
     fields(origin, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin', ...(captured ? ['snapshotReference', 'stepId', 'port', 'context', 'contextSha256', 'contextEvidence'] : [])]);
@@ -434,7 +435,7 @@ export async function decodeSnapshotPreparationTyped(bytes, resultDescriptor) {
           || body.totalRows === 0 && columns.length || rows.length !== Math.min(body.limit, Math.max(0, body.totalRows - body.offset))
           || body.hasMore !== (body.offset + body.limit < body.totalRows)) fail();
       unique(columns); rows.forEach(row => { if (dense(row, columns.length).length !== columns.length || row.some(cell => !scalar(cell))) fail(); });
-    } else {
+    } else if (view.family === 'metrics') {
       fields(body, ['family', 'source', 'semantics', 'items']); fields(body.semantics, ['role', 'title']);
       if (body.family !== 'metrics' || body.semantics.role !== view.semantics.role || body.semantics.title !== view.semantics.title) fail();
       const items = dense(body.items, ANALYSIS_SNAPSHOT_TYPED_LIMITS.metrics);
@@ -445,6 +446,33 @@ export async function decodeSnapshotPreparationTyped(bytes, resultDescriptor) {
             || item.label !== (view.semantics.metrics[item.key]?.label ?? null) || item.unit !== (view.semantics.metrics[item.key]?.unit ?? null)) fail();
       }); unique(items.map(item => item.key));
       if (Object.keys(view.semantics.metrics).some(key => !items.some(item => item.key === key))) fail();
+    } else {
+      fields(body, ['family', 'source', 'semantics', 'identity', 'x', 'y', 'ids', 'sourceIndices', 'sampling'], ['groups']);
+      const T = ANALYSIS_SNAPSHOT_TYPED_LIMITS, count = dense(body.x, T.maximumPoints).length;
+      if (body.family !== 'embedding' || canonicalSnapshotJson(body.semantics) !== canonicalSnapshotJson(view.semantics)
+          || dense(body.y, T.maximumPoints).length !== count || [...body.x, ...body.y].some(value => typeof value !== 'number' || !scalar(value))) fail();
+      fields(body.identity, ['kind', 'scope', 'indexBase']);
+      if (body.identity.scope !== 'exact-source-version' || body.identity.indexBase !== 0) fail();
+      const text = (value, maximum) => typeof value === 'string' && value.trim() && value.isWellFormed() && value.length <= maximum
+        && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+      if (body.ids === null) { if (body.identity.kind !== 'source-row-positions') fail(); }
+      else {
+        if (body.identity.kind !== 'source-identifiers' || dense(body.ids, T.maximumPoints).length !== count || body.ids.some(value => !text(value, T.identifierCharacters))) fail();
+        unique(body.ids);
+      }
+      if (Object.hasOwn(body, 'groups')) {
+        if (dense(body.groups, T.maximumPoints).length !== count || body.groups.some(value => !text(value, T.groupCharacters)) || new Set(body.groups).size > T.groups) fail();
+      }
+      fields(body.sampling, ['method', 'sourceCount', 'returnedCount', 'requestedLimit', 'sampled', 'aggregated', 'stratified', 'budgetLimited']);
+      const sample = body.sampling;
+      integer(sample.sourceCount, 0, T.sourcePoints); integer(sample.returnedCount, 0, T.maximumPoints); integer(sample.requestedLimit, 1, T.maximumPoints);
+      if (sample.requestedLimit !== view.spec.pointLimit || sample.returnedCount !== count || count > Math.min(sample.sourceCount, sample.requestedLimit)
+          || sample.sourceCount > 0 && count === 0 || sample.sampled !== (count < sample.sourceCount)
+          || sample.method !== (sample.sampled ? 'sha256-priority-v1' : 'none') || sample.aggregated !== false || sample.stratified !== false
+          || sample.budgetLimited !== (count < Math.min(sample.sourceCount, sample.requestedLimit))) fail();
+      const indices = dense(body.sourceIndices, T.maximumPoints);
+      if (indices.length !== count) fail();
+      indices.forEach((value, index) => { integer(value, 0, sample.sourceCount - 1); if (!sample.sampled && value !== index) fail(); }); unique(indices);
     }
     return body;
   } catch { fail(); }

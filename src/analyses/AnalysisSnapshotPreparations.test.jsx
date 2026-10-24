@@ -8,6 +8,7 @@ import { snapshotScope as scope, snapshotRecipe, snapshotRecord, snapshotList, s
 import { linkedRecord } from './snapshotLinkedTestFixtures';
 import { typedDescriptor, typedOptions, typedRecord } from './snapshotTypedTestFixtures';
 import { workflowSnapshotReference, workflowOffer, workflowSelection, workflowRecipe, workflowRecord, workflowOptions } from './snapshotWorkflowTestFixtures';
+import { embeddingRecipe, embeddingRecord, embeddingOptions } from './snapshotEmbeddingTestFixtures';
 
 // Keep the actual transport, target fence, canonical helpers and strict validators.
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -30,7 +31,8 @@ function writes(kind = 'prepare') {
 function observe(value) {
   return { ...structuredClone(value), canPrepare: state.allowed, canResume: state.allowed && ['preparing', 'failed'].includes(value.state) };
 }
-const recordFactory = recipe => recipe.results.some(item => item.kind === 'captured-workflow-output') || recipe.prerequisites.some(item => item.kind === 'captured-workflow-reference') ? workflowRecord
+const recordFactory = recipe => recipe.results.some(item => item.view.family === 'embedding') ? embeddingRecord
+  : recipe.results.some(item => item.kind === 'captured-workflow-output') || recipe.prerequisites.some(item => item.kind === 'captured-workflow-reference') ? workflowRecord
   : recipe.results.some(item => item.kind === 'typed-analysis-reference') ? typedRecord
   : recipe.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
 async function server(request) {
@@ -120,10 +122,90 @@ async function inspectCaptured() {
   return screen.findByRole('list', { name: 'Recorded workflow outputs' });
 }
 async function addCaptured(family = 'table') {
-  const list = await inspectCaptured(), label = family === 'table' ? 'Add captured table excerpt' : family === 'metrics' ? 'Add captured metrics' : 'Add captured figure';
+  const list = await inspectCaptured(), label = family === 'table' ? 'Add captured table excerpt' : family === 'metrics' ? 'Add captured metrics' : family === 'embedding' ? 'Add captured embedding' : 'Add captured figure';
   fireEvent.click(await within(list).findByRole('button', { name: label, exact: true }));
   return screen.getByRole('group', { name: 'Recorded context for linked finding 1' });
 }
+
+function offerEmbedding({ captured = false } = {}) {
+  state.onTypedOptions = request => embeddingOptions({ analysisVersion: Number(request.query.get('analysisVersion')), canPrepare: state.allowed });
+  if (captured) {
+    const typed = state.onTypedOptions; offerCaptured(); state.onTypedOptions = typed;
+    state.onCapturedOptions = request => embeddingOptions({ captured: true, analysisVersion: Number(request.query.get('analysisVersion')), canPrepare: state.allowed,
+      snapshotReference: workflowSnapshotReference({ snapshotId: request.query.get('snapshotId'), sha256: request.query.get('snapshotSha256') }) });
+  }
+}
+
+it('starts a direct embedding at an explicit 2000-point bound and preserves that bound in the accepted exact intent', async () => {
+  offerEmbedding(); await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));
+  expect(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' })).toHaveValue(2000);
+  expect(writes()).toHaveLength(0); const submitted = await submit(); await screen.findByTestId('prepared-result');
+  const option = embeddingOptions().items[0];
+  expect(submitted.results).toEqual([{ kind: 'typed-analysis-reference', reference: option.reference, descriptorSha256: option.descriptorSha256,
+    caption: option.label, view: { family: 'embedding', pointLimit: 2000 } }]);
+  expect(state.records.get(submitted.requestId).package.results[0].view.spec).toEqual({ pointLimit: 2000 });
+  expect(state.requests.every(request => request.pathname === base || request.pathname === base + '/options')).toBe(true);
+});
+
+it('prepares distinct direct five-point and captured nine-point samples without confusing the sampling bound with the recorded seed', async () => {
+  offerEmbedding({ captured: true }); await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' }), { target: { value: '5' } });
+  const outputs = await inspectCaptured(); fireEvent.click(await within(outputs).findByRole('button', { name: 'Add captured embedding', exact: true }));
+  const context = screen.getByRole('group', { name: 'Recorded context for linked finding 2' });
+  expect(within(context).getAllByRole('checkbox').every(node => !node.checked)).toBe(true);
+  fireEvent.click(within(context).getByRole('checkbox', { name: /^Include recorded seed/ }));
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 2' }), { target: { value: '9' } });
+  const submitted = await submit(); await screen.findByTestId('prepared-result');
+  expect(submitted.results.map(item => [item.kind, item.view])).toEqual([
+    ['typed-analysis-reference', { family: 'embedding', pointLimit: 5 }], ['captured-workflow-output', { family: 'embedding', pointLimit: 9 }],
+  ]);
+  expect(submitted.results[1].contextSelection).toEqual(workflowSelection({ seed: true }));
+  expect(submitted.results[1].contextSha256).toBe(embeddingRecipe({ captured: true, pointLimit: 9, selection: workflowSelection({ seed: true }) }).results[0].contextSha256);
+  expect(state.records.get(submitted.requestId).package.results.map(item => item.view.spec.pointLimit)).toEqual([5, 9]);
+  expect(state.requests.every(request => request.pathname === base || request.pathname === base + '/options')).toBe(true);
+});
+
+it('preserves a separate point bound and caption for each chosen saved analysis version', async () => {
+  offerEmbedding(); await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' }), { target: { value: '5' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: 'Original five points' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' }), { target: { value: '9' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 2/ }));
+  expect(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' })).toHaveValue(5);
+  expect(screen.getByRole('textbox', { name: 'Caption for linked finding 1' })).toHaveValue('Original five points');
+  const submitted = await submit(); await screen.findByTestId('prepared-result');
+  expect(submitted.analysisVersion).toBe(2); expect(submitted.results[0].view.pointLimit).toBe(5);
+});
+
+it('allows different embedding bounds but rejects an edited duplicate source and bound before any preparation POST', async () => {
+  offerEmbedding(); await frame(); const add = await screen.findByRole('button', { name: 'Add linked embedding', exact: true }); fireEvent.click(add);
+  expect(add).toBeDisabled(); fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' }), { target: { value: '5' } });
+  expect(add).toBeEnabled(); fireEvent.click(add);
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 2' }), { target: { value: '5' } });
+  fireEvent.submit(screen.getByRole('form', { name: 'Prepare private snapshot' })); await screen.findByRole('alert'); expect(writes()).toHaveLength(0);
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 2' }), { target: { value: '9' } });
+  const submitted = await submit(); await screen.findByTestId('prepared-result');
+  expect(submitted.results.map(item => item.view.pointLimit)).toEqual([5, 9]);
+});
+
+it.each([0, 5001, 1.5])('refuses an invalid embedding bound of %s even when native form validation is bypassed', async pointLimit => {
+  offerEmbedding(); await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' }), { target: { value: String(pointLimit) } });
+  fireEvent.submit(screen.getByRole('form', { name: 'Prepare private snapshot' })); await screen.findByRole('alert'); expect(writes()).toHaveLength(0);
+  expect(screen.queryByRole('button', { name: 'Retry original preparation' })).not.toBeInTheDocument();
+});
+
+it('recovers the original accepted embedding bound after a lost reply despite later chooser metadata', async () => {
+  offerEmbedding(); state.onPrepare = request => { const value = embeddingRecord(request.body); state.records.set(value.requestId, value); throw new Error('Accepted reply lost.'); };
+  await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum included points for linked finding 1' }), { target: { value: '5' } });
+  const submitted = await submit(); await screen.findByRole('alert');
+  state.onTypedOptions = () => embeddingOptions({ items: [] });
+  fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' })); await screen.findByTestId('prepared-result');
+  expect(state.records.get(submitted.requestId).recipe.results[0].view).toEqual({ family: 'embedding', pointLimit: 5 }); expect(writes()).toHaveLength(1);
+});
 
 it.each(['table', 'metrics', 'image'])('discovers a captured %s only after explicit expansion and prepares exact all-off context without opening a working workflow', async family => {
   offerCaptured({ family }); await frame(); await screen.findByRole('button', { name: 'Inspect captured outputs' });

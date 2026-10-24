@@ -197,7 +197,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       if (planned.kind === 'result') {
         const selected = recipe.results[planned.index], source = captured.results[planned.index], safeSource = isLinkedRecipe(recipe) ? linkedSource(source.original) : fields(source.original);
         const fullReference = { artifactId: safeSource.artifactId, versionId: safeSource.versionId, projectId, sha256: safeSource.sha256 };
-        const family = selected.view.family, spec = family === 'table' ? { offset: selected.view.offset, limit: selected.view.limit } : null;
+        const family = selected.view.family, spec = family === 'table' ? { offset: selected.view.offset, limit: selected.view.limit } : family === 'embedding' ? { pointLimit: selected.view.pointLimit } : null;
         const typed = isTypedResult(selected);
         const cacheKey = typed ? `${safeSource.versionId}:typed:${selected.descriptorSha256}:${JSON.stringify(selected.view)}` : `${safeSource.versionId}:${JSON.stringify(spec)}`;
         let rendered = cached.get(cacheKey);
@@ -315,7 +315,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       if (!item) missing();
       const expected = item.view || item, blob = (await client.query('SELECT * FROM research_analysis_snapshot_blobs WHERE preparation_id=$1 AND id=$2 AND kind=$3', [preparationId, viewId, kind])).rows[0];
       if (!blob || blob.content.length !== expected.blobBytes || blob.size_bytes !== expected.blobBytes || blob.sha256 !== expected.blobSha256 || hash(blob.content) !== expected.blobSha256) throw retainedError();
-      return { bytes: blob.content, mimeType: kind === 'document' || ['table', 'metrics'].includes(item.view.family) ? 'application/json; charset=utf-8' : item.source.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg' };
+      return { bytes: blob.content, mimeType: kind === 'document' || ['table', 'metrics', 'embedding'].includes(item.view.family) ? 'application/json; charset=utf-8' : item.source.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg' };
     });
   }
   const cursorScope = (userId, projectId, analysisId) => hash(JSON.stringify([Number(userId), projectId, analysisId])).slice(0, 16);
