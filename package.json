@@ -98,6 +98,7 @@
     "test:analysis-typed-publications-browser": "npm run build && node scripts/verify-analysis-typed-publications-ui.js",
     "test:analysis-workflow-publications-browser": "npm run build && node scripts/verify-analysis-workflow-publications-ui.js",
     "test:analysis-embedding-publications-browser": "npm run build && node scripts/verify-analysis-embedding-publications-ui.js",
+    "test:analysis-inert-publications-browser": "npm run build && node scripts/verify-analysis-inert-publications-ui.js",
     "test:existing-work-browser": "npm run build && node scripts/verify-existing-work-ui.js",
     "test:retained-workflows-browser": "npm run build && node scripts/verify-retained-workflows-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",

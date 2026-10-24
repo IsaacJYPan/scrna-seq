@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const contract = import('../shared/researchAnalysis.mjs');
 const snapshots = import('../shared/analysisSnapshotPreparationDispatch.mjs');
 const { typedSnapshotMetadata } = require('./analysisSnapshotTypedSources');
+const { inertSnapshotMetadata } = require('./analysisSnapshotInertSources');
 const SCHEMA = 'traceomics.analysis-snapshot-preparation.v2';
 const formats = ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg'];
 const failure = (code, message, status = 409) => Object.assign(new Error(message), { code: `ANALYSIS_SNAPSHOT_${code}`, status });
@@ -59,6 +60,13 @@ function createLinkedSnapshotSources(artifacts, legacySources, captures) {
         results.push(await captures.selected(client, userId, projectId, recipe, selected, keys, captureMemo)); continue;
       }
       if (!keys.has(schema.canonicalSnapshotJson(selected.reference))) throw failure('SOURCE_UNAVAILABLE', 'The selected result is not linked in this exact saved analysis version.');
+      if (selected.kind === 'inert-analysis-reference') {
+        const inert = await inertSnapshotMetadata(artifacts, client, userId, projectId, selected.reference);
+        if (!inert) throw failure('SOURCE_CHANGED', 'The exact owned source is unavailable for an inert text prefix.');
+        results.push({ original: asOriginal(inert.source), origin: { kind: selected.kind, reference: selected.reference, analysisVersion: recipe.analysisVersion,
+          caption: selected.caption, captionOrigin: 'user-supplied', includeSourceText: true } });
+        continue;
+      }
       if (selected.kind === 'typed-analysis-reference') {
         const typed = await typedSnapshotMetadata(artifacts, client, userId, projectId, selected.reference);
         if (!typed || typed.family !== selected.view.family || typed.descriptorSha256 !== selected.descriptorSha256) throw failure('SOURCE_CHANGED', 'The exact selected typed source or its recorded meaning changed. Review its current descriptor before preparing a new request.');
@@ -89,7 +97,7 @@ function createLinkedSnapshotSources(artifacts, legacySources, captures) {
   }
   async function options(client, context, userId, projectId, analysisId, input, canPrepare) {
     if (input.kind === 'captured-workflow-outputs') return captures.options(client, context, userId, projectId, analysisId, input, canPrepare, version => references(client, projectId, analysisId, version));
-    const kind = input.kind, typedOnly = kind === 'analysis-typed-references';
+    const kind = input.kind, typedOnly = kind === 'analysis-typed-references', inertOnly = kind === 'analysis-inert-references';
     const version = Number(input.analysisVersion), limit = input.limit === undefined ? 30 : Number(input.limit);
     if (Object.keys(input).some(key => !['kind', 'analysisVersion', 'limit', 'cursor'].includes(key))
         || !['string', 'number'].includes(typeof input.analysisVersion) || typeof input.analysisVersion === 'string' && !/^[1-9][0-9]{0,9}$/.test(input.analysisVersion)
@@ -113,9 +121,10 @@ function createLinkedSnapshotSources(artifacts, legacySources, captures) {
     let position = start;
     while (position < saved.length && result.items.length < limit) {
       const reference = saved[position];
-      const source = typedOnly ? await typedSnapshotMetadata(artifacts, client, userId, projectId, reference) : await metadata(artifacts, client, userId, projectId, reference);
+      const source = typedOnly ? await typedSnapshotMetadata(artifacts, client, userId, projectId, reference) : inertOnly ? await inertSnapshotMetadata(artifacts, client, userId, projectId, reference) : await metadata(artifacts, client, userId, projectId, reference);
       if (!source) { position++; continue; }
-      const item = typedOnly ? { reference, label: source.source.name, viewFamily: source.family, descriptor: source.descriptor, descriptorSha256: source.descriptorSha256, integrity: 'not-checked', availability: 'not-checked' }
+      const item = inertOnly ? { reference, label: source.source.name, viewFamily: 'text', sourceFormatId: source.source.format.id, sourceBytes: source.source.size, integrity: 'not-checked', availability: 'not-checked' }
+        : typedOnly ? { reference, label: source.source.name, viewFamily: source.family, descriptor: source.descriptor, descriptorSha256: source.descriptorSha256, integrity: 'not-checked', availability: 'not-checked' }
         : { reference, label: source.label, viewFamily: source.family, referenceOnlyReason: source.reason, integrity: 'not-checked', availability: 'not-checked' };
       result.items.push(item);
       if (Buffer.byteLength(JSON.stringify(result)) + 256 > 128 * 1024) { result.items.pop(); break; }

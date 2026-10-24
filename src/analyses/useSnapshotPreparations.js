@@ -13,7 +13,7 @@ const denied = error => error.status === 401 || !sourceFailure(error) && !writer
 const digest = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), value => value.toString(16).padStart(2, '0')).join('');
 const emptyNotes = () => ({ summary: '', decisions: '', limitations: '' });
 const optionKey = (kind, value) => kind === 'analysis-versions' ? value.version : kind === 'results' ? value.revisionId
-  : ['analysis-references', 'analysis-typed-references'].includes(kind) ? JSON.stringify(value.reference)
+  : ['analysis-references', 'analysis-typed-references', 'analysis-inert-references'].includes(kind) ? JSON.stringify(value.reference)
     : kind === 'captured-workflow-outputs' ? JSON.stringify([value.stepId, value.port, value.reference]) : value.versionId;
 
 export default function useSnapshotPreparations({ projectId, analysisId, userId, savedAnalysis, canWrite, available, isActive }) {
@@ -93,7 +93,7 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
     if (!usable || !service.current) return;
     const captured = kind === 'captured-workflow-outputs';
     if (captured && !snapshotReference) return;
-    const linked = captured || ['analysis-references', 'analysis-typed-references'].includes(kind), version = analysisVersion,
+    const linked = captured || ['analysis-references', 'analysis-typed-references', 'analysis-inert-references'].includes(kind), version = analysisVersion,
       key = captured ? capturedOptionsKey(version, snapshotReference) : linked ? `${kind}:${version}` : kind;
     optionRequests.current.get(key)?.abort(); const controller = new AbortController(); optionRequests.current.set(key, controller);
     const epoch = permissionEpoch.current; setOptionLoading(previous => ({ ...previous, [key]: true })); setError('');
@@ -131,7 +131,8 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
   useEffect(() => {
     const kinds = ['analysis-references', 'analysis-typed-references'], keys = kinds.map(kind => `${kind}:${analysisVersion}`);
     for (const [name, controller] of optionRequests.current) if (kinds.some(kind => name.startsWith(kind + ':')) && !keys.includes(name)
-        || name.startsWith('captured-workflow-outputs:') && !name.startsWith(`captured-workflow-outputs:${analysisVersion}:`)) {
+        || name.startsWith('captured-workflow-outputs:') && !name.startsWith(`captured-workflow-outputs:${analysisVersion}:`)
+        || name.startsWith('analysis-inert-references:') && name !== `analysis-inert-references:${analysisVersion}`) {
       controller.abort(); optionRequests.current.delete(name);
       setOptionLoading(previous => previous[name] ? { ...previous, [name]: false } : previous);
     }

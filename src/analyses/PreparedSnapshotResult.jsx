@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { RetainedResultContent } from '../components/RetainedArtifactView';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import { readSnapshotPreparationView } from './snapshotPreparationApi';
-import { decodeSnapshotPreparationTable, decodeSnapshotPreparationTyped } from './snapshotPreparationValidation';
+import { decodeSnapshotPreparationTable, decodeSnapshotPreparationTyped, decodeSnapshotPreparationInert } from './snapshotPreparationValidation';
 
 const denied = error => error.status === 401 || error.code === 'ANALYSIS_SNAPSHOT_SCOPE_NOT_FOUND'
   || error.status === 403 && !['ANALYSIS_SNAPSHOT_WRITE_REQUIRED', 'ANALYSIS_SNAPSHOT_WITHDRAW_REQUIRED', 'ANALYSIS_SNAPSHOT_SOURCE_READ_REQUIRED'].includes(error.code);
@@ -22,12 +22,12 @@ export default function PreparedSnapshotResult({ projectId, analysisId, preparat
   const usable = available && isActive && !target.blocked && validScope;
   const key = JSON.stringify([audience, resourceId, snapshotSha256, projectId, analysisId, serviceId, userId, target.identity, target.epoch,
     descriptor?.viewId, descriptor?.view?.schema, descriptor?.view?.viewSha256, descriptor?.view?.blobSha256, descriptor?.view?.blobBytes,
-    descriptor?.view?.family, descriptor?.view?.spec?.offset, descriptor?.view?.spec?.limit, descriptor?.view?.spec?.pointLimit, descriptor?.view?.width,
+    descriptor?.view?.family, descriptor?.view?.spec?.offset, descriptor?.view?.spec?.limit, descriptor?.view?.spec?.pointLimit, descriptor?.view?.spec?.maxBytes, descriptor?.view?.width,
     descriptor?.view?.height, descriptor?.view?.descriptorSha256, descriptor?.view?.semantics,
     descriptor?.source?.artifactId, descriptor?.source?.versionId, descriptor?.source?.ownerUserId,
     descriptor?.source?.sha256, descriptor?.source?.sizeBytes, descriptor?.source?.name, descriptor?.source?.format?.id, descriptor?.source?.format?.version,
     descriptor?.origin?.kind, descriptor?.origin?.reference?.kind, descriptor?.origin?.reference?.versionId, descriptor?.origin?.reference?.sha256,
-    descriptor?.origin?.analysisVersion, descriptor?.origin?.caption, descriptor?.origin?.captionOrigin,
+    descriptor?.origin?.analysisVersion, descriptor?.origin?.caption, descriptor?.origin?.captionOrigin, descriptor?.origin?.includeSourceText,
     descriptor?.origin?.snapshotReference, descriptor?.origin?.stepId, descriptor?.origin?.port, descriptor?.origin?.contextSha256, descriptor?.origin?.contextEvidence,
     descriptor?.origin?.attachment?.attachmentId, descriptor?.origin?.attachment?.revisionId, descriptor?.origin?.attachment?.sourceOwnerUserId,
     descriptor?.attachment?.attachmentId, descriptor?.attachment?.revisionId, descriptor?.attachment?.sourceOwnerUserId]);
@@ -47,7 +47,10 @@ export default function PreparedSnapshotResult({ projectId, analysisId, preparat
       try {
         const received = await reader(projectId, analysisId, resourceId, expected, { signal: controller.signal });
         if (!current()) return;
-        if (['table', 'metrics', 'embedding'].includes(expected.view.family)) {
+        if (expected.view.family === 'text') {
+          const preview = await decodeSnapshotPreparationInert(received.bytes, expected);
+          if (current()) setBody({ key, reader, preview });
+        } else if (['table', 'metrics', 'embedding'].includes(expected.view.family)) {
           const typed = expected.view.schema === 'traceomics.fixed-result-view.v3';
           if (expected.view.family === 'embedding' && !typed) throw Object.assign(new Error('The retained embedding schema is not supported.'), { code: 'INVALID_SNAPSHOT_PREPARATION_RESPONSE' });
           const preview = await (typed ? decodeSnapshotPreparationTyped : decodeSnapshotPreparationTable)(received.bytes, expected);
@@ -86,6 +89,7 @@ export default function PreparedSnapshotResult({ projectId, analysisId, preparat
         {withdrawn ? <p role="alert" className="text-sm text-danger">This snapshot has been withdrawn. Its accepted identity remains recorded.</p>
           : problem?.key === key && <div className="space-y-2"><p role="alert" className="text-sm text-danger">{problem.message}</p><button type="button" className="btn btn-secondary text-xs" disabled={loading} onClick={() => setAttempt(value => value + 1)}>Retry retained view</button></div>}
         {visible && <><p className="text-xs text-success">Retained view checksum verified · fixed saved content</p><RetainedResultContent key={key} fixedView preview={visible.preview}
+          fixedSourceText={descriptor.view.schema === 'traceomics.fixed-result-view.v4' && visible.preview.family === 'text'}
           typedScalars={descriptor.view.schema === 'traceomics.fixed-result-view.v3' && visible.preview.family === 'metrics'}
           imageUrl={visible.imageUrl} name={descriptor.source.name} onImageError={imageFailed} /></>}
       </>}

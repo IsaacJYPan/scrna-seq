@@ -12,6 +12,8 @@ import {
   canonicalAnalysisSnapshotResultViewV3, parseAnalysisSnapshotScalarJson,
   normalizeAnalysisSnapshotWorkflowContextOffer, normalizeAnalysisSnapshotWorkflowOutputReference, normalizeAnalysisSnapshotWorkflowContext,
   normalizeAnalysisSnapshotWorkflowContextEvidence, canonicalAnalysisSnapshotWorkflowContextBinding, assertAnalysisSnapshotWorkflowContextPayload,
+  FIXED_RESULT_VIEW_SCHEMA_V4, ANALYSIS_SNAPSHOT_INERT_LIMITS, ANALYSIS_SNAPSHOT_INERT_FORMATS,
+  canonicalAnalysisSnapshotInertBody, canonicalAnalysisSnapshotResultViewV4,
 } from '../../shared/analysisSnapshotPreparationDispatch.mjs';
 import { normalizeAnalysisAttachmentCreate } from '../../shared/analysisAttachment.mjs';
 import { validateResearchAnalysisReference } from '../../shared/researchAnalysis.mjs';
@@ -109,7 +111,7 @@ function analysis(value) {
   if (!['active', 'archived'].includes(value.status)) fail();
   timestamp(value.createdAt); timestamp(value.updatedAt); if (value.updatedAt < value.createdAt) fail(); pattern(value.revisionSha256, SHA);
 }
-function source(value, linked = false, typedFamily = null) {
+function source(value, linked = false, typedFamily = null, inert = false) {
   fields(value, linked ? [...sourceKeys, 'ownerUserId'] : sourceKeys);
   pattern(value.artifactId, linked ? /^(?:af|av|art|eri)_[a-f0-9]{16,40}$/ : AF);
   pattern(value.versionId, linked ? /^(?:av|art|eri)_[a-f0-9]{16,40}$/ : AV); pattern(value.sha256, SHA);
@@ -120,6 +122,11 @@ function source(value, linked = false, typedFamily = null) {
         || value.name.length > ANALYSIS_SNAPSHOT_LINKED_LIMITS.sourceName || /[\p{Cc}\p{Cf}\\/]/u.test(value.name)) fail();
   } else { savedText(value.name, 160); if (value.name.length > 160) fail(); }
   fields(value.format, ['id', 'version']);
+  if (inert) {
+    if (!ANALYSIS_SNAPSHOT_INERT_FORMATS.includes(value.format.id) || value.format.version !== '1'
+        || !/^(?:av|eri)_[a-f0-9]{16,40}$/.test(value.versionId)) fail();
+    return 'text';
+  }
   if (typedFamily !== null) {
     if (value.format.id !== { table: 'org.traceomics.table', metrics: 'org.ietf.json', image: 'org.w3.png', embedding: 'org.traceomics.coordinates' }[typedFamily]
         || value.format.version !== '1' || value.sizeBytes < 1 || value.sizeBytes > ANALYSIS_SNAPSHOT_TYPED_LIMITS.sourceBytes) fail();
@@ -159,10 +166,28 @@ export function validateSnapshotPreparationList(input, expectedScope) {
 }
 export function validateSnapshotPreparationOptions(input, expectedScope, kind, expectedAnalysisVersion, expectedSnapshotReference) {
   try {
+    if (kind === 'analysis-inert-references') {
+      const items = Object.getOwnPropertyDescriptor(input, 'items');
+      if (items && Object.hasOwn(items, 'value')) dense(items.value, L.page).forEach(item => {
+        const fact = Object.getOwnPropertyDescriptor(item, 'sourceBytes'); if (fact && Object.hasOwn(fact, 'value') && Object.is(fact.value, -0)) fail();
+      });
+    }
     const value = capture(input, L.listBytes), scope = scopeCopy(expectedScope, true);
-    envelope(value, scope, ['kind', 'items', 'nextCursor', ...(['analysis-references', 'analysis-typed-references', 'captured-workflow-outputs'].includes(kind) ? ['analysisVersion'] : []),
+    envelope(value, scope, ['kind', 'items', 'nextCursor', ...(['analysis-references', 'analysis-typed-references', 'captured-workflow-outputs', 'analysis-inert-references'].includes(kind) ? ['analysisVersion'] : []),
       ...(kind === 'captured-workflow-outputs' ? ['snapshotReference'] : [])]); paging(value);
-    if (!['analysis-versions', 'results', 'documents', 'analysis-references', 'analysis-typed-references', 'captured-workflow-outputs'].includes(kind) || value.kind !== kind) fail();
+    if (!['analysis-versions', 'results', 'documents', 'analysis-references', 'analysis-typed-references', 'captured-workflow-outputs', 'analysis-inert-references'].includes(kind) || value.kind !== kind) fail();
+    if (kind === 'analysis-inert-references') {
+      integer(expectedAnalysisVersion, 1, 2147483647); if (value.analysisVersion !== expectedAnalysisVersion) fail();
+      value.items.forEach(item => {
+        fields(item, ['reference', 'label', 'viewFamily', 'sourceFormatId', 'sourceBytes', 'integrity', 'availability']);
+        const reference = validateResearchAnalysisReference(item.reference); integer(item.sourceBytes, 0, ANALYSIS_SNAPSHOT_INERT_LIMITS.sourceBytes);
+        if (reference.kind !== 'artifact-version' || !/^(?:av|eri)_[a-f0-9]{16,40}$/.test(reference.versionId)
+            || canonicalSnapshotJson(reference) !== canonicalSnapshotJson(item.reference) || item.viewFamily !== 'text'
+            || !ANALYSIS_SNAPSHOT_INERT_FORMATS.includes(item.sourceFormatId) || item.integrity !== 'not-checked' || item.availability !== 'not-checked'
+            || typeof item.label !== 'string' || !item.label.isWellFormed() || !item.label || item.label !== item.label.trim()
+            || item.label.length > ANALYSIS_SNAPSHOT_LINKED_LIMITS.optionLabel || /[\p{Cc}\p{Cf}]/u.test(item.label)) fail();
+      }); unique(value.items.map(item => canonicalSnapshotJson(item.reference))); return value;
+    }
     if (kind === 'captured-workflow-outputs') {
       integer(expectedAnalysisVersion, 1, 2147483647); if (value.analysisVersion !== expectedAnalysisVersion) fail();
       const expected = validateResearchAnalysisReference(capture(expectedSnapshotReference, L.requestBytes));
@@ -320,7 +345,7 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
       const origin = linked ? item.origin : { kind: 'attachment-revision', attachment: item.attachment };
       if (linked && origin.kind !== chosen.kind || origin.kind === 'attachment-revision'
           && (origin.attachment.attachmentId !== chosen.attachmentId || origin.attachment.revisionId !== chosen.revisionId)
-          || ['analysis-reference', 'typed-analysis-reference'].includes(origin.kind) && (canonicalSnapshotJson(origin.reference) !== canonicalSnapshotJson(chosen.reference)
+          || ['analysis-reference', 'typed-analysis-reference', 'inert-analysis-reference'].includes(origin.kind) && (canonicalSnapshotJson(origin.reference) !== canonicalSnapshotJson(chosen.reference)
             || origin.caption !== chosen.caption || origin.analysisVersion !== recipe.analysisVersion)
           || origin.kind === 'typed-analysis-reference' && view.descriptorSha256 !== chosen.descriptorSha256
           || origin.kind === 'captured-workflow-output' && (canonicalSnapshotJson(origin.snapshotReference) !== canonicalSnapshotJson(chosen.snapshotReference)
@@ -329,7 +354,9 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
             || origin.contextSha256 !== chosen.contextSha256 || canonicalSnapshotJson({ method: origin.context.method !== null,
               parameterKeys: origin.context.parameters.map(item => item.key), seed: origin.context.seed !== null, environment: origin.context.environment !== null }) !== canonicalSnapshotJson(chosen.contextSelection))
           || item.source.versionId !== chosen.reference.versionId || item.source.sha256 !== chosen.reference.sha256
+          || origin.kind === 'inert-analysis-reference' && (origin.includeSourceText !== true || chosen.includeSourceText !== true)
           || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)
+          || view.family === 'text' && view.spec.maxBytes !== chosen.view.maxBytes
           || view.family === 'embedding' && view.spec.pointLimit !== chosen.view.pointLimit) fail();
     }
     for (let i = 0; i < pkg.documents.length; i++) {
@@ -340,7 +367,7 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
   } catch { fail(); }
 }
 
-async function raw(bytes, expected, maximum) {
+async function raw(bytes, expected, maximum, preserveBom = false) {
   // Native brand/accessors accept byte arrays from another realm without
   // reading a caller's constructor, byteLength getter or Symbol.iterator.
   if (!ArrayBuffer.isView(bytes) || typedArrayName.call(bytes) !== 'Uint8Array') fail();
@@ -349,7 +376,7 @@ async function raw(bytes, expected, maximum) {
   if (length !== expected.blobBytes) fail();
   const copied = new Uint8Array(length); Uint8Array.prototype.set.call(copied, bytes);
   if (await digest(copied) !== expected.blobSha256) fail();
-  return new TextDecoder('utf-8', { fatal: true }).decode(copied);
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: preserveBom }).decode(copied);
 }
 export async function decodeSnapshotPreparationTable(bytes, resultDescriptor) {
   try {
@@ -474,6 +501,27 @@ export async function decodeSnapshotPreparationTyped(bytes, resultDescriptor) {
       if (indices.length !== count) fail();
       indices.forEach((value, index) => { integer(value, 0, sample.sourceCount - 1); if (!sample.sampled && value !== index) fail(); }); unique(indices);
     }
+    return body;
+  } catch { fail(); }
+}
+export async function decodeSnapshotPreparationInert(bytes, resultDescriptor) {
+  try {
+    const result = capture(resultDescriptor, L.packageBytes), view = result.view;
+    fields(result, ['viewId', 'origin', 'source', 'view']); pattern(result.viewId, VIEW); source(result.source, true, null, true);
+    fields(view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height']); pattern(view.viewSha256, SHA);
+    if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V4 || view.family !== 'text' || view.width !== null || view.height !== null) fail();
+    fields(view.spec, ['maxBytes']); integer(view.spec.maxBytes, 1, ANALYSIS_SNAPSHOT_INERT_LIMITS.prefixBytes);
+    const origin = result.origin; fields(origin, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin', 'includeSourceText']);
+    const ref = validateResearchAnalysisReference(origin.reference); integer(origin.analysisVersion, 1, 2147483647);
+    if (origin.kind !== 'inert-analysis-reference' || origin.includeSourceText !== true || origin.captionOrigin !== 'user-supplied'
+        || normalizeAnalysisSnapshotCaptionV2(origin.caption) !== origin.caption || ref.kind !== 'artifact-version'
+        || canonicalSnapshotJson(ref) !== canonicalSnapshotJson(origin.reference) || ref.versionId !== result.source.versionId || ref.sha256 !== result.source.sha256) fail();
+    const text = await raw(bytes, view, ANALYSIS_SNAPSHOT_INERT_LIMITS.responseBytes, true), body = JSON.parse(text);
+    if (canonicalAnalysisSnapshotInertBody(body) !== text || body.source.artifactId !== result.source.artifactId
+        || body.source.versionId !== result.source.versionId || body.source.sha256 !== result.source.sha256
+        || body.sourceFormatId !== result.source.format.id || body.sourceBytes !== result.source.sizeBytes || body.maxBytes !== view.spec.maxBytes) fail();
+    const { viewSha256, ...preimage } = view;
+    if (await digest(canonicalAnalysisSnapshotResultViewV4({ ...preimage, source: body.source })) !== viewSha256) fail();
     return body;
   } catch { fail(); }
 }

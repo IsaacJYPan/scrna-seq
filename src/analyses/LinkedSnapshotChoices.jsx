@@ -1,6 +1,8 @@
 import React from 'react';
 import { ANALYSIS_SNAPSHOT_PREPARATION_LIMITS as limits } from '../../shared/analysisSnapshotPreparation.mjs';
 import CapturedWorkflowChoices, { CapturedWorkflowContextChoices } from './CapturedWorkflowChoices';
+import InertSnapshotChoices from './InertSnapshotChoices';
+import { ANALYSIS_SNAPSHOT_INERT_LIMITS as inertLimits } from '../../shared/analysisSnapshotInertResult.mjs';
 
 const identity = reference => JSON.stringify(reference);
 const explanation = reason => ({
@@ -71,8 +73,9 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
     }}>Refresh linked references</button>
       {collection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-references', collection.cursor)}>Load more linked references</button>}
       {typedCollection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-typed-references', typedCollection.cursor)}>Load more typed references</button>}</div>
+    <InertSnapshotChoices key={analysisVersion} state={state} disabled={disabled} />
     <ol aria-label="Selected linked findings" className="space-y-3">{linkedResults.map((item, index) => <li key={index} className="space-y-3 rounded border border-border p-3">
-      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : item.view.family === 'metrics' ? 'Metrics' : item.view.family === 'embedding' ? 'Embedding sample' : 'Figure'} · Saved analysis {analysisVersion}</p>
+      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : item.view.family === 'metrics' ? 'Metrics' : item.view.family === 'embedding' ? 'Embedding sample' : item.view.family === 'text' ? 'Source text prefix' : 'Figure'} · Saved analysis {analysisVersion}</p>
       <label className="block text-sm">Caption for linked finding {index + 1}<textarea value={item.caption} required maxLength={2000} disabled={disabled} rows={2}
         onChange={event => edit(index, { caption: event.target.value })} className="input mt-2 block w-full" /></label>
       <p className="text-xs text-textMuted">This caption is supplied for this snapshot.</p>
@@ -92,6 +95,15 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
           value={item.view.pointLimit} disabled={disabled} className="input mt-1 block w-36"
           onChange={event => edit(index, { view: { family: 'embedding', pointLimit: Number(event.target.value) } })} /></label>
         <p className="text-xs text-textMuted">Review the included point identifiers, groups and coordinates in the private preview. A fixed sample may omit groups and can include fewer points to fit its byte limit.</p>
+      </div>}
+      {item.kind === 'inert-analysis-reference' && <div className="space-y-3"><label className="block text-sm">Maximum source bytes to include
+        <input aria-label={`Maximum source bytes for linked finding ${index + 1}`} type="number" min={1} max={inertLimits.prefixBytes} step={1}
+          value={item.view.maxBytes} disabled={disabled} className="input mt-1 block w-36"
+          onChange={event => edit(index, { view: { family: 'text', maxBytes: Number(event.target.value) } })} /></label>
+        <label className="flex items-start gap-2 text-sm"><input type="checkbox" required checked={item.includeSourceText === true} disabled={disabled} className="mt-1"
+          aria-label={`Include source text for linked finding ${index + 1}`} onChange={event => edit(index, { includeSourceText: event.target.checked })} />
+          <span>Include source text in this private preview.</span></label>
+        <p className="text-xs text-textMuted">Only this prefix will be retained, using complete UTF-8 characters. Review the included text before publishing. Code and JSON stay plain text; syntax is not checked.</p>
       </div>}
       <ExactReference reference={item.reference} /><button type="button" className="text-xs text-textMuted underline" disabled={disabled} onClick={() => setLinkedResults(previous => previous.filter((_, position) => position !== index))}>Remove linked finding {index + 1}</button>
     </li>)}</ol>

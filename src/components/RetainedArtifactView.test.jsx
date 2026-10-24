@@ -58,6 +58,42 @@ it('renders only the fixed retained table window without original-source paging 
   expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
 });
 
+it('renders only the included literal JSON source prefix with honest byte and syntax facts', () => {
+  const text = '\uFEFF{\r\n  "n":900719925474099312345,"n":2,\r\n  "script":"<script>run()</script>"', included = new TextEncoder().encode(text).length;
+  const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+  render(<RetainedResultContent fixedView fixedSourceText preview={{ family: 'text', representation: 'utf8-source-prefix', sourceFormatId: 'org.ietf.json',
+    text, sourceBytes: 200, maxBytes: included + 2, includedSourceBytes: included, truncated: true, syntax: 'not-checked' }} />);
+  expect(screen.getByLabelText('Saved text preview').textContent).toBe(text);
+  expect(screen.getByLabelText('Saved text preview')).toHaveAttribute('tabindex', '0');
+  expect(screen.getByLabelText('Fixed retained source text')).toHaveTextContent('JSON source text · syntax not checked');
+  expect(screen.getByLabelText('Fixed retained source text')).toHaveTextContent(`Included ${included} of 200 source bytes.`);
+  expect(screen.getByText('Only this retained source prefix is included. Omitted source bytes are not accessible here.')).toBeVisible();
+  expect(screen.queryByText('Showing part of the file. The full version is saved.')).not.toBeInTheDocument();
+  expect(document.querySelector('script')).toBeNull(); expect(fetch).not.toHaveBeenCalled();
+  expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: /Run|Load more|Download/ })).not.toBeInTheDocument();
+});
+
+it('distinguishes all included text from an empty source and from a zero-character multibyte prefix', () => {
+  const preview = { family: 'text', representation: 'utf8-source-prefix', sourceFormatId: 'org.ietf.text', text: 'a\t0\r\n',
+    sourceBytes: 5, includedSourceBytes: 5, maxBytes: 16384, truncated: false, syntax: 'not-checked' };
+  const view = render(<RetainedResultContent fixedView fixedSourceText preview={preview} />);
+  expect(screen.getByLabelText('Saved text preview').textContent).toBe(preview.text);
+  expect(screen.getByText('All source text is included in this retained view.')).toBeVisible();
+  view.rerender(<RetainedResultContent fixedView fixedSourceText preview={{ ...preview, text: '', sourceBytes: 0, includedSourceBytes: 0 }} />);
+  expect(screen.getByText('The source is empty.')).toBeVisible();
+  view.rerender(<RetainedResultContent fixedView fixedSourceText preview={{ ...preview, text: '', sourceBytes: 4, includedSourceBytes: 0, maxBytes: 1, truncated: true }} />);
+  expect(screen.getByText('No complete UTF-8 character fits within the selected byte limit.')).toBeVisible();
+  expect(screen.queryByText('The source is empty.')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Fixed retained source text')).toHaveTextContent('Included 0 of 4 source bytes. Maximum selected: 1 byte.');
+});
+
+it.each([{}, { fixedView: true }, { fixedSourceText: true }])('preserves generic text inspection wording outside explicit fixed-source mode (%j)', flags => {
+  render(<RetainedResultContent {...flags} preview={{ family: 'text', text: '<img src="https://invalid.test/no-fetch">', truncated: true }} />);
+  expect(screen.getByText('Showing part of the file. The full version is saved.')).toBeVisible();
+  expect(screen.queryByLabelText('Fixed retained source text')).not.toBeInTheDocument(); expect(document.querySelector('img')).toBeNull();
+});
+
 it('discloses bounded scans honestly and never invents row numbers for an empty retained window', () => {
   const view = render(<RetainedResultContent fixedView preview={{ ...table, offset: 100, rows: [], hasMore: false, truncated: true }} />);
   expect(screen.getByText('Fixed retained excerpt · no rows are included from the selected source window.')).toBeVisible();

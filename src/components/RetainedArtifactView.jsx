@@ -105,6 +105,7 @@ function RetainedResultBody({
   onPageSizeChange,
   onImageError,
   fixedView = false,
+  fixedSourceText = false,
   typedScalars = false,
   pointLimit = 2000,
   onPointLimitChange,
@@ -121,6 +122,12 @@ function RetainedResultBody({
   if (preview.family === 'text' && typeof preview.text === 'string')
     return (
       <>
+        {fixedView && fixedSourceText && <div className="space-y-2 text-xs text-textMuted" aria-label="Fixed retained source text">
+          <p className="font-medium text-text">{preview.sourceFormatId === 'org.ietf.json' ? 'JSON source text' : 'Plain source text'} · syntax not checked</p>
+          <p>Included {preview.includedSourceBytes.toLocaleString()} of {preview.sourceBytes.toLocaleString()} source {preview.sourceBytes === 1 ? 'byte' : 'bytes'}. Maximum selected: {preview.maxBytes.toLocaleString()} {preview.maxBytes === 1 ? 'byte' : 'bytes'}.</p>
+          <p>{preview.truncated ? 'Only this retained source prefix is included. Omitted source bytes are not accessible here.' : 'All source text is included in this retained view.'}</p>
+          {preview.includedSourceBytes === 0 && <p>{preview.sourceBytes === 0 ? 'The source is empty.' : 'No complete UTF-8 character fits within the selected byte limit.'}</p>}
+        </div>}
         <pre
           tabIndex={0}
           aria-label="Saved text preview"
@@ -128,7 +135,7 @@ function RetainedResultBody({
         >
           {preview.text}
         </pre>
-        {preview.truncated && (
+        {preview.truncated && !(fixedView && fixedSourceText) && (
           <p className="text-xs text-textMuted">
             Showing part of the file. The full version is saved.
           </p>

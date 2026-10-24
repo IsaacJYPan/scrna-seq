@@ -9,6 +9,7 @@ import { linkedRecord } from './snapshotLinkedTestFixtures';
 import { typedDescriptor, typedOptions, typedRecord } from './snapshotTypedTestFixtures';
 import { workflowSnapshotReference, workflowOffer, workflowSelection, workflowRecipe, workflowRecord, workflowOptions } from './snapshotWorkflowTestFixtures';
 import { embeddingRecipe, embeddingRecord, embeddingOptions } from './snapshotEmbeddingTestFixtures';
+import { inertRecord, inertOptions } from './snapshotInertTestFixtures';
 
 // Keep the actual transport, target fence, canonical helpers and strict validators.
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -31,7 +32,8 @@ function writes(kind = 'prepare') {
 function observe(value) {
   return { ...structuredClone(value), canPrepare: state.allowed, canResume: state.allowed && ['preparing', 'failed'].includes(value.state) };
 }
-const recordFactory = recipe => recipe.results.some(item => item.view.family === 'embedding') ? embeddingRecord
+const recordFactory = recipe => recipe.results.some(item => item.kind === 'inert-analysis-reference') ? inertRecord
+  : recipe.results.some(item => item.view.family === 'embedding') ? embeddingRecord
   : recipe.results.some(item => item.kind === 'captured-workflow-output') || recipe.prerequisites.some(item => item.kind === 'captured-workflow-reference') ? workflowRecord
   : recipe.results.some(item => item.kind === 'typed-analysis-reference') ? typedRecord
   : recipe.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
@@ -42,6 +44,8 @@ async function server(request) {
         snapshotReference: workflowSnapshotReference({ snapshotId: request.query.get('snapshotId'), sha256: request.query.get('snapshotSha256') }) });
     if (request.query.get('kind') === 'analysis-typed-references') return state.onTypedOptions ? state.onTypedOptions(request)
       : snapshotOptions('analysis-typed-references', state.allowed, [], Number(request.query.get('analysisVersion')));
+    if (request.query.get('kind') === 'analysis-inert-references') return state.onInertOptions ? state.onInertOptions(request)
+      : inertOptions({ items: [], analysisVersion: Number(request.query.get('analysisVersion')), canPrepare: state.allowed });
     if (request.query.get('kind') === 'analysis-references') return state.onLinkedOptions ? state.onLinkedOptions(request)
       : snapshotOptions('analysis-references', state.allowed, [], Number(request.query.get('analysisVersion')));
     if (state.onOptions) return state.onOptions(request);
@@ -135,6 +139,117 @@ function offerEmbedding({ captured = false } = {}) {
       snapshotReference: workflowSnapshotReference({ snapshotId: request.query.get('snapshotId'), sha256: request.query.get('snapshotSha256') }) });
   }
 }
+
+function offerInert(options = {}) {
+  state.onInertOptions = request => inertOptions({ ...options, analysisVersion: Number(request.query.get('analysisVersion')), canPrepare: state.allowed });
+}
+async function inspectInert() {
+  const summary = await screen.findByText('Text and JSON source excerpts (optional)'), details = summary.closest('details');
+  if (!details.open) fireEvent.click(summary);
+  return screen.findByRole('list', { name: 'Linked text and JSON sources' });
+}
+async function addInert() {
+  const list = await inspectInert(); fireEvent.click(await within(list).findByRole('button', { name: 'Select source prefix', exact: true }));
+  return screen.getByRole('checkbox', { name: 'Include source text for linked finding 1' });
+}
+
+it.each(['org.ietf.text', 'org.ietf.json'])('requires explicit source inclusion before submitting %s and never fetches its content from metadata discovery', async formatId => {
+  offerInert({ formatId }); state.onPrepare = request => { const value = inertRecord(request.body, { formats: [formatId] }); state.records.set(value.requestId, value); return value; };
+  await frame(); expect(state.requests.some(request => request.query.get('kind') === 'analysis-inert-references')).toBe(false);
+  const checkbox = await addInert(); expect(checkbox).not.toBeChecked();
+  expect(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 1' })).toHaveValue(16384);
+  expect(state.requests.every(request => request.pathname === base || request.pathname === base + '/options')).toBe(true); expect(writes()).toHaveLength(0);
+  fireEvent.submit(screen.getByRole('form', { name: 'Prepare private snapshot' })); await screen.findByRole('alert'); expect(writes()).toHaveLength(0);
+  fireEvent.click(checkbox); const submitted = await submit(); await screen.findByTestId('prepared-result');
+  expect(submitted.results).toEqual([{ kind: 'inert-analysis-reference', reference: inertOptions({ formatId }).items[0].reference,
+    caption: inertOptions({ formatId }).items[0].label, view: { family: 'text', maxBytes: 16384 }, includeSourceText: true }]);
+  expect(state.records.get(submitted.requestId).package.results[0].source.format.id).toBe(formatId);
+});
+
+it('keeps deliberate inclusion when its private prefix bound changes and preserves caption/bound/consent per saved version', async () => {
+  offerInert(); await frame(); const checkbox = await addInert(); fireEvent.click(checkbox);
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 1' }), { target: { value: '8' } }); expect(checkbox).toBeChecked();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: 'Old eight-byte prefix' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ }));
+  expect(screen.getByText('Text and JSON source excerpts (optional)').closest('details').open).toBe(false);
+  const otherConsent = await addInert(); expect(otherConsent).not.toBeChecked();
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 1' }), { target: { value: '16' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 2/ }));
+  expect(screen.getByRole('checkbox', { name: 'Include source text for linked finding 1' })).toBeChecked();
+  expect(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 1' })).toHaveValue(8);
+  expect(screen.getByRole('textbox', { name: 'Caption for linked finding 1' })).toHaveValue('Old eight-byte prefix');
+  const submitted = await submit(); await screen.findByTestId('prepared-result'); expect(submitted.analysisVersion).toBe(2); expect(submitted.results[0].view.maxBytes).toBe(8);
+});
+
+it('fences a held old-version source list and requires explicit expansion for the newly selected version', async () => {
+  const held = deferred(); state.onInertOptions = () => held.promise; await frame(); await inspectInert();
+  await waitFor(() => expect(state.requests.some(request => request.query.get('kind') === 'analysis-inert-references')).toBe(true));
+  const request = state.requests.find(value => value.query.get('kind') === 'analysis-inert-references');
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ })); expect(request.signal.aborted).toBe(true);
+  expect(screen.getByText('Text and JSON source excerpts (optional)').closest('details').open).toBe(false);
+  await act(async () => held.resolve(inertOptions({ items: [{ ...inertOptions().items[0], label: 'Obsolete old source' }] })));
+  expect(screen.queryByText('Obsolete old source')).not.toBeInTheDocument();
+  expect(state.requests.filter(value => value.query.get('kind') === 'analysis-inert-references')).toHaveLength(1);
+  offerInert(); await addInert(); expect(state.requests.filter(value => value.query.get('kind') === 'analysis-inert-references').map(value => value.query.get('analysisVersion'))).toEqual(['2', '1']);
+  expect(writes()).toHaveLength(0);
+});
+
+it('allows different deliberate prefix bounds but rejects an edited identical prefix before any POST', async () => {
+  offerInert(); await frame(); fireEvent.click(await addInert());
+  const add = screen.getByRole('button', { name: 'Select source prefix', exact: true }); expect(add).toBeDisabled();
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 1' }), { target: { value: '8' } }); expect(add).toBeEnabled(); fireEvent.click(add);
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Include source text for linked finding 2' }));
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 2' }), { target: { value: '8' } });
+  fireEvent.submit(screen.getByRole('form', { name: 'Prepare private snapshot' })); await screen.findByRole('alert'); expect(writes()).toHaveLength(0);
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 2' }), { target: { value: '16' } });
+  const submitted = await submit(); await screen.findByTestId('prepared-result'); expect(submitted.results.map(item => item.view.maxBytes)).toEqual([8, 16]);
+});
+
+it.each([0, 16385, 1.5])('rejects inert prefix bound %s before source inclusion can reach the server', async maxBytes => {
+  offerInert(); await frame(); fireEvent.click(await addInert());
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 1' }), { target: { value: String(maxBytes) } });
+  fireEvent.submit(screen.getByRole('form', { name: 'Prepare private snapshot' })); await screen.findByRole('alert'); expect(writes()).toHaveLength(0);
+});
+
+it('keeps unrelated selected findings when source-text metadata becomes unavailable', async () => {
+  offerInert(); await frame(); await choose(); state.onInertOptions = () => failure(404, 'ANALYSIS_SNAPSHOT_SOURCE_UNAVAILABLE');
+  await inspectInert(); await screen.findByRole('alert'); expect(screen.getByRole('form', { name: 'Prepare private snapshot' })).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Prepare private preview' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Refresh text and JSON sources' })).toBeEnabled(); expect(writes()).toHaveLength(0);
+});
+
+it('recovers an accepted literal prefix after a lost reply without reading or preparing the source again', async () => {
+  offerInert(); state.onPrepare = request => { const value = inertRecord(request.body); state.records.set(value.requestId, value); throw new Error('Accepted reply lost.'); };
+  await frame(); fireEvent.click(await addInert());
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum source bytes for linked finding 1' }), { target: { value: '8' } });
+  const original = await submit(); await screen.findByRole('alert'); fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' })); await screen.findByTestId('prepared-result');
+  expect(writes()).toHaveLength(1); expect(state.records.get(original.requestId).recipe).toEqual(original);
+  expect(screen.queryByRole('button', { name: 'Retry original preparation' })).not.toBeInTheDocument();
+});
+
+it('retries a genuinely absent source-text preparation only with its frozen original UUID/consent/prefix bound', async () => {
+  offerInert(); state.onPrepare = request => { if (writes().length === 1) throw new Error('Never accepted.'); const value = inertRecord(request.body); state.records.set(value.requestId, value); return value; };
+  await frame(); fireEvent.click(await addInert()); const original = await submit(); await screen.findByRole('alert');
+  fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' })); fireEvent.click(await screen.findByRole('button', { name: 'Retry original preparation' }));
+  await screen.findByTestId('prepared-result'); expect(writes()).toHaveLength(2); expect(writes()[1].body).toEqual(original);
+});
+
+it.each(['navigation', 'read-only'])('does not admit source text after %s changes while the exact consent-bound intent hash is pending', async change => {
+  offerInert(); await frame(); fireEvent.click(await addInert());
+  const held = deferred(), actual = webcrypto.subtle.digest.bind(webcrypto.subtle); let pending;
+  vi.stubGlobal('crypto', { randomUUID: webcrypto.randomUUID.bind(webcrypto), subtle: { digest: (algorithm, bytes) => {
+    if (!pending && new TextDecoder().decode(bytes).includes('"kind":"inert-analysis-reference"')) {
+      pending = { algorithm, bytes: new Uint8Array(bytes) }; return held.promise;
+    }
+    return actual(algorithm, bytes);
+  } } });
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare private preview' })); await waitFor(() => expect(pending).toBeTruthy());
+  if (change === 'navigation') fireEvent.click(screen.getByRole('button', { name: 'Saved preparations' }));
+  else { state.allowed = false; fireEvent.click(screen.getByRole('button', { name: 'Refresh access and saved preparations' })); await screen.findByText(/New previews require write access/); }
+  await act(async () => held.resolve(await actual(pending.algorithm, pending.bytes))); expect(writes()).toHaveLength(0);
+  if (change === 'navigation') expect(screen.getByRole('region', { name: 'Your private preparations' })).toBeVisible();
+  else expect(screen.getByRole('button', { name: 'Prepare private preview' })).toBeDisabled();
+});
 
 it('starts a direct embedding at an explicit 2000-point bound and preserves that bound in the accepted exact intent', async () => {
   offerEmbedding(); await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked embedding', exact: true }));

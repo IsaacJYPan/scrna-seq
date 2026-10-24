@@ -6,6 +6,7 @@ import { withExecutionTarget } from '../runtime/executionTarget';
 import { typedRecipe, typedRecord, typedMetricsBytes } from './snapshotTypedTestFixtures';
 import { workflowRecipe, workflowRecord } from './snapshotWorkflowTestFixtures';
 import { embeddingRecipe, embeddingRecord, embeddingBytes } from './snapshotEmbeddingTestFixtures';
+import { inertRecipe, inertRecord, inertBytes } from './snapshotInertTestFixtures';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
 vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
@@ -110,6 +111,25 @@ it.each(['mime', 'checksum', 'length', 'size', 'schema'])('rejects public embedd
   if (mismatch === 'schema') result.view.schema = 'traceomics.fixed-result-view.v99';
   fetch.mockResolvedValue(new Response(mismatch === 'length' ? content.subarray(1) : content,
     { headers: { 'Content-Type': mismatch === 'mime' ? 'image/png' : 'application/json' } }));
+  await expect(readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', result)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' });
+  expect(fetch).toHaveBeenCalledTimes(['size', 'schema'].includes(mismatch) ? 0 : 1);
+});
+
+it.each(['org.ietf.text', 'org.ietf.json'])('reads checked fixed4 %s only through the exact current-reader publication body route', async formatId => {
+  const record = inertRecord(inertRecipe({ formatId, maxBytes: 8 }), { formats: [formatId] }), result = record.package.results[0], content = inertBytes(result);
+  fetch.mockResolvedValue(new Response(content, { headers: { 'Content-Type': 'application/json; charset=utf-8' } }));
+  const received = await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', result);
+  expect(Array.from(received.bytes)).toEqual(Array.from(content)); expect(received.type).toBe('application/json');
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([`${base}/aspub_exact/views/${result.viewId}`]);
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it.each(['source MIME', 'checksum', 'length', 'size', 'schema'])('rejects public fixed4 text %s mismatch without source or prefix fallback', async mismatch => {
+  const record = inertRecord(), result = record.package.results[0], content = inertBytes(result);
+  if (mismatch === 'checksum') result.view.blobSha256 = 'b'.repeat(64);
+  if (mismatch === 'size') result.view.blobBytes = 262145;
+  if (mismatch === 'schema') result.view.schema = 'traceomics.fixed-result-view.v2';
+  fetch.mockResolvedValue(new Response(mismatch === 'length' ? content.subarray(1) : content, { headers: { 'Content-Type': mismatch === 'source MIME' ? 'text/plain' : 'application/json' } }));
   await expect(readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', result)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' });
   expect(fetch).toHaveBeenCalledTimes(['size', 'schema'].includes(mismatch) ? 0 : 1);
 });

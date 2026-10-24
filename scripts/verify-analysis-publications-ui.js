@@ -19,11 +19,12 @@ async function until(test, message, timeout = 30000) {
   while (Date.now() < end) { if (await test()) return; await new Promise(resolve => setTimeout(resolve, 75)); }
   throw new Error(message);
 }
-async function main({ linkedResults = false, typedResults = false, capturedResults = false, embeddingResults = false } = {}) {
+async function main({ linkedResults = false, typedResults = false, capturedResults = false, embeddingResults = false, inertResults = false } = {}) {
+  embeddingResults ||= inertResults;
   capturedResults ||= embeddingResults;
   typedResults ||= capturedResults;
   linkedResults ||= typedResults;
-  const directory = path.join(root, 'playwright', 'report', (embeddingResults ? 'analysis-embedding-publications-' : capturedResults ? 'analysis-workflow-publications-' : typedResults ? 'analysis-typed-publications-' : linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
+  const directory = path.join(root, 'playwright', 'report', (inertResults ? 'analysis-inert-publications-' : embeddingResults ? 'analysis-embedding-publications-' : capturedResults ? 'analysis-workflow-publications-' : typedResults ? 'analysis-typed-publications-' : linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
   const frozen = new Map(fs.readdirSync(path.join(root, 'dist/assets')).map(name => [name, sha(fs.readFileSync(path.join(root, 'dist/assets', name)))]));
   const checks = [], screenshots = [], profiles = [], requests = [], browserErrors = [], consoleErrors = [], assetReads = [], faults = [], restarts = [];
   const compiledAssets = {}, accounts = {}, expected = new Set(), faultPaths = new Set();
@@ -79,8 +80,10 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     target.on('pageerror', error => browserErrors.push(error.message));
     target.on('console', value => { if (value.type() === 'error') consoleErrors.push({ text: value.text(), url: value.location().url, at: Date.now() }); });
     target.on('request', request => {
-      const pathname = new URL(request.url()).pathname; if (!pathname.startsWith('/api/')) return;
-      requests.push({ actor, method: request.method(), pathname, ...(request.method() === 'POST' && /\/(?:snapshot-preparations|snapshot-publications(?:\/aspub_[a-f0-9]{24}\/withdrawals)?)$/.test(pathname) ? { input: request.postDataJSON() } : {}) });
+      const address = new URL(request.url()), pathname = address.pathname; if (!pathname.startsWith('/api/')) return;
+      requests.push({ actor, method: request.method(), pathname, ...(pathname.endsWith('/snapshot-preparations/options')
+        ? { optionKind: address.searchParams.get('kind'), optionAnalysisVersion: address.searchParams.get('analysisVersion') } : {}),
+      ...(request.method() === 'POST' && /\/(?:snapshot-preparations|snapshot-publications(?:\/aspub_[a-f0-9]{24}\/withdrawals)?)$/.test(pathname) ? { input: request.postDataJSON() } : {}) });
     });
     target.on('response', response => {
       const pathname = new URL(response.url()).pathname;
@@ -95,16 +98,16 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     const expand = target.getByRole('button', { name: 'Expand sidebar', exact: true }); if (await expand.isVisible()) await expand.click();
     await target.getByRole('button', { name, exact: typeof name === 'string' }).click();
   }
-  async function openAnalysis(target) {
+  async function openAnalysis(target, selectedStudy = study) {
     await nav(target, /^Data workspace,/); await target.getByRole('button', { name: new RegExp('^' + escape(service.project.name) + '(?:$|\\s)') }).click();
     await nav(target, 'Analyses');
     if (await panel(target).isVisible()) await panel(target).getByRole('button', { name: /Back to (?:analysis|private preparation)/ }).click();
     if (await prep(target).isVisible()) await prep(target).getByRole('button', { name: 'Back to analysis', exact: true }).click();
     const all = target.getByRole('button', { name: 'All analyses', exact: true }); if (await all.isVisible()) await all.click();
-    await target.getByRole('list', { name: 'Analysis list', exact: true }).getByRole('button', { name: new RegExp('^' + escape(study.name)) }).click();
+    await target.getByRole('list', { name: 'Analysis list', exact: true }).getByRole('button', { name: new RegExp('^' + escape(selectedStudy.name)) }).click();
     await target.getByRole('region', { name: 'Selected analysis', exact: true }).waitFor();
   }
-  async function openPublications(target) { await openAnalysis(target); await target.getByRole('button', { name: 'Published snapshots', exact: true }).click(); await panel(target).waitFor(); }
+  async function openPublications(target, selectedStudy = study) { await openAnalysis(target, selectedStudy); await target.getByRole('button', { name: 'Published snapshots', exact: true }).click(); await panel(target).waitFor(); }
   async function openPublic(target) {
     await panel(target).getByRole('button', { name: 'Browse published snapshots', exact: true }).click();
     await panel(target).getByRole('button', { name: 'Open published snapshot', exact: true }).first().click();
@@ -543,6 +546,12 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
       && !storage.includes('PRIVATE_UNSELECTED_CAPTURE_NOTE') && !storage.includes('PRIVATE_CAPTURE_PATH'), 'Scientific source, private recorded values or original sharing intent entered Web Storage.');
     if (linkedResults) assert(requests.filter(item => item.method === 'POST' && item.pathname === prepPath()).length === 1, 'The original v2 preparation was repeated after acceptance/restart.');
     check('A publisher downgraded to reader explicitly withdraws; a real committed lost reply recovers its original acceptance, older active colleague replies cannot restore content, last-reference bytes are released, and original publication replay never reactivates it or runs science.');
+    if (inertResults) {
+      await require('./analysis-inert-sharing-ui.cjs').verifyInertSharing({ service, database, page, accounts, api, importFixture, login, restart,
+        openAnalysis, openPublications, openPublic, prep, panel, detail, matrix, intercept, faults, faultPaths, expected, requests, check, until });
+      assert((await database.query('SELECT COUNT(*)::int AS n FROM private_r_executions')).rows[0].n === scientificCount
+        && (await database.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n === jobCount, 'Inert source sharing dispatched additional science.');
+    }
     await Promise.all(assetReads);
     const unexpected = consoleErrors.filter(entry => {
       let url; try { url = new URL(entry.url); } catch { return true; }
@@ -555,7 +564,8 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     check('All sharing journeys used frozen production assets, genuine authenticated accounts and real retained R outputs without unexpected browser errors, extra scientific execution or scientific browser persistence.');
     fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: true, checks, screenshots, profiles, browserRestarts: restarts, compiledAssets, browserErrors, consoleErrors, requests, intentionalRuntimeResponses,
       image: service.image, environment: service.environment.id, producerStopped: true, typedWorkerCompleted: typedFindings?.workerCompleted || false,
-      fixture: 'Disposable actual R kernel+managed serializers' + (typedFindings ? '+completed typed workflow worker' : '') + '/HTTPS/auth/PG/private storage; synthetic20genes12cells; no general scientific correctness, SSH or reference-hardware claim.' }, null, 2));
+      fixture: 'Disposable actual R kernel+managed serializers' + (typedFindings ? '+completed typed workflow worker' : '') + '/HTTPS/auth/PG/private storage; synthetic20genes12cells; '
+        + (inertResults ? 'TXT/JSON source fixtures separately imported, not produced by the workflow; ' : '') + 'no general scientific correctness, SSH or reference-hardware claim.' }, null, 2));
     console.log('Analysis publication acceptance: ' + directory);
   } catch (error) {
     await (visibleTarget || page)?.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true }).catch(() => {});

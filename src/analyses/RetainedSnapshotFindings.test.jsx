@@ -12,6 +12,7 @@ import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes } from '.
 import { typedDescriptor, typedRecipe, typedRecord, typedTableBytes, typedMetricsBytes, typedImageBytes } from './snapshotTypedTestFixtures';
 import { workflowOffer, workflowSelection, workflowRecipe, workflowRecord, workflowReferencePrerequisite } from './snapshotWorkflowTestFixtures';
 import { validateSnapshotPreparation } from './snapshotPreparationValidation';
+import { inertValue, inertRecipe, inertRecord, inertBytes } from './snapshotInertTestFixtures';
 
 vi.mock('./snapshotPreparationApi', () => ({ readSnapshotPreparationView: vi.fn(), readSnapshotPreparationDocument: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
@@ -52,6 +53,14 @@ function linkedFixture({ prerequisites = [], referenceReasons = [], caption = 'C
   const record = linkedRecord(linkedRecipe({ results: [attachment, direct], prerequisites }), { referenceReasons });
   readSnapshotPreparationView.mockImplementation((_p, _a, _id, result) => Promise.resolve({ bytes: linkedTableBytes(result), type: 'application/json' }));
   readSnapshotPreparationDocument.mockResolvedValue({ bytes: new TextEncoder().encode(canonicalNotebookContent(savedSnapshotContent)), type: 'application/json' });
+  return { record, props: { ...snapshotScope, resourceId: record.preparationId, snapshotSha256: record.snapshotSha256, snapshot: record.package,
+    availability: record.availability, available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() } };
+}
+async function inertFindingFixture({ text = inertValue(), two = false } = {}) {
+  const first = inertRecipe({ text, maxBytes: 8 }).results[0], recipe = inertRecipe({ text, results: two
+    ? [first, { ...first, caption: 'The longer deliberate prefix', view: { family: 'text', maxBytes: 16 } }] : [first] });
+  const record = inertRecord(recipe, { values: [text, text] }); await validateSnapshotPreparation(record, snapshotScope, recipe);
+  readSnapshotPreparationView.mockImplementation((_p, _a, _id, result) => Promise.resolve({ bytes: inertBytes(result, text), type: 'application/json' }));
   return { record, props: { ...snapshotScope, resourceId: record.preparationId, snapshotSha256: record.snapshotSha256, snapshot: record.package,
     availability: record.availability, available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() } };
 }
@@ -413,4 +422,57 @@ it('clears recorded method/settings/environment evidence with the published pack
   view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
   expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(screen.queryByLabelText('Recorded workflow context')).not.toBeInTheDocument();
   expect(screen.queryByText('Recorded random seed:')).not.toBeInTheDocument(); expect(screen.queryByText(workflowOffer().environment.profileId)).not.toBeInTheDocument(); expect(readView).toHaveBeenCalledOnce();
+});
+
+it('presents deliberately included inert source as its own supplied-caption finding with distinct source and view identities', async () => {
+  const value = await inertFindingFixture(); render(<RetainedSnapshotFindings {...value.props} />);
+  await screen.findByLabelText('Saved text preview');
+  expect(screen.getByRole('button', { name: /1\. Selected inert source text/ })).toHaveTextContent('Source text included · Saved analysis 2');
+  const detail = within(screen.getByLabelText('Retained prepared finding'));
+  expect(detail.getByRole('heading', { name: 'Selected inert source text' })).toBeVisible(); expect(detail.getByText('Caption supplied for this snapshot.')).toBeVisible();
+  expect(detail.queryByLabelText('Recorded workflow context')).not.toBeInTheDocument();
+  const exact = detail.getByText('Supplied context and exact view').closest('details'); exact.open = true;
+  expect(within(exact).getByText(value.record.package.results[0].source.sha256)).toBeVisible();
+  expect(within(exact).getByText(value.record.package.results[0].view.viewSha256)).toBeVisible();
+  expect(within(exact).queryByText('Recorded output descriptor SHA-256')).not.toBeInTheDocument();
+  expect(readSnapshotPreparationDocument).not.toHaveBeenCalled(); expect(screen.getByRole('button', { name: 'View supporting source' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: /Run|Import source|Load more/ })).not.toBeInTheDocument();
+});
+
+it('mounts only one deliberate retained prefix at a time and preserves its selection through equal package refresh', async () => {
+  const value = await inertFindingFixture({ two: true }), view = render(<RetainedSnapshotFindings {...value.props} />);
+  await screen.findByLabelText('Saved text preview'); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button', { name: /2\. The longer deliberate prefix/ }));
+  await waitFor(() => expect(screen.getByLabelText('Fixed retained source text')).toHaveTextContent('Maximum selected: 16 bytes.'));
+  expect(screen.getAllByLabelText('Saved text preview')).toHaveLength(1); expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2);
+  view.rerender(<RetainedSnapshotFindings {...value.props} snapshot={structuredClone(value.props.snapshot)} availability={structuredClone(value.props.availability)} />);
+  await act(async () => {}); expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole('button', { name: /2\. The longer deliberate prefix/ })).toHaveAttribute('aria-pressed', 'true');
+});
+
+it('keeps current unavailable inert source identity without loading its body or treating it as a supporting script', async () => {
+  const value = await inertFindingFixture(); value.props.availability.views[0].status = 'unavailable'; value.props.availability.status = 'unavailable';
+  render(<RetainedSnapshotFindings {...value.props} />);
+  expect(screen.getByText('This retained view is unavailable. Its exact saved identity is kept and has not been regenerated.')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Selected inert source text' })).toBeVisible(); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('uses current colleague publication authority for included text and unmounts all literal content on withdrawal', async () => {
+  const value = await inertFindingFixture({ text: '<script>never_execute()</script>private suffix' });
+  const readView = vi.fn().mockImplementation((_p, _a, _id, result) => Promise.resolve({ bytes: inertBytes(result, '<script>never_execute()</script>private suffix'), type: 'application/json' }));
+  const props = { ...value.props, userId: 17, audience: 'project-publication', resourceId: publicId, readView };
+  const view = render(<RetainedSnapshotFindings {...props} />); await screen.findByLabelText('Saved text preview');
+  expect(readView.mock.calls[0][2]).toBe(publicId); expect(readView.mock.calls[0][3].source.ownerUserId).toBe(7); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+  expect(document.querySelector('script')).toBeNull();
+  view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
+  expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument(); expect(screen.queryByText('Source text included · Saved analysis 2')).not.toBeInTheDocument();
+  expect(readView).toHaveBeenCalledOnce();
+});
+
+it('fails closed when a purported inert finding lacks its explicit inclusion declaration', async () => {
+  const value = await inertFindingFixture(); value.props.snapshot.results[0].origin.includeSourceText = false;
+  render(<RetainedSnapshotFindings {...value.props} />);
+  expect(screen.getByRole('alert')).toHaveTextContent('finding context could not be verified');
+  expect(readSnapshotPreparationView).not.toHaveBeenCalled();
 });

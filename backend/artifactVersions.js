@@ -7,7 +7,9 @@ const config = require('./config');
 const previews = require('./artifactPreviews');
 const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, projectRetainedMetrics, projectRetainedEmbedding, validateRetainedRasterMetadata } = require('./retainedTypedPreviews');
 const { projectTypedSource } = require('./analysisSnapshotTypedSources');
+const { projectInertSource } = require('./analysisSnapshotInertSources');
 const snapshotTypedContract = import('../shared/analysisSnapshotTypedResult.mjs');
+const snapshotInertContract = import('../shared/analysisSnapshotInertResult.mjs');
 const snapshotContract = import('../shared/analysisSnapshotPreparationDispatch.mjs');
 const { DOWNLOADABLE_ARTIFACT_TYPES, authorizeArtifactDownload } = require('./researchExports');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
@@ -225,7 +227,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       const result = await reader.query('SELECT * FROM managed_artifact_versions WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
       if (result.rows[0]) row = managed(result.rows[0]);
     } else if (versionId.startsWith('eri_')) {
-      const input = await reader.query('SELECT * FROM expert_r_private_inputs WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
+      const input = await reader.query(`SELECT * FROM expert_r_private_inputs WHERE id=$1 AND project_id=$2 AND owner_user_id=$3${snapshotClient ? ' FOR SHARE' : ''}`, [versionId, projectId, userId]);
       if (input.rows[0]) row = privateInput(input.rows[0]);
       else {
         const output = await reader.query(`SELECT * FROM workflow_artifacts WHERE id=$1 AND project_id=$2 AND owner_user_id=$3${snapshotClient ? ' FOR SHARE' : ''}`, [versionId, projectId, userId]);
@@ -499,6 +501,34 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     } finally { await opened.handle.close(); }
   }
 
+  async function prepareFixedInertViews(userId, projectId, versionId, selections) {
+    if (!Array.isArray(selections) || selections.length < 1 || selections.length > 8
+        || selections.some(value => value.family !== 'text' || !Number.isSafeInteger(value.maxBytes) || value.maxBytes < 1 || value.maxBytes > 16384)) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'Choose at most eight bounded inert text prefixes.');
+    const source = await internal(userId, projectId, versionId);
+    if (Number(source.ownerId) !== Number(userId) || !projectInertSource(source)) notFound();
+    const version = await display(source), opened = await resolveVerified(userId, projectId, version.reference);
+    try {
+      const maximum = Math.max(...selections.map(value => value.maxBytes)), bytes = await prefix(opened, maximum);
+      if (bytes.length !== Math.min(maximum, version.sizeBytes)) throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The source text changed while its fixed prefix was read.', 409);
+      const schema = await snapshotInertContract, projected = new Map(), result = [];
+      for (const selection of selections) {
+        if (!projected.has(selection.maxBytes)) {
+          const body = schema.projectAnalysisSnapshotInertPrefix({ source: version.reference, sourceFormatId: source.format.id,
+            sourceBytes: version.sizeBytes, maxBytes: selection.maxBytes, bytes: bytes.subarray(0, Math.min(version.sizeBytes, selection.maxBytes)) });
+          projected.set(selection.maxBytes, { bytes: Buffer.from(schema.canonicalAnalysisSnapshotInertBody(body)), width: null, height: null });
+        }
+        result.push(projected.get(selection.maxBytes));
+      }
+      const stat = await opened.handle.stat();
+      if (!stat.isFile() || ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].some(key => stat[key] !== opened.stat[key])) throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The source text changed while its fixed prefix was read.', 409);
+      await recheckOpened(userId, projectId, opened);
+      const current = await internal(userId, projectId, versionId);
+      if (Number(current.ownerId) !== Number(userId) || !projectInertSource(current) || current.format.id !== source.format.id
+          || current.sourceKind !== source.sourceKind) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The exact inert source authority or format changed during preparation.', 409);
+      return result;
+    } finally { await opened.handle.close(); }
+  }
+
   async function importFile(userId, projectId, file, previousVersionId = null) {
     await db.requireProjectRole(userId, projectId, WRITE_ROLES);
     if (!file || typeof file.path !== 'string') throw artifactError('INVALID_ARTIFACT_FILE', 'Select a file to import.');
@@ -650,7 +680,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     return inserted.rows[0];
   }
   return { list, get, preview, readVerifiedImage, importFile, getImportReceipt, serializeImportReceipt: importReceipt,
-    resolveVerified, prepareFixedTableViews, prepareFixedTypedViews, snapshotSourceMetadata, readVerifiedOwnedImage, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
+    resolveVerified, prepareFixedTableViews, prepareFixedTypedViews, prepareFixedInertViews, snapshotSourceMetadata, readVerifiedOwnedImage, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

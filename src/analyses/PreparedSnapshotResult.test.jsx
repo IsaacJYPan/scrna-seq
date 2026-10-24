@@ -13,6 +13,7 @@ import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes, linkedIm
 import { typedRecipe, typedRecord, typedTableBytes, typedMetricsBytes, typedImageBytes } from './snapshotTypedTestFixtures';
 import { embeddingRecipe, embeddingRecord, embeddingDescriptor, embeddingBytes, embeddingValue } from './snapshotEmbeddingTestFixtures';
 import { workflowSelection } from './snapshotWorkflowTestFixtures';
+import { inertValue, inertRecipe, inertRecord, inertBytes } from './snapshotInertTestFixtures';
 import { validateSnapshotPreparation } from './snapshotPreparationValidation';
 import Plot from '../components/Plot';
 import { downloadPlotImage } from '../components/PlotlyRenderer';
@@ -62,6 +63,17 @@ async function embeddingFixture(options = {}) {
   await validateSnapshotPreparation(record, snapshotScope, recipe);
   return { props: { ...snapshotScope, preparationId: record.preparationId, descriptor: record.package.results[0], snapshotSha256: record.snapshotSha256,
     available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() }, bytes: embeddingBytes(record.package.results[0], value), type: 'application/json' };
+}
+async function inertFixture({ formatId = 'org.ietf.text', text = inertValue(formatId), ...options } = {}) {
+  const recipe = inertRecipe({ ...options, formatId, text }), record = inertRecord(recipe, { values: [text], formats: [formatId] });
+  await validateSnapshotPreparation(record, snapshotScope, recipe);
+  return { text, props: { ...snapshotScope, preparationId: record.preparationId, descriptor: record.package.results[0], snapshotSha256: record.snapshotSha256,
+    available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() }, bytes: inertBytes(record.package.results[0], text), type: 'application/json' };
+}
+function resealView(descriptor) {
+  const { viewSha256: previous, ...view } = descriptor.view; void previous;
+  descriptor.view.viewSha256 = hash(canonicalAnalysisSnapshotResultView({ ...view, source: { artifactId: descriptor.source.artifactId,
+    versionId: descriptor.source.versionId, projectId: snapshotScope.projectId, sha256: descriptor.source.sha256 } }));
 }
 beforeEach(() => {
   vi.resetAllMocks(); vi.stubGlobal('crypto', webcrypto); useExecutionTarget.mockReturnValue(connection);
@@ -441,6 +453,7 @@ it.each(['bound', 'source', 'counts', 'axes'])('rejects re-sealed embedding %s m
   else if (change === 'counts') body.sampling.returnedCount--;
   else body.semantics.axes.x.label = 'Unreviewed dimension';
   value.bytes = new TextEncoder().encode(canonicalSnapshotJson(body)); value.props.descriptor.view.blobSha256 = hash(value.bytes); value.props.descriptor.view.blobBytes = value.bytes.length;
+  resealView(value.props.descriptor);
   readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
   expect(await screen.findByRole('alert')).toHaveTextContent('exact saved identity is kept');
   expect(screen.queryByTestId('retained-plot')).not.toBeInTheDocument(); expect(screen.queryByRole('button', { name: 'Export plot PNG' })).not.toBeInTheDocument();
@@ -482,4 +495,91 @@ it('refuses an embedding under an unknown fixed schema instead of treating JSON 
   const value = await embeddingFixture(); value.props.descriptor.view.schema = 'traceomics.fixed-result-view.v2';
   readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
   await screen.findByRole('alert'); expect(screen.queryByTestId('retained-plot')).not.toBeInTheDocument(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+});
+
+it.each(['org.ietf.text', 'org.ietf.json'])('strictly renders included %s as literal text without parsing source JSON or executing markup', async formatId => {
+  const value = await inertFixture({ formatId }); readSnapshotPreparationView.mockResolvedValue(value);
+  render(<PreparedSnapshotResult {...value.props} />);
+  expect((await screen.findByLabelText('Saved text preview')).textContent).toBe(value.text);
+  expect(screen.getByLabelText('Fixed retained source text')).toHaveTextContent('syntax not checked');
+  expect(screen.getByText('All source text is included in this retained view.')).toBeVisible();
+  expect(document.querySelector('b')).toBeNull(); expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  expect(URL.createObjectURL).not.toHaveBeenCalled(); expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+  fireEvent.keyDown(screen.getByLabelText('Saved text preview'), { key: 'ArrowDown' });
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(screen.queryByRole('button', { name: /Load more|Run|Expand prefix/ })).not.toBeInTheDocument();
+});
+
+it('renders only complete UTF-8 characters within the retained prefix and never exposes its unselected suffix', async () => {
+  const text = '\uFEFFa\r\n🧬PRIVATE_UNSELECTED_SUFFIX', value = await inertFixture({ text, maxBytes: 8 });
+  readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
+  expect((await screen.findByLabelText('Saved text preview')).textContent).toBe('\uFEFFa\r\n');
+  expect(screen.getByLabelText('Fixed retained source text')).toHaveTextContent('Included 6 of');
+  expect(screen.getByLabelText('Fixed retained source text')).toHaveTextContent('Maximum selected: 8 bytes.');
+  expect(screen.queryByText(/PRIVATE_UNSELECTED_SUFFIX/)).not.toBeInTheDocument();
+  expect(screen.getByText('Only this retained source prefix is included. Omitted source bytes are not accessible here.')).toBeVisible();
+});
+
+it.each([['', 1, 'The source is empty.'], ['🧬tail', 1, 'No complete UTF-8 character fits within the selected byte limit.']])('distinguishes an empty included prefix for %j', async (text, maxBytes, explanation) => {
+  const value = await inertFixture({ text, maxBytes }); readSnapshotPreparationView.mockResolvedValue(value);
+  render(<PreparedSnapshotResult {...value.props} />); expect((await screen.findByLabelText('Saved text preview')).textContent).toBe('');
+  expect(screen.getByText(explanation)).toBeVisible();
+});
+
+it.each(['bound', 'format', 'owner', 'consent', 'source bytes', 'source checksum'])('fences held inert prefix bytes when %s changes under the same retained blob hash', async change => {
+  const value = await inertFixture(), held = deferred(), replacement = deferred();
+  readSnapshotPreparationView.mockReturnValueOnce(held.promise).mockReturnValueOnce(replacement.promise);
+  const view = render(<PreparedSnapshotResult {...value.props} />); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledOnce());
+  const signal = readSnapshotPreparationView.mock.calls[0][4].signal, descriptor = structuredClone(value.props.descriptor);
+  if (change === 'bound') descriptor.view.spec.maxBytes = 8;
+  else if (change === 'format') descriptor.source.format.id = 'org.ietf.json';
+  else if (change === 'owner') descriptor.source.ownerUserId = 8;
+  else if (change === 'consent') descriptor.origin.includeSourceText = false;
+  else if (change === 'source bytes') descriptor.source.sizeBytes++;
+  else descriptor.source.sha256 = 'e'.repeat(64);
+  view.rerender(<PreparedSnapshotResult {...value.props} descriptor={descriptor} />); expect(signal.aborted).toBe(true);
+  await act(async () => held.resolve(value)); expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument();
+  expect(value.props.onUnavailable).not.toHaveBeenCalled(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+  view.unmount(); await act(async () => replacement.resolve(value));
+});
+
+it.each(['source', 'format', 'source size', 'included bytes', 'bound', 'truncation', 'syntax'])('rejects re-sealed inert body %s disagreement before displaying source text', async change => {
+  const value = await inertFixture(), body = JSON.parse(new TextDecoder().decode(value.bytes));
+  if (change === 'source') body.source.sha256 = 'e'.repeat(64);
+  else if (change === 'format') body.sourceFormatId = 'org.ietf.json';
+  else if (change === 'source size') body.sourceBytes++;
+  else if (change === 'included bytes') body.includedSourceBytes--;
+  else if (change === 'bound') body.maxBytes--;
+  else if (change === 'truncation') body.truncated = true;
+  else body.syntax = 'validated';
+  value.bytes = new TextEncoder().encode(canonicalSnapshotJson(body)); value.props.descriptor.view.blobSha256 = hash(value.bytes); value.props.descriptor.view.blobBytes = value.bytes.length;
+  resealView(value.props.descriptor);
+  readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
+  await screen.findByRole('alert'); expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument();
+  expect(value.props.onUnavailable).toHaveBeenCalledOnce(); expect(value.props.onDenied).not.toHaveBeenCalled(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+});
+
+it('keeps inert public reads viewer-bound and removes content immediately on current access loss', async () => {
+  const value = await inertFixture({ formatId: 'org.ietf.json', versionId: 'eri_' + '8'.repeat(24) }), readView = vi.fn().mockResolvedValue(value);
+  const props = { ...value.props, userId: 17, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView };
+  const view = render(<PreparedSnapshotResult {...props} />); await screen.findByLabelText('Saved text preview');
+  expect(readSnapshotPreparationView).not.toHaveBeenCalled(); expect(readView.mock.calls[0][3].source.ownerUserId).toBe(7);
+  view.rerender(<PreparedSnapshotResult {...props} available={false} />); expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument();
+  expect(readView).toHaveBeenCalledOnce();
+});
+
+it('keeps equal inert descriptors stable through recovery but treats a withdrawn observation as terminal', async () => {
+  const value = await inertFixture(), readView = vi.fn().mockResolvedValue(value);
+  const props = { ...value.props, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView };
+  const view = render(<PreparedSnapshotResult {...props} />); await screen.findByLabelText('Saved text preview');
+  view.rerender(<PreparedSnapshotResult {...props} descriptor={structuredClone(props.descriptor)} />); await act(async () => {}); expect(readView).toHaveBeenCalledOnce();
+  view.unmount(); readView.mockRejectedValue(Object.assign(new Error('withdrawn'), { status: 409, code: 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN' }));
+  const next = render(<PreparedSnapshotResult {...props} />); await screen.findByRole('alert');
+  next.rerender(<PreparedSnapshotResult {...props} descriptor={structuredClone(props.descriptor)} />); await act(async () => {});
+  expect(readView).toHaveBeenCalledTimes(2); expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry retained view' })).not.toBeInTheDocument();
+});
+
+it('rejects text under a legacy fixed schema rather than bypassing the new literal-prefix decoder', async () => {
+  const value = await inertFixture(); value.props.descriptor.view.schema = 'traceomics.fixed-result-view.v3'; readSnapshotPreparationView.mockResolvedValue(value);
+  render(<PreparedSnapshotResult {...value.props} />); await screen.findByRole('alert'); expect(screen.queryByLabelText('Saved text preview')).not.toBeInTheDocument();
 });

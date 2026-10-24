@@ -1,10 +1,12 @@
 import * as legacy from './analysisSnapshotPreparation.mjs';
 import * as linked from './analysisSnapshotPreparationV2.mjs';
 import * as typed from './analysisSnapshotTypedResult.mjs';
+import * as inert from './analysisSnapshotInertResult.mjs';
 export * from './analysisSnapshotPreparation.mjs';
 export * from './analysisSnapshotPreparationV2.mjs';
 export * from './analysisSnapshotTypedResult.mjs';
 export * from './analysisSnapshotWorkflowContext.mjs';
+export * from './analysisSnapshotInertResult.mjs';
 
 function schema(value, optional = false) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return unsupported();
@@ -35,5 +37,6 @@ export function canonicalAnalysisSnapshotResultView(input) {
   const version = schema(input);
   return version === legacy.FIXED_RESULT_VIEW_SCHEMA ? legacy.canonicalAnalysisSnapshotResultView(input)
     : version === linked.FIXED_RESULT_VIEW_SCHEMA_V2 ? linked.canonicalAnalysisSnapshotResultViewV2(input)
-      : version === typed.FIXED_RESULT_VIEW_SCHEMA_V3 ? typed.canonicalAnalysisSnapshotResultViewV3(input) : unsupported();
+      : version === typed.FIXED_RESULT_VIEW_SCHEMA_V3 ? typed.canonicalAnalysisSnapshotResultViewV3(input)
+        : version === inert.FIXED_RESULT_VIEW_SCHEMA_V4 ? inert.canonicalAnalysisSnapshotResultViewV4(input) : unsupported();
 }

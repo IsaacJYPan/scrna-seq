@@ -65,7 +65,8 @@ export default function AnalysisSnapshotPublications(props) {
           {props.seed && <button type="button" className="btn btn-secondary text-sm" disabled={busy || !props.available || pending} onClick={() => void state.reviewSeed(props.seed.preparation)}>Check selected private preparation</button>}</>
           : <><p className="break-words font-semibold">{acknowledgement.package.analysis.name}</p>
             <p className="text-sm text-textMuted">Saved analysis {acknowledgement.package.analysis.version} · {acknowledgement.package.results.length} findings · {acknowledgement.package.documents.length} supporting documents</p>
-            <p className="text-sm">Current project members will be able to view the selected fixed table excerpts, whole retained figures, supplied notes and included saved supporting source. Members can save content they can view.</p>
+            <p className="text-sm">Current project members will be able to view the retained findings, supplied notes and any included saved supporting source. Members can save content they can view.</p>
+            {acknowledgement.package.results.some(item => item.origin?.kind === 'inert-analysis-reference') && <p className="text-sm">Selected text and JSON source excerpts are included as plain text. Only the reviewed prefixes are shared; JSON syntax is not checked.</p>}
             <p className="text-sm text-textMuted">Original datasets, private scratch, editing and execution access remain governed by their own permissions. Supporting source does not establish producing code or reproducibility.</p>
             <ExactSnapshot value={acknowledgement} />
             <button type="button" className="btn btn-primary" disabled={busy || pending || !state.canPublish} onClick={() => void state.publish()}>Publish to project</button>

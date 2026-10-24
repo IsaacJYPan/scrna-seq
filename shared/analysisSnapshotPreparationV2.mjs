@@ -4,6 +4,7 @@ import { ANALYSIS_SNAPSHOT_PREPARATION_LIMITS as L, ANALYSIS_SNAPSHOT_PREPARATIO
 import { normalizeAnalysisAttachmentCreate } from './analysisAttachment.mjs';
 import { validateResearchAnalysisReference } from './researchAnalysis.mjs';
 import { FIXED_RESULT_VIEW_SCHEMA_V3, canonicalAnalysisSnapshotResultViewV3 } from './analysisSnapshotTypedResult.mjs';
+import { FIXED_RESULT_VIEW_SCHEMA_V4, ANALYSIS_SNAPSHOT_INERT_LIMITS, ANALYSIS_SNAPSHOT_INERT_FORMATS, canonicalAnalysisSnapshotResultViewV4 } from './analysisSnapshotInertResult.mjs';
 import { ANALYSIS_SNAPSHOT_WORKFLOW_LIMITS, normalizeAnalysisSnapshotWorkflowOutputReference,
   normalizeAnalysisSnapshotWorkflowContextSelection, normalizeAnalysisSnapshotWorkflowContext,
   normalizeAnalysisSnapshotWorkflowContextEvidence, canonicalAnalysisSnapshotWorkflowContextBinding, assertAnalysisSnapshotWorkflowContextPayload } from './analysisSnapshotWorkflowContext.mjs';
@@ -62,6 +63,13 @@ function selectedTypedView(value) {
   return selectedView(value);
 }
 function selectedResult(value) {
+  if (value?.kind === 'inert-analysis-reference') {
+    fields(value, ['kind', 'reference', 'caption', 'view', 'includeSourceText']); fields(value.view, ['family', 'maxBytes']);
+    if (value.includeSourceText !== true || value.view.family !== 'text') invalid('Explicitly choose to include this inert source text.');
+    const ref = reference(value.reference, true); if (!/^(?:av|eri)_[a-f0-9]{16,40}$/.test(ref.versionId)) invalid('Choose an owned recognized text source.');
+    return { kind: value.kind, reference: ref, caption: text(value.caption, B.caption),
+      view: { family: 'text', maxBytes: integer(value.view.maxBytes, 1, ANALYSIS_SNAPSHOT_INERT_LIMITS.prefixBytes) }, includeSourceText: true };
+  }
   if (value?.kind === 'attachment-revision') {
     fields(value, ['kind', 'attachmentId', 'revisionId', 'reference', 'view']);
     return { kind: value.kind, attachmentId: pattern(value.attachmentId, ATTACHMENT), revisionId: pattern(value.revisionId, REVISION),
@@ -168,13 +176,13 @@ function savedAnalysis(value) {
   if (!['active', 'archived'].includes(value.status)) invalid('Saved analysis status is unsupported.');
   timestamp(value.createdAt); timestamp(value.updatedAt); if (value.updatedAt < value.createdAt) invalid('A saved revision cannot predate its creation.'); pattern(value.revisionSha256, SHA);
 }
-function savedSource(value, owner, projectId, typed = false) {
+function savedSource(value, owner, projectId, typed = false, inert = false) {
   fields(value, ['artifactId', 'versionId', 'ownerUserId', 'sha256', 'sizeBytes', 'name', 'format']);
   fullSource({ artifactId: value.artifactId, versionId: value.versionId, projectId, sha256: value.sha256 });
   if (value.ownerUserId !== owner) invalid('Fixed findings must retain their original owned source.'); integer(value.sizeBytes, 0, L.originalBytes);
   if (text(value.name, B.sourceName, false, false) !== value.name || /[\\/]/.test(value.name)) invalid('Use a safe bounded source label, not a path.');
   fields(value.format, ['id', 'version']);
-  if (!(typed ? ['org.traceomics.table', 'org.ietf.json', 'org.w3.png', 'org.traceomics.coordinates'] : ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg']).includes(value.format.id)
+  if (!(inert ? ANALYSIS_SNAPSHOT_INERT_FORMATS : typed ? ['org.traceomics.table', 'org.ietf.json', 'org.w3.png', 'org.traceomics.coordinates'] : ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg']).includes(value.format.id)
       || value.format.version !== '1') invalid('Choose a supported source format for this exact adapter.');
 }
 function savedOrigin(value, source, analysisVersion, owner) {
@@ -198,6 +206,13 @@ function savedOrigin(value, source, analysisVersion, owner) {
         || canonicalSnapshotJson(context.snapshotReference) !== canonicalSnapshotJson(origin.snapshotReference) || context.stepId !== origin.stepId || context.port !== origin.port) invalid('Keep exact captured output and selected recorded context.');
     return { kind: value.kind, ...origin, contextSelection: { method: context.method !== null, parameterKeys: context.parameters.map(item => item.key), seed: context.seed !== null, environment: context.environment !== null } };
   }
+  if (value.kind === 'inert-analysis-reference') {
+    fields(value, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin', 'includeSourceText']);
+    const ref = reference(value.reference, true);
+    if (value.includeSourceText !== true || value.analysisVersion !== analysisVersion || value.captionOrigin !== 'user-supplied'
+        || text(value.caption, B.caption) !== value.caption || ref.versionId !== source.versionId || ref.sha256 !== source.sha256) invalid('Keep the exact deliberate inert source selection.');
+    return { kind: value.kind, reference: ref };
+  }
   fields(value, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin']);
   if (!['analysis-reference', 'typed-analysis-reference'].includes(value.kind) || value.analysisVersion !== analysisVersion || value.captionOrigin !== 'user-supplied'
       || text(value.caption, B.caption) !== value.caption) invalid('Keep exact selected saved-analysis context and supplied caption.');
@@ -214,7 +229,8 @@ export function canonicalAnalysisSnapshotPackageV2(input) {
   let retained = 0, documentBytes = 0, contextBytes = 0; const ids = [], selections = [], sources = new Map(), typedDescriptors = new Map();
   array(value.results, L.results, 1).forEach(item => {
     fields(item, ['viewId', 'origin', 'source', 'view']); pattern(item.viewId, ANALYSIS_SNAPSHOT_VIEW_ID); ids.push(item.viewId);
-    const typed = ['typed-analysis-reference', 'captured-workflow-output'].includes(item.origin?.kind); savedSource(item.source, value.ownerUserId, value.projectId, typed);
+    const typed = ['typed-analysis-reference', 'captured-workflow-output'].includes(item.origin?.kind), inert = item.origin?.kind === 'inert-analysis-reference';
+    savedSource(item.source, value.ownerUserId, value.projectId, typed, inert);
     const origin = savedOrigin(item.origin, item.source, value.analysis.version, value.ownerUserId);
     if (item.origin.kind === 'captured-workflow-output') {
       canonicalAnalysisSnapshotWorkflowContextBinding({ serviceId: value.serviceId, projectId: value.projectId, analysisId: value.analysisId, ownerUserId: value.ownerUserId, analysisVersion: value.analysis.version, context: item.origin.context });
@@ -223,8 +239,8 @@ export function canonicalAnalysisSnapshotPackageV2(input) {
     }
     fields(item.view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height', ...(typed ? ['descriptorSha256', 'semantics'] : [])]);
     const { viewSha256, ...view } = item.view; pattern(viewSha256, SHA);
-    (typed ? canonicalAnalysisSnapshotResultViewV3 : canonicalAnalysisSnapshotResultViewV2)({ ...view, source: { artifactId: item.source.artifactId, versionId: item.source.versionId, projectId: value.projectId, sha256: item.source.sha256 } });
-    const family = typed ? { 'org.traceomics.table': 'table', 'org.ietf.json': 'metrics', 'org.w3.png': 'image', 'org.traceomics.coordinates': 'embedding' }[item.source.format.id]
+    (inert ? canonicalAnalysisSnapshotResultViewV4 : typed ? canonicalAnalysisSnapshotResultViewV3 : canonicalAnalysisSnapshotResultViewV2)({ ...view, source: { artifactId: item.source.artifactId, versionId: item.source.versionId, projectId: value.projectId, sha256: item.source.sha256 } });
+    const family = inert ? 'text' : typed ? { 'org.traceomics.table': 'table', 'org.ietf.json': 'metrics', 'org.w3.png': 'image', 'org.traceomics.coordinates': 'embedding' }[item.source.format.id]
       : ['org.ietf.csv', 'org.iana.tsv'].includes(item.source.format.id) ? 'table' : 'image';
     if (typed) {
       if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || item.source.sizeBytes > 5 * 1024 * 1024 || item.source.sizeBytes < 1) invalid('Typed findings retain a complete bounded source.');
@@ -232,8 +248,9 @@ export function canonicalAnalysisSnapshotPackageV2(input) {
       if (prior && prior !== descriptorIdentity) invalid('One source version must retain one exact typed descriptor and meaning.');
       typedDescriptors.set(item.source.versionId, descriptorIdentity);
     }
+    if (inert && view.schema !== FIXED_RESULT_VIEW_SCHEMA_V4) invalid('Inert source text uses its explicit fixed prefix schema.');
     if (view.family !== family || family === 'image' && (view.blobBytes !== item.source.sizeBytes || view.blobSha256 !== item.source.sha256)) invalid('A fixed view must match its original source format and raster bytes.');
-    selections.push({ ...origin, view: ['table', 'embedding'].includes(family) ? { family, ...view.spec } : { family } });
+    selections.push({ ...origin, view: ['table', 'embedding', 'text'].includes(family) ? { family, ...view.spec } : { family } });
     const previous = sources.get(item.source.versionId);
     if (previous && canonicalSnapshotJson(previous) !== canonicalSnapshotJson(item.source)) invalid('One source version must retain one exact identity.');
     sources.set(item.source.versionId, item.source); retained += view.blobBytes;

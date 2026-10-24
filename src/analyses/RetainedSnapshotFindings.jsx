@@ -12,6 +12,10 @@ function findingContext(item, schema) {
     return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
       short: `Linked in saved analysis ${item.origin.analysisVersion}`, long: `Linked in saved analysis ${item.origin.analysisVersion}` };
   }
+  if (schema === packageV2 && item.origin?.kind === 'inert-analysis-reference' && item.origin.captionOrigin === 'user-supplied' && item.origin.includeSourceText === true) {
+    return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
+      short: `Source text included · Saved analysis ${item.origin.analysisVersion}`, long: `Source text included · Saved analysis ${item.origin.analysisVersion}` };
+  }
   if (schema === packageV2 && item.origin?.kind === 'captured-workflow-output' && item.origin.captionOrigin === 'user-supplied') {
     return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
       short: `Recorded in workflow capture · Saved analysis ${item.origin.analysisVersion}`,
