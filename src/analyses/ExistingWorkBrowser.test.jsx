@@ -93,7 +93,8 @@ describe('existing work adoption and inspection', () => {
   it('allows read-only owned-source inspection but never fresh analysis creation', async () => {
     render(<ExistingWorkBrowser {...defaults} canWrite={false} />); await choose();
     fireEvent.click(screen.getByRole('button', { name: 'Inspect saved version' }));
-    expect(await screen.findByTestId('saved-version')).toHaveTextContent(reference.checkpointVersionId);
+    // Nested lazy imports can settle slowly while the full suite transforms other modules.
+    expect(await screen.findByTestId('saved-version', {}, { timeout: 5000 })).toHaveTextContent(reference.checkpointVersionId);
     expect(screen.queryByRole('form', { name: 'Start from saved work' })).toBeNull();
     expect(defaults.onAdopt).not.toHaveBeenCalled();
   });

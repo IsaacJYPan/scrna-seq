@@ -5,7 +5,10 @@ const fs = require('node:fs');
 const storage = require('./storage');
 const config = require('./config');
 const previews = require('./artifactPreviews');
-const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, validateRetainedRasterMetadata } = require('./retainedTypedPreviews');
+const { RETAINED_TYPED_LIMITS, projectRetainedTypedPreview, projectRetainedMetrics, validateRetainedRasterMetadata } = require('./retainedTypedPreviews');
+const { projectTypedSource } = require('./analysisSnapshotTypedSources');
+const snapshotTypedContract = import('../shared/analysisSnapshotTypedResult.mjs');
+const snapshotContract = import('../shared/analysisSnapshotPreparationDispatch.mjs');
 const { DOWNLOADABLE_ARTIFACT_TYPES, authorizeArtifactDownload } = require('./researchExports');
 const { getPrivateRArtifactPolicy } = require('./privateRArtifactPolicy');
 const analysisContract = import('../shared/analysisModel.mjs');
@@ -225,7 +228,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
       const input = await reader.query('SELECT * FROM expert_r_private_inputs WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
       if (input.rows[0]) row = privateInput(input.rows[0]);
       else {
-        const output = await reader.query('SELECT * FROM workflow_artifacts WHERE id=$1 AND project_id=$2 AND owner_user_id=$3', [versionId, projectId, userId]);
+        const output = await reader.query(`SELECT * FROM workflow_artifacts WHERE id=$1 AND project_id=$2 AND owner_user_id=$3${snapshotClient ? ' FOR SHARE' : ''}`, [versionId, projectId, userId]);
         if (output.rows[0]) row = workflowOutput(output.rows[0]);
       }
     } else {
@@ -448,6 +451,49 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     } finally { await opened.handle.close(); }
   }
 
+  // Retain all selected windows of one small typed source together. The caller
+  // supplies only exact identities/specs; current authority and descriptor
+  // meaning are checked before and after complete source verification.
+  async function prepareFixedTypedViews(userId, projectId, versionId, descriptorSha256, selections) {
+    if (!Array.isArray(selections) || selections.length < 1 || selections.length > 8) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'Choose at most eight fixed typed views.');
+    const source = await internal(userId, projectId, versionId), projection = await projectTypedSource(source);
+    if (Number(source.ownerId) !== Number(userId)) notFound();
+    if (!projection || projection.descriptorSha256 !== descriptorSha256) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The selected typed descriptor changed before verification.', 409);
+    const version = await display(source), opened = await resolveVerified(userId, projectId, version.reference);
+    try {
+      const bytes = await completeBytes(opened, version, RETAINED_TYPED_LIMITS.sourceJsonBytes);
+      const typed = await snapshotTypedContract, schema = await snapshotContract;
+      let value = null;
+      if (projection.family !== 'image') {
+        let text;
+        try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+        catch { throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The saved typed result must contain complete valid UTF-8 JSON.'); }
+        value = typed.parseAnalysisSnapshotScalarJson(text);
+      }
+      const result = [];
+      for (const selection of selections) {
+        if (selection.family !== projection.family) throw artifactError('ARTIFACT_PREVIEW_INVALID', 'The selected typed family does not match its descriptor.');
+        let rendered;
+        if (selection.family === 'image') {
+          const dimensions = raster(bytes, version);
+          rendered = { bytes, width: dimensions.width, height: dimensions.height };
+        } else {
+          const body = selection.family === 'table'
+            ? typed.projectAnalysisSnapshotJsonTable({ source: version.reference, descriptor: projection.descriptor, value, offset: selection.offset, limit: selection.limit })
+            : projectRetainedMetrics({ source: version.reference, value, semantics: projection.descriptor.semantics });
+          rendered = { bytes: Buffer.from(schema.canonicalSnapshotJson(body, previews.PREVIEW_LIMITS.bytes)), width: null, height: null };
+        }
+        result.push({ ...rendered, descriptor: projection.descriptor, descriptorSha256 });
+      }
+      const currentStat = await opened.handle.stat();
+      if (!currentStat.isFile() || ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].some(key => currentStat[key] !== opened.stat[key])) throw artifactError('ARTIFACT_INTEGRITY_FAILED', 'The typed source changed while its fixed views were read.', 409);
+      await recheckOpened(userId, projectId, opened);
+      const current = await internal(userId, projectId, versionId), finalProjection = await projectTypedSource(current);
+      if (Number(current.ownerId) !== Number(userId) || finalProjection?.descriptorSha256 !== descriptorSha256) throw artifactError('ARTIFACT_VERSION_CHANGED', 'The selected typed descriptor changed during preparation.', 409);
+      return result;
+    } finally { await opened.handle.close(); }
+  }
+
   async function importFile(userId, projectId, file, previousVersionId = null) {
     await db.requireProjectRole(userId, projectId, WRITE_ROLES);
     if (!file || typeof file.path !== 'string') throw artifactError('INVALID_ARTIFACT_FILE', 'Select a file to import.');
@@ -599,7 +645,7 @@ function createArtifactVersionService(db, provider = storage.createLocalStorageP
     return inserted.rows[0];
   }
   return { list, get, preview, readVerifiedImage, importFile, getImportReceipt, serializeImportReceipt: importReceipt,
-    resolveVerified, prepareFixedTableViews, snapshotSourceMetadata, readVerifiedOwnedImage, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
+    resolveVerified, prepareFixedTableViews, prepareFixedTypedViews, snapshotSourceMetadata, readVerifiedOwnedImage, assertCapacity, reserveProducedCapacity, planProduced, registerProduced };
 }
 
 module.exports = { createArtifactVersionService, VERSION_PATTERN, QUOTA };

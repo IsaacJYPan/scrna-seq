@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { Client } = require('pg');
 const { chromium } = require('playwright');
 const { createAnalysisSharingRuntimeFixture, produceSharingFindings } = require('./analysis-sharing-runtime-fixture.cjs');
+const { createTypedSharingProducer } = require('./analysis-typed-sharing-fixture.cjs');
 const root = path.resolve(__dirname, '..');
 const assert = (value, message) => { if (!value) throw new Error(message); };
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -18,13 +19,19 @@ async function until(test, message, timeout = 30000) {
   while (Date.now() < end) { if (await test()) return; await new Promise(resolve => setTimeout(resolve, 75)); }
   throw new Error(message);
 }
-async function main({ linkedResults = false } = {}) {
-  const directory = path.join(root, 'playwright', 'report', (linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
+async function main({ linkedResults = false, typedResults = false } = {}) {
+  linkedResults ||= typedResults;
+  const directory = path.join(root, 'playwright', 'report', (typedResults ? 'analysis-typed-publications-' : linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
   const frozen = new Map(fs.readdirSync(path.join(root, 'dist/assets')).map(name => [name, sha(fs.readFileSync(path.join(root, 'dist/assets', name)))]));
   const checks = [], screenshots = [], profiles = [], requests = [], browserErrors = [], consoleErrors = [], assetReads = [], faults = [], restarts = [];
   const compiledAssets = {}, accounts = {}, expected = new Set(), faultPaths = new Set();
+  const intentionalRuntimeResponses = [];
+  const expectRuntime = (status, pathname, reason) => {
+    intentionalRuntimeResponses.push({ status, pathname, reason, from: Date.now() });
+  };
   const check = message => { checks.push(message); console.log('PASS: ' + message); };
-  let service, database, browser, page, study, findings, linkedInfo;
+  let service, database, browser, page, study, findings, linkedInfo, typedFindings, visibleTarget;
+  const typedProducer = typedResults ? createTypedSharingProducer(process.env.EXPERT_R_SANDBOX_IMAGE) : null;
   let selectedAnalysisVersion = 1, latestAnalysisVersion = 1;
   const analysisPath = () => `/api/projects/${service.project.id}/analyses/${study.id}`;
   const prepPath = () => analysisPath() + '/snapshot-preparations', publicationPath = () => analysisPath() + '/snapshot-publications';
@@ -55,8 +62,9 @@ async function main({ linkedResults = false } = {}) {
   }
   async function login(actor = 'owner') {
     const context = await browser.newContext({ viewport: { width: 1366, height: 768 } }); const target = await context.newPage();
+    visibleTarget = target;
     target.on('pageerror', error => browserErrors.push(error.message));
-    target.on('console', value => { if (value.type() === 'error') consoleErrors.push({ text: value.text(), url: value.location().url }); });
+    target.on('console', value => { if (value.type() === 'error') consoleErrors.push({ text: value.text(), url: value.location().url, at: Date.now() }); });
     target.on('request', request => {
       const pathname = new URL(request.url()).pathname; if (!pathname.startsWith('/api/')) return;
       requests.push({ actor, method: request.method(), pathname, ...(request.method() === 'POST' && /\/(?:snapshot-preparations|snapshot-publications(?:\/aspub_[a-f0-9]{24}\/withdrawals)?)$/.test(pathname) ? { input: request.postDataJSON() } : {}) });
@@ -119,7 +127,7 @@ async function main({ linkedResults = false } = {}) {
     await until(() => panel(target).getByRole('button', { name: 'Refresh sharing access', exact: true }).isEnabled(), 'Sharing refresh did not settle.');
   }
   try {
-    service = await createAnalysisSharingRuntimeFixture({ artifactDirectory: directory, configureProjectEnvironment: async ({ env, account, project }) => {
+    service = await createAnalysisSharingRuntimeFixture({ artifactDirectory: directory, configureEnvironment: typedProducer?.configureEnvironment, configureProjectEnvironment: async ({ env, account, project }) => {
       const client = new Client({ connectionString: env.DATABASE_URL }); await client.connect();
       try {
         const owner = (await client.query('SELECT * FROM users WHERE email=$1', [account.email])).rows[0]; accounts.owner = { id: Number(owner.id), email: account.email };
@@ -131,9 +139,18 @@ async function main({ linkedResults = false } = {}) {
         await client.query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,'viewer')", [project.id, reader.id]);
       } finally { await client.end(); } return {};
     } });
+    if (typedResults) {
+      // The genuine Plumber service starts without a standard pipeline session.
+      // Sharing/private workflows do not create that unrelated standard state.
+      expectRuntime(404, '/api/r/pipeline-state', 'No standard pipeline state was opened in this sharing fixture.');
+      expectRuntime(403, '/api/r/pipeline-state', 'A project viewer has no standard pipeline execution access.');
+    }
     database = new Client({ connectionString: service.databaseUrl }); await database.connect(); browser = await launch(); page = await login();
     findings = await produceSharingFindings((pathname, options) => api(page, pathname, options), service.project.id, service.environment);
+    if (typedProducer) typedFindings = await typedProducer.produce({ database, service, owner: accounts.owner, colleague: accounts.colleague,
+      api: (pathname, options) => api(page, pathname, options) });
     const reference = version => ({ kind: 'artifact-version', versionId: version.versionId, sha256: version.sha256 });
+    const typedReferences = typedFindings ? Object.values(typedFindings.outputs).map(output => ({ kind: 'artifact-version', versionId: output.id, sha256: output.sha256 })) : [];
     if (linkedResults) {
       const opaque = await importFixture(page, 'Owned opaque prerequisite', 'opaque-prerequisite.bin', 'An inert opaque prerequisite.\n');
       await database.query("UPDATE project_members SET role='analyst' WHERE project_id=$1 AND user_id=$2", [service.project.id, accounts.colleague.id]);
@@ -143,7 +160,7 @@ async function main({ linkedResults = false } = {}) {
         name: 'Shared condition findings', description: 'Compare the two synthetic conditions without sharing a live session.', references: [reference(restricted)] } })).analysis;
       await other.context().close();
       await database.query("UPDATE project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2", [service.project.id, accounts.colleague.id]);
-      const refs = [reference(restricted), reference(findings.table), reference(findings.figure), reference(opaque)];
+      const refs = [reference(restricted), reference(findings.table), reference(findings.figure), reference(opaque), ...typedReferences];
       study = (await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: 1, references: refs } })).analysis;
       selectedAnalysisVersion = study.version;
       study = (await api(page, analysisPath(), { method: 'PATCH', body: { expectedVersion: study.version, references: refs.filter(item => item.versionId !== findings.table.versionId) } })).analysis;
@@ -160,6 +177,7 @@ async function main({ linkedResults = false } = {}) {
     const content = importScriptDocument({ filename: 'synthetic-conditions.R', bytes: Buffer.from(findings.source), cellId: 'conditions_r' });
     const saved = (await api(page, analysisPath() + '/documents', { method: 'POST', status: 201, body: { requestId: crypto.randomUUID(), title: 'Supplied condition method', content } })).document;
     const scientificCount = (await database.query('SELECT COUNT(*)::int AS n FROM private_r_executions')).rows[0].n;
+    const jobCount = (await database.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n;
     await openAnalysis(page); await page.getByRole('textbox', { name: 'Research question or notes', exact: true }).fill('An unsaved interpretation stays outside the published snapshot.');
     await page.getByRole('button', { name: 'Prepare sharing', exact: true }).click();
     const choices = prep(page).getByRole('form', { name: 'Prepare private snapshot', exact: true });
@@ -183,6 +201,17 @@ async function main({ linkedResults = false } = {}) {
         && await linked.getByRole('spinbutton', { name: 'First data row for linked finding 1', exact: true }).inputValue() === '2', 'Returning to the older saved version lost its deliberate caption or table window.');
       await linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ has: page.getByText(findings.figure.name, { exact: true }) }).getByRole('button', { name: 'Add linked figure', exact: true }).click();
       await linked.getByRole('textbox', { name: 'Caption for linked finding 2', exact: true }).fill(attached[1].caption);
+      if (typedFindings) {
+        for (const [position, name, button] of [[3, 'values', 'Add linked table excerpt'], [4, 'summary', 'Add linked metrics'], [5, 'figure', 'Add linked figure']]) {
+          const option = linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ hasText: typedFindings.outputs[name].id });
+          await option.getByRole('button', { name: button, exact: true }).click();
+          await linked.getByRole('textbox', { name: `Caption for linked finding ${position}`, exact: true }).fill(`Exact typed workflow ${name}`);
+          if (name === 'values') await linked.getByRole('spinbutton', { name: `Rows to include for linked finding ${position}`, exact: true }).fill('2');
+        }
+        assert(await linked.getByText('Recorded typed metrics · declared meaning retained', { exact: true }).count() === 1, 'Typed linked choices duplicated their flat metadata card.');
+        const metricsOption = linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ hasText: typedFindings.outputs.summary.id });
+        await matrix(page, 'typed-linked-choices-with-recorded-meaning', () => metricsOption.scrollIntoViewIfNeeded());
+      }
       for (const version of [linkedInfo.opaque, linkedInfo.restricted]) {
         await linked.getByRole('list', { name: 'Linked saved references' }).getByRole('listitem').filter({ hasText: version.versionId }).getByRole('button', { name: 'Include reference only', exact: true }).click();
       }
@@ -203,7 +232,12 @@ async function main({ linkedResults = false } = {}) {
     await prep(page).getByRole('heading', { name: 'Ready for private review', exact: true }).waitFor();
     const candidate = (await api(page, prepPath())).items[0]; const originalA = await api(page, prepPath() + '/' + candidate.preparationId);
     const packageSha = originalA.snapshotSha256, physical = (await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_snapshot_blobs WHERE preparation_id=$1', [candidate.preparationId])).rows[0].n;
-    assert(physical === (linkedResults ? 4 : 3), 'The computed findings and saved source were not independently retained, or a reference-only prerequisite retained bytes.');
+    assert(physical === (typedResults ? 7 : linkedResults ? 4 : 3), 'The computed findings and saved source were not independently retained, or a reference-only prerequisite retained bytes.');
+    if (typedFindings) {
+      const selected = originalA.package.results.filter(item => item.origin.kind === 'typed-analysis-reference');
+      assert(selected.length === 3 && selected.every(item => item.view.schema === 'traceomics.fixed-result-view.v3'
+        && item.view.descriptorSha256 === originalA.recipe.results.find(choice => choice.kind === 'typed-analysis-reference' && choice.reference.versionId === item.source.versionId)?.descriptorSha256), 'The retained typed descriptors changed after actual R production or original preparation recovery.');
+    }
     if (linkedResults) {
       assert(originalA.package.schema === 'traceomics.analysis-snapshot-package.v2' && originalA.package.analysis.version === selectedAnalysisVersion
         && originalA.package.prerequisites.items.length === 2 && originalA.package.results.filter(item => item.origin.kind === 'analysis-reference').length === 2
@@ -244,10 +278,19 @@ async function main({ linkedResults = false } = {}) {
     check('Explicit publication is bound to the reviewed snapshot SHA; pre-upstream failure permits only deliberate identical retry, and genuine accepted lost acknowledgement is rediscovered from actor-private activity after a real browser restart without another publication.');
 
     await findings.stop(); await service.stopCompute();
+    if (typedProducer) for (const pathname of ['/api/r/session-id', '/api/r/pipeline-state', '/api/r/health']) {
+      expectRuntime(502, pathname, 'The actual R orchestration service is deliberately stopped before retained colleague reads.');
+    }
+    await typedProducer?.stop();
     assert((await database.query('SELECT status FROM private_r_kernels WHERE id=$1', [findings.kernel.id])).rows[0].status === 'stopped', 'The genuine producing kernel was not stopped.');
     for (const version of [findings.table, findings.figure]) {
       const row = (await database.query('SELECT storage_key FROM managed_artifact_versions WHERE id=$1', [version.versionId])).rows[0];
       const filename = path.resolve(service.storageRoot, ...row.storage_key.split('/')); assert(filename.startsWith(path.resolve(service.storageRoot) + path.sep), 'Source removal escaped the owned fixture.'); fs.unlinkSync(filename);
+    }
+    if (typedFindings) for (const output of Object.values(typedFindings.outputs)) {
+      const row = (await database.query('SELECT storage_key FROM workflow_artifacts WHERE id=$1', [output.id])).rows[0];
+      const filename = path.resolve(service.storageRoot, ...row.storage_key.split('/'));
+      assert(filename.startsWith(path.resolve(service.storageRoot) + path.sep), 'Typed source removal escaped the owned fixture.'); fs.unlinkSync(filename);
     }
     await openAnalysis(page); await page.getByRole('button', { name: 'Prepare sharing', exact: true }).click(); await prep(page).getByRole('button', { name: 'Saved preparations', exact: true }).click();
     await prep(page).getByRole('button', { name: 'Open private preparation', exact: true }).click(); await prep(page).getByRole('button', { name: 'Remove private preparation', exact: true }).click();
@@ -271,6 +314,28 @@ async function main({ linkedResults = false } = {}) {
       await matrix(colleague, 'linked-colleague-fixed-direct-excerpt', () => detail(colleague).getByRole('table').scrollIntoViewIfNeeded());
       await matrix(colleague, 'linked-colleague-reference-only-prerequisites', () => referenceOnly.scrollIntoViewIfNeeded());
       check('A colleague reads the exact direct one-row excerpt and both inert prerequisite identities with producer stopped, newer heads and original files gone; no private source label or prerequisite contents are disclosed.');
+    }
+    if (typedFindings) {
+      const selection = detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true });
+      await selection.getByRole('button').filter({ hasText: 'Exact typed workflow values' }).click();
+      const table = detail(colleague).getByRole('table'); await table.getByRole('cell', { name: 'false', exact: true }).waitFor();
+      for (const value of ['true', '0', 'null', 'empty string']) assert(await table.getByRole('cell', { name: value, exact: true }).count() > 0, 'The typed table lost an exact scalar distinction: ' + value);
+      await detail(colleague).getByText(typedFindings.meaning.values.title, { exact: true }).waitFor();
+      await matrix(colleague, 'typed-colleague-table-scalars-producer-stopped', () => table.scrollIntoViewIfNeeded());
+      await selection.getByRole('button').filter({ hasText: 'Exact typed workflow summary' }).click();
+      const metrics = detail(colleague).locator('dl[aria-label="Saved scalar metrics"]');
+      await detail(colleague).getByText('Retained cells (cells)', { exact: true }).waitFor();
+      await detail(colleague).getByText(typedFindings.meaning.summary.title, { exact: true }).waitFor();
+      for (const value of ['false', '0', 'null', 'empty string']) assert(await metrics.getByText(value, { exact: true }).count() > 0, 'The typed metrics lost a scalar: ' + value);
+      await detail(colleague).getByText('Measured features (features)', { exact: true }).waitFor();
+      await matrix(colleague, 'typed-colleague-metrics-labels-units-producer-stopped', () => detail(colleague).getByText('Retained cells (cells)', { exact: true }).scrollIntoViewIfNeeded());
+      await selection.getByRole('button').filter({ hasText: 'Exact typed workflow figure' }).click();
+      await detail(colleague).getByText(typedFindings.meaning.figure.title, { exact: true }).waitFor();
+      const typedImage = detail(colleague).getByRole('img');
+      await until(async () => await typedImage.count() && await typedImage.evaluate(node => node.complete && node.naturalWidth > 0), 'The retained semantic R figure did not decode.');
+      await matrix(colleague, 'typed-colleague-semantic-figure-producer-stopped', () => typedImage.scrollIntoViewIfNeeded());
+      for (const reference of typedReferences) await api(colleague, `/api/artifact-versions/${service.project.id}/${reference.versionId}`, { status: 404 });
+      check('Actual completed R workflow tables, metrics and PNG retain exact scalar types, labels, units, declared meaning and descriptor identities for a separate colleague after worker/runtime shutdown, original file deletion and private preparation removal.');
     }
     await detail(colleague).getByRole('list', { name: 'Retained finding selection', exact: true }).getByRole('button').filter({ hasText: attached[1].caption }).click();
     const image = detail(colleague).getByRole('img', { name: /Computed condition figure/ }); await until(async () => await image.count() && await image.evaluate(node => node.complete && node.naturalWidth > 0), 'The genuine retained R figure did not decode for the colleague.');
@@ -329,7 +394,7 @@ async function main({ linkedResults = false } = {}) {
     assert(replay.acceptance.publicationId === publicationId && replay.current.policy.state === 'withdrawn' && replay.current.package === null, 'The original publish retry reactivated withdrawn content or lost acceptance.');
     assert((await database.query('SELECT COUNT(*)::int AS n FROM research_analysis_snapshot_publications')).rows[0].n === 1
       && (await database.query('SELECT COUNT(*)::int AS n FROM private_r_executions')).rows[0].n === scientificCount
-      && (await database.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n === 0, 'Sharing duplicated publication or ran additional science.');
+      && (await database.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n === jobCount, 'Sharing duplicated publication or ran additional science.');
     const storage = await page.evaluate(() => Object.values(localStorage).concat(Object.values(sessionStorage)).join('\n'));
     assert(!storage.includes(intent.requestId) && !storage.includes(originalA.requestId) && !storage.includes(findings.source), 'Scientific source or original sharing intent entered Web Storage.');
     if (linkedResults) assert(requests.filter(item => item.method === 'POST' && item.pathname === prepPath()).length === 1, 'The original v2 preparation was repeated after acceptance/restart.');
@@ -339,19 +404,21 @@ async function main({ linkedResults = false } = {}) {
       let url; try { url = new URL(entry.url); } catch { return true; }
       const status = /status of (\d+)/.exec(entry.text)?.[1];
       if (status === '401' && url.pathname === '/api/auth/session' || status === '404' && url.pathname === '/api/r/session-id' || expected.has(`${status} ${url.pathname}${url.search}`) || expected.has(`${status} ${url.pathname}`)) return false;
+      if (intentionalRuntimeResponses.some(value => String(value.status) === status && value.pathname === url.pathname && entry.at >= value.from)) return false;
       return !(/^Failed to load resource: net::ERR_(?:FAILED|CONTENT_LENGTH_MISMATCH|EMPTY_RESPONSE|INCOMPLETE_CHUNKED_ENCODING|CONNECTION_CLOSED|CONNECTION_RESET)/.test(entry.text) && faultPaths.has(url.pathname));
     });
     assert(browserErrors.length === 0 && unexpected.length === 0, 'Unexpected production sharing browser errors occurred.');
     check('All sharing journeys used frozen production assets, genuine authenticated accounts and real retained R outputs without unexpected browser errors, extra scientific execution or scientific browser persistence.');
-    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: true, checks, screenshots, profiles, browserRestarts: restarts, compiledAssets, browserErrors, consoleErrors, requests,
-      image: service.image, environment: service.environment.id, producerStopped: true, fixture: 'Disposable actual R kernel+managed serializers/HTTPS/auth/PG/private storage; synthetic20genes12cells; no general scientific correctness, SSH or reference-hardware claim.' }, null, 2));
+    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: true, checks, screenshots, profiles, browserRestarts: restarts, compiledAssets, browserErrors, consoleErrors, requests, intentionalRuntimeResponses,
+      image: service.image, environment: service.environment.id, producerStopped: true, typedWorkerCompleted: typedFindings?.workerCompleted || false,
+      fixture: 'Disposable actual R kernel+managed serializers' + (typedFindings ? '+completed typed workflow worker' : '') + '/HTTPS/auth/PG/private storage; synthetic20genes12cells; no general scientific correctness, SSH or reference-hardware claim.' }, null, 2));
     console.log('Analysis publication acceptance: ' + directory);
   } catch (error) {
-    await page?.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true }).catch(() => {});
-    const tree = await page?.locator('main').ariaSnapshot().catch(() => null); if (tree) fs.writeFileSync(path.join(directory, 'failure-accessibility.txt'), tree);
+    await (visibleTarget || page)?.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true }).catch(() => {});
+    const tree = await (visibleTarget || page)?.locator('main').ariaSnapshot().catch(() => null); if (tree) fs.writeFileSync(path.join(directory, 'failure-accessibility.txt'), tree);
     let message = error.message; for (const secret of [service?.databaseUrl, service?.storageRoot, service?.account.password, ...Object.values(accounts).map(value => value.email)].filter(Boolean)) message = message.split(secret).join('[private fixture]');
-    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: false, checks, screenshots, error: message, browserErrors, consoleErrors, requests }, null, 2)); throw new Error(message);
-  } finally { for (const fault of faults) fault.release(); await browser?.close(); await database?.end(); await service?.stop(); }
+    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: false, checks, screenshots, error: message, browserErrors, consoleErrors, requests, intentionalRuntimeResponses }, null, 2)); throw new Error(message);
+  } finally { for (const fault of faults) fault.release(); await browser?.close(); await database?.end(); await typedProducer?.stop(); await service?.stop(); }
 }
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
 module.exports = { main };

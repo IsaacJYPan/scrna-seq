@@ -1,15 +1,16 @@
 import React from 'react';
 import { createHash, webcrypto } from 'node:crypto';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import PreparedSnapshotResult from './PreparedSnapshotResult';
 import { readSnapshotPreparationView } from './snapshotPreparationApi';
 import useExecutionTarget from '../runtime/useExecutionTarget';
 import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifactApi';
 import { fetchRetainedArtifactImage } from '../artifacts/retainedArtifactApi';
-import { canonicalSnapshotJson, canonicalAnalysisSnapshotResultView } from '../../shared/analysisSnapshotPreparation.mjs';
+import { canonicalSnapshotJson, canonicalAnalysisSnapshotResultView } from '../../shared/analysisSnapshotPreparationDispatch.mjs';
 import { snapshotScope, snapshotRecipe, snapshotRecord } from './snapshotPreparationTestFixtures';
 import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes, linkedImageResult, linkedImageBytes } from './snapshotLinkedTestFixtures';
+import { typedRecipe, typedRecord, typedTableBytes, typedMetricsBytes, typedImageBytes } from './snapshotTypedTestFixtures';
 
 vi.mock('./snapshotPreparationApi', () => ({ readSnapshotPreparationView: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
@@ -40,6 +41,13 @@ function linkedFixture({ prefix = 'art', format = 'org.ietf.csv', image = false 
   if (!image) descriptor.source.format.id = format;
   return { props: { ...snapshotScope, preparationId: record.preparationId, descriptor, available: true, isActive: true,
     onDenied: vi.fn(), onUnavailable: vi.fn() }, bytes: image ? linkedImageBytes() : linkedTableBytes(descriptor), type: image ? 'image/png' : 'application/json' };
+}
+function typedFixture(family = 'table') {
+  const record = typedRecord(typedRecipe({ family })), descriptor = record.package.results[0];
+  return { props: { ...snapshotScope, preparationId: record.preparationId, descriptor, snapshotSha256: record.snapshotSha256,
+    available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() },
+  bytes: family === 'image' ? typedImageBytes() : family === 'metrics' ? typedMetricsBytes(descriptor) : typedTableBytes(descriptor),
+  type: family === 'image' ? 'image/png' : 'application/json' };
 }
 beforeEach(() => {
   vi.resetAllMocks(); vi.stubGlobal('crypto', webcrypto); useExecutionTarget.mockReturnValue(connection);
@@ -274,4 +282,83 @@ it.each(['wrong checksum', 'different fixed rows'])('refuses v2 %s before displa
 it('preserves the strict v1 source boundary rather than accepting an art source without a v2 descriptor', async () => {
   const value = fixture(); value.props.descriptor.source.versionId = 'art_' + '4'.repeat(24); readSnapshotPreparationView.mockResolvedValue(value);
   render(<PreparedSnapshotResult {...value.props} />); await screen.findByRole('alert'); expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(value.props.onUnavailable).toHaveBeenCalledOnce();
+});
+
+it('decodes a fixed typed table with exact scalar values and declared meaning without reading original sources', async () => {
+  const value = typedFixture(); readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
+  const row = (await screen.findAllByRole('row'))[1], cells = within(row).getAllByRole('cell');
+  expect(cells.map(cell => cell.textContent)).toEqual(['null', 'false', 'true', '0', 'empty string', '1.25', 'null', 'donor 🧬']);
+  expect(screen.getByRole('heading', { name: 'Recorded scalar table' })).toBeVisible(); expect(screen.getByText('Primary result')).toBeVisible();
+  expect(within(cells[0]).getByTitle('JSON null')).toBeVisible(); expect(within(cells[6]).getByTitle('Text value')).toBeVisible();
+  expect(screen.getByText('Source table: 1 row.')).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Next rows' })).not.toBeInTheDocument(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+  expect(getArtifactVersion).not.toHaveBeenCalled(); expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+});
+
+it('renders checked typed metrics with descriptor labels and units for a different current publication viewer', async () => {
+  const value = typedFixture('metrics'), readView = vi.fn().mockResolvedValue(value), resourceId = 'aspub_' + 'b'.repeat(24);
+  render(<PreparedSnapshotResult {...value.props} userId={17} audience="project-publication" resourceId={resourceId} readView={readView} />);
+  expect(await screen.findByLabelText('Saved scalar metrics')).toBeVisible();
+  expect(screen.getByText('Cells (cells)')).toBeVisible(); expect(screen.getByText('Coverage (%)')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Recorded QC metrics' })).toBeVisible(); expect(screen.getByText('Diagnostic')).toBeVisible();
+  for (const text of ['0', '1.25', 'false']) expect(screen.getByText(text)).toBeVisible();
+  expect(screen.getByTitle('JSON null')).toHaveTextContent('null'); expect(screen.getByTitle('Text with zero characters')).toHaveTextContent('empty string');
+  expect(screen.queryByText('Not recorded')).not.toBeInTheDocument(); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+  expect(readView).toHaveBeenCalledExactlyOnceWith(snapshotScope.projectId, snapshotScope.analysisId, resourceId, value.props.descriptor, { signal: expect.any(AbortSignal) });
+});
+
+it('keeps typed semantic PNG meaning alongside the exact retained raster and revokes it on native disconnect', async () => {
+  const value = typedFixture('image'); readSnapshotPreparationView.mockResolvedValue(value);
+  const view = render(<PreparedSnapshotResult {...value.props} />); await screen.findByRole('img');
+  expect(screen.getByRole('heading', { name: 'Recorded measured figure' })).toBeVisible(); expect(screen.getByText('Primary result')).toBeVisible();
+  expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:retained-1'); expect(screen.getByRole('link', { name: 'Open full-size image' })).toHaveAttribute('href', 'blob:retained-1');
+  useExecutionTarget.mockReturnValue({ ...connection, blocked: true, epoch: 2 }); view.rerender(<PreparedSnapshotResult {...value.props} />);
+  expect(screen.queryByRole('img')).not.toBeInTheDocument(); expect(screen.queryByRole('heading', { name: 'Recorded measured figure' })).not.toBeInTheDocument();
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:retained-1'); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
+});
+
+it.each(['descriptor hash', 'meaning title', 'metric unit', 'source name'])('fences held typed metrics when %s changes under an unchanged retained byte hash', async change => {
+  const value = typedFixture('metrics'), held = deferred(), replacement = deferred(); readSnapshotPreparationView.mockReturnValueOnce(held.promise).mockReturnValue(replacement.promise);
+  const view = render(<PreparedSnapshotResult {...value.props} />); await waitFor(() => expect(readSnapshotPreparationView).toHaveBeenCalledOnce());
+  const signal = readSnapshotPreparationView.mock.calls[0][4].signal, descriptor = structuredClone(value.props.descriptor);
+  if (change === 'descriptor hash') descriptor.view.descriptorSha256 = 'e'.repeat(64);
+  else if (change === 'meaning title') descriptor.view.semantics.title = 'Different recorded meaning';
+  else if (change === 'metric unit') descriptor.view.semantics.metrics.coverage.unit = 'reads';
+  else descriptor.source.name = 'Different exact recorded name';
+  view.rerender(<PreparedSnapshotResult {...value.props} descriptor={descriptor} />); expect(signal.aborted).toBe(true);
+  await act(async () => held.resolve(value)); expect(screen.queryByLabelText('Saved scalar metrics')).not.toBeInTheDocument();
+  expect(value.props.onUnavailable).not.toHaveBeenCalled(); view.unmount(); await act(async () => replacement.resolve(value));
+  expect(URL.createObjectURL).not.toHaveBeenCalled();
+});
+
+it('does not refetch typed metrics when immutable scope, descriptor and semantics are unchanged after recovery', async () => {
+  const value = typedFixture('metrics'); readSnapshotPreparationView.mockResolvedValue(value);
+  const view = render(<PreparedSnapshotResult {...value.props} />); await screen.findByLabelText('Saved scalar metrics');
+  view.rerender(<PreparedSnapshotResult {...value.props} descriptor={structuredClone(value.props.descriptor)} onUnavailable={vi.fn()} onDenied={vi.fn()} />);
+  await act(async () => {}); expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(screen.getByText('Coverage (%)')).toBeVisible();
+});
+
+it.each(['unit override', 'label override', 'source mismatch'])('rejects typed metrics %s even when the retained body checksum has been resealed', async change => {
+  const value = typedFixture('metrics'), body = JSON.parse(new TextDecoder().decode(value.bytes));
+  if (change === 'unit override') body.items[0].unit = 'reads';
+  else if (change === 'label override') body.items[0].label = 'Fabricated biological conclusion';
+  else body.source.sha256 = 'd'.repeat(64);
+  value.bytes = new TextEncoder().encode(canonicalSnapshotJson(body)); value.props.descriptor.view.blobSha256 = hash(value.bytes); value.props.descriptor.view.blobBytes = value.bytes.length;
+  const { viewSha256: previousHash, ...view } = value.props.descriptor.view; void previousHash;
+  value.props.descriptor.view.viewSha256 = hash(canonicalAnalysisSnapshotResultView({ ...view,
+    source: { artifactId: value.props.descriptor.source.artifactId, versionId: value.props.descriptor.source.versionId,
+      projectId: snapshotScope.projectId, sha256: value.props.descriptor.source.sha256 } }));
+  readSnapshotPreparationView.mockResolvedValue(value); render(<PreparedSnapshotResult {...value.props} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('exact saved identity is kept');
+  expect(screen.queryByLabelText('Saved scalar metrics')).not.toBeInTheDocument(); expect(screen.queryByText(/checksum verified/)).not.toBeInTheDocument();
+  expect(value.props.onUnavailable).toHaveBeenCalledOnce(); expect(value.props.onDenied).not.toHaveBeenCalled();
+});
+
+it('keeps a withdrawn typed publication terminal rather than reloading scientific values after an equal descriptor refresh', async () => {
+  const value = typedFixture('metrics'), readView = vi.fn().mockRejectedValue(Object.assign(new Error('withdrawn'), { status: 409, code: 'ANALYSIS_SNAPSHOT_PUBLICATION_WITHDRAWN' }));
+  const props = { ...value.props, audience: 'project-publication', resourceId: 'aspub_' + 'b'.repeat(24), readView };
+  const view = render(<PreparedSnapshotResult {...props} />); await screen.findByRole('alert');
+  view.rerender(<PreparedSnapshotResult {...props} descriptor={structuredClone(props.descriptor)} />); await act(async () => {});
+  expect(readView).toHaveBeenCalledOnce(); expect(screen.queryByLabelText('Saved scalar metrics')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry retained view' })).not.toBeInTheDocument();
 });

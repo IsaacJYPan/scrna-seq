@@ -7,6 +7,9 @@ import {
   canonicalAnalysisSnapshotDocumentSource, ANALYSIS_SNAPSHOT_PREPARATION_SCHEMA_V2,
   ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2, FIXED_RESULT_VIEW_SCHEMA_V2, ANALYSIS_SNAPSHOT_LINKED_LIMITS,
   normalizeAnalysisSnapshotCaptionV2,
+  FIXED_RESULT_VIEW_SCHEMA_V3, ANALYSIS_SNAPSHOT_SCALAR_MODEL, ANALYSIS_SNAPSHOT_TYPED_LIMITS,
+  normalizeAnalysisSnapshotTypedDescriptor, canonicalAnalysisSnapshotTypedDescriptor,
+  canonicalAnalysisSnapshotResultViewV3, parseAnalysisSnapshotScalarJson,
 } from '../../shared/analysisSnapshotPreparationDispatch.mjs';
 import { normalizeAnalysisAttachmentCreate } from '../../shared/analysisAttachment.mjs';
 import { validateResearchAnalysisReference } from '../../shared/researchAnalysis.mjs';
@@ -104,7 +107,7 @@ function analysis(value) {
   if (!['active', 'archived'].includes(value.status)) fail();
   timestamp(value.createdAt); timestamp(value.updatedAt); if (value.updatedAt < value.createdAt) fail(); pattern(value.revisionSha256, SHA);
 }
-function source(value, linked = false) {
+function source(value, linked = false, typedFamily = null) {
   fields(value, linked ? [...sourceKeys, 'ownerUserId'] : sourceKeys);
   pattern(value.artifactId, linked ? /^(?:af|av|art|eri)_[a-f0-9]{16,40}$/ : AF);
   pattern(value.versionId, linked ? /^(?:av|art|eri)_[a-f0-9]{16,40}$/ : AV); pattern(value.sha256, SHA);
@@ -115,6 +118,11 @@ function source(value, linked = false) {
         || value.name.length > ANALYSIS_SNAPSHOT_LINKED_LIMITS.sourceName || /[\p{Cc}\p{Cf}\\/]/u.test(value.name)) fail();
   } else { savedText(value.name, 160); if (value.name.length > 160) fail(); }
   fields(value.format, ['id', 'version']);
+  if (typedFamily !== null) {
+    if (value.format.id !== { table: 'org.traceomics.table', metrics: 'org.ietf.json', image: 'org.w3.png' }[typedFamily]
+        || value.format.version !== '1' || value.sizeBytes < 1 || value.sizeBytes > ANALYSIS_SNAPSHOT_TYPED_LIMITS.sourceBytes) fail();
+    return typedFamily;
+  }
   if (!['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg'].includes(value.format.id) || value.format.version !== '1') fail();
   return ['org.ietf.csv', 'org.iana.tsv'].includes(value.format.id) ? 'table' : 'image';
 }
@@ -150,8 +158,24 @@ export function validateSnapshotPreparationList(input, expectedScope) {
 export function validateSnapshotPreparationOptions(input, expectedScope, kind, expectedAnalysisVersion) {
   try {
     const value = capture(input, L.listBytes), scope = scopeCopy(expectedScope, true);
-    envelope(value, scope, ['kind', 'items', 'nextCursor', ...(kind === 'analysis-references' ? ['analysisVersion'] : [])]); paging(value);
-    if (!['analysis-versions', 'results', 'documents', 'analysis-references'].includes(kind) || value.kind !== kind) fail();
+    envelope(value, scope, ['kind', 'items', 'nextCursor', ...(['analysis-references', 'analysis-typed-references'].includes(kind) ? ['analysisVersion'] : [])]); paging(value);
+    if (!['analysis-versions', 'results', 'documents', 'analysis-references', 'analysis-typed-references'].includes(kind) || value.kind !== kind) fail();
+    if (kind === 'analysis-typed-references') {
+      integer(expectedAnalysisVersion, 1, 2147483647); if (value.analysisVersion !== expectedAnalysisVersion) fail();
+      const checks = value.items.map(item => {
+        fields(item, ['reference', 'label', 'viewFamily', 'descriptor', 'descriptorSha256', 'integrity', 'availability']);
+        const reference = validateResearchAnalysisReference(item.reference), descriptor = normalizeAnalysisSnapshotTypedDescriptor(item.descriptor);
+        if (reference.kind !== 'artifact-version' || canonicalSnapshotJson(reference) !== canonicalSnapshotJson(item.reference)
+            || canonicalSnapshotJson(descriptor) !== canonicalSnapshotJson(item.descriptor) || descriptor.id !== reference.versionId || descriptor.sha256 !== reference.sha256
+            || item.viewFamily !== { table: 'table', metrics: 'metrics', figure: 'image' }[descriptor.type]
+            || item.integrity !== 'not-checked' || item.availability !== 'not-checked' || typeof item.label !== 'string'
+            || !item.label.isWellFormed() || !item.label || item.label !== item.label.trim() || item.label.length > ANALYSIS_SNAPSHOT_LINKED_LIMITS.optionLabel
+            || /[\p{Cc}\p{Cf}]/u.test(item.label)) fail();
+        pattern(item.descriptorSha256, SHA); return [canonicalAnalysisSnapshotTypedDescriptor(descriptor), item.descriptorSha256];
+      });
+      unique(value.items.map(item => canonicalSnapshotJson(item.reference)));
+      return (async () => { try { for (const [canonical, expected] of checks) if (await digest(canonical) !== expected) fail(); return value; } catch { fail(); } })();
+    }
     if (kind === 'analysis-versions') {
       value.items.forEach(analysis); unique(value.items.map(item => item.version));
       for (let i = 1; i < value.items.length; i++) if (value.items[i - 1].version <= value.items[i].version) fail();
@@ -267,8 +291,9 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
       const origin = linked ? item.origin : { kind: 'attachment-revision', attachment: item.attachment };
       if (linked && origin.kind !== chosen.kind || origin.kind === 'attachment-revision'
           && (origin.attachment.attachmentId !== chosen.attachmentId || origin.attachment.revisionId !== chosen.revisionId)
-          || origin.kind === 'analysis-reference' && (canonicalSnapshotJson(origin.reference) !== canonicalSnapshotJson(chosen.reference)
+          || ['analysis-reference', 'typed-analysis-reference'].includes(origin.kind) && (canonicalSnapshotJson(origin.reference) !== canonicalSnapshotJson(chosen.reference)
             || origin.caption !== chosen.caption || origin.analysisVersion !== recipe.analysisVersion)
+          || origin.kind === 'typed-analysis-reference' && view.descriptorSha256 !== chosen.descriptorSha256
           || item.source.versionId !== chosen.reference.versionId || item.source.sha256 !== chosen.reference.sha256
           || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)) fail();
     }
@@ -294,6 +319,10 @@ async function raw(bytes, expected, maximum) {
 export async function decodeSnapshotPreparationTable(bytes, resultDescriptor) {
   try {
     const result = capture(resultDescriptor, L.packageBytes);
+    if (result.view?.schema === FIXED_RESULT_VIEW_SCHEMA_V3) {
+      if (result.view.family !== 'table') fail();
+      return await decodeSnapshotPreparationTyped(bytes, result);
+    }
     const linked = result.view?.schema === FIXED_RESULT_VIEW_SCHEMA_V2;
     fields(result, ['viewId', linked ? 'origin' : 'attachment', 'source', 'view']); pattern(result.viewId, VIEW);
     if (source(result.source, linked) !== 'table') fail();
@@ -331,6 +360,53 @@ export async function decodeSnapshotPreparationTable(bytes, resultDescriptor) {
     if (rows.length && table.scannedRows < table.offset + rows.length || !table.truncated && table.hasMore
         && (rows.length !== table.limit || table.scannedRows !== table.offset + table.limit + 1)) fail();
     return table;
+  } catch { fail(); }
+}
+export async function decodeSnapshotPreparationTyped(bytes, resultDescriptor) {
+  try {
+    const result = capture(resultDescriptor, L.packageBytes), view = result.view;
+    fields(result, ['viewId', 'origin', 'source', 'view']); pattern(result.viewId, VIEW);
+    fields(view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height', 'descriptorSha256', 'semantics']);
+    if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || !['table', 'metrics'].includes(view.family)) fail();
+    source(result.source, true, view.family); pattern(view.viewSha256, SHA);
+    const origin = result.origin; fields(origin, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin']);
+    const reference = validateResearchAnalysisReference(origin.reference); integer(origin.analysisVersion, 1, 2147483647);
+    if (origin.kind !== 'typed-analysis-reference' || origin.captionOrigin !== 'user-supplied' || reference.kind !== 'artifact-version'
+        || canonicalSnapshotJson(reference) !== canonicalSnapshotJson(origin.reference) || reference.versionId !== result.source.versionId
+        || reference.sha256 !== result.source.sha256 || normalizeAnalysisSnapshotCaptionV2(origin.caption) !== origin.caption) fail();
+    const text = await raw(bytes, view, ANALYSIS_SNAPSHOT_TYPED_LIMITS.responseBytes), body = parseAnalysisSnapshotScalarJson(text);
+    if (canonicalSnapshotJson(body, ANALYSIS_SNAPSHOT_TYPED_LIMITS.responseBytes) !== text) fail();
+    fields(body.source, ['artifactId', 'versionId', 'projectId', 'sha256']); pattern(body.source.projectId, PROJECT);
+    if (body.source.artifactId !== result.source.artifactId || body.source.versionId !== result.source.versionId || body.source.sha256 !== result.source.sha256) fail();
+    const { viewSha256, ...preimage } = view;
+    if (await digest(canonicalAnalysisSnapshotResultViewV3({ ...preimage, source: body.source })) !== viewSha256) fail();
+    const scalar = value => value === null || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)
+      && !Object.is(value, -0) && (!Number.isInteger(value) || Number.isSafeInteger(value))
+      || typeof value === 'string' && value.isWellFormed() && value.length <= ANALYSIS_SNAPSHOT_TYPED_LIMITS.cellCharacters;
+    if (view.family === 'table') {
+      fields(body, ['family', 'source', 'semantics', 'columns', 'rows', 'offset', 'limit', 'totalRows', 'hasMore', 'truncated', 'scalarModel']);
+      if (body.family !== 'table' || body.offset !== view.spec.offset || body.limit !== view.spec.limit || body.truncated !== false
+          || body.scalarModel !== ANALYSIS_SNAPSHOT_SCALAR_MODEL || canonicalSnapshotJson(body.semantics) !== canonicalSnapshotJson(view.semantics)) fail();
+      integer(body.totalRows, 0, ANALYSIS_SNAPSHOT_TYPED_LIMITS.sourceRows);
+      const columns = dense(body.columns, ANALYSIS_SNAPSHOT_TYPED_LIMITS.columns), rows = dense(body.rows, body.limit);
+      if (columns.some(key => typeof key !== 'string' || !key.trim() || !key.isWellFormed() || key.length > ANALYSIS_SNAPSHOT_TYPED_LIMITS.columnCharacters
+          || /[\p{Cc}]/u.test(key) || ['__proto__', 'prototype', 'constructor'].includes(key)) || body.totalRows > 0 && !columns.length
+          || body.totalRows === 0 && columns.length || rows.length !== Math.min(body.limit, Math.max(0, body.totalRows - body.offset))
+          || body.hasMore !== (body.offset + body.limit < body.totalRows)) fail();
+      unique(columns); rows.forEach(row => { if (dense(row, columns.length).length !== columns.length || row.some(cell => !scalar(cell))) fail(); });
+    } else {
+      fields(body, ['family', 'source', 'semantics', 'items']); fields(body.semantics, ['role', 'title']);
+      if (body.family !== 'metrics' || body.semantics.role !== view.semantics.role || body.semantics.title !== view.semantics.title) fail();
+      const items = dense(body.items, ANALYSIS_SNAPSHOT_TYPED_LIMITS.metrics);
+      items.forEach(item => {
+        fields(item, ['key', 'value', 'label', 'unit']);
+        if (typeof item.key !== 'string' || !item.key.trim() || !item.key.isWellFormed() || item.key.length > ANALYSIS_SNAPSHOT_TYPED_LIMITS.metricKeyCharacters
+            || /[\p{Cc}]/u.test(item.key) || ['__proto__', 'prototype', 'constructor'].includes(item.key) || !scalar(item.value)
+            || item.label !== (view.semantics.metrics[item.key]?.label ?? null) || item.unit !== (view.semantics.metrics[item.key]?.unit ?? null)) fail();
+      }); unique(items.map(item => item.key));
+      if (Object.keys(view.semantics.metrics).some(key => !items.some(item => item.key === key))) fail();
+    }
+    return body;
   } catch { fail(); }
 }
 export async function decodeSnapshotPreparationDocument(bytes, documentDescriptor) {

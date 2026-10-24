@@ -3,6 +3,7 @@ import { ANALYSIS_SNAPSHOT_PREPARATION_LIMITS as L, ANALYSIS_SNAPSHOT_PREPARATIO
   canonicalAnalysisSnapshotDocumentSource } from './analysisSnapshotPreparation.mjs';
 import { normalizeAnalysisAttachmentCreate } from './analysisAttachment.mjs';
 import { validateResearchAnalysisReference } from './researchAnalysis.mjs';
+import { FIXED_RESULT_VIEW_SCHEMA_V3, canonicalAnalysisSnapshotResultViewV3 } from './analysisSnapshotTypedResult.mjs';
 
 export const ANALYSIS_SNAPSHOT_PREPARATION_SCHEMA_V2 = 'traceomics.analysis-snapshot-preparation.v2';
 export const ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2 = 'traceomics.analysis-snapshot-package.v2';
@@ -57,6 +58,13 @@ function selectedResult(value) {
     fields(value, ['kind', 'attachmentId', 'revisionId', 'reference', 'view']);
     return { kind: value.kind, attachmentId: pattern(value.attachmentId, ATTACHMENT), revisionId: pattern(value.revisionId, REVISION),
       reference: reference(value.reference, true, true), view: selectedView(value.view) };
+  }
+  if (value?.kind === 'typed-analysis-reference') {
+    fields(value, ['kind', 'reference', 'descriptorSha256', 'caption', 'view']);
+    let view;
+    if (value.view?.family === 'metrics') { fields(value.view, ['family']); view = { family: 'metrics' }; }
+    else view = selectedView(value.view);
+    return { kind: value.kind, reference: reference(value.reference, true), descriptorSha256: pattern(value.descriptorSha256, SHA), caption: text(value.caption, B.caption), view };
   }
   fields(value, ['kind', 'reference', 'caption', 'view']); if (value.kind !== 'analysis-reference') invalid('Choose a supported saved-result origin.');
   return { kind: value.kind, reference: reference(value.reference, true), caption: text(value.caption, B.caption), view: selectedView(value.view) };
@@ -139,13 +147,14 @@ function savedAnalysis(value) {
   if (!['active', 'archived'].includes(value.status)) invalid('Saved analysis status is unsupported.');
   timestamp(value.createdAt); timestamp(value.updatedAt); if (value.updatedAt < value.createdAt) invalid('A saved revision cannot predate its creation.'); pattern(value.revisionSha256, SHA);
 }
-function savedSource(value, owner, projectId) {
+function savedSource(value, owner, projectId, typed = false) {
   fields(value, ['artifactId', 'versionId', 'ownerUserId', 'sha256', 'sizeBytes', 'name', 'format']);
   fullSource({ artifactId: value.artifactId, versionId: value.versionId, projectId, sha256: value.sha256 });
   if (value.ownerUserId !== owner) invalid('Fixed findings must retain their original owned source.'); integer(value.sizeBytes, 0, L.originalBytes);
   if (text(value.name, B.sourceName, false, false) !== value.name || /[\\/]/.test(value.name)) invalid('Use a safe bounded source label, not a path.');
   fields(value.format, ['id', 'version']);
-  if (!['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg'].includes(value.format.id) || value.format.version !== '1') invalid('Choose a supported C1 source format.');
+  if (!(typed ? ['org.traceomics.table', 'org.ietf.json', 'org.w3.png'] : ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg']).includes(value.format.id)
+      || value.format.version !== '1') invalid('Choose a supported source format for this exact adapter.');
 }
 function savedOrigin(value, source, analysisVersion, owner) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('Choose an exact saved result origin.');
@@ -160,7 +169,7 @@ function savedOrigin(value, source, analysisVersion, owner) {
     return { kind: value.kind, attachmentId: item.attachmentId, revisionId: item.revisionId, reference: copied.reference };
   }
   fields(value, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin']);
-  if (value.kind !== 'analysis-reference' || value.analysisVersion !== analysisVersion || value.captionOrigin !== 'user-supplied'
+  if (!['analysis-reference', 'typed-analysis-reference'].includes(value.kind) || value.analysisVersion !== analysisVersion || value.captionOrigin !== 'user-supplied'
       || text(value.caption, B.caption) !== value.caption) invalid('Keep exact selected saved-analysis context and supplied caption.');
   const ref = reference(value.reference, true);
   if (ref.versionId !== source.versionId || ref.sha256 !== source.sha256) invalid('The selected reference must match its retained source.');
@@ -171,14 +180,22 @@ export function canonicalAnalysisSnapshotPackageV2(input) {
   fields(value, ['schema', 'serviceId', 'projectId', 'analysisId', 'ownerUserId', 'preparationId', 'createdAt', 'analysis', 'results', 'documents', 'notes', 'prerequisites', 'reproduction']);
   if (value.schema !== ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2) invalid('Use the linked snapshot package schema.'); identity(value);
   pattern(value.preparationId, ANALYSIS_SNAPSHOT_PREPARATION_ID); timestamp(value.createdAt); savedAnalysis(value.analysis);
-  let retained = 0, documentBytes = 0; const ids = [], selections = [], sources = new Map();
+  let retained = 0, documentBytes = 0; const ids = [], selections = [], sources = new Map(), typedDescriptors = new Map();
   array(value.results, L.results, 1).forEach(item => {
-    fields(item, ['viewId', 'origin', 'source', 'view']); pattern(item.viewId, ANALYSIS_SNAPSHOT_VIEW_ID); ids.push(item.viewId); savedSource(item.source, value.ownerUserId, value.projectId);
+    fields(item, ['viewId', 'origin', 'source', 'view']); pattern(item.viewId, ANALYSIS_SNAPSHOT_VIEW_ID); ids.push(item.viewId);
+    const typed = item.origin?.kind === 'typed-analysis-reference'; savedSource(item.source, value.ownerUserId, value.projectId, typed);
     const origin = savedOrigin(item.origin, item.source, value.analysis.version, value.ownerUserId);
-    fields(item.view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height']);
+    fields(item.view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height', ...(typed ? ['descriptorSha256', 'semantics'] : [])]);
     const { viewSha256, ...view } = item.view; pattern(viewSha256, SHA);
-    canonicalAnalysisSnapshotResultViewV2({ ...view, source: { artifactId: item.source.artifactId, versionId: item.source.versionId, projectId: value.projectId, sha256: item.source.sha256 } });
-    const family = ['org.ietf.csv', 'org.iana.tsv'].includes(item.source.format.id) ? 'table' : 'image';
+    (typed ? canonicalAnalysisSnapshotResultViewV3 : canonicalAnalysisSnapshotResultViewV2)({ ...view, source: { artifactId: item.source.artifactId, versionId: item.source.versionId, projectId: value.projectId, sha256: item.source.sha256 } });
+    const family = typed ? { 'org.traceomics.table': 'table', 'org.ietf.json': 'metrics', 'org.w3.png': 'image' }[item.source.format.id]
+      : ['org.ietf.csv', 'org.iana.tsv'].includes(item.source.format.id) ? 'table' : 'image';
+    if (typed) {
+      if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || item.source.sizeBytes > 5 * 1024 * 1024 || item.source.sizeBytes < 1) invalid('Typed findings retain a complete bounded source.');
+      const descriptorIdentity = canonicalSnapshotJson({ sha256: view.descriptorSha256, semantics: view.semantics }), prior = typedDescriptors.get(item.source.versionId);
+      if (prior && prior !== descriptorIdentity) invalid('One source version must retain one exact typed descriptor and meaning.');
+      typedDescriptors.set(item.source.versionId, descriptorIdentity);
+    }
     if (view.family !== family || family === 'image' && (view.blobBytes !== item.source.sizeBytes || view.blobSha256 !== item.source.sha256)) invalid('A fixed view must match its original source format and raster bytes.');
     selections.push({ ...origin, view: family === 'table' ? { family, ...view.spec } : { family } });
     const previous = sources.get(item.source.versionId);

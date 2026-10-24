@@ -79,7 +79,7 @@ export function snapshotList(records = [], canPrepare = true) {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.preparationId.localeCompare(a.preparationId)), nextCursor: null };
 }
 export function snapshotOptions(kind, canPrepare = true, items, analysisVersion = 2) {
-  if (kind === 'analysis-references') return { ...snapshotList([], canPrepare), kind, analysisVersion, items: items || [] };
+  if (['analysis-references', 'analysis-typed-references'].includes(kind)) return { ...snapshotList([], canPrepare), kind, analysisVersion, items: items || [] };
   return { ...snapshotList([], canPrepare), kind, items: items || (kind === 'analysis-versions' ? [snapshotAnalysisOption(2), snapshotAnalysisOption(1)]
     : kind === 'results' ? [snapshotResultOption()] : [snapshotDocumentOption()]) };
 }

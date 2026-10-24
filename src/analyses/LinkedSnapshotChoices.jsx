@@ -19,46 +19,60 @@ function ExactReference({ reference }) {
 export default function LinkedSnapshotChoices({ state, disabled }) {
   const { analysisVersion, results, linkedResults, setLinkedResults, linkedPrerequisites, setLinkedPrerequisites,
     prerequisites, options, optionLoading, loadOptions } = state;
-  const collectionKey = `analysis-references:${analysisVersion}`, collection = options[collectionKey], loading = optionLoading[collectionKey];
-  const count = results.length + linkedResults.length, prerequisiteCount = prerequisites.length + linkedPrerequisites.length;
+  const collectionKey = `analysis-references:${analysisVersion}`, typedKey = `analysis-typed-references:${analysisVersion}`;
+  const collection = options[collectionKey], typedCollection = options[typedKey], loading = optionLoading[collectionKey] || optionLoading[typedKey];
   const same = (first, second) => identity(first) === identity(second);
+  const typedByReference = new Map((typedCollection?.items || []).map(item => [identity(item.reference), item]));
+  const choices = [...(collection?.items || []).map(item => typedByReference.has(identity(item.reference))
+    ? { ...typedByReference.get(identity(item.reference)), typed: true } : item),
+  ...(typedCollection?.items || []).filter(item => !collection?.items.some(value => same(value.reference, item.reference))).map(item => ({ ...item, typed: true }))];
+  const count = results.length + linkedResults.length, prerequisiteCount = prerequisites.length + linkedPrerequisites.length;
   const edit = (index, update) => setLinkedResults(previous => previous.map((item, position) => position === index ? { ...item, ...update } : item));
   const editPrerequisite = (index, update) => setLinkedPrerequisites(previous => previous.map((item, position) => position === index ? { ...item, ...update } : item));
   const addFinding = option => {
     const prior = linkedResults.filter(item => same(item.reference, option.reference));
+    const previousTable = prior.filter(item => item.view.family === 'table').at(-1);
     const view = option.viewFamily === 'table'
-      ? { family: 'table', offset: Math.min(limits.tableOffset, prior.length ? prior.at(-1).view.offset + prior.at(-1).view.limit : 0), limit: 25 }
-      : { family: 'image' };
+      ? { family: 'table', offset: Math.min(limits.tableOffset, previousTable ? previousTable.view.offset + previousTable.view.limit : 0), limit: 25 }
+      : { family: option.viewFamily };
     if (count >= limits.results || prior.some(item => identity(item.view) === identity(view))) return;
-    setLinkedResults(previous => [...previous, { kind: 'analysis-reference', reference: option.reference, caption: option.label, view }]);
+    setLinkedResults(previous => [...previous, { kind: option.typed ? 'typed-analysis-reference' : 'analysis-reference', reference: option.reference,
+      ...(option.typed ? { descriptorSha256: option.descriptorSha256 } : {}), caption: option.label, view }]);
   };
   return <section aria-label={`Linked in saved analysis ${analysisVersion}`} className="space-y-4 border-t border-border pt-5">
     <div><h4 className="font-medium">Linked in saved analysis {analysisVersion}</h4>
       <p className="mt-1 text-sm text-textMuted">Choose findings already linked to this exact saved version. Linked selections are kept separately for each saved analysis version.</p>
       <p className="mt-2 text-xs text-textMuted">Eligibility is based on recorded metadata. Contents are checked when preparing a finding. Reference-only items include no contents or data access.</p></div>
-    <ul aria-label="Linked saved references" className="space-y-3">{collection?.items.map(option => {
+    <ul aria-label="Linked saved references" className="space-y-3">{choices.map(option => {
       const included = linkedPrerequisites.some(item => same(item.reference, option.reference));
       return <li key={identity(option.reference)} className="min-w-0 rounded border border-border bg-surface p-3">
         <p className="break-words text-sm font-medium">{option.label}</p>
+        {option.typed && <div className="mt-2 space-y-1 text-xs text-textMuted"><p>Recorded typed {option.viewFamily === 'image' ? 'figure' : option.viewFamily === 'metrics' ? 'metrics' : 'table'} · declared meaning retained</p>
+          {option.descriptor.semantics.title && <p className="break-words">{option.descriptor.semantics.title}</p>}
+          <details><summary className="cursor-pointer">Recorded descriptor identity</summary><p className="mt-1 break-all">SHA-256 {option.descriptorSha256}</p><p>Recorded profile: {option.descriptor.profileId || 'Not recorded'}. Runtime availability has not been checked.</p></details></div>}
         {option.referenceOnlyReason && <p className="mt-1 text-xs text-textMuted">{explanation(option.referenceOnlyReason)}</p>}
         <ExactReference reference={option.reference} />
         <div className="mt-3 flex flex-wrap gap-3">{option.viewFamily && <button type="button" className="btn btn-secondary text-xs"
-          disabled={disabled || count >= limits.results || option.viewFamily === 'image' && linkedResults.some(item => same(item.reference, option.reference))}
-          onClick={() => addFinding(option)}>{option.viewFamily === 'table' ? 'Add linked table excerpt' : 'Add linked figure'}</button>}
+          disabled={disabled || count >= limits.results || option.viewFamily !== 'table' && linkedResults.some(item => same(item.reference, option.reference))}
+          onClick={() => addFinding(option)}>{option.viewFamily === 'table' ? 'Add linked table excerpt' : option.viewFamily === 'metrics' ? 'Add linked metrics' : 'Add linked figure'}</button>}
           <button type="button" className="text-xs text-primary underline" disabled={disabled || included || prerequisiteCount >= limits.prerequisites}
             onClick={() => setLinkedPrerequisites(previous => [...previous, { kind: 'analysis-reference', reference: option.reference, label: initialLabel(option.label), detail: null }])}>
             {included ? 'Reference included' : 'Include reference only'}</button></div>
       </li>;
     })}</ul>
     {loading && <p role="status" className="text-sm text-textMuted">Loading references for saved analysis {analysisVersion}…</p>}
-    {collection && !collection.items.length && <p className="text-sm text-textMuted">No references are linked to this saved analysis version. Attached findings can still be selected above.</p>}
-    <div className="flex flex-wrap gap-3 text-xs"><button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-references')}>Refresh linked references</button>
-      {collection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-references', collection.cursor)}>Load more linked references</button>}</div>
+    {collection && typedCollection && !choices.length && <p className="text-sm text-textMuted">No references are linked to this saved analysis version. Attached findings can still be selected above.</p>}
+    <div className="flex flex-wrap gap-3 text-xs"><button type="button" className="text-primary underline" disabled={!!loading} onClick={() => {
+      void loadOptions('analysis-references'); void loadOptions('analysis-typed-references');
+    }}>Refresh linked references</button>
+      {collection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-references', collection.cursor)}>Load more linked references</button>}
+      {typedCollection?.cursor && <button type="button" className="text-primary underline" disabled={!!loading} onClick={() => void loadOptions('analysis-typed-references', typedCollection.cursor)}>Load more typed references</button>}</div>
     <ol aria-label="Selected linked findings" className="space-y-3">{linkedResults.map((item, index) => <li key={index} className="space-y-3 rounded border border-border p-3">
-      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : 'Figure'} · Saved analysis {analysisVersion}</p>
+      <p className="text-sm font-medium">Linked finding {index + 1} · {item.view.family === 'table' ? 'Table excerpt' : item.view.family === 'metrics' ? 'Metrics' : 'Figure'} · Saved analysis {analysisVersion}</p>
       <label className="block text-sm">Caption for linked finding {index + 1}<textarea value={item.caption} required maxLength={2000} disabled={disabled} rows={2}
         onChange={event => edit(index, { caption: event.target.value })} className="input mt-2 block w-full" /></label>
       <p className="text-xs text-textMuted">This caption is supplied for this snapshot.</p>
+      {item.kind === 'typed-analysis-reference' && <details className="text-xs text-textMuted"><summary className="cursor-pointer">Selected descriptor identity</summary><p className="mt-1 break-all">SHA-256 {item.descriptorSha256}</p><p className="mt-1">This selection keeps its recorded meaning. If the source descriptor changes, start a new selection after reviewing it.</p></details>}
       {item.view.family === 'table' && <div className="flex flex-wrap gap-3">
         <label className="text-xs">First data row<input aria-label={`First data row for linked finding ${index + 1}`} type="number" min={1} max={limits.tableOffset + 1} value={item.view.offset + 1} disabled={disabled}
           onChange={event => edit(index, { view: { ...item.view, offset: Number(event.target.value) - 1 } })} className="input mt-1 block w-28" /></label>

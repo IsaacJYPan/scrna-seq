@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const contract = import('../shared/researchAnalysis.mjs');
 const snapshots = import('../shared/analysisSnapshotPreparationDispatch.mjs');
+const { typedSnapshotMetadata } = require('./analysisSnapshotTypedSources');
 const SCHEMA = 'traceomics.analysis-snapshot-preparation.v2';
 const formats = ['org.ietf.csv', 'org.iana.tsv', 'org.w3.png', 'org.iso.jpeg'];
 const failure = (code, message, status = 409) => Object.assign(new Error(message), { code: `ANALYSIS_SNAPSHOT_${code}`, status });
@@ -55,6 +56,13 @@ function createLinkedSnapshotSources(artifacts, legacySources) {
         results.push(captured); continue;
       }
       if (!keys.has(schema.canonicalSnapshotJson(selected.reference))) throw failure('SOURCE_UNAVAILABLE', 'The selected result is not linked in this exact saved analysis version.');
+      if (selected.kind === 'typed-analysis-reference') {
+        const typed = await typedSnapshotMetadata(artifacts, client, userId, projectId, selected.reference);
+        if (!typed || typed.family !== selected.view.family || typed.descriptorSha256 !== selected.descriptorSha256) throw failure('SOURCE_CHANGED', 'The exact selected typed source or its recorded meaning changed. Review its current descriptor before preparing a new request.');
+        results.push({ original: asOriginal(typed.source), descriptor: typed.descriptor, descriptorSha256: typed.descriptorSha256,
+          origin: { kind: selected.kind, reference: selected.reference, analysisVersion: recipe.analysisVersion, caption: selected.caption, captionOrigin: 'user-supplied' } });
+        continue;
+      }
       const selectedSource = await metadata(artifacts, client, userId, projectId, selected.reference);
       if (!selectedSource.source || selectedSource.family !== selected.view.family) throw failure('SOURCE_UNAVAILABLE', 'Choose an owned linked CSV, TSV, PNG or JPEG with a supported fixed view.');
       results.push({ original: asOriginal(selectedSource.source), origin: { kind: 'analysis-reference', reference: selected.reference, analysisVersion: recipe.analysisVersion,
@@ -72,6 +80,7 @@ function createLinkedSnapshotSources(artifacts, legacySources) {
     return { results, documents: legacy.documents, prerequisites };
   }
   async function options(client, context, userId, projectId, analysisId, input, canPrepare) {
+    const kind = input.kind, typedOnly = kind === 'analysis-typed-references';
     const version = Number(input.analysisVersion), limit = input.limit === undefined ? 30 : Number(input.limit);
     if (Object.keys(input).some(key => !['kind', 'analysisVersion', 'limit', 'cursor'].includes(key))
         || !['string', 'number'].includes(typeof input.analysisVersion) || typeof input.analysisVersion === 'string' && !/^[1-9][0-9]{0,9}$/.test(input.analysisVersion)
@@ -86,21 +95,24 @@ function createLinkedSnapshotSources(artifacts, legacySources) {
         if (typeof input.cursor !== 'string' || input.cursor.length > 256 || !/^[A-Za-z0-9_-]+$/.test(input.cursor)) throw new Error();
         const bytes = Buffer.from(input.cursor, 'base64url'); if (bytes.toString('base64url') !== input.cursor) throw new Error();
         const value = JSON.parse(bytes.toString());
-        if (!Array.isArray(value) || value.length !== 4 || value[0] !== 'analysis-references' || value[1] !== scope || value[2] !== version || !Number.isInteger(value[3]) || value[3] < 0 || value[3] >= saved.length) throw new Error();
+        if (!Array.isArray(value) || value.length !== 4 || value[0] !== kind || value[1] !== scope || value[2] !== version || !Number.isInteger(value[3]) || value[3] < 0 || value[3] >= saved.length) throw new Error();
         start = value[3];
       } catch { throw failure('INVALID_PAGE', 'This linked-reference cursor belongs to a different account or saved analysis version.', 400); }
     }
     const result = { schema: 'traceomics.analysis-snapshot-preparation.v1', serviceId: context.serviceId, projectId, analysisId, ownerUserId: Number(userId),
-      canPrepare, kind: 'analysis-references', analysisVersion: version, items: [], nextCursor: null };
+      canPrepare, kind, analysisVersion: version, items: [], nextCursor: null };
     let position = start;
     while (position < saved.length && result.items.length < limit) {
-      const reference = saved[position], source = await metadata(artifacts, client, userId, projectId, reference);
-      const item = { reference, label: source.label, viewFamily: source.family, referenceOnlyReason: source.reason, integrity: 'not-checked', availability: 'not-checked' };
+      const reference = saved[position];
+      const source = typedOnly ? await typedSnapshotMetadata(artifacts, client, userId, projectId, reference) : await metadata(artifacts, client, userId, projectId, reference);
+      if (!source) { position++; continue; }
+      const item = typedOnly ? { reference, label: source.source.name, viewFamily: source.family, descriptor: source.descriptor, descriptorSha256: source.descriptorSha256, integrity: 'not-checked', availability: 'not-checked' }
+        : { reference, label: source.label, viewFamily: source.family, referenceOnlyReason: source.reason, integrity: 'not-checked', availability: 'not-checked' };
       result.items.push(item);
       if (Buffer.byteLength(JSON.stringify(result)) + 256 > 128 * 1024) { result.items.pop(); break; }
       position++;
     }
-    if (position < saved.length && result.items.length) result.nextCursor = Buffer.from(JSON.stringify(['analysis-references', scope, version, position])).toString('base64url');
+    if (position < saved.length && result.items.length) result.nextCursor = Buffer.from(JSON.stringify([kind, scope, version, position])).toString('base64url');
     return result;
   }
   return { sources, options };

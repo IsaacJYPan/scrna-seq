@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import RetainedArtifactView, { RetainedResultContent } from './RetainedArtifactView';
 import { getArtifactVersion, previewArtifactVersion } from '../artifacts/artifactApi';
@@ -67,6 +67,54 @@ it('discloses bounded scans honestly and never invents row numbers for an empty 
   expect(screen.getByLabelText('Fixed retained table excerpt')).toHaveTextContent('source rows 1–1');
   expect(screen.queryByText('Other source rows are outside this retained view.')).not.toBeInTheDocument();
   expect(screen.queryByText(/complete source row count is unknown/)).not.toBeInTheDocument();
+});
+
+it('preserves every fixed typed scalar without confusing null, false, zero and empty text', () => {
+  const preview = { ...table, scalarModel: 'finite-ieee754-safe-integers.v1', totalRows: 2,
+    columns: ['null value', 'boolean', 'count', 'text', 'fraction', 'literal null'],
+    rows: [[null, false, 0, '', 0.125, 'null'], ['<img onerror="attack()">', true, 42, 'β\nγ', 1.5, 'empty string']],
+    hasMore: false, truncated: false };
+  render(<RetainedResultContent fixedView preview={preview} />);
+  const rows = screen.getAllByRole('row').slice(1), cells = within(rows[0]).getAllByRole('cell');
+  expect(cells.map(cell => cell.textContent)).toEqual(['null', 'false', '0', 'empty string', '0.125', 'null']);
+  expect(within(cells[0]).getByTitle('JSON null')).toBeVisible();
+  expect(within(cells[3]).getByTitle('Text with zero characters')).toBeVisible();
+  expect(within(cells[5]).getByTitle('Text value')).toBeVisible();
+  expect(within(rows[1]).getByRole('cell', { name: 'true' })).toBeVisible();
+  expect(screen.getByText('<img onerror="attack()">')).toBeVisible(); expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  expect(screen.getByText('Source table: 2 rows.')).toBeVisible();
+  expect(screen.getByText('Null values and empty strings are marked explicitly.')).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Next rows' })).not.toBeInTheDocument(); expect(previewArtifactVersion).not.toHaveBeenCalled();
+});
+
+it('renders a genuinely empty fixed typed source without inventing a column or row', () => {
+  render(<RetainedResultContent fixedView preview={{ ...table, columns: [], rows: [], scalarModel: 'finite-ieee754-safe-integers.v1',
+    totalRows: 0, hasMore: false, truncated: false }} />);
+  expect(screen.queryByRole('cell')).not.toBeInTheDocument(); expect(screen.queryByRole('columnheader')).not.toBeInTheDocument();
+  expect(screen.getByText('Source table: 0 rows.')).toBeVisible();
+  expect(screen.getByText('Fixed retained excerpt · no rows are included from the selected source window.')).toBeVisible();
+});
+
+it.each([undefined, 'unknown-model'])('keeps historical generic table literals outside the exact typed scalar model (%s)', scalarModel => {
+  render(<RetainedResultContent fixedView typedScalars preview={{ ...table, columns: ['a', 'b', 'c'], rows: [[false, null, '']], scalarModel, totalRows: 1 }} />);
+  expect(screen.getAllByRole('cell').map(cell => cell.textContent)).toEqual(['', '', '']);
+  expect(screen.queryByText('Null values and empty strings are marked explicitly.')).not.toBeInTheDocument();
+});
+
+it('marks scalar metrics only in explicitly checked fixed typed mode while preserving labels and units', () => {
+  const preview = { family: 'metrics', semantics: { role: 'diagnostic', title: 'QC overview' }, items: [
+    { key: 'count', value: 0, label: 'Cells retained', unit: 'cells' }, { key: 'accepted', value: false, label: null, unit: null },
+    { key: 'missing', value: null, label: null, unit: null }, { key: 'empty', value: '', label: null, unit: null },
+  ] };
+  const view = render(<RetainedResultContent fixedView typedScalars preview={preview} />);
+  expect(screen.getByRole('heading', { name: 'QC overview' })).toBeVisible(); expect(screen.getByText('Diagnostic')).toBeVisible();
+  expect(screen.getByText('Cells retained (cells)')).toBeVisible(); expect(screen.getByText('0')).toBeVisible(); expect(screen.getByText('false')).toBeVisible();
+  expect(screen.getByTitle('JSON null')).toHaveTextContent('null'); expect(screen.getByTitle('Text with zero characters')).toHaveTextContent('empty string');
+  view.rerender(<RetainedResultContent fixedView preview={preview} />);
+  expect(screen.getByText('Not recorded')).toBeVisible(); expect(screen.queryByText('empty string')).not.toBeInTheDocument();
+  view.rerender(<RetainedResultContent typedScalars preview={preview} />);
+  expect(screen.getByText('Not recorded')).toBeVisible(); expect(screen.queryByTitle('JSON null')).not.toBeInTheDocument();
+  expect(previewArtifactVersion).not.toHaveBeenCalled(); expect(fetchRetainedArtifactImage).not.toHaveBeenCalled();
 });
 
 it('keeps legacy source paging by default and enables its callbacks only outside fixed mode', () => {

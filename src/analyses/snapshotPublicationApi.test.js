@@ -3,6 +3,7 @@ import { createHash, webcrypto } from 'node:crypto';
 import { listSnapshotPublications, listSnapshotPublicationRequests, getSnapshotPublication, getSnapshotPublicationRequest,
   publishAnalysisSnapshot, withdrawAnalysisSnapshot, readSnapshotPublicationView, readSnapshotPublicationDocument } from './snapshotPublicationApi';
 import { withExecutionTarget } from '../runtime/executionTarget';
+import { typedRecipe, typedRecord, typedMetricsBytes } from './snapshotTypedTestFixtures';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
 vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
@@ -35,6 +36,31 @@ it('reads only the exact selected publication view/source routes and checks thei
   expect(Array.from((await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_a', result)).bytes)).toEqual(Array.from(bytes));
   await readSnapshotPublicationDocument('project 1', 'analysis 1', 'aspub_a', { viewId: 'asv_source', ...blob });
   expect(fetch.mock.calls.map(([url]) => url)).toEqual([base + '/aspub_a/views/asv_selected', base + '/aspub_a/documents/asv_source']);
+});
+
+it('reads fixed3 metrics through the current-reader publication route with bounded checked JSON bytes', async () => {
+  const record = typedRecord(typedRecipe({ family: 'metrics' })), metrics = record.package.results[0], content = typedMetricsBytes(metrics);
+  fetch.mockResolvedValue(new Response(content, { headers: { 'Content-Type': 'application/json' } }));
+  const received = await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', metrics);
+  expect(Array.from(received.bytes)).toEqual(Array.from(content)); expect(received.type).toBe('application/json');
+  expect(fetch.mock.calls[0][0]).toBe(`${base}/aspub_exact/views/${metrics.viewId}`);
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it.each(['mime', 'checksum', 'length', 'size'])('refuses public fixed3 metrics %s mismatch before a checked preview can appear', async mismatch => {
+  const record = typedRecord(typedRecipe({ family: 'metrics' })), metrics = record.package.results[0], content = typedMetricsBytes(metrics);
+  if (mismatch === 'checksum') metrics.view.blobSha256 = 'b'.repeat(64);
+  if (mismatch === 'size') metrics.view.blobBytes = 262145;
+  fetch.mockResolvedValue(new Response(mismatch === 'length' ? content.subarray(1) : content,
+    { headers: { 'Content-Type': mismatch === 'mime' ? 'image/png' : 'application/json' } }));
+  await expect(readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', metrics)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' });
+  expect(fetch).toHaveBeenCalledTimes(mismatch === 'size' ? 0 : 1);
+});
+
+it.each(['traceomics.fixed-result-view.v2', 'traceomics.fixed-result-view.v99'])('does not infer metrics JSON for unrecognized schema %s', async schema => {
+  const record = typedRecord(typedRecipe({ family: 'metrics' })), metrics = record.package.results[0]; metrics.view.schema = schema;
+  await expect(readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', metrics)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' });
+  expect(fetch).not.toHaveBeenCalled(); expect(withExecutionTarget).not.toHaveBeenCalled();
 });
 it.each(['checksum', 'mime', 'length'])('refuses %s mismatch before returning retained bytes', async kind => {
   fetch.mockResolvedValue(new Response(kind === 'length' ? bytes.slice(1) : bytes, { headers: { 'Content-Type': kind === 'mime' ? 'text/html' : 'application/json' } }));

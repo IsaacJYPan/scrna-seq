@@ -76,6 +76,12 @@ function ResultMeaning({ semantics }) {
   );
 }
 
+function TypedScalar({ value }) {
+  if (value === null) return <span className="italic text-textMuted" title="JSON null">null</span>;
+  if (value === '') return <span className="italic text-textMuted" title="Text with zero characters">empty string</span>;
+  return <span title={typeof value === 'string' ? 'Text value' : typeof value === 'boolean' ? 'Boolean value' : 'Numeric value'}>{String(value)}</span>;
+}
+
 // Rendering has no transport or execution dependency.
 export function RetainedResultContent(props) {
   const { preview } = props;
@@ -99,6 +105,7 @@ function RetainedResultBody({
   onPageSizeChange,
   onImageError,
   fixedView = false,
+  typedScalars = false,
   pointLimit = 2000,
   onPointLimitChange,
 }) {
@@ -160,7 +167,7 @@ function RetainedResultBody({
               {item.unit ? ` (${item.unit})` : ''}
             </dt>
             <dd className="break-words whitespace-pre-wrap font-medium">
-              {item.value === null ? 'Not recorded' : String(item.value)}
+              {fixedView && typedScalars ? <TypedScalar value={item.value} /> : item.value === null ? 'Not recorded' : String(item.value)}
             </dd>
           </div>
         ))}
@@ -176,7 +183,8 @@ function RetainedResultBody({
         fixedView={fixedView}
       />
     );
-  if (preview.family === 'table' && validTablePreview(preview))
+  if (preview.family === 'table' && validTablePreview(preview)) {
+    const scalarTable = fixedView && preview.scalarModel === 'finite-ieee754-safe-integers.v1' && Number.isSafeInteger(preview.totalRows) && preview.totalRows >= 0;
     return (
       <>
         <div
@@ -199,7 +207,7 @@ function RetainedResultBody({
                 <tr key={preview.offset + index}>
                   {row.map((cell, column) => (
                     <td className="border-t border-border p-2 whitespace-pre-wrap" key={column}>
-                      {cell}
+                      {scalarTable ? <TypedScalar value={cell} /> : cell}
                     </td>
                   ))}
                 </tr>
@@ -214,6 +222,7 @@ function RetainedResultBody({
               : 'Fixed retained excerpt · no rows are included from the selected source window.'}</p>
             {(preview.hasMore || preview.offset > 0) && <p>Other source rows are outside this retained view.</p>}
             {preview.truncated && <p>Source inspection reached its scan limit; the complete source row count is unknown.</p>}
+            {scalarTable && <><p>Source table: {preview.totalRows.toLocaleString()} {preview.totalRows === 1 ? 'row' : 'rows'}.</p><p>Null values and empty strings are marked explicitly.</p></>}
           </div>
         ) : preview.truncated && (
           <p className="text-xs text-textMuted">
@@ -260,6 +269,7 @@ function RetainedResultBody({
         </div>}
       </>
     );
+  }
   return (
     <p className="text-sm text-textMuted">
       This retained result format has no supported browser renderer. The saved version remains

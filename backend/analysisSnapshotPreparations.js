@@ -177,21 +177,28 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
     const schema = await contract, recipe = value.recipe_json;
     const captured = await transaction(userId, projectId, analysisId, async (client, context) => { assertWritable(context); return sources(client, userId, projectId, analysisId, recipe); });
     const resultItems = [], documentItems = [], blobs = [], cached = new Map();
-    for (const sourceId of new Set(recipe.results.filter(selected => selected.view.family === 'table').map(selected => selected.reference.versionId))) {
-      const selections = recipe.results.filter(selected => selected.reference.versionId === sourceId && selected.view.family === 'table');
+    for (const sourceId of new Set(recipe.results.filter(selected => selected.kind !== 'typed-analysis-reference' && selected.view.family === 'table').map(selected => selected.reference.versionId))) {
+      const selections = recipe.results.filter(selected => selected.kind !== 'typed-analysis-reference' && selected.reference.versionId === sourceId && selected.view.family === 'table');
       const previews = await artifacts.prepareFixedTableViews(userId, projectId, sourceId, selections.map(selected => ({ offset: selected.view.offset, limit: selected.view.limit })));
       for (let index = 0; index < selections.length; index++) {
         const spec = { offset: selections[index].view.offset, limit: selections[index].view.limit };
         cached.set(`${sourceId}:${JSON.stringify(spec)}`, { bytes: Buffer.from(schema.canonicalSnapshotJson(previews[index], schema.ANALYSIS_SNAPSHOT_PREPARATION_LIMITS.tableBytes)), width: null, height: null });
       }
     }
+    for (const sourceId of new Set(recipe.results.filter(selected => selected.kind === 'typed-analysis-reference').map(selected => selected.reference.versionId))) {
+      const selections = recipe.results.filter(selected => selected.kind === 'typed-analysis-reference' && selected.reference.versionId === sourceId);
+      const rendered = await artifacts.prepareFixedTypedViews(userId, projectId, sourceId, selections[0].descriptorSha256, selections.map(selected => selected.view));
+      for (let index = 0; index < selections.length; index++) cached.set(`${sourceId}:typed:${selections[index].descriptorSha256}:${JSON.stringify(selections[index].view)}`, rendered[index]);
+    }
     for (const planned of value.object_plan_json) {
       if (planned.kind === 'result') {
         const selected = recipe.results[planned.index], source = captured.results[planned.index], safeSource = isLinkedRecipe(recipe) ? linkedSource(source.original) : fields(source.original);
         const fullReference = { artifactId: safeSource.artifactId, versionId: safeSource.versionId, projectId, sha256: safeSource.sha256 };
         const family = selected.view.family, spec = family === 'table' ? { offset: selected.view.offset, limit: selected.view.limit } : null;
-        const cacheKey = `${safeSource.versionId}:${JSON.stringify(spec)}`;
+        const typed = selected.kind === 'typed-analysis-reference';
+        const cacheKey = typed ? `${safeSource.versionId}:typed:${selected.descriptorSha256}:${JSON.stringify(selected.view)}` : `${safeSource.versionId}:${JSON.stringify(spec)}`;
         let rendered = cached.get(cacheKey);
+        if (typed && !rendered) throw error('VIEW_UNSUPPORTED', 'The exact typed source did not supply the selected fixed view.');
         if (!rendered) {
           if (family === 'table') {
             const preview = (await artifacts.preview(userId, projectId, safeSource.versionId, spec)).preview;
@@ -203,8 +210,10 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
           }
           cached.set(cacheKey, rendered);
         }
-        const descriptor = { schema: isLinkedRecipe(recipe) ? 'traceomics.fixed-result-view.v2' : schema.FIXED_RESULT_VIEW_SCHEMA, source: fullReference, family, spec, blobSha256: hash(rendered.bytes), blobBytes: rendered.bytes.length, width: rendered.width, height: rendered.height };
+        const descriptor = { schema: typed ? 'traceomics.fixed-result-view.v3' : isLinkedRecipe(recipe) ? 'traceomics.fixed-result-view.v2' : schema.FIXED_RESULT_VIEW_SCHEMA, source: fullReference, family, spec, blobSha256: hash(rendered.bytes), blobBytes: rendered.bytes.length, width: rendered.width, height: rendered.height,
+          ...(typed ? { descriptorSha256: source.descriptorSha256, semantics: source.descriptor.semantics } : {}) };
         const view = { schema: descriptor.schema, family, spec, blobSha256: descriptor.blobSha256, blobBytes: descriptor.blobBytes, width: descriptor.width, height: descriptor.height };
+        if (typed) Object.assign(view, { descriptorSha256: descriptor.descriptorSha256, semantics: descriptor.semantics });
         resultItems.push({ viewId: planned.viewId, ...(isLinkedRecipe(recipe) ? { origin: source.origin || { kind: 'attachment-revision', attachment: attachment(source.revision) } } : { attachment: attachment(source.revision) }), source: safeSource,
           view: { ...view, viewSha256: hash(schema.canonicalAnalysisSnapshotResultView(descriptor)) } });
         blobs.push({ viewId: planned.viewId, kind: 'result', bytes: rendered.bytes, sha256: descriptor.blobSha256 });
@@ -301,7 +310,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       if (!item) missing();
       const expected = item.view || item, blob = (await client.query('SELECT * FROM research_analysis_snapshot_blobs WHERE preparation_id=$1 AND id=$2 AND kind=$3', [preparationId, viewId, kind])).rows[0];
       if (!blob || blob.content.length !== expected.blobBytes || blob.size_bytes !== expected.blobBytes || blob.sha256 !== expected.blobSha256 || hash(blob.content) !== expected.blobSha256) throw retainedError();
-      return { bytes: blob.content, mimeType: kind === 'document' || item.view.family === 'table' ? 'application/json; charset=utf-8' : item.source.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg' };
+      return { bytes: blob.content, mimeType: kind === 'document' || ['table', 'metrics'].includes(item.view.family) ? 'application/json; charset=utf-8' : item.source.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg' };
     });
   }
   const cursorScope = (userId, projectId, analysisId) => hash(JSON.stringify([Number(userId), projectId, analysisId])).slice(0, 16);
@@ -341,7 +350,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
     });
   }
   async function options(userId, projectId, analysisId, input = {}) {
-    if (input.kind === 'analysis-references') return transaction(userId, projectId, analysisId, (client, context) => linked.options(client, context, userId, projectId, analysisId, input, writable(context)));
+    if (['analysis-references', 'analysis-typed-references'].includes(input.kind)) return transaction(userId, projectId, analysisId, (client, context) => linked.options(client, context, userId, projectId, analysisId, input, writable(context)));
     const kind = input.kind, scope = cursorScope(userId, projectId, analysisId), page = paging(input, kind, scope);
     if (!['analysis-versions', 'results', 'documents'].includes(kind)) throw error('INVALID_PAGE', 'Choose saved analysis versions, result revisions or supporting source.', 400);
     return transaction(userId, projectId, analysisId, async (client, context) => {

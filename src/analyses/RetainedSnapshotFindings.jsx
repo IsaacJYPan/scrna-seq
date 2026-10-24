@@ -7,7 +7,7 @@ const packageV1 = 'traceomics.analysis-snapshot-package.v1', packageV2 = 'traceo
 function findingContext(item, schema) {
   const attachment = schema === packageV1 ? item.attachment : item.origin?.kind === 'attachment-revision' ? item.origin.attachment : null;
   if (attachment) return { attachment, caption: attachment.caption, short: `Saved revision ${attachment.revisionNumber}`, long: `Saved attachment revision ${attachment.revisionNumber}` };
-  if (schema === packageV2 && item.origin?.kind === 'analysis-reference' && item.origin.captionOrigin === 'user-supplied') {
+  if (schema === packageV2 && ['analysis-reference', 'typed-analysis-reference'].includes(item.origin?.kind) && item.origin.captionOrigin === 'user-supplied') {
     return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
       short: `Linked in saved analysis ${item.origin.analysisVersion}`, long: `Linked in saved analysis ${item.origin.analysisVersion}` };
   }
@@ -59,6 +59,7 @@ function Findings({ projectId, analysisId, serviceId, userId, resourceId, audien
             {context.attachment && Object.entries(context.attachment.suppliedOrigin).map(([field, value]) => <div key={field}><dt>{field}</dt><dd className="whitespace-pre-wrap break-words">{value || 'Unknown / not supplied'}</dd></div>)}
             {context.reference && <><div><dt>Saved analysis version</dt><dd>{context.analysisVersion}</dd></div><ExactReference reference={context.reference} includeChecksum={false} /></>}
             <div><dt>Original source SHA-256</dt><dd className="break-all">{finding.source.sha256}</dd></div>
+            {finding.origin?.kind === 'typed-analysis-reference' && <div><dt>Recorded output descriptor SHA-256</dt><dd className="break-all">{finding.view.descriptorSha256}</dd></div>}
             <div><dt>Retained view SHA-256</dt><dd className="break-all">{finding.view.viewSha256}</dd></div>
           </dl>
         </details>

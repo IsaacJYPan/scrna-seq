@@ -18,7 +18,7 @@ async function reservePort() {
   return port;
 }
 
-async function createAnalysisSharingRuntimeFixture({ artifactDirectory, configureProjectEnvironment }) {
+async function createAnalysisSharingRuntimeFixture({ artifactDirectory, configureProjectEnvironment, configureEnvironment }) {
   const image = process.env.EXPERT_R_SANDBOX_IMAGE;
   assert(/^(?:[^\s@]+@)?sha256:[a-f0-9]{64}$/.test(image || ''), 'Set EXPERT_R_SANDBOX_IMAGE to the reviewed immutable R image.');
   const output = path.resolve(artifactDirectory), reportRoot = path.join(root, 'playwright', 'report');
@@ -45,7 +45,7 @@ async function createAnalysisSharingRuntimeFixture({ artifactDirectory, configur
     }
   }
   try {
-    service = await createDesktopTunnelServiceFixture({ artifactDirectory: output,
+    service = await createDesktopTunnelServiceFixture({ artifactDirectory: output, configureEnvironment,
       webEnvironment: { AUTH_RATE_LIMIT_MAX: '100', EXPERT_R_ENABLED: 'true', EXPERT_R_ACCESS_POLICY: 'project-roles',
         EXPERT_R_SANDBOX_URL: `http://127.0.0.1:${port}`, EXPERT_R_SANDBOX_TOKEN: token }, configureProjectEnvironment });
     process.env.STORAGE_ROOT = service.storageRoot;

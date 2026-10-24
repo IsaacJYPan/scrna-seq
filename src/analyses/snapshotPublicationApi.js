@@ -18,10 +18,10 @@ export const publishAnalysisSnapshot = (projectId, analysisId, body, { signal } 
 export const withdrawAnalysisSnapshot = (projectId, analysisId, publicationId, body, { signal } = {}) => request(`${path(projectId, analysisId, publicationId)}/withdrawals`, { method: 'POST', body, signal });
 
 export function readSnapshotPublicationView(projectId, analysisId, publicationId, result, { signal } = {}) {
-  const table = result?.view?.family === 'table';
-  const type = table ? 'application/json' : { 'org.w3.png': 'image/png', 'org.iso.jpeg': 'image/jpeg' }[result?.source?.format?.id];
-  if (!type || !table && result?.view?.family !== 'image') return Promise.reject(Object.assign(new Error('The retained publication view could not be verified.'), { code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' }));
-  return retainedBytes(`${path(projectId, analysisId, publicationId)}/views/${encodeURIComponent(result.viewId)}`, result.view, type, table ? limits.tableBytes : limits.imageBytes, signal);
+  const json = result?.view?.family === 'table' || result?.view?.family === 'metrics' && result?.view?.schema === 'traceomics.fixed-result-view.v3';
+  const type = json ? 'application/json' : { 'org.w3.png': 'image/png', 'org.iso.jpeg': 'image/jpeg' }[result?.source?.format?.id];
+  if (!type || !json && result?.view?.family !== 'image') return Promise.reject(Object.assign(new Error('The retained publication view could not be verified.'), { code: 'INVALID_SNAPSHOT_PUBLICATION_RESPONSE' }));
+  return retainedBytes(`${path(projectId, analysisId, publicationId)}/views/${encodeURIComponent(result.viewId)}`, result.view, type, json ? limits.tableBytes : limits.imageBytes, signal);
 }
 export function readSnapshotPublicationDocument(projectId, analysisId, publicationId, document, { signal } = {}) {
   return retainedBytes(`${path(projectId, analysisId, publicationId)}/documents/${encodeURIComponent(document?.viewId)}`, document, 'application/json', limits.documentBytes, signal);

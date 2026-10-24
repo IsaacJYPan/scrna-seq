@@ -209,7 +209,7 @@ function createAnalysisSnapshotPublicationService(database = db) {
       if (current.state !== 'published' || current.policy_version !== captured.value.policy_version) throw error('PUBLICATION_WITHDRAWN', 'This publication has been withdrawn. Its retained bodies are no longer shared.');
       if (current.snapshot_sha256 !== captured.value.snapshot_sha256 || !(await client.query('SELECT 1 FROM research_analysis_snapshot_publication_blobs WHERE publication_id=$1 AND preparation_id=$2 AND view_id=$3 AND kind=$4', [publicationId, current.preparation_id, viewId, kind])).rowCount) throw unavailable();
     });
-    return { bytes: blob.content, mimeType: kind === 'document' || captured.item.view.family === 'table' ? 'application/json; charset=utf-8' : captured.item.source.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg' };
+    return { bytes: blob.content, mimeType: kind === 'document' || ['table', 'metrics'].includes(captured.item.view.family) ? 'application/json; charset=utf-8' : captured.item.source.format.id === 'org.w3.png' ? 'image/png' : 'image/jpeg' };
   }
   async function paging(userId, projectId, analysisId, serviceId, input, requests) {
     const schema = await contract, L = schema.ANALYSIS_SNAPSHOT_PUBLICATION_LIMITS, limit = input.limit === undefined ? 30 : Number(input.limit);

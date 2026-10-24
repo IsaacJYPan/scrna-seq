@@ -6,6 +6,7 @@ import AnalysisSnapshotPreparations from './AnalysisSnapshotPreparations';
 import { snapshotScope as scope, snapshotRecipe, snapshotRecord, snapshotList, snapshotOptions,
   snapshotAnalysisOption, snapshotResultOption } from './snapshotPreparationTestFixtures';
 import { linkedRecord } from './snapshotLinkedTestFixtures';
+import { typedDescriptor, typedOptions, typedRecord } from './snapshotTypedTestFixtures';
 
 // Keep the actual transport, target fence, canonical helpers and strict validators.
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -28,8 +29,12 @@ function writes(kind = 'prepare') {
 function observe(value) {
   return { ...structuredClone(value), canPrepare: state.allowed, canResume: state.allowed && ['preparing', 'failed'].includes(value.state) };
 }
+const recordFactory = recipe => recipe.results.some(item => item.kind === 'typed-analysis-reference') ? typedRecord
+  : recipe.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
 async function server(request) {
   if (request.method === 'GET' && request.pathname === base + '/options') {
+    if (request.query.get('kind') === 'analysis-typed-references') return state.onTypedOptions ? state.onTypedOptions(request)
+      : snapshotOptions('analysis-typed-references', state.allowed, [], Number(request.query.get('analysisVersion')));
     if (request.query.get('kind') === 'analysis-references') return state.onLinkedOptions ? state.onLinkedOptions(request)
       : snapshotOptions('analysis-references', state.allowed, [], Number(request.query.get('analysisVersion')));
     if (state.onOptions) return state.onOptions(request);
@@ -46,18 +51,18 @@ async function server(request) {
   }
   if (request.method === 'POST' && request.pathname === base) {
     if (state.onPrepare) return state.onPrepare(request);
-    const factory = request.body.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
+    const factory = recordFactory(request.body);
     const value = factory(request.body, { canPrepare: state.allowed }); state.records.set(value.requestId, value); return value;
   }
   if (request.method === 'POST' && request.pathname.endsWith('/resume')) {
     if (state.onResume) return state.onResume(request);
-    const previous = state.records.get(request.body.requestId), factory = previous.recipe?.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
+    const previous = state.records.get(request.body.requestId), factory = recordFactory(previous.recipe);
     const value = factory(previous.recipe, { canPrepare: state.allowed, preparationId: previous.preparationId });
     state.records.set(value.requestId, value); return value;
   }
   if (request.method === 'DELETE') {
     if (state.onDelete) return state.onDelete(request);
-    const previous = state.records.get(request.body.requestId), factory = previous.recipe?.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
+    const previous = state.records.get(request.body.requestId), factory = recordFactory(previous.recipe);
     const value = factory(previous.recipe, { state: 'deleted', canPrepare: state.allowed, preparationId: previous.preparationId });
     state.records.set(value.requestId, value); return value;
   }
@@ -98,6 +103,87 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); delete window.des
 const linkedOption = (version = 2, changes = {}) => ({ reference: { kind: 'artifact-version', versionId: 'av_' + String(version).repeat(24), sha256: 'a'.repeat(64) },
   label: `Linked measured result for version ${version}`, viewFamily: 'table', referenceOnlyReason: null,
   integrity: 'not-checked', availability: 'not-checked', ...changes });
+
+it.each(['table', 'metrics', 'image'])('merges duplicate linked metadata into one typed %s choice and submits its exact descriptor intent only on request', async family => {
+  const options = typedOptions({ family }), option = options.items[0];
+  state.onTypedOptions = () => options;
+  state.onLinkedOptions = request => snapshotOptions('analysis-references', true, [linkedOption(2, { reference: option.reference,
+    label: 'Duplicate generic choice', viewFamily: family === 'image' ? 'image' : null, referenceOnlyReason: family === 'image' ? null : 'unsupported-view' })], Number(request.query.get('analysisVersion')));
+  await frame(); const label = family === 'table' ? 'Add linked table excerpt' : family === 'metrics' ? 'Add linked metrics' : 'Add linked figure';
+  const button = await screen.findByRole('button', { name: label, exact: true });
+  expect(screen.getAllByRole('list', { name: 'Linked saved references' })[0].children).toHaveLength(1);
+  expect(screen.queryByText('Duplicate generic choice')).not.toBeInTheDocument(); expect(writes()).toHaveLength(0);
+  fireEvent.click(button); fireEvent.change(screen.getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: 'Supplied exact typed interpretation' } });
+  if (family === 'table') fireEvent.change(screen.getByRole('spinbutton', { name: 'Rows to include for linked finding 1' }), { target: { value: '1' } });
+  const original = await submit(); await screen.findByTestId('prepared-result');
+  expect(original.results).toEqual([{ kind: 'typed-analysis-reference', reference: option.reference, descriptorSha256: option.descriptorSha256,
+    caption: 'Supplied exact typed interpretation', view: family === 'table' ? { family, offset: 0, limit: 1 } : { family } }]);
+  expect(original.schema).toBe('traceomics.analysis-snapshot-preparation.v2'); expect(original.analysisVersion).toBe(2); expect(writes()).toHaveLength(1);
+  expect(state.requests.every(request => request.pathname === base || request.pathname === base + '/options')).toBe(true);
+});
+
+it('keeps a selected descriptor SHA frozen when fresh metadata records new meaning under the same source checksum', async () => {
+  const original = typedOptions({ family: 'metrics' }), changedDescriptor = typedDescriptor({ type: 'metrics', semantics: {
+    role: 'diagnostic', title: 'A later recorded interpretation', metrics: { nCells: { label: 'Later cells', unit: 'cells' } } } });
+  let options = original; state.onTypedOptions = () => options;
+  await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked metrics' }));
+  options = typedOptions({ family: 'metrics', descriptor: changedDescriptor });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh linked references' })); await screen.findByText('A later recorded interpretation', { exact: true });
+  const selected = screen.getByText('Selected descriptor identity').closest('details'); selected.open = true;
+  expect(selected).toHaveTextContent(original.items[0].descriptorSha256); expect(selected).not.toHaveTextContent(options.items[0].descriptorSha256);
+  state.onPrepare = () => failure(409, 'ANALYSIS_SNAPSHOT_SOURCE_DESCRIPTOR_CHANGED');
+  const submitted = await submit(); await screen.findByRole('alert');
+  expect(submitted.results[0].descriptorSha256).toBe(original.items[0].descriptorSha256);
+  expect(submitted.results[0].reference.sha256).toBe(options.items[0].reference.sha256);
+  expect(screen.getByRole('button', { name: 'Check original preparation' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: 'Retry original preparation' })).not.toBeInTheDocument();
+});
+
+it('starts a new table excerpt at row one when the same refreshed reference was previously selected as metrics', async () => {
+  const original = typedOptions({ family: 'metrics' }), metadata = original.items[0].descriptor;
+  let options = original; state.onTypedOptions = () => options;
+  await frame(); fireEvent.click(await screen.findByRole('button', { name: 'Add linked metrics' }));
+  options = typedOptions({ descriptor: typedDescriptor({ id: metadata.id, sha256: metadata.sha256, sizeBytes: metadata.sizeBytes, type: 'table' }) });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh linked references' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Add linked table excerpt' }));
+  expect(screen.getByRole('spinbutton', { name: 'First data row for linked finding 2' })).toHaveValue(1);
+  expect(screen.getByRole('spinbutton', { name: 'Rows to include for linked finding 2' })).toHaveValue(25);
+  expect(writes()).toHaveLength(0);
+});
+
+function holdFirstTypedDescriptorHash() {
+  const held = deferred(), actual = webcrypto.subtle.digest.bind(webcrypto.subtle); let pending;
+  vi.stubGlobal('crypto', { randomUUID: webcrypto.randomUUID.bind(webcrypto), subtle: { digest: (algorithm, bytes) => {
+    if (!pending && new TextDecoder().decode(bytes).includes('traceomics.retained-output-descriptor.v1')) {
+      pending = { algorithm, bytes: new Uint8Array(bytes) }; return held.promise;
+    }
+    return actual(algorithm, bytes);
+  } } });
+  return { wait: async () => waitFor(() => expect(pending).toBeTruthy()), release: async () => held.resolve(await actual(pending.algorithm, pending.bytes)) };
+}
+
+it('fences an old saved version while its typed descriptor verification is actually awaiting WebCrypto', async () => {
+  const hold = holdFirstTypedDescriptorHash();
+  state.onTypedOptions = request => {
+    const version = Number(request.query.get('analysisVersion')), options = typedOptions({ analysisVersion: version });
+    options.items[0].label = `Typed result from saved version ${version}`; return options;
+  };
+  await frame(); await hold.wait();
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ })); await screen.findByText('Typed result from saved version 1');
+  await act(async () => hold.release()); expect(screen.queryByText('Typed result from saved version 2')).not.toBeInTheDocument();
+  expect(state.requests.filter(request => request.query.get('kind') === 'analysis-typed-references').map(request => request.query.get('analysisVersion'))).toEqual(['2', '1']);
+  expect(writes()).toHaveLength(0);
+});
+
+it('does not let a held positive typed descriptor validation restore writes after fresh current read-only discovery', async () => {
+  const hold = holdFirstTypedDescriptorHash(); state.onTypedOptions = () => typedOptions();
+  await frame(); await hold.wait(); await choose(); state.allowed = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh access and saved preparations' }));
+  await screen.findByText('New previews require write access to an active analysis. You can still recover your own saved preparations.');
+  await act(async () => hold.release());
+  expect(screen.getByRole('button', { name: 'Prepare private preview' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Add linked table excerpt' })).toBeDisabled(); expect(writes()).toHaveLength(0);
+});
 
 it('keeps linked caption, row window and reference-only selections separate for each saved analysis version', async () => {
   state.onLinkedOptions = request => {

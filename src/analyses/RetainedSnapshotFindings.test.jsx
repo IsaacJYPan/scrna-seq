@@ -9,6 +9,7 @@ import { canonicalSnapshotJson, canonicalAnalysisSnapshotResultView } from '../.
 import { canonicalNotebookContent } from '../../shared/notebookDocument.mjs';
 import { savedSnapshotContent, snapshotScope, snapshotRecipe, snapshotRecord } from './snapshotPreparationTestFixtures';
 import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes } from './snapshotLinkedTestFixtures';
+import { typedDescriptor, typedRecipe, typedRecord, typedTableBytes, typedMetricsBytes, typedImageBytes } from './snapshotTypedTestFixtures';
 
 vi.mock('./snapshotPreparationApi', () => ({ readSnapshotPreparationView: vi.fn(), readSnapshotPreparationDocument: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
@@ -247,4 +248,65 @@ it('removes v2 reference-only metadata and fixed bodies together when publicatio
   expect(screen.getByText('Recorded restricted prerequisite')).toBeVisible(); view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
   expect(screen.queryByText('Recorded restricted prerequisite')).not.toBeInTheDocument(); expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(screen.queryByLabelText('Reference-only prerequisites')).not.toBeInTheDocument();
   expect(readView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+function typedFindingFixture() {
+  const metricDescriptor = typedDescriptor({ type: 'metrics', id: 'eri_' + '7'.repeat(24) });
+  const imageDescriptor = typedDescriptor({ type: 'figure', id: 'eri_' + '8'.repeat(24) });
+  const recipe = typedRecipe({ results: [typedRecipe().results[0],
+    { ...typedRecipe({ family: 'metrics', descriptor: metricDescriptor }).results[0], caption: 'Supplied QC interpretation' },
+    { ...typedRecipe({ family: 'image', descriptor: imageDescriptor }).results[0], caption: 'Supplied measured figure interpretation' }] });
+  const record = typedRecord(recipe, { descriptors: [typedDescriptor(), metricDescriptor, imageDescriptor] });
+  const bodies = new Map(record.package.results.map(result => [result.viewId, {
+    bytes: result.view.family === 'metrics' ? typedMetricsBytes(result) : result.view.family === 'image' ? typedImageBytes() : typedTableBytes(result),
+    type: result.view.family === 'image' ? 'image/png' : 'application/json',
+  }]));
+  readSnapshotPreparationView.mockImplementation((_project, _analysis, _preparation, result) => Promise.resolve(bodies.get(result.viewId)));
+  return { record, bodies, props: { ...snapshotScope, resourceId: record.preparationId, audience: 'private-preparation', snapshotSha256: record.snapshotSha256,
+    snapshot: record.package, availability: record.availability, available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() } };
+}
+
+it('presents typed findings with supplied captions, frozen declared meaning and exact descriptor identity without inventing workflow capture', async () => {
+  const value = typedFindingFixture(); render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  expect(screen.getByRole('heading', { name: 'Recorded scalar table' })).toBeVisible(); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button', { name: /2\. Supplied QC interpretation/ })); await screen.findByLabelText('Saved scalar metrics');
+  const section = within(screen.getByLabelText('Retained prepared finding'));
+  expect(section.getByRole('heading', { name: 'Supplied QC interpretation' })).toBeVisible();
+  expect(section.getByText('recorded.json · Linked in saved analysis 2')).toBeVisible();
+  expect(section.getByText('Caption supplied for this snapshot.')).toBeVisible();
+  expect(section.getByRole('heading', { name: 'Recorded QC metrics' })).toBeVisible(); expect(section.getByText('Coverage (%)')).toBeVisible();
+  expect(section.queryByText(/Saved attachment revision|Saved revision|Producing workflow|Captured settings/)).not.toBeInTheDocument();
+  const details = section.getByText('Supplied context and exact view').closest('details'); details.open = true;
+  expect(section.getByText('Recorded output descriptor SHA-256')).toBeVisible();
+  expect(section.getByText(value.record.package.results[1].view.descriptorSha256)).toBeVisible();
+  expect(section.getByText('Original source SHA-256')).toBeVisible(); expect(section.getByText('Retained view SHA-256')).toBeVisible();
+  expect(screen.getAllByLabelText('Retained prepared finding')).toHaveLength(1); expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2);
+  expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('keeps a typed metrics selection and its exact units through equal recovery, then switches to the semantic raster', async () => {
+  const value = typedFindingFixture(), view = render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  fireEvent.click(screen.getByRole('button', { name: /2\. Supplied QC interpretation/ })); await screen.findByLabelText('Saved scalar metrics');
+  view.rerender(<RetainedSnapshotFindings {...value.props} snapshot={structuredClone(value.props.snapshot)} availability={structuredClone(value.props.availability)} onUnavailable={vi.fn()} />);
+  await act(async () => {}); expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole('button', { name: /2\. Supplied QC interpretation/ })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByText('Coverage (%)')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: /3\. Supplied measured figure interpretation/ })); await screen.findByRole('img');
+  expect(screen.getByRole('heading', { name: 'Recorded measured figure' })).toBeVisible(); expect(screen.queryByLabelText('Saved scalar metrics')).not.toBeInTheDocument();
+  expect(readSnapshotPreparationView).toHaveBeenCalledTimes(3); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('keeps unavailable typed findings distinct from ordinary reference-only prerequisites and clears both on withdrawal', async () => {
+  const value = typedFindingFixture(); value.props.availability.views[1].status = 'unavailable';
+  value.props.snapshot.prerequisites.items.push({ kind: 'analysis-reference', reference: linkedReference(), label: 'Declared reference only', detail: null,
+    role: 'reference-only', reason: 'not-included', integrity: 'not-checked', dataAccess: 'not-granted' });
+  const readView = vi.fn().mockImplementation((_p, _a, _id, result) => Promise.resolve(value.bodies.get(result.viewId)));
+  const props = { ...value.props, userId: 17, audience: 'project-publication', resourceId: publicId, readView };
+  const view = render(<RetainedSnapshotFindings {...props} />); await screen.findByRole('table');
+  fireEvent.click(screen.getByRole('button', { name: /2\. Supplied QC interpretation/ }));
+  expect(screen.getByText('This retained view is unavailable. Its exact saved identity is kept and has not been regenerated.')).toBeVisible();
+  expect(screen.queryByLabelText('Saved scalar metrics')).not.toBeInTheDocument(); expect(screen.getByText('Declared reference only')).toBeVisible();
+  expect(readView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+  view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
+  expect(screen.queryByLabelText('Retained finding selection')).not.toBeInTheDocument(); expect(screen.queryByText('Declared reference only')).not.toBeInTheDocument();
 });

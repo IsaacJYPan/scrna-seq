@@ -11,7 +11,7 @@ const denied = error => error.status === 401 || !sourceFailure(error) && !writer
 const digest = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), value => value.toString(16).padStart(2, '0')).join('');
 const emptyNotes = () => ({ summary: '', decisions: '', limitations: '' });
 const optionKey = (kind, value) => kind === 'analysis-versions' ? value.version : kind === 'results' ? value.revisionId
-  : kind === 'analysis-references' ? JSON.stringify(value.reference) : value.versionId;
+  : ['analysis-references', 'analysis-typed-references'].includes(kind) ? JSON.stringify(value.reference) : value.versionId;
 
 export default function useSnapshotPreparations({ projectId, analysisId, userId, savedAnalysis, canWrite, available, isActive }) {
   const [mode, setMode] = useState(canWrite && savedAnalysis?.status === 'active' ? 'choose' : 'library');
@@ -82,11 +82,11 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
   }, [usable, projectId, analysisId, scope, observe, revoke]);
   const loadOptions = useCallback(async (kind, next = null) => {
     if (!usable || !service.current) return;
-    const linked = kind === 'analysis-references', version = analysisVersion, key = linked ? `${kind}:${version}` : kind;
+    const linked = ['analysis-references', 'analysis-typed-references'].includes(kind), version = analysisVersion, key = linked ? `${kind}:${version}` : kind;
     optionRequests.current.get(key)?.abort(); const controller = new AbortController(); optionRequests.current.set(key, controller);
     const epoch = permissionEpoch.current; setOptionLoading(previous => ({ ...previous, [key]: true })); setError('');
     try {
-      const result = validateSnapshotPreparationOptions(await api.listSnapshotPreparationOptions(projectId, analysisId, kind,
+      const result = await validateSnapshotPreparationOptions(await api.listSnapshotPreparationOptions(projectId, analysisId, kind,
         { cursor: next, signal: controller.signal, ...(linked ? { analysisVersion: version } : {}) }), scope(), kind, linked ? version : undefined);
       if (!mounted.current || controller.signal.aborted || optionRequests.current.get(key) !== controller) return;
       observe(result.canPrepare, controller, epoch);
@@ -117,12 +117,14 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
     }
   }, [usable, loaded, mode, options, optionLoading, error, loadOptions]);
   useEffect(() => {
-    const key = `analysis-references:${analysisVersion}`;
-    for (const [name, controller] of optionRequests.current) if (name.startsWith('analysis-references:') && name !== key) {
+    const kinds = ['analysis-references', 'analysis-typed-references'], keys = kinds.map(kind => `${kind}:${analysisVersion}`);
+    for (const [name, controller] of optionRequests.current) if (kinds.some(kind => name.startsWith(kind + ':')) && !keys.includes(name)) {
       controller.abort(); optionRequests.current.delete(name);
       setOptionLoading(previous => previous[name] ? { ...previous, [name]: false } : previous);
     }
-    if (usable && loaded && mode === 'choose' && !options[key] && !optionLoading[key] && !error) void loadOptions('analysis-references');
+    if (usable && loaded && mode === 'choose' && !error) kinds.forEach((kind, index) => {
+      if (!options[keys[index]] && !optionLoading[keys[index]]) void loadOptions(kind);
+    });
   }, [usable, loaded, mode, analysisVersion, options, optionLoading, error, loadOptions]);
   const refresh = async (requestId, controller, expected) => {
     setLastCheck('unconfirmed'); const epoch = permissionEpoch.current;

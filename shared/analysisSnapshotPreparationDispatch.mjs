@@ -1,7 +1,9 @@
 import * as legacy from './analysisSnapshotPreparation.mjs';
 import * as linked from './analysisSnapshotPreparationV2.mjs';
+import * as typed from './analysisSnapshotTypedResult.mjs';
 export * from './analysisSnapshotPreparation.mjs';
 export * from './analysisSnapshotPreparationV2.mjs';
+export * from './analysisSnapshotTypedResult.mjs';
 
 function schema(value, optional = false) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return unsupported();
@@ -31,5 +33,6 @@ export function canonicalAnalysisSnapshotPackage(input) {
 export function canonicalAnalysisSnapshotResultView(input) {
   const version = schema(input);
   return version === legacy.FIXED_RESULT_VIEW_SCHEMA ? legacy.canonicalAnalysisSnapshotResultView(input)
-    : version === linked.FIXED_RESULT_VIEW_SCHEMA_V2 ? linked.canonicalAnalysisSnapshotResultViewV2(input) : unsupported();
+    : version === linked.FIXED_RESULT_VIEW_SCHEMA_V2 ? linked.canonicalAnalysisSnapshotResultViewV2(input)
+      : version === typed.FIXED_RESULT_VIEW_SCHEMA_V3 ? typed.canonicalAnalysisSnapshotResultViewV3(input) : unsupported();
 }

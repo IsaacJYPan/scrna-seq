@@ -4,6 +4,7 @@ import { createSnapshotPreparation, deleteSnapshotPreparation, getSnapshotPrepar
   listSnapshotPreparations, listSnapshotPreparationOptions, readSnapshotPreparationDocument, readSnapshotPreparationView,
   resumeSnapshotPreparation } from './snapshotPreparationApi';
 import { withExecutionTarget } from '../runtime/executionTarget';
+import { typedRecipe, typedRecord, typedMetricsBytes } from './snapshotTypedTestFixtures';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
 vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
@@ -43,6 +44,40 @@ it('binds linked choice discovery to an explicit saved analysis version without 
   await listSnapshotPreparationOptions('project 1', 'analysis 1', 'analysis-references', { analysisVersion: 19, cursor: 'saved/page' });
   expect(fetch.mock.calls[0][0]).toBe(base + '/options?limit=30&kind=analysis-references&cursor=saved%2Fpage&analysisVersion=19');
   expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it('sends typed discovery only to the saved-version-bound metadata route', async () => {
+  fetch.mockResolvedValue(new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+  const signal = new AbortController().signal;
+  await listSnapshotPreparationOptions('project 1', 'analysis 1', 'analysis-typed-references', { analysisVersion: 7, cursor: 'typed/page', signal });
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(base + '/options?limit=30&kind=analysis-typed-references&cursor=typed%2Fpage&analysisVersion=7',
+    expect.objectContaining({ method: 'GET', signal }));
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it('returns only checked fixed3 metrics JSON from the private retained route without adding source or pagination selectors', async () => {
+  const record = typedRecord(typedRecipe({ family: 'metrics' })), result = record.package.results[0], content = typedMetricsBytes(result);
+  fetch.mockResolvedValue(new Response(content, { headers: { 'Content-Type': 'application/json; charset=utf-8' } }));
+  const received = await readSnapshotPreparationView('project 1', 'analysis 1', record.preparationId, result);
+  expect(Array.from(received.bytes)).toEqual(Array.from(content)); expect(received.type).toBe('application/json');
+  expect(fetch.mock.calls[0][0]).toBe(`${base}/${record.preparationId}/views/${result.viewId}`);
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it.each(['mime', 'short', 'checksum', 'size'])('rejects fixed3 metrics %s mismatch before handing bytes to a renderer', async mismatch => {
+  const record = typedRecord(typedRecipe({ family: 'metrics' })), result = record.package.results[0], content = typedMetricsBytes(result);
+  if (mismatch === 'checksum') result.view.blobSha256 = 'b'.repeat(64);
+  if (mismatch === 'size') result.view.blobBytes = 262145;
+  fetch.mockResolvedValue(new Response(mismatch === 'short' ? content.subarray(1) : content,
+    { headers: { 'Content-Type': mismatch === 'mime' ? 'text/html' : 'application/json' } }));
+  await expect(readSnapshotPreparationView('project 1', 'analysis 1', record.preparationId, result)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PREPARATION_RESPONSE' });
+  expect(fetch).toHaveBeenCalledTimes(mismatch === 'size' ? 0 : 1);
+});
+
+it.each(['traceomics.fixed-result-view.v2', 'traceomics.fixed-result-view.v99'])('does not read metrics under an unsupported view schema %s', async schema => {
+  const record = typedRecord(typedRecipe({ family: 'metrics' })), result = record.package.results[0]; result.view.schema = schema;
+  await expect(readSnapshotPreparationView('project 1', 'analysis 1', record.preparationId, result)).rejects.toMatchObject({ code: 'INVALID_SNAPSHOT_PREPARATION_RESPONSE' });
+  expect(fetch).not.toHaveBeenCalled(); expect(withExecutionTarget).not.toHaveBeenCalled();
 });
 
 it('verifies exact retained bytes before returning them, without adding an offset or reopening private artifacts', async () => {

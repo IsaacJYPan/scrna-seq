@@ -95,6 +95,7 @@
     "test:analysis-snapshot-preparations-browser": "npm run build && node scripts/verify-analysis-snapshot-preparations-ui.js",
     "test:analysis-publications-browser": "npm run build && node scripts/verify-analysis-publications-ui.js",
     "test:analysis-linked-publications-browser": "npm run build && node scripts/verify-analysis-linked-publications-ui.js",
+    "test:analysis-typed-publications-browser": "npm run build && node scripts/verify-analysis-typed-publications-ui.js",
     "test:existing-work-browser": "npm run build && node scripts/verify-existing-work-ui.js",
     "test:retained-workflows-browser": "npm run build && node scripts/verify-retained-workflows-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",
