@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import useSnapshotPublications from './useSnapshotPublications';
 import { readSnapshotPublicationView, readSnapshotPublicationDocument } from './snapshotPublicationApi';
+import SharedSnapshotCopyLink from '../sharing/SharedSnapshotCopyLink';
 
 const RetainedSnapshotFindings = React.lazy(() => import('./RetainedSnapshotFindings'));
 const time = value => new Date(value).toLocaleString();
@@ -30,18 +31,22 @@ export default function AnalysisSnapshotPublications(props) {
   const { mode, navigate, selected, acknowledgement, receipt, existing, busy, error, notice, phase } = state;
   useEffect(() => { if (props.isActive) heading.current?.focus({ preventScroll: true }); }, [mode, props.isActive]);
   const pending = !!state.original && state.lastCheck !== 'confirmed';
+  const activityAvailable = props.available && props.isActive && state.loaded && !!state.serviceId;
   const refresh = () => { void state.load(); if (mode === 'activity') void state.loadActivity(); };
-  const showActivity = () => { navigate('activity'); void state.loadActivity(); };
+  const showActivity = () => { if (activityAvailable) { navigate('activity'); void state.loadActivity(); } };
   return <section aria-label="Published analysis snapshots" className="flex h-full min-h-0 min-w-0 flex-col bg-background text-text">
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-8">
       <div className="min-w-0"><button type="button" className="text-xs text-textMuted underline" onClick={props.onBack}>{props.returnToPreparation ? 'Back to private preparation' : 'Back to analysis'}</button>
         <h2 ref={heading} tabIndex={-1} className="mt-1 text-lg font-semibold focus-visible:outline-none">Published snapshots</h2></div>
       <div className="flex flex-wrap gap-3 text-xs"><button type="button" className="text-primary underline" onClick={() => navigate('list')}>Browse published snapshots</button>
-        <button type="button" className="text-primary underline" onClick={showActivity}>Your sharing activity</button>
+        <button type="button" className="text-primary underline" disabled={!activityAvailable} onClick={showActivity}>Your sharing activity</button>
         <button type="button" className="text-primary underline" disabled={!props.available || state.loading || state.activityLoading} onClick={refresh}>Refresh sharing access</button></div>
     </header>
     <div className="min-h-0 flex-1 overflow-auto px-4 py-5 sm:px-8"><div className="mx-auto max-w-5xl space-y-5 pb-8">
       {!props.available && <p role="status" className="text-sm text-textMuted">Reconnect to the same workspace. The original sharing request is kept in this panel.</p>}
+      {props.available && props.isActive && !state.loaded && <p role="status" className="text-sm text-textMuted">{state.loading
+        ? 'Checking workspace access before opening your sharing activity…'
+        : 'Check workspace access to open your sharing activity. Use Refresh sharing access to try again.'}</p>}
       {error && <p role="alert" className="whitespace-pre-wrap break-words text-sm text-danger">{error}</p>}
       {notice && <p role="status" className="text-sm text-textMuted">{notice}</p>}{busy && <p role="status" className="text-sm text-textMuted">{phase}</p>}
       <OriginalAction state={state} available={props.available} />
@@ -83,6 +88,9 @@ export default function AnalysisSnapshotPublications(props) {
             <p className="break-words text-xs text-textMuted">Published by {selected.publisherLabel} · {time(selected.publishedAt)}</p>
             {selected.policy.state === 'withdrawn' && <p className="text-sm">Viewing through this publication ended {time(selected.policy.withdrawnAt)}. Its original publication identity remains recorded. Copies already delivered cannot be recalled.</p>}
             <ExactSnapshot value={selected} />
+            <SharedSnapshotCopyLink publication={selected} projectId={props.projectId} analysisId={props.analysisId} serviceId={state.serviceId}
+              userId={props.userId} available={props.available} isActive={props.isActive}
+              blocked={busy || pending || state.bodyBlocked && selected.policy.state !== 'withdrawn'} />
             <div className="flex flex-wrap gap-3"><button type="button" className="btn btn-secondary text-sm" disabled={!props.available} onClick={() => void state.open(selected, { preserveMode: true })}>Check current snapshot access</button>
               {selected.canWithdraw && <button type="button" className="text-sm text-textMuted underline" disabled={busy || pending || !props.available} onClick={state.confirmWithdrawal}>Withdraw from project</button>}</div>
           </div>
@@ -125,6 +133,9 @@ export default function AnalysisSnapshotPublications(props) {
         <p className="text-sm text-textMuted">Original action accepted {time(receipt.acceptance.acceptedAt)}.</p>
         <p className="text-sm">{receipt.current.policy.state === 'withdrawn' ? 'This snapshot is now withdrawn. Recovering its original acceptance does not reactivate it.' : 'The exact reviewed snapshot is published to current project members.'}</p>
         <ExactSnapshot value={receipt.current} />
+        <SharedSnapshotCopyLink publication={receipt.current} projectId={props.projectId} analysisId={props.analysisId} serviceId={state.serviceId}
+          userId={props.userId} available={props.available} isActive={props.isActive}
+          blocked={busy || pending || state.bodyBlocked && selected?.publicationId === receipt.current.publicationId && receipt.current.policy.state !== 'withdrawn'} />
         <details className="text-xs text-textMuted"><summary className="cursor-pointer">Accepted action identity</summary><dl className="mt-2 space-y-2 break-all"><div><dt>Original request</dt><dd>{receipt.requestId}</dd></div><div><dt>Request SHA-256</dt><dd>{receipt.requestSha256}</dd></div><div><dt>Audit event</dt><dd>{receipt.acceptance.auditEventId}</dd></div></dl></details>
         <button type="button" className="btn btn-primary text-sm" disabled={!props.available} onClick={state.openReceipt}>Open original published snapshot</button>
         <button type="button" className="ml-3 text-sm text-primary underline" onClick={() => void state.checkRequest({ requestId: receipt.requestId, requestSha256: receipt.requestSha256, request: receipt.request })} disabled={busy || !props.available}>Check accepted action again</button>

@@ -3,7 +3,7 @@ import { Shield, Lock, Mail, User, Microscope, AlertTriangle, CheckCircle, Eye, 
 import auth from '../auth';
 import passwordPolicy from '../../shared/passwordPolicyContract.json';
 
-export default function Login({ onLogin, notice = '', theme = 'light', setTheme }) {
+export default function Login({ onLogin, notice = '', theme = 'light', setTheme, allowDemo = true, submitLabel = 'Open Workbench', pendingLabel = 'Opening workbench…' }) {
   const [mode, setMode] = useState('login'); // 'login' | 'signup'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -156,13 +156,13 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
               </button>
           </div>}
 
-          {!registrationEnabled && !demoMode && (
+          {!registrationEnabled && (!demoMode || !allowDemo) && (
             <p className="mb-5 text-center text-xs text-textMuted">
               Accounts are provisioned by your deployment administrator.
             </p>
           )}
 
-          {demoMode && (
+          {demoMode && allowDemo && (
             <div className="mb-5 rounded-xl border border-primary/25 bg-primary/5 p-4 text-center">
               <p className="text-xs text-textMuted">Explore a curated, temporary single-cell project. Uploads and Expert R are disabled.</p>
               <button
@@ -299,10 +299,10 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme 
             >
               {loading ? <>
                 <div aria-hidden="true" className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                {mode === 'signup' ? 'Creating account…' : 'Opening workbench…'}
+                {mode === 'signup' ? 'Creating account…' : pendingLabel}
               </> : (
                 <>
-                  {mode === 'login' ? 'Open Workbench' : 'Create Account'} <Shield size={17} />
+                  {mode === 'login' ? submitLabel : 'Create Account'} <Shield size={17} />
                 </>
               )}
             </button>

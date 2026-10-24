@@ -120,11 +120,42 @@ it('freshly verifies the exact acknowledged A seed without automatically publish
   await waitFor(() => expect(reads(preparations + '/' + prepared.preparationId)).toHaveLength(1));
   expect(writes()).toHaveLength(0); expect(screen.queryByRole('button', { name: 'Publish to project' })).not.toBeInTheDocument();
   await act(async () => completion.resolve(prepared)); await screen.findByRole('button', { name: 'Publish to project' }); expect(writes()).toHaveLength(0);
+  expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument();
   const request = await publish(); await screen.findByRole('heading', { name: 'Publication accepted' });
   expect(request).toEqual({ requestId: expect.any(String), serviceId: scope.serviceId, projectId: scope.projectId, analysisId: scope.analysisId,
     ownerUserId: 7, preparationId: prepared.preparationId, snapshotSha256: prepared.snapshotSha256 });
   expect(writes('withdraw')).toHaveLength(0); expect(writes()[0]).toMatchObject({ credentials: 'include', headers: { 'X-Traceomics-Csrf': '1' } });
-  expect(screen.queryByRole('button', { name: /copy link|run|execute/i })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Copy link' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: /run|execute/i })).not.toBeInTheDocument();
+});
+
+it('keeps activity navigation closed until a held initial list confirms the workspace, then opens exact accepted activity on one explicit click', async () => {
+  const held = deferred(), value = publicationFull({ viewerUserId: 7, canPublish: true }), receipt = publicationReceipt({ current: value });
+  state.publications.set(value.publicationId, value); state.journal.set(receipt.requestId, receipt); state.onList = () => held.promise;
+  render(<AnalysisSnapshotPublications {...propsFor()} />); await waitFor(() => expect(reads(base)).toHaveLength(1));
+  expect(screen.getByRole('button', { name: 'Your sharing activity' })).toBeDisabled();
+  expect(screen.getByText('Checking workspace access before opening your sharing activity…')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Your sharing activity' })); expect(reads(base + '/requests')).toHaveLength(0);
+  expect(screen.queryByLabelText('Your accepted sharing activity')).not.toBeInTheDocument();
+  await act(async () => held.resolve(publicationList([value], { scope, canPublish: true })));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Your sharing activity' })).toBeEnabled());
+  expect(reads(base + '/requests')).toHaveLength(0); fireEvent.click(screen.getByRole('button', { name: 'Your sharing activity' }));
+  expect(await screen.findByRole('button', { name: 'Check accepted sharing action' })).toBeVisible();
+  expect(reads(base + '/requests')).toHaveLength(1); expect(reads(base + '/requests')[0].credentials).toBe('include');
+  expect(writes()).toHaveLength(0); expect(writes('withdraw')).toHaveLength(0);
+});
+
+it('offers an explicit workspace-access retry after initial discovery fails instead of stranding an empty activity page', async () => {
+  const value = publicationFull({ viewerUserId: 7, canPublish: true }), receipt = publicationReceipt({ current: value });
+  state.publications.set(value.publicationId, value); state.journal.set(receipt.requestId, receipt); state.onList = () => failure(503, 'SHARING_TEMPORARILY_UNAVAILABLE');
+  render(<AnalysisSnapshotPublications {...propsFor()} />); await screen.findByRole('alert');
+  expect(screen.getByRole('button', { name: 'Your sharing activity' })).toBeDisabled();
+  expect(screen.getByText('Check workspace access to open your sharing activity. Use Refresh sharing access to try again.')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Your sharing activity' })); expect(reads(base + '/requests')).toHaveLength(0);
+  state.onList = undefined; fireEvent.click(screen.getByRole('button', { name: 'Refresh sharing access' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Your sharing activity' })).toBeEnabled());
+  expect(reads(base)).toHaveLength(2); await activity(); expect(await screen.findByRole('button', { name: 'Check accepted sharing action' })).toBeVisible();
+  expect(reads(base + '/requests')).toHaveLength(1); expect(writes()).toHaveLength(0);
 });
 
 it('rejects a refreshed private package with another SHA instead of publishing a newer selection', async () => {
@@ -411,4 +442,57 @@ it('does not mark retained content missing from a 500 response with a misleading
   await waitFor(() => expect(reads(base + '/' + value.publicationId)).toHaveLength(2));
   expect(screen.getByTestId('published-findings')).toBeVisible(); expect(screen.queryByText(/Viewing is paused while this publication's access or withdrawal is being checked/)).not.toBeInTheDocument();
   await act(async () => completion.resolve(value)); expect(screen.getByTestId('published-findings')).toBeVisible(); expect(writes()).toHaveLength(0);
+});
+
+it('copies the exact accepted receipt and verified detail link without a private request identity or another sharing mutation', async () => {
+  const clipboard = vi.fn().mockResolvedValue(undefined); vi.stubGlobal('navigator', { clipboard: { writeText: clipboard } });
+  await seeded(); expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument();
+  const original = await publish(); await screen.findByRole('heading', { name: 'Publication accepted' });
+  fireEvent.click(screen.getByRole('button', { name: 'Copy link' })); await screen.findByText(/^Link copied/);
+  const value = [...state.publications.values()][0], copied = clipboard.mock.calls[0][0];
+  expect(copied).toContain(`#/shared-snapshots/v1/${scope.serviceId}/${scope.projectId}/${scope.analysisId}/${value.publicationId}/${original.snapshotSha256}`);
+  expect(copied).not.toContain(original.requestId); expect(copied).not.toContain(original.preparationId);
+  fireEvent.click(screen.getByRole('button', { name: 'Open original published snapshot' })); await screen.findByTestId('published-findings');
+  fireEvent.click(screen.getByRole('button', { name: 'Copy link' })); await screen.findByText(/^Link copied/);
+  expect(clipboard).toHaveBeenCalledTimes(2); expect(clipboard.mock.calls[1][0]).toBe(copied);
+  expect(writes()).toHaveLength(1); expect(writes('withdraw')).toHaveLength(0);
+  fireEvent.click(screen.getByRole('button', { name: 'Browse published snapshots' }));
+  expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument();
+});
+
+it('offers no unconfirmed action link but recovers a copyable accepted record from private activity without another POST', async () => {
+  const clipboard = vi.fn().mockResolvedValue(undefined); vi.stubGlobal('navigator', { clipboard: { writeText: clipboard } });
+  state.onPublish = request => { acceptPublish(request); throw new Error('accepted reply lost'); };
+  await seeded(); await publish(); await screen.findByRole('alert');
+  expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument();
+  await activity(); fireEvent.click(await screen.findByRole('button', { name: 'Check accepted sharing action' })); await screen.findByRole('heading', { name: 'Publication accepted' });
+  fireEvent.click(screen.getByRole('button', { name: 'Copy link' })); await screen.findByText(/^Link copied/);
+  expect(clipboard).toHaveBeenCalledOnce(); expect(writes()).toHaveLength(1);
+});
+
+it('allows a current reader to copy a verified colleague publication without publish or source authority', async () => {
+  const clipboard = vi.fn().mockResolvedValue(undefined); vi.stubGlobal('navigator', { clipboard: { writeText: clipboard } });
+  state.userId = 17; state.allowed = false; const value = publicationFull(); state.publications.set(value.publicationId, value);
+  await frame(propsFor({ userId: 17, canWrite: false })); await openPublished();
+  fireEvent.click(screen.getByRole('button', { name: 'Copy link' })); await screen.findByText(/^Link copied/);
+  expect(clipboard.mock.calls[0][0]).toContain(`/${value.publicationId}/${value.snapshotSha256}`);
+  expect(writes()).toHaveLength(0); expect(writes('withdraw')).toHaveLength(0);
+  expect(state.requests.every(request => !request.pathname.startsWith(preparations))).toBe(true);
+});
+
+it('blocks copying while a withdrawal is unconfirmed but preserves exact accepted tombstone links after recovery', async () => {
+  const clipboard = vi.fn().mockResolvedValue(undefined), held = deferred(); vi.stubGlobal('navigator', { clipboard: { writeText: clipboard } });
+  const value = publicationFull({ viewerUserId: 7, canPublish: true }); state.publications.set(value.publicationId, value);
+  state.onWithdraw = request => { acceptWithdrawal(request); return held.promise; };
+  await frame(); await openPublished(); fireEvent.click(screen.getByRole('button', { name: 'Withdraw from project' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm withdrawal' })); await waitFor(() => expect(writes('withdraw')).toHaveLength(1));
+  state.onDetail = () => value; fireEvent.click(screen.getByRole('button', { name: 'Browse published snapshots' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Open published snapshot' })); await screen.findByText(/Viewing is paused while this publication's access or withdrawal is being checked/);
+  expect(screen.getByRole('button', { name: 'Copy link' })).toBeDisabled(); expect(clipboard).not.toHaveBeenCalled();
+  state.onDetail = undefined; await act(async () => held.reject(new Error('accepted withdrawal reply lost')));
+  fireEvent.click(screen.getByRole('button', { name: 'Check original sharing request' })); await screen.findByRole('heading', { name: 'Withdrawal accepted' });
+  fireEvent.click(screen.getByRole('button', { name: 'Copy link' })); await screen.findByText(/^Link copied/);
+  expect(clipboard.mock.calls[0][0]).toContain(`/${value.publicationId}/${value.snapshotSha256}`);
+  expect(screen.getByText('This exact link opens the withdrawn publication record. Its findings are no longer available.')).toBeVisible();
+  expect(writes('withdraw')).toHaveLength(1); expect(writes()).toHaveLength(0);
 });

@@ -40,8 +40,8 @@ const referenceReasons = {
 };
 
 function Findings({ projectId, analysisId, serviceId, userId, resourceId, audience, snapshotSha256, snapshot, availability,
-  available, isActive, readView, readDocument, onDenied, onUnavailable }) {
-  const [findingId, setFindingId] = useState(null), heading = useRef(null), list = useRef(null);
+  available, isActive, readView, readDocument, onDenied, onUnavailable, renderRevisionDiscussion, initialFindingId, onFindingSelection }) {
+  const [findingId, setFindingId] = useState(initialFindingId || null), heading = useRef(null), list = useRef(null);
   const finding = snapshot.results.find(item => item.viewId === findingId) || snapshot.results[0];
   const context = finding && findingContext(finding, snapshot.schema);
   const referenceOnly = item => ['analysis-reference', 'captured-workflow-reference'].includes(item.kind);
@@ -54,7 +54,7 @@ function Findings({ projectId, analysisId, serviceId, userId, resourceId, audien
       {snapshot.results.map((item, index) => { const label = findingContext(item, snapshot.schema); return <li key={item.viewId}>
         <button type="button" aria-pressed={finding?.viewId === item.viewId}
           className={`w-full min-w-0 rounded border p-3 text-left text-sm ${finding?.viewId === item.viewId ? 'border-primary bg-primary/5' : 'border-border bg-surface'}`}
-          onClick={() => { setFindingId(item.viewId); requestAnimationFrame(() => heading.current?.focus()); }}>
+          onClick={() => { setFindingId(item.viewId); onFindingSelection?.(item.viewId); requestAnimationFrame(() => heading.current?.focus()); }}>
           <span className="line-clamp-2 break-words">{index + 1}. {label.caption}</span>
           <span className="mt-1 block break-words text-xs text-textMuted">{item.source.name} · {label.short}</span>
         </button>
@@ -79,6 +79,7 @@ function Findings({ projectId, analysisId, serviceId, userId, resourceId, audien
           ? <PreparedSnapshotResult {...scope} descriptor={finding} readView={readView} />
           : <p role="status" className="text-sm text-textMuted">This retained view is unavailable. Its exact saved identity is kept and has not been regenerated.</p>}
         <button type="button" className="mt-4 text-xs text-primary underline" onClick={() => list.current?.focus()}>Back to retained findings</button>
+        {renderRevisionDiscussion && <div className="mt-5 border-t border-border pt-4">{renderRevisionDiscussion(context.attachment || null)}</div>}
       </section>}
       <div className="mt-6 space-y-4">
         {snapshot.documents.map(item => availability.documents.find(value => value.documentId === item.documentId && value.versionId === item.versionId)?.status === 'available'

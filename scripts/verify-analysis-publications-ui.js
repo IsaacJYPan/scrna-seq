@@ -19,21 +19,22 @@ async function until(test, message, timeout = 30000) {
   while (Date.now() < end) { if (await test()) return; await new Promise(resolve => setTimeout(resolve, 75)); }
   throw new Error(message);
 }
-async function main({ linkedResults = false, typedResults = false, capturedResults = false, embeddingResults = false, inertResults = false } = {}) {
+async function main({ linkedResults = false, typedResults = false, capturedResults = false, embeddingResults = false, inertResults = false, sharedLinks = false } = {}) {
   embeddingResults ||= inertResults;
   capturedResults ||= embeddingResults;
   typedResults ||= capturedResults;
   linkedResults ||= typedResults;
-  const directory = path.join(root, 'playwright', 'report', (inertResults ? 'analysis-inert-publications-' : embeddingResults ? 'analysis-embedding-publications-' : capturedResults ? 'analysis-workflow-publications-' : typedResults ? 'analysis-typed-publications-' : linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
+  const directory = path.join(root, 'playwright', 'report', (sharedLinks ? 'analysis-shared-links-' : inertResults ? 'analysis-inert-publications-' : embeddingResults ? 'analysis-embedding-publications-' : capturedResults ? 'analysis-workflow-publications-' : typedResults ? 'analysis-typed-publications-' : linkedResults ? 'analysis-linked-publications-' : 'analysis-publications-') + Date.now()); fs.mkdirSync(directory, { recursive: true });
   const frozen = new Map(fs.readdirSync(path.join(root, 'dist/assets')).map(name => [name, sha(fs.readFileSync(path.join(root, 'dist/assets', name)))]));
   const checks = [], screenshots = [], profiles = [], requests = [], browserErrors = [], consoleErrors = [], assetReads = [], faults = [], restarts = [];
+  const httpFailures = [], failureReads = [], scopedReadDenials = [], pageIds = new WeakMap(); let nextPageId = 0;
   const compiledAssets = {}, accounts = {}, expected = new Set(), faultPaths = new Set();
   const intentionalRuntimeResponses = [];
   const expectRuntime = (status, pathname, reason) => {
     intentionalRuntimeResponses.push({ status, pathname, reason, from: Date.now() });
   };
   const check = message => { checks.push(message); console.log('PASS: ' + message); };
-  let service, database, browser, page, study, findings, linkedInfo, typedFindings, visibleTarget;
+  let service, database, browser, page, study, findings, linkedInfo, typedFindings, visibleTarget, sharedLinkEvidence;
   const typedProducer = typedResults ? createTypedSharingProducer(process.env.EXPERT_R_SANDBOX_IMAGE) : null;
   const findingCaption = name => `Exact ${capturedResults ? 'captured' : 'typed'} workflow ${name}`;
   const intercept = input => service.interceptNextResponse({ ...input, ...(capturedResults ? { maximumBytes: 512 * 1024 } : {}) });
@@ -74,11 +75,11 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     return chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP ' + new URL(service.endpoint).hostname + ' 127.0.0.1',
       '--ignore-certificate-errors-spki-list=' + crypto.createHash('sha256').update(leaf.publicKey.export({ type: 'spki', format: 'der' })).digest('base64')] });
   }
-  async function login(actor = 'owner') {
-    const context = await browser.newContext({ viewport: { width: 1366, height: 768 } }); const target = await context.newPage();
+  function registerPage(target, actor = 'owner') {
+    const pageId = ++nextPageId; pageIds.set(target, pageId);
     visibleTarget = target;
     target.on('pageerror', error => browserErrors.push(error.message));
-    target.on('console', value => { if (value.type() === 'error') consoleErrors.push({ text: value.text(), url: value.location().url, at: Date.now() }); });
+    target.on('console', value => { if (value.type() === 'error') consoleErrors.push({ text: value.text(), url: value.location().url, at: Date.now(), actor, pageId }); });
     target.on('request', request => {
       const address = new URL(request.url()), pathname = address.pathname; if (!pathname.startsWith('/api/')) return;
       requests.push({ actor, method: request.method(), pathname, ...(pathname.endsWith('/snapshot-preparations/options')
@@ -87,9 +88,24 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     });
     target.on('response', response => {
       const pathname = new URL(response.url()).pathname;
+      if (response.status() === 404 && pathname.startsWith('/api/')) {
+        const observed = { actor, pageId, pathname, status: 404, at: Date.now(), code: null };
+        failureReads.push((async () => {
+          try {
+            const bytes = await response.body();
+            if (bytes.length <= 16 * 1024) { const code = JSON.parse(bytes.toString('utf8')).code;
+              if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) observed.code = code; }
+          } catch { /* An unreadable denial cannot satisfy the scoped expectation. */ }
+          httpFailures.push(observed);
+        })());
+      }
       if (!response.ok() || !pathname.startsWith('/assets/') || !pathname.endsWith('.js')) return;
       assetReads.push((async () => { const actual = sha(await response.body()); compiledAssets[pathname] = actual; assert(frozen.get(pathname.split('/').at(-1)) === actual, 'Production assets changed during sharing acceptance.'); })().catch(error => browserErrors.push(error.message)));
     });
+    return target;
+  }
+  async function login(actor = 'owner') {
+    const context = await browser.newContext({ viewport: { width: 1366, height: 768 } }); const target = registerPage(await context.newPage(), actor);
     await target.goto(service.endpoint); await target.getByPlaceholder('researcher@lab.edu').fill(accounts[actor].email);
     await target.getByLabel('Password', { exact: true }).fill(service.account.password); await target.getByRole('button', { name: /Open Workbench/ }).click();
     await target.getByText('Connection details', { exact: true }).waitFor(); return target;
@@ -497,13 +513,31 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     assert(!(await detail(colleague).getByRole('button', { name: 'Withdraw from project', exact: true }).count()), 'An unrelated current reader gained withdrawal authority.');
     check('A real colleague inspects actual R-produced CSV, PNG and exact saved supporting source after the producer kernel and broker stop, original files are removed, private preparation is deleted and live heads advance. Private sources, original action UUIDs and execution history remain denied.');
 
+    if (sharedLinks) sharedLinkEvidence = await require('./analysis-shared-links-ui.cjs').verifySharedLinks({ service, database, page, accounts, api, login,
+      openPublications, openPublic, panel, detail, matrix, capture, intercept, faults, faultPaths, expected, requests, check, until,
+      publicationId, packageSha, study, attached, directory, browser, registerPage, baselineColleague: colleague });
+
     const heldRead = intercept({ method: 'GET', pathname: `${publicationPath()}/${publicationId}`, mode: 'hold' }); faults.push(heldRead);
     await detail(colleague).getByRole('button', { name: 'Check current snapshot access', exact: true }).click(); await until(() => heldRead.observation(), 'The genuine authorized colleague read was not held.');
+    const tableAfterReopen = sharedLinks && publicValue.package.results.find(item => item.view.family === 'table');
+    const scopedDenial = tableAfterReopen ? { actor: 'colleague', pageId: pageIds.get(colleague), status: 404,
+      pathname: `${publicationPath()}/${publicationId}/views/${tableAfterReopen.viewId}`, code: 'ANALYSIS_SNAPSHOT_SCOPE_NOT_FOUND',
+      from: Date.now(), through: null, reason: 'An in-flight table read rechecks current membership during deliberate baseline revocation.' } : null;
+    if (scopedDenial) scopedReadDenials.push(scopedDenial);
     await database.query('DELETE FROM project_members WHERE project_id=$1 AND user_id=$2', [service.project.id, accounts.colleague.id]); expected.add(`404 ${publicationPath()}?limit=30`);
+    if (scopedDenial) {
+      const rawDenied = await colleague.evaluate(async pathname => {
+        const response = await fetch(pathname, { credentials: 'include' });
+        const body = await response.json(); return { status: response.status, code: body.code };
+      }, scopedDenial.pathname);
+      assert(rawDenied.status === scopedDenial.status && rawDenied.code === scopedDenial.code,
+        'The exact retained table did not deny its currently revoked reader with the authoritative scope code.');
+    }
     await refresh(colleague); await until(async () => !(await detail(colleague).getByRole('heading', { name: 'Published to this project', exact: true }).count()), 'Membership revocation retained protected publication content.');
     heldRead.release(); await colleague.waitForTimeout(200); assert(!(await detail(colleague).getByText(attached[1].caption, { exact: true }).count()), 'An older held success restored publication content after scope denial.');
     await matrix(colleague, 'sharing-colleague-revoked-held-response-fenced', () => panel(colleague).scrollIntoViewIfNeeded());
     await database.query("INSERT INTO project_members(project_id,user_id,role) VALUES($1,$2,'viewer')", [service.project.id, accounts.colleague.id]); await refresh(colleague); await openPublic(colleague);
+    if (scopedDenial) scopedDenial.through = Date.now();
     check('Actual reader membership revocation clears protected publication content and fences a previously authorized held reply; explicit restored access opens the original retained identity.');
     const broken = publicValue.package.results.find(item => item.view.family === 'image');
     expected.add(`409 ${publicationPath()}/${publicationId}/views/${broken.viewId}`);
@@ -546,24 +580,34 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
       && !storage.includes('PRIVATE_UNSELECTED_CAPTURE_NOTE') && !storage.includes('PRIVATE_CAPTURE_PATH'), 'Scientific source, private recorded values or original sharing intent entered Web Storage.');
     if (linkedResults) assert(requests.filter(item => item.method === 'POST' && item.pathname === prepPath()).length === 1, 'The original v2 preparation was repeated after acceptance/restart.');
     check('A publisher downgraded to reader explicitly withdraws; a real committed lost reply recovers its original acceptance, older active colleague replies cannot restore content, last-reference bytes are released, and original publication replay never reactivates it or runs science.');
+    if (sharedLinks) await require('./analysis-shared-links-ui.cjs').verifyWithdrawnSharedLink({ ...sharedLinkEvidence,
+      browser, service, accounts, registerPage, capture, check, page });
     if (inertResults) {
       await require('./analysis-inert-sharing-ui.cjs').verifyInertSharing({ service, database, page, accounts, api, importFixture, login, restart,
         openAnalysis, openPublications, openPublic, prep, panel, detail, matrix, intercept, faults, faultPaths, expected, requests, check, until });
       assert((await database.query('SELECT COUNT(*)::int AS n FROM private_r_executions')).rows[0].n === scientificCount
         && (await database.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n === jobCount, 'Inert source sharing dispatched additional science.');
     }
-    await Promise.all(assetReads);
+    await Promise.all([...assetReads, ...failureReads]);
     const unexpected = consoleErrors.filter(entry => {
       let url; try { url = new URL(entry.url); } catch { return true; }
       const status = /status of (\d+)/.exec(entry.text)?.[1];
       if (status === '401' && url.pathname === '/api/auth/session' || status === '404' && url.pathname === '/api/r/session-id' || expected.has(`${status} ${url.pathname}${url.search}`) || expected.has(`${status} ${url.pathname}`)) return false;
       if (intentionalRuntimeResponses.some(value => String(value.status) === status && value.pathname === url.pathname && entry.at >= value.from)) return false;
+      if (scopedReadDenials.some(value => {
+        if (String(value.status) !== status || value.pathname !== url.pathname || entry.pageId !== value.pageId
+            || entry.at < value.from || value.through === null || entry.at > value.through) return false;
+        const observed = httpFailures.filter(item => item.pageId === value.pageId && item.pathname === value.pathname
+          && item.status === value.status && item.at >= value.from && item.at <= value.through);
+        return observed.length > 0 && observed.every(item => item.code === value.code);
+      })) return false;
       return !(/^Failed to load resource: net::ERR_(?:FAILED|CONTENT_LENGTH_MISMATCH|EMPTY_RESPONSE|INCOMPLETE_CHUNKED_ENCODING|CONNECTION_CLOSED|CONNECTION_RESET)/.test(entry.text) && faultPaths.has(url.pathname));
     });
-    assert(browserErrors.length === 0 && unexpected.length === 0, 'Unexpected production sharing browser errors occurred.');
+    assert(browserErrors.length === 0 && unexpected.length === 0, 'Unexpected production sharing browser errors occurred: ' + unexpected.map(value => value.text + ' ' + new URL(value.url).pathname).join('; '));
     check('All sharing journeys used frozen production assets, genuine authenticated accounts and real retained R outputs without unexpected browser errors, extra scientific execution or scientific browser persistence.');
-    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: true, checks, screenshots, profiles, browserRestarts: restarts, compiledAssets, browserErrors, consoleErrors, requests, intentionalRuntimeResponses,
+    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: true, checks, screenshots, profiles, browserRestarts: restarts, compiledAssets, browserErrors, consoleErrors, requests, intentionalRuntimeResponses, scopedReadDenials, httpFailures,
       image: service.image, environment: service.environment.id, producerStopped: true, typedWorkerCompleted: typedFindings?.workerCompleted || false,
+      ...(sharedLinks ? { sharedLink: sharedLinkEvidence } : {}),
       fixture: 'Disposable actual R kernel+managed serializers' + (typedFindings ? '+completed typed workflow worker' : '') + '/HTTPS/auth/PG/private storage; synthetic20genes12cells; '
         + (inertResults ? 'TXT/JSON source fixtures separately imported, not produced by the workflow; ' : '') + 'no general scientific correctness, SSH or reference-hardware claim.' }, null, 2));
     console.log('Analysis publication acceptance: ' + directory);
@@ -571,7 +615,7 @@ async function main({ linkedResults = false, typedResults = false, capturedResul
     await (visibleTarget || page)?.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true }).catch(() => {});
     const tree = await (visibleTarget || page)?.locator('main').ariaSnapshot().catch(() => null); if (tree) fs.writeFileSync(path.join(directory, 'failure-accessibility.txt'), tree);
     let message = error.message; for (const secret of [service?.databaseUrl, service?.storageRoot, service?.account.password, ...Object.values(accounts).map(value => value.email)].filter(Boolean)) message = message.split(secret).join('[private fixture]');
-    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: false, checks, screenshots, error: message, browserErrors, consoleErrors, requests, intentionalRuntimeResponses }, null, 2)); throw new Error(message);
+    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ passed: false, checks, screenshots, compiledAssets, error: message, browserErrors, consoleErrors, requests, intentionalRuntimeResponses, scopedReadDenials, httpFailures }, null, 2)); throw new Error(message);
   } finally { for (const fault of faults) fault.release(); await browser?.close(); await database?.end(); await typedProducer?.stop(); await service?.stop(); }
 }
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });

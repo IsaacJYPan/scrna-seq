@@ -18,6 +18,19 @@ describe('Login registration policy', () => {
     vi.clearAllMocks();
   });
 
+  it('keeps a private shared-link login on its intended route even when a temporary demo is available', async () => {
+    auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false, demoMode: true });
+    const onLogin = vi.fn(); auth.login.mockResolvedValue({ user: { id: 17 } });
+    render(<Login onLogin={onLogin} allowDemo={false} submitLabel="Open shared snapshot" pendingLabel="Opening shared snapshot…" />);
+    await screen.findByText(/accounts are provisioned by your deployment administrator/i);
+    expect(screen.queryByRole('button', { name: 'Start temporary demo' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'reader@example.invalid' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'a sufficiently long password' } });
+    fireEvent.click(screen.getByRole('button', { name: /Open shared snapshot/ }));
+    await waitFor(() => expect(onLogin).toHaveBeenCalledWith({ user: { id: 17 } }));
+    expect(auth.startDemoGuest).not.toHaveBeenCalled();
+  });
+
   it('hides network signup when accounts are operator-managed', async () => {
     auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false });
     render(<Login onLogin={vi.fn()} />);

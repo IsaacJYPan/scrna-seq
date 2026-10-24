@@ -95,6 +95,49 @@ it('keeps selected finding and exact source through equal package/availability r
   expect(readSnapshotPreparationView).toHaveBeenCalledTimes(2); expect(readSnapshotPreparationDocument).toHaveBeenCalledOnce();
 });
 
+it('restores only a chosen finding ID on remount and fetches that one fixed view with supporting source still closed', async () => {
+  const value = fixture(), onFindingSelection = vi.fn(), first = render(<RetainedSnapshotFindings {...value.props} onFindingSelection={onFindingSelection} />);
+  await screen.findByRole('cell', { name: 'retained donor 1' }); expect(onFindingSelection).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: /2\. Finding 2 exact caption/ })); await screen.findByRole('cell', { name: 'retained donor 2' });
+  const chosen = value.props.snapshot.results[1].viewId; expect(onFindingSelection).toHaveBeenCalledExactlyOnceWith(chosen);
+  first.unmount(); readSnapshotPreparationView.mockClear(); readSnapshotPreparationDocument.mockClear(); onFindingSelection.mockClear();
+  render(<RetainedSnapshotFindings {...value.props} initialFindingId={chosen} onFindingSelection={onFindingSelection} />);
+  expect(await screen.findByRole('cell', { name: 'retained donor 2' })).toBeVisible();
+  expect(screen.getByRole('button', { name: /2\. Finding 2 exact caption/ })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.queryByRole('cell', { name: 'retained donor 1' })).not.toBeInTheDocument();
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationView.mock.calls[0][3].viewId).toBe(chosen);
+  expect(readSnapshotPreparationDocument).not.toHaveBeenCalled(); expect(screen.queryByLabelText('Retained saved source')).not.toBeInTheDocument();
+  expect(onFindingSelection).not.toHaveBeenCalled();
+});
+
+it.each([undefined, null, '', 'asv_' + 'f'.repeat(24)])('falls back to the first retained finding for an absent or stale initial choice %s', async initialFindingId => {
+  const value = fixture(), onFindingSelection = vi.fn(); render(<RetainedSnapshotFindings {...value.props} initialFindingId={initialFindingId} onFindingSelection={onFindingSelection} />);
+  expect(await screen.findByRole('cell', { name: 'retained donor 1' })).toBeVisible();
+  expect(screen.getByRole('button', { name: /1\. Finding 1 exact caption/ })).toHaveAttribute('aria-pressed', 'true');
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+  expect(onFindingSelection).not.toHaveBeenCalled();
+});
+
+it('passes the currently selected exact saved attachment to the optional discussion seam without changing legacy viewers', async () => {
+  const value = fixture(), renderRevisionDiscussion = vi.fn(attachment => <p aria-label="Included revision discussion">{attachment?.revisionId || 'No included revision'}</p>);
+  render(<RetainedSnapshotFindings {...value.props} renderRevisionDiscussion={renderRevisionDiscussion} />); await screen.findByRole('table');
+  expect(screen.getByLabelText('Included revision discussion')).toHaveTextContent(value.props.snapshot.results[0].attachment.revisionId);
+  expect(renderRevisionDiscussion.mock.calls.at(-1)[0]).toBe(value.props.snapshot.results[0].attachment);
+  fireEvent.click(screen.getByRole('button', { name: /2\. Finding 2 exact caption/ })); await screen.findByRole('cell', { name: 'retained donor 2' });
+  expect(screen.getByLabelText('Included revision discussion')).toHaveTextContent(value.props.snapshot.results[1].attachment.revisionId);
+  expect(renderRevisionDiscussion.mock.calls.at(-1)[0]).toBe(value.props.snapshot.results[1].attachment);
+});
+
+it('uses only a v2 attachment-revision origin for optional discussion and supplies null for a directly linked finding', async () => {
+  const value = linkedFixture(), renderRevisionDiscussion = vi.fn(attachment => <p aria-label="Included revision discussion">{attachment?.revisionId || 'No included revision'}</p>);
+  const view = render(<RetainedSnapshotFindings {...value.props} renderRevisionDiscussion={renderRevisionDiscussion} />); await screen.findByRole('table');
+  expect(renderRevisionDiscussion.mock.calls.at(-1)[0]).toBe(value.props.snapshot.results[0].origin.attachment);
+  fireEvent.click(screen.getByRole('button', { name: /2\. Caption supplied for a linked result/ }));
+  expect(await screen.findByText('No included revision')).toBeVisible(); expect(renderRevisionDiscussion.mock.calls.at(-1)[0]).toBeNull();
+  view.rerender(<RetainedSnapshotFindings {...value.props} snapshot={null} availability={null} renderRevisionDiscussion={renderRevisionDiscussion} />);
+  expect(screen.queryByLabelText('Included revision discussion')).not.toBeInTheDocument();
+});
+
 it('preserves supplied context, literal notes and prerequisites without rendering code or duplicating the analysis header', async () => {
   const value = fixture(); render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
   expect(screen.getByText('<script>private note</script>')).toBeVisible(); expect(document.querySelector('script')).toBeNull();
