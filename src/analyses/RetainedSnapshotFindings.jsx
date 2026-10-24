@@ -1,4 +1,5 @@
 import React, { useRef, useState } from 'react';
+import RecordedSnapshotContext from './RecordedSnapshotContext';
 
 const PreparedSnapshotResult = React.lazy(() => import('./PreparedSnapshotResult'));
 const PreparedSnapshotSource = React.lazy(() => import('./PreparedSnapshotSource'));
@@ -10,6 +11,11 @@ function findingContext(item, schema) {
   if (schema === packageV2 && ['analysis-reference', 'typed-analysis-reference'].includes(item.origin?.kind) && item.origin.captionOrigin === 'user-supplied') {
     return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
       short: `Linked in saved analysis ${item.origin.analysisVersion}`, long: `Linked in saved analysis ${item.origin.analysisVersion}` };
+  }
+  if (schema === packageV2 && item.origin?.kind === 'captured-workflow-output' && item.origin.captionOrigin === 'user-supplied') {
+    return { caption: item.origin.caption, reference: item.origin.reference, analysisVersion: item.origin.analysisVersion,
+      short: `Recorded in workflow capture · Saved analysis ${item.origin.analysisVersion}`,
+      long: `Recorded in workflow capture · Saved analysis ${item.origin.analysisVersion}` };
   }
   return null;
 }
@@ -34,8 +40,9 @@ function Findings({ projectId, analysisId, serviceId, userId, resourceId, audien
   const [findingId, setFindingId] = useState(null), heading = useRef(null), list = useRef(null);
   const finding = snapshot.results.find(item => item.viewId === findingId) || snapshot.results[0];
   const context = finding && findingContext(finding, snapshot.schema);
-  const declared = snapshot.prerequisites.items.filter(item => item.kind !== 'analysis-reference');
-  const references = snapshot.prerequisites.items.filter(item => item.kind === 'analysis-reference');
+  const referenceOnly = item => ['analysis-reference', 'captured-workflow-reference'].includes(item.kind);
+  const declared = snapshot.prerequisites.items.filter(item => !referenceOnly(item));
+  const references = snapshot.prerequisites.items.filter(referenceOnly);
   const scope = { projectId, analysisId, serviceId, userId, resourceId, audience, snapshotSha256, available, isActive, onDenied, onUnavailable };
   return <>
     <h4 className="text-sm font-semibold">Retained findings</h4>
@@ -54,12 +61,13 @@ function Findings({ projectId, analysisId, serviceId, userId, resourceId, audien
         <h4 ref={heading} tabIndex={-1} className="whitespace-pre-wrap break-words text-sm font-semibold focus-visible:outline-none">{context.caption}</h4>
         <p className="mt-1 break-words text-xs text-textMuted">{finding.source.name} · {context.long}</p>
         {context.reference && <p className="mt-2 text-xs text-textMuted">Caption supplied for this snapshot.</p>}
+        <RecordedSnapshotContext origin={finding.origin} />
         <details className="my-3 text-xs text-textMuted"><summary className="cursor-pointer">Supplied context and exact view</summary>
           <dl className="mt-2 space-y-2">
             {context.attachment && Object.entries(context.attachment.suppliedOrigin).map(([field, value]) => <div key={field}><dt>{field}</dt><dd className="whitespace-pre-wrap break-words">{value || 'Unknown / not supplied'}</dd></div>)}
             {context.reference && <><div><dt>Saved analysis version</dt><dd>{context.analysisVersion}</dd></div><ExactReference reference={context.reference} includeChecksum={false} /></>}
             <div><dt>Original source SHA-256</dt><dd className="break-all">{finding.source.sha256}</dd></div>
-            {finding.origin?.kind === 'typed-analysis-reference' && <div><dt>Recorded output descriptor SHA-256</dt><dd className="break-all">{finding.view.descriptorSha256}</dd></div>}
+            {['typed-analysis-reference', 'captured-workflow-output'].includes(finding.origin?.kind) && <div><dt>Recorded output descriptor SHA-256</dt><dd className="break-all">{finding.view.descriptorSha256}</dd></div>}
             <div><dt>Retained view SHA-256</dt><dd className="break-all">{finding.view.viewSha256}</dd></div>
           </dl>
         </details>
@@ -86,7 +94,11 @@ function Findings({ projectId, analysisId, serviceId, userId, resourceId, audien
       {references.map((item, index) => <div key={index} className="space-y-2 rounded border border-border p-3"><p className="break-words text-sm font-medium">{item.label}</p>
         {item.detail && <p className="whitespace-pre-wrap break-words text-sm text-textMuted">{item.detail}</p>}
         <p className="text-xs text-textMuted">{referenceReasons[item.reason]}</p>
-        <details className="text-xs text-textMuted"><summary className="cursor-pointer">Exact saved reference</summary><dl className="mt-2 space-y-2"><ExactReference reference={item.reference} /></dl></details>
+        <details className="text-xs text-textMuted"><summary className="cursor-pointer">Exact saved reference</summary><dl className="mt-2 space-y-2">
+          {item.kind === 'captured-workflow-reference' && <><ExactReference reference={item.snapshotReference} includeChecksum={false} />
+            <div><dt>Capture SHA-256</dt><dd className="break-all">{item.snapshotReference.sha256}</dd></div>
+            <div><dt>Recorded step</dt><dd className="break-all">{item.stepId}</dd></div><div><dt>Recorded output port</dt><dd className="break-all">{item.port}</dd></div></>}
+          <ExactReference reference={item.reference} /></dl></details>
       </div>)}
     </section>}
   </>;

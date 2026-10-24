@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { canonicalAnalysisSnapshotPreparation, normalizeAnalysisSnapshotPreparation } from '../../shared/analysisSnapshotPreparationDispatch.mjs';
+import { canonicalAnalysisSnapshotPreparation, normalizeAnalysisSnapshotPreparation,
+  projectAnalysisSnapshotWorkflowContext, canonicalAnalysisSnapshotWorkflowContextBinding } from '../../shared/analysisSnapshotPreparationDispatch.mjs';
 import * as api from './snapshotPreparationApi';
 import { validateSnapshotPreparation, validateSnapshotPreparationList, validateSnapshotPreparationOptions } from './snapshotPreparationValidation';
 import { publicErrorMessage } from '../publicError';
+import { capturedOptionsKey } from './snapshotCapturedChoices';
 
 const missing = error => error?.status === 404 && error.code === 'ANALYSIS_SNAPSHOT_PREPARATION_NOT_FOUND';
 const sourceFailure = error => /^(?:ANALYSIS_SNAPSHOT_SOURCE_|ARTIFACT_|SERVER_IMPORT_)/.test(error.code || '');
@@ -11,7 +13,8 @@ const denied = error => error.status === 401 || !sourceFailure(error) && !writer
 const digest = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), value => value.toString(16).padStart(2, '0')).join('');
 const emptyNotes = () => ({ summary: '', decisions: '', limitations: '' });
 const optionKey = (kind, value) => kind === 'analysis-versions' ? value.version : kind === 'results' ? value.revisionId
-  : ['analysis-references', 'analysis-typed-references'].includes(kind) ? JSON.stringify(value.reference) : value.versionId;
+  : ['analysis-references', 'analysis-typed-references'].includes(kind) ? JSON.stringify(value.reference)
+    : kind === 'captured-workflow-outputs' ? JSON.stringify([value.stepId, value.port, value.reference]) : value.versionId;
 
 export default function useSnapshotPreparations({ projectId, analysisId, userId, savedAnalysis, canWrite, available, isActive }) {
   const [mode, setMode] = useState(canWrite && savedAnalysis?.status === 'active' ? 'choose' : 'library');
@@ -19,6 +22,7 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
   const [results, setResults] = useState([]), [documents, setDocuments] = useState([]), [notes, setNotes] = useState(emptyNotes), [prerequisites, setPrerequisites] = useState([]);
   const [linkedDrafts, setLinkedDrafts] = useState({});
   const linkedResults = linkedDrafts[analysisVersion]?.results || [], linkedPrerequisites = linkedDrafts[analysisVersion]?.prerequisites || [];
+  const capturedOffers = linkedDrafts[analysisVersion]?.capturedOffers || {};
   const versionRef = useRef(analysisVersion); versionRef.current = analysisVersion;
   const setLinkedResults = update => setLinkedDrafts(previous => {
     const draft = previous[analysisVersion] || { results: [], prerequisites: [] };
@@ -27,6 +31,10 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
   const setLinkedPrerequisites = update => setLinkedDrafts(previous => {
     const draft = previous[analysisVersion] || { results: [], prerequisites: [] };
     return { ...previous, [analysisVersion]: { ...draft, prerequisites: typeof update === 'function' ? update(draft.prerequisites) : update } };
+  });
+  const keepCapturedOffer = (item, offer) => setLinkedDrafts(previous => {
+    const draft = previous[analysisVersion] || { results: [], prerequisites: [] };
+    return { ...previous, [analysisVersion]: { ...draft, capturedOffers: { ...draft.capturedOffers, [item.offerId]: offer } } };
   });
   const [library, setLibrary] = useState([]), [cursor, setCursor] = useState(null), [loaded, setLoaded] = useState(false), [loading, setLoading] = useState(false);
   const [options, setOptions] = useState({}), [optionLoading, setOptionLoading] = useState({});
@@ -49,6 +57,7 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
     permissionEpoch.current++; cancelAction(); listing.current?.abort(); listGeneration.current++;
     for (const controller of optionRequests.current.values()) controller.abort(); optionRequests.current.clear();
     selectedRef.current = null; setSelected(null); setLibrary([]); setCursor(null); setLoaded(false); setLoading(false); setOptions({}); setOptionLoading({});
+    setLinkedDrafts(previous => Object.fromEntries(Object.entries(previous).map(([version, draft]) => [version, { ...draft, capturedOffers: {} }])));
     allowedRef.current = false; setAllowed(false); setLastCheck('unconfirmed'); setNotice('');
     setError('Access to this private preparation is unavailable. Reconnect to the same workspace and refresh.');
   }, [cancelAction]);
@@ -80,14 +89,17 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
       if (denied(caught)) revoke(); setError(publicErrorMessage(caught, 'Saved preparations could not be loaded. Reconnect to the same workspace and refresh.'));
     } finally { if (mounted.current && generation === listGeneration.current) setLoading(false); }
   }, [usable, projectId, analysisId, scope, observe, revoke]);
-  const loadOptions = useCallback(async (kind, next = null) => {
+  const loadOptions = useCallback(async (kind, next = null, snapshotReference = null) => {
     if (!usable || !service.current) return;
-    const linked = ['analysis-references', 'analysis-typed-references'].includes(kind), version = analysisVersion, key = linked ? `${kind}:${version}` : kind;
+    const captured = kind === 'captured-workflow-outputs';
+    if (captured && !snapshotReference) return;
+    const linked = captured || ['analysis-references', 'analysis-typed-references'].includes(kind), version = analysisVersion,
+      key = captured ? capturedOptionsKey(version, snapshotReference) : linked ? `${kind}:${version}` : kind;
     optionRequests.current.get(key)?.abort(); const controller = new AbortController(); optionRequests.current.set(key, controller);
     const epoch = permissionEpoch.current; setOptionLoading(previous => ({ ...previous, [key]: true })); setError('');
     try {
       const result = await validateSnapshotPreparationOptions(await api.listSnapshotPreparationOptions(projectId, analysisId, kind,
-        { cursor: next, signal: controller.signal, ...(linked ? { analysisVersion: version } : {}) }), scope(), kind, linked ? version : undefined);
+        { cursor: next, signal: controller.signal, ...(linked ? { analysisVersion: version } : {}), ...(captured ? { snapshotReference } : {}) }), scope(), kind, linked ? version : undefined, captured ? snapshotReference : undefined);
       if (!mounted.current || controller.signal.aborted || optionRequests.current.get(key) !== controller) return;
       observe(result.canPrepare, controller, epoch);
       if (linked && versionRef.current !== version) return;
@@ -118,7 +130,8 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
   }, [usable, loaded, mode, options, optionLoading, error, loadOptions]);
   useEffect(() => {
     const kinds = ['analysis-references', 'analysis-typed-references'], keys = kinds.map(kind => `${kind}:${analysisVersion}`);
-    for (const [name, controller] of optionRequests.current) if (kinds.some(kind => name.startsWith(kind + ':')) && !keys.includes(name)) {
+    for (const [name, controller] of optionRequests.current) if (kinds.some(kind => name.startsWith(kind + ':')) && !keys.includes(name)
+        || name.startsWith('captured-workflow-outputs:') && !name.startsWith(`captured-workflow-outputs:${analysisVersion}:`)) {
       controller.abort(); optionRequests.current.delete(name);
       setOptionLoading(previous => previous[name] ? { ...previous, [name]: false } : previous);
     }
@@ -158,11 +171,25 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
       if (!valid(controller)) return; observe(access.canPrepare, controller, epoch); if (!access.canPrepare || !allowedRef.current) return;
       let record = originalRef.current;
       if (!record) {
+        const chosenLinked = [];
+        for (const selected of linkedResults) {
+          if (selected.kind !== 'captured-workflow-output') { chosenLinked.push(selected); continue; }
+          const offer = capturedOffers[selected.offerId];
+          if (!offer) throw new Error('Inspect this captured output again before preparing its recorded context.');
+          const context = projectAnalysisSnapshotWorkflowContext({ snapshotReference: selected.snapshotReference, stepId: selected.stepId,
+            port: selected.port, offer, selection: selected.contextSelection });
+          const contextSha256 = await digest(canonicalAnalysisSnapshotWorkflowContextBinding({ serviceId: service.current, projectId, analysisId,
+            ownerUserId: Number(userId), analysisVersion, context }));
+          if (!valid(controller) || allowedRef.current !== true || epoch !== permissionEpoch.current) return;
+          const { offerId: privateOfferId, ...request } = selected;
+          if (!privateOfferId) throw new Error('The reviewed captured selection could not be identified.');
+          chosenLinked.push({ ...request, contextSha256 });
+        }
         const extended = linkedResults.length > 0 || linkedPrerequisites.length > 0;
         const recipe = normalizeAnalysisSnapshotPreparation({ requestId: crypto.randomUUID(), serviceId: service.current, projectId, analysisId,
           ...(extended ? { schema: 'traceomics.analysis-snapshot-preparation.v2' } : {}),
           ownerUserId: Number(userId), analysisVersion,
-          results: extended ? [...results.map(item => ({ kind: 'attachment-revision', ...item })), ...linkedResults] : results,
+          results: extended ? [...results.map(item => ({ kind: 'attachment-revision', ...item })), ...chosenLinked] : results,
           documents, notes, prerequisites: [...prerequisites, ...linkedPrerequisites] });
         record = { recipe, requestSha256: await digest(canonicalAnalysisSnapshotPreparation(recipe)) };
         if (!valid(controller)) return; originalRef.current = record; setOriginal(record);
@@ -209,7 +236,7 @@ export default function useSnapshotPreparations({ projectId, analysisId, userId,
   };
   const navigate = next => { cancelAction(); setMode(next); };
   return { mode, setMode: navigate, analysisVersion, setAnalysisVersion: chooseAnalysisVersion, results, setResults, linkedResults, setLinkedResults,
-    linkedPrerequisites, setLinkedPrerequisites, documents, setDocuments, notes, setNotes, prerequisites, setPrerequisites,
+    linkedPrerequisites, setLinkedPrerequisites, capturedOffers, keepCapturedOffer, documents, setDocuments, notes, setNotes, prerequisites, setPrerequisites,
     library, cursor, loaded, loading, options, optionLoading, selected, original, lastCheck, allowed, phase, busy: !!phase, error, notice,
     serviceId: service.current, writer: usable && canWrite && savedAnalysis?.status === 'active' && allowed === true,
     load, loadOptions, check, prepare, resume: () => mutate('resume'), remove: () => mutate('delete'), newPreparation, revoke };

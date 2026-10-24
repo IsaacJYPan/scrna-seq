@@ -7,6 +7,7 @@ import { snapshotScope as scope, snapshotRecipe, snapshotRecord, snapshotList, s
   snapshotAnalysisOption, snapshotResultOption } from './snapshotPreparationTestFixtures';
 import { linkedRecord } from './snapshotLinkedTestFixtures';
 import { typedDescriptor, typedOptions, typedRecord } from './snapshotTypedTestFixtures';
+import { workflowSnapshotReference, workflowOffer, workflowSelection, workflowRecipe, workflowRecord, workflowOptions } from './snapshotWorkflowTestFixtures';
 
 // Keep the actual transport, target fence, canonical helpers and strict validators.
 vi.mock('../api', () => ({ apiUrl: value => value }));
@@ -29,10 +30,14 @@ function writes(kind = 'prepare') {
 function observe(value) {
   return { ...structuredClone(value), canPrepare: state.allowed, canResume: state.allowed && ['preparing', 'failed'].includes(value.state) };
 }
-const recordFactory = recipe => recipe.results.some(item => item.kind === 'typed-analysis-reference') ? typedRecord
+const recordFactory = recipe => recipe.results.some(item => item.kind === 'captured-workflow-output') || recipe.prerequisites.some(item => item.kind === 'captured-workflow-reference') ? workflowRecord
+  : recipe.results.some(item => item.kind === 'typed-analysis-reference') ? typedRecord
   : recipe.schema === 'traceomics.analysis-snapshot-preparation.v2' ? linkedRecord : snapshotRecord;
 async function server(request) {
   if (request.method === 'GET' && request.pathname === base + '/options') {
+    if (request.query.get('kind') === 'captured-workflow-outputs') return state.onCapturedOptions ? state.onCapturedOptions(request)
+      : workflowOptions({ analysisVersion: Number(request.query.get('analysisVersion')), canPrepare: state.allowed,
+        snapshotReference: workflowSnapshotReference({ snapshotId: request.query.get('snapshotId'), sha256: request.query.get('snapshotSha256') }) });
     if (request.query.get('kind') === 'analysis-typed-references') return state.onTypedOptions ? state.onTypedOptions(request)
       : snapshotOptions('analysis-typed-references', state.allowed, [], Number(request.query.get('analysisVersion')));
     if (request.query.get('kind') === 'analysis-references') return state.onLinkedOptions ? state.onLinkedOptions(request)
@@ -103,6 +108,175 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); delete window.des
 const linkedOption = (version = 2, changes = {}) => ({ reference: { kind: 'artifact-version', versionId: 'av_' + String(version).repeat(24), sha256: 'a'.repeat(64) },
   label: `Linked measured result for version ${version}`, viewFamily: 'table', referenceOnlyReason: null,
   integrity: 'not-checked', availability: 'not-checked', ...changes });
+
+function offerCaptured({ family = 'table', offer = workflowOffer(), reason = null } = {}) {
+  state.onLinkedOptions = request => snapshotOptions('analysis-references', state.allowed, [linkedOption(2, { reference: workflowSnapshotReference(),
+    label: 'Saved workflow capture', viewFamily: null, referenceOnlyReason: 'opaque' })], Number(request.query.get('analysisVersion')));
+  state.onCapturedOptions = request => workflowOptions({ family, offer, reason, analysisVersion: Number(request.query.get('analysisVersion')), canPrepare: state.allowed,
+    snapshotReference: workflowSnapshotReference({ snapshotId: request.query.get('snapshotId'), sha256: request.query.get('snapshotSha256') }) });
+}
+async function inspectCaptured() {
+  if (!screen.queryByRole('button', { name: 'Hide captured outputs', exact: true })) fireEvent.click(await screen.findByRole('button', { name: 'Inspect captured outputs', exact: true }));
+  return screen.findByRole('list', { name: 'Recorded workflow outputs' });
+}
+async function addCaptured(family = 'table') {
+  const list = await inspectCaptured(), label = family === 'table' ? 'Add captured table excerpt' : family === 'metrics' ? 'Add captured metrics' : 'Add captured figure';
+  fireEvent.click(await within(list).findByRole('button', { name: label, exact: true }));
+  return screen.getByRole('group', { name: 'Recorded context for linked finding 1' });
+}
+
+it.each(['table', 'metrics', 'image'])('discovers a captured %s only after explicit expansion and prepares exact all-off context without opening a working workflow', async family => {
+  offerCaptured({ family }); await frame(); await screen.findByRole('button', { name: 'Inspect captured outputs' });
+  expect(state.requests.some(request => request.query.get('kind') === 'captured-workflow-outputs')).toBe(false);
+  const context = await addCaptured(family); expect(within(context).getAllByRole('checkbox').every(node => !node.checked)).toBe(true);
+  expect(writes()).toHaveLength(0); const submitted = await submit(); await screen.findByTestId('prepared-result');
+  const expected = { ...workflowRecipe({ family }).results[0], caption: workflowOptions({ family }).items[0].outputLabel }; expect(submitted.results).toEqual([expected]);
+  expect(submitted.results[0].contextSelection).toEqual(workflowSelection()); expect(submitted.results[0].contextSha256).toMatch(/^[a-f0-9]{64}$/);
+  const discovery = state.requests.filter(request => request.query.get('kind') === 'captured-workflow-outputs');
+  expect(discovery).toHaveLength(1); expect(discovery[0].query.get('analysisVersion')).toBe('2');
+  expect(discovery[0].query.get('snapshotId')).toBe(workflowSnapshotReference().snapshotId); expect(discovery[0].query.get('snapshotSha256')).toBe(workflowSnapshotReference().sha256);
+  expect(state.requests.every(request => request.pathname === base || request.pathname === base + '/options')).toBe(true);
+});
+
+it('includes only deliberately selected recorded settings with false, zero, seed zero and exact environment context SHA', async () => {
+  offerCaptured(); await frame(); const context = await addCaptured();
+  for (const name of ['Include recorded method', 'Include recorded seed', 'Include recorded environment reference']) fireEvent.click(within(context).getByRole('checkbox', { name: new RegExp('^' + name) }));
+  for (const key of ['include-empty', 'min-cells', 'mode']) fireEvent.click(within(context).getByRole('checkbox', { name: `Include ${key} for linked finding 1` }));
+  const selection = workflowSelection({ method: true, parameterKeys: ['include-empty', 'min-cells', 'mode'], seed: true, environment: true });
+  const submitted = await submit(); await screen.findByTestId('prepared-result');
+  expect(submitted.results[0].contextSelection).toEqual(selection);
+  expect(submitted.results[0].contextSha256).toBe(workflowRecipe({ selection }).results[0].contextSha256);
+  const captured = state.records.get(submitted.requestId).package.results[0].origin.context;
+  expect(captured.parameters.map(item => item.value)).toEqual([false, 0, 'paired']); expect(captured.seed).toBe(0);
+  expect(captured.environment).toEqual(workflowOffer().environment); expect(captured.method.name).toBe('Condition counts');
+  expect(writes()).toHaveLength(1);
+});
+
+it('keeps captured context choices separate per saved version and retains the reviewed offer through later metadata refresh', async () => {
+  offerCaptured(); await frame(); const context = await addCaptured();
+  fireEvent.click(within(context).getByRole('checkbox', { name: 'Include min-cells for linked finding 1' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Caption for linked finding 1' }), { target: { value: 'Interpretation of the old capture' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ }));
+  expect(screen.queryByRole('textbox', { name: 'Caption for linked finding 1' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 2/ }));
+  expect(screen.getByRole('textbox', { name: 'Caption for linked finding 1' })).toHaveValue('Interpretation of the old capture');
+  expect(screen.getByRole('checkbox', { name: 'Include min-cells for linked finding 1' })).toBeChecked();
+  state.onCapturedOptions = request => workflowOptions({ analysisVersion: Number(request.query.get('analysisVersion')),
+    offer: workflowOffer({ parameters: [{ key: 'min-cells', type: 'integer', label: 'Later offered count', value: 99 }] }) });
+  await inspectCaptured(); fireEvent.click(screen.getByRole('button', { name: 'Refresh captured outputs' }));
+  await waitFor(() => expect(state.requests.filter(request => request.query.get('kind') === 'captured-workflow-outputs')).toHaveLength(2));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh captured outputs' })).toBeEnabled());
+  const selectedContext = screen.getByRole('group', { name: 'Recorded context for linked finding 1' });
+  expect(within(selectedContext).getByRole('checkbox', { name: 'Include min-cells for linked finding 1' }).closest('label')).toHaveTextContent('Minimum cells');
+  expect(selectedContext).not.toHaveTextContent('Later offered count');
+  const submitted = await submit(); await screen.findByTestId('prepared-result');
+  expect(submitted.results[0].contextSha256).toBe(workflowRecipe({ selection: workflowSelection({ parameterKeys: ['min-cells'] }) }).results[0].contextSha256);
+  expect(submitted.analysisVersion).toBe(2);
+});
+
+it('keeps captured reference-only outputs from counting as findings or disclosing recorded settings', async () => {
+  offerCaptured({ reason: 'restricted-or-unavailable' }); await frame(); const list = await inspectCaptured();
+  fireEvent.click(await within(list).findByRole('button', { name: 'Include captured reference only' }));
+  expect(screen.getByRole('button', { name: 'Prepare private preview' })).toBeDisabled();
+  expect(screen.queryByRole('group', { name: /Recorded context for/ })).not.toBeInTheDocument();
+  expect(within(list).queryByRole('button', { name: /Add captured/ })).not.toBeInTheDocument(); await choose();
+  const submitted = await submit(); await screen.findByTestId('prepared-result');
+  expect(submitted.results[0].kind).toBe('attachment-revision'); expect(submitted.prerequisites[0]).toMatchObject({ kind: 'captured-workflow-reference',
+    snapshotReference: workflowSnapshotReference(), stepId: 'counts', port: 'values' });
+  expect(submitted.prerequisites[0]).not.toHaveProperty('context'); expect(writes()).toHaveLength(1);
+});
+
+it('keeps each captured excerpt bound to its own reviewed offer when another excerpt is added after refreshed context', async () => {
+  offerCaptured(); await frame(); const first = await addCaptured();
+  fireEvent.click(within(first).getByRole('checkbox', { name: 'Include min-cells for linked finding 1' }));
+  const laterOffer = workflowOffer({ parameters: [{ key: 'min-cells', type: 'integer', label: 'Later reviewed count', value: 99 }] });
+  state.onCapturedOptions = () => workflowOptions({ offer: laterOffer });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh captured outputs' }));
+  await waitFor(() => expect(state.requests.filter(request => request.query.get('kind') === 'captured-workflow-outputs')).toHaveLength(2));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh captured outputs' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Add captured table excerpt' }));
+  const second = screen.getByRole('group', { name: 'Recorded context for linked finding 2' });
+  fireEvent.click(within(second).getByRole('checkbox', { name: 'Include min-cells for linked finding 2' }));
+  expect(first).toHaveTextContent('Minimum cells'); expect(first).not.toHaveTextContent('Later reviewed count'); expect(second).toHaveTextContent('Later reviewed count');
+  state.onPrepare = () => failure(409, 'ANALYSIS_SNAPSHOT_SOURCE_CONTEXT_CHANGED');
+  const submitted = await submit(); await screen.findByRole('alert');
+  const selection = workflowSelection({ parameterKeys: ['min-cells'] });
+  expect(submitted.results[0].contextSha256).toBe(workflowRecipe({ selection }).results[0].contextSha256);
+  expect(submitted.results[1].contextSha256).toBe(workflowRecipe({ selection, offer: laterOffer }).results[0].contextSha256);
+  expect(submitted.results[0].contextSha256).not.toBe(submitted.results[1].contextSha256);
+  for (const result of submitted.results) {
+    expect(Object.keys(result).sort()).toEqual(['kind', 'snapshotReference', 'stepId', 'port', 'reference', 'descriptorSha256', 'caption', 'view', 'contextSelection', 'contextSha256'].sort());
+    expect(result).not.toHaveProperty('offerId'); expect(result).not.toHaveProperty('contextOffer');
+  }
+});
+
+it('keeps existing attached, direct flat and typed branches literal when mixed with an explicitly selected captured output', async () => {
+  offerCaptured(); const capturedLinked = state.onLinkedOptions;
+  state.onLinkedOptions = request => { const options = capturedLinked(request); options.items.push(linkedOption(2)); return options; };
+  state.onTypedOptions = () => typedOptions({ descriptor: typedDescriptor({ id: 'eri_' + 'a'.repeat(24) }) }); await frame(); await choose();
+  const linked = screen.getByRole('list', { name: 'Linked saved references' });
+  fireEvent.click(await within(within(linked).getByText('Linked measured result for version 2').closest('li')).findByRole('button', { name: 'Add linked table excerpt' }));
+  fireEvent.click(await within(within(linked).getByText('Recorded typed measured result').closest('li')).findByRole('button', { name: 'Add linked table excerpt' }));
+  const outputs = await inspectCaptured(); fireEvent.click(await within(outputs).findByRole('button', { name: 'Add captured table excerpt' }));
+  const submitted = await submit(); await screen.findAllByTestId('prepared-result');
+  expect(submitted.results.map(item => item.kind)).toEqual(['attachment-revision', 'analysis-reference', 'typed-analysis-reference', 'captured-workflow-output']);
+  expect(submitted.results[1]).not.toHaveProperty('descriptorSha256'); expect(submitted.results[2]).not.toHaveProperty('contextSelection');
+  expect(submitted.results[3].contextSelection).toEqual(workflowSelection()); expect(submitted.results[3].contextSha256).toBe(workflowRecipe().results[0].contextSha256);
+});
+
+it('keeps a missing captured source local to its chooser without revoking unrelated selected analysis findings', async () => {
+  offerCaptured(); await frame(); await choose(); state.onCapturedOptions = () => failure(404, 'ANALYSIS_SNAPSHOT_SOURCE_CAPTURE_UNAVAILABLE');
+  await inspectCaptured(); await screen.findByRole('alert');
+  expect(screen.getByRole('form', { name: 'Prepare private snapshot' })).toBeVisible(); expect(screen.getByRole('list', { name: 'Selected snapshot findings' })).toHaveTextContent('measured.csv');
+  expect(screen.getByRole('button', { name: 'Prepare private preview' })).toBeEnabled(); expect(screen.getByRole('button', { name: 'Refresh captured outputs' })).toBeEnabled();
+  expect(screen.queryByText('Access to this private preparation is unavailable. Reconnect to the same workspace and refresh.')).not.toBeInTheDocument(); expect(writes()).toHaveLength(0);
+});
+
+it('ignores an old capture reply after switching the chosen saved analysis version', async () => {
+  offerCaptured(); const held = deferred(); state.onCapturedOptions = () => held.promise;
+  await frame(); await inspectCaptured(); await waitFor(() => expect(state.requests.some(request => request.query.get('kind') === 'captured-workflow-outputs')).toBe(true));
+  const request = state.requests.find(value => value.query.get('kind') === 'captured-workflow-outputs');
+  fireEvent.click(screen.getByRole('radio', { name: /Saved version 1/ })); expect(request.signal.aborted).toBe(true);
+  await act(async () => held.resolve(workflowOptions()));
+  expect(screen.queryByRole('button', { name: 'Add captured table excerpt' })).not.toBeInTheDocument(); expect(writes()).toHaveLength(0);
+});
+
+function holdFirstCapturedContextHash() {
+  const held = deferred(), actual = webcrypto.subtle.digest.bind(webcrypto.subtle); let pending;
+  vi.stubGlobal('crypto', { randomUUID: webcrypto.randomUUID.bind(webcrypto), subtle: { digest: (algorithm, bytes) => {
+    if (!pending && new TextDecoder().decode(bytes).includes('traceomics.captured-workflow-context-binding.v1')) {
+      pending = { algorithm, bytes: new Uint8Array(bytes) }; return held.promise;
+    }
+    return actual(algorithm, bytes);
+  } } });
+  return { wait: async () => waitFor(() => expect(pending).toBeTruthy()), release: async () => held.resolve(await actual(pending.algorithm, pending.bytes)) };
+}
+
+it.each(['navigation', 'read-only'])('does not submit after %s changes while the selected captured context SHA is being computed', async change => {
+  offerCaptured(); await frame(); await addCaptured(); const hold = holdFirstCapturedContextHash();
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare private preview' })); await hold.wait();
+  if (change === 'navigation') fireEvent.click(screen.getByRole('button', { name: 'Saved preparations' }));
+  else { state.allowed = false; fireEvent.click(screen.getByRole('button', { name: 'Refresh access and saved preparations' })); await screen.findByText(/New previews require write access/); }
+  await act(async () => hold.release()); expect(writes()).toHaveLength(0);
+  if (change === 'navigation') expect(screen.getByRole('region', { name: 'Your private preparations' })).toBeVisible();
+  else expect(screen.getByRole('button', { name: 'Prepare private preview' })).toBeDisabled();
+});
+
+it('recovers an accepted captured preparation after a lost reply without computing new context or issuing a second prepare', async () => {
+  offerCaptured(); state.onPrepare = request => { const value = workflowRecord(request.body); state.records.set(value.requestId, value); throw new Error('Accepted reply lost.'); };
+  await frame(); await addCaptured(); const original = await submit(); await screen.findByRole('alert');
+  fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' })); await screen.findByTestId('prepared-result');
+  expect(writes()).toHaveLength(1); expect(state.records.get(original.requestId).recipe.results[0].contextSha256).toBe(original.results[0].contextSha256);
+  expect(screen.queryByRole('button', { name: 'Retry original preparation' })).not.toBeInTheDocument();
+});
+
+it('retries a genuinely missing captured preparation only with its original UUID and context-bound body', async () => {
+  offerCaptured(); state.onPrepare = request => { if (writes().length === 1) throw new Error('The request never arrived.'); const value = workflowRecord(request.body); state.records.set(value.requestId, value); return value; };
+  await frame(); await addCaptured(); const original = await submit(); await screen.findByRole('alert');
+  fireEvent.click(screen.getByRole('button', { name: 'Check original preparation' })); await screen.findByRole('button', { name: 'Retry original preparation' });
+  fireEvent.click(screen.getByRole('button', { name: 'Retry original preparation' })); await screen.findByTestId('prepared-result');
+  expect(writes()).toHaveLength(2); expect(writes()[1].body).toEqual(original);
+});
 
 it.each(['table', 'metrics', 'image'])('merges duplicate linked metadata into one typed %s choice and submits its exact descriptor intent only on request', async family => {
   const options = typedOptions({ family }), option = options.items[0];

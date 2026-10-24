@@ -7,6 +7,7 @@ const config = require('./config');
 const { getServiceExecutionIdentity } = require('./executionTargets');
 const { createArtifactVersionService } = require('./artifactVersions');
 const { createLinkedSnapshotSources, isLinkedRecipe, safeSource: linkedSource } = require('./analysisSnapshotLinkedSources');
+const { createCapturedSnapshotSources, isTypedResult } = require('./analysisSnapshotCapturedSources');
 const contract = import('../shared/analysisSnapshotPreparationDispatch.mjs');
 const documents = import('../shared/notebookDocument.mjs');
 const READ = ['owner', 'admin', 'analyst', 'viewer'], WRITE = ['owner', 'admin', 'analyst'];
@@ -24,7 +25,8 @@ const budget = (value, maximum, message) => { if (value > maximum) throw error('
 
 function createAnalysisSnapshotPreparationService(database = db, provider = storage.createLocalStorageProvider()) {
   const artifacts = createArtifactVersionService(database, provider);
-  const linked = createLinkedSnapshotSources(artifacts, legacySources);
+  const captures = createCapturedSnapshotSources(database, artifacts, provider);
+  const linked = createLinkedSnapshotSources(artifacts, legacySources, captures);
   async function transaction(userId, projectId, analysisId, action) {
     if (!/^proj_[a-f0-9]{16,40}$/.test(projectId || '') || !/^ra_[a-f0-9]{24}$/.test(analysisId || '')) scopeMissing();
     const client = await (await database.connect()).connect(); let committing = false, destroy = false;
@@ -176,17 +178,18 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
   async function compile(userId, projectId, analysisId, value) {
     const schema = await contract, recipe = value.recipe_json;
     const captured = await transaction(userId, projectId, analysisId, async (client, context) => { assertWritable(context); return sources(client, userId, projectId, analysisId, recipe); });
+    await captures.verifyEnvironments(userId, projectId, captured.results);
     const resultItems = [], documentItems = [], blobs = [], cached = new Map();
-    for (const sourceId of new Set(recipe.results.filter(selected => selected.kind !== 'typed-analysis-reference' && selected.view.family === 'table').map(selected => selected.reference.versionId))) {
-      const selections = recipe.results.filter(selected => selected.kind !== 'typed-analysis-reference' && selected.reference.versionId === sourceId && selected.view.family === 'table');
+    for (const sourceId of new Set(recipe.results.filter(selected => !isTypedResult(selected) && selected.view.family === 'table').map(selected => selected.reference.versionId))) {
+      const selections = recipe.results.filter(selected => !isTypedResult(selected) && selected.reference.versionId === sourceId && selected.view.family === 'table');
       const previews = await artifacts.prepareFixedTableViews(userId, projectId, sourceId, selections.map(selected => ({ offset: selected.view.offset, limit: selected.view.limit })));
       for (let index = 0; index < selections.length; index++) {
         const spec = { offset: selections[index].view.offset, limit: selections[index].view.limit };
         cached.set(`${sourceId}:${JSON.stringify(spec)}`, { bytes: Buffer.from(schema.canonicalSnapshotJson(previews[index], schema.ANALYSIS_SNAPSHOT_PREPARATION_LIMITS.tableBytes)), width: null, height: null });
       }
     }
-    for (const sourceId of new Set(recipe.results.filter(selected => selected.kind === 'typed-analysis-reference').map(selected => selected.reference.versionId))) {
-      const selections = recipe.results.filter(selected => selected.kind === 'typed-analysis-reference' && selected.reference.versionId === sourceId);
+    for (const sourceId of new Set(recipe.results.filter(isTypedResult).map(selected => selected.reference.versionId))) {
+      const selections = recipe.results.filter(selected => isTypedResult(selected) && selected.reference.versionId === sourceId);
       const rendered = await artifacts.prepareFixedTypedViews(userId, projectId, sourceId, selections[0].descriptorSha256, selections.map(selected => selected.view));
       for (let index = 0; index < selections.length; index++) cached.set(`${sourceId}:typed:${selections[index].descriptorSha256}:${JSON.stringify(selections[index].view)}`, rendered[index]);
     }
@@ -195,7 +198,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
         const selected = recipe.results[planned.index], source = captured.results[planned.index], safeSource = isLinkedRecipe(recipe) ? linkedSource(source.original) : fields(source.original);
         const fullReference = { artifactId: safeSource.artifactId, versionId: safeSource.versionId, projectId, sha256: safeSource.sha256 };
         const family = selected.view.family, spec = family === 'table' ? { offset: selected.view.offset, limit: selected.view.limit } : null;
-        const typed = selected.kind === 'typed-analysis-reference';
+        const typed = isTypedResult(selected);
         const cacheKey = typed ? `${safeSource.versionId}:typed:${selected.descriptorSha256}:${JSON.stringify(selected.view)}` : `${safeSource.versionId}:${JSON.stringify(spec)}`;
         let rendered = cached.get(cacheKey);
         if (typed && !rendered) throw error('VIEW_UNSUPPORTED', 'The exact typed source did not supply the selected fixed view.');
@@ -235,7 +238,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
       reproduction: { status: 'not-checked', producingSource: 'not-established', runtime: 'not-included', dataAccess: 'not-granted' } };
     const canonical = schema.canonicalAnalysisSnapshotPackage(snapshot), bytes = blobs.reduce((sum, blob) => sum + blob.bytes.length, 0) + Buffer.byteLength(canonical) + Buffer.byteLength(schema.canonicalAnalysisSnapshotPreparation(recipe));
     budget(bytes, schema.ANALYSIS_SNAPSHOT_PREPARATION_LIMITS.retainedBytes, 'The selected retained views and metadata exceed the preparation byte limit.');
-    return { snapshot, snapshotSha256: hash(canonical), bytes, blobs, originalKeys: captured.results.map(item => item.original.storage_key) };
+    return { snapshot, snapshotSha256: hash(canonical), bytes, blobs, originalKeys: captured.results.map(item => item.original.storage_key), environments: captured.results.map(item => item.environment || null) };
   }
   async function build(userId, projectId, analysisId, preparationId) {
     if (active.size >= 2 || active.has(preparationId)) return;
@@ -261,6 +264,8 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
           const finalSources = await sources(client, userId, projectId, analysisId, current.recipe_json), schema = await contract;
           for (let index = 0; index < finalSources.results.length; index++) {
             if (finalSources.results[index].original.storage_key !== compiled.originalKeys[index]
+                || schema.canonicalSnapshotJson(finalSources.results[index].environment || null) !== schema.canonicalSnapshotJson(compiled.environments[index])
+                || finalSources.results[index].origin?.context && schema.canonicalSnapshotJson(finalSources.results[index].origin) !== schema.canonicalSnapshotJson(compiled.snapshot.results[index].origin)
                 || schema.canonicalSnapshotJson(isLinkedRecipe(current.recipe_json) ? linkedSource(finalSources.results[index].original) : fields(finalSources.results[index].original)) !== schema.canonicalSnapshotJson(compiled.snapshot.results[index].source)) throw error('SOURCE_CHANGED', 'A selected exact source changed while its fixed view was being prepared.');
           }
           for (const blob of compiled.blobs) await client.query('INSERT INTO research_analysis_snapshot_blobs(preparation_id,id,kind,sha256,size_bytes,content) VALUES($1,$2,$3,$4,$5,$6)',
@@ -350,7 +355,7 @@ function createAnalysisSnapshotPreparationService(database = db, provider = stor
     });
   }
   async function options(userId, projectId, analysisId, input = {}) {
-    if (['analysis-references', 'analysis-typed-references'].includes(input.kind)) return transaction(userId, projectId, analysisId, (client, context) => linked.options(client, context, userId, projectId, analysisId, input, writable(context)));
+    if (['analysis-references', 'analysis-typed-references', 'captured-workflow-outputs'].includes(input.kind)) return transaction(userId, projectId, analysisId, (client, context) => linked.options(client, context, userId, projectId, analysisId, input, writable(context)));
     const kind = input.kind, scope = cursorScope(userId, projectId, analysisId), page = paging(input, kind, scope);
     if (!['analysis-versions', 'results', 'documents'].includes(kind)) throw error('INVALID_PAGE', 'Choose saved analysis versions, result revisions or supporting source.', 400);
     return transaction(userId, projectId, analysisId, async (client, context) => {

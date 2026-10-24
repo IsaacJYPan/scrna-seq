@@ -10,6 +10,8 @@ import { canonicalNotebookContent } from '../../shared/notebookDocument.mjs';
 import { savedSnapshotContent, snapshotScope, snapshotRecipe, snapshotRecord } from './snapshotPreparationTestFixtures';
 import { linkedRecipe, linkedRecord, linkedReference, linkedTableBytes } from './snapshotLinkedTestFixtures';
 import { typedDescriptor, typedRecipe, typedRecord, typedTableBytes, typedMetricsBytes, typedImageBytes } from './snapshotTypedTestFixtures';
+import { workflowOffer, workflowSelection, workflowRecipe, workflowRecord, workflowReferencePrerequisite } from './snapshotWorkflowTestFixtures';
+import { validateSnapshotPreparation } from './snapshotPreparationValidation';
 
 vi.mock('./snapshotPreparationApi', () => ({ readSnapshotPreparationView: vi.fn(), readSnapshotPreparationDocument: vi.fn() }));
 vi.mock('../runtime/useExecutionTarget', () => ({ default: vi.fn() }));
@@ -309,4 +311,106 @@ it('keeps unavailable typed findings distinct from ordinary reference-only prere
   expect(readView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
   view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
   expect(screen.queryByLabelText('Retained finding selection')).not.toBeInTheDocument(); expect(screen.queryByText('Declared reference only')).not.toBeInTheDocument();
+});
+
+async function capturedFindingFixture({ selection = workflowSelection({ method: true, parameterKeys: ['include-empty', 'min-cells'], seed: true, environment: true }),
+  options = {}, ...changes } = {}) {
+  const recipe = workflowRecipe({ selection, ...changes });
+  const record = await validateSnapshotPreparation(workflowRecord(recipe, options), snapshotScope, recipe);
+  readSnapshotPreparationView.mockImplementation((_p, _a, _id, result) => Promise.resolve({
+    bytes: result.view.family === 'image' ? typedImageBytes() : result.view.family === 'metrics' ? typedMetricsBytes(result) : typedTableBytes(result),
+    type: result.view.family === 'image' ? 'image/png' : 'application/json',
+  }));
+  return { record, props: { ...snapshotScope, resourceId: record.preparationId, audience: 'private-preparation', snapshotSha256: record.snapshotSha256,
+    snapshot: record.package, availability: record.availability, available: true, isActive: true, onDenied: vi.fn(), onUnavailable: vi.fn() } };
+}
+function openRecordedContext() {
+  const node = screen.getByLabelText('Recorded workflow context'); fireEvent.click(within(node).getByText('Recorded in this workflow capture')); node.open = true; return within(node);
+}
+
+it('renders selected captured settings beside a supplied caption without inventing producing code, source access or another result read', async () => {
+  const network = vi.spyOn(globalThis, 'fetch'), storage = vi.spyOn(Storage.prototype, 'setItem');
+  const value = await capturedFindingFixture({ notes: { summary: 'A supplied rationale, separate from recorded settings.', decisions: null, limitations: null } });
+  render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  const finding = within(screen.getByLabelText('Retained prepared finding'));
+  expect(finding.getByText('recorded.json · Recorded in workflow capture · Saved analysis 2')).toBeVisible();
+  expect(finding.getByText('Caption supplied for this snapshot.')).toBeVisible(); expect(screen.getByText('A supplied rationale, separate from recorded settings.')).toBeVisible();
+  expect(finding.queryByText(/Saved attachment revision|Linked in saved analysis/)).not.toBeInTheDocument();
+  const context = openRecordedContext(), settings = within(context.getByRole('region', { name: 'Recorded settings' }));
+  expect(settings.getAllByRole('term').map(node => node.textContent)).toEqual(['Include empty conditions', 'Minimum cells']);
+  expect(settings.getAllByRole('definition').map(node => node.textContent)).toEqual(['false', '0']);
+  expect(context.getByText('Recorded random seed:')).toHaveTextContent('Recorded random seed: 0');
+  expect(context.getByText('Recorded environment reference checked when prepared; current runtime availability not checked.')).toBeVisible();
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled(); expect(storage).not.toHaveBeenCalled();
+});
+
+it('shows exact capture, selected context and output descriptor identities as separate secondary evidence', async () => {
+  const value = await capturedFindingFixture(); render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  const context = openRecordedContext(), origin = value.record.package.results[0].origin;
+  const exact = context.getByText('Exact capture identities').closest('details'); expect(exact).not.toHaveAttribute('open'); exact.open = true;
+  expect(within(exact).getByText(origin.snapshotReference.snapshotId)).toBeVisible(); expect(within(exact).getByText(origin.snapshotReference.sha256)).toBeVisible();
+  expect(within(exact).getByText(origin.contextSha256)).toBeVisible(); expect(within(exact).getByText(origin.context.method.digest)).toBeVisible();
+  const finding = within(screen.getByLabelText('Retained prepared finding')), supplied = finding.getByText('Supplied context and exact view').closest('details'); supplied.open = true;
+  expect(within(supplied).getByText('Recorded output descriptor SHA-256')).toBeVisible();
+  expect(within(supplied).getByText(value.record.package.results[0].view.descriptorSha256)).toBeVisible();
+  expect(finding.queryByRole('button', { name: /Run|Restore|Open workflow|Download environment/ })).not.toBeInTheDocument();
+});
+
+it.each(['metrics', 'image'])('pairs recorded capture context with the existing fixed %s renderer without claiming producing provenance', async family => {
+  const value = await capturedFindingFixture({ family }); render(<RetainedSnapshotFindings {...value.props} />);
+  if (family === 'metrics') expect(await screen.findByLabelText('Saved scalar metrics')).toBeVisible();
+  else expect(await screen.findByRole('img')).toBeVisible();
+  const context = openRecordedContext(); expect(context.getByText('Condition counts · 1.0.0')).toBeVisible();
+  expect(context.getByText('This selected context is separate from the supplied caption. It does not establish the code or runtime that originally produced the result.')).toBeVisible();
+  expect(readSnapshotPreparationView).toHaveBeenCalledOnce(); expect(readSnapshotPreparationDocument).not.toHaveBeenCalled();
+});
+
+it('keeps omitted captured categories absent and does not fill method defaults or runtime context while inspecting intact fixed bytes', async () => {
+  const value = await capturedFindingFixture({ selection: workflowSelection() }); render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  const context = openRecordedContext(); expect(context.getByText('No method, settings, seed or environment reference was included.')).toBeVisible();
+  expect(context.queryByText(workflowOffer().method.name)).not.toBeInTheDocument(); expect(context.queryByText(workflowOffer().environment.profileId)).not.toBeInTheDocument();
+  expect(context.queryByText(/Recorded random seed/)).not.toBeInTheDocument(); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+});
+
+it('keeps opened recorded context on an equal immutable refresh without re-reading the result or original capture', async () => {
+  const value = await capturedFindingFixture(), view = render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  openRecordedContext(); view.rerender(<RetainedSnapshotFindings {...value.props} snapshot={structuredClone(value.props.snapshot)}
+    availability={structuredClone(value.props.availability)} onUnavailable={vi.fn()} />);
+  await act(async () => {}); expect(screen.getByLabelText('Recorded workflow context')).toHaveAttribute('open');
+  expect(screen.getByRole('region', { name: 'Recorded settings' })).toBeVisible(); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+});
+
+it('preserves immutable checked recorded context when its fixed bytes are unavailable without reconstructing a workflow', async () => {
+  const value = await capturedFindingFixture(); value.props.availability.views[0].status = 'unavailable';
+  render(<RetainedSnapshotFindings {...value.props} />); const context = openRecordedContext();
+  expect(context.getByText('Condition counts · 1.0.0')).toBeVisible();
+  expect(screen.getByText('This retained view is unavailable. Its exact saved identity is kept and has not been regenerated.')).toBeVisible();
+  expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['opaque', 'Object contents are not included.'], ['unsupported-view', 'This format is not included as a fixed finding.'],
+  ['restricted-or-unavailable', 'Source access or availability has not been established.'], ['not-included', 'Only this saved reference was selected.'],
+])('exposes %s captured output prerequisites only as inert capture/step/port/output identities', async (reason, message) => {
+  const prerequisite = workflowReferencePrerequisite({ label: 'An opaque saved output', port: 'object' });
+  const value = await capturedFindingFixture({ prerequisites: [prerequisite], options: { referenceReasons: [reason] } });
+  render(<RetainedSnapshotFindings {...value.props} />); await screen.findByRole('table');
+  const references = within(screen.getByLabelText('Reference-only prerequisites'));
+  expect(references.getByText('An opaque saved output')).toBeVisible(); expect(references.getByText(message)).toBeVisible();
+  expect(references.getByText('Contents not included. Integrity not checked. Data access not granted.')).toBeVisible();
+  expect(references.queryByText('Supplied reproduction prerequisites')).not.toBeInTheDocument(); expect(references.queryByLabelText('Recorded workflow context')).not.toBeInTheDocument();
+  const exact = references.getByText('Exact saved reference').closest('details'); exact.open = true;
+  expect(within(exact).getByText(prerequisite.snapshotReference.snapshotId)).toBeVisible(); expect(within(exact).getByText(prerequisite.snapshotReference.sha256)).toBeVisible();
+  expect(within(exact).getByText(prerequisite.reference.versionId)).toBeVisible(); expect(within(exact).getByText(prerequisite.stepId)).toBeVisible(); expect(within(exact).getByText('object')).toBeVisible();
+  expect(references.queryByRole('button', { name: /Preview|Inspect|Restore|Run|Download/ })).not.toBeInTheDocument(); expect(readSnapshotPreparationView).toHaveBeenCalledOnce();
+});
+
+it('clears recorded method/settings/environment evidence with the published package when access is withdrawn', async () => {
+  const value = await capturedFindingFixture(), readView = vi.fn().mockImplementation((_p, _a, _id, result) => Promise.resolve({ bytes: typedTableBytes(result), type: 'application/json' }));
+  const props = { ...value.props, userId: 17, audience: 'project-publication', resourceId: publicId, readView };
+  const view = render(<RetainedSnapshotFindings {...props} />); await screen.findByRole('table'); openRecordedContext();
+  expect(screen.getByRole('region', { name: 'Recorded settings' })).toBeVisible(); expect(readSnapshotPreparationView).not.toHaveBeenCalled();
+  view.rerender(<RetainedSnapshotFindings {...props} snapshot={null} availability={null} />);
+  expect(screen.queryByRole('table')).not.toBeInTheDocument(); expect(screen.queryByLabelText('Recorded workflow context')).not.toBeInTheDocument();
+  expect(screen.queryByText('Recorded random seed:')).not.toBeInTheDocument(); expect(screen.queryByText(workflowOffer().environment.profileId)).not.toBeInTheDocument(); expect(readView).toHaveBeenCalledOnce();
 });

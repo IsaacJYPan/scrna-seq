@@ -40,12 +40,12 @@ async function metadata(artifacts, client, userId, projectId, reference) {
     return { source: null, family: null, reason: 'restricted-or-unavailable', label: 'Saved reference' };
   }
 }
-function createLinkedSnapshotSources(artifacts, legacySources) {
+function createLinkedSnapshotSources(artifacts, legacySources, captures) {
   async function sources(client, userId, projectId, analysisId, recipe) {
     const schema = await snapshots, saved = await references(client, projectId, analysisId, recipe.analysisVersion);
     const keys = new Set(saved.map(item => schema.canonicalSnapshotJson(item))), legacySelections = recipe.results.filter(item => item.kind === 'attachment-revision');
     const legacy = await legacySources(client, userId, projectId, analysisId, { ...recipe, schema: undefined, results: legacySelections.map(({ kind: _kind, ...item }) => item) });
-    const results = []; let attachmentIndex = 0;
+    const results = [], captureMemo = new Map(); let attachmentIndex = 0;
     for (const selected of recipe.results) {
       if (selected.kind === 'attachment-revision') {
         const captured = legacy.results[attachmentIndex++];
@@ -54,6 +54,9 @@ function createLinkedSnapshotSources(artifacts, legacySources) {
         // historical attachment caption/origin remain entirely unchanged.
         const owned = await artifacts.snapshotSourceMetadata(client, userId, projectId, selected.reference); captured.original.name = owned.name;
         results.push(captured); continue;
+      }
+      if (selected.kind === 'captured-workflow-output') {
+        results.push(await captures.selected(client, userId, projectId, recipe, selected, keys, captureMemo)); continue;
       }
       if (!keys.has(schema.canonicalSnapshotJson(selected.reference))) throw failure('SOURCE_UNAVAILABLE', 'The selected result is not linked in this exact saved analysis version.');
       if (selected.kind === 'typed-analysis-reference') {
@@ -70,16 +73,22 @@ function createLinkedSnapshotSources(artifacts, legacySources) {
     }
     const prerequisites = [];
     for (const item of recipe.prerequisites) {
+      if (item.kind === 'captured-workflow-reference') {
+        prerequisites.push(await captures.selected(client, userId, projectId, recipe, item, keys, captureMemo, true)); continue;
+      }
       if (item.kind !== 'analysis-reference') { prerequisites.push(item); continue; }
       if (!keys.has(schema.canonicalSnapshotJson(item.reference))) throw failure('SOURCE_UNAVAILABLE', 'This prerequisite is not recorded in the selected exact saved analysis version.');
       const source = await metadata(artifacts, client, userId, projectId, item.reference);
       prerequisites.push({ ...item, role: 'reference-only', reason: source.reason || 'not-included', integrity: 'not-checked', dataAccess: 'not-granted' });
     }
     const distinct = new Map(results.map(item => [item.original.id, Number(item.original.size_bytes)]));
+    for (const item of results) if (item.environment) distinct.set(item.environment.id, item.environment.sizeBytes);
     if ([...distinct.values()].reduce((a, b) => a + b, 0) > 200 * 1024 * 1024) throw failure('CAPACITY', 'The distinct selected original sources exceed the 200 MiB preparation limit.');
+    if (results.reduce((sum, item) => sum + (item.origin?.context ? Buffer.byteLength(schema.canonicalSnapshotJson(item.origin.context)) : 0), 0) > 32 * 1024) throw failure('CAPACITY', 'The selected captured context exceeds its 32 KiB aggregate limit.');
     return { results, documents: legacy.documents, prerequisites };
   }
   async function options(client, context, userId, projectId, analysisId, input, canPrepare) {
+    if (input.kind === 'captured-workflow-outputs') return captures.options(client, context, userId, projectId, analysisId, input, canPrepare, version => references(client, projectId, analysisId, version));
     const kind = input.kind, typedOnly = kind === 'analysis-typed-references';
     const version = Number(input.analysisVersion), limit = input.limit === undefined ? 30 : Number(input.limit);
     if (Object.keys(input).some(key => !['kind', 'analysisVersion', 'limit', 'cursor'].includes(key))

@@ -4,6 +4,9 @@ import { ANALYSIS_SNAPSHOT_PREPARATION_LIMITS as L, ANALYSIS_SNAPSHOT_PREPARATIO
 import { normalizeAnalysisAttachmentCreate } from './analysisAttachment.mjs';
 import { validateResearchAnalysisReference } from './researchAnalysis.mjs';
 import { FIXED_RESULT_VIEW_SCHEMA_V3, canonicalAnalysisSnapshotResultViewV3 } from './analysisSnapshotTypedResult.mjs';
+import { ANALYSIS_SNAPSHOT_WORKFLOW_LIMITS, normalizeAnalysisSnapshotWorkflowOutputReference,
+  normalizeAnalysisSnapshotWorkflowContextSelection, normalizeAnalysisSnapshotWorkflowContext,
+  normalizeAnalysisSnapshotWorkflowContextEvidence, canonicalAnalysisSnapshotWorkflowContextBinding, assertAnalysisSnapshotWorkflowContextPayload } from './analysisSnapshotWorkflowContext.mjs';
 
 export const ANALYSIS_SNAPSHOT_PREPARATION_SCHEMA_V2 = 'traceomics.analysis-snapshot-preparation.v2';
 export const ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2 = 'traceomics.analysis-snapshot-package.v2';
@@ -59,6 +62,13 @@ function selectedResult(value) {
     return { kind: value.kind, attachmentId: pattern(value.attachmentId, ATTACHMENT), revisionId: pattern(value.revisionId, REVISION),
       reference: reference(value.reference, true, true), view: selectedView(value.view) };
   }
+  if (value?.kind === 'captured-workflow-output') {
+    fields(value, ['kind', 'snapshotReference', 'stepId', 'port', 'reference', 'descriptorSha256', 'caption', 'view', 'contextSelection', 'contextSha256']);
+    const origin = normalizeAnalysisSnapshotWorkflowOutputReference({ snapshotReference: value.snapshotReference, stepId: value.stepId, port: value.port, reference: value.reference });
+    let view; if (value.view?.family === 'metrics') { fields(value.view, ['family']); view = { family: 'metrics' }; } else view = selectedView(value.view);
+    return { kind: value.kind, ...origin, descriptorSha256: pattern(value.descriptorSha256, SHA), caption: text(value.caption, B.caption), view,
+      contextSelection: normalizeAnalysisSnapshotWorkflowContextSelection(value.contextSelection), contextSha256: pattern(value.contextSha256, SHA) };
+  }
   if (value?.kind === 'typed-analysis-reference') {
     fields(value, ['kind', 'reference', 'descriptorSha256', 'caption', 'view']);
     let view;
@@ -70,6 +80,8 @@ function selectedResult(value) {
   return { kind: value.kind, reference: reference(value.reference, true), caption: text(value.caption, B.caption), view: selectedView(value.view) };
 }
 function selectionKey(value) {
+  if (value.kind === 'captured-workflow-output') return canonicalSnapshotJson({ kind: value.kind, snapshotReference: value.snapshotReference, stepId: value.stepId, port: value.port,
+    reference: value.reference, view: value.view, contextSelection: value.contextSelection });
   return canonicalSnapshotJson(value.kind === 'attachment-revision'
     ? { kind: value.kind, attachmentId: value.attachmentId, revisionId: value.revisionId, reference: value.reference, view: value.view }
     : { kind: value.kind, reference: value.reference, view: value.view });
@@ -80,6 +92,11 @@ function notes(value) {
   return Object.fromEntries(['summary', 'decisions', 'limitations'].map(key => [key, text(value[key], L.notes, true)]));
 }
 function prerequisite(value) {
+  if (value?.kind === 'captured-workflow-reference') {
+    fields(value, ['kind', 'snapshotReference', 'stepId', 'port', 'reference', 'label', 'detail']);
+    const origin = normalizeAnalysisSnapshotWorkflowOutputReference({ snapshotReference: value.snapshotReference, stepId: value.stepId, port: value.port, reference: value.reference });
+    return { kind: value.kind, ...origin, label: text(value.label, B.label, false, false), detail: text(value.detail, B.detail, true) };
+  }
   if (value?.kind === 'analysis-reference') {
     fields(value, ['kind', 'reference', 'label', 'detail']);
     return { kind: value.kind, reference: reference(value.reference), label: text(value.label, B.label, false, false), detail: text(value.detail, B.detail, true) };
@@ -90,7 +107,8 @@ function prerequisite(value) {
 }
 function prerequisites(value) {
   const result = array(value, L.prerequisites).map(prerequisite);
-  unique(result.filter(item => item.kind === 'analysis-reference'), item => canonicalSnapshotJson(item.reference)); return result;
+  unique(result.filter(item => item.kind === 'analysis-reference'), item => canonicalSnapshotJson(item.reference));
+  unique(result.filter(item => item.kind === 'captured-workflow-reference'), item => canonicalSnapshotJson({ snapshotReference: item.snapshotReference, stepId: item.stepId, port: item.port, reference: item.reference })); return result;
 }
 function chosenDocuments(value) {
   const result = array(value, L.documents).map(item => {
@@ -168,6 +186,15 @@ function savedOrigin(value, source, analysisVersion, owner) {
     if (copied.caption !== item.caption || canonicalSnapshotJson(copied.suppliedOrigin) !== canonicalSnapshotJson(item.suppliedOrigin)) invalid('Keep literal saved attachment context.');
     return { kind: value.kind, attachmentId: item.attachmentId, revisionId: item.revisionId, reference: copied.reference };
   }
+  if (value.kind === 'captured-workflow-output') {
+    fields(value, ['kind', 'snapshotReference', 'analysisVersion', 'stepId', 'port', 'reference', 'caption', 'captionOrigin', 'context', 'contextSha256', 'contextEvidence']);
+    const origin = normalizeAnalysisSnapshotWorkflowOutputReference({ snapshotReference: value.snapshotReference, stepId: value.stepId, port: value.port, reference: value.reference });
+    const context = normalizeAnalysisSnapshotWorkflowContext(value.context); normalizeAnalysisSnapshotWorkflowContextEvidence(value.contextEvidence, context); pattern(value.contextSha256, SHA);
+    if (value.analysisVersion !== analysisVersion || value.captionOrigin !== 'user-supplied' || text(value.caption, B.caption) !== value.caption
+        || origin.reference.versionId !== source.versionId || origin.reference.sha256 !== source.sha256
+        || canonicalSnapshotJson(context.snapshotReference) !== canonicalSnapshotJson(origin.snapshotReference) || context.stepId !== origin.stepId || context.port !== origin.port) invalid('Keep exact captured output and selected recorded context.');
+    return { kind: value.kind, ...origin, contextSelection: { method: context.method !== null, parameterKeys: context.parameters.map(item => item.key), seed: context.seed !== null, environment: context.environment !== null } };
+  }
   fields(value, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin']);
   if (!['analysis-reference', 'typed-analysis-reference'].includes(value.kind) || value.analysisVersion !== analysisVersion || value.captionOrigin !== 'user-supplied'
       || text(value.caption, B.caption) !== value.caption) invalid('Keep exact selected saved-analysis context and supplied caption.');
@@ -176,15 +203,21 @@ function savedOrigin(value, source, analysisVersion, owner) {
   return { kind: value.kind, reference: ref };
 }
 export function canonicalAnalysisSnapshotPackageV2(input) {
+  assertAnalysisSnapshotWorkflowContextPayload(input);
   const value = capture(input, L.packageBytes);
   fields(value, ['schema', 'serviceId', 'projectId', 'analysisId', 'ownerUserId', 'preparationId', 'createdAt', 'analysis', 'results', 'documents', 'notes', 'prerequisites', 'reproduction']);
   if (value.schema !== ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2) invalid('Use the linked snapshot package schema.'); identity(value);
   pattern(value.preparationId, ANALYSIS_SNAPSHOT_PREPARATION_ID); timestamp(value.createdAt); savedAnalysis(value.analysis);
-  let retained = 0, documentBytes = 0; const ids = [], selections = [], sources = new Map(), typedDescriptors = new Map();
+  let retained = 0, documentBytes = 0, contextBytes = 0; const ids = [], selections = [], sources = new Map(), typedDescriptors = new Map();
   array(value.results, L.results, 1).forEach(item => {
     fields(item, ['viewId', 'origin', 'source', 'view']); pattern(item.viewId, ANALYSIS_SNAPSHOT_VIEW_ID); ids.push(item.viewId);
-    const typed = item.origin?.kind === 'typed-analysis-reference'; savedSource(item.source, value.ownerUserId, value.projectId, typed);
+    const typed = ['typed-analysis-reference', 'captured-workflow-output'].includes(item.origin?.kind); savedSource(item.source, value.ownerUserId, value.projectId, typed);
     const origin = savedOrigin(item.origin, item.source, value.analysis.version, value.ownerUserId);
+    if (item.origin.kind === 'captured-workflow-output') {
+      canonicalAnalysisSnapshotWorkflowContextBinding({ serviceId: value.serviceId, projectId: value.projectId, analysisId: value.analysisId, ownerUserId: value.ownerUserId, analysisVersion: value.analysis.version, context: item.origin.context });
+      contextBytes += new TextEncoder().encode(canonicalSnapshotJson(item.origin.context)).byteLength;
+      if (contextBytes > ANALYSIS_SNAPSHOT_WORKFLOW_LIMITS.candidateContextBytes) invalid('Selected recorded context exceeds its candidate byte budget.', true);
+    }
     fields(item.view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height', ...(typed ? ['descriptorSha256', 'semantics'] : [])]);
     const { viewSha256, ...view } = item.view; pattern(viewSha256, SHA);
     (typed ? canonicalAnalysisSnapshotResultViewV3 : canonicalAnalysisSnapshotResultViewV2)({ ...view, source: { artifactId: item.source.artifactId, versionId: item.source.versionId, projectId: value.projectId, sha256: item.source.sha256 } });
@@ -218,17 +251,19 @@ export function canonicalAnalysisSnapshotPackageV2(input) {
   fields(value.prerequisites, ['declaration', 'items']); if (value.prerequisites.declaration !== 'selected-and-user-supplied') invalid('Reference prerequisites are selected identities, not source grants.');
   const chosen = array(value.prerequisites.items, L.prerequisites).map(item => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) invalid('Choose a supported recorded prerequisite.');
-    if (item.kind !== 'analysis-reference') return prerequisite(item);
-    fields(item, ['kind', 'reference', 'label', 'detail', 'role', 'reason', 'integrity', 'dataAccess']);
+    if (!['analysis-reference', 'captured-workflow-reference'].includes(item.kind)) return prerequisite(item);
+    fields(item, ['kind', 'reference', 'label', 'detail', 'role', 'reason', 'integrity', 'dataAccess', ...(item.kind === 'captured-workflow-reference' ? ['snapshotReference', 'stepId', 'port'] : [])]);
     if (item.role !== 'reference-only' || !['opaque', 'unsupported-view', 'restricted-or-unavailable', 'not-included'].includes(item.reason)
         || item.integrity !== 'not-checked' || item.dataAccess !== 'not-granted') invalid('A reference prerequisite grants no source, integrity or runtime capability.');
-    return prerequisite({ kind: item.kind, reference: item.reference, label: item.label, detail: item.detail });
+    return prerequisite({ kind: item.kind, reference: item.reference, label: item.label, detail: item.detail,
+      ...(item.kind === 'captured-workflow-reference' ? { snapshotReference: item.snapshotReference, stepId: item.stepId, port: item.port } : {}) });
   });
   chosen.forEach((item, index) => {
     const original = value.prerequisites.items[index];
     if (item.label !== original.label || item.detail !== original.detail || item.reference && canonicalSnapshotJson(item.reference) !== canonicalSnapshotJson(original.reference)) invalid('Keep normalized selected prerequisite context.');
   });
   unique(chosen.filter(item => item.kind === 'analysis-reference'), item => canonicalSnapshotJson(item.reference));
+  unique(chosen.filter(item => item.kind === 'captured-workflow-reference'), item => canonicalSnapshotJson({ snapshotReference: item.snapshotReference, stepId: item.stepId, port: item.port, reference: item.reference }));
   fields(value.reproduction, ['status', 'producingSource', 'runtime', 'dataAccess']);
   if (value.reproduction.status !== 'not-checked' || value.reproduction.producingSource !== 'not-established'
       || value.reproduction.runtime !== 'not-included' || value.reproduction.dataAccess !== 'not-granted') invalid('A snapshot does not establish reproduction or execution access.');

@@ -4153,7 +4153,7 @@ async function getProjectArtifactInternal(userId, projectId, artifactId, { clien
   const { rows } = await execute(
     `SELECT artifact.* FROM job_artifacts artifact
       WHERE artifact.id = $1 AND artifact.project_id = $2
-        AND ${expertRArtifactVisibilitySql('artifact', '$3')}`,
+        AND ${expertRArtifactVisibilitySql('artifact', '$3')}${client ? ' FOR SHARE OF artifact' : ''}`,
     [String(artifactId), String(projectId), Number(membership.userId)]
   );
   return rowToJobArtifact(rows[0]);

@@ -10,6 +10,8 @@ import {
   FIXED_RESULT_VIEW_SCHEMA_V3, ANALYSIS_SNAPSHOT_SCALAR_MODEL, ANALYSIS_SNAPSHOT_TYPED_LIMITS,
   normalizeAnalysisSnapshotTypedDescriptor, canonicalAnalysisSnapshotTypedDescriptor,
   canonicalAnalysisSnapshotResultViewV3, parseAnalysisSnapshotScalarJson,
+  normalizeAnalysisSnapshotWorkflowContextOffer, normalizeAnalysisSnapshotWorkflowOutputReference, normalizeAnalysisSnapshotWorkflowContext,
+  normalizeAnalysisSnapshotWorkflowContextEvidence, canonicalAnalysisSnapshotWorkflowContextBinding, assertAnalysisSnapshotWorkflowContextPayload,
 } from '../../shared/analysisSnapshotPreparationDispatch.mjs';
 import { normalizeAnalysisAttachmentCreate } from '../../shared/analysisAttachment.mjs';
 import { validateResearchAnalysisReference } from '../../shared/researchAnalysis.mjs';
@@ -51,7 +53,7 @@ function dense(value, maximum) {
   }
   return value;
 }
-const capture = (value, maximum) => JSON.parse(canonicalSnapshotJson(value, maximum));
+const capture = (value, maximum) => { assertAnalysisSnapshotWorkflowContextPayload(value); return JSON.parse(canonicalSnapshotJson(value, maximum)); };
 function pattern(value, expression) { if (typeof value !== 'string' || !expression.test(value)) fail(); return value; }
 function integer(value, min, max) { if (!Number.isSafeInteger(value) || value < min || value > max) fail(); }
 function timestamp(value) {
@@ -155,11 +157,35 @@ export function validateSnapshotPreparationList(input, expectedScope) {
     descending(value.items, 'createdAt', 'preparationId'); return value;
   } catch { fail(); }
 }
-export function validateSnapshotPreparationOptions(input, expectedScope, kind, expectedAnalysisVersion) {
+export function validateSnapshotPreparationOptions(input, expectedScope, kind, expectedAnalysisVersion, expectedSnapshotReference) {
   try {
     const value = capture(input, L.listBytes), scope = scopeCopy(expectedScope, true);
-    envelope(value, scope, ['kind', 'items', 'nextCursor', ...(['analysis-references', 'analysis-typed-references'].includes(kind) ? ['analysisVersion'] : [])]); paging(value);
-    if (!['analysis-versions', 'results', 'documents', 'analysis-references', 'analysis-typed-references'].includes(kind) || value.kind !== kind) fail();
+    envelope(value, scope, ['kind', 'items', 'nextCursor', ...(['analysis-references', 'analysis-typed-references', 'captured-workflow-outputs'].includes(kind) ? ['analysisVersion'] : []),
+      ...(kind === 'captured-workflow-outputs' ? ['snapshotReference'] : [])]); paging(value);
+    if (!['analysis-versions', 'results', 'documents', 'analysis-references', 'analysis-typed-references', 'captured-workflow-outputs'].includes(kind) || value.kind !== kind) fail();
+    if (kind === 'captured-workflow-outputs') {
+      integer(expectedAnalysisVersion, 1, 2147483647); if (value.analysisVersion !== expectedAnalysisVersion) fail();
+      const expected = validateResearchAnalysisReference(capture(expectedSnapshotReference, L.requestBytes));
+      if (expected.kind !== 'workflow-snapshot' || canonicalSnapshotJson(value.snapshotReference) !== canonicalSnapshotJson(expected)) fail();
+      const checks = [];
+      value.items.forEach(item => {
+        fields(item, ['stepId', 'stepLabel', 'port', 'outputLabel', 'reference', 'viewFamily', 'descriptor', 'descriptorSha256', 'referenceOnlyReason', 'contextOffer', 'integrity', 'availability']);
+        normalizeAnalysisSnapshotWorkflowOutputReference({ snapshotReference: expected, stepId: item.stepId, port: item.port, reference: item.reference });
+        for (const label of [item.stepLabel, item.outputLabel]) if (typeof label !== 'string' || !label.isWellFormed() || !label.trim() || label.length > 100 || /[\p{Cc}]/u.test(label)) fail();
+        if (item.integrity !== 'not-checked' || item.availability !== 'not-checked') fail();
+        if (item.viewFamily === null) {
+          if (item.descriptor !== null || item.descriptorSha256 !== null || item.contextOffer !== null || !['opaque', 'unsupported-view', 'restricted-or-unavailable'].includes(item.referenceOnlyReason)) fail();
+        } else {
+          const descriptor = normalizeAnalysisSnapshotTypedDescriptor(item.descriptor), offer = normalizeAnalysisSnapshotWorkflowContextOffer(item.contextOffer);
+          if (item.referenceOnlyReason !== null || canonicalSnapshotJson(descriptor) !== canonicalSnapshotJson(item.descriptor)
+              || canonicalSnapshotJson(offer) !== canonicalSnapshotJson(item.contextOffer) || descriptor.id !== item.reference.versionId || descriptor.sha256 !== item.reference.sha256
+              || item.viewFamily !== { table: 'table', metrics: 'metrics', figure: 'image' }[descriptor.type]
+              || offer.method !== null && (offer.method.stepLabel !== item.stepLabel || offer.method.outputLabel !== item.outputLabel)) fail();
+          pattern(item.descriptorSha256, SHA); checks.push([canonicalAnalysisSnapshotTypedDescriptor(descriptor), item.descriptorSha256]);
+        }
+      }); unique(value.items.map(item => `${item.stepId}:${item.port}`));
+      return (async () => { try { for (const [canonical, sha] of checks) if (await digest(canonical) !== sha) fail(); return value; } catch { fail(); } })();
+    }
     if (kind === 'analysis-typed-references') {
       integer(expectedAnalysisVersion, 1, 2147483647); if (value.analysisVersion !== expectedAnalysisVersion) fail();
       const checks = value.items.map(item => {
@@ -221,6 +247,8 @@ async function verifySnapshotPackage(pkg, binding) {
     const { viewSha256, ...view } = item.view;
     if (await digest(canonicalAnalysisSnapshotResultView({ ...view, source: { artifactId: item.source.artifactId,
       versionId: item.source.versionId, projectId: pkg.projectId, sha256: item.source.sha256 } })) !== viewSha256) fail();
+    if (item.origin?.kind === 'captured-workflow-output' && await digest(canonicalAnalysisSnapshotWorkflowContextBinding({ serviceId: pkg.serviceId, projectId: pkg.projectId,
+      analysisId: pkg.analysisId, ownerUserId: pkg.ownerUserId, analysisVersion: pkg.analysis.version, context: item.origin.context })) !== item.origin.contextSha256) fail();
   }
   for (const item of pkg.documents) {
     if (await digest(canonicalAnalysisSnapshotDocumentSource({ schema: FIXED_DOCUMENT_SOURCE_SCHEMA,
@@ -276,7 +304,8 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
     const linked = recipe.schema === ANALYSIS_SNAPSHOT_PREPARATION_SCHEMA_V2;
     if (pkg.schema !== (linked ? ANALYSIS_SNAPSHOT_PACKAGE_SCHEMA_V2 : 'traceomics.analysis-snapshot-package.v1')) fail();
     const prerequisiteIntent = linked ? pkg.prerequisites.items.map(item => item.kind === 'analysis-reference'
-      ? { kind: item.kind, reference: item.reference, label: item.label, detail: item.detail } : item) : pkg.prerequisites.items;
+      ? { kind: item.kind, reference: item.reference, label: item.label, detail: item.detail } : item.kind === 'captured-workflow-reference'
+        ? { kind: item.kind, snapshotReference: item.snapshotReference, stepId: item.stepId, port: item.port, reference: item.reference, label: item.label, detail: item.detail } : item) : pkg.prerequisites.items;
     if (pkg.serviceId !== value.serviceId || pkg.projectId !== value.projectId || pkg.analysisId !== value.analysisId || pkg.ownerUserId !== value.ownerUserId
         || pkg.preparationId !== value.preparationId || pkg.createdAt !== value.createdAt || pkg.analysis.version !== recipe.analysisVersion
         || pkg.results.length !== recipe.results.length || pkg.documents.length !== recipe.documents.length
@@ -294,6 +323,11 @@ export async function validateSnapshotPreparation(input, expectedScope, expected
           || ['analysis-reference', 'typed-analysis-reference'].includes(origin.kind) && (canonicalSnapshotJson(origin.reference) !== canonicalSnapshotJson(chosen.reference)
             || origin.caption !== chosen.caption || origin.analysisVersion !== recipe.analysisVersion)
           || origin.kind === 'typed-analysis-reference' && view.descriptorSha256 !== chosen.descriptorSha256
+          || origin.kind === 'captured-workflow-output' && (canonicalSnapshotJson(origin.snapshotReference) !== canonicalSnapshotJson(chosen.snapshotReference)
+            || origin.stepId !== chosen.stepId || origin.port !== chosen.port || canonicalSnapshotJson(origin.reference) !== canonicalSnapshotJson(chosen.reference)
+            || origin.analysisVersion !== recipe.analysisVersion || origin.caption !== chosen.caption || view.descriptorSha256 !== chosen.descriptorSha256
+            || origin.contextSha256 !== chosen.contextSha256 || canonicalSnapshotJson({ method: origin.context.method !== null,
+              parameterKeys: origin.context.parameters.map(item => item.key), seed: origin.context.seed !== null, environment: origin.context.environment !== null }) !== canonicalSnapshotJson(chosen.contextSelection))
           || item.source.versionId !== chosen.reference.versionId || item.source.sha256 !== chosen.reference.sha256
           || view.family !== chosen.view.family || view.family === 'table' && (view.spec.offset !== chosen.view.offset || view.spec.limit !== chosen.view.limit)) fail();
     }
@@ -369,11 +403,17 @@ export async function decodeSnapshotPreparationTyped(bytes, resultDescriptor) {
     fields(view, ['schema', 'family', 'spec', 'blobSha256', 'blobBytes', 'viewSha256', 'width', 'height', 'descriptorSha256', 'semantics']);
     if (view.schema !== FIXED_RESULT_VIEW_SCHEMA_V3 || !['table', 'metrics'].includes(view.family)) fail();
     source(result.source, true, view.family); pattern(view.viewSha256, SHA);
-    const origin = result.origin; fields(origin, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin']);
+    const origin = result.origin, captured = origin?.kind === 'captured-workflow-output';
+    fields(origin, ['kind', 'reference', 'analysisVersion', 'caption', 'captionOrigin', ...(captured ? ['snapshotReference', 'stepId', 'port', 'context', 'contextSha256', 'contextEvidence'] : [])]);
     const reference = validateResearchAnalysisReference(origin.reference); integer(origin.analysisVersion, 1, 2147483647);
-    if (origin.kind !== 'typed-analysis-reference' || origin.captionOrigin !== 'user-supplied' || reference.kind !== 'artifact-version'
+    if (!['typed-analysis-reference', 'captured-workflow-output'].includes(origin.kind) || origin.captionOrigin !== 'user-supplied' || reference.kind !== 'artifact-version'
         || canonicalSnapshotJson(reference) !== canonicalSnapshotJson(origin.reference) || reference.versionId !== result.source.versionId
         || reference.sha256 !== result.source.sha256 || normalizeAnalysisSnapshotCaptionV2(origin.caption) !== origin.caption) fail();
+    if (captured) {
+      normalizeAnalysisSnapshotWorkflowOutputReference({ snapshotReference: origin.snapshotReference, stepId: origin.stepId, port: origin.port, reference: origin.reference });
+      const context = normalizeAnalysisSnapshotWorkflowContext(origin.context); normalizeAnalysisSnapshotWorkflowContextEvidence(origin.contextEvidence, context); pattern(origin.contextSha256, SHA);
+      if (canonicalSnapshotJson(context.snapshotReference) !== canonicalSnapshotJson(origin.snapshotReference) || context.stepId !== origin.stepId || context.port !== origin.port) fail();
+    }
     const text = await raw(bytes, view, ANALYSIS_SNAPSHOT_TYPED_LIMITS.responseBytes), body = parseAnalysisSnapshotScalarJson(text);
     if (canonicalSnapshotJson(body, ANALYSIS_SNAPSHOT_TYPED_LIMITS.responseBytes) !== text) fail();
     fields(body.source, ['artifactId', 'versionId', 'projectId', 'sha256']); pattern(body.source.projectId, PROJECT);

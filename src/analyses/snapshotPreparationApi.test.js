@@ -5,6 +5,7 @@ import { createSnapshotPreparation, deleteSnapshotPreparation, getSnapshotPrepar
   resumeSnapshotPreparation } from './snapshotPreparationApi';
 import { withExecutionTarget } from '../runtime/executionTarget';
 import { typedRecipe, typedRecord, typedMetricsBytes } from './snapshotTypedTestFixtures';
+import { workflowRecipe, workflowRecord, workflowSnapshotReference } from './snapshotWorkflowTestFixtures';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
 vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
@@ -52,6 +53,23 @@ it('sends typed discovery only to the saved-version-bound metadata route', async
   await listSnapshotPreparationOptions('project 1', 'analysis 1', 'analysis-typed-references', { analysisVersion: 7, cursor: 'typed/page', signal });
   expect(fetch).toHaveBeenCalledExactlyOnceWith(base + '/options?limit=30&kind=analysis-typed-references&cursor=typed%2Fpage&analysisVersion=7',
     expect.objectContaining({ method: 'GET', signal }));
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it('binds explicit captured output discovery to one saved analysis and exact scalar snapshot query without exposing context values', async () => {
+  fetch.mockResolvedValue(new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+  const snapshotReference = workflowSnapshotReference(), signal = new AbortController().signal;
+  await listSnapshotPreparationOptions('project 1', 'analysis 1', 'captured-workflow-outputs', { analysisVersion: 9, snapshotReference, cursor: 'capture/page', signal });
+  expect(fetch).toHaveBeenCalledExactlyOnceWith(`${base}/options?limit=30&kind=captured-workflow-outputs&cursor=capture%2Fpage&analysisVersion=9&snapshotId=${snapshotReference.snapshotId}&snapshotSha256=${snapshotReference.sha256}`,
+    expect.objectContaining({ method: 'GET', signal }));
+  expect(fetch.mock.calls[0][1].body).toBeUndefined(); expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it('reads captured metrics from their existing private fixed3 route without fetching the capture or environment', async () => {
+  const record = workflowRecord(workflowRecipe({ family: 'metrics' })), result = record.package.results[0], content = typedMetricsBytes(result);
+  fetch.mockResolvedValue(new Response(content, { headers: { 'Content-Type': 'application/json' } }));
+  expect(Array.from((await readSnapshotPreparationView('project 1', 'analysis 1', record.preparationId, result)).bytes)).toEqual(Array.from(content));
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([`${base}/${record.preparationId}/views/${result.viewId}`]);
   expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
 });
 

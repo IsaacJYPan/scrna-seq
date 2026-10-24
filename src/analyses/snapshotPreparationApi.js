@@ -10,9 +10,10 @@ function page(cursor, kind) {
   return new URLSearchParams({ limit: '30', ...(kind ? { kind } : {}), ...(cursor ? { cursor } : {}) });
 }
 export const listSnapshotPreparations = (projectId, analysisId, { cursor, signal } = {}) => request(`${base(projectId, analysisId)}?${page(cursor)}`, { signal }, limits.list);
-export const listSnapshotPreparationOptions = (projectId, analysisId, kind, { cursor, signal, analysisVersion } = {}) => {
+export const listSnapshotPreparationOptions = (projectId, analysisId, kind, { cursor, signal, analysisVersion, snapshotReference } = {}) => {
   const query = page(cursor, kind);
   if (analysisVersion !== undefined) query.set('analysisVersion', String(analysisVersion));
+  if (snapshotReference !== undefined) { query.set('snapshotId', snapshotReference.snapshotId); query.set('snapshotSha256', snapshotReference.sha256); }
   return request(`${base(projectId, analysisId)}/options?${query}`, { signal }, limits.list);
 };
 export const getSnapshotPreparation = (projectId, analysisId, preparationId, { signal } = {}) => request(path(projectId, analysisId, preparationId), { signal });

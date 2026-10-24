@@ -4,6 +4,7 @@ import * as typed from './analysisSnapshotTypedResult.mjs';
 export * from './analysisSnapshotPreparation.mjs';
 export * from './analysisSnapshotPreparationV2.mjs';
 export * from './analysisSnapshotTypedResult.mjs';
+export * from './analysisSnapshotWorkflowContext.mjs';
 
 function schema(value, optional = false) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return unsupported();

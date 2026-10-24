@@ -88,13 +88,14 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
   let runtimeHealth = { value: { status: 'ok' }, status: 200 };
   let stopped = false;
   const responseFaults = new Set();
-  function interceptNextResponse({ method, pathname, mode }) {
+  function interceptNextResponse({ method, pathname, mode, maximumBytes = 16 * 1024 }) {
     if (!['GET', 'POST', 'PUT', 'DELETE'].includes(method) || !['drop', 'hold'].includes(mode)
-      || typeof pathname !== 'string' || !pathname.startsWith('/api/') || pathname.length > 256 || pathname.includes('?')) {
+      || typeof pathname !== 'string' || !pathname.startsWith('/api/') || pathname.length > 256 || pathname.includes('?')
+      || !Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 512 * 1024) {
       throw new Error('A disposable response fault requires an exact bounded API method and path.');
     }
     let release;
-    const fault = { method, pathname, mode, matched: false, observation: null,
+    const fault = { method, pathname, mode, maximumBytes, matched: false, observation: null,
       released: new Promise(resolve => { release = resolve; }) };
     fault.release = release;
     responseFaults.add(fault);
@@ -171,7 +172,7 @@ async function createDesktopTunnelServiceFixture({ artifactDirectory,
           let bytes = 0; const chunks = [];
           response.on('data', chunk => {
             bytes += chunk.length;
-            if (bytes > 16 * 1024) {
+            if (bytes > fault.maximumBytes) {
               fault.observation = { status: response.statusCode, bytes, value: null };
               response.destroy(); res.destroy(); responseFaults.delete(fault);
             } else chunks.push(chunk);

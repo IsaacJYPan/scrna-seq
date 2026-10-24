@@ -4,6 +4,7 @@ import { listSnapshotPublications, listSnapshotPublicationRequests, getSnapshotP
   publishAnalysisSnapshot, withdrawAnalysisSnapshot, readSnapshotPublicationView, readSnapshotPublicationDocument } from './snapshotPublicationApi';
 import { withExecutionTarget } from '../runtime/executionTarget';
 import { typedRecipe, typedRecord, typedMetricsBytes } from './snapshotTypedTestFixtures';
+import { workflowRecipe, workflowRecord } from './snapshotWorkflowTestFixtures';
 
 vi.mock('../api', () => ({ apiUrl: value => value }));
 vi.mock('../runtime/executionTarget', () => ({ withExecutionTarget: vi.fn(fn => fn()) }));
@@ -44,6 +45,14 @@ it('reads fixed3 metrics through the current-reader publication route with bound
   const received = await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', metrics);
   expect(Array.from(received.bytes)).toEqual(Array.from(content)); expect(received.type).toBe('application/json');
   expect(fetch.mock.calls[0][0]).toBe(`${base}/aspub_exact/views/${metrics.viewId}`);
+  expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
+});
+
+it('keeps published captured-output body access on the exact publication route without acquiring a private capture capability', async () => {
+  const record = workflowRecord(workflowRecipe({ family: 'metrics' })), metrics = record.package.results[0], content = typedMetricsBytes(metrics);
+  fetch.mockResolvedValue(new Response(content, { headers: { 'Content-Type': 'application/json' } }));
+  expect(Array.from((await readSnapshotPublicationView('project 1', 'analysis 1', 'aspub_exact', metrics)).bytes)).toEqual(Array.from(content));
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([`${base}/aspub_exact/views/${metrics.viewId}`]);
   expect(withExecutionTarget).toHaveBeenCalledExactlyOnceWith(expect.any(Function), { mutation: false });
 });
 

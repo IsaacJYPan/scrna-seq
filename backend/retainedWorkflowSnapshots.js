@@ -6,6 +6,8 @@ const storage = require('./storage');
 const snapshotContract = import('../shared/workflowSnapshot.mjs');
 const packages = import('../shared/recipePackage.mjs');
 const workflowPackages = import('../shared/workflowPackage.mjs');
+const publicationContext = import('../shared/analysisSnapshotWorkflowContext.mjs');
+const typedPublication = import('../shared/analysisSnapshotTypedResult.mjs');
 const { EXPERT_R_PROFILE } = require('./expertR');
 const { validateEnvironmentReference } = require('./rEnvironment');
 const { validateResultSemantics } = require('../shared/resultSemantics.mjs');
@@ -69,6 +71,66 @@ async function snapshotIsReferenced(client, projectId, snapshotId) {
     SELECT jsonb_array_elements(references_json) AS reference FROM research_analyses WHERE project_id=$1
     UNION ALL SELECT jsonb_array_elements(snapshot_json->'references') FROM research_analysis_revisions WHERE project_id=$1
   ) saved WHERE reference->>'kind'='workflow-snapshot' AND reference->>'snapshotId'=$2 LIMIT 1`, [projectId, snapshotId])).rowCount > 0;
+}
+
+// Trusted publication callers share their short current-member transaction.
+// Return only selected-safe offers and exact output identities, never private
+// code/state/inputs or a working instance. Reopening has different requirements.
+async function snapshotPublicationOutputs(client, userId, projectId, reference, selectedPorts = null) {
+  if (reference?.kind !== 'workflow-snapshot' || !/^wfs_[a-f0-9]{24}$/.test(reference.snapshotId || '') || !/^[a-f0-9]{64}$/.test(reference.sha256 || '')) missing();
+  const row = (await snapshotRows(client, userId, projectId, [reference.snapshotId]))[0];
+  if (!row || await fingerprint(row) !== reference.sha256) missing();
+  let workflow;
+  try {
+    workflow = (await workflowPackages).validateWorkflowPackage(row.package_json);
+    if (digest(workflow) !== row.package_digest || Buffer.byteLength(JSON.stringify(row.state_json)) > STATE_BYTES
+        || !plain(row.state_json) || row.state_json.active !== null || !plain(row.state_json.results)) throw new Error();
+  } catch { throw failure('WORKFLOW_PUBLICATION_UNSUPPORTED', 'The recorded capture cannot supply an exact selected output projection.', 409); }
+  const context = await publicationContext, typed = await typedPublication, items = [];
+  const safeNumber = value => Number.isFinite(value) && !Object.is(value, -0) && (!Number.isInteger(value) || Number.isSafeInteger(value));
+  for (const step of workflow.steps) {
+    const result = row.state_json.results[step.id]; if (!plain(result) || !plain(result.outputs)) continue;
+    for (const [port, declared] of Object.entries(step.outputs)) {
+      if (selectedPorts && !selectedPorts.some(item => item.stepId === step.id && item.port === port)) continue;
+      const output = result.outputs[port];
+      if (!plain(output) || typeof output.id !== 'string' || !/^(?:av|art|eri)_[a-f0-9]{16,40}$/.test(output.id)
+          || typeof output.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(output.sha256)) continue;
+      const outputReference = { kind: 'artifact-version', versionId: output.id, sha256: output.sha256 };
+      let descriptor = null, consistent = output.type === declared.type && Number.isSafeInteger(output.sizeBytes) && output.sizeBytes >= 0 && output.sizeBytes <= 200 * 1024 * 1024;
+      try {
+        if (output.profileId != null && output.profileId !== workflow.runtime.profileId) consistent = false;
+        if (Object.hasOwn(declared, 'semantics') && digest(validateResultSemantics(declared.semantics, declared.type)) !== digest(validateResultSemantics(output.semantics ?? {}, output.type))) consistent = false;
+        if (['table', 'metrics', 'figure'].includes(output.type)) descriptor = typed.normalizeAnalysisSnapshotTypedDescriptor({ schema: typed.ANALYSIS_SNAPSHOT_TYPED_DESCRIPTOR_SCHEMA,
+          id: output.id, type: output.type, sha256: output.sha256, sizeBytes: output.sizeBytes, profileId: output.profileId ?? null, semantics: output.semantics ?? {} });
+      } catch { consistent = false; }
+      const parameters = [];
+      for (const parameter of step.parameters) {
+        if (!plain(result.parameters) || !Object.hasOwn(result.parameters, parameter.key)) continue;
+        const value = result.parameters[parameter.key];
+        const numeric = ['integer', 'number'].includes(parameter.type);
+        const allowed = numeric ? typeof value === 'number' && safeNumber(value) && (parameter.type !== 'integer' || Number.isSafeInteger(value))
+          && (parameter.min === undefined || value >= parameter.min) && (parameter.max === undefined || value <= parameter.max)
+          : parameter.type === 'boolean' ? typeof value === 'boolean'
+            : parameter.type === 'choice' && typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,79}$/.test(value) && parameter.options.includes(value);
+        if (allowed) parameters.push({ key: parameter.key, type: parameter.type, label: parameter.label, value });
+      }
+      let environment = null;
+      try {
+        const runtime = result.runtime, artifact = runtime?.environmentArtifact, recorded = validateEnvironmentReference(runtime?.environment);
+        if (!plain(runtime) || !plain(artifact) || !/^art_[a-f0-9]{16,40}$/.test(artifact.id || '') || artifact.checksumSha256 !== recorded.manifestSha256
+            || !Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 1 || artifact.sizeBytes > 256 * 1024
+            || recorded.profileId !== workflow.runtime.profileId || runtime.profileId != null && runtime.profileId !== recorded.profileId
+            || output.profileId != null && output.profileId !== recorded.profileId) throw new Error();
+        environment = { reference: recorded, artifact: { id: artifact.id, checksumSha256: artifact.checksumSha256, sizeBytes: artifact.sizeBytes } };
+      } catch { /* Unselected unavailable context never blocks an intact output. */ }
+      const offer = context.normalizeAnalysisSnapshotWorkflowContextOffer({ method: { id: workflow.id, name: workflow.name, version: workflow.version, digest: row.package_digest,
+        stepLabel: step.label, outputLabel: declared.label }, parameters, seed: Number.isSafeInteger(result.seed) && !Object.is(result.seed, -0) && result.seed >= 0 && result.seed <= 2147483647 ? result.seed : null,
+      environment: environment?.reference || null });
+      items.push({ stepId: step.id, stepLabel: step.label, port, outputLabel: declared.label, reference: outputReference,
+        descriptor, consistent, type: output.type, offer, environment });
+    }
+  }
+  return items;
 }
 
 async function inspectSource(client, row) {
@@ -253,4 +315,4 @@ function createRetainedWorkflowSnapshotService(database = db) {
   return { get, list, open };
 }
 
-module.exports = { createRetainedWorkflowSnapshotService, authorizedWorkflowSnapshotReferences, snapshotIsReferenced, fingerprint, inspectSource };
+module.exports = { createRetainedWorkflowSnapshotService, authorizedWorkflowSnapshotReferences, snapshotIsReferenced, fingerprint, inspectSource, snapshotPublicationOutputs };

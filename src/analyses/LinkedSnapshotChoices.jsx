@@ -1,5 +1,6 @@
 import React from 'react';
 import { ANALYSIS_SNAPSHOT_PREPARATION_LIMITS as limits } from '../../shared/analysisSnapshotPreparation.mjs';
+import CapturedWorkflowChoices, { CapturedWorkflowContextChoices } from './CapturedWorkflowChoices';
 
 const identity = reference => JSON.stringify(reference);
 const explanation = reason => ({
@@ -30,7 +31,7 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
   const edit = (index, update) => setLinkedResults(previous => previous.map((item, position) => position === index ? { ...item, ...update } : item));
   const editPrerequisite = (index, update) => setLinkedPrerequisites(previous => previous.map((item, position) => position === index ? { ...item, ...update } : item));
   const addFinding = option => {
-    const prior = linkedResults.filter(item => same(item.reference, option.reference));
+    const prior = linkedResults.filter(item => item.kind !== 'captured-workflow-output' && same(item.reference, option.reference));
     const previousTable = prior.filter(item => item.view.family === 'table').at(-1);
     const view = option.viewFamily === 'table'
       ? { family: 'table', offset: Math.min(limits.tableOffset, previousTable ? previousTable.view.offset + previousTable.view.limit : 0), limit: 25 }
@@ -44,7 +45,7 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
       <p className="mt-1 text-sm text-textMuted">Choose findings already linked to this exact saved version. Linked selections are kept separately for each saved analysis version.</p>
       <p className="mt-2 text-xs text-textMuted">Eligibility is based on recorded metadata. Contents are checked when preparing a finding. Reference-only items include no contents or data access.</p></div>
     <ul aria-label="Linked saved references" className="space-y-3">{choices.map(option => {
-      const included = linkedPrerequisites.some(item => same(item.reference, option.reference));
+      const included = linkedPrerequisites.some(item => item.kind === 'analysis-reference' && same(item.reference, option.reference));
       return <li key={identity(option.reference)} className="min-w-0 rounded border border-border bg-surface p-3">
         <p className="break-words text-sm font-medium">{option.label}</p>
         {option.typed && <div className="mt-2 space-y-1 text-xs text-textMuted"><p>Recorded typed {option.viewFamily === 'image' ? 'figure' : option.viewFamily === 'metrics' ? 'metrics' : 'table'} · declared meaning retained</p>
@@ -53,11 +54,12 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
         {option.referenceOnlyReason && <p className="mt-1 text-xs text-textMuted">{explanation(option.referenceOnlyReason)}</p>}
         <ExactReference reference={option.reference} />
         <div className="mt-3 flex flex-wrap gap-3">{option.viewFamily && <button type="button" className="btn btn-secondary text-xs"
-          disabled={disabled || count >= limits.results || option.viewFamily !== 'table' && linkedResults.some(item => same(item.reference, option.reference))}
+          disabled={disabled || count >= limits.results || option.viewFamily !== 'table' && linkedResults.some(item => item.kind !== 'captured-workflow-output' && same(item.reference, option.reference))}
           onClick={() => addFinding(option)}>{option.viewFamily === 'table' ? 'Add linked table excerpt' : option.viewFamily === 'metrics' ? 'Add linked metrics' : 'Add linked figure'}</button>}
           <button type="button" className="text-xs text-primary underline" disabled={disabled || included || prerequisiteCount >= limits.prerequisites}
             onClick={() => setLinkedPrerequisites(previous => [...previous, { kind: 'analysis-reference', reference: option.reference, label: initialLabel(option.label), detail: null }])}>
             {included ? 'Reference included' : 'Include reference only'}</button></div>
+        {option.reference.kind === 'workflow-snapshot' && <CapturedWorkflowChoices snapshotReference={option.reference} state={state} disabled={disabled} />}
       </li>;
     })}</ul>
     {loading && <p role="status" className="text-sm text-textMuted">Loading references for saved analysis {analysisVersion}…</p>}
@@ -72,7 +74,11 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
       <label className="block text-sm">Caption for linked finding {index + 1}<textarea value={item.caption} required maxLength={2000} disabled={disabled} rows={2}
         onChange={event => edit(index, { caption: event.target.value })} className="input mt-2 block w-full" /></label>
       <p className="text-xs text-textMuted">This caption is supplied for this snapshot.</p>
-      {item.kind === 'typed-analysis-reference' && <details className="text-xs text-textMuted"><summary className="cursor-pointer">Selected descriptor identity</summary><p className="mt-1 break-all">SHA-256 {item.descriptorSha256}</p><p className="mt-1">This selection keeps its recorded meaning. If the source descriptor changes, start a new selection after reviewing it.</p></details>}
+      {['typed-analysis-reference', 'captured-workflow-output'].includes(item.kind) && <details className="text-xs text-textMuted"><summary className="cursor-pointer">Selected descriptor identity</summary><p className="mt-1 break-all">SHA-256 {item.descriptorSha256}</p><p className="mt-1">This selection keeps its recorded meaning. If the source descriptor changes, start a new selection after reviewing it.</p></details>}
+      {item.kind === 'captured-workflow-output' && <><p className="break-words text-xs text-textMuted">Captured output · {item.stepId} · {item.port}</p>
+        <CapturedWorkflowContextChoices item={item} index={index} offer={state.capturedOffers[item.offerId]} disabled={disabled} readable={state.writer}
+          onChange={contextSelection => edit(index, { contextSelection, contextSha256: null })} />
+        <ExactReference reference={item.snapshotReference} /></>}
       {item.view.family === 'table' && <div className="flex flex-wrap gap-3">
         <label className="text-xs">First data row<input aria-label={`First data row for linked finding ${index + 1}`} type="number" min={1} max={limits.tableOffset + 1} value={item.view.offset + 1} disabled={disabled}
           onChange={event => edit(index, { view: { ...item.view, offset: Number(event.target.value) - 1 } })} className="input mt-1 block w-28" /></label>
@@ -83,10 +89,11 @@ export default function LinkedSnapshotChoices({ state, disabled }) {
     </li>)}</ol>
     {linkedPrerequisites.length > 0 && <section aria-label="Selected reference-only prerequisites" className="space-y-3">
       <h4 className="text-sm font-medium">Reference-only prerequisites</h4><p className="text-xs text-textMuted">Contents not included. Integrity not checked. Data access not granted. These references do not count as retained findings.</p>
-      {linkedPrerequisites.map((item, index) => <fieldset key={identity(item.reference)} className="space-y-3 rounded border border-border p-3">
+      {linkedPrerequisites.map((item, index) => <fieldset key={JSON.stringify([item.kind, item.snapshotReference, item.stepId, item.port, item.reference])} className="space-y-3 rounded border border-border p-3">
         <legend className="px-1 text-sm">Linked prerequisite {index + 1}</legend>
         <label className="block text-sm">Label for linked prerequisite {index + 1}<input value={item.label} required maxLength={160} disabled={disabled} onChange={event => editPrerequisite(index, { label: event.target.value })} className="input mt-1 block w-full" /></label>
         <label className="block text-sm">Note for linked prerequisite {index + 1}<textarea value={item.detail || ''} maxLength={1000} disabled={disabled} rows={2} onChange={event => editPrerequisite(index, { detail: event.target.value })} className="input mt-1 block w-full" /></label>
+        {item.kind === 'captured-workflow-reference' && <><p className="break-words text-xs text-textMuted">Captured reference · {item.stepId} · {item.port}</p><ExactReference reference={item.snapshotReference} /></>}
         <ExactReference reference={item.reference} /><button type="button" className="text-xs text-textMuted underline" disabled={disabled} onClick={() => setLinkedPrerequisites(previous => previous.filter((_, position) => position !== index))}>Remove linked prerequisite {index + 1}</button>
       </fieldset>)}
     </section>}

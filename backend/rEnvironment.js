@@ -150,11 +150,18 @@ async function readEnvironmentArtifact(provider, descriptor, expected) {
     }
     const bytes = buffer.subarray(0, length);
     if (bytes.length !== descriptor.sizeBytes || bytes.length > MAX_ENVIRONMENT_BYTES) throw error('R_ENVIRONMENT_INVALID', 'The recorded R environment artifact is invalid.');
-    const manifest = validateEnvironmentManifest(JSON.parse(bytes.toString('utf8')));
-    const reference = summarizeEnvironmentManifest(manifest);
-    if (reference.manifestSha256 !== descriptor.checksumSha256 || !bytes.equals(environmentBytes(manifest))) throw error('R_ENVIRONMENT_INVALID', 'The recorded R environment checksum is invalid.');
-    assertEnvironmentMatches(expected, reference);
-    return manifest;
+    // Only interpretation of the bounded, verified manifest is classified here.
+    // Storage acquisition, reads and close remain outside this pure boundary.
+    try {
+      const manifest = validateEnvironmentManifest(JSON.parse(bytes.toString('utf8')));
+      const reference = summarizeEnvironmentManifest(manifest);
+      if (reference.manifestSha256 !== descriptor.checksumSha256 || !bytes.equals(environmentBytes(manifest))) throw error('R_ENVIRONMENT_INVALID', 'The recorded R environment checksum is invalid.');
+      assertEnvironmentMatches(expected, reference);
+      return manifest;
+    } catch (failure) {
+      if (failure instanceof SyntaxError || failure instanceof TypeError) throw error('R_ENVIRONMENT_INVALID', 'The recorded R environment manifest is invalid.');
+      throw failure;
+    }
   } finally { await opened.handle.close(); }
 }
 module.exports = { ENVIRONMENT_SCHEMA, MAX_ENVIRONMENT_BYTES, environmentBytes,

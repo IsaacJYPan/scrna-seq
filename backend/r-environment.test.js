@@ -83,4 +83,20 @@ describe('immutable R environments', () => {
     await expect(env.readEnvironmentArtifact(provider,descriptor,reference)).rejects.toThrow();
     await expect(env.readEnvironmentArtifact(provider,{ ...descriptor,sizeBytes:env.MAX_ENVIRONMENT_BYTES+1 },reference)).rejects.toMatchObject({ code:'R_ENVIRONMENT_INVALID' });
   });
+  it.each(['open', 'read', 'close'])('preserves a storage %s TypeError outside pure manifest validation', async phase => {
+    const { manifest, reference } = environmentFixture(), bytes = env.environmentBytes(manifest);
+    const failure = new TypeError(`Storage ${phase} failed`); let closed = false;
+    const provider = { openVerifiedRead: async () => {
+      if (phase === 'open') throw failure;
+      return { handle: {
+        read: async (buffer, offset, length, position) => {
+          if (phase === 'read') throw failure;
+          return { bytesRead: bytes.copy(buffer, offset, position, position + length) };
+        },
+        close: async () => { closed = true; if (phase === 'close') throw failure; }
+      } };
+    } };
+    await expect(env.readEnvironmentArtifact(provider, { internalStorageKey: 'environment.json', checksumSha256: reference.manifestSha256, sizeBytes: bytes.length }, reference)).rejects.toBe(failure);
+    expect(closed).toBe(phase !== 'open');
+  });
 });
