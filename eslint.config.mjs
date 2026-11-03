@@ -113,5 +113,14 @@ export default [
       sourceType: 'module',
       globals: { ...globals.node, ...globals.browser }
     }
-  }
+  },
+  {
+    // Added to eslint:recommended in ESLint 10. Public API wrappers deliberately
+    // throw sanitized errors without the internal cause, and the flagged
+    // assignments are defensive defaults; keep the previous rule set.
+    rules: {
+      'preserve-caught-error': 'off',
+      'no-useless-assignment': 'off',
+    },
+  },
 ];
