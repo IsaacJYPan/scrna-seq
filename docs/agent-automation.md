@@ -9,7 +9,7 @@ describes that is not listed here as implemented is not available.
 | 0. Authority inventory and contracts | Implemented for the routes below |
 | 1. Read-only agents and inert proposals | Implemented |
 | 2. Approved local workflow execution | Implemented for one release (Seurat QC/clustering) |
-| 3. Qualified HPC target | Not started |
+| 3. Qualified HPC target | Slurm target implemented (SSH login node); site qualification pending |
 | 4. Isolated development | Not started |
 | 5. Bounded protocol automation / MCP | Not started |
 
@@ -143,6 +143,59 @@ in the shared R service, so the isolation is the existing trusted-lab
 deployment model (see [deployment](deployment.md)), not a hostile-tenant
 boundary. HPC targets are phase 3.
 
+## Slurm execution target (phase 3)
+
+Seurat pipeline runs (`seurat.pipeline.v1`, `seurat.multisample.v1`) can run on
+a Slurm cluster instead of the installation's R service. People choose **Run on →
+Slurm cluster** in the workbench; a study created with
+`executionTarget: "slurm"` sends every agent run in it to the cluster.
+
+**How a run executes.** The worker claims the job as usual, then over SSH to the
+login node it:
+
+1. creates `<SLURM_REMOTE_ROOT>/<jobId>/` with `input/`, `output/`, `lib/`;
+2. copies `r-backend/hpc-runner.R`, `r-backend/lib/seuratPipelineCore.R` (the same
+   analysis code the R service runs), `params.json`, `inputs.json`, and the dataset
+   files;
+3. writes `job.sh` with `--job-name=tro-<jobId>`, CPUs, memory, and wall time
+   (an agent run's reservation, or 1 CPU / 8 GiB / 1 h), plus partition, account
+   and QoS, and submits it with `sbatch --parsable`;
+4. polls `sacct` (falling back to `squeue`) and renews its lease meanwhile;
+5. on `COMPLETED`, copies back `result.json` and `checkpoint.rds`, verifies the
+   checkpoint's SHA-256, and records the result exactly as for a local run.
+
+The dispatch is recorded in `hpc_dispatches` before `sbatch`. A restarted worker
+re-attaches to the stored Slurm job id, or finds it by its `tro-<jobId>` name,
+instead of submitting again. Canceling the job in the app, or an agent canceling
+its own run, sends `scancel`. Failed jobs record the Slurm state and the tail of
+`slurm.out` in the job log.
+
+**Configuration** (web and worker processes):
+
+| Variable | Meaning |
+| --- | --- |
+| `SLURM_SSH_TARGET` | `user@login-node` for a dedicated service account |
+| `SLURM_SSH_KEY`, `SLURM_SSH_KNOWN_HOSTS`, `SLURM_SSH_PORT` | Key file, pinned host keys (enables strict checking), port |
+| `SLURM_REMOTE_ROOT` | Absolute cluster directory for run workspaces (for example scratch) |
+| `SLURM_PARTITION`, `SLURM_ACCOUNT`, `SLURM_QOS` | Passed to `sbatch` |
+| `SLURM_RSCRIPT` | Command that runs R on compute nodes, for example `apptainer exec /path/traceomics-r.sif Rscript` |
+| `SLURM_MODULES` | Optional `module load` list |
+| `SLURM_POLL_SECONDS` | Poll interval (default 30) |
+
+The compute nodes need R with Seurat, hdf5r, jsonlite and digest; the simplest
+route is the project's R image converted to Apptainer. `GET
+/api/projects/:projectId/compute-targets` (people) and `GET
+/api/automation/v1/projects/:projectId/targets` (agents, `traceomics targets
+list`) report whether the cluster is reachable, using `sinfo`.
+
+**Current limits.** The local worker holds one claim slot while it waits on the
+cluster, so a long Slurm run blocks other local jobs; raise the worker pool size
+if needed. Only the Seurat pipelines run on Slurm. Isolation on the cluster is
+whatever the site's Slurm and container configuration enforce; site
+qualification (cgroup limits, no nested submission, network policy) is still to
+do. Remote commands are built from validated tokens and single-quoted; no
+caller text reaches the remote shell.
+
 ## Route inventory (phase 0 gate)
 
 Agent credentials are refused before routing by `agentCredentialGuard`
@@ -261,7 +314,8 @@ cannot obtain human credentials. Before issuing agent credentials:
 
 ## Not yet implemented
 
-HPC adapters and remote reconciliation, per-run OS isolation, workflow
+Site qualification of the Slurm target, Slurm for other job types,
+per-run OS isolation, workflow
 composition, sensitivity-study selection rules, standing acceptance rules,
 isolated development, and MCP. Agent-specific limits do not change what people can do with
 their own sessions.

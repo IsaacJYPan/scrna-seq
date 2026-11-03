@@ -367,3 +367,34 @@ describe.skipIf(!CONFIGURED)('agent CLI journey', () => {
     expect((await db.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n).toBe(1);
   });
 });
+
+describe.skipIf(!CONFIGURED)('Slurm target routing', () => {
+  it('routes an agent run in a Slurm study to the cluster target and reports targets', async () => {
+    const { installFakeSlurm } = require('./_fakeSlurm');
+    const fake = installFakeSlurm();
+    try {
+      const ctx = await setup({ study: { executionTarget: 'slurm' } });
+      expect(ctx.study.executionTarget).toBe('slurm');
+      const planned = (await plan(ctx)).data;
+      expect(planned.plan.executionTarget).toBe('slurm');
+      const run = (await submit(ctx, planned, 'run-req-slurm1')).data.run;
+      expect(run.executionTarget).toBe('slurm');
+      expect((await db.query('SELECT execution_target FROM jobs')).rows[0].execution_target).toBe('slurm');
+
+      const human = await api(server, `${ctx.base}/compute-targets`, { token: ctx.sponsor.token });
+      expect(human.data.targets.map((t) => [t.name, t.available])).toEqual([['local', true], ['slurm', true]]);
+      const agentView = await agent(ctx, '/targets');
+      expect(agentView.data.targets[1].partitions.map((p) => p.name)).toContain('normal');
+    } finally { fake.restore(); }
+  });
+
+  it('rejects a Slurm study when the target is unavailable', async () => {
+    const ctx = await setup();
+    const res = await api(server, `${ctx.base}/studies`, {
+      method: 'POST', token: ctx.sponsor.token,
+      body: { name: 'HPC', releaseId: ctx.rel.id, datasetIds: [ctx.datasetId], executionTarget: 'slurm' },
+    });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('TARGET_UNAVAILABLE');
+  });
+});

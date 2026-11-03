@@ -13,6 +13,7 @@ const { WRITE_ROLES, READ_ROLES, codedError } = require('../policy/agentCapabili
 const { recordAutomationEvent } = require('../automation/automationAudit');
 const { canonicalJson, sha256 } = require('../workflowTrust/catalog');
 const { assertSupportedSeuratPipelineDataset } = require('../seuratPipeline');
+const { slurmConfig } = require('../executors/slurm');
 
 const PLAN_TTL_SECONDS = 3600;
 const MAX_OPEN_PLANS_PER_DELEGATION = 20;
@@ -107,6 +108,7 @@ function publicRun(row) {
     planDigest: row.plan_digest,
     requestId: row.request_id,
     release: plan.release,
+    executionTarget: plan.executionTarget || 'local',
     inputs: plan.inputs,
     choices: plan.choices,
     state,
@@ -250,6 +252,7 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         choices,
         parameters,
         resources: release.definition.resources,
+        executionTarget: study.execution_target || 'local',
         outputs: release.definition.outputs,
         validation: release.definition.validation,
         expiresAt,
@@ -342,6 +345,10 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       }
       const { dataset } = await pinnedInput(client, study, plan.inputs.datasetId, release);
 
+      const executionTarget = plan.executionTarget || 'local';
+      if (executionTarget === 'slurm' && !slurmConfig().enabled) {
+        throw codedError('TARGET_UNQUALIFIED', 'The Slurm target is not available on this installation.', 409);
+      }
       const cpuSeconds = plan.resources.cpus * plan.resources.maxWallSeconds;
       const limits = installationLimits();
       const policy = actor.delegation.policy;
@@ -385,10 +392,10 @@ function createAdmissionService({ db, withTransaction, approvals }) {
       const maxAttempts = db.RETRYABLE_DURABLE_JOB_TYPES.has(plan.release.jobType) ? 2 : 1;
       await client.query(
         `INSERT INTO jobs (id, owner_user_id, project_id, analysis_object_id, dataset_id, job_type, status,
-           parameters_json, max_attempts)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+           parameters_json, max_attempts, execution_target)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [jobId, actor.sponsorUserId, actor.delegation.projectId, plan.inputs.analysisObjectId, dataset.id,
-          plan.release.jobType, db.INITIAL_JOB_STATUS, JSON.stringify(plan.parameters), maxAttempts]
+          plan.release.jobType, db.INITIAL_JOB_STATUS, JSON.stringify(plan.parameters), maxAttempts, executionTarget]
       );
       const runId = `run_${crypto.randomBytes(12).toString('hex')}`;
       await client.query(

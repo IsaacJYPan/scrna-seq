@@ -71,6 +71,7 @@ describe('traceomics CLI', () => {
     expect(buildRequest(parseArgs(['runs', 'cancel', '--project', 'p', `run_${'b'.repeat(24)}`])))
       .toEqual({ method: 'POST', path: `/projects/p/runs/run_${'b'.repeat(24)}/cancel`, body: {} });
     expect(buildRequest(parseArgs(['runs', 'list', '--project', 'p', '--mine', '--limit', '5'])).path).toBe('/projects/p/runs?scope=mine&limit=5');
+    expect(buildRequest(parseArgs(['targets', 'list', '--project', 'p'])).path).toBe('/projects/p/targets');
     expect(() => buildRequest(parseArgs(['runs', 'status', '--project', 'p', '../x']))).toThrow(/run id/);
   });
 });

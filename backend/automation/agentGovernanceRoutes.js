@@ -11,7 +11,7 @@ const { humanActorContext } = require('../actors/actorContext');
 const { READ_ROLES, MANAGE_ROLES } = require('../policy/agentCapabilities');
 const { listAutomationEvents } = require('./automationAudit');
 
-function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission }) {
+function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission, targets }) {
   const router = express.Router({ mergeParams: true });
 
   const route = (handler, { status = 200 } = {}) => async (req, res) => {
@@ -61,6 +61,10 @@ function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies,
     (req, actor) => proposals.reviewByHuman(actor, req.params.projectId, req.params.proposalId, req.body || {})));
 
   // Approved workflow releases, studies, and agent runs (docs/spec.md phase 2).
+  router.get('/compute-targets', route(async (req, actor) => {
+    await db.requireProjectRole(actor.userId, req.params.projectId, READ_ROLES);
+    return targets.list();
+  }));
   router.get('/workflow-releases', route((req, actor) => approvals.listForHuman(actor, req.params.projectId)));
   router.post('/workflow-releases/:releaseId/approve', route(
     (req, actor) => approvals.approve(actor, req.params.projectId, req.params.releaseId, req.body || {}), { status: 201 }));

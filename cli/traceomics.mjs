@@ -24,6 +24,7 @@ Commands:
   datasets list    --project <id> [--limit N]
   runs list        --project <id> [--mine] [--limit N]
   workflows list   --project <id>           Approved workflow releases
+  targets list     --project <id>           Compute targets (local, Slurm) and availability
   studies list     --project <id>
   studies show     --project <id> <study-id>
   plans create     --project <id> --study <id> --dataset <id> [--choice name=value ...]
@@ -119,6 +120,7 @@ export function buildRequest({ positional, options }, { readFile = (p) => readFi
     return { method: 'GET', path: `${projectPath(options)}/runs${query ? `?${query}` : ''}` };
   }
   if (group === 'workflows' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/workflows` };
+  if (group === 'targets' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/targets` };
   if (group === 'studies' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/studies` };
   if (group === 'studies' && action === 'show') return { method: 'GET', path: `${projectPath(options)}/studies/${oneId(rest, /^study_[0-9a-f]{24}$/, 'study')}` };
   if (group === 'plans' && action === 'show') return { method: 'GET', path: `${projectPath(options)}/plans/${oneId(rest, /^plan_[0-9a-f]{24}$/, 'plan')}` };

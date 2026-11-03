@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const database = require('./pgDatabase');
 const rWorkerBridge = require('./rWorkerBridge');
 const storage = require('./storage');
+const { createSlurmExecutor } = require('./executors/slurm');
 const { observedRuntimeMetadata } = require('./executionHistoryProjection');
 const {
   genericNoopHandler,
@@ -154,6 +155,20 @@ function createJobWorker(options = {}) {
     logger = console,
     now,
   } = options;
+
+  // Slurm target (phase 3): cluster execution for jobs routed to 'slurm'.
+  const slurmExecutor = options.slurmExecutor || createSlurmExecutor({ db });
+  async function slurmResourcesForJob(jobId) {
+    const { rows } = await db.query(
+      'SELECT reserved_cpus, reserved_memory_mib, max_wall_seconds FROM agent_runs WHERE job_id = $1', [jobId]);
+    return rows[0] ? { cpus: rows[0].reserved_cpus, memoryMiB: rows[0].reserved_memory_mib, maxWallSeconds: rows[0].max_wall_seconds } : null;
+  }
+  async function slurmCancelRequested(jobId) {
+    const { rows } = await db.query(
+      `SELECT (j.status = 'canceled' OR ar.cancel_requested_at IS NOT NULL) AS canceled
+         FROM jobs j LEFT JOIN agent_runs ar ON ar.job_id = j.id WHERE j.id = $1`, [jobId]);
+    return rows[0]?.canceled === true;
+  }
 
   // Resolve the R caller once. Tests inject `callR` directly (a fake) so no real
   // HTTP happens; in production the server passes rBridgeConfig (PLUMBER_PORT +
@@ -538,6 +553,11 @@ function createJobWorker(options = {}) {
         removeDurableObject: (key) => storageProvider.remove(key),
         runRBridgeOperation: runClaimedRBridge,
         callR: resolvedCallR,
+        slurm: slurmExecutor,
+        resolveStorageReadPath: (key) => storageProvider.resolveKey(key),
+        resolveStorageWritePath: (key) => storageProvider.prepareWrite(key),
+        getSlurmResources: () => slurmResourcesForJob(jobId),
+        isCanceled: () => slurmCancelRequested(jobId),
         getOwnedAnalysisObject: () =>
           db.getOwnedAnalysisObjectForJobByWorker(
             jobId,
@@ -1023,6 +1043,11 @@ function createJobWorker(options = {}) {
           // durable publication before/after this bridge call.
           runRBridgeOperation: runClaimedRBridge,
           callR: resolvedCallR,
+          slurm: slurmExecutor,
+          resolveStorageReadPath: (key) => storageProvider.resolveKey(key),
+          resolveStorageWritePath: (key) => storageProvider.prepareWrite(key),
+          getSlurmResources: () => slurmResourcesForJob(jobId),
+          isCanceled: () => slurmCancelRequested(jobId),
           // Claim-authorized resource resolvers derive every id from the trusted job
           // row and validate this worker's live lease/token. They deliberately do not
           // re-read project membership after claim: claim-time eligibility is the

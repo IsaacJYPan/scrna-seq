@@ -38,7 +38,8 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
   const [datasets, setDatasets] = useState([]);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
-  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], param: '', values: '', maxTrials: 4 });
+  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], param: '', values: '', maxTrials: 4, executionTarget: 'local' });
+  const [slurm, setSlurm] = useState(null);
   const canWrite = role === 'owner' || role === 'admin' || role === 'analyst';
 
   const load = useCallback(async () => {
@@ -54,6 +55,10 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
       setStudies(st?.studies || []);
       setRuns(rn?.runs || []);
       setDatasets(Array.isArray(ds) ? ds.filter((d) => d.uploadStatus === 'uploaded') : []);
+      if (api.listComputeTargets) {
+        const targets = await api.listComputeTargets(projectId).catch(() => null);
+        if (mounted.current) setSlurm((targets?.targets || []).find((t) => t.name === 'slurm' && t.available) || null);
+      }
     } catch (err) {
       if (mounted.current) setError(publicErrorMessage(err?.message, 'Approved workflows are unavailable.'));
     }
@@ -81,6 +86,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
     event.preventDefault();
     const body = {
       name: form.name, releaseId: selected?.id, datasetIds: form.datasetIds, maxTrials: Number(form.maxTrials),
+      ...(form.executionTarget === 'slurm' ? { executionTarget: 'slurm' } : {}),
     };
     if (form.param && form.values.trim()) {
       body.variations = { [form.param]: parseValues(form.values, selected?.parameterSchema?.[form.param]) };
@@ -159,6 +165,14 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
             <label className="space-y-1 text-xs font-bold text-textMuted">Allowed values (comma-separated)
               <input value={form.values} disabled={!form.param} onChange={(e) => setForm((f) => ({ ...f, values: e.target.value }))} placeholder="0.5, 0.8, 1.2" className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
+            {slurm && (
+              <label className="space-y-1 text-xs font-bold text-textMuted">Runs on
+                <select value={form.executionTarget} onChange={(e) => setForm((f) => ({ ...f, executionTarget: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
+                  <option value="local">This installation</option>
+                  <option value="slurm">Slurm cluster{slurm.partition ? ` (${slurm.partition})` : ''}</option>
+                </select>
+              </label>
+            )}
             <label className="space-y-1 text-xs font-bold text-textMuted">Max trials
               <input type="number" min={1} max={100} value={form.maxTrials} onChange={(e) => setForm((f) => ({ ...f, maxTrials: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
@@ -178,7 +192,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
               <p className="font-bold text-text">{s.name} <span className="ml-1 text-xs uppercase text-textMuted">{s.status}</span></p>
               {s.status === 'open' && canWrite && <button type="button" disabled={Boolean(busy)} onClick={() => act(`close:${s.id}`, () => api.closeStudy(projectId, s.id))} className="btn btn-secondary text-sm">Close study</button>}
             </div>
-            <p className="mt-1 text-xs text-textMuted">Varies: {Object.entries(s.variations).map(([k, v]) => `${k} ∈ {${v.join(', ')}}`).join('; ') || 'nothing'} · Max {s.maxTrials} trials · {Math.round(s.maxCpuSeconds / 3600)} CPU-hours</p>
+            <p className="mt-1 text-xs text-textMuted">Varies: {Object.entries(s.variations).map(([k, v]) => `${k} ∈ {${v.join(', ')}}`).join('; ') || 'nothing'} · Max {s.maxTrials} trials · {Math.round(s.maxCpuSeconds / 3600)} CPU-hours · Runs on {s.executionTarget === 'slurm' ? 'Slurm' : 'this installation'}</p>
           </article>
         ))}
       </div>
@@ -189,7 +203,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
           <article key={r.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface p-4 text-sm">
             <div className="min-w-0">
               <p className="text-text"><span className="font-bold">{r.studyName}</span> · trial {r.trialNumber} · {r.agent.displayName}</p>
-              <p className="text-xs text-textMuted">Choices: {Object.entries(r.choices).map(([k, v]) => `${k}=${v}`).join(', ') || 'defaults'} · Reserved {r.reservation.cpuSeconds / 3600} CPU-h</p>
+              <p className="text-xs text-textMuted">Choices: {Object.entries(r.choices).map(([k, v]) => `${k}=${v}`).join(', ') || 'defaults'} · Reserved {r.reservation.cpuSeconds / 3600} CPU-h · {r.executionTarget === 'slurm' ? 'Slurm' : 'local'}</p>
             </div>
             <div className="flex items-center gap-2">
               <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span>

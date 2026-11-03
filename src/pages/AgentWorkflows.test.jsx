@@ -54,4 +54,24 @@ describe('AgentWorkflows', () => {
     }));
     expect(screen.queryByRole('button', { name: /^revoke$/i })).not.toBeInTheDocument();
   });
+
+  it('offers the Slurm target only when the cluster is available and sends it with the study', async () => {
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }] }));
+    window.electronAPI.listComputeTargets = vi.fn(async () => ({ targets: [{ name: 'local', available: true }, { name: 'slurm', available: true, partition: 'normal' }] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'HPC sweep' } });
+    fireEvent.click(await screen.findByLabelText('pbmc.h5'));
+    fireEvent.change(await screen.findByLabelText('Runs on'), { target: { value: 'slurm' } });
+    fireEvent.click(screen.getByRole('button', { name: /create study/i }));
+    await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({ executionTarget: 'slurm' })));
+  });
+
+  it('hides the target choice when no cluster is available', async () => {
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }] }));
+    window.electronAPI.listComputeTargets = vi.fn(async () => ({ targets: [{ name: 'local', available: true }, { name: 'slurm', available: false }] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    await screen.findByLabelText('Study name');
+    await waitFor(() => expect(window.electronAPI.listComputeTargets).toHaveBeenCalled());
+    expect(screen.queryByLabelText('Runs on')).not.toBeInTheDocument();
+  });
 });

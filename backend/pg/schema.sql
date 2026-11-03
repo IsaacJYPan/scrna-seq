@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261034, now())
+VALUES ('traceomics.runtime', 20261035, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -2312,3 +2312,27 @@ DROP TRIGGER IF EXISTS trg_result_acceptance_immutable ON result_acceptances;
 CREATE TRIGGER trg_result_acceptance_immutable
   BEFORE UPDATE OR DELETE ON result_acceptances
   FOR EACH ROW EXECUTE FUNCTION reject_result_acceptance_mutation();
+
+-- ── Slurm execution target (docs/spec.md phase 3) ────────────────────────────
+-- Jobs run locally unless routed to the configured cluster target. The dispatch
+-- record is written before sbatch so a restarted worker re-attaches to the
+-- submitted Slurm job (by stored id, or by its tro-<jobId> name) instead of
+-- submitting it again.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS execution_target TEXT NOT NULL DEFAULT 'local';
+DO $$ BEGIN
+  ALTER TABLE jobs ADD CONSTRAINT jobs_execution_target_check CHECK (execution_target IN ('local', 'slurm'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE study_envelopes ADD COLUMN IF NOT EXISTS execution_target TEXT NOT NULL DEFAULT 'local';
+DO $$ BEGIN
+  ALTER TABLE study_envelopes ADD CONSTRAINT study_envelopes_execution_target_check CHECK (execution_target IN ('local', 'slurm'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS hpc_dispatches (
+  job_id        TEXT PRIMARY KEY REFERENCES jobs(id),
+  target        TEXT NOT NULL,
+  remote_dir    TEXT NOT NULL,
+  slurm_job_id  TEXT CHECK (slurm_job_id IS NULL OR slurm_job_id ~ '^[0-9]{1,20}$'),
+  state         TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

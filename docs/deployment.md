@@ -232,7 +232,7 @@ publish partial versions. A lost response is inspected through its existing
 receipt, without repeating serialization. Older pinned images retain their
 original 20 MiB output and 200/250 MiB input limits until updated.
 
-This release requires database schema contract `20261034`. Apply
+This release requires database schema contract `20261035`. Apply
 `npm run init:postgres` with the migration owner's database credentials before
 starting the upgraded services. It adds delegated-agent principals, project
 delegations, hashed agent credentials, inert proposals, an append-only

@@ -57,7 +57,7 @@ function createRateLimiter() {
   };
 }
 
-function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals }) {
+function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals, targets }) {
   const router = express.Router();
   const rateLimit = createRateLimiter();
 
@@ -171,6 +171,7 @@ function automationRoutes({ db, delegations, proposals, readModels, studies, adm
     schema: 'traceomics.automation.workflows.v1',
     releases: await approvals.listApprovedForProject(actor.delegation.projectId),
   })));
+  router.get('/projects/:projectId/targets', route('metadata.read', () => targets.list()));
   router.get('/projects/:projectId/studies', route('workflow.plan', async (req, actor) => ({
     schema: 'traceomics.automation.studies.v1',
     studies: await studies.listForAgent(actor),

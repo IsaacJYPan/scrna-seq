@@ -1899,6 +1899,7 @@ const agentAdmission = require('./backend/resourceAdmission/admission').createAd
 const agentServices = {
   db, delegations: agentDelegations, proposals: agentProposals,
   approvals: agentApprovals, studies: agentStudies, admission: agentAdmission,
+  targets: require('./backend/executors/targets').createTargetDirectory({ db }),
 };
 app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes(agentServices));
 app.use('/api/automation/v1', automationRoutes({
@@ -2511,7 +2512,8 @@ function sendProjectResourceError(res, e, context) {
   }
   switch (e.code) {
     case 'EXPERT_R_UNAVAILABLE':
-      return res.status(503).json({ error: e.message });
+    case 'TARGET_UNAVAILABLE':
+      return res.status(503).json({ error: e.message, ...(e.code === 'TARGET_UNAVAILABLE' ? { code: e.code } : {}) });
     case 'NOT_FOUND':
     case 'PARENT_NOT_FOUND':
     case 'DATASET_NOT_FOUND':
@@ -3349,6 +3351,7 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
       datasetId: body.datasetId,
       jobType: body.jobType,
       parameters: jobParameters,
+      ...(body.executionTarget === undefined ? {} : { executionTarget: body.executionTarget }),
       ...(body.requestId === undefined ? {} : { requestId: body.requestId }),
     }, submissionHash);
     res.setHeader('Cache-Control', 'no-store');

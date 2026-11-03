@@ -70,7 +70,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261034;
+const SCHEMA_CONTRACT_VERSION = 20261035;
 
 let pool = null;
 
@@ -751,7 +751,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
-      result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
+      hpc_dispatches, result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
       automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
       research_analysis_snapshot_blobs, research_analysis_snapshot_preparations,
@@ -1555,6 +1555,7 @@ async function deleteExpiredDemoGuest(userId) {
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
       await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM hpc_dispatches WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ANY($1::text[]))', [projectIds]);
       for (const table of ['result_acceptances', 'agent_runs', 'execution_plans', 'study_envelopes', 'workflow_approvals']) {
         await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
       }
@@ -2799,6 +2800,7 @@ function rowToJob(row) {
     resultAnalysisObjectId: row.result_analysis_object_id,
     datasetId: row.dataset_id,
     jobType: row.job_type,
+    executionTarget: row.execution_target || 'local',
     status: row.status,
     parameters: JSON.parse(row.parameters_json || '{}'),
     logs: JSON.parse(row.logs_json || '[]'),
@@ -3064,6 +3066,18 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
       && (input.analysisObjectId === undefined || input.analysisObjectId === null)) {
     throw codedError('INVALID_PARAMETERS', `${jobType} requires a source analysisObjectId.`);
   }
+  const executionTarget = input.executionTarget === undefined || input.executionTarget === null ? 'local' : input.executionTarget;
+  if (!['local', 'slurm'].includes(executionTarget)) {
+    throw codedError('INVALID_PARAMETERS', 'executionTarget must be local or slurm.');
+  }
+  if (executionTarget === 'slurm') {
+    if (!['seurat.pipeline.v1', 'seurat.multisample.v1'].includes(jobType)) {
+      throw codedError('INVALID_PARAMETERS', `${jobType} cannot run on the Slurm target yet.`);
+    }
+    if (!require('./executors/slurm').slurmConfig().enabled) {
+      throw codedError('TARGET_UNAVAILABLE', 'The Slurm target is not configured for this installation.');
+    }
+  }
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
   let storedParameters = parameters;
@@ -3196,8 +3210,8 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
     const { rows } = await (client ? client.query.bind(client) : query)(
       `WITH new_job AS (INSERT INTO jobs
          (id, owner_user_id, project_id, retry_of_job_id, analysis_object_id,
-          result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts, execution_target)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *), retained_source AS (
          INSERT INTO execution_source_versions
            (id, project_id, owner_user_id, job_id, language, source_code, source_sha256)
@@ -3207,7 +3221,7 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
          RETURNING id
        ) SELECT * FROM new_job`,
       [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
-        jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
+        jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid), executionTarget]
     );
     const job = rowToJob(rows[0]);
     if (requestId) {
@@ -3265,6 +3279,7 @@ async function retryProjectJob(userId, projectId, jobId) {
       analysisObjectId: source.analysisObjectId,
       jobType: source.jobType,
       parameters: source.parameters,
+      executionTarget: source.executionTarget,
     };
     if (source.datasetId !== null && source.datasetId !== undefined) {
       retryInput.datasetId = source.datasetId;

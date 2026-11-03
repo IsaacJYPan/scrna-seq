@@ -2,6 +2,13 @@
 
 const SAFE_HANDLER_DOMAIN_MESSAGES = Object.freeze({
   ANALYSIS_OBJECT_NOT_FOUND: 'Analysis object not found.',
+  SLURM_UNAVAILABLE: 'The Slurm target is not configured for this installation.',
+  SLURM_SUBMIT_FAILED: 'The cluster did not accept the job. Check the Slurm partition and account settings.',
+  SLURM_COMMAND_FAILED: 'A cluster command failed. Check the login node connection and try again.',
+  SLURM_JOB_FAILED: 'The Slurm job did not complete. See the job log for its final state and output.',
+  SLURM_STATE_UNKNOWN: 'The Slurm job state could not be determined. Check the cluster before retrying.',
+  CHECKPOINT_INTEGRITY_FAILED: 'The cluster result did not match its recorded checksum and was discarded.',
+  JOB_CANCELED: 'The job was canceled.',
   CELLCHAT_PACKAGES_UNAVAILABLE:
     'CellChat is unavailable in the current analysis runtime. Ask an operator to enable the required package profile.',
   CELLCHAT_GROUPING_UNAVAILABLE:

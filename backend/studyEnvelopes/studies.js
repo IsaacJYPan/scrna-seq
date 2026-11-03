@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { READ_ROLES, WRITE_ROLES, codedError } = require('../policy/agentCapabilities');
 const { recordAutomationEvent } = require('../automation/automationAudit');
 const { canonicalJson, validateScalar } = require('../workflowTrust/catalog');
+const { slurmConfig } = require('../executors/slurm');
 
 const MAX_INPUTS = 10;
 const MAX_VALUES_PER_VARIATION = 10;
@@ -47,6 +48,7 @@ function publicStudy(row, trials = null) {
     maxTrials: row.max_trials,
     maxOutstandingRuns: row.max_outstanding_runs,
     maxCpuSeconds: Number(row.max_cpu_seconds),
+    executionTarget: row.execution_target || 'local',
     status: row.status,
     closedAt: row.closed_at,
     acceptedRunId: row.accepted_run_id,
@@ -60,7 +62,7 @@ function createStudyService({ db, withTransaction, approvals }) {
   async function create(actor, projectId, body = {}) {
     requireHuman(actor);
     const allowed = ['name', 'objective', 'releaseId', 'datasetIds', 'fixedParameters', 'variations',
-      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds'];
+      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds', 'executionTarget'];
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw codedError('INVALID_INPUT', 'A JSON object is required.', 400);
     for (const key of Object.keys(body)) {
       if (!allowed.includes(key)) throw codedError('UNKNOWN_FIELD', `Unknown field: ${key.slice(0, 64)}.`, 400);
@@ -114,6 +116,11 @@ function createStudyService({ db, withTransaction, approvals }) {
         || new Set(datasetIds).size !== datasetIds.length) {
       throw codedError('INVALID_INPUT', `datasetIds must list 1-${MAX_INPUTS} distinct datasets.`, 400);
     }
+    const executionTarget = body.executionTarget === undefined ? 'local' : body.executionTarget;
+    if (!['local', 'slurm'].includes(executionTarget)) throw codedError('INVALID_INPUT', 'executionTarget must be local or slurm.', 400);
+    if (executionTarget === 'slurm' && !slurmConfig().enabled) {
+      throw codedError('TARGET_UNAVAILABLE', 'The Slurm target is not configured for this installation.', 409);
+    }
     const maxTrials = intInRange(body.maxTrials, 'maxTrials', 1, 100, 4);
     const maxOutstandingRuns = intInRange(body.maxOutstandingRuns, 'maxOutstandingRuns', 1, 10, 1);
     const maxCpuSeconds = intInRange(body.maxCpuSeconds, 'maxCpuSeconds', 1, 100000000,
@@ -153,10 +160,10 @@ function createStudyService({ db, withTransaction, approvals }) {
       const { rows } = await client.query(
         `INSERT INTO study_envelopes
            (id, project_id, created_by_user_id, name, objective, release_id, approval_id, inputs_json, protected_json,
-            variations_json, max_trials, max_outstanding_runs, max_cpu_seconds)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13) RETURNING *`,
+            variations_json, max_trials, max_outstanding_runs, max_cpu_seconds, execution_target)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14) RETURNING *`,
         [id, String(projectId), actor.userId, name, objective, release.id, approvalRows[0].id, JSON.stringify(inputs),
-          canonicalJson(fixed), canonicalJson(variations), maxTrials, maxOutstandingRuns, maxCpuSeconds]
+          canonicalJson(fixed), canonicalJson(variations), maxTrials, maxOutstandingRuns, maxCpuSeconds, executionTarget]
       );
       await recordAutomationEvent(client, {
         projectId, actor, action: 'study.created', decision: 'allowed', targetType: 'study', targetId: id,

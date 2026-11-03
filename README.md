@@ -53,8 +53,8 @@ Researchers can delegate narrow, revocable authority to an AI agent from
 **Agent access** in a project. The agent gets its own credential and uses the
 [automation API and CLI](docs/agent-automation.md); it cannot use your session.
 Agents can read bounded metadata, submit inert code/method proposals, and run
-approved workflows inside studies you define; a person accepts results. HPC
-targets follow the [design](docs/spec.md).
+approved workflows inside studies you define; a person accepts results. Seurat
+runs can also go to a Slurm cluster ([setup](docs/agent-automation.md#slurm-execution-target-phase-3)).
 
 ## Development
 
