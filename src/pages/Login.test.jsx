@@ -17,6 +17,15 @@ describe('Login registration policy', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
+  it('offers an explicitly public compute-free example without submitting login or starting a guest session', async () => {
+    auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false, demoMode: true });
+    render(<Login onLogin={vi.fn()} allowDemo={false} />);
+    const link = screen.getByRole('link', { name: 'Inspect a public saved example' });
+    expect(link.href).toBe(window.location.origin + '/#/examples/qc-retention/v1');
+    expect(link).toHaveAttribute('target', '_blank'); expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    await screen.findByText(/Accounts are provisioned/);
+    expect(auth.login).not.toHaveBeenCalled(); expect(auth.startDemoGuest).not.toHaveBeenCalled();
+  });
 
   it('keeps a private shared-link login on its intended route even when a temporary demo is available', async () => {
     auth.registrationPolicy.mockResolvedValue({ registrationEnabled: false, demoMode: true });

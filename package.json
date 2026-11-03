@@ -100,6 +100,7 @@
     "test:analysis-embedding-publications-browser": "npm run build && node scripts/verify-analysis-embedding-publications-ui.js",
     "test:analysis-inert-publications-browser": "npm run build && node scripts/verify-analysis-inert-publications-ui.js",
     "test:analysis-shared-links-browser": "npm run build && node scripts/verify-analysis-shared-links-ui.js",
+    "test:public-saved-example-browser": "npm run build && node scripts/verify-public-saved-example-ui.js",
     "test:existing-work-browser": "npm run build && node scripts/verify-existing-work-ui.js",
     "test:retained-workflows-browser": "npm run build && node scripts/verify-retained-workflows-ui.js",
     "test:notebook-documents-browser": "npm run build && node scripts/verify-notebook-documents-ui.js",

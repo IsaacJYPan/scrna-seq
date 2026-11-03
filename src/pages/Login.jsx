@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Shield, Lock, Mail, User, Microscope, AlertTriangle, CheckCircle, Eye, EyeOff, Sun, Moon } from 'lucide-react';
 import auth from '../auth';
 import passwordPolicy from '../../shared/passwordPolicyContract.json';
+import { buildPublicExampleUrl } from '../examples/publicExampleRoute';
 
 export default function Login({ onLogin, notice = '', theme = 'light', setTheme, allowDemo = true, submitLabel = 'Open Workbench', pendingLabel = 'Opening workbench…' }) {
   const [mode, setMode] = useState('login'); // 'login' | 'signup'
@@ -39,6 +40,7 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
   const passwordMeetsLength = Array.from(password).length >= passwordPolicy.minLength;
   const passwordsMatch = passwordConfirmation.length > 0 && passwordConfirmation === password;
   const isDark = theme === 'dark';
+  const publicExampleUrl = buildPublicExampleUrl(window.location.href);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -307,6 +309,10 @@ export default function Login({ onLogin, notice = '', theme = 'light', setTheme,
               )}
             </button>
           </form>
+          {publicExampleUrl && <div className="mt-5 border-t border-border pt-4 text-center">
+            <a href={publicExampleUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-primary underline">Inspect a public saved example</a>
+            <p className="mt-1 text-xs text-textMuted">Synthetic findings · No sign-in or compute session · Opens a new tab</p>
+          </div>}
 
         </div>
       </div>

@@ -12,6 +12,7 @@ vi.mock('../demo/DemoRouter', () => ({ default: function Workspace() {
 vi.mock('./SharedSnapshotEntry', () => ({ default: function Reader({ target, onOpenWorkspace }) {
   mounted.reader(target); return <main><h1>Exact shared reader</h1><p>{target.publicationId}</p><button onClick={onOpenWorkspace}>Open workspace</button></main>;
 } }));
+vi.mock('../examples/PublicSavedExample', () => ({ default: ({ onOpenWorkspace }) => <main><h1>Public saved example</h1><button onClick={onOpenWorkspace}>Open workspace</button></main> }));
 const target = { serviceId: 'svc_' + 'a'.repeat(32), projectId: 'proj_' + 'b'.repeat(16), analysisId: 'ra_' + 'c'.repeat(24),
   publicationId: 'aspub_' + 'd'.repeat(24), snapshotSha256: 'e'.repeat(64) };
 function navigate(hash) { window.history.replaceState(null, '', '/' + hash); fireEvent(window, new HashChangeEvent('hashchange')); }
@@ -19,6 +20,25 @@ beforeEach(() => { vi.clearAllMocks(); window.history.replaceState(null, '', '/'
 afterEach(cleanup);
 
 describe('shared snapshot route isolation and workspace continuity', () => {
+  it('opens the explicit public example without mounting a signed-in reader or workspace', async () => {
+    navigate('#/examples/qc-retention/v1'); render(<SharedSnapshotRouter />);
+    expect(await screen.findByRole('heading', { name: 'Public saved example' })).toBeInTheDocument();
+    expect(mounted.workspace).not.toHaveBeenCalled(); expect(mounted.reader).not.toHaveBeenCalled();
+  });
+  it('does not turn an unsupported public example into a private workspace or a different example', () => {
+    navigate('#/examples/qc-retention/v2'); render(<SharedSnapshotRouter />);
+    expect(screen.getByRole('heading', { name: 'This public example link could not be read' })).toBeInTheDocument();
+    expect(mounted.workspace).not.toHaveBeenCalled(); expect(mounted.reader).not.toHaveBeenCalled();
+  });
+  it('offers a separate public-example tab while retaining an existing dirty workspace', async () => {
+    render(<SharedSnapshotRouter />); const draft = await screen.findByLabelText('Existing analysis draft');
+    fireEvent.change(draft, { target: { value: 'Keep this scientific draft' } }); navigate('#/examples/qc-retention/v1');
+    const link = screen.getByRole('link', { name: 'Open public example in new tab' });
+    expect(link).toHaveAttribute('target', '_blank'); expect(link.href).toBe(window.location.origin + '/#/examples/qc-retention/v1');
+    expect(screen.getByRole('complementary', { name: 'Public example link' })).toBeInTheDocument();
+    expect(draft).toHaveValue('Keep this scientific draft'); expect(mounted.workspace).toHaveBeenCalledTimes(1);
+    expect(mounted.reader).not.toHaveBeenCalled(); expect(mounted.teardown).not.toHaveBeenCalled();
+  });
   it('mounts only the exact reader on a fresh shared URL', async () => {
     navigate(buildSharedSnapshotHash(target)); render(<SharedSnapshotRouter />);
     expect(await screen.findByRole('heading', { name: 'Exact shared reader' })).toBeInTheDocument();
