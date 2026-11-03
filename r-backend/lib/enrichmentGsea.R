@@ -259,21 +259,25 @@ run_enrichment_gsea_analysis <- function(input_obj, p) {
     gsea_error <- NULL
     gsea_result <- tryCatch(
       withCallingHandlers(
-        clusterProfiler::gseGO(
-          geneList = gene_list,
-          ont = "BP",
-          OrgDb = org_db,
-          keyType = "ENTREZID",
-          exponent = 1,
-          minGSSize = p$min_gene_set_size,
-          maxGSSize = p$max_gene_set_size,
-          eps = 1e-10,
-          pvalueCutoff = 1,
-          pAdjustMethod = "BH",
-          verbose = FALSE,
-          seed = TRUE,
-          by = "fgsea"
-        ),
+        do.call(clusterProfiler::gseGO, c(
+          list(
+            geneList = gene_list,
+            ont = "BP",
+            OrgDb = org_db,
+            keyType = "ENTREZID",
+            exponent = 1,
+            minGSSize = p$min_gene_set_size,
+            maxGSSize = p$max_gene_set_size,
+            eps = 1e-10,
+            pvalueCutoff = 1,
+            pAdjustMethod = "BH",
+            verbose = FALSE,
+            seed = TRUE
+          ),
+          # Older clusterProfiler releases select the method with `by`; newer
+          # ones always use fgsea and reject the argument.
+          if ("by" %in% names(formals(clusterProfiler::gseGO))) list(by = "fgsea") else list()
+        )),
         warning = function(w) {
           gsea_warned <<- TRUE
           invokeRestart("muffleWarning")
