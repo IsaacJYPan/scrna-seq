@@ -108,9 +108,14 @@ async function main() {
       }
     });
     page.on('pageerror', error => consoleErrors.push(error.message));
-    page.on('requestfailed', request => requestFailures.push(
-      `${request.method()} ${request.url()} ${request.failure()?.errorText || 'failed'}`
-    ));
+    page.on('requestfailed', request => {
+      const error = request.failure()?.errorText || 'failed';
+      // The installation identity read is abortable by design (it is superseded
+      // when the session context changes); a client-side cancel is not a failure.
+      if (error === 'net::ERR_ABORTED' && request.method() === 'GET'
+        && new URL(request.url()).pathname === '/api/auth/installation') return;
+      requestFailures.push(`${request.method()} ${request.url()} ${error}`);
+    });
     page.on('response', response => {
       if (response.status() >= 500) {
         serverErrors.push(`${response.status()} ${response.request().method()} ${response.url()}`);
@@ -178,6 +183,10 @@ async function main() {
       serverFigureExportEnabled: false,
     }));
     await page.route('**/api/auth/session*', route => fulfill(route, { user, authVia: 'cookie' }));
+    // Job submission binds its recovery receipt to the installation identity.
+    await page.route('**/api/auth/installation', route => fulfill(route, {
+      schema: 'traceomics.installation.v1', installationId: `svc_${'a'.repeat(32)}`, userId: user.id,
+    }));
     await page.route('**/api/pipeline-registry/capabilities*', route => fulfill(route, { canPublishPipelineManifests: false }));
     await page.route('**/api/expert-r/capabilities*', route => fulfill(route, { expertREnabled: false, expertRProfile: null }));
     await page.route('**/api/organizations**', route => fulfill(route, [organization]));
@@ -245,7 +254,11 @@ async function main() {
           analysisObjectId: object.id, datasetId: null, resultAnalysisObjectId: null,
           parameters: payload.parameters, createdAt: '2026-07-18T00:00:00.000Z',
         };
-        return fulfill(route, createdJob, 201);
+        // The client accepts a submission only with its exact durable receipt.
+        return fulfill(route, { ...createdJob, submission: {
+          schema: 'traceomics.job-submission.v1', requestId: payload.requestId, projectId: project.id,
+          jobId: createdJob.id, requestHash: 'c'.repeat(64), createdAt: createdJob.createdAt,
+        } }, 201);
       }
       if (pathname === `${jobBase}/job_cellchat_browser`) return fulfill(route, createdJob || {});
       if (pathname === `${jobBase}/job_cellchat_browser/logs`) {
@@ -306,7 +319,9 @@ async function main() {
     await page.getByRole('heading', { name: 'Recorded run settings', exact: true })
       .waitFor({ state: 'visible', timeout: 15000 });
     assert.equal(launchBodies.length, 1, 'CellChat created exactly one durable job.');
-    assert.deepEqual(launchBodies[0], {
+    const { requestId: launchRequestId, ...launchBody } = launchBodies[0];
+    assert.match(launchRequestId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'CellChat submits with a recovery request ID.');
+    assert.deepEqual(launchBody, {
       jobType: 'cellchat.infer.v1', analysisObjectId: object.id,
       parameters: {
         groupBy: 'seurat_clusters', assay: 'RNA', species: 'human',
