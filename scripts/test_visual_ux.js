@@ -575,7 +575,8 @@ async function prepareVisualPage(context, { logConsole = true, fullPipeline = fa
     const err = req.failure()?.errorText || 'unknown';
     // These read-only requests are deliberately cancelled by their owners on
     // tab/context changes. Keep real failures and HTTP errors strict.
-    const cancelledRead = err === 'net::ERR_ABORTED' && /\/(reduction-results|execution-history|artifact-versions|run-monitoring)([/?]|$)/.test(new URL(url).pathname);
+    const cancelledRead = err === 'net::ERR_ABORTED' && (/\/(reduction-results|execution-history|artifact-versions|run-monitoring)([/?]|$)/.test(new URL(url).pathname)
+      || (req.method() === 'GET' && new URL(url).pathname === '/api/auth/installation'));
     if (!cancelledRead && !isIgnorableError(err)) {
       networkFailures.push(`${req.method()} ${url} → ${err}`);
       console.log(`[NETWORK FAIL] ${req.method()} ${url} → ${err}`);
