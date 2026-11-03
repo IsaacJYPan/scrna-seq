@@ -10,6 +10,13 @@ const { chromium } = require('playwright');
 
 const ROOT = path.resolve(__dirname, '..');
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jf1sAAAAASUVORK5CYII=', 'base64');
+// Artifact versions sit inside a collapsed "Inspect or import artifact files"
+// panel on Runs & Results; open it after each navigation.
+async function openArtifactInspector(page) {
+  const summary = page.locator('summary', { hasText: 'Inspect or import artifact files' });
+  await summary.waitFor();
+  if (!(await summary.evaluate(node => node.parentElement.open))) await summary.click();
+}
 function assert(value, message) { if (!value) throw new Error(message); }
 
 async function verifyArtifactVersionsUi({ page, artifactDirectory, corruptVersion, revokeAccess } = {}) {
@@ -67,6 +74,7 @@ async function verifyArtifactVersionsUi({ page, artifactDirectory, corruptVersio
   await page.screenshot({ path: path.join(directory, 'immutable-table-versions.png'), fullPage: true });
   checks.push('Replacement creates a second exact version while original contents remain inspectable.');
   await page.reload({ waitUntil: 'domcontentloaded' });
+  await openArtifactInspector(page);
   await region.getByRole('button', { name: new RegExp(`^${tableName} · v1`) }).click();
   await verified();
   assert(await region.getByRole('cell', { name: 'one, two', exact: true }).isVisible(), 'Immutable original did not survive page reload.');
@@ -189,6 +197,7 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
     page.on('response', response => { if (response.url().startsWith(backendOrigin)) responses.push({ status: response.status(), path: new URL(response.url()).pathname }); });
     const url = origin + '/scratch/' + name + '/index.html';
     await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await openArtifactInspector(page);
     const region = page.getByRole('region', { name: 'Artifact versions', exact: true });
     await region.getByRole('button', { name: /^Saved analysis/ }).click();
     await region.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
@@ -203,7 +212,7 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
     });
     const viewerContext = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
     await viewerContext.addCookies([{ name: cookie, value: viewer.token, url: backendOrigin, httpOnly: true, sameSite: 'Lax' }]);
-    const viewerPage = await viewerContext.newPage(); await viewerPage.goto(url, { waitUntil: 'domcontentloaded' });
+    const viewerPage = await viewerContext.newPage(); await viewerPage.goto(url, { waitUntil: 'domcontentloaded' }); await openArtifactInspector(viewerPage);
     const viewerRegion = viewerPage.getByRole('region', { name: 'Artifact versions', exact: true });
     await viewerRegion.getByText('No saved artifact files are available for your workspace yet.', { exact: true }).waitFor();
     assert(await viewerRegion.getByLabel('Artifact file').count() === 0, 'Viewer received writer-only import controls.');

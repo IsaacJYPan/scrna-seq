@@ -8,6 +8,12 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { chromium } = require('playwright');
 const ROOT = path.resolve(__dirname, '..');
+// Execution history mounts only after its Runs & Results toggle is expanded.
+async function openExecutionHistory(page) {
+  const toggle = page.locator('button[aria-controls="execution-history-panel"]');
+  await toggle.waitFor();
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+}
 function assert(condition, message) { if (!condition) throw new Error(message); }
 
 async function verifyExecutionHistoryUi({ page, fixtures, newSource, directory, corruptOutput, revokeAccess }) {
@@ -154,14 +160,14 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
     page.on('pageerror', error => { errors.push(error.message); });
     page.on('request', request => { if (request.url().startsWith(backendOrigin)) requests.push({ method: request.method(), path: new URL(request.url()).pathname }); });
     page.on('response', response => { if (response.url().startsWith(backendOrigin)) responses.push({ status: response.status(), path: new URL(response.url()).pathname }); });
-    const url = origin + '/scratch/' + name + '/index.html'; await page.goto(url, { waitUntil: 'domcontentloaded' });
+    const url = origin + '/scratch/' + name + '/index.html'; await page.goto(url, { waitUntil: 'domcontentloaded' }); await openExecutionHistory(page);
     const result = await verifyExecutionHistoryUi({ page, fixtures, newSource, directory,
       corruptOutput: async () => { fs.writeFileSync(provider.resolveKey(fixtures.result.key), 'gene,score\nCHANGED,9\n'); },
       revokeAccess: async () => { await db.query('DELETE FROM project_members WHERE project_id=$1 AND user_id=$2', [project.id, owner.user.id]); },
     });
     const viewerContext = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
     await viewerContext.addCookies([{ name: cookie, value: viewer.token, url: backendOrigin, httpOnly: true, sameSite: 'Lax' }]);
-    const viewerPage = await viewerContext.newPage(); await viewerPage.goto(url, { waitUntil: 'domcontentloaded' });
+    const viewerPage = await viewerContext.newPage(); await viewerPage.goto(url, { waitUntil: 'domcontentloaded' }); await openExecutionHistory(viewerPage);
     const viewerRegion = viewerPage.getByRole('region', { name: 'Execution history', exact: true });
     await viewerRegion.getByRole('button', { name: new RegExp(newSource.id) }).click();
     await viewerRegion.getByText(/require separate sharing authorization/).waitFor();

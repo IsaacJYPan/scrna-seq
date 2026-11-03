@@ -328,6 +328,9 @@ async function main() {
           && failure.responseStatus < 400)
         || (failure.responseStatus === 401
           && new URL(failure.url).pathname === '/api/auth/session')
+        // The installation identity read is cancelled by its owner when the
+        // session context changes (sign-in, account switch, logout).
+        || (failure.method === 'GET' && new URL(failure.url).pathname === '/api/auth/installation')
       )
     ));
     assert(serverErrors.length === 0, `Browser observed server errors: ${serverErrors.join(' | ')}`);
