@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseArgs, buildRequest, run, EXIT, defaultRequestId } from './traceomics.mjs';
+import { parseArgs, buildRequest, run, EXIT, defaultRequestId, parseChoice } from './traceomics.mjs';
 
 const TOKEN = `tro_agent_${'A'.repeat(43)}`;
 
@@ -57,5 +57,20 @@ describe('traceomics CLI', () => {
     expect(await run(['context'], { env: { TRACEOMICS_AGENT_TOKEN: TOKEN }, stdout: sink(), stderr: err2,
       fetchImpl: async () => { throw new Error('reset'); } })).toBe(EXIT.UNAVAILABLE);
     expect(err2.text()).toMatch(/outcome is unknown/);
+  });
+
+  it('builds plan and run requests with typed choices and stable request ids', () => {
+    const planReq = buildRequest(parseArgs(['plans', 'create', '--project', 'proj_1', '--study', 'study_x', '--dataset', 'ds_1',
+      '--choice', 'clusterResolution=0.8', '--choice', 'normalizationMethod=SCTransform', '--choice', 'seed=null']));
+    expect(planReq.body).toEqual({ studyId: 'study_x', datasetId: 'ds_1',
+      choices: { clusterResolution: 0.8, normalizationMethod: 'SCTransform', seed: null } });
+    expect(parseChoice('true')).toBe(true);
+    expect(parseChoice('{"a":1}')).toBe('{"a":1}');
+    const args = ['runs', 'submit', '--project', 'proj_1', '--plan', `plan_${'a'.repeat(24)}`, '--digest', 'f'.repeat(64)];
+    expect(buildRequest(parseArgs(args)).body.requestId).toBe(buildRequest(parseArgs(args)).body.requestId);
+    expect(buildRequest(parseArgs(['runs', 'cancel', '--project', 'p', `run_${'b'.repeat(24)}`])))
+      .toEqual({ method: 'POST', path: `/projects/p/runs/run_${'b'.repeat(24)}/cancel`, body: {} });
+    expect(buildRequest(parseArgs(['runs', 'list', '--project', 'p', '--mine', '--limit', '5'])).path).toBe('/projects/p/runs?scope=mine&limit=5');
+    expect(() => buildRequest(parseArgs(['runs', 'status', '--project', 'p', '../x']))).toThrow(/run id/);
   });
 });

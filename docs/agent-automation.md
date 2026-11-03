@@ -8,7 +8,7 @@ describes that is not listed here as implemented is not available.
 | --- | --- |
 | 0. Authority inventory and contracts | Implemented for the routes below |
 | 1. Read-only agents and inert proposals | Implemented |
-| 2. Approved local workflow execution | Not started; requests return `CAPABILITY_UNAVAILABLE` |
+| 2. Approved local workflow execution | Implemented for one release (Seurat QC/clustering) |
 | 3. Qualified HPC target | Not started |
 | 4. Isolated development | Not started |
 | 5. Bounded protocol automation / MCP | Not started |
@@ -46,16 +46,19 @@ describes that is not listed here as implemented is not available.
 | `metadata.read` | Delegable | any project role |
 | `results.read` | Delegable | any project role |
 | `proposal.create` | Delegable | owner, admin, analyst |
-| `workflow.plan`, `workflow.executeApproved`, `run.cancelOwn` | Planned (phase 2) | — |
+| `workflow.plan`, `workflow.executeApproved`, `run.cancelOwn` | Delegable | owner, admin, analyst |
 | `development.executeCandidate` | Planned (phase 4) | — |
 | `artifact.export` | Planned (phase 5) | — |
 | `workflow.approve`, `study.expand`, `result.accept`, `result.publish`, `delegation.manage` | Human-only | — |
 | `security.manage`, `target.manage`, `budget.increase` | Never delegated | — |
 
 The capability catalog lives in `backend/policy/agentCapabilities.js`.
-Execution switches in the stored policy (`allowWorkflowExecution`,
+Switches in the stored policy (`allowArbitraryCode`,
 `allowCandidateCodeExecution`, `allowArtifactExport`, `allowGpu`,
 `allowJobArrays`) are fixed to `false`; requests to change them are rejected.
+Delegation limits: `maxOpenProposals`, `maxProposalBytes`,
+`maxRequestsPerMinute`, `maxOutstandingRuns` (default 1), and
+`maxReservedCpuSeconds` (default 14,400).
 
 ### Disclosure profiles
 
@@ -67,6 +70,78 @@ Execution switches in the stored policy (`allowWorkflowExecution`,
 No profile exposes storage locations, dataset metadata, job parameters, logs, or
 errors. Data an agent is allowed to read can still reach its model provider;
 choose the profile with that in mind.
+
+## Approved workflow execution (phase 2)
+
+**Releases.** The only operations an agent can run are listed in
+`backend/workflowTrust/catalog.js`. A release digest covers its handler files
+(`backend/seuratPipeline.js`, `backend/jobs/pipelineHandlers.js`,
+`r-backend/plumber.R`), parameter schema, resources, inputs, and outputs. When
+any of those bytes change, the release gets a new id, the old one is marked
+superseded, and it must be approved again. The first release,
+`seurat-qc-cluster` v1, runs the existing `seurat.pipeline.v1` job on an
+uploaded 10x HDF5 dataset.
+
+**Approval.** Project owners and admins approve one exact release digest per
+project under *Agent access → Approved workflows*. Agents cannot approve.
+
+**Studies.** A person with write access defines a study: the approved release,
+the exact input datasets (pinned by SHA-256, with a study-owned input object),
+the parameters the agent may vary and their allowed values, a trial limit, a
+limit on active runs, and a CPU-second budget. Every other parameter is fixed.
+Studies cannot be edited, only closed. An agent sees only open studies that its
+sponsor created.
+
+**Plans.** The agent asks for a plan with a study, dataset, and choices. The
+server checks that each choice is a permitted value, applies the release's
+cross-parameter checks, and stores an immutable plan whose SHA-256 digest
+covers the actor, release, approval, inputs, full parameters, resources, and
+outputs. Plans expire after an hour. A choice outside the study is
+`STUDY_AMENDMENT_REQUIRED`; a forbidden combination is
+`STUDY_CONSTRAINT_VIOLATION`.
+
+**Admission.** Submitting `{ planId, planDigest, requestId }` runs one
+transaction that rechecks the delegation, the sponsor's write role, the approval,
+the current release, the open study, and the pinned input. It then checks every
+budget, reserves the run's maximum CPU time, records the run, and queues the job.
+
+| Budget | Source | Default |
+| --- | --- | --- |
+| Active agent runs, whole installation | `AGENT_MAX_OUTSTANDING_RUNS` | 4 |
+| Active runs, all of one sponsor's agents | `AGENT_MAX_OUTSTANDING_RUNS_PER_SPONSOR` | 2 |
+| Active runs and total reserved CPU seconds, one agent | delegation limits | 1 / 14,400 |
+| Trials, active runs, and CPU seconds, one study | study | set by its creator |
+
+Failing a budget returns `429 BUDGET_EXCEEDED` with `details.budget` naming the
+level. Admissions are serialized with one database lock, so concurrent agents
+cannot overrun a shared budget. Reservations are never refunded: failed and
+canceled runs still count against trials and CPU budgets. The same `requestId`
+returns the original run; a plan can be submitted only once.
+
+**Dispatch recheck.** When the worker claims a queued agent job it checks again.
+It cancels the job with `AGENT_AUTHORITY_REVOKED` before any R contact if the
+delegation was revoked or expired, the approval was revoked, the release was
+superseded, the study was closed, or the agent asked to cancel.
+
+**Runs and results.** Run states are `queued`, `running`, `cancel_requested`,
+`candidate_ready`, `quarantined`, `failed`, and `canceled`. `candidate_ready`
+means the job completed and produced its declared result object; it is not
+scientific acceptance. Output that completes after a cancellation request or
+after the delegation was revoked is `quarantined`. Agents read a bounded result
+summary (numbers, booleans, and short strings only).
+
+**Acceptance.** A person accepts one candidate per study with
+`expectedAcceptedRunId` set to the study's current accepted run (or `null`). If
+it changed in the meantime the request fails with `BASELINE_CHANGED`. Each
+acceptance is recorded append-only. Accepting moves the study's accepted-result
+pointer; it never copies or overwrites another analysis.
+
+**What is and is not enforced.** Budgets are enforced at admission. The local
+worker runs one job at a time, and physical CPU and memory limits come from the
+R runtime container's configuration, not from a per-run sandbox. Runs execute
+in the shared R service, so the isolation is the existing trusted-lab
+deployment model (see [deployment](deployment.md)), not a hostile-tenant
+boundary. HPC targets are phase 3.
 
 ## Route inventory (phase 0 gate)
 
@@ -96,10 +171,20 @@ Errors use `{ error, code, retry, correlationId }`; `retry` is `never`,
 | Identity, sponsor, effective capabilities, limits | `GET /api/automation/v1/context` | — |
 | Project summary | `GET /api/automation/v1/projects/:projectId` | `metadata.read` |
 | Datasets | `GET /api/automation/v1/projects/:projectId/datasets?limit=` | `metadata.read` |
-| Completed run summaries | `GET /api/automation/v1/projects/:projectId/runs?limit=` | `results.read` |
+| Completed project runs, or `?scope=mine` for this agent's runs | `GET /api/automation/v1/projects/:projectId/runs` | `results.read` |
 | Submit a proposal | `POST /api/automation/v1/projects/:projectId/proposals` | `proposal.create` |
 | This agent's proposals | `GET /api/automation/v1/projects/:projectId/proposals[/:proposalId]` | `proposal.create` |
-| Workflows, plans, run control | `…/workflows`, `…/plans`, `…/runs/:runId/*` | `501 CAPABILITY_UNAVAILABLE` |
+| Approved releases | `GET …/projects/:projectId/workflows` | `workflow.plan` |
+| Sponsor's open studies, with full trial history | `GET …/projects/:projectId/studies[/:studyId]` | `workflow.plan` |
+| Create or read a plan | `POST …/plans`, `GET …/plans/:planId` | `workflow.plan` |
+| Submit a plan | `POST …/runs` with `{ planId, planDigest, requestId }` | `workflow.executeApproved` |
+| Run receipt and result summary | `GET …/runs/:runId`, `GET …/runs/:runId/results` | `results.read` |
+| Cancel own run | `POST …/runs/:runId/cancel` | `run.cancelOwn` |
+
+Human routes (session only) under `/api/projects/:projectId`:
+`workflow-releases`, `workflow-releases/:id/approve`,
+`workflow-approvals/:id/revoke`, `studies`, `studies/:id`, `studies/:id/close`,
+`agent-runs`, and `agent-runs/:runId/accept`.
 
 A proposal request is:
 
@@ -137,11 +222,28 @@ node cli/traceomics.mjs proposals create --project proj_example --kind code \
   --title "Add a QC metric" --patch candidate.patch
 ```
 
+```bash
+node cli/traceomics.mjs plans create --project proj_example --study study_example \
+  --dataset ds_example --choice clusterResolution=0.8
+```
+
+```bash
+node cli/traceomics.mjs runs submit --project proj_example --plan plan_example --digest <plan digest>
+```
+
+```bash
+node cli/traceomics.mjs runs results --project proj_example run_example
+```
+
+Other commands: `workflows list`, `studies list|show`, `plans show`,
+`runs list [--mine]`, `runs status`, `runs cancel`.
+
 JSON goes to stdout and diagnostics to stderr. Exit codes: `0` ok, `2` usage,
 `3` credential, `4` denied, `5` not found, `6` conflict or limit,
 `7` unavailable or unreachable, `1` other. Without `--request-id`, the CLI
-derives one from the content, so re-running a command after a lost reply
-returns the original proposal instead of creating a duplicate.
+derives one from the content (or, for `runs submit`, from the plan), so
+re-running a command after a lost reply returns the original proposal or run
+instead of creating a duplicate.
 
 ## Deployment prerequisites
 
@@ -159,9 +261,9 @@ cannot obtain human credentials. Before issuing agent credentials:
 
 ## Not yet implemented
 
-Study envelopes, workflow releases and approvals, execution plans, resource
-reservations, candidate workspaces, result acceptance, HPC adapters, isolated
-development, and MCP. Agent-specific limits do not change what people can do with
+HPC adapters and remote reconciliation, per-run OS isolation, workflow
+composition, sensitivity-study selection rules, standing acceptance rules,
+isolated development, and MCP. Agent-specific limits do not change what people can do with
 their own sessions.
 
 ## Tests
@@ -173,4 +275,10 @@ their own sessions.
   immutability, audit attribution, and the CLI end to end.
 - `backend/agent-capabilities.test.js`: delegations never exceed the sponsor's
   role; frozen actor contexts; fixed policy switches.
-- `cli/traceomics.test.mjs`, `src/pages/AgentAccess.test.jsx`.
+- `backend/agent-approved-runs.test.js`: the full plan → admit → lost reply →
+  candidate → compare-and-swap acceptance journey; variations and joint
+  constraints; changed inputs; approval separation; trial, delegation, compute,
+  and racing sponsor budgets; claim-time cancellation after revocation, study
+  close, or release supersession; cancellation and quarantine; the CLI.
+- `cli/traceomics.test.mjs`, `src/pages/AgentAccess.test.jsx`,
+  `src/pages/AgentWorkflows.test.jsx`.

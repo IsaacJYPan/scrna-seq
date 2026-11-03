@@ -57,7 +57,7 @@ describe('AgentAccess', () => {
     render(<AgentAccess currentWs={workspace} userId={7} />);
     expect(await screen.findByText('QC helper', { selector: 'p' })).toBeInTheDocument();
     expect(screen.getByText(/Sponsor: Dana \(you\)/)).toBeInTheDocument();
-    expect(screen.getByText(/10 open proposals · 60 requests\/min · execution off/)).toBeInTheDocument();
+    expect(screen.getByText(/10 open proposals · 60 requests\/min · no runs · own code never/)).toBeInTheDocument();
     expect(screen.getByLabelText(/Read project and dataset metadata/)).toBeEnabled();
     expect(screen.queryByText('workflow.executeApproved')).not.toBeInTheDocument();
     expect(screen.queryByText('workflow.approve')).not.toBeInTheDocument();
@@ -72,7 +72,7 @@ describe('AgentAccess', () => {
     expect(await screen.findByTestId('agent-token')).toHaveTextContent(TOKEN);
     expect(window.electronAPI.createAgentDelegation).toHaveBeenCalledWith('proj_1', {
       agentName: 'New agent', capabilities: ['metadata.read', 'proposal.create'], disclosureProfile: 'identifiers',
-      lifetimeSeconds: 604800, limits: { maxOpenProposals: 10 },
+      lifetimeSeconds: 604800, limits: { maxOpenProposals: 10, maxOutstandingRuns: 1, maxReservedCpuSeconds: 14400 },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(screen.queryByTestId('agent-token')).not.toBeInTheDocument());

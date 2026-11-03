@@ -70,7 +70,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261033;
+const SCHEMA_CONTRACT_VERSION = 20261034;
 
 let pool = null;
 
@@ -751,6 +751,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
       automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
       research_analysis_snapshot_blobs, research_analysis_snapshot_preparations,
@@ -1554,6 +1555,9 @@ async function deleteExpiredDemoGuest(userId) {
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
       await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
+      for (const table of ['result_acceptances', 'agent_runs', 'execution_plans', 'study_envelopes', 'workflow_approvals']) {
+        await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
+      }
       await client.query('DELETE FROM agent_change_proposals WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query(`DELETE FROM agent_credentials WHERE delegation_id IN
         (SELECT id FROM agent_delegations WHERE project_id = ANY($1::text[]))`, [projectIds]);
@@ -4770,6 +4774,7 @@ async function claimNextJob(workerId, opts = {}) {
       `SELECT j.id, j.job_type, j.attempts, j.logs_json,
                (j.project_id IS NULL) AS invalid_project_scope,
                (j.job_type = 'expert.r.v1' AND NOT ${expertRAccessSql('j.owner_user_id', 'j.project_id', process.env, '$3')}) AS expert_access_revoked,
+               (j.project_id IS NOT NULL AND agent_run_authority_revoked(j.id, now())) AS agent_authority_revoked,
                (j.result_analysis_object_id IS NOT NULL
                 OR EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = j.id)
                 OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = j.id)
@@ -4787,6 +4792,9 @@ async function claimNextJob(workerId, opts = {}) {
                      AND pm.role = ANY($1::text[])
                 )
                 OR (j.job_type = 'expert.r.v1' AND NOT ${expertRAccessSql('j.owner_user_id', 'j.project_id', process.env, '$3')})
+                -- Delegated agent runs recheck their delegation, approval, release,
+                -- study, and cancellation before any handler or R contact.
+                OR agent_run_authority_revoked(j.id, now())
               ))
             OR
             (j.project_id IS NULL AND (
@@ -4823,6 +4831,10 @@ async function claimNextJob(workerId, opts = {}) {
       code: 'EXPERT_R_ACCESS_REVOKED',
       message: 'Job canceled because its creator no longer has approved Expert R access.',
     });
+    const agentAuthorityError = normalizeJobError({
+      code: 'AGENT_AUTHORITY_REVOKED',
+      message: 'Job canceled because the delegated agent authority, approval, or study is no longer valid.',
+    });
     const scopeError = normalizeJobError({
       code: 'INVALID_PROJECT_SCOPE',
       message: 'Job canceled because a project-associated input was submitted without project scope.',
@@ -4830,7 +4842,8 @@ async function claimNextJob(workerId, opts = {}) {
     for (const row of revoked.rows) {
       const cancellationError = row.invalid_project_scope
         ? scopeError
-        : row.expert_access_revoked ? expertAccessError : accessError;
+        : row.expert_access_revoked ? expertAccessError
+          : row.agent_authority_revoked ? agentAuthorityError : accessError;
       const logs = [
         ...parseJson(row.logs_json, []),
         normalizeJobLogEntry({ level: 'warn', message: cancellationError.message }),

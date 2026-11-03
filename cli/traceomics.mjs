@@ -22,7 +22,16 @@ Commands:
   context                                   Show this agent's identity, sponsor, and limits
   project show     --project <id>           Bounded project summary
   datasets list    --project <id> [--limit N]
-  runs list        --project <id> [--limit N]
+  runs list        --project <id> [--mine] [--limit N]
+  workflows list   --project <id>           Approved workflow releases
+  studies list     --project <id>
+  studies show     --project <id> <study-id>
+  plans create     --project <id> --study <id> --dataset <id> [--choice name=value ...]
+  plans show       --project <id> <plan-id>
+  runs submit      --project <id> --plan <plan-id> --digest <sha256> [--request-id <id>]
+  runs status      --project <id> <run-id>
+  runs results     --project <id> <run-id>
+  runs cancel      --project <id> <run-id>
   proposals create --project <id> --kind <code|method|workflow> --title <text>
                    [--summary <text>] [--patch <file>] [--request-id <id>]
   proposals list   --project <id> [--limit N]
@@ -40,7 +49,7 @@ class UsageError extends Error {}
 export function parseArgs(argv) {
   const positional = [];
   const options = {};
-  const flags = new Set(['help', 'json']);
+  const flags = new Set(['help', 'json', 'mine']);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--') { positional.push(...argv.slice(i + 1)); break; }
@@ -52,7 +61,8 @@ export function parseArgs(argv) {
       const value = eq === -1 ? argv[i + 1] : arg.slice(eq + 1);
       if (value === undefined || (eq === -1 && value.startsWith('--'))) throw new UsageError(`--${arg.slice(2)} needs a value.`);
       if (eq === -1) i += 1;
-      options[name] = value;
+      if (name === 'choice') (options.choice ||= []).push(value);
+      else options[name] = value;
     } else {
       positional.push(arg);
     }
@@ -77,6 +87,20 @@ function projectPath(options) {
   return `/projects/${id}`;
 }
 
+function oneId(rest, pattern, label) {
+  if (rest.length !== 1 || !pattern.test(rest[0])) throw new UsageError(`Give one ${label} id.`);
+  return rest[0];
+}
+
+// --choice values: JSON literals (numbers, booleans, null, quoted strings) or bare strings.
+export function parseChoice(text) {
+  try {
+    const value = JSON.parse(text);
+    if (value === null || ['number', 'boolean', 'string'].includes(typeof value)) return value;
+  } catch { /* bare string */ }
+  return text;
+}
+
 // The default request id is derived from the content, so re-running the same
 // command after a lost reply replays the original submission instead of
 // creating a duplicate.
@@ -90,7 +114,37 @@ export function buildRequest({ positional, options }, { readFile = (p) => readFi
   if (group === 'context' && action === undefined) return { method: 'GET', path: '/context' };
   if (group === 'project' && action === 'show') return { method: 'GET', path: projectPath(options) };
   if (group === 'datasets' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/datasets${limitQuery(options)}` };
-  if (group === 'runs' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/runs${limitQuery(options)}` };
+  if (group === 'runs' && action === 'list') {
+    const query = [options.mine ? 'scope=mine' : '', limitQuery(options).slice(1)].filter(Boolean).join('&');
+    return { method: 'GET', path: `${projectPath(options)}/runs${query ? `?${query}` : ''}` };
+  }
+  if (group === 'workflows' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/workflows` };
+  if (group === 'studies' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/studies` };
+  if (group === 'studies' && action === 'show') return { method: 'GET', path: `${projectPath(options)}/studies/${oneId(rest, /^study_[0-9a-f]{24}$/, 'study')}` };
+  if (group === 'plans' && action === 'show') return { method: 'GET', path: `${projectPath(options)}/plans/${oneId(rest, /^plan_[0-9a-f]{24}$/, 'plan')}` };
+  if (group === 'plans' && action === 'create') {
+    const choices = {};
+    for (const entry of options.choice || []) {
+      const eq = entry.indexOf('=');
+      if (eq < 1) throw new UsageError('--choice must be name=value.');
+      choices[entry.slice(0, eq)] = parseChoice(entry.slice(eq + 1));
+    }
+    return { method: 'POST', path: `${projectPath(options)}/plans`,
+      body: { studyId: requireOption(options, 'study'), datasetId: requireOption(options, 'dataset'), choices } };
+  }
+  if (group === 'runs' && action === 'submit') {
+    const planId = requireOption(options, 'plan');
+    const planDigest = requireOption(options, 'digest');
+    // Derived from the plan, so re-running after a lost reply returns the original receipt.
+    const requestId = options.requestId || defaultRequestId(['run', planId, planDigest]);
+    return { method: 'POST', path: `${projectPath(options)}/runs`, body: { planId, planDigest, requestId } };
+  }
+  if (group === 'runs' && ['status', 'results', 'cancel'].includes(action)) {
+    const id = oneId(rest, /^run_[0-9a-f]{24}$/, 'run');
+    if (action === 'status') return { method: 'GET', path: `${projectPath(options)}/runs/${id}` };
+    if (action === 'results') return { method: 'GET', path: `${projectPath(options)}/runs/${id}/results` };
+    return { method: 'POST', path: `${projectPath(options)}/runs/${id}/cancel`, body: {} };
+  }
   if (group === 'proposals' && action === 'list') return { method: 'GET', path: `${projectPath(options)}/proposals${limitQuery(options)}` };
   if (group === 'proposals' && action === 'show') {
     if (rest.length !== 1 || !/^prop_[0-9a-f]{24}$/.test(rest[0])) throw new UsageError('proposals show needs one proposal id.');

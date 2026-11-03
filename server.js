@@ -1887,11 +1887,22 @@ const agentDelegations = require('./backend/actors/delegations').createDelegatio
 const agentProposals = require('./backend/automation/proposals').createProposalService({
   db, withTransaction: agentDelegations.withTransaction,
 });
-app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes({
+const agentApprovals = require('./backend/workflowTrust/approvals').createApprovalService({
+  db, withTransaction: agentDelegations.withTransaction,
+});
+const agentStudies = require('./backend/studyEnvelopes/studies').createStudyService({
+  db, withTransaction: agentDelegations.withTransaction, approvals: agentApprovals,
+});
+const agentAdmission = require('./backend/resourceAdmission/admission').createAdmissionService({
+  db, withTransaction: agentDelegations.withTransaction, approvals: agentApprovals,
+});
+const agentServices = {
   db, delegations: agentDelegations, proposals: agentProposals,
-}));
+  approvals: agentApprovals, studies: agentStudies, admission: agentAdmission,
+};
+app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes(agentServices));
 app.use('/api/automation/v1', automationRoutes({
-  db, delegations: agentDelegations, proposals: agentProposals,
+  ...agentServices,
   readModels: require('./backend/automation/readModels').createAutomationReadModels({ db }),
 }));
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));

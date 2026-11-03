@@ -52,8 +52,9 @@ the supported methods and their interpretation.
 Researchers can delegate narrow, revocable authority to an AI agent from
 **Agent access** in a project. The agent gets its own credential and uses the
 [automation API and CLI](docs/agent-automation.md); it cannot use your session.
-This release covers read-only inspection and inert code/method proposals.
-Approved workflow execution and HPC targets follow the [design](docs/spec.md).
+Agents can read bounded metadata, submit inert code/method proposals, and run
+approved workflows inside studies you define; a person accepts results. HPC
+targets follow the [design](docs/spec.md).
 
 ## Development
 

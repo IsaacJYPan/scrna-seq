@@ -21,14 +21,19 @@ const RETRY = Object.freeze({
   CAPABILITY_UNAVAILABLE: 'never',
   RATE_LIMITED: 'after-delay',
   PROPOSAL_LIMIT: 'after-review',
+  BUDGET_EXCEEDED: 'after-review',
+  STUDY_AMENDMENT_REQUIRED: 'never',
+  RELEASE_NOT_APPROVED: 'never',
+  PLAN_STALE: 'new-plan',
   IDEMPOTENCY_CONFLICT: 'never',
   SERVICE_UNAVAILABLE: 'same-request-id',
 });
 
-function sendError(res, status, code, message, actor) {
+function sendError(res, status, code, message, actor, details) {
   res.status(status).json({
     error: message,
     code,
+    ...(details ? { details } : {}),
     retry: RETRY[code] || (status >= 500 ? 'same-request-id' : 'never'),
     correlationId: actor?.correlationId || null,
   });
@@ -52,7 +57,7 @@ function createRateLimiter() {
   };
 }
 
-function automationRoutes({ db, delegations, proposals, readModels }) {
+function automationRoutes({ db, delegations, proposals, readModels, studies, admission, approvals }) {
   const router = express.Router();
   const rateLimit = createRateLimiter();
 
@@ -115,7 +120,7 @@ function automationRoutes({ db, delegations, proposals, readModels }) {
         console.error(`[automation] ${req.method} request failed (${error.code || 'INTERNAL'}).`);
         return sendError(res, 500, 'INTERNAL', 'The request could not be completed.', actor);
       }
-      return sendError(res, status, error.code || 'INVALID_REQUEST', error.message, actor);
+      return sendError(res, status, error.code || 'INVALID_REQUEST', error.message, actor, error.details);
     }
   };
 
@@ -143,8 +148,10 @@ function automationRoutes({ db, delegations, proposals, readModels }) {
   router.get('/projects/:projectId', route('metadata.read', (req, actor) => readModels.projectSummary(actor)));
   router.get('/projects/:projectId/datasets', route('metadata.read',
     (req, actor) => readModels.listDatasets(actor, { limit: req.query.limit })));
-  router.get('/projects/:projectId/runs', route('results.read',
-    (req, actor) => readModels.listRuns(actor, { limit: req.query.limit })));
+  // ?scope=mine lists this agent's own runs; otherwise bounded project history.
+  router.get('/projects/:projectId/runs', route('results.read', async (req, actor) => (req.query.scope === 'mine'
+    ? { schema: 'traceomics.automation.agent-runs.v1', runs: await admission.listRunsForAgent(actor, { limit: req.query.limit }) }
+    : readModels.listRuns(actor, { limit: req.query.limit }))));
 
   router.post('/projects/:projectId/proposals', route('proposal.create', async (req, actor) => {
     const { proposal, replayed } = await proposals.createForAgent(actor, req.body);
@@ -159,15 +166,38 @@ function automationRoutes({ db, delegations, proposals, readModels }) {
     proposal: await proposals.getForAgent(actor, req.params.proposalId),
   })));
 
-  // Planned execution surface. Present so clients receive an explicit,
-  // non-retryable reason instead of guessing from a 404.
-  const planned = (req, res) => sendError(res, 501, 'CAPABILITY_UNAVAILABLE',
-    'Approved workflow planning and execution are not available to agents in this release.', req.actor);
-  router.all('/projects/:projectId/workflows', planned);
-  router.all('/projects/:projectId/plans', planned);
-  router.all('/projects/:projectId/plans/:planId', planned);
-  router.all('/projects/:projectId/runs/:runId', planned);
-  router.all('/projects/:projectId/runs/:runId/{*rest}', planned);
+  // Approved workflow execution (docs/spec.md phase 2).
+  router.get('/projects/:projectId/workflows', route('workflow.plan', async (req, actor) => ({
+    schema: 'traceomics.automation.workflows.v1',
+    releases: await approvals.listApprovedForProject(actor.delegation.projectId),
+  })));
+  router.get('/projects/:projectId/studies', route('workflow.plan', async (req, actor) => ({
+    schema: 'traceomics.automation.studies.v1',
+    studies: await studies.listForAgent(actor),
+  })));
+  router.get('/projects/:projectId/studies/:studyId', route('workflow.plan', async (req, actor) => ({
+    schema: 'traceomics.automation.study.v1',
+    study: await studies.getForAgent(actor, req.params.studyId),
+  })));
+  router.post('/projects/:projectId/plans', route('workflow.plan', async (req, actor) => ({
+    __status: 201, body: { schema: 'traceomics.automation.plan.v1', ...(await admission.createPlan(actor, req.body)) },
+  })));
+  router.get('/projects/:projectId/plans/:planId', route('workflow.plan', async (req, actor) => ({
+    schema: 'traceomics.automation.plan.v1', ...(await admission.getPlan(actor, req.params.planId)),
+  })));
+  router.post('/projects/:projectId/runs', route('workflow.executeApproved', async (req, actor) => {
+    const { run, replayed } = await admission.submitRun(actor, req.body);
+    return { __status: replayed ? 200 : 201, body: { schema: 'traceomics.automation.run.v1', replayed, run } };
+  }));
+  router.get('/projects/:projectId/runs/:runId', route('results.read', async (req, actor) => ({
+    schema: 'traceomics.automation.run.v1', run: await admission.getRunForAgent(actor, req.params.runId),
+  })));
+  router.get('/projects/:projectId/runs/:runId/results', route('results.read', async (req, actor) => ({
+    schema: 'traceomics.automation.run-results.v1', ...(await admission.resultsForAgent(actor, req.params.runId)),
+  })));
+  router.post('/projects/:projectId/runs/:runId/cancel', route('run.cancelOwn', async (req, actor) => ({
+    schema: 'traceomics.automation.run.v1', run: await admission.cancelForAgent(actor, req.params.runId),
+  })));
 
   router.use((req, res) => sendError(res, 404, 'NOT_FOUND', 'Unknown automation operation.', req.actor));
   // Malformed JSON and other body errors.

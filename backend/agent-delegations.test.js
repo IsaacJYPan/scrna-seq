@@ -86,7 +86,7 @@ describe.skipIf(!CONFIGURED)('agent delegation lifecycle', () => {
     expect(context.data.delegation.projectId).toBe(project.id);
     expect(context.data.delegation.effectiveCapabilities).toEqual(['metadata.read', 'proposal.create', 'results.read']);
     expect(context.data.delegation.policy).toMatchObject({
-      allowWorkflowExecution: false, allowCandidateCodeExecution: false, allowArtifactExport: false,
+      allowArbitraryCode: false, allowCandidateCodeExecution: false, allowArtifactExport: false,
     });
     expect(JSON.stringify(context.data)).not.toContain(token);
 
@@ -101,7 +101,7 @@ describe.skipIf(!CONFIGURED)('agent delegation lifecycle', () => {
   it('refuses planned, human-only, unknown capabilities and fixed execution switches', async () => {
     const { sponsor, project } = await setupProject();
     for (const [capabilities, code] of [
-      [['workflow.executeApproved'], 'CAPABILITY_UNAVAILABLE'],
+      [['artifact.export'], 'CAPABILITY_UNAVAILABLE'],
       [['development.executeCandidate'], 'CAPABILITY_UNAVAILABLE'],
       [['workflow.approve'], 'CAPABILITY_NOT_DELEGABLE'],
       [['result.accept'], 'CAPABILITY_NOT_DELEGABLE'],
@@ -227,13 +227,13 @@ describe.skipIf(!CONFIGURED)('enforcement boundary', () => {
     expect((await agentApi(`/projects/${project.id}`, labels)).data.name).toBe('PBMC study');
   });
 
-  it('reports planned execution operations explicitly', async () => {
+  it('denies workflow operations that were not delegated', async () => {
     const { sponsor, project } = await setupProject();
     const token = (await delegate(sponsor.token, project.id)).data.credential.token;
-    for (const [method, path] of [['GET', 'workflows'], ['POST', 'plans'], ['POST', 'runs/run_1/cancel']]) {
+    for (const [method, path] of [['GET', 'workflows'], ['POST', 'plans'], ['POST', 'runs'], ['POST', 'runs/run_1/cancel']]) {
       const res = await agentApi(`/projects/${project.id}/${path}`, token, { method, body: method === 'POST' ? {} : undefined });
-      expect(res.status, path).toBe(501);
-      expect(res.data).toMatchObject({ code: 'CAPABILITY_UNAVAILABLE', retry: 'never' });
+      expect(res.status, path).toBe(403);
+      expect(res.data.code).toBe('SCOPE_DENIED');
     }
     expect((await db.query('SELECT COUNT(*)::int AS n FROM jobs')).rows[0].n).toBe(0);
   });

@@ -11,7 +11,7 @@ const { humanActorContext } = require('../actors/actorContext');
 const { READ_ROLES, MANAGE_ROLES } = require('../policy/agentCapabilities');
 const { listAutomationEvents } = require('./automationAudit');
 
-function agentGovernanceRoutes({ db, delegations, proposals }) {
+function agentGovernanceRoutes({ db, delegations, proposals, approvals, studies, admission }) {
   const router = express.Router({ mergeParams: true });
 
   const route = (handler, { status = 200 } = {}) => async (req, res) => {
@@ -32,7 +32,7 @@ function agentGovernanceRoutes({ db, delegations, proposals }) {
         code = 'INTERNAL';
         return res.status(500).json({ error: 'Agent settings are unavailable. Please try again.', code });
       }
-      return res.status(httpStatus).json({ error: error.message, code });
+      return res.status(httpStatus).json({ error: error.message, code, ...(error.details ? { details: error.details } : {}) });
     }
   };
 
@@ -59,6 +59,22 @@ function agentGovernanceRoutes({ db, delegations, proposals }) {
     (req, actor) => proposals.getForHuman(actor, req.params.projectId, req.params.proposalId)));
   router.post('/agent-proposals/:proposalId/review', route(
     (req, actor) => proposals.reviewByHuman(actor, req.params.projectId, req.params.proposalId, req.body || {})));
+
+  // Approved workflow releases, studies, and agent runs (docs/spec.md phase 2).
+  router.get('/workflow-releases', route((req, actor) => approvals.listForHuman(actor, req.params.projectId)));
+  router.post('/workflow-releases/:releaseId/approve', route(
+    (req, actor) => approvals.approve(actor, req.params.projectId, req.params.releaseId, req.body || {}), { status: 201 }));
+  router.post('/workflow-approvals/:approvalId/revoke', route(
+    (req, actor) => approvals.revoke(actor, req.params.projectId, req.params.approvalId)));
+  router.get('/studies', route((req, actor) => studies.listForHuman(actor, req.params.projectId)));
+  router.post('/studies', route((req, actor) => studies.create(actor, req.params.projectId, req.body || {}), { status: 201 }));
+  router.get('/studies/:studyId', route((req, actor) => studies.getForHuman(actor, req.params.projectId, req.params.studyId)));
+  router.post('/studies/:studyId/close', route((req, actor) => studies.close(actor, req.params.projectId, req.params.studyId)));
+  router.get('/agent-runs', route((req, actor) => admission.listRunsForHuman(actor, req.params.projectId, {
+    studyId: typeof req.query.studyId === 'string' ? req.query.studyId : undefined,
+  })));
+  router.post('/agent-runs/:runId/accept', route(
+    (req, actor) => admission.acceptByHuman(actor, req.params.projectId, req.params.runId, req.body || {})));
 
   router.get('/automation-audit', route(async (req, actor) => {
     const membership = await db.requireProjectRole(actor.userId, req.params.projectId, READ_ROLES);

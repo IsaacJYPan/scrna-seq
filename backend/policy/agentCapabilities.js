@@ -18,9 +18,12 @@ const CAPABILITIES = Object.freeze({
     description: 'Submit inert code or method proposals for human review.' },
   // Planned agent capabilities. They exist in the catalog so that requests for
   // them fail with an explicit reason instead of an unknown-capability error.
-  'workflow.plan': { availability: 'planned', phase: 2 },
-  'workflow.executeApproved': { availability: 'planned', phase: 2 },
-  'run.cancelOwn': { availability: 'planned', phase: 2 },
+  'workflow.plan': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
+    description: "Plan runs of approved workflows inside the sponsor's open studies." },
+  'workflow.executeApproved': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
+    description: 'Submit planned runs of approved workflows, within study and compute budgets.' },
+  'run.cancelOwn': { availability: 'delegable', sponsorRoles: WRITE_ROLES,
+    description: "Cancel this agent's own runs." },
   'development.executeCandidate': { availability: 'planned', phase: 4 },
   'artifact.export': { availability: 'planned', phase: 5 },
   // Human-only governance. Agent credentials are rejected even when the sponsor
@@ -42,13 +45,15 @@ const POLICY_LIMITS = Object.freeze({
   maxOpenProposals: { min: 0, max: 50, default: 10 },
   maxProposalBytes: { min: 1024, max: 262144, default: 65536 },
   maxRequestsPerMinute: { min: 1, max: 600, default: 60 },
+  maxOutstandingRuns: { min: 0, max: 10, default: 1 },
+  maxReservedCpuSeconds: { min: 0, max: 100000000, default: 14400 },
 });
 
-// Execution-related switches are fixed off until the corresponding phase has a
-// tested enforcement path. They are recorded so the effective policy is explicit.
+// Switches fixed off until the corresponding phase has a tested enforcement
+// path. Approved-workflow execution is governed by capabilities and studies.
 const FIXED_POLICY = Object.freeze({
-  mode: 'read-and-propose',
-  allowWorkflowExecution: false,
+  mode: 'approved-workflows',
+  allowArbitraryCode: false,
   allowCandidateCodeExecution: false,
   allowArtifactExport: false,
   allowGpu: false,

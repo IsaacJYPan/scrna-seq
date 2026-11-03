@@ -926,6 +926,14 @@ export const electronAPI = {
   getAgentProposal: async (id, proposalId) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals/${encodeURIComponent(proposalId)}`),
   reviewAgentProposal: async (id, proposalId, decision, note) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals/${encodeURIComponent(proposalId)}/review`, { method: 'POST', body: JSON.stringify(note ? { decision, note } : { decision }) }),
   listAutomationAudit: async (id) => req(`/api/projects/${encodeURIComponent(id)}/automation-audit?limit=50`),
+  listWorkflowReleases: async (id) => req(`/api/projects/${encodeURIComponent(id)}/workflow-releases`),
+  approveWorkflowRelease: async (id, releaseId, digest) => req(`/api/projects/${encodeURIComponent(id)}/workflow-releases/${encodeURIComponent(releaseId)}/approve`, { method: 'POST', body: JSON.stringify({ digest }) }),
+  revokeWorkflowApproval: async (id, approvalId) => req(`/api/projects/${encodeURIComponent(id)}/workflow-approvals/${encodeURIComponent(approvalId)}/revoke`, { method: 'POST', body: '{}' }),
+  listStudies: async (id) => req(`/api/projects/${encodeURIComponent(id)}/studies`),
+  createStudy: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/studies`, { method: 'POST', body: JSON.stringify(body) }),
+  closeStudy: async (id, studyId) => req(`/api/projects/${encodeURIComponent(id)}/studies/${encodeURIComponent(studyId)}/close`, { method: 'POST', body: '{}' }),
+  listAgentRuns: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs`),
+  acceptAgentRun: async (id, runId, expectedAcceptedRunId) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs/${encodeURIComponent(runId)}/accept`, { method: 'POST', body: JSON.stringify({ expectedAcceptedRunId }) }),
 
   // Cache
   makeCacheKey: async (op, params, ver, pids) => {

@@ -48,7 +48,7 @@ describe('agent capability policy', () => {
 
   it('fixes execution switches off and rejects unknown limits', () => {
     const policy = caps.normalizePolicy({ maxOpenProposals: 3 });
-    expect(policy).toMatchObject({ maxOpenProposals: 3, allowWorkflowExecution: false, allowCandidateCodeExecution: false });
+    expect(policy).toMatchObject({ maxOpenProposals: 3, allowArbitraryCode: false, allowCandidateCodeExecution: false });
     expect(() => caps.normalizePolicy({ allowGpu: true })).toThrow(/cannot be changed/);
     expect(() => caps.normalizePolicy({ maxReservedCpus: 8 })).toThrow(/Unknown/);
     expect(() => caps.normalizePolicy({ maxOpenProposals: 1.5 })).toThrow(/integer/);

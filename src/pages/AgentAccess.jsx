@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import { publicErrorMessage } from '../publicError';
+import AgentWorkflows from './AgentWorkflows';
 
 // Human governance for delegated agents (docs/spec.md phases 0-1). This page
 // only displays and changes delegations; every rule is enforced server-side.
@@ -18,6 +19,9 @@ const CAPABILITY_LABELS = {
   'metadata.read': 'Read project and dataset metadata',
   'results.read': 'Read completed run summaries',
   'proposal.create': 'Submit code or method proposals (inert)',
+  'workflow.plan': 'Plan runs of approved workflows in your studies',
+  'workflow.executeApproved': 'Run approved workflows within study budgets',
+  'run.cancelOwn': 'Cancel its own runs',
 };
 
 function errorText(error, fallback) {
@@ -61,7 +65,7 @@ function AgentAccessProject({ currentWs, userId, projectId }) {
   const [reviewNote, setReviewNote] = useState('');
   const [form, setForm] = useState({
     agentName: '', clientLabel: '', capabilities: ['metadata.read'], disclosureProfile: 'identifiers',
-    lifetimeSeconds: 604800, maxOpenProposals: 10,
+    lifetimeSeconds: 604800, maxOpenProposals: 10, maxOutstandingRuns: 1, maxCpuHours: 4,
   });
 
   const load = useCallback(async () => {
@@ -116,7 +120,11 @@ function AgentAccessProject({ currentWs, userId, projectId }) {
       capabilities: form.capabilities,
       disclosureProfile: form.disclosureProfile,
       lifetimeSeconds: Number(form.lifetimeSeconds),
-      limits: { maxOpenProposals: Number(form.maxOpenProposals) },
+      limits: {
+        maxOpenProposals: Number(form.maxOpenProposals),
+        maxOutstandingRuns: Number(form.maxOutstandingRuns),
+        maxReservedCpuSeconds: Math.round(Number(form.maxCpuHours) * 3600),
+      },
     };
     if (form.clientLabel.trim()) body.clientLabel = form.clientLabel;
     const result = await run('create', () => api.createAgentDelegation(projectId, body));
@@ -177,7 +185,7 @@ function AgentAccessProject({ currentWs, userId, projectId }) {
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-textMuted">
           <div className="mb-1 flex items-center gap-2 font-bold text-text"><ShieldCheck size={17} className="text-primary" /> What an agent can do here</div>
           <p>An agent acts with its own credential, never your session. Its authority is what you delegate, narrowed by your current project role and re-checked on every request.
-            In this release agents can read bounded metadata and submit <span className="font-bold text-text">inert proposals</span>. They cannot run analyses, R, or code, export data, or approve anything.</p>
+            Agents can read bounded metadata, submit <span className="font-bold text-text">inert proposals</span>, and run <span className="font-bold text-text">approved workflows inside your studies</span>. They cannot run their own code or R, export data, approve workflows, or accept results.</p>
           <p className="mt-2">Run the agent under a separate account or isolated runtime that cannot reach your browser, SSH keys, or password. If an agent can use your own login, TraceOmics cannot tell it apart from you.</p>
         </div>
 
@@ -242,12 +250,20 @@ function AgentAccessProject({ currentWs, userId, projectId }) {
                 {LIFETIMES.map(l => <option key={l.seconds} value={l.seconds}>{l.label}</option>)}
               </select>
             </label>
+            <label className="space-y-1 text-xs font-bold text-textMuted">Max active runs
+              <input type="number" min={0} max={10} value={form.maxOutstandingRuns} onChange={e => setForm(f => ({ ...f, maxOutstandingRuns: e.target.value }))}
+                className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
+            </label>
+            <label className="space-y-1 text-xs font-bold text-textMuted">Total compute budget (CPU-hours)
+              <input type="number" min={0} max={1000} value={form.maxCpuHours} onChange={e => setForm(f => ({ ...f, maxCpuHours: e.target.value }))}
+                className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
+            </label>
             <label className="space-y-1 text-xs font-bold text-textMuted">Max open proposals
               <input type="number" min={0} max={50} value={form.maxOpenProposals} onChange={e => setForm(f => ({ ...f, maxOpenProposals: e.target.value }))}
                 className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
           </div>
-          <p className="text-xs text-textMuted">Not available to agents in this release: approved workflow execution, code execution, data export, and any approval or acceptance.</p>
+          <p className="text-xs text-textMuted">Never available to agents: running their own code or R, data export, approving workflows, or accepting results.</p>
           <button type="submit" disabled={Boolean(busy) || !form.agentName.trim() || form.capabilities.length === 0} className="btn btn-primary inline-flex items-center gap-2 text-sm">
             {busy === 'create' ? <Loader2 size={16} className="animate-spin" /> : <Bot size={16} />} Create agent and credential
           </button>
@@ -283,7 +299,7 @@ function AgentAccessProject({ currentWs, userId, projectId }) {
                   </div>
                   <p className="text-textMuted">Sponsor: {d.sponsor.displayName}{Number(d.sponsor.userId) === Number(userId) ? ' (you)' : ''}{d.agent.clientLabel ? ` · Client: ${d.agent.clientLabel}` : ''}</p>
                   <p className="text-textMuted">Capabilities: {d.capabilities.join(', ')} · Visibility: {d.disclosureProfile}</p>
-                  <p className="text-textMuted">Limits: {d.policy.maxOpenProposals} open proposals · {d.policy.maxRequestsPerMinute} requests/min · execution off</p>
+                  <p className="text-textMuted">Limits: {d.policy.maxOpenProposals} open proposals · {d.policy.maxRequestsPerMinute} requests/min · {d.capabilities.includes('workflow.executeApproved') ? `${d.policy.maxOutstandingRuns ?? 0} active runs, ${Math.round((d.policy.maxReservedCpuSeconds ?? 0) / 360) / 10} CPU-hours total` : 'no runs'} · own code never</p>
                   <p className="text-textMuted">Expires {formatDate(d.expiresAt)}{d.revokedAt ? ` · Revoked ${formatDate(d.revokedAt)} (${d.revocationReason})` : ''}</p>
                 </div>
                 {d.status === 'active' && (
@@ -310,6 +326,8 @@ function AgentAccessProject({ currentWs, userId, projectId }) {
             </article>
           ))}
         </section>
+
+        <AgentWorkflows projectId={projectId} role={role} onChanged={load} />
 
         <section className="space-y-3" aria-label="Agent proposals">
           <div>
