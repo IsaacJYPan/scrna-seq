@@ -257,7 +257,15 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     if(path.dirname(record.directory)!==kernelRoot||path.basename(record.directory)!==record.kernelId)throw failure('PRIVATE_KERNEL_OWNERSHIP_INVALID','The private workspace could not be safely removed.');
     const stat=await fsp.lstat(record.directory).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
     if(stat?.isSymbolicLink())throw failure('PRIVATE_KERNEL_OWNERSHIP_INVALID','The private workspace could not be safely removed.');
-    if(stat)await fsp.rm(record.directory,{recursive:true,force:true});
+    if(stat){
+      // Staged inputs are made read-only (0555) for the kernel. Restore owner
+      // write on that broker-owned directory first, or a non-root broker cannot
+      // remove its contents and the workspace leaks.
+      const inputDirectory=path.join(record.directory,'input');
+      const inputStat=await fsp.lstat(inputDirectory).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+      if(inputStat?.isDirectory())await fsp.chmod(inputDirectory,0o700);
+      await fsp.rm(record.directory,{recursive:true,force:true});
+    }
     record.releaseInputs?.();record.releaseInputs=null;
     for(const key of record.failedOutputCleanup||[]) {await provider.remove(key);record.failedOutputCleanup.delete(key);}
     for(const release of record.cleanupReservations||[])release();record.cleanupReservations=[];

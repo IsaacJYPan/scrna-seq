@@ -47,7 +47,15 @@ async function openSelection(root, relativePath, directory = false) {
       const pieces = [...root.path.split('/').filter(Boolean), ...relativePath.split('/').filter(Boolean)];
       for (let index = 0; index < pieces.length; index++) {
         const isDirectory = directory || index < pieces.length - 1;
-        opened = await fs.promises.open(`/proc/self/fd/${parent.fd}/${pieces[index]}`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (isDirectory ? fs.constants.O_DIRECTORY : 0));
+        const entryPath = `/proc/self/fd/${parent.fd}/${pieces[index]}`;
+        try {
+          opened = await fs.promises.open(entryPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (isDirectory ? fs.constants.O_DIRECTORY : 0));
+        } catch (error) {
+          // With O_DIRECTORY, Linux reports a symlink as ENOTDIR rather than
+          // ELOOP. A link is unsafe, not missing.
+          if (error?.code === 'ENOTDIR' && (await fs.promises.lstat(entryPath).catch(() => null))?.isSymbolicLink()) throw unsafe();
+          throw error;
+        }
         handles.push(opened); assertEntry(await opened.stat({ bigint: true }), isDirectory); parent = opened;
       }
       opened = parent;

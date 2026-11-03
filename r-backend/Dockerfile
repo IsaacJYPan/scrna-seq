@@ -103,7 +103,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     libzmq3-dev python3-jupyter-client jupyter-client jupyter-core \
     && rm -rf /var/lib/apt/lists/*
 RUN install-r-packages private-r-kernel \
-    -e "versions <- c(uuid='1.2-2', repr='1.1.7', pbdZMQ='0.3-14', IRdisplay='1.1', IRkernel='1.3.2'); for (pkg in names(versions)) remotes::install_version(pkg, version=versions[[pkg]], dependencies=FALSE, upgrade='never', repos='https://cran.r-project.org'); stopifnot(all(vapply(names(versions), function(pkg) utils::packageVersion(pkg) == package_version(versions[[pkg]]), logical(1)))); IRkernel::installspec(user=FALSE)"
+    -e "versions <- c(uuid='1.2-2', repr='1.1.7', pbdZMQ='0.3-14', IRdisplay='1.1', IRkernel='1.3.2'); cran <- 'https://cran.r-project.org/src/contrib'; for (pkg in names(versions)) { v <- versions[[pkg]]; urls <- c(sprintf('%s/%s_%s.tar.gz', cran, pkg, v), sprintf('%s/Archive/%s/%s_%s.tar.gz', cran, pkg, pkg, v)); tarball <- tempfile(fileext='.tar.gz'); ok <- FALSE; for (url in urls) if (!ok) ok <- !inherits(try(utils::download.file(url, tarball, mode='wb', quiet=TRUE), silent=TRUE), 'try-error'); if (!ok) stop('Pinned package source unavailable: ', pkg, ' ', v); utils::install.packages(tarball, repos=NULL, type='source') }; stopifnot(all(vapply(names(versions), function(pkg) utils::packageVersion(pkg) == package_version(versions[[pkg]]), logical(1)))); IRkernel::installspec(user=FALSE)"
 RUN --network=none /usr/bin/python3 -c "from jupyter_client import KernelManager; from jupyter_client.kernelspec import KernelSpecManager; assert 'IRkernel::main' in ' '.join(KernelSpecManager().get_kernel_spec('ir').argv)"
 
 COPY image-packages.R /tmp/image-packages.R
