@@ -47,6 +47,14 @@ Cell annotation, cross-condition CellChat, and publication report generation
 are not yet available. See [analysis workflows](docs/analysis-workflows.md) for
 the supported methods and their interpretation.
 
+## AI agents
+
+Researchers can delegate narrow, revocable authority to an AI agent from
+**Agent access** in a project. The agent gets its own credential and uses the
+[automation API and CLI](docs/agent-automation.md); it cannot use your session.
+This release covers read-only inspection and inert code/method proposals.
+Approved workflow execution and HPC targets follow the [design](docs/spec.md).
+
 ## Development
 
 The React app is in `src/`, the Express API and workers in `backend/`, and the

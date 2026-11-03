@@ -1305,6 +1305,12 @@ app.use((req, res, next) => {
   return next();
 });
 
+// Agent credentials are honored only by /api/automation/v1. Every other API
+// route refuses them explicitly, and mixed human+agent credentials are refused
+// everywhere (docs/spec.md section 16.3). This runs before any route.
+const { agentCredentialGuard, automationRoutes } = require('./backend/automation/automationRoutes');
+app.use(agentCredentialGuard({ hasSessionCookie }));
+
 // CORS must allow credentials so the browser sends/stores the HttpOnly session
 // cookie cross-origin (when the API is on a different origin than the frontend).
 // Origin is reflected only from the configured allowlist; requests without an
@@ -1875,6 +1881,19 @@ app.use('/api/projects/:projectId/analyses/:analysisId/documents', requireAuth,
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 app.use('/api/projects/:projectId/analyses', researchAnalysisRoutes({ database: db }));
+// Delegated agents: human governance under the session-authenticated project
+// routes, and the agent-credential automation API (docs/spec.md).
+const agentDelegations = require('./backend/actors/delegations').createDelegationStore({ db });
+const agentProposals = require('./backend/automation/proposals').createProposalService({
+  db, withTransaction: agentDelegations.withTransaction,
+});
+app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes({
+  db, delegations: agentDelegations, proposals: agentProposals,
+}));
+app.use('/api/automation/v1', automationRoutes({
+  db, delegations: agentDelegations, proposals: agentProposals,
+  readModels: require('./backend/automation/readModels').createAutomationReadModels({ db }),
+}));
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth }));

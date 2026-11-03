@@ -915,6 +915,18 @@ export const electronAPI = {
   updateProjectMemberRole: async (id, userId, role) => req(`/api/projects/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
   removeProjectMember: async (id, userId) => req(`/api/projects/${id}/members/${userId}`, { method: 'DELETE' }),
 
+  // Delegated agents (human governance; agents use /api/automation/v1 instead)
+  listAgentDelegations: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations`),
+  createAgentDelegation: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations`, { method: 'POST', body: JSON.stringify(body) }),
+  revokeAgentDelegation: async (id, delegationId, reason) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/${encodeURIComponent(delegationId)}/revoke`, { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) }),
+  revokeAllAgentDelegations: async (id, scope) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/revoke-all`, { method: 'POST', body: JSON.stringify({ scope }) }),
+  issueAgentCredential: async (id, delegationId) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/${encodeURIComponent(delegationId)}/credentials`, { method: 'POST', body: '{}' }),
+  revokeAgentCredential: async (id, delegationId, credentialId) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/${encodeURIComponent(delegationId)}/credentials/${encodeURIComponent(credentialId)}/revoke`, { method: 'POST', body: '{}' }),
+  listAgentProposals: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals`),
+  getAgentProposal: async (id, proposalId) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals/${encodeURIComponent(proposalId)}`),
+  reviewAgentProposal: async (id, proposalId, decision, note) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals/${encodeURIComponent(proposalId)}/review`, { method: 'POST', body: JSON.stringify(note ? { decision, note } : { decision }) }),
+  listAutomationAudit: async (id) => req(`/api/projects/${encodeURIComponent(id)}/automation-audit?limit=50`),
+
   // Cache
   makeCacheKey: async (op, params, ver, pids) => {
     const res = await req('/api/db/cache-key', { method: 'POST', body: JSON.stringify({ operation: op, params, dataVersion: ver, parentIds: pids }) });

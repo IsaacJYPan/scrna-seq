@@ -70,7 +70,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261032;
+const SCHEMA_CONTRACT_VERSION = 20261033;
 
 let pool = null;
 
@@ -751,6 +751,7 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
       research_analysis_snapshot_blobs, research_analysis_snapshot_preparations,
       managed_artifact_import_receipts, workflow_restoration_receipts, research_document_pending, research_document_pending_requests,
@@ -1552,6 +1553,11 @@ async function deleteExpiredDemoGuest(userId) {
     const projectIds = projectRows.rows.map((row) => row.id);
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
+      await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM agent_change_proposals WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query(`DELETE FROM agent_credentials WHERE delegation_id IN
+        (SELECT id FROM agent_delegations WHERE project_id = ANY($1::text[]))`, [projectIds]);
+      await client.query('DELETE FROM agent_delegations WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_publication_blobs WHERE publication_id IN (SELECT id FROM research_analysis_snapshot_publications WHERE project_id=ANY($1::text[]))', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_publication_requests WHERE project_id=ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_publications WHERE project_id=ANY($1::text[])', [projectIds]);
@@ -1610,6 +1616,7 @@ async function deleteExpiredDemoGuest(userId) {
       await client.query('DELETE FROM organization_members WHERE organization_id = ANY($1::text[])', [orgIds]);
       await client.query('DELETE FROM organizations WHERE id = ANY($1::text[])', [orgIds]);
     }
+    await client.query('DELETE FROM agent_principals WHERE sponsor_user_id = $1', [Number(userId)]);
     await client.query('DELETE FROM users WHERE id = $1', [Number(userId)]);
     await client.query('COMMIT');
     return true;
