@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -10,7 +10,11 @@ const { environmentFixture } = require('./_r-environment-test-utils');
 const { createLocalStorageProvider } = require('./storage');
 const { generatePrivateKernelExportSource } = require('./privateKernelExports');
 const directories=[], runtimes=[];
-afterEach(async()=>{for(const runtime of runtimes.splice(0))await runtime.close();for(const directory of directories.splice(0))await rm(directory,{recursive:true,force:true});});
+// Some tests leave a kernel workspace the runtime deliberately refused to remove;
+// its staged input directory is read-only, so restore owner write before cleanup.
+async function makeWritable(directory){await chmod(directory,0o700).catch(()=>{});
+  for(const entry of await readdir(directory,{withFileTypes:true}).catch(()=>[]))if(entry.isDirectory())await makeWritable(path.join(directory,entry.name));}
+afterEach(async()=>{for(const runtime of runtimes.splice(0))await runtime.close();for(const directory of directories.splice(0)){await makeWritable(directory);await rm(directory,{recursive:true,force:true});}});
 const scope={ownerUserId:1,projectId:'project1',workspaceId:'workspace1'};
 const kernelId=`pk_${'a'.repeat(24)}`;
 const secondId=`pk_${'b'.repeat(24)}`;
