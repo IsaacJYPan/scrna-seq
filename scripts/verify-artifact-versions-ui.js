@@ -95,9 +95,11 @@ async function verifyArtifactVersionsUi({ page, artifactDirectory, corruptVersio
   const objectName = `Acceptance opaque object ${tag}`;
   await upload('untrusted.rds', 'arbitrary serialized object placeholder', objectName);
   await region.getByRole('button', { name: 'Import artifact', exact: true }).click();
-  await verified();
+  // Opaque files are never read in the browser, so no checksum-verified preview is shown.
+  await region.getByText(/Only its saved metadata is shown; its contents have not been read or verified here\./).waitFor();
+  assert(await region.getByText('Saved checksum verified · preview from this exact version', { exact: true }).count() === 0, 'Untrusted RDS was presented as browser-verified.');
   assert(await region.getByText('Metadata only', { exact: true }).isVisible(), 'Untrusted RDS offered an unsafe preview.');
-  assert(await region.getByText(/its contents require an appropriate private analysis runtime/).isVisible(), 'Metadata-only object restriction was absent.');
+  assert(await region.getByText(/RDS files open only in an appropriate private runtime/).isVisible(), 'Metadata-only object restriction was absent.');
   assert(await region.getByRole('img').count() === 0 && await region.getByRole('table').count() === 0, 'Opaque RDS was deserialized in the inspector.');
   await page.screenshot({ path: path.join(directory, 'opaque-object-metadata.png'), fullPage: true });
   checks.push('Untrusted RDS remains metadata-only with integrity status and no object transfer or deserialization.');
@@ -105,7 +107,7 @@ async function verifyArtifactVersionsUi({ page, artifactDirectory, corruptVersio
   if (corruptVersion) {
     await corruptVersion(replacement);
     await region.getByRole('button', { name: new RegExp(`^${tableName} · v2`) }).click();
-    await region.getByRole('alert').filter({ hasText: 'integrity check failed' }).waitFor();
+    await region.getByRole('alert').filter({ hasText: 'could not be verified against its saved version and checksum' }).waitFor();
     assert(await region.getByRole('table').count() === 0, 'Corrupted bytes still received a table preview.');
     await page.screenshot({ path: path.join(directory, 'changed-bytes-rejected.png'), fullPage: true });
     await region.getByRole('button', { name: new RegExp(`^${tableName} · v1`) }).click();
@@ -200,7 +202,10 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
     await openArtifactInspector(page);
     const region = page.getByRole('region', { name: 'Artifact versions', exact: true });
     await region.getByRole('button', { name: /^Saved analysis/ }).click();
-    await region.getByText('Saved checksum verified · preview from this exact version', { exact: true }).waitFor();
+    // A checkpoint has no browser preview: since 10-20 it is shown metadata-only
+    // and explicitly not described as read or checksum-verified in the browser.
+    await region.getByText(/Only its saved metadata is shown; its contents have not been read or verified here\./).waitFor();
+    assert(await region.getByText('Saved checksum verified · preview from this exact version', { exact: true }).count() === 0, 'Opaque checkpoint was presented as browser-verified.');
     assert(await region.getByText(job.id, { exact: true }).isVisible(), 'Existing checkpoint lost its source-run identity.');
     assert(await region.getByText('org.traceomics.seurat-checkpoint · 1', { exact: true }).isVisible(), 'Existing checkpoint format was absent.');
     const result = await verifyArtifactVersionsUi({ page, artifactDirectory: directory,
@@ -229,9 +234,9 @@ createRoot(document.getElementById('root')).render(<div className="mx-auto max-w
       return response.status;
     }, { backendOrigin, otherId: other.id, versionId: result.references.original.versionId });
     assert(wrongProject === 404, 'An exact managed version crossed the project boundary.');
-    assert(!requests.some(request => request.path.startsWith('/api/r')), 'Artifact inspection invoked a shared R endpoint.');
+    assert(!requests.some(request => /^\/api\/r(\/|$)/.test(request.path)), 'Artifact inspection invoked a shared R endpoint.');
     assert(errors.length === 0, 'Browser errors: ' + errors.join('; '));
-    result.checks.unshift('Existing saved checkpoint adapts to generic object metadata with verified bytes and exact source run.');
+    result.checks.unshift('Existing saved checkpoint is shown metadata-only (not read or verified in the browser) with its exact source run.');
     result.checks.push('Actual viewer project role hides imports; API denies uploads and wrong-project previews.');
     fs.writeFileSync(path.join(directory, 'acceptance.json'), JSON.stringify({ ...result, noEndpointMocks: true, actualProjectHistory: true, scientificDeserializationVerified: false, requests, responses }, null, 2) + '\n');
     console.log(JSON.stringify({ passed: true, checks: result.checks, directory }));
