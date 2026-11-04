@@ -363,6 +363,10 @@ async function main() {
     const clientErrors = [];
     page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
     page.on('pageerror', (error) => pageErrors.push(error.message));
+    const workflowResponses = [];
+    page.on('response', (response) => {
+      if (response.url().includes('/api/workflows/')) workflowResponses.push(`${response.request().method()} ${new URL(response.url()).pathname} ${response.status()}`);
+    });
     page.on('response', (response) => {
       if (response.status() >= 500) serverErrors.push(`${response.status()} ${response.url()}`);
       else if (response.status() >= 400) clientErrors.push(`${response.status()} ${response.url()}`);
@@ -524,9 +528,20 @@ write_table(summary_table, "object-summary.csv")
     // Surface the library's error instead of a bare timeout if opening is refused.
     const workflowHeading = page.getByRole('heading', { name: 'Single-cell workflow', exact: true, level: 1 });
     const workflowError = page.getByRole('alert');
-    await workflowHeading.or(workflowError).first().waitFor();
+    try {
+      await workflowHeading.or(workflowError).first().waitFor();
+    } catch { /* reported below */ }
     if (!(await workflowHeading.isVisible())) {
-      throw new Error(`Opening the workflow failed: ${(await workflowError.allInnerTexts()).join(' | ')}`);
+      const headings = await page.getByRole('heading').allInnerTexts();
+      const statuses = await page.getByRole('status').allInnerTexts();
+      throw new Error(['Opening the workflow did not show the workbench.',
+        `alerts: ${(await workflowError.allInnerTexts()).join(' | ')}`,
+        `workflow requests: ${workflowResponses.join(' | ')}`,
+        `headings: ${headings.slice(0, 8).join(' | ')}`,
+        `status: ${statuses.slice(0, 8).join(' | ')}`,
+        `console errors: ${consoleErrors.slice(-5).join(' | ')}`,
+        `page errors: ${pageErrors.slice(-5).join(' | ')}`,
+        `server errors: ${serverErrors.join(' | ')}`, `client errors: ${clientErrors.slice(-5).join(' | ')}`].join('\n'));
     }
     const pcaNavigation = page.getByRole('button', { name: 'PCA', exact: true });
     assert(await pcaNavigation.getAttribute('aria-disabled') === 'true', 'PCA must start locked');
