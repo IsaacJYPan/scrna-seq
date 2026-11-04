@@ -16,6 +16,7 @@ const { createExpertSandboxClient } = require('./expertSandboxClient');
 const { deriveRObjectStateKey } = require('./rStateKeys');
 const {
   createJobWorker,
+  createLanedJobWorker,
   DEFAULT_HANDLERS,
   parseJobWorkerConfig,
 } = require('./jobWorker');
@@ -210,7 +211,9 @@ function createStandaloneWorkerRuntime(options = {}) {
   const memoryProbe = options.availableMemoryBytes || availableMemoryBytes;
   const probeR = options.probeRReadiness
     || ((cfg, probeOptions) => rRuntime.probeWorkerRReadiness(cfg, probeOptions));
-  const createWorker = options.createJobWorker || createJobWorker;
+  const baseCreateWorker = options.createJobWorker || createJobWorker;
+  // Slurm jobs run on their own worker loops so a cluster wait never blocks local work.
+  const createWorker = (workerOptions) => createLanedJobWorker(workerOptions, { env, create: baseCreateWorker });
   const createServer = options.createHealthServer || createHealthServer;
   const onFatal = typeof options.onFatal === 'function' ? options.onFatal : () => {};
 

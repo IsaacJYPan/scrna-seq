@@ -496,7 +496,21 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     if (studyId !== undefined) { params.push(String(studyId)); filter = ' AND ar.study_id = $2'; }
     const { rows } = await db.query(
       `${RUN_SELECT} WHERE ar.project_id = $1${filter} ORDER BY ar.created_at DESC, ar.id DESC LIMIT 200`, params);
-    return { schema: 'traceomics.agent-runs.v1', runs: rows.map(publicRun) };
+    const runs = rows.map(publicRun);
+    const resultIds = runs.map((r) => r.resultAnalysisObjectId).filter(Boolean);
+    const summaries = new Map();
+    if (resultIds.length) {
+      const { rows: objects } = await db.query(
+        'SELECT id, metadata_json FROM analysis_objects WHERE project_id = $1 AND id = ANY($2::text[])',
+        [String(projectId), resultIds]);
+      for (const o of objects) {
+        let metadata = {};
+        try { metadata = JSON.parse(o.metadata_json || '{}'); } catch { metadata = {}; }
+        summaries.set(o.id, boundedSummary(metadata));
+      }
+    }
+    for (const r of runs) r.summary = r.resultAnalysisObjectId ? summaries.get(r.resultAnalysisObjectId) || null : null;
+    return { schema: 'traceomics.agent-runs.v1', runs };
   }
 
   // Human acceptance: compare-and-swap on the study's accepted-result pointer,

@@ -45,7 +45,7 @@ Environment:
 Output is JSON on stdout. Exit codes: 0 ok, 2 usage, 3 credential, 4 denied,
 5 not found, 6 conflict or limit, 7 unavailable, 1 other.`;
 
-class UsageError extends Error {}
+export class UsageError extends Error {}
 
 export function parseArgs(argv) {
   const positional = [];
@@ -181,7 +181,7 @@ export function exitCodeFor(status) {
   return EXIT.ERROR;
 }
 
-function readToken(options, env, readFile) {
+export function readToken(options, env, readFile) {
   let token = env.TRACEOMICS_AGENT_TOKEN;
   if (options.tokenFile) token = readFile(options.tokenFile).trim();
   if (!token) throw new UsageError('Set TRACEOMICS_AGENT_TOKEN or pass --token-file.');
@@ -204,31 +204,18 @@ async function readBounded(response) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export async function run(argv, { env = process.env, stdout = process.stdout, stderr = process.stderr,
-  fetchImpl = globalThis.fetch, readFile = (p) => readFileSync(p, 'utf8') } = {}) {
-  let request;
-  let token;
-  try {
-    const parsed = parseArgs(argv);
-    request = buildRequest(parsed, { readFile });
-    if (request.help) { stderr.write(`${USAGE}\n`); return parsed.options.help ? EXIT.OK : EXIT.USAGE; }
-    token = readToken(parsed.options, env, readFile);
-  } catch (error) {
-    if (error instanceof UsageError) { stderr.write(`traceomics: ${error.message}\n`); return EXIT.USAGE; }
-    stderr.write(`traceomics: ${error.code === 'ENOENT' ? 'file not found' : 'could not read input'}\n`);
-    return EXIT.USAGE;
-  }
+// Sends one automation API request. Returns { response, data } for any JSON
+// reply, or { failure, exit } when there is no usable reply.
+export async function sendRequest(request, { env = process.env, token, fetchImpl = globalThis.fetch }) {
   let origin;
   try {
     origin = new URL(env.TRACEOMICS_URL || 'http://127.0.0.1:3000');
   } catch {
-    stderr.write('traceomics: TRACEOMICS_URL is not a valid URL.\n');
-    return EXIT.USAGE;
+    return { failure: 'TRACEOMICS_URL is not a valid URL.', exit: EXIT.USAGE };
   }
   const local = ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname);
   if (origin.protocol !== 'https:' && !local) {
-    stderr.write('traceomics: refusing to send a credential over plain HTTP to a non-local server.\n');
-    return EXIT.USAGE;
+    return { failure: 'refusing to send a credential over plain HTTP to a non-local server.', exit: EXIT.USAGE };
   }
   const url = new URL(`/api/automation/v1${request.path}`, origin);
   let response;
@@ -245,19 +232,37 @@ export async function run(argv, { env = process.env, stdout = process.stdout, st
       signal: AbortSignal.timeout(30000),
     });
   } catch {
-    // The outcome of a submission is unknown; re-running the same command
+    // The outcome of a submission is unknown; repeating the same request
     // reuses the same request id and returns the original receipt.
-    stderr.write('traceomics: the server could not be reached; the outcome is unknown. Re-run the same command to check.\n');
-    return EXIT.UNAVAILABLE;
+    return { failure: 'the server could not be reached; the outcome is unknown. Re-run the same command to check.', exit: EXIT.UNAVAILABLE };
   }
   let text;
-  try { text = await readBounded(response); } catch (error) { stderr.write(`traceomics: ${error.message}\n`); return EXIT.ERROR; }
+  try { text = await readBounded(response); } catch (error) { return { failure: error.message, exit: EXIT.ERROR }; }
   let data;
   try { data = text ? JSON.parse(text) : null; } catch { data = null; }
   if (data === null || typeof data !== 'object') {
-    stderr.write(`traceomics: unexpected response (HTTP ${response.status}).\n`);
-    return EXIT.ERROR;
+    return { failure: `unexpected response (HTTP ${response.status}).`, exit: EXIT.ERROR };
   }
+  return { response, data };
+}
+
+export async function run(argv, { env = process.env, stdout = process.stdout, stderr = process.stderr,
+  fetchImpl = globalThis.fetch, readFile = (p) => readFileSync(p, 'utf8') } = {}) {
+  let request;
+  let token;
+  try {
+    const parsed = parseArgs(argv);
+    request = buildRequest(parsed, { readFile });
+    if (request.help) { stderr.write(`${USAGE}\n`); return parsed.options.help ? EXIT.OK : EXIT.USAGE; }
+    token = readToken(parsed.options, env, readFile);
+  } catch (error) {
+    if (error instanceof UsageError) { stderr.write(`traceomics: ${error.message}\n`); return EXIT.USAGE; }
+    stderr.write(`traceomics: ${error.code === 'ENOENT' ? 'file not found' : 'could not read input'}\n`);
+    return EXIT.USAGE;
+  }
+  const reply = await sendRequest(request, { env, token, fetchImpl });
+  if (reply.failure) { stderr.write(`traceomics: ${reply.failure}\n`); return reply.exit; }
+  const { response, data } = reply;
   stdout.write(`${JSON.stringify(data, null, 2)}\n`);
   if (!response.ok) stderr.write(`traceomics: ${data.code || `HTTP ${response.status}`}: ${data.error || 'request failed'}\n`);
   return exitCodeFor(response.status);

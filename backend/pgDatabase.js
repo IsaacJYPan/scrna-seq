@@ -4759,6 +4759,20 @@ async function claimNextJob(workerId, opts = {}) {
       throw codedError('INVALID_WORKER_CAPABILITIES', 'allowedJobTypes contains an invalid job type.');
     }
   }
+  // Execution lanes: Slurm jobs wait on the cluster, not on local CPU, so they
+  // are counted separately from local work and never hold the local slot. A
+  // worker restricted to ['slurm'] is gated by running Slurm jobs; any other
+  // worker is gated by running local jobs.
+  let executionTargets = null;
+  if (opts.executionTargets !== undefined && opts.executionTargets !== null) {
+    if (!Array.isArray(opts.executionTargets)
+        || opts.executionTargets.length === 0
+        || opts.executionTargets.some((t) => !['local', 'slurm'].includes(t))) {
+      throw codedError('INVALID_WORKER_CAPABILITIES', 'executionTargets must list local and/or slurm.');
+    }
+    executionTargets = [...new Set(opts.executionTargets)];
+  }
+  const gateLane = executionTargets && executionTargets.length === 1 && executionTargets[0] === 'slurm' ? 'slurm' : 'local';
   const claimToken = generateClaimToken();
   const p = await connect();
   const client = await p.connect();
@@ -4773,8 +4787,9 @@ async function claimNextJob(workerId, opts = {}) {
       `SELECT COUNT(*)::int AS count FROM jobs
         WHERE status = 'running'
           AND lease_expires_at IS NOT NULL
-          AND lease_expires_at > $1`,
-      [now]
+          AND lease_expires_at > $1
+          AND execution_target = $2`,
+      [now, gateLane]
     );
     if (Number(activeClaim.rows[0]?.count || 0) >= maxConcurrentClaims) {
       await client.query('COMMIT');
@@ -4915,6 +4930,7 @@ async function claimNextJob(workerId, opts = {}) {
          FROM jobs j
         WHERE j.status = 'queued' AND j.attempts < j.max_attempts
           AND ($2::text[] IS NULL OR j.job_type = ANY($2::text[]))
+          AND ($6::text[] IS NULL OR j.execution_target = ANY($6::text[]))
           AND (
             (j.project_id IS NULL
               AND NOT EXISTS (
@@ -4965,6 +4981,7 @@ async function claimNextJob(workerId, opts = {}) {
         [...RETRYABLE_DURABLE_JOB_TYPES],
         RECOVERY_ONLY_PENDING_CODES,
         EXPERT_R_EXECUTE_CAPABILITY,
+        executionTargets,
       ]
     );
     if (!found.rows[0]) {

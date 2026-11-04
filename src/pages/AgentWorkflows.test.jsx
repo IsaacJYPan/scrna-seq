@@ -41,6 +41,22 @@ describe('AgentWorkflows', () => {
     await waitFor(() => expect(window.electronAPI.acceptAgentRun).toHaveBeenCalledWith('proj_1', 'run_1', 'run_0'));
   });
 
+  it('compares trials of a study side by side with their result metrics', async () => {
+    window.electronAPI.listAgentRuns = vi.fn(async () => ({ runs: [
+      { ...run, id: 'run_2', trialNumber: 2, choices: { clusterResolution: 1.2 }, summary: { n_cells: 2638, n_clusters: 11, used_seed: 7 } },
+      { ...run, summary: { n_cells: 2638, n_clusters: 7, used_seed: 7 } },
+    ] }));
+    render(<AgentWorkflows projectId="proj_1" role="viewer" />);
+    const table = await screen.findByRole('table', { name: /trials for sweep/i });
+    const rows = table.querySelectorAll('tbody tr');
+    expect([...rows].map((r) => r.textContent)).toEqual([
+      expect.stringMatching(/^1.*0\.5.*2,638.*7/), expect.stringMatching(/^2.*1\.2.*2,638.*11/),
+    ]);
+    expect(table.textContent).toContain('Clusters');
+    expect(table.textContent).not.toContain('Seed');
+    expect(screen.queryByRole('button', { name: /accept this result/i })).not.toBeInTheDocument();
+  });
+
   it('creates a study with typed allowed values and hides approval from non-managers', async () => {
     window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }] }));
     render(<AgentWorkflows projectId="proj_1" role="analyst" />);

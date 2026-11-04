@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const database = require('./pgDatabase');
 const rWorkerBridge = require('./rWorkerBridge');
 const storage = require('./storage');
-const { createSlurmExecutor } = require('./executors/slurm');
+const { createSlurmExecutor, slurmConfig } = require('./executors/slurm');
 const { observedRuntimeMetadata } = require('./executionHistoryProjection');
 const {
   genericNoopHandler,
@@ -140,6 +140,8 @@ function createJobWorker(options = {}) {
     leaseSeconds = JOB_WORKER_DEFAULTS.leaseSeconds,
     handlers = DEFAULT_HANDLERS,
     allowedJobTypes,
+    // null claims every target; ['local'] or ['slurm'] restricts this loop to one lane.
+    executionTargets = null,
     maxConcurrentClaims = 1,
     claimGate,
     rBridge = rWorkerBridge,
@@ -333,6 +335,7 @@ function createJobWorker(options = {}) {
           {
             leaseSeconds,
             allowedJobTypes,
+            executionTargets,
             maxConcurrentClaims,
           },
           nowTs
@@ -1385,8 +1388,47 @@ function createJobWorker(options = {}) {
   return { runOnce, start, stop, isRunning, workerId, leaseSeconds };
 }
 
+// Number of Slurm jobs this installation waits on at once (SLURM_MAX_RUNNING,
+// default 4, at most 32). Zero when the Slurm target is not configured.
+function slurmLaneCount(env = process.env) {
+  if (!slurmConfig(env).enabled) return 0;
+  const raw = env.SLURM_MAX_RUNNING;
+  const n = raw === undefined || raw === '' ? 4 : Number(raw);
+  return Number.isInteger(n) && n >= 0 ? Math.min(n, 32) : 4;
+}
+
+// A cluster job can wait in the queue for hours, so Slurm jobs get their own
+// worker loops: the main loop keeps running local work, and each Slurm loop
+// submits and waits on one cluster job. Without a configured Slurm target this
+// is just the one worker (which then fails any Slurm job as unavailable).
+// Returns the same interface as createJobWorker; runOnce() drives the main loop.
+function createLanedJobWorker(options = {}, { env = process.env, create = createJobWorker } = {}) {
+  const lanes = slurmLaneCount(env);
+  if (lanes === 0) return create(options);
+  const main = create({ ...options, executionTargets: ['local'] });
+  const slurmWorkers = Array.from({ length: lanes }, (_, i) => create({
+    ...options,
+    workerId: `${main.workerId}-slurm-${i + 1}`,
+    executionTargets: ['slurm'],
+    maxConcurrentClaims: lanes,
+    pollIntervalMs: Math.max(options.pollIntervalMs || 1000, 5000),
+  }));
+  const all = [main, ...slurmWorkers];
+  return {
+    runOnce: main.runOnce,
+    start() { for (const w of all) w.start(); },
+    stop() { return Promise.all(all.map((w) => w.stop())).then(() => undefined); },
+    isRunning: () => all.some((w) => w.isRunning()),
+    workerId: main.workerId,
+    leaseSeconds: main.leaseSeconds,
+    slurmWorkers,
+  };
+}
+
 module.exports = {
   createJobWorker,
+  createLanedJobWorker,
+  slurmLaneCount,
   generateWorkerId,
   genericNoopHandler,
   checkpointNoopHandler,

@@ -144,6 +144,8 @@ describe.skipIf(!CONFIGURED)('approved workflow journey', () => {
     expect(results.data.result).toMatchObject({ analysisObjectId: resultId, summary: { cells: 2638, clusters: 9 } });
     expect(JSON.stringify(results.data)).not.toContain('/vault/x');
     expect(results.data.result.summary.note).toBeUndefined();
+    const humanRuns = await api(server, `${ctx.base}/agent-runs`, { token: ctx.sponsor.token });
+    expect(humanRuns.data.runs[0].summary).toEqual({ cells: 2638, clusters: 9 });
 
     const accept = (body) => api(server, `${ctx.base}/agent-runs/${first.data.run.id}/accept`, { method: 'POST', token: ctx.sponsor.token, body });
     const accepted = await accept({ expectedAcceptedRunId: null, note: 'Looks right.' });

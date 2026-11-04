@@ -14,7 +14,7 @@ const config = require('./config');
 const dbmod = require('./pgDatabase');
 const storage = require('./storage');
 const { installFakeSlurm } = require('./_fakeSlurm');
-const { createJobWorker } = require('./jobWorker');
+const { createJobWorker, createLanedJobWorker, slurmLaneCount } = require('./jobWorker');
 const { createSlurmExecutor, slurmConfig, wallTime } = require('./executors/slurm');
 
 const CONFIGURED = config.hasPostgresConnection();
@@ -178,5 +178,37 @@ describe.skipIf(!CONFIGURED)('Slurm executor', () => {
     await expect(dbmod.createProjectJob(alice.id, proj.id, {
       jobType: 'seurat.pipeline.v1', datasetId: input.datasetId, analysisObjectId: input.id, executionTarget: 'slurm',
     })).rejects.toMatchObject({ code: 'TARGET_UNAVAILABLE' });
+  });
+});
+
+describe.skipIf(!CONFIGURED)('Slurm execution lane', () => {
+  it('a running local job does not block Slurm jobs, and lanes only claim their own target', async () => {
+    const { alice, proj, input, job: slurmJob } = await seedSlurmJob();
+    const localJob = await dbmod.createProjectJob(alice.id, proj.id, {
+      jobType: 'seurat.pipeline.v1', datasetId: input.datasetId, analysisObjectId: input.id, executionTarget: 'local',
+    });
+    const local = await dbmod.claimNextJob('w_local', { leaseSeconds: 60, executionTargets: ['local'] });
+    expect(local.id).toBe(localJob.id);
+    // The local slot is full, but that does not stop the Slurm lane.
+    expect(await dbmod.claimNextJob('w_local2', { leaseSeconds: 60, executionTargets: ['local'] })).toBeNull();
+    const remote = await dbmod.claimNextJob('w_slurm', { leaseSeconds: 60, executionTargets: ['slurm'] });
+    expect(remote.id).toBe(slurmJob.id);
+    // A running Slurm job does not hold the local slot either.
+    expect(await dbmod.claimNextJob('w_slurm2', { leaseSeconds: 60, executionTargets: ['slurm'], maxConcurrentClaims: 1 })).toBeNull();
+    await expect(dbmod.claimNextJob('w_bad', { executionTargets: ['gpu'] })).rejects.toMatchObject({ code: 'INVALID_WORKER_CAPABILITIES' });
+  });
+
+  it('starts Slurm worker loops only when the target is configured', () => {
+    const created = [];
+    const fakeCreate = (o) => { created.push(o); return { workerId: o.workerId || 'w_main', leaseSeconds: 30, runOnce: async () => ({}), start() {}, stop: async () => {}, isRunning: () => false }; };
+    const laned = createLanedJobWorker({ db: dbmod }, { env: { ...process.env, SLURM_MAX_RUNNING: '2' }, create: fakeCreate });
+    expect(created.map((o) => o.executionTargets)).toEqual([['local'], ['slurm'], ['slurm']]);
+    expect(created[1]).toMatchObject({ workerId: 'w_main-slurm-1', maxConcurrentClaims: 2 });
+    expect(laned.slurmWorkers).toHaveLength(2);
+    created.length = 0;
+    createLanedJobWorker({ db: dbmod }, { env: { PATH: process.env.PATH }, create: fakeCreate });
+    expect(created).toHaveLength(1);
+    expect(created[0].executionTargets).toBeUndefined();
+    expect(slurmLaneCount({ ...process.env, SLURM_MAX_RUNNING: '0' })).toBe(0);
   });
 });

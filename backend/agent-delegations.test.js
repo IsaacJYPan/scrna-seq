@@ -457,3 +457,22 @@ describe.skipIf(!CONFIGURED)('agent CLI against the real server', () => {
     expect(`${context.err}${denied.err}${JSON.stringify(denied.data)}`).not.toContain(token);
   });
 });
+
+describe.skipIf(!CONFIGURED)('agent MCP server against the real server', () => {
+  it('reads context and datasets and refuses other projects', async () => {
+    const { createMcpServer } = await import('../cli/traceomics-mcp.mjs');
+    const { sponsor, project } = await setupProject();
+    const token = (await delegate(sponsor.token, project.id)).data.credential.token;
+    const { port } = server.address();
+    const mcp = createMcpServer({ env: { TRACEOMICS_AGENT_TOKEN: token, TRACEOMICS_URL: `http://127.0.0.1:${port}` } });
+    const call = async (name, args) => (await mcp.callTool(name, args)).result;
+    const context = await call('get_context', {});
+    expect(context.isError).toBeUndefined();
+    expect(JSON.parse(context.content[0].text).actor.kind).toBe('agent');
+    const datasets = await call('list_datasets', { projectId: project.id });
+    expect(JSON.parse(datasets.content[0].text).datasets[0].id).toBe('ds_secret1');
+    const denied = await call('list_runs', { projectId: 'proj_elsewhere' });
+    expect(denied.isError).toBe(true);
+    expect(denied.content[0].text).not.toContain(token);
+  });
+});

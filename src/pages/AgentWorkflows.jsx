@@ -15,6 +15,40 @@ const STATE_TONE = {
   failed: 'border-danger/30 bg-danger/10 text-danger',
 };
 
+const METRIC_LABELS = {
+  n_cells: 'Cells', n_features: 'Features', n_clusters: 'Clusters', cells: 'Cells', clusters: 'Clusters',
+  resolution: 'Resolution', used_seed: 'Seed', normalization_method: 'Normalization',
+};
+const METRIC_ORDER = ['n_cells', 'cells', 'n_features', 'n_clusters', 'clusters'];
+
+function groupByStudy(runs) {
+  const groups = new Map();
+  for (const r of runs) {
+    if (!groups.has(r.studyId)) groups.set(r.studyId, []);
+    groups.get(r.studyId).push(r);
+  }
+  for (const list of groups.values()) list.sort((a, b) => a.trialNumber - b.trialNumber);
+  return [...groups.entries()];
+}
+
+// Show the summary fields that differ between trials or that are always worth comparing.
+function metricColumns(runs) {
+  const keys = new Set(runs.flatMap((r) => Object.keys(r.summary || {})));
+  const shown = METRIC_ORDER.filter((k) => keys.has(k));
+  for (const k of keys) {
+    if (shown.includes(k) || shown.length >= 6) continue;
+    const values = new Set(runs.filter((r) => r.summary).map((r) => String(r.summary[k])));
+    if (values.size > 1) shown.push(k);
+  }
+  return shown;
+}
+
+function formatMetric(value) {
+  if (value === undefined || value === null) return '—';
+  if (typeof value === 'number') return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(3);
+  return String(value);
+}
+
 function parseValues(text, spec) {
   return text.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
     if (spec?.type === 'enum') {
@@ -199,21 +233,44 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
 
       <div className="space-y-2">
         <h4 className="text-sm font-bold text-text">Agent runs</h4>
-        {runs.length === 0 ? <p className="text-sm text-textMuted">No agent runs yet.</p> : runs.map((r) => (
-          <article key={r.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface p-4 text-sm">
-            <div className="min-w-0">
-              <p className="text-text"><span className="font-bold">{r.studyName}</span> · trial {r.trialNumber} · {r.agent.displayName}</p>
-              <p className="text-xs text-textMuted">Choices: {Object.entries(r.choices).map(([k, v]) => `${k}=${v}`).join(', ') || 'defaults'} · Reserved {r.reservation.cpuSeconds / 3600} CPU-h · {r.executionTarget === 'slurm' ? 'Slurm' : 'local'}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span>
-              {r.acceptance === 'accepted' && <span className="inline-flex items-center gap-1 text-xs font-bold text-success"><CheckCircle2 size={14} /> Accepted</span>}
-              {r.state === 'candidate_ready' && r.acceptance !== 'accepted' && canWrite && (
-                <button type="button" disabled={Boolean(busy)} onClick={() => act(`accept:${r.id}`, () => api.acceptAgentRun(projectId, r.id, acceptedFor(r.studyId)))} className="btn btn-primary text-sm">Accept this result</button>
-              )}
-            </div>
-          </article>
-        ))}
+        {runs.length === 0 ? <p className="text-sm text-textMuted">No agent runs yet.</p> : groupByStudy(runs).map(([studyId, studyRuns]) => {
+          const metrics = metricColumns(studyRuns);
+          const choiceKeys = [...new Set(studyRuns.flatMap((r) => Object.keys(r.choices || {})))];
+          return (
+            <article key={studyId} className="overflow-x-auto rounded-lg border border-border bg-surface p-4 text-sm">
+              <p className="mb-2 font-bold text-text">{studyRuns[0].studyName} <span className="ml-1 text-xs font-normal text-textMuted">{studyRuns.length} trial{studyRuns.length === 1 ? '' : 's'}</span></p>
+              <table className="w-full min-w-[480px] text-left text-xs" aria-label={`Trials for ${studyRuns[0].studyName}`}>
+                <thead className="text-textMuted">
+                  <tr>
+                    <th className="py-1 pr-3">Trial</th>
+                    {choiceKeys.map((k) => <th key={k} className="py-1 pr-3">{k}</th>)}
+                    {metrics.map((k) => <th key={k} className="py-1 pr-3">{METRIC_LABELS[k] || k}</th>)}
+                    <th className="py-1 pr-3">Agent</th>
+                    <th className="py-1 pr-3">State</th>
+                    <th className="py-1" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {studyRuns.map((r) => (
+                    <tr key={r.id} className={`border-t border-border ${r.acceptance === 'accepted' ? 'bg-success/5' : ''}`}>
+                      <td className="py-2 pr-3 font-bold text-text">{r.trialNumber}<span className="ml-1 font-normal text-textMuted">{r.executionTarget === 'slurm' ? 'Slurm' : 'local'}</span></td>
+                      {choiceKeys.map((k) => <td key={k} className="py-2 pr-3 text-text">{r.choices?.[k] === undefined ? 'default' : String(r.choices[k])}</td>)}
+                      {metrics.map((k) => <td key={k} className="py-2 pr-3 text-text">{formatMetric(r.summary?.[k])}</td>)}
+                      <td className="py-2 pr-3 text-textMuted">{r.agent.displayName}</td>
+                      <td className="py-2 pr-3"><span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span></td>
+                      <td className="py-2 text-right">
+                        {r.acceptance === 'accepted' && <span className="inline-flex items-center gap-1 font-bold text-success"><CheckCircle2 size={14} /> Accepted</span>}
+                        {r.state === 'candidate_ready' && r.acceptance !== 'accepted' && canWrite && (
+                          <button type="button" disabled={Boolean(busy)} onClick={() => act(`accept:${r.id}`, () => api.acceptAgentRun(projectId, r.id, acceptedFor(r.studyId)))} className="btn btn-primary text-xs">Accept this result</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </article>
+          );
+        })}
       </div>
     </section>
   );

@@ -4106,7 +4106,10 @@ function startJobWorkerIfEnabled(env = process.env, deps = {}) {
   const logger = deps.logger || console;
   const config = parseJobWorkerConfig(env, { logger });
   if (!config.enabled) return null;
-  const create = deps.createJobWorker || require('./backend/jobWorker').createJobWorker;
+  const { createLanedJobWorker, createJobWorker } = require('./backend/jobWorker');
+  const baseCreate = deps.createJobWorker || createJobWorker;
+  // Slurm jobs run on their own worker loops so a cluster wait never blocks local work.
+  const create = (options) => createLanedJobWorker(options, { env, create: baseCreate });
   // Wire the in-process worker to the local R backend so the r.runtime.check bridge
   // handler can reach it. We build the narrow R caller HERE and pass it as a function
   // (a closure over the secret), so the API token is NEVER placed as a plain field on

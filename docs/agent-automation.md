@@ -11,7 +11,7 @@ describes that is not listed here as implemented is not available.
 | 2. Approved local workflow execution | Implemented for one release (Seurat QC/clustering) |
 | 3. Qualified HPC target | Slurm target implemented (SSH login node); site qualification pending |
 | 4. Isolated development | Not started |
-| 5. Bounded protocol automation / MCP | Not started |
+| 5. Bounded protocol automation / MCP | MCP server implemented; composition and standing acceptance not started |
 
 ## What exists
 
@@ -134,7 +134,10 @@ summary (numbers, booleans, and short strings only).
 `expectedAcceptedRunId` set to the study's current accepted run (or `null`). If
 it changed in the meantime the request fails with `BASELINE_CHANGED`. Each
 acceptance is recorded append-only. Accepting moves the study's accepted-result
-pointer; it never copies or overwrites another analysis.
+pointer; it never copies or overwrites another analysis. *Agent access →
+Approved workflows* shows each study's trials in one table (the varied
+choices, the result's cells and clusters, and any summary field that differs
+between trials) so the candidates can be compared before one is accepted.
 
 **What is and is not enforced.** Budgets are enforced at admission. The local
 worker runs one job at a time, and physical CPU and memory limits come from the
@@ -181,6 +184,7 @@ its own run, sends `scancel`. Failed jobs record the Slurm state and the tail of
 | `SLURM_RSCRIPT` | Command that runs R on compute nodes, for example `apptainer exec /path/traceomics-r.sif Rscript` |
 | `SLURM_MODULES` | Optional `module load` list |
 | `SLURM_POLL_SECONDS` | Poll interval (default 30) |
+| `SLURM_MAX_RUNNING` | Cluster jobs waited on at once (default 4; `0` puts Slurm jobs in the local queue) |
 
 The compute nodes need R with Seurat, hdf5r, jsonlite and digest; the simplest
 route is the project's R image converted to Apptainer. `GET
@@ -188,9 +192,12 @@ route is the project's R image converted to Apptainer. `GET
 /api/automation/v1/projects/:projectId/targets` (agents, `traceomics targets
 list`) report whether the cluster is reachable, using `sinfo`.
 
-**Current limits.** The local worker holds one claim slot while it waits on the
-cluster, so a long Slurm run blocks other local jobs; raise the worker pool size
-if needed. Only the Seurat pipelines run on Slurm. Isolation on the cluster is
+**Execution lanes.** Slurm jobs have their own worker loops
+(`SLURM_MAX_RUNNING` of them) and their own claim limit, so a job waiting in the
+cluster queue never holds the local slot, and local work never delays a Slurm
+submission.
+
+**Current limits.** Only the Seurat pipelines run on Slurm. Isolation on the cluster is
 whatever the site's Slurm and container configuration enforce; site
 qualification (cgroup limits, no nested submission, network policy) is still to
 do. Remote commands are built from validated tokens and single-quoted; no
@@ -298,6 +305,40 @@ derives one from the content (or, for `runs submit`, from the plan), so
 re-running a command after a lost reply returns the original proposal or run
 instead of creating a duplicate.
 
+## MCP server
+
+`cli/traceomics-mcp.mjs` serves the same automation API as MCP tools over
+stdio, so an MCP client (an AI assistant or agent framework) can use TraceOmics
+directly. Like the CLI it has no authority of its own and reads the credential
+from `TRACEOMICS_AGENT_TOKEN` or `TRACEOMICS_AGENT_TOKEN_FILE`; tools never take
+a credential argument.
+
+Tools: `get_context`, `get_project`, `list_datasets`, `list_runs`,
+`list_workflows`, `list_targets`, `list_studies`, `get_study`, `create_plan`,
+`get_plan`, `submit_run`, `get_run`, `get_run_results`, `cancel_run`,
+`create_proposal`, `list_proposals`, `get_proposal`. A refusal from the server
+(for example `BUDGET_EXCEEDED`) comes back as a tool error with the server's
+JSON. `submit_run` and `create_proposal` derive their request id from the
+content, so a repeated call after a lost reply returns the original.
+
+Example client configuration (the token file is readable only by the agent's
+OS account):
+
+```json
+{
+  "mcpServers": {
+    "traceomics": {
+      "command": "node",
+      "args": ["/opt/traceomics/cli/traceomics-mcp.mjs"],
+      "env": {
+        "TRACEOMICS_URL": "https://traceomics.example.org",
+        "TRACEOMICS_AGENT_TOKEN_FILE": "/home/agent/.traceomics-token"
+      }
+    }
+  }
+}
+```
+
 ## Deployment prerequisites
 
 The application can separate agent and human authority only if the agent
@@ -316,8 +357,8 @@ cannot obtain human credentials. Before issuing agent credentials:
 
 Site qualification of the Slurm target, Slurm for other job types,
 per-run OS isolation, workflow
-composition, sensitivity-study selection rules, standing acceptance rules,
-isolated development, and MCP. Agent-specific limits do not change what people can do with
+composition, sensitivity-study selection rules, standing acceptance rules, and
+isolated development. Agent-specific limits do not change what people can do with
 their own sessions.
 
 ## Tests
