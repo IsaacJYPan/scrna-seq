@@ -373,7 +373,7 @@ async function main() {
     await login(page, email, password);
     await page.getByText('Expert browser project', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
-    await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
     await page.getByRole('heading', { name: 'Exact R environment',exact:true }).waitFor();
     await page.getByRole('button', { name: 'Inspect package lock',exact:true }).click();
     await page.getByRole('button', { name: 'Download environment manifest',exact:true }).waitFor();
@@ -573,7 +573,7 @@ write_table(summary_table, "object-summary.csv")
     console.log('[workflow-browser] PASS import, locks, figures, rerun invalidation, and snapshot restoration');
 
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
-    await page.getByRole('heading', { name: 'Expert R Workbench' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
     const privateMarker = `${tempRoot}\\private-marker.txt`;
     await page.getByLabel('R script').fill(`stop("${privateMarker.replace(/\\/g, '\\\\')}")`);
     await page.getByRole('button', { name: 'Run R analysis' }).click();
