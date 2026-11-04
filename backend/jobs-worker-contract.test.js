@@ -1008,7 +1008,7 @@ describe.skipIf(!CONFIGURED)('jobs worker contract — invariants preserved', ()
     // The create response shape is exactly the historical public shape.
     expect(Object.keys(created).sort()).toEqual([
       'analysisObjectId', 'canceledAt', 'completedAt', 'createdAt', 'datasetId',
-      'error', 'id', 'jobType', 'logs', 'ownerUserId', 'parameters', 'projectId',
+      'error', 'executionTarget', 'id', 'jobType', 'logs', 'ownerUserId', 'parameters', 'projectId',
       'resultAnalysisObjectId', 'retryOfJobId', 'startedAt', 'status', 'updatedAt'
     ]);
     // Claiming does not add worker keys to the public read shape.

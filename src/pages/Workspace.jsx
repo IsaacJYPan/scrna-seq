@@ -817,6 +817,22 @@ export function SeuratPipelinePanel({
   const [logs, setLogs] = useState([]);
   const [artifacts, setArtifacts] = useState([]);
   const [jobStatus, setJobStatus] = useState({ launching: false, refreshing: false, error: null });
+  // Compute target for Seurat runs: the installation worker, or the Slurm
+  // cluster when this installation has one configured and reachable.
+  const [runTarget, setRunTarget] = useState('local');
+  const [slurmTarget, setSlurmTarget] = useState(null);
+  React.useEffect(() => {
+    let active = true;
+    setSlurmTarget(null);
+    setRunTarget('local');
+    const api = window.electronAPI || {};
+    if (!activeProjectId || typeof api.listComputeTargets !== 'function') return undefined;
+    api.listComputeTargets(activeProjectId).then((result) => {
+      const slurm = (result?.targets || []).find((target) => target.name === 'slurm');
+      if (active && slurm?.available) setSlurmTarget(slurm);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [activeProjectId]);
   const [loadStatus, setLoadStatus] = useState({ launching: false, refreshing: false, error: null });
   const [params, setParams] = useState(() => ({ ...DEFAULT_SEURAT_PIPELINE_PARAMS }));
 
@@ -1098,6 +1114,7 @@ export function SeuratPipelinePanel({
         ...(multiSampleMode ? { samples: multiSampleRows } : {}),
         analysisObjectId: input.id,
         params: scrubEmptyParams(params),
+        ...(!spatialMode && runTarget === 'slurm' ? { executionTarget: 'slurm' } : {}),
       });
       setJob(created);
       await refreshJob(created.id);
@@ -1423,6 +1440,15 @@ export function SeuratPipelinePanel({
                     <p key={message} className="mt-2 text-danger">{safeMessage(message)}</p>
                   ))}
                 </div>
+              )}
+              {slurmTarget && !spatialMode && (
+                <label className="mt-4 block space-y-1 text-xs font-bold text-textMuted">Run on
+                  <select aria-label="Run on" value={runTarget} onChange={(event) => setRunTarget(event.target.value)}
+                    className="w-full max-w-xs rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
+                    <option value="local">This installation</option>
+                    <option value="slurm">Slurm cluster{slurmTarget.partition ? ` (${slurmTarget.partition})` : ''}</option>
+                  </select>
+                </label>
               )}
               <button
                 onClick={launchPipeline}

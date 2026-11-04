@@ -122,7 +122,7 @@ export function buildCellChatInferenceJobPayload(objectId, params = {}) {
   };
 }
 
-export function buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params = {} } = {}) {
+export function buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params = {}, executionTarget } = {}) {
   const safeParams = {};
   const rawParams = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
   for (const [key, value] of Object.entries(rawParams)) {
@@ -133,6 +133,7 @@ export function buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, par
     ...(datasetId ? { datasetId } : {}),
     ...(analysisObjectId ? { analysisObjectId } : {}),
     parameters: safeParams,
+    ...(executionTarget === 'slurm' ? { executionTarget } : {}),
   };
 }
 
@@ -143,12 +144,13 @@ export function buildSpatialSeuratPipelineJobPayload({ datasetId, analysisObject
   };
 }
 
-export function buildMultiSampleSeuratPipelineJobPayload({ samples = [], analysisObjectId, params = {} } = {}) {
+export function buildMultiSampleSeuratPipelineJobPayload({ samples = [], analysisObjectId, params = {}, executionTarget } = {}) {
   const primaryDatasetId = Array.isArray(samples) ? samples[0]?.datasetId : null;
   const base = buildSeuratPipelineJobPayload({
     datasetId: primaryDatasetId,
     analysisObjectId,
     params,
+    executionTarget,
   });
   return {
     ...base,
@@ -828,15 +830,15 @@ export const electronAPI = {
       method: 'POST',
       body: JSON.stringify(buildCheckpointSaveJobPayload(objectId)),
     }),
-  createSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
+  createSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {}, executionTarget } = {}) =>
     req(`/api/projects/${projectId}/jobs`, {
       method: 'POST',
-      body: JSON.stringify(buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params })),
+      body: JSON.stringify(buildSeuratPipelineJobPayload({ datasetId, analysisObjectId, params, executionTarget })),
     }),
-  createMultiSampleSeuratPipelineJob: async (projectId, { samples = [], analysisObjectId, params = {} } = {}) =>
+  createMultiSampleSeuratPipelineJob: async (projectId, { samples = [], analysisObjectId, params = {}, executionTarget } = {}) =>
     req(`/api/projects/${projectId}/jobs`, {
       method: 'POST',
-      body: JSON.stringify(buildMultiSampleSeuratPipelineJobPayload({ samples, analysisObjectId, params })),
+      body: JSON.stringify(buildMultiSampleSeuratPipelineJobPayload({ samples, analysisObjectId, params, executionTarget })),
     }),
   createSpatialSeuratPipelineJob: async (projectId, { datasetId, analysisObjectId, params = {} } = {}) =>
     req(`/api/projects/${projectId}/jobs`, {
@@ -914,6 +916,27 @@ export const electronAPI = {
   addProjectMember: async (id, email, role) => req(`/api/projects/${id}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
   updateProjectMemberRole: async (id, userId, role) => req(`/api/projects/${id}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
   removeProjectMember: async (id, userId) => req(`/api/projects/${id}/members/${userId}`, { method: 'DELETE' }),
+
+  // Delegated agents (human governance; agents use /api/automation/v1 instead)
+  listAgentDelegations: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations`),
+  createAgentDelegation: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations`, { method: 'POST', body: JSON.stringify(body) }),
+  revokeAgentDelegation: async (id, delegationId, reason) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/${encodeURIComponent(delegationId)}/revoke`, { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) }),
+  revokeAllAgentDelegations: async (id, scope) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/revoke-all`, { method: 'POST', body: JSON.stringify({ scope }) }),
+  issueAgentCredential: async (id, delegationId) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/${encodeURIComponent(delegationId)}/credentials`, { method: 'POST', body: '{}' }),
+  revokeAgentCredential: async (id, delegationId, credentialId) => req(`/api/projects/${encodeURIComponent(id)}/agent-delegations/${encodeURIComponent(delegationId)}/credentials/${encodeURIComponent(credentialId)}/revoke`, { method: 'POST', body: '{}' }),
+  listAgentProposals: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals`),
+  getAgentProposal: async (id, proposalId) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals/${encodeURIComponent(proposalId)}`),
+  reviewAgentProposal: async (id, proposalId, decision, note) => req(`/api/projects/${encodeURIComponent(id)}/agent-proposals/${encodeURIComponent(proposalId)}/review`, { method: 'POST', body: JSON.stringify(note ? { decision, note } : { decision }) }),
+  listAutomationAudit: async (id) => req(`/api/projects/${encodeURIComponent(id)}/automation-audit?limit=50`),
+  listComputeTargets: async (id) => req(`/api/projects/${encodeURIComponent(id)}/compute-targets`),
+  listWorkflowReleases: async (id) => req(`/api/projects/${encodeURIComponent(id)}/workflow-releases`),
+  approveWorkflowRelease: async (id, releaseId, digest) => req(`/api/projects/${encodeURIComponent(id)}/workflow-releases/${encodeURIComponent(releaseId)}/approve`, { method: 'POST', body: JSON.stringify({ digest }) }),
+  revokeWorkflowApproval: async (id, approvalId) => req(`/api/projects/${encodeURIComponent(id)}/workflow-approvals/${encodeURIComponent(approvalId)}/revoke`, { method: 'POST', body: '{}' }),
+  listStudies: async (id) => req(`/api/projects/${encodeURIComponent(id)}/studies`),
+  createStudy: async (id, body) => req(`/api/projects/${encodeURIComponent(id)}/studies`, { method: 'POST', body: JSON.stringify(body) }),
+  closeStudy: async (id, studyId) => req(`/api/projects/${encodeURIComponent(id)}/studies/${encodeURIComponent(studyId)}/close`, { method: 'POST', body: '{}' }),
+  listAgentRuns: async (id) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs`),
+  acceptAgentRun: async (id, runId, expectedAcceptedRunId) => req(`/api/projects/${encodeURIComponent(id)}/agent-runs/${encodeURIComponent(runId)}/accept`, { method: 'POST', body: JSON.stringify({ expectedAcceptedRunId }) }),
 
   // Cache
   makeCacheKey: async (op, params, ver, pids) => {

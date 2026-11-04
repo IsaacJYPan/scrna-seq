@@ -1305,6 +1305,12 @@ app.use((req, res, next) => {
   return next();
 });
 
+// Agent credentials are honored only by /api/automation/v1. Every other API
+// route refuses them explicitly, and mixed human+agent credentials are refused
+// everywhere (docs/spec.md section 16.3). This runs before any route.
+const { agentCredentialGuard, automationRoutes } = require('./backend/automation/automationRoutes');
+app.use(agentCredentialGuard({ hasSessionCookie }));
+
 // CORS must allow credentials so the browser sends/stores the HttpOnly session
 // cookie cross-origin (when the API is on a different origin than the frontend).
 // Origin is reflected only from the configured allowlist; requests without an
@@ -1875,6 +1881,31 @@ app.use('/api/projects/:projectId/analyses/:analysisId/documents', requireAuth,
 app.use('/api/projects', express.json());
 app.use('/api/projects', requireAuth);
 app.use('/api/projects/:projectId/analyses', researchAnalysisRoutes({ database: db }));
+// Delegated agents: human governance under the session-authenticated project
+// routes, and the agent-credential automation API (docs/spec.md).
+const agentDelegations = require('./backend/actors/delegations').createDelegationStore({ db });
+const agentProposals = require('./backend/automation/proposals').createProposalService({
+  db, withTransaction: agentDelegations.withTransaction,
+});
+const agentApprovals = require('./backend/workflowTrust/approvals').createApprovalService({
+  db, withTransaction: agentDelegations.withTransaction,
+});
+const agentStudies = require('./backend/studyEnvelopes/studies').createStudyService({
+  db, withTransaction: agentDelegations.withTransaction, approvals: agentApprovals,
+});
+const agentAdmission = require('./backend/resourceAdmission/admission').createAdmissionService({
+  db, withTransaction: agentDelegations.withTransaction, approvals: agentApprovals,
+});
+const agentServices = {
+  db, delegations: agentDelegations, proposals: agentProposals,
+  approvals: agentApprovals, studies: agentStudies, admission: agentAdmission,
+  targets: require('./backend/executors/targets').createTargetDirectory({ db }),
+};
+app.use('/api/projects/:projectId', require('./backend/automation/agentGovernanceRoutes').agentGovernanceRoutes(agentServices));
+app.use('/api/automation/v1', automationRoutes({
+  ...agentServices,
+  readModels: require('./backend/automation/readModels').createAutomationReadModels({ db }),
+}));
 app.use('/api/workflows', require('./backend/workflowRoutes').workflowRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/artifact-versions', require('./backend/artifactVersionRoutes').artifactVersionRoutes({ db, provider: durableStorage, requireAuth }));
 app.use('/api/server-data', require('./backend/serverDataImportRoutes').serverDataImportRoutes({ db, provider: durableStorage, requireAuth }));
@@ -2481,7 +2512,8 @@ function sendProjectResourceError(res, e, context) {
   }
   switch (e.code) {
     case 'EXPERT_R_UNAVAILABLE':
-      return res.status(503).json({ error: e.message });
+    case 'TARGET_UNAVAILABLE':
+      return res.status(503).json({ error: e.message, ...(e.code === 'TARGET_UNAVAILABLE' ? { code: e.code } : {}) });
     case 'NOT_FOUND':
     case 'PARENT_NOT_FOUND':
     case 'DATASET_NOT_FOUND':
@@ -3319,6 +3351,7 @@ app.post('/api/projects/:projectId/jobs', async (req, res) => {
       datasetId: body.datasetId,
       jobType: body.jobType,
       parameters: jobParameters,
+      ...(body.executionTarget === undefined ? {} : { executionTarget: body.executionTarget }),
       ...(body.requestId === undefined ? {} : { requestId: body.requestId }),
     }, submissionHash);
     res.setHeader('Cache-Control', 'no-store');
@@ -4073,7 +4106,10 @@ function startJobWorkerIfEnabled(env = process.env, deps = {}) {
   const logger = deps.logger || console;
   const config = parseJobWorkerConfig(env, { logger });
   if (!config.enabled) return null;
-  const create = deps.createJobWorker || require('./backend/jobWorker').createJobWorker;
+  const { createLanedJobWorker, createJobWorker } = require('./backend/jobWorker');
+  const baseCreate = deps.createJobWorker || createJobWorker;
+  // Slurm jobs run on their own worker loops so a cluster wait never blocks local work.
+  const create = (options) => createLanedJobWorker(options, { env, create: baseCreate });
   // Wire the in-process worker to the local R backend so the r.runtime.check bridge
   // handler can reach it. We build the narrow R caller HERE and pass it as a function
   // (a closure over the secret), so the API token is NEVER placed as a plain field on

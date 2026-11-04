@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const database = require('./pgDatabase');
 const rWorkerBridge = require('./rWorkerBridge');
 const storage = require('./storage');
+const { createSlurmExecutor, slurmConfig } = require('./executors/slurm');
 const { observedRuntimeMetadata } = require('./executionHistoryProjection');
 const {
   genericNoopHandler,
@@ -139,6 +140,8 @@ function createJobWorker(options = {}) {
     leaseSeconds = JOB_WORKER_DEFAULTS.leaseSeconds,
     handlers = DEFAULT_HANDLERS,
     allowedJobTypes,
+    // null claims every target; ['local'] or ['slurm'] restricts this loop to one lane.
+    executionTargets = null,
     maxConcurrentClaims = 1,
     claimGate,
     rBridge = rWorkerBridge,
@@ -154,6 +157,20 @@ function createJobWorker(options = {}) {
     logger = console,
     now,
   } = options;
+
+  // Slurm target (phase 3): cluster execution for jobs routed to 'slurm'.
+  const slurmExecutor = options.slurmExecutor || createSlurmExecutor({ db });
+  async function slurmResourcesForJob(jobId) {
+    const { rows } = await db.query(
+      'SELECT reserved_cpus, reserved_memory_mib, max_wall_seconds FROM agent_runs WHERE job_id = $1', [jobId]);
+    return rows[0] ? { cpus: rows[0].reserved_cpus, memoryMiB: rows[0].reserved_memory_mib, maxWallSeconds: rows[0].max_wall_seconds } : null;
+  }
+  async function slurmCancelRequested(jobId) {
+    const { rows } = await db.query(
+      `SELECT (j.status = 'canceled' OR ar.cancel_requested_at IS NOT NULL) AS canceled
+         FROM jobs j LEFT JOIN agent_runs ar ON ar.job_id = j.id WHERE j.id = $1`, [jobId]);
+    return rows[0]?.canceled === true;
+  }
 
   // Resolve the R caller once. Tests inject `callR` directly (a fake) so no real
   // HTTP happens; in production the server passes rBridgeConfig (PLUMBER_PORT +
@@ -318,6 +335,7 @@ function createJobWorker(options = {}) {
           {
             leaseSeconds,
             allowedJobTypes,
+            executionTargets,
             maxConcurrentClaims,
           },
           nowTs
@@ -538,6 +556,11 @@ function createJobWorker(options = {}) {
         removeDurableObject: (key) => storageProvider.remove(key),
         runRBridgeOperation: runClaimedRBridge,
         callR: resolvedCallR,
+        slurm: slurmExecutor,
+        resolveStorageReadPath: (key) => storageProvider.resolveKey(key),
+        resolveStorageWritePath: (key) => storageProvider.prepareWrite(key),
+        getSlurmResources: () => slurmResourcesForJob(jobId),
+        isCanceled: () => slurmCancelRequested(jobId),
         getOwnedAnalysisObject: () =>
           db.getOwnedAnalysisObjectForJobByWorker(
             jobId,
@@ -1023,6 +1046,11 @@ function createJobWorker(options = {}) {
           // durable publication before/after this bridge call.
           runRBridgeOperation: runClaimedRBridge,
           callR: resolvedCallR,
+          slurm: slurmExecutor,
+          resolveStorageReadPath: (key) => storageProvider.resolveKey(key),
+          resolveStorageWritePath: (key) => storageProvider.prepareWrite(key),
+          getSlurmResources: () => slurmResourcesForJob(jobId),
+          isCanceled: () => slurmCancelRequested(jobId),
           // Claim-authorized resource resolvers derive every id from the trusted job
           // row and validate this worker's live lease/token. They deliberately do not
           // re-read project membership after claim: claim-time eligibility is the
@@ -1360,8 +1388,47 @@ function createJobWorker(options = {}) {
   return { runOnce, start, stop, isRunning, workerId, leaseSeconds };
 }
 
+// Number of Slurm jobs this installation waits on at once (SLURM_MAX_RUNNING,
+// default 4, at most 32). Zero when the Slurm target is not configured.
+function slurmLaneCount(env = process.env) {
+  if (!slurmConfig(env).enabled) return 0;
+  const raw = env.SLURM_MAX_RUNNING;
+  const n = raw === undefined || raw === '' ? 4 : Number(raw);
+  return Number.isInteger(n) && n >= 0 ? Math.min(n, 32) : 4;
+}
+
+// A cluster job can wait in the queue for hours, so Slurm jobs get their own
+// worker loops: the main loop keeps running local work, and each Slurm loop
+// submits and waits on one cluster job. Without a configured Slurm target this
+// is just the one worker (which then fails any Slurm job as unavailable).
+// Returns the same interface as createJobWorker; runOnce() drives the main loop.
+function createLanedJobWorker(options = {}, { env = process.env, create = createJobWorker } = {}) {
+  const lanes = slurmLaneCount(env);
+  if (lanes === 0) return create(options);
+  const main = create({ ...options, executionTargets: ['local'] });
+  const slurmWorkers = Array.from({ length: lanes }, (_, i) => create({
+    ...options,
+    workerId: `${main.workerId}-slurm-${i + 1}`,
+    executionTargets: ['slurm'],
+    maxConcurrentClaims: lanes,
+    pollIntervalMs: Math.max(options.pollIntervalMs || 1000, 5000),
+  }));
+  const all = [main, ...slurmWorkers];
+  return {
+    runOnce: main.runOnce,
+    start() { for (const w of all) w.start(); },
+    stop() { return Promise.all(all.map((w) => w.stop())).then(() => undefined); },
+    isRunning: () => all.some((w) => w.isRunning()),
+    workerId: main.workerId,
+    leaseSeconds: main.leaseSeconds,
+    slurmWorkers,
+  };
+}
+
 module.exports = {
   createJobWorker,
+  createLanedJobWorker,
+  slurmLaneCount,
   generateWorkerId,
   genericNoopHandler,
   checkpointNoopHandler,

@@ -69,6 +69,7 @@ const LineageExplorer = React.lazy(() => import('./pages/LineageExplorer'));
 const ProjectHistory = React.lazy(() => import('./pages/ProjectHistory'));
 const BatchIntegration = React.lazy(() => import('./pages/BatchIntegration'));
 const Collaborators = React.lazy(() => import('./pages/Collaborators'));
+const AgentAccess = React.lazy(() => import('./pages/AgentAccess'));
 const Inspect = React.lazy(() => import('./pages/Inspect'));
 const Diagnostics = React.lazy(() => import('./pages/Diagnostics'));
 const PipelineManager = React.lazy(() => import('./pages/PipelineManager'));
@@ -88,7 +89,7 @@ const PIPELINE_ORDER = ['qc', 'normalize', 'integrate', 'pca', 'cluster', 'umap'
 const TAB_TITLES = {
   account: 'Account security',
   analyses: 'Analyses',
-  workspace: 'Workbench', 'pipeline-manager': 'Pipelines', team: 'Collaborators',
+  workspace: 'Workbench', 'pipeline-manager': 'Pipelines', team: 'Collaborators', agents: 'Agent access',
   branches: 'Analysis Branches',
   'study-design': 'Study Design',
   'expert-r': 'Advanced analysis',
@@ -1473,6 +1474,7 @@ export default function App() {
         <ErrorBoundary key="publication"><TabContent id="publication" activeTab={activeTab}><Publication {...props} isActive={activeTab === 'publication'} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="validation"><TabContent id="validation" activeTab={activeTab}><Validation {...props} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="team"><TabContent id="team" activeTab={activeTab}><Collaborators {...props} workspaces={workspaces} setWorkspaces={setWorkspaces} activeWsIndex={activeWsIndex} /></TabContent></ErrorBoundary>
+        <ErrorBoundary key="agents"><TabContent id="agents" activeTab={activeTab}><AgentAccess {...props} refreshAnalysisObjects={refreshAnalysisObjects} onSelectAnalysisObject={handleSelectAnalysisObject} setActiveTab={setActiveTab} /></TabContent></ErrorBoundary>
         <ErrorBoundary key="diagnostics"><TabContent id="diagnostics" activeTab={activeTab}><Diagnostics apiStatus={apiStatus} /></TabContent></ErrorBoundary>
       </div>
     );

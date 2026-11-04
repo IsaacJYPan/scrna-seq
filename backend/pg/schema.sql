@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261032, now())
+VALUES ('traceomics.runtime', 20261036, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -1937,3 +1937,418 @@ CREATE CONSTRAINT TRIGGER trg_analysis_snapshot_publication_complete AFTER INSER
 DROP TRIGGER IF EXISTS trg_analysis_snapshot_publication_lease_complete ON research_analysis_snapshot_publication_blobs;
 CREATE CONSTRAINT TRIGGER trg_analysis_snapshot_publication_lease_complete AFTER INSERT OR UPDATE OR DELETE ON research_analysis_snapshot_publication_blobs
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION check_analysis_snapshot_publication_leases();
+
+-- ── Delegated agent authority (docs/spec.md, phases 0-1) ─────────────────────
+-- An agent is a distinct principal sponsored by one human. It acts only through
+-- a project-scoped, versioned delegation and a revocable bearer credential whose
+-- SHA-256 digest (never the token) is stored here. Every request rechecks the
+-- credential, delegation, principal, and the sponsor's *current* project role.
+-- None of these rows can be created or changed by an agent credential.
+CREATE TABLE IF NOT EXISTS agent_principals (
+  id              TEXT PRIMARY KEY,
+  sponsor_user_id BIGINT NOT NULL REFERENCES users(id),
+  display_name    TEXT NOT NULL CHECK (char_length(display_name) BETWEEN 1 AND 120),
+  -- Descriptive only (for example a client or model name). Never grants authority.
+  client_label    TEXT NOT NULL DEFAULT '' CHECK (char_length(client_label) <= 120),
+  status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  disabled_at     TIMESTAMPTZ,
+  CHECK ((status = 'disabled') = (disabled_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_principals_sponsor ON agent_principals(sponsor_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_delegations (
+  id                  TEXT PRIMARY KEY,
+  agent_principal_id  TEXT NOT NULL REFERENCES agent_principals(id),
+  project_id          TEXT NOT NULL REFERENCES projects(id),
+  sponsor_user_id     BIGINT NOT NULL REFERENCES users(id),
+  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+  capabilities        JSONB NOT NULL CHECK (jsonb_typeof(capabilities) = 'array'),
+  disclosure_profile  TEXT NOT NULL CHECK (disclosure_profile IN ('identifiers', 'labels')),
+  policy_json         JSONB NOT NULL CHECK (jsonb_typeof(policy_json) = 'object'),
+  expires_at          TIMESTAMPTZ NOT NULL,
+  revoked_at          TIMESTAMPTZ,
+  revoked_by_user_id  BIGINT REFERENCES users(id),
+  revocation_reason   TEXT CHECK (revocation_reason IS NULL OR char_length(revocation_reason) <= 64),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (expires_at > created_at),
+  CHECK ((revoked_at IS NULL) = (revoked_by_user_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_delegations_project ON agent_delegations(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_delegations_principal ON agent_delegations(agent_principal_id);
+CREATE INDEX IF NOT EXISTS idx_agent_delegations_sponsor ON agent_delegations(sponsor_user_id, project_id);
+
+CREATE TABLE IF NOT EXISTS agent_credentials (
+  id                 TEXT PRIMARY KEY,
+  delegation_id      TEXT NOT NULL REFERENCES agent_delegations(id),
+  token_sha256       TEXT NOT NULL UNIQUE CHECK (token_sha256 ~ '^[0-9a-f]{64}$'),
+  -- A short non-secret fragment so people can recognize a credential in the UI.
+  token_hint         TEXT NOT NULL CHECK (token_hint ~ '^[A-Za-z0-9_-]{4,8}$'),
+  issued_by_user_id  BIGINT NOT NULL REFERENCES users(id),
+  expires_at         TIMESTAMPTZ NOT NULL,
+  revoked_at         TIMESTAMPTZ,
+  last_used_at       TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (expires_at > created_at)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_credentials_delegation ON agent_credentials(delegation_id);
+
+-- Inert code/method proposals. Creating one never executes, installs, or
+-- approves anything. Content columns are immutable; only one human review
+-- decision may be recorded, and "noted" is explicitly not an approval.
+CREATE TABLE IF NOT EXISTS agent_change_proposals (
+  id                  TEXT PRIMARY KEY,
+  project_id          TEXT NOT NULL REFERENCES projects(id),
+  delegation_id       TEXT NOT NULL REFERENCES agent_delegations(id),
+  agent_principal_id  TEXT NOT NULL REFERENCES agent_principals(id),
+  sponsor_user_id     BIGINT NOT NULL REFERENCES users(id),
+  request_id          TEXT NOT NULL CHECK (request_id ~ '^[A-Za-z0-9_-]{8,80}$'),
+  request_sha256      TEXT NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+  kind                TEXT NOT NULL CHECK (kind IN ('code', 'method', 'workflow')),
+  title               TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 200),
+  summary             TEXT NOT NULL CHECK (char_length(summary) <= 4000),
+  body_text           TEXT NOT NULL,
+  body_sha256         TEXT NOT NULL CHECK (body_sha256 ~ '^[0-9a-f]{64}$'),
+  body_bytes          INTEGER NOT NULL CHECK (body_bytes BETWEEN 0 AND 262144),
+  review_state        TEXT NOT NULL DEFAULT 'open' CHECK (review_state IN ('open', 'declined', 'noted')),
+  reviewed_by_user_id BIGINT REFERENCES users(id),
+  reviewed_at         TIMESTAMPTZ,
+  review_note         TEXT CHECK (review_note IS NULL OR char_length(review_note) <= 2000),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (delegation_id, request_id),
+  CHECK ((review_state = 'open') = (reviewed_at IS NULL)),
+  CHECK ((reviewed_at IS NULL) = (reviewed_by_user_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_proposals_project ON agent_change_proposals(project_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_proposals_delegation_open
+  ON agent_change_proposals(delegation_id) WHERE review_state = 'open';
+
+CREATE OR REPLACE FUNCTION protect_agent_change_proposal()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'agent proposals are retained evidence' USING ERRCODE = '55000';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.project_id IS DISTINCT FROM OLD.project_id
+     OR NEW.delegation_id IS DISTINCT FROM OLD.delegation_id
+     OR NEW.agent_principal_id IS DISTINCT FROM OLD.agent_principal_id
+     OR NEW.sponsor_user_id IS DISTINCT FROM OLD.sponsor_user_id
+     OR NEW.request_id IS DISTINCT FROM OLD.request_id OR NEW.request_sha256 IS DISTINCT FROM OLD.request_sha256
+     OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.title IS DISTINCT FROM OLD.title
+     OR NEW.summary IS DISTINCT FROM OLD.summary OR NEW.body_text IS DISTINCT FROM OLD.body_text
+     OR NEW.body_sha256 IS DISTINCT FROM OLD.body_sha256 OR NEW.body_bytes IS DISTINCT FROM OLD.body_bytes
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'agent proposal content is immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD.review_state <> 'open' THEN
+    RAISE EXCEPTION 'agent proposal review is already recorded' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_agent_proposal_protect ON agent_change_proposals;
+CREATE TRIGGER trg_agent_proposal_protect
+  BEFORE UPDATE OR DELETE ON agent_change_proposals
+  FOR EACH ROW EXECUTE FUNCTION protect_agent_change_proposal();
+
+-- Append-only record of delegated-authority decisions. Unlike legacy
+-- project_audit_events, every row names the actual principal kind: an agent
+-- action is never rewritten as its sponsor's action.
+CREATE TABLE IF NOT EXISTS automation_audit_events (
+  id                  TEXT PRIMARY KEY,
+  project_id          TEXT NOT NULL REFERENCES projects(id),
+  actor_kind          TEXT NOT NULL CHECK (actor_kind IN ('human', 'agent')),
+  actor_user_id       BIGINT REFERENCES users(id),
+  actor_principal_id  TEXT REFERENCES agent_principals(id),
+  sponsor_user_id     BIGINT NOT NULL REFERENCES users(id),
+  delegation_id       TEXT REFERENCES agent_delegations(id),
+  delegation_version  INTEGER,
+  credential_id       TEXT REFERENCES agent_credentials(id),
+  action              TEXT NOT NULL CHECK (action ~ '^[a-z][a-z._-]{2,63}$'),
+  decision            TEXT NOT NULL CHECK (decision IN ('allowed', 'denied')),
+  reason_code         TEXT CHECK (reason_code IS NULL OR reason_code ~ '^[A-Z][A-Z_]{2,63}$'),
+  target_type         TEXT CHECK (target_type IS NULL OR target_type ~ '^[a-z_]{2,40}$'),
+  target_id           TEXT CHECK (target_id IS NULL OR target_id ~ '^[A-Za-z0-9_.:-]{1,160}$'),
+  request_id          TEXT CHECK (request_id IS NULL OR request_id ~ '^[A-Za-z0-9_-]{8,80}$'),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((actor_kind = 'human' AND actor_user_id IS NOT NULL AND actor_principal_id IS NULL)
+      OR (actor_kind = 'agent' AND actor_user_id IS NULL AND actor_principal_id IS NOT NULL
+          AND delegation_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_automation_audit_project ON automation_audit_events(project_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_audit_delegation ON automation_audit_events(delegation_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION reject_automation_audit_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'automation audit events are append-only' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_automation_audit_no_update ON automation_audit_events;
+CREATE TRIGGER trg_automation_audit_no_update
+  BEFORE UPDATE ON automation_audit_events
+  FOR EACH ROW EXECUTE FUNCTION reject_automation_audit_mutation();
+DROP TRIGGER IF EXISTS trg_automation_audit_no_delete ON automation_audit_events;
+CREATE TRIGGER trg_automation_audit_no_delete
+  BEFORE DELETE ON automation_audit_events
+  FOR EACH ROW EXECUTE FUNCTION reject_automation_audit_mutation();
+
+-- ── Approved workflow execution for agents (docs/spec.md phase 2) ────────────
+-- Releases are registered from server code (backend/workflowTrust/catalog.js),
+-- never from packages or clients. A release's digest covers its handler files,
+-- parameter schema, resource profile, and output contract; any change creates a
+-- new release and marks older ones superseded, so earlier approvals stop
+-- matching.
+CREATE TABLE IF NOT EXISTS workflow_releases (
+  id              TEXT PRIMARY KEY,
+  release_key     TEXT NOT NULL CHECK (release_key ~ '^[a-z][a-z0-9.-]{2,63}$'),
+  version         TEXT NOT NULL,
+  job_type        TEXT NOT NULL,
+  digest          TEXT NOT NULL UNIQUE CHECK (digest ~ '^[0-9a-f]{64}$'),
+  definition_json JSONB NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'current' CHECK (status IN ('current', 'superseded')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  superseded_at   TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_releases_current
+  ON workflow_releases(release_key) WHERE status = 'current';
+
+-- A human approval binds one exact release digest to one project.
+CREATE TABLE IF NOT EXISTS workflow_approvals (
+  id                  TEXT PRIMARY KEY,
+  project_id          TEXT NOT NULL REFERENCES projects(id),
+  release_id          TEXT NOT NULL REFERENCES workflow_releases(id),
+  release_digest      TEXT NOT NULL CHECK (release_digest ~ '^[0-9a-f]{64}$'),
+  approved_by_user_id BIGINT NOT NULL REFERENCES users(id),
+  note                TEXT CHECK (note IS NULL OR char_length(note) <= 2000),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_at          TIMESTAMPTZ,
+  revoked_by_user_id  BIGINT REFERENCES users(id),
+  CHECK ((revoked_at IS NULL) = (revoked_by_user_id IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_approvals_active
+  ON workflow_approvals(project_id, release_id) WHERE revoked_at IS NULL;
+
+-- The finite scientific and operational space an agent may work in. Content is
+-- immutable; only closing and the compare-and-swap accepted-result pointer change.
+CREATE TABLE IF NOT EXISTS study_envelopes (
+  id                    TEXT PRIMARY KEY,
+  project_id            TEXT NOT NULL REFERENCES projects(id),
+  created_by_user_id    BIGINT NOT NULL REFERENCES users(id),
+  name                  TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 200),
+  objective             TEXT NOT NULL DEFAULT '' CHECK (char_length(objective) <= 4000),
+  release_id            TEXT NOT NULL REFERENCES workflow_releases(id),
+  approval_id           TEXT NOT NULL REFERENCES workflow_approvals(id),
+  inputs_json           JSONB NOT NULL CHECK (jsonb_typeof(inputs_json) = 'array'),
+  protected_json        JSONB NOT NULL CHECK (jsonb_typeof(protected_json) = 'object'),
+  variations_json       JSONB NOT NULL CHECK (jsonb_typeof(variations_json) = 'object'),
+  max_trials            INTEGER NOT NULL CHECK (max_trials BETWEEN 1 AND 100),
+  max_outstanding_runs  INTEGER NOT NULL CHECK (max_outstanding_runs BETWEEN 1 AND 10),
+  max_cpu_seconds       BIGINT NOT NULL CHECK (max_cpu_seconds BETWEEN 1 AND 100000000),
+  status                TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+  closed_at             TIMESTAMPTZ,
+  closed_by_user_id     BIGINT REFERENCES users(id),
+  accepted_run_id       TEXT,
+  accepted_version      INTEGER NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((status = 'closed') = (closed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_study_envelopes_project ON study_envelopes(project_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION protect_study_envelope()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'study envelopes are retained evidence' USING ERRCODE = '55000';
+  END IF;
+  IF (to_jsonb(NEW) - ARRAY['status','closed_at','closed_by_user_id','accepted_run_id','accepted_version'])
+     IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status','closed_at','closed_by_user_id','accepted_run_id','accepted_version']) THEN
+    RAISE EXCEPTION 'study envelope content is immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD.status = 'closed' AND NEW.status <> 'closed' THEN
+    RAISE EXCEPTION 'a closed study cannot be reopened' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_study_envelope_protect ON study_envelopes;
+CREATE TRIGGER trg_study_envelope_protect
+  BEFORE UPDATE OR DELETE ON study_envelopes
+  FOR EACH ROW EXECUTE FUNCTION protect_study_envelope();
+
+-- Immutable admitted specification. canonical_json is the exact digested bytes.
+CREATE TABLE IF NOT EXISTS execution_plans (
+  id                  TEXT PRIMARY KEY,
+  project_id          TEXT NOT NULL REFERENCES projects(id),
+  delegation_id       TEXT NOT NULL REFERENCES agent_delegations(id),
+  agent_principal_id  TEXT NOT NULL REFERENCES agent_principals(id),
+  sponsor_user_id     BIGINT NOT NULL REFERENCES users(id),
+  study_id            TEXT NOT NULL REFERENCES study_envelopes(id),
+  release_id          TEXT NOT NULL REFERENCES workflow_releases(id),
+  approval_id         TEXT NOT NULL REFERENCES workflow_approvals(id),
+  canonical_json      TEXT NOT NULL,
+  digest              TEXT NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+  expires_at          TIMESTAMPTZ NOT NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_execution_plans_delegation ON execution_plans(delegation_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION reject_execution_plan_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'execution plans are immutable' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_execution_plan_immutable ON execution_plans;
+CREATE TRIGGER trg_execution_plan_immutable
+  BEFORE UPDATE OR DELETE ON execution_plans
+  FOR EACH ROW EXECUTE FUNCTION reject_execution_plan_mutation();
+
+-- One admitted agent run per plan. Reservations are retained for the life of
+-- the record: failure or cancellation does not refund compute already reserved.
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id                    TEXT PRIMARY KEY,
+  project_id            TEXT NOT NULL REFERENCES projects(id),
+  delegation_id         TEXT NOT NULL REFERENCES agent_delegations(id),
+  agent_principal_id    TEXT NOT NULL REFERENCES agent_principals(id),
+  sponsor_user_id       BIGINT NOT NULL REFERENCES users(id),
+  credential_id         TEXT NOT NULL REFERENCES agent_credentials(id),
+  study_id              TEXT NOT NULL REFERENCES study_envelopes(id),
+  plan_id               TEXT NOT NULL UNIQUE REFERENCES execution_plans(id),
+  plan_digest           TEXT NOT NULL CHECK (plan_digest ~ '^[0-9a-f]{64}$'),
+  request_id            TEXT NOT NULL CHECK (request_id ~ '^[A-Za-z0-9_-]{8,80}$'),
+  job_id                TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+  trial_number          INTEGER NOT NULL CHECK (trial_number >= 1),
+  reserved_cpus         INTEGER NOT NULL CHECK (reserved_cpus >= 1),
+  reserved_memory_mib   INTEGER NOT NULL CHECK (reserved_memory_mib >= 1),
+  max_wall_seconds      INTEGER NOT NULL CHECK (max_wall_seconds >= 1),
+  reserved_cpu_seconds  BIGINT NOT NULL CHECK (reserved_cpu_seconds >= 1),
+  cancel_requested_at   TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (delegation_id, request_id),
+  UNIQUE (study_id, trial_number)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_project ON agent_runs(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_sponsor ON agent_runs(sponsor_user_id);
+
+CREATE OR REPLACE FUNCTION protect_agent_run()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'agent runs are retained evidence' USING ERRCODE = '55000';
+  END IF;
+  IF (to_jsonb(NEW) - 'cancel_requested_at') IS DISTINCT FROM (to_jsonb(OLD) - 'cancel_requested_at')
+     OR (OLD.cancel_requested_at IS NOT NULL AND NEW.cancel_requested_at IS DISTINCT FROM OLD.cancel_requested_at) THEN
+    RAISE EXCEPTION 'agent run records are immutable' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_agent_run_protect ON agent_runs;
+CREATE TRIGGER trg_agent_run_protect
+  BEFORE UPDATE OR DELETE ON agent_runs
+  FOR EACH ROW EXECUTE FUNCTION protect_agent_run();
+
+-- Dispatch-time recheck used by the worker claim. True when a queued agent job
+-- must not start: delegation revoked/expired, principal disabled, approval
+-- revoked, release superseded, study closed, or cancellation requested.
+CREATE OR REPLACE FUNCTION agent_run_authority_revoked(p_job_id TEXT, p_at TIMESTAMPTZ)
+RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM agent_runs ar
+      JOIN agent_delegations ad ON ad.id = ar.delegation_id
+      JOIN agent_principals ap ON ap.id = ar.agent_principal_id
+      JOIN execution_plans ep ON ep.id = ar.plan_id
+      JOIN workflow_approvals wa ON wa.id = ep.approval_id
+      JOIN workflow_releases wr ON wr.id = ep.release_id
+      JOIN study_envelopes se ON se.id = ar.study_id
+     WHERE ar.job_id = p_job_id
+       AND (ad.revoked_at IS NOT NULL OR ad.expires_at <= p_at OR ap.status <> 'active'
+            OR wa.revoked_at IS NOT NULL OR wr.status <> 'current' OR se.status <> 'open'
+            OR ar.cancel_requested_at IS NOT NULL)
+  );
+$$;
+
+-- Append-only acceptance decisions. Each one names the exact run and result
+-- object and the accepted pointer it replaced (compare-and-swap baseline).
+CREATE TABLE IF NOT EXISTS result_acceptances (
+  id                        TEXT PRIMARY KEY,
+  project_id                TEXT NOT NULL REFERENCES projects(id),
+  study_id                  TEXT NOT NULL REFERENCES study_envelopes(id),
+  run_id                    TEXT NOT NULL REFERENCES agent_runs(id),
+  result_analysis_object_id TEXT NOT NULL REFERENCES analysis_objects(id),
+  accepted_by_user_id       BIGINT NOT NULL REFERENCES users(id),
+  previous_run_id           TEXT,
+  accepted_version          INTEGER NOT NULL,
+  note                      TEXT CHECK (note IS NULL OR char_length(note) <= 2000),
+  created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (study_id, accepted_version)
+);
+
+CREATE OR REPLACE FUNCTION reject_result_acceptance_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('app.demo_cleanup', true) = 'on' THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'result acceptances are append-only' USING ERRCODE = '55000';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_result_acceptance_immutable ON result_acceptances;
+CREATE TRIGGER trg_result_acceptance_immutable
+  BEFORE UPDATE OR DELETE ON result_acceptances
+  FOR EACH ROW EXECUTE FUNCTION reject_result_acceptance_mutation();
+
+-- ── Slurm execution target (docs/spec.md phase 3) ────────────────────────────
+-- Jobs run locally unless routed to the configured cluster target. The dispatch
+-- record is written before sbatch so a restarted worker re-attaches to the
+-- submitted Slurm job (by stored id, or by its tro-<jobId> name) instead of
+-- submitting it again.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS execution_target TEXT NOT NULL DEFAULT 'local';
+DO $$ BEGIN
+  ALTER TABLE jobs ADD CONSTRAINT jobs_execution_target_check CHECK (execution_target IN ('local', 'slurm'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE study_envelopes ADD COLUMN IF NOT EXISTS execution_target TEXT NOT NULL DEFAULT 'local';
+DO $$ BEGIN
+  ALTER TABLE study_envelopes ADD CONSTRAINT study_envelopes_execution_target_check CHECK (execution_target IN ('local', 'slurm'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS hpc_dispatches (
+  job_id        TEXT PRIMARY KEY REFERENCES jobs(id),
+  target        TEXT NOT NULL,
+  remote_dir    TEXT NOT NULL,
+  slurm_job_id  TEXT CHECK (slurm_job_id IS NULL OR slurm_job_id ~ '^[0-9]{1,20}$'),
+  state         TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ── Composed studies (docs/spec.md phase 5) ──────────────────────────────────
+-- A follow-on study runs a second approved release on the accepted result of a
+-- source study. The pinned input object is recorded in inputs_json; this column
+-- names the study it came from. Releases whose output is an artifact (marker
+-- tables) are accepted by artifact instead of by result object.
+ALTER TABLE study_envelopes ADD COLUMN IF NOT EXISTS source_study_id TEXT REFERENCES study_envelopes(id);
+ALTER TABLE result_acceptances ALTER COLUMN result_analysis_object_id DROP NOT NULL;
+ALTER TABLE result_acceptances ADD COLUMN IF NOT EXISTS result_artifact_id TEXT REFERENCES job_artifacts(id);
+DO $$ BEGIN
+  ALTER TABLE result_acceptances ADD CONSTRAINT result_acceptances_one_result_check
+    CHECK ((result_analysis_object_id IS NULL) <> (result_artifact_id IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Optional comparison rule a study declares up front: which summary metric
+-- ranks its candidates and in which direction. It recommends; it never accepts.
+ALTER TABLE study_envelopes ADD COLUMN IF NOT EXISTS selection_rule_json JSONB;

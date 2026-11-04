@@ -17,6 +17,7 @@ const {
   assertSupportedSpatialSeuratDataset,
 } = require('../spatialPipeline');
 const { codedHandlerError, publicationIndeterminateError } = require('./jobErrors');
+const { seuratPipelineDescriptor } = require('../rWorkerBridge');
 const { removeRetryOrphanOutput, discardUnrecordedProjectOutput } = require('./completionRecovery');
 
 async function pbmcPipelineHandler(ctx) {
@@ -261,7 +262,37 @@ async function seuratPipelineHandler(ctx) {
   await removeRetryOrphanOutput(ctx, checkpointStorageKey);
 
   let descriptor;
-  try {
+  if (job.executionTarget === 'slurm') {
+    // Cluster execution: same analysis code (r-backend/lib/seuratPipelineCore.R),
+    // run by Slurm; the checkpoint is copied back into durable storage and the
+    // result is built exactly as for the R service.
+    if (!ctx.slurm || typeof ctx.resolveStorageWritePath !== 'function') {
+      throw codedHandlerError('SLURM_UNAVAILABLE', 'The Slurm execution target is not configured.');
+    }
+    try {
+      const { body } = await ctx.slurm.runSeurat({
+        jobId: job.id,
+        params,
+        inputs: datasets.map((entry, index) => ({
+          localPath: ctx.resolveStorageReadPath(entry.internalStorageKey),
+          ...(multiSample ? {
+            sampleName: samples[index].sampleName, conditionName: samples[index].conditionName,
+            donorCode: samples[index].donorCode, batch: samples[index].batch,
+          } : {}),
+        })),
+        resources: (typeof ctx.getSlurmResources === 'function' && await ctx.getSlurmResources()) || { cpus: 1, memoryMiB: 8192, maxWallSeconds: 3600 },
+        checkpointPath: ctx.resolveStorageWritePath(checkpointStorageKey),
+        heartbeat: () => ctx.heartbeat(),
+        log: (entry) => ctx.log(entry),
+        isCanceled: () => (typeof ctx.isCanceled === 'function' ? ctx.isCanceled() : false),
+      });
+      descriptor = seuratPipelineDescriptor(operation, body);
+    } catch (err) {
+      await ctx.log({ level: 'error', message: `${handlerName} handler: Slurm execution failed (${err.code || 'ERROR'}).` });
+      await discardUnrecordedProjectOutput(ctx, checkpointStorageKey, err);
+      throw err;
+    }
+  } else try {
     descriptor = await ctx.runRBridgeOperation({
       job,
       operation,

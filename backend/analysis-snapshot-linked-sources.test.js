@@ -149,7 +149,7 @@ describe.skipIf(!process.env.DATABASE_URL)('exact linked flat result preparation
     await expect(preparations.prepare(owner.user.id, project.id, analysis.id, { ...mixed, requestId: legacy.requestId })).rejects.toMatchObject({ code: 'ANALYSIS_SNAPSHOT_REQUEST_CONFLICT' });
     expect((await preparations.list(owner.user.id, project.id, analysis.id)).items).toHaveLength(2); await db.initSchema(); await db.initSchema();
     expect((await preparations.getByRequest(owner.user.id, project.id, analysis.id, mixed.requestId)).snapshotSha256).toBe(current.snapshotSha256);
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261032);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261036);
   });
 
   it('retains safe opaque and foreign-owned prerequisites without hashing or exposing their private metadata', async () => {

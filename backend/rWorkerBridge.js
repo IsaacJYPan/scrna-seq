@@ -201,6 +201,37 @@ function createDefaultRCaller(config = {}) {
   return callR;
 }
 
+// Builds the sanitized Seurat pipeline descriptor from an R response body. Shared
+// by the R service bridge and the Slurm executor, which reads the same body from
+// the cluster runner's output.
+function seuratPipelineDescriptor(operation, body) {
+  const spec = R_BRIDGE_OPERATIONS[operation];
+  const summary = sanitizePipelineSummary(body);
+  const checkpoint = sanitizeCheckpointInfo(body);
+  if (checkpoint.saved === true && !checkpoint.checksumSha256) {
+    throw markRSideEffectsPossible(
+      codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
+    );
+  }
+  return {
+    operation,
+    artifactType: spec.artifactType,
+    name: spec.artifactName,
+    description: spec.artifactDescription,
+    resultObjectType: 'seurat',
+    summary,
+    checkpoint,
+    metadata: {
+      operation,
+      kind: 'pipeline',
+      scientific_output: true,
+      ranAt: new Date().toISOString(),
+      summary,
+      warnings: sanitizeNameList(body.warnings, 32, 160),
+    },
+  };
+}
+
 async function runRBridgeOperation(args = {}) {
   const { job, operation, callR } = args;
   const logger = args.logger || console;
@@ -956,30 +987,7 @@ async function runRBridgeOperation(args = {}) {
   }
 
   if (operation === 'r.seurat.pipeline.v1' || operation === 'r.seurat.multisample.v1') {
-    const summary = sanitizePipelineSummary(body);
-    const checkpoint = sanitizeCheckpointInfo(body);
-    if (checkpoint.saved === true && !checkpoint.checksumSha256) {
-      throw markRSideEffectsPossible(
-        codedError('R_RESPONSE_INVALID', 'R runtime returned an invalid response.')
-      );
-    }
-    return {
-      operation,
-      artifactType: spec.artifactType,
-      name: spec.artifactName,
-      description: spec.artifactDescription,
-      resultObjectType: 'seurat',
-      summary,
-      checkpoint,
-      metadata: {
-        operation,
-        kind: 'pipeline',
-        scientific_output: true,
-        ranAt: new Date().toISOString(),
-        summary,
-        warnings: sanitizeNameList(body.warnings, 32, 160),
-      },
-    };
+    return seuratPipelineDescriptor(operation, body);
   }
 
   if (operation === 'r.spatial.seurat.v1') {
@@ -1058,6 +1066,7 @@ async function runRBridgeOperation(args = {}) {
 }
 
 module.exports = {
+  seuratPipelineDescriptor,
   DEFAULT_R_BRIDGE_TIMEOUT_MS,
   MAX_R_BRIDGE_TIMEOUT_MS,
   MAX_CELLCHAT_RESULT_ROWS,

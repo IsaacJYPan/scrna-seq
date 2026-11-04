@@ -70,7 +70,7 @@ const {
 } = require('./pipelineManifests');
 
 const SCHEMA_PATH = path.join(__dirname, 'pg', 'schema.sql');
-const SCHEMA_CONTRACT_VERSION = 20261032;
+const SCHEMA_CONTRACT_VERSION = 20261036;
 
 let pool = null;
 
@@ -751,6 +751,8 @@ async function resetSchemaForTests() {
   }
   await query(`
     DROP TABLE IF EXISTS
+      hpc_dispatches, result_acceptances, agent_runs, execution_plans, study_envelopes, workflow_approvals, workflow_releases,
+      automation_audit_events, agent_change_proposals, agent_credentials, agent_delegations, agent_principals,
       research_analysis_snapshot_publication_blobs, research_analysis_snapshot_publication_requests, research_analysis_snapshot_publications,
       research_analysis_snapshot_blobs, research_analysis_snapshot_preparations,
       managed_artifact_import_receipts, workflow_restoration_receipts, research_document_pending, research_document_pending_requests,
@@ -1552,6 +1554,15 @@ async function deleteExpiredDemoGuest(userId) {
     const projectIds = projectRows.rows.map((row) => row.id);
     const orgIds = [...new Set(projectRows.rows.map((row) => row.organization_id))];
     if (projectIds.length > 0) {
+      await client.query('DELETE FROM automation_audit_events WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query('DELETE FROM hpc_dispatches WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ANY($1::text[]))', [projectIds]);
+      for (const table of ['result_acceptances', 'agent_runs', 'execution_plans', 'study_envelopes', 'workflow_approvals']) {
+        await client.query(`DELETE FROM ${table} WHERE project_id = ANY($1::text[])`, [projectIds]);
+      }
+      await client.query('DELETE FROM agent_change_proposals WHERE project_id = ANY($1::text[])', [projectIds]);
+      await client.query(`DELETE FROM agent_credentials WHERE delegation_id IN
+        (SELECT id FROM agent_delegations WHERE project_id = ANY($1::text[]))`, [projectIds]);
+      await client.query('DELETE FROM agent_delegations WHERE project_id = ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_publication_blobs WHERE publication_id IN (SELECT id FROM research_analysis_snapshot_publications WHERE project_id=ANY($1::text[]))', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_publication_requests WHERE project_id=ANY($1::text[])', [projectIds]);
       await client.query('DELETE FROM research_analysis_snapshot_publications WHERE project_id=ANY($1::text[])', [projectIds]);
@@ -1610,6 +1621,7 @@ async function deleteExpiredDemoGuest(userId) {
       await client.query('DELETE FROM organization_members WHERE organization_id = ANY($1::text[])', [orgIds]);
       await client.query('DELETE FROM organizations WHERE id = ANY($1::text[])', [orgIds]);
     }
+    await client.query('DELETE FROM agent_principals WHERE sponsor_user_id = $1', [Number(userId)]);
     await client.query('DELETE FROM users WHERE id = $1', [Number(userId)]);
     await client.query('COMMIT');
     return true;
@@ -2788,6 +2800,7 @@ function rowToJob(row) {
     resultAnalysisObjectId: row.result_analysis_object_id,
     datasetId: row.dataset_id,
     jobType: row.job_type,
+    executionTarget: row.execution_target || 'local',
     status: row.status,
     parameters: JSON.parse(row.parameters_json || '{}'),
     logs: JSON.parse(row.logs_json || '[]'),
@@ -3053,6 +3066,18 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
       && (input.analysisObjectId === undefined || input.analysisObjectId === null)) {
     throw codedError('INVALID_PARAMETERS', `${jobType} requires a source analysisObjectId.`);
   }
+  const executionTarget = input.executionTarget === undefined || input.executionTarget === null ? 'local' : input.executionTarget;
+  if (!['local', 'slurm'].includes(executionTarget)) {
+    throw codedError('INVALID_PARAMETERS', 'executionTarget must be local or slurm.');
+  }
+  if (executionTarget === 'slurm') {
+    if (!['seurat.pipeline.v1', 'seurat.multisample.v1'].includes(jobType)) {
+      throw codedError('INVALID_PARAMETERS', `${jobType} cannot run on the Slurm target yet.`);
+    }
+    if (!require('./executors/slurm').slurmConfig().enabled) {
+      throw codedError('TARGET_UNAVAILABLE', 'The Slurm target is not configured for this installation.');
+    }
+  }
   const parameters = input.parameters === undefined ? {} : input.parameters;
   assertPlainObject(parameters, 'INVALID_PARAMETERS', 'parameters must be a plain JSON object.');
   let storedParameters = parameters;
@@ -3185,8 +3210,8 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
     const { rows } = await (client ? client.query.bind(client) : query)(
       `WITH new_job AS (INSERT INTO jobs
          (id, owner_user_id, project_id, retry_of_job_id, analysis_object_id,
-          result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          result_analysis_object_id, dataset_id, job_type, status, parameters_json, max_attempts, execution_target)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *), retained_source AS (
          INSERT INTO execution_source_versions
            (id, project_id, owner_user_id, job_id, language, source_code, source_sha256)
@@ -3196,7 +3221,7 @@ async function createProjectJobInternal(userId, projectId, input = {}, retryOfJo
          RETURNING id
        ) SELECT * FROM new_job`,
       [id, Number(owner), pid, retryOfJobId, analysisObjectId, resultAnalysisObjectId, datasetId,
-        jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid)]
+        jobType, INITIAL_JOB_STATUS, JSON.stringify(storedParameters), maxAttemptsForJobType(jobType, pid), executionTarget]
     );
     const job = rowToJob(rows[0]);
     if (requestId) {
@@ -3254,6 +3279,7 @@ async function retryProjectJob(userId, projectId, jobId) {
       analysisObjectId: source.analysisObjectId,
       jobType: source.jobType,
       parameters: source.parameters,
+      executionTarget: source.executionTarget,
     };
     if (source.datasetId !== null && source.datasetId !== undefined) {
       retryInput.datasetId = source.datasetId;
@@ -4733,6 +4759,20 @@ async function claimNextJob(workerId, opts = {}) {
       throw codedError('INVALID_WORKER_CAPABILITIES', 'allowedJobTypes contains an invalid job type.');
     }
   }
+  // Execution lanes: Slurm jobs wait on the cluster, not on local CPU, so they
+  // are counted separately from local work and never hold the local slot. A
+  // worker restricted to ['slurm'] is gated by running Slurm jobs; any other
+  // worker is gated by running local jobs.
+  let executionTargets = null;
+  if (opts.executionTargets !== undefined && opts.executionTargets !== null) {
+    if (!Array.isArray(opts.executionTargets)
+        || opts.executionTargets.length === 0
+        || opts.executionTargets.some((t) => !['local', 'slurm'].includes(t))) {
+      throw codedError('INVALID_WORKER_CAPABILITIES', 'executionTargets must list local and/or slurm.');
+    }
+    executionTargets = [...new Set(opts.executionTargets)];
+  }
+  const gateLane = executionTargets && executionTargets.length === 1 && executionTargets[0] === 'slurm' ? 'slurm' : 'local';
   const claimToken = generateClaimToken();
   const p = await connect();
   const client = await p.connect();
@@ -4747,8 +4787,9 @@ async function claimNextJob(workerId, opts = {}) {
       `SELECT COUNT(*)::int AS count FROM jobs
         WHERE status = 'running'
           AND lease_expires_at IS NOT NULL
-          AND lease_expires_at > $1`,
-      [now]
+          AND lease_expires_at > $1
+          AND execution_target = $2`,
+      [now, gateLane]
     );
     if (Number(activeClaim.rows[0]?.count || 0) >= maxConcurrentClaims) {
       await client.query('COMMIT');
@@ -4763,6 +4804,7 @@ async function claimNextJob(workerId, opts = {}) {
       `SELECT j.id, j.job_type, j.attempts, j.logs_json,
                (j.project_id IS NULL) AS invalid_project_scope,
                (j.job_type = 'expert.r.v1' AND NOT ${expertRAccessSql('j.owner_user_id', 'j.project_id', process.env, '$3')}) AS expert_access_revoked,
+               (j.project_id IS NOT NULL AND agent_run_authority_revoked(j.id, now())) AS agent_authority_revoked,
                (j.result_analysis_object_id IS NOT NULL
                 OR EXISTS (SELECT 1 FROM job_artifacts a WHERE a.job_id = j.id)
                 OR EXISTS (SELECT 1 FROM analysis_object_edges e WHERE e.job_id = j.id)
@@ -4780,6 +4822,9 @@ async function claimNextJob(workerId, opts = {}) {
                      AND pm.role = ANY($1::text[])
                 )
                 OR (j.job_type = 'expert.r.v1' AND NOT ${expertRAccessSql('j.owner_user_id', 'j.project_id', process.env, '$3')})
+                -- Delegated agent runs recheck their delegation, approval, release,
+                -- study, and cancellation before any handler or R contact.
+                OR agent_run_authority_revoked(j.id, now())
               ))
             OR
             (j.project_id IS NULL AND (
@@ -4816,6 +4861,10 @@ async function claimNextJob(workerId, opts = {}) {
       code: 'EXPERT_R_ACCESS_REVOKED',
       message: 'Job canceled because its creator no longer has approved Expert R access.',
     });
+    const agentAuthorityError = normalizeJobError({
+      code: 'AGENT_AUTHORITY_REVOKED',
+      message: 'Job canceled because the delegated agent authority, approval, or study is no longer valid.',
+    });
     const scopeError = normalizeJobError({
       code: 'INVALID_PROJECT_SCOPE',
       message: 'Job canceled because a project-associated input was submitted without project scope.',
@@ -4823,7 +4872,8 @@ async function claimNextJob(workerId, opts = {}) {
     for (const row of revoked.rows) {
       const cancellationError = row.invalid_project_scope
         ? scopeError
-        : row.expert_access_revoked ? expertAccessError : accessError;
+        : row.expert_access_revoked ? expertAccessError
+          : row.agent_authority_revoked ? agentAuthorityError : accessError;
       const logs = [
         ...parseJson(row.logs_json, []),
         normalizeJobLogEntry({ level: 'warn', message: cancellationError.message }),
@@ -4880,6 +4930,7 @@ async function claimNextJob(workerId, opts = {}) {
          FROM jobs j
         WHERE j.status = 'queued' AND j.attempts < j.max_attempts
           AND ($2::text[] IS NULL OR j.job_type = ANY($2::text[]))
+          AND ($6::text[] IS NULL OR j.execution_target = ANY($6::text[]))
           AND (
             (j.project_id IS NULL
               AND NOT EXISTS (
@@ -4930,6 +4981,7 @@ async function claimNextJob(workerId, opts = {}) {
         [...RETRYABLE_DURABLE_JOB_TYPES],
         RECOVERY_ONLY_PENDING_CODES,
         EXPERT_R_EXECUTE_CAPABILITY,
+        executionTargets,
       ]
     );
     if (!found.rows[0]) {

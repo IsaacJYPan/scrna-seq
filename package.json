@@ -74,7 +74,7 @@
     "test:demo-compose": "node scripts/verify-compose-demo.js",
     "test:demo-browser": "node scripts/verify-guided-demo-ui.js",
     "test:frontend": "vitest run src/",
-    "test:tools": "vitest run scripts/ --environment node --fileParallelism=false",
+    "test:tools": "vitest run scripts/ cli/ --environment node --fileParallelism=false",
     "test:desktop": "vitest run desktop/ backend/desktop-packaging.test.js --environment node --fileParallelism=false",
     "test:desktop:targets-ui": "node scripts/verify-desktop-targets-ui.js",
     "test:desktop:ssh-ui": "node scripts/verify-desktop-ssh-ui.js",
