@@ -345,6 +345,9 @@ async function removeJobDirectory(jobDirectory, workRoot) {
   const outputDirectory = path.join(jobDirectory, 'output');
   await fsp.chmod(jobDirectory, 0o700).catch(() => {});
   await fsp.chmod(inputDirectory, 0o700).catch(() => {});
+  // Private inputs are staged read-only in input/files; without write access
+  // to that directory the recursive delete cannot remove them as non-root.
+  await fsp.chmod(path.join(inputDirectory, 'files'), 0o700).catch(() => {});
   await fsp.chmod(path.join(inputDirectory, 'checkpoint.rds'), 0o600).catch(() => {});
   await fsp.chmod(path.join(inputDirectory, 'analysis.R'), 0o600).catch(() => {});
   await fsp.chmod(outputDirectory, 0o700).catch(() => {});
