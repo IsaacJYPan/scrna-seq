@@ -374,6 +374,7 @@ async function main() {
     await page.getByText('Expert browser project', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
     await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
+    await page.locator('summary', { hasText: 'Runtime, packages, and privacy' }).click();
     await page.getByRole('heading', { name: 'Exact R environment',exact:true }).waitFor();
     await page.getByRole('button', { name: 'Inspect package lock',exact:true }).click();
     await page.getByRole('button', { name: 'Download environment manifest',exact:true }).waitFor();
@@ -389,6 +390,7 @@ async function main() {
     fs.mkdirSync(rStatusScreenshots, { recursive: true });
     await page.screenshot({ path: path.join(rStatusScreenshots, 'runtime-ready.png'), fullPage: true });
     console.log('[r-environment-browser] PASS actual package-lock inspection and manifest download',expectedEnvironment.id);
+    await page.locator('summary', { hasText: /^Private input files/ }).click();
     await page.getByLabel('Choose private input').setInputFiles(inputPath);
     await page.getByRole('button', { name: 'Import file' }).click();
     await page.getByText('covariates.csv', { exact: true }).waitFor({ state: 'visible' });
