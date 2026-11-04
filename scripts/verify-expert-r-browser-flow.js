@@ -405,7 +405,7 @@ summary_table <- data.frame(
 )
 write_table(summary_table, "object-summary.csv")
 `;
-    await page.getByLabel('R script').fill(successScript);
+    await page.getByRole('textbox', { name: 'R script', exact: true }).fill(successScript);
     await page.getByRole('button', { name: 'Run R analysis' }).click();
     await page.getByText('Run submitted. Results will remain private until you choose to share them.', { exact: true })
       .waitFor({ state: 'visible' });
@@ -579,7 +579,7 @@ write_table(summary_table, "object-summary.csv")
     await page.getByRole('button', { name: /^Advanced analysis/ }).click();
     await page.getByRole('heading', { name: 'Advanced analysis', exact: true }).waitFor({ state: 'visible' });
     const privateMarker = `${tempRoot}\\private-marker.txt`;
-    await page.getByLabel('R script').fill(`stop("${privateMarker.replace(/\\/g, '\\\\')}")`);
+    await page.getByRole('textbox', { name: 'R script', exact: true }).fill(`stop("${privateMarker.replace(/\\/g, '\\\\')}")`);
     await page.getByRole('button', { name: 'Run R analysis' }).click();
     await page.getByText('Run submitted. Results will remain private until you choose to share them.', { exact: true })
       .waitFor({ state: 'visible' });
