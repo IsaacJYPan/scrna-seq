@@ -524,6 +524,16 @@ write_table(summary_table, "object-summary.csv")
     await packWorkflow(path.join(ROOT, 'examples/pipelines/scrna-workflow'), workflowPath);
     await page.getByLabel('Workflow package file').setInputFiles(workflowPath);
     await page.getByRole('button', { name: 'Install Single-cell workflow', exact: true }).click();
+    const openTrace = [];
+    const traceResponse = (response) => {
+      if (response.url().includes('/api/')) openTrace.push(`${Date.now()} ${response.request().method()} ${new URL(response.url()).pathname} ${response.status()}`);
+    };
+    page.on('response', traceResponse);
+    await page.evaluate(() => {
+      window.__titleTrace = [document.title];
+      new MutationObserver(() => window.__titleTrace.push(`${Date.now()} ${document.title}`))
+        .observe(document.querySelector('title'), { childList: true, characterData: true, subtree: true });
+    });
     await page.getByRole('button', { name: 'Open Single-cell workflow', exact: true }).click();
     // Surface the library's error instead of a bare timeout if opening is refused.
     const workflowHeading = page.getByRole('heading', { name: 'Single-cell workflow', exact: true, level: 1 });
@@ -541,8 +551,12 @@ write_table(summary_table, "object-summary.csv")
         `status: ${statuses.slice(0, 8).join(' | ')}`,
         `console errors: ${consoleErrors.slice(-5).join(' | ')}`,
         `page errors: ${pageErrors.slice(-5).join(' | ')}`,
-        `server errors: ${serverErrors.join(' | ')}`, `client errors: ${clientErrors.slice(-5).join(' | ')}`].join('\n'));
+        `server errors: ${serverErrors.join(' | ')}`, `client errors: ${clientErrors.slice(-5).join(' | ')}`,
+        `api after open: ${openTrace.slice(0, 40).join(' | ')}`,
+        `titles: ${(await page.evaluate(() => window.__titleTrace || [])).join(' | ')}`,
+        `stored selection: ${await page.evaluate(() => Object.entries(localStorage).filter(([k]) => /select/i.test(k)).map(([k, v]) => `${k}=${String(v).slice(0, 120)}`).join(' ; '))}`].join('\n'));
     }
+    page.off('response', traceResponse);
     const pcaNavigation = page.getByRole('button', { name: 'PCA', exact: true });
     assert(await pcaNavigation.getAttribute('aria-disabled') === 'true', 'PCA must start locked');
     await pcaNavigation.focus();
