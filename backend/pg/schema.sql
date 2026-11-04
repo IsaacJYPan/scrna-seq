@@ -2349,3 +2349,6 @@ DO $$ BEGIN
   ALTER TABLE result_acceptances ADD CONSTRAINT result_acceptances_one_result_check
     CHECK ((result_analysis_object_id IS NULL) <> (result_artifact_id IS NULL));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Optional comparison rule a study declares up front: which summary metric
+-- ranks its candidates and in which direction. It recommends; it never accepts.
+ALTER TABLE study_envelopes ADD COLUMN IF NOT EXISTS selection_rule_json JSONB;

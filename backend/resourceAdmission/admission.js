@@ -14,6 +14,7 @@ const { recordAutomationEvent } = require('../automation/automationAudit');
 const { canonicalJson, sha256, RESULT_ARTIFACT_TYPES } = require('../workflowTrust/catalog');
 const { assertSupportedSeuratPipelineDataset } = require('../seuratPipeline');
 const { slurmConfig } = require('../executors/slurm');
+const { boundedSummary, parseMetadata } = require('./summaries');
 
 const PLAN_TTL_SECONDS = 3600;
 const MAX_OPEN_PLANS_PER_DELEGATION = 20;
@@ -128,23 +129,6 @@ function publicRun(row) {
     completedAt: row.completed_at,
     canceledAt: row.canceled_at,
   };
-}
-
-function parseMetadata(text) {
-  if (text && typeof text === 'object') return text;
-  try { return JSON.parse(text || '{}'); } catch { return {}; }
-}
-
-function boundedSummary(metadata) {
-  const summary = metadata && typeof metadata.summary === 'object' && metadata.summary ? metadata.summary : {};
-  const out = {};
-  for (const [key, value] of Object.entries(summary).slice(0, 30)) {
-    if (!/^[A-Za-z0-9_]{1,64}$/.test(key)) continue;
-    if (typeof value === 'number' && Number.isFinite(value)) out[key] = value;
-    else if (typeof value === 'boolean') out[key] = value;
-    else if (typeof value === 'string' && value.length <= 80) out[key] = value;
-  }
-  return out;
 }
 
 function createAdmissionService({ db, withTransaction, approvals }) {

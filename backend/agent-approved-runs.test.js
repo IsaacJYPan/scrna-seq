@@ -488,3 +488,36 @@ describe.skipIf(!CONFIGURED)('composed follow-on studies', () => {
     expect(notMine.status).toBe(403);
   });
 });
+
+describe.skipIf(!CONFIGURED)('study selection rules', () => {
+  it('recommends the finished trial the declared rule ranks first, without accepting it', async () => {
+    const ctx = await setup({ study: { selectionRule: { metric: 'nClusters', goal: 'max' } } });
+    expect(ctx.study.selectionRule).toEqual({ metric: 'nClusters', goal: 'max' });
+    const bad = await api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token,
+      body: { name: 'Bad', releaseId: ctx.rel.id, datasetIds: [ctx.datasetId], selectionRule: { metric: 'x; drop', goal: 'max' } } });
+    expect(bad.status).toBe(400);
+
+    const ids = [];
+    for (const [i, value] of [[1, 0.5], [2, 1.2]]) {
+      const planned = await plan(ctx, { clusterResolution: value });
+      const run = await submit(ctx, planned.data, `run-req-000${i}`);
+      ids.push(run.data.run.id);
+      const { rows: [job] } = await db.query('SELECT job_id FROM agent_runs WHERE id = $1', [run.data.run.id]);
+      const resultId = `ao_${String(i).repeat(24)}`;
+      await db.query(`INSERT INTO analysis_objects (id, owner_user_id, project_id, object_type, metadata_json) VALUES ($1, $2, $3, 'seurat', $4)`,
+        [resultId, ctx.sponsor.user.id, ctx.project.id, JSON.stringify({ summary: { nClusters: i === 1 ? 7 : 11 } })]);
+      await db.query(`UPDATE jobs SET status = 'completed', completed_at = now(), result_analysis_object_id = $2 WHERE id = $1`, [job.job_id, resultId]);
+    }
+    const study = await agent(ctx, `/studies/${ctx.study.id}`);
+    expect(study.data.study.selection).toMatchObject({ runId: ids[1], value: 11, rule: { metric: 'nClusters', goal: 'max' } });
+    expect(study.data.study.trials.map((t) => t.summary)).toEqual([{ nClusters: 7 }, { nClusters: 11 }]);
+    expect(study.data.study.acceptedRunId).toBeNull();
+
+    // Without results.read the agent sees the rule but not results or the pick.
+    const limited = await api(server, `${ctx.base}/agent-delegations`, { method: 'POST', token: ctx.sponsor.token,
+      body: { agentName: 'Planner', capabilities: ['workflow.plan'], limits: { maxOutstandingRuns: 1 } } });
+    const view = await agent(ctx, `/studies/${ctx.study.id}`, {}, limited.data.credential.token);
+    expect(view.data.study.selection).toEqual({ rule: { metric: 'nClusters', goal: 'max' } });
+    expect(view.data.study.trials.every((t) => t.summary === null)).toBe(true);
+  });
+});

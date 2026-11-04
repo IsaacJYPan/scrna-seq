@@ -144,6 +144,16 @@ Approved workflows* shows each study's trials in one table (the varied
 choices, the result's cells and clusters, and any summary field that differs
 between trials) so the candidates can be compared before one is accepted.
 
+**Selection rules.** A study may declare `selectionRule: { metric, goal }`
+(goal `max` or `min`) on a result summary field, for example
+`{ "metric": "nClusters", "goal": "max" }`. The rule is fixed with the study.
+`GET …/studies/:studyId` then reports `selection`: the finished trial the rule
+ranks first (earliest on ties), and the comparison table marks it *Best by
+rule*. It is a recommendation: nothing is accepted automatically. Agents
+without `results.read` see the rule but not trial summaries or the pick.
+*Open in workspace* on a candidate's row opens its result object for normal
+inspection.
+
 **Follow-on studies.** A study of a release whose input is an analysis object
 (today `seurat-markers`) is created with `sourceStudyId` instead of
 `datasetIds`. The source study must run the release the follow-on declares as
@@ -375,8 +385,7 @@ cannot obtain human credentials. Before issuing agent credentials:
 ## Not yet implemented
 
 Site qualification of the Slurm target, Slurm for other job types,
-per-run OS isolation, composition beyond one follow-on step,
-sensitivity-study selection rules, standing acceptance rules, and
+per-run OS isolation, composition beyond one follow-on step, standing acceptance rules, and
 isolated development. Agent-specific limits do not change what people can do with
 their own sessions.
 

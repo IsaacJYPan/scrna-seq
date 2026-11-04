@@ -16,10 +16,29 @@ const STATE_TONE = {
 };
 
 const METRIC_LABELS = {
+  nCells: 'Cells', nFeatures: 'Features', nClusters: 'Clusters', nVariableFeatures: 'Variable features',
+  preFilterCells: 'Cells before QC', postFilterCells: 'Cells after QC', nGroups: 'Groups', nMarkersTotal: 'Markers',
   n_cells: 'Cells', n_features: 'Features', n_clusters: 'Clusters', cells: 'Cells', clusters: 'Clusters',
   resolution: 'Resolution', used_seed: 'Seed', normalization_method: 'Normalization',
 };
-const METRIC_ORDER = ['n_cells', 'cells', 'n_features', 'n_clusters', 'clusters'];
+const METRIC_ORDER = ['nCells', 'n_cells', 'cells', 'nFeatures', 'n_features', 'nClusters', 'n_clusters', 'clusters', 'nGroups', 'nMarkersTotal'];
+// Summary fields a selection rule can rank by, per workflow job type.
+const RULE_METRICS = {
+  'seurat.pipeline.v1': [['nClusters', 'clusters'], ['postFilterCells', 'cells kept after QC'], ['nVariableFeatures', 'variable features']],
+  'deg.find_markers.v1': [['nMarkersTotal', 'marker genes'], ['nGroups', 'groups']],
+};
+
+// Mirrors the server's selection: best finished trial by the study's rule, earliest on ties.
+function pickByRule(rule, runs) {
+  if (!rule) return null;
+  let best = null;
+  for (const r of runs) {
+    const v = r.state === 'candidate_ready' ? r.summary?.[rule.metric] : undefined;
+    if (typeof v !== 'number') continue;
+    if (!best || (rule.goal === 'min' ? v < best.v : v > best.v) || (v === best.v && r.trialNumber < best.trial)) best = { id: r.id, v, trial: r.trialNumber };
+  }
+  return best?.id || null;
+}
 
 function groupByStudy(runs) {
   const groups = new Map();
@@ -61,7 +80,7 @@ function parseValues(text, spec) {
   });
 }
 
-export default function AgentWorkflows({ projectId, role, onChanged }) {
+export default function AgentWorkflows({ projectId, role, onChanged, onOpenResult }) {
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
@@ -72,7 +91,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
   const [datasets, setDatasets] = useState([]);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
-  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], sourceStudyId: '', param: '', values: '', maxTrials: 4, executionTarget: 'local' });
+  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], sourceStudyId: '', param: '', values: '', maxTrials: 4, executionTarget: 'local', ruleMetric: '', ruleGoal: 'max' });
   const [slurm, setSlurm] = useState(null);
   const canWrite = role === 'owner' || role === 'admin' || role === 'analyst';
 
@@ -128,6 +147,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
       name: form.name, releaseId: selected?.id, maxTrials: Number(form.maxTrials),
       ...(composedFrom ? { sourceStudyId: form.sourceStudyId } : { datasetIds: form.datasetIds }),
       ...(slurmAllowed && form.executionTarget === 'slurm' ? { executionTarget: 'slurm' } : {}),
+      ...(form.ruleMetric ? { selectionRule: { metric: form.ruleMetric, goal: form.ruleGoal } } : {}),
     };
     if (form.param && form.values.trim()) {
       body.variations = { [form.param]: parseValues(form.values, selected?.parameterSchema?.[form.param]) };
@@ -224,6 +244,18 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
                 </select>
               </label>
             )}
+            <label className="space-y-1 text-xs font-bold text-textMuted">Recommend the trial with
+              <span className="flex gap-2">
+                <select aria-label="Selection goal" value={form.ruleGoal} disabled={!form.ruleMetric} onChange={(e) => setForm((f) => ({ ...f, ruleGoal: e.target.value }))} className="rounded border border-border bg-background px-2 py-2 text-sm font-normal text-text">
+                  <option value="max">most</option>
+                  <option value="min">fewest</option>
+                </select>
+                <select aria-label="Selection metric" value={form.ruleMetric} onChange={(e) => setForm((f) => ({ ...f, ruleMetric: e.target.value }))} className="w-full rounded border border-border bg-background px-2 py-2 text-sm font-normal text-text">
+                  <option value="">No rule</option>
+                  {(RULE_METRICS[selected?.jobType] || []).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                </select>
+              </span>
+            </label>
             <label className="space-y-1 text-xs font-bold text-textMuted">Max trials
               <input type="number" min={1} max={100} value={form.maxTrials} onChange={(e) => setForm((f) => ({ ...f, maxTrials: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
@@ -251,11 +283,15 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
       <div className="space-y-2">
         <h4 className="text-sm font-bold text-text">Agent runs</h4>
         {runs.length === 0 ? <p className="text-sm text-textMuted">No agent runs yet.</p> : groupByStudy(runs).map(([studyId, studyRuns]) => {
+          const study = studies.find((x) => x.id === studyId);
+          const rule = study?.selectionRule || null;
           const metrics = metricColumns(studyRuns);
+          if (rule && !metrics.includes(rule.metric)) metrics.unshift(rule.metric);
+          const recommended = pickByRule(rule, studyRuns);
           const choiceKeys = [...new Set(studyRuns.flatMap((r) => Object.keys(r.choices || {})))];
           return (
             <article key={studyId} className="overflow-x-auto rounded-lg border border-border bg-surface p-4 text-sm">
-              <p className="mb-2 font-bold text-text">{studyRuns[0].studyName} <span className="ml-1 text-xs font-normal text-textMuted">{studyRuns.length} trial{studyRuns.length === 1 ? '' : 's'}</span></p>
+              <p className="mb-2 font-bold text-text">{studyRuns[0].studyName} <span className="ml-1 text-xs font-normal text-textMuted">{studyRuns.length} trial{studyRuns.length === 1 ? '' : 's'}{rule ? ` · rule: ${rule.goal === 'min' ? 'fewest' : 'most'} ${METRIC_LABELS[rule.metric] || rule.metric}` : ''}</span></p>
               <table className="w-full min-w-[480px] text-left text-xs" aria-label={`Trials for ${studyRuns[0].studyName}`}>
                 <thead className="text-textMuted">
                   <tr>
@@ -275,7 +311,11 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
                       {metrics.map((k) => <td key={k} className="py-2 pr-3 text-text">{formatMetric(r.summary?.[k])}</td>)}
                       <td className="py-2 pr-3 text-textMuted">{r.agent.displayName}</td>
                       <td className="py-2 pr-3"><span className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${STATE_TONE[r.state] || STATE_TONE.queued}`}>{r.state.replace('_', ' ')}</span></td>
-                      <td className="py-2 text-right">
+                      <td className="space-x-2 whitespace-nowrap py-2 text-right">
+                        {recommended === r.id && <span className="rounded border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-bold uppercase text-primary">Best by rule</span>}
+                        {r.resultAnalysisObjectId && onOpenResult && (
+                          <button type="button" onClick={() => onOpenResult(r.resultAnalysisObjectId)} className="btn btn-secondary text-xs">Open in workspace</button>
+                        )}
                         {r.acceptance === 'accepted' && <span className="inline-flex items-center gap-1 font-bold text-success"><CheckCircle2 size={14} /> Accepted</span>}
                         {r.state === 'candidate_ready' && r.acceptance !== 'accepted' && canWrite && (
                           <button type="button" disabled={Boolean(busy)} onClick={() => act(`accept:${r.id}`, () => api.acceptAgentRun(projectId, r.id, acceptedFor(r.studyId)))} className="btn btn-primary text-xs">Accept this result</button>

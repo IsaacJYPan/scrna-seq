@@ -80,6 +80,29 @@ describe('AgentWorkflows', () => {
     expect(window.electronAPI.createStudy.mock.calls[0][1].datasetIds).toBeUndefined();
   });
 
+  it('opens a candidate result in the workspace', async () => {
+    window.electronAPI.listAgentRuns = vi.fn(async () => ({ runs: [{ ...run, resultAnalysisObjectId: 'ao_1' }] }));
+    const onOpenResult = vi.fn();
+    render(<AgentWorkflows projectId="proj_1" role="viewer" onOpenResult={onOpenResult} />);
+    fireEvent.click(await screen.findByRole('button', { name: /open in workspace/i }));
+    expect(onOpenResult).toHaveBeenCalledWith('ao_1');
+  });
+
+  it('marks the trial the study rule recommends and sends a chosen rule', async () => {
+    window.electronAPI.listStudies = vi.fn(async () => ({ studies: [{ id: 'study_1', name: 'Sweep', status: 'open', variations: {}, maxTrials: 3, maxCpuSeconds: 10800, acceptedRunId: null, selectionRule: { metric: 'nClusters', goal: 'max' } }] }));
+    window.electronAPI.listAgentRuns = vi.fn(async () => ({ runs: [
+      { ...run, summary: { nClusters: 7 } },
+      { ...run, id: 'run_2', trialNumber: 2, summary: { nClusters: 11 } },
+      { ...run, id: 'run_3', trialNumber: 3, state: 'failed', summary: { nClusters: 99 } },
+    ] }));
+    render(<AgentWorkflows projectId="proj_1" role="viewer" />);
+    const table = await screen.findByRole('table', { name: /trials for sweep/i });
+    const rows = [...table.querySelectorAll('tbody tr')];
+    expect(rows[1].textContent).toContain('Best by rule');
+    expect(rows[0].textContent + rows[2].textContent).not.toContain('Best by rule');
+    expect(screen.getByText(/rule: most Clusters/)).toBeInTheDocument();
+  });
+
   it('creates a study with typed allowed values and hides approval from non-managers', async () => {
     window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }] }));
     render(<AgentWorkflows projectId="proj_1" role="analyst" />);
@@ -87,9 +110,11 @@ describe('AgentWorkflows', () => {
     fireEvent.click(await screen.findByLabelText('pbmc.h5'));
     fireEvent.change(screen.getByLabelText('Parameter the agent may vary'), { target: { value: 'clusterResolution' } });
     fireEvent.change(screen.getByLabelText(/Allowed values/), { target: { value: '0.5, 1.2' } });
+    fireEvent.change(screen.getByLabelText('Selection metric'), { target: { value: 'nClusters' } });
+    fireEvent.change(screen.getByLabelText('Selection goal'), { target: { value: 'min' } });
     fireEvent.click(screen.getByRole('button', { name: /create study/i }));
     await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', {
-      name: 'Sweep 2', releaseId: 'rel_1', datasetIds: ['ds_1'], maxTrials: 4, variations: { clusterResolution: [0.5, 1.2] },
+      name: 'Sweep 2', releaseId: 'rel_1', datasetIds: ['ds_1'], maxTrials: 4, variations: { clusterResolution: [0.5, 1.2] }, selectionRule: { metric: 'nClusters', goal: 'min' },
     }));
     expect(screen.queryByRole('button', { name: /^revoke$/i })).not.toBeInTheDocument();
   });

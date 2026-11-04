@@ -46,7 +46,7 @@ export default function AgentAccess(props) {
   return <AgentAccessProject key={projectId || 'no-project'} {...props} projectId={projectId} />;
 }
 
-function AgentAccessProject({ currentWs, userId, projectId }) {
+function AgentAccessProject({ currentWs, userId, projectId, refreshAnalysisObjects, onSelectAnalysisObject, setActiveTab }) {
   const project = currentWs?.projects?.find(p => p.id === projectId) || null;
   const api = window.electronAPI || NO_API;
   const mounted = useRef(true);
@@ -327,7 +327,12 @@ function AgentAccessProject({ currentWs, userId, projectId }) {
           ))}
         </section>
 
-        <AgentWorkflows projectId={projectId} role={role} onChanged={load} />
+        <AgentWorkflows projectId={projectId} role={role} onChanged={load}
+          onOpenResult={onSelectAnalysisObject ? async (objectId) => {
+            if (typeof refreshAnalysisObjects === 'function') await refreshAnalysisObjects(projectId);
+            await onSelectAnalysisObject(projectId, objectId);
+            setActiveTab?.('workspace');
+          } : undefined} />
 
         <section className="space-y-3" aria-label="Agent proposals">
           <div>

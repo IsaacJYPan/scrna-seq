@@ -8,7 +8,8 @@
 const crypto = require('crypto');
 const { READ_ROLES, WRITE_ROLES, codedError } = require('../policy/agentCapabilities');
 const { recordAutomationEvent } = require('../automation/automationAudit');
-const { canonicalJson, validateScalar } = require('../workflowTrust/catalog');
+const { canonicalJson, validateScalar, RESULT_ARTIFACT_TYPES } = require('../workflowTrust/catalog');
+const { boundedSummary, parseMetadata } = require('../resourceAdmission/summaries');
 const { slurmConfig } = require('../executors/slurm');
 
 const MAX_INPUTS = 10;
@@ -51,6 +52,7 @@ function publicStudy(row, trials = null) {
     maxCpuSeconds: Number(row.max_cpu_seconds),
     executionTarget: row.execution_target || 'local',
     sourceStudyId: row.source_study_id || null,
+    selectionRule: row.selection_rule_json || null,
     status: row.status,
     closedAt: row.closed_at,
     acceptedRunId: row.accepted_run_id,
@@ -60,11 +62,27 @@ function publicStudy(row, trials = null) {
   };
 }
 
+// The trial a study's declared selection rule recommends among finished
+// trials (ties go to the earliest trial). A recommendation only: acceptance is
+// always a separate human decision.
+function selectByRule(rule, trials) {
+  if (!rule || !rule.metric) return null;
+  let best = null;
+  for (const trial of trials) {
+    const value = trial.summary?.[rule.metric];
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    if (!best || (rule.goal === 'min' ? value < best.value : value > best.value)) {
+      best = { runId: trial.runId, trialNumber: trial.trialNumber, value };
+    }
+  }
+  return best ? { rule, ...best } : { rule, runId: null, reason: 'No finished trial reports this metric yet.' };
+}
+
 function createStudyService({ db, withTransaction, approvals }) {
   async function create(actor, projectId, body = {}) {
     requireHuman(actor);
     const allowed = ['name', 'objective', 'releaseId', 'datasetIds', 'fixedParameters', 'variations',
-      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds', 'executionTarget', 'sourceStudyId'];
+      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds', 'executionTarget', 'sourceStudyId', 'selectionRule'];
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw codedError('INVALID_INPUT', 'A JSON object is required.', 400);
     for (const key of Object.keys(body)) {
       if (!allowed.includes(key)) throw codedError('UNKNOWN_FIELD', `Unknown field: ${key.slice(0, 64)}.`, 400);
@@ -134,6 +152,17 @@ function createStudyService({ db, withTransaction, approvals }) {
     if (executionTarget === 'slurm' && !slurmConfig().enabled) {
       throw codedError('TARGET_UNAVAILABLE', 'The Slurm target is not configured for this installation.', 409);
     }
+    let selectionRule = null;
+    if (body.selectionRule !== undefined && body.selectionRule !== null) {
+      const rule = body.selectionRule;
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule)
+          || Object.keys(rule).some((k) => !['metric', 'goal'].includes(k))
+          || typeof rule.metric !== 'string' || !/^[A-Za-z0-9_]{1,64}$/.test(rule.metric)
+          || !['max', 'min'].includes(rule.goal)) {
+        throw codedError('INVALID_INPUT', 'selectionRule must be { metric: <summary field>, goal: "max" or "min" }.', 400);
+      }
+      selectionRule = { metric: rule.metric, goal: rule.goal };
+    }
     const maxTrials = intInRange(body.maxTrials, 'maxTrials', 1, 100, 4);
     const maxOutstandingRuns = intInRange(body.maxOutstandingRuns, 'maxOutstandingRuns', 1, 10, 1);
     const maxCpuSeconds = intInRange(body.maxCpuSeconds, 'maxCpuSeconds', 1, 100000000,
@@ -180,11 +209,12 @@ function createStudyService({ db, withTransaction, approvals }) {
       const { rows } = await client.query(
         `INSERT INTO study_envelopes
            (id, project_id, created_by_user_id, name, objective, release_id, approval_id, inputs_json, protected_json,
-            variations_json, max_trials, max_outstanding_runs, max_cpu_seconds, execution_target, source_study_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15) RETURNING *`,
+            variations_json, max_trials, max_outstanding_runs, max_cpu_seconds, execution_target, source_study_id,
+            selection_rule_json)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb) RETURNING *`,
         [id, String(projectId), actor.userId, name, objective, release.id, approvalRows[0].id, JSON.stringify(inputs),
           canonicalJson(fixed), canonicalJson(variations), maxTrials, maxOutstandingRuns, maxCpuSeconds, executionTarget,
-          sourceStudyId]
+          sourceStudyId, selectionRule ? canonicalJson(selectionRule) : null]
       );
       await recordAutomationEvent(client, {
         projectId, actor, action: 'study.created', decision: 'allowed', targetType: 'study', targetId: id,
@@ -246,14 +276,20 @@ function createStudyService({ db, withTransaction, approvals }) {
   async function trialsFor(studyId) {
     const { rows } = await db.query(
       `SELECT ar.id, ar.trial_number, ar.created_at, ar.cancel_requested_at, ar.agent_principal_id, ar.delegation_id,
-              ep.canonical_json, j.status AS job_status, j.result_analysis_object_id, j.completed_at
+              ep.canonical_json, j.status AS job_status, j.result_analysis_object_id, j.completed_at,
+              ao.metadata_json AS object_metadata,
+              (SELECT a.metadata_json FROM job_artifacts a WHERE a.job_id = j.id AND a.artifact_type = ANY($2::text[])
+                ORDER BY a.created_at, a.id LIMIT 1) AS artifact_metadata
          FROM agent_runs ar JOIN execution_plans ep ON ep.id = ar.plan_id JOIN jobs j ON j.id = ar.job_id
+         LEFT JOIN analysis_objects ao ON ao.id = j.result_analysis_object_id
         WHERE ar.study_id = $1 ORDER BY ar.trial_number`,
-      [studyId]
+      [studyId, RESULT_ARTIFACT_TYPES]
     );
     // The full bounded trial history: every attempted variant, not only the best.
     return rows.map((row) => {
       const plan = JSON.parse(row.canonical_json);
+      const finished = row.job_status === 'completed' && !row.cancel_requested_at
+        && (row.object_metadata || row.artifact_metadata);
       return {
         runId: row.id,
         trialNumber: row.trial_number,
@@ -263,10 +299,16 @@ function createStudyService({ db, withTransaction, approvals }) {
         jobStatus: row.job_status,
         cancelRequested: Boolean(row.cancel_requested_at),
         resultAnalysisObjectId: row.result_analysis_object_id,
+        summary: finished ? boundedSummary(parseMetadata(row.object_metadata || row.artifact_metadata)) : null,
         createdAt: row.created_at,
         completedAt: row.completed_at,
       };
     });
+  }
+
+  async function withTrials(row) {
+    const trials = await trialsFor(row.id);
+    return { ...publicStudy(row, trials), selection: selectByRule(row.selection_rule_json, trials) };
   }
 
   async function listForHuman(actor, projectId) {
@@ -283,7 +325,7 @@ function createStudyService({ db, withTransaction, approvals }) {
     if (!STUDY_ID.test(String(studyId))) throw codedError('NOT_FOUND', 'Study not found.', 404);
     const { rows } = await db.query('SELECT * FROM study_envelopes WHERE id = $1 AND project_id = $2', [studyId, String(projectId)]);
     if (!rows[0]) throw codedError('NOT_FOUND', 'Study not found.', 404);
-    return publicStudy(rows[0], await trialsFor(studyId));
+    return withTrials(rows[0]);
   }
 
   async function close(actor, projectId, studyId) {
@@ -321,10 +363,16 @@ function createStudyService({ db, withTransaction, approvals }) {
       [studyId, actor.delegation.projectId, actor.sponsorUserId]
     );
     if (!rows[0]) throw codedError('NOT_FOUND', 'Study not found.', 404);
-    return publicStudy(rows[0], await trialsFor(studyId));
+    const study = await withTrials(rows[0]);
+    // Result summaries are disclosed only with results.read (spec 13.2).
+    if (!(actor.delegation.capabilities || []).includes('results.read')) {
+      study.trials = study.trials.map((t) => ({ ...t, summary: null }));
+      study.selection = study.selection ? { rule: study.selection.rule } : null;
+    }
+    return study;
   }
 
   return { create, listForHuman, getForHuman, close, listForAgent, getForAgent, trialsFor };
 }
 
-module.exports = { createStudyService, publicStudy, STUDY_ID };
+module.exports = { createStudyService, publicStudy, selectByRule, STUDY_ID };
