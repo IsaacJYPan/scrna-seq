@@ -563,10 +563,12 @@ write_table(summary_table, "object-summary.csv")
     await runWorkflowStep('PCA', 'pca');
     const resetState = (await appClient.query('SELECT state_json FROM workflow_instances WHERE owner_user_id=$1', [user.id])).rows[0].state_json;
     assert(!resetState.results.umap && !resetState.results.neighbors && !resetState.results.clusters && !resetState.results['umap-figure'], 'Changed PCA must clear both branches and their figures.');
-    await page.getByText('Saved workflows for this analysis', { exact: true }).click();
-    page.once('dialog', dialog => dialog.accept());
+    await page.getByText('Recent saved workflows for this analysis', { exact: true }).click();
     await page.getByRole('button', { name: 'Open', exact: true }).click();
-    await page.getByText('Opened Completed workflow.', { exact: true }).waitFor();
+    const retained = page.getByRole('region', { name: 'Open retained workflow' });
+    await retained.getByLabel('Replace this identified working workflow').check();
+    await retained.getByRole('button', { name: 'Open saved workflow', exact: true }).click();
+    await retained.getByText('The exact saved workflow is open. No analysis step was run.', { exact: true }).waitFor();
     assert(await page.getByLabel('Components', { exact: true }).inputValue() === '15', 'Snapshot restore must restore the applied form settings.');
     await page.getByRole('button', { name: 'UMAP', exact: true }).click();
     await figure.waitFor({ state: 'visible' });
