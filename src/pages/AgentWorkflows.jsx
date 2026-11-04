@@ -72,7 +72,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
   const [datasets, setDatasets] = useState([]);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
-  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], param: '', values: '', maxTrials: 4, executionTarget: 'local' });
+  const [form, setForm] = useState({ name: '', releaseId: '', datasetIds: [], sourceStudyId: '', param: '', values: '', maxTrials: 4, executionTarget: 'local' });
   const [slurm, setSlurm] = useState(null);
   const canWrite = role === 'owner' || role === 'admin' || role === 'analyst';
 
@@ -116,18 +116,25 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
 
   const approved = releases.filter((r) => r.approval);
   const selected = releases.find((r) => r.id === (form.releaseId || approved[0]?.id));
+  // A follow-on release runs on the accepted result of a study of another release.
+  const composedFrom = selected?.inputs?.[0]?.kind === 'analysis_object' ? selected.inputs[0].fromRelease : null;
+  const releaseKey = (id) => releases.find((r) => r.id === id)?.key;
+  const sourceStudies = composedFrom ? studies.filter((s) => s.acceptedRunId && releaseKey(s.releaseId) === composedFrom) : [];
+  const studyName = (id) => studies.find((s) => s.id === id)?.name || id;
+  const slurmAllowed = slurm && selected?.jobType === 'seurat.pipeline.v1';
   const createStudy = (event) => {
     event.preventDefault();
     const body = {
-      name: form.name, releaseId: selected?.id, datasetIds: form.datasetIds, maxTrials: Number(form.maxTrials),
-      ...(form.executionTarget === 'slurm' ? { executionTarget: 'slurm' } : {}),
+      name: form.name, releaseId: selected?.id, maxTrials: Number(form.maxTrials),
+      ...(composedFrom ? { sourceStudyId: form.sourceStudyId } : { datasetIds: form.datasetIds }),
+      ...(slurmAllowed && form.executionTarget === 'slurm' ? { executionTarget: 'slurm' } : {}),
     };
     if (form.param && form.values.trim()) {
       body.variations = { [form.param]: parseValues(form.values, selected?.parameterSchema?.[form.param]) };
     }
     act('study', async () => {
       await api.createStudy(projectId, body);
-      setForm((f) => ({ ...f, name: '', values: '', datasetIds: [] }));
+      setForm((f) => ({ ...f, name: '', values: '', datasetIds: [], sourceStudyId: '' }));
     });
   };
 
@@ -177,6 +184,15 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
               </select>
             </label>
           </div>
+          {composedFrom ? (
+            <label className="block space-y-1 text-xs font-bold text-textMuted">Builds on the accepted result of
+              <select value={form.sourceStudyId} onChange={(e) => setForm((f) => ({ ...f, sourceStudyId: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
+                <option value="">Choose a study…</option>
+                {sourceStudies.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              {sourceStudies.length === 0 && <span className="block font-normal">No study of {releases.find((r) => r.key === composedFrom)?.title || composedFrom} has an accepted result yet.</span>}
+            </label>
+          ) : (
           <fieldset className="space-y-1">
             <legend className="text-xs font-bold text-textMuted">Input datasets (exact versions are pinned)</legend>
             {datasets.length === 0 && <p className="text-xs text-textMuted">No uploaded 10x HDF5 datasets in this project.</p>}
@@ -189,6 +205,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
               </label>
             ))}
           </fieldset>
+          )}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <label className="space-y-1 text-xs font-bold text-textMuted">Parameter the agent may vary
               <select value={form.param} onChange={(e) => setForm((f) => ({ ...f, param: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
@@ -199,7 +216,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
             <label className="space-y-1 text-xs font-bold text-textMuted">Allowed values (comma-separated)
               <input value={form.values} disabled={!form.param} onChange={(e) => setForm((f) => ({ ...f, values: e.target.value }))} placeholder="0.5, 0.8, 1.2" className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text" />
             </label>
-            {slurm && (
+            {slurmAllowed && (
               <label className="space-y-1 text-xs font-bold text-textMuted">Runs on
                 <select value={form.executionTarget} onChange={(e) => setForm((f) => ({ ...f, executionTarget: e.target.value }))} className="w-full rounded border border-border bg-background px-3 py-2 text-sm font-normal text-text">
                   <option value="local">This installation</option>
@@ -212,7 +229,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
             </label>
           </div>
           <p className="text-xs text-textMuted">Every other parameter is fixed. The agent cannot change the inputs, the method, or the study.</p>
-          <button type="submit" disabled={Boolean(busy) || !form.name.trim() || form.datasetIds.length === 0} className="btn btn-primary text-sm">
+          <button type="submit" disabled={Boolean(busy) || !form.name.trim() || (composedFrom ? !form.sourceStudyId : form.datasetIds.length === 0)} className="btn btn-primary text-sm">
             {busy === 'study' ? <Loader2 size={16} className="animate-spin" /> : null} Create study
           </button>
         </form>
@@ -226,7 +243,7 @@ export default function AgentWorkflows({ projectId, role, onChanged }) {
               <p className="font-bold text-text">{s.name} <span className="ml-1 text-xs uppercase text-textMuted">{s.status}</span></p>
               {s.status === 'open' && canWrite && <button type="button" disabled={Boolean(busy)} onClick={() => act(`close:${s.id}`, () => api.closeStudy(projectId, s.id))} className="btn btn-secondary text-sm">Close study</button>}
             </div>
-            <p className="mt-1 text-xs text-textMuted">Varies: {Object.entries(s.variations).map(([k, v]) => `${k} ∈ {${v.join(', ')}}`).join('; ') || 'nothing'} · Max {s.maxTrials} trials · {Math.round(s.maxCpuSeconds / 3600)} CPU-hours · Runs on {s.executionTarget === 'slurm' ? 'Slurm' : 'this installation'}</p>
+            <p className="mt-1 text-xs text-textMuted">Varies: {Object.entries(s.variations).map(([k, v]) => `${k} ∈ {${v.join(', ')}}`).join('; ') || 'nothing'} · Max {s.maxTrials} trials · {Math.round(s.maxCpuSeconds / 3600)} CPU-hours · Runs on {s.executionTarget === 'slurm' ? 'Slurm' : 'this installation'}{s.sourceStudyId ? ` · Builds on ${studyName(s.sourceStudyId)}` : ''}</p>
           </article>
         ))}
       </div>

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AgentWorkflows from './AgentWorkflows';
 
 const release = {
-  id: 'rel_1', key: 'seurat-qc-cluster', version: '1', title: 'Seurat QC', digest: 'a'.repeat(64),
+  id: 'rel_1', key: 'seurat-qc-cluster', version: '1', title: 'Seurat QC', jobType: 'seurat.pipeline.v1', digest: 'a'.repeat(64),
   handler: [{ path: 'backend/seuratPipeline.js', sha256: 'b'.repeat(64) }],
   parameterSchema: { clusterResolution: { type: 'number', min: 0.01, max: 10, default: 0.8 },
     normalizationMethod: { type: 'enum', values: ['LogNormalize', 'SCTransform'], default: 'LogNormalize' } },
@@ -55,6 +55,29 @@ describe('AgentWorkflows', () => {
     expect(table.textContent).toContain('Clusters');
     expect(table.textContent).not.toContain('Seed');
     expect(screen.queryByRole('button', { name: /accept this result/i })).not.toBeInTheDocument();
+  });
+
+  it('creates a follow-on study on the accepted result of a clustering study', async () => {
+    const markers = { ...release, id: 'rel_2', key: 'seurat-markers', title: 'Markers', jobType: 'deg.find_markers.v1',
+      inputs: [{ name: 'clustering', kind: 'analysis_object', fromRelease: 'seurat-qc-cluster' }],
+      parameterSchema: { logfcThreshold: { type: 'number', min: 0, max: 10, default: 0.25 } }, approval: { id: 'wfa_2' } };
+    window.electronAPI.listWorkflowReleases = vi.fn(async () => ({ canApprove: false, releases: [{ ...release, approval: { id: 'wfa_1' } }, markers] }));
+    window.electronAPI.listStudies = vi.fn(async () => ({ studies: [
+      { id: 'study_1', name: 'Sweep', releaseId: 'rel_1', status: 'open', variations: {}, maxTrials: 3, maxCpuSeconds: 10800, acceptedRunId: 'run_1' },
+      { id: 'study_3', name: 'Unaccepted', releaseId: 'rel_1', status: 'open', variations: {}, maxTrials: 3, maxCpuSeconds: 10800, acceptedRunId: null },
+    ] }));
+    render(<AgentWorkflows projectId="proj_1" role="analyst" />);
+    fireEvent.change(await screen.findByLabelText('Study name'), { target: { value: 'Markers' } });
+    fireEvent.change(screen.getByLabelText('Approved release'), { target: { value: 'rel_2' } });
+    expect(screen.queryByText('pbmc.h5')).not.toBeInTheDocument();
+    const source = screen.getByLabelText(/Builds on the accepted result of/);
+    expect([...source.options].map((o) => o.textContent)).toEqual(['Choose a study…', 'Sweep']);
+    expect(screen.getByRole('button', { name: /create study/i })).toBeDisabled();
+    fireEvent.change(source, { target: { value: 'study_1' } });
+    fireEvent.click(screen.getByRole('button', { name: /create study/i }));
+    await waitFor(() => expect(window.electronAPI.createStudy).toHaveBeenCalledWith('proj_1', expect.objectContaining({
+      name: 'Markers', releaseId: 'rel_2', sourceStudyId: 'study_1' })));
+    expect(window.electronAPI.createStudy.mock.calls[0][1].datasetIds).toBeUndefined();
   });
 
   it('creates a study with typed allowed values and hides approval from non-managers', async () => {

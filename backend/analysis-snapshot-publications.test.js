@@ -300,7 +300,7 @@ describe.skipIf(!process.env.DATABASE_URL)('exact project finding publications',
 
   it('applies schema32 twice while accepted publication/private data and exact blob identities survive', async () => {
     const candidate = await ready(), saved = await service.publish(owner.user.id, project.id, analysis.id, publish(candidate)); await db.initSchema(); await db.initSchema();
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261035);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261036);
     expect((await service.getByRequest(owner.user.id, project.id, analysis.id, saved.requestId)).acceptance).toEqual(saved.acceptance);
     expect((await service.get(colleague.user.id, project.id, analysis.id, saved.acceptance.publicationId)).package).toEqual(candidate.package);
     expect((await preparations.get(owner.user.id, project.id, analysis.id, candidate.preparationId)).package).toEqual(candidate.package);

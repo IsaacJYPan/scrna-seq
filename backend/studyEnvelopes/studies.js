@@ -12,6 +12,7 @@ const { canonicalJson, validateScalar } = require('../workflowTrust/catalog');
 const { slurmConfig } = require('../executors/slurm');
 
 const MAX_INPUTS = 10;
+const SLURM_JOB_TYPES = ['seurat.pipeline.v1', 'seurat.multisample.v1'];
 const MAX_VALUES_PER_VARIATION = 10;
 const MAX_VARIED_PARAMETERS = 6;
 const DATASET_ID = /^ds_[A-Za-z0-9]+$/;
@@ -49,6 +50,7 @@ function publicStudy(row, trials = null) {
     maxOutstandingRuns: row.max_outstanding_runs,
     maxCpuSeconds: Number(row.max_cpu_seconds),
     executionTarget: row.execution_target || 'local',
+    sourceStudyId: row.source_study_id || null,
     status: row.status,
     closedAt: row.closed_at,
     acceptedRunId: row.accepted_run_id,
@@ -62,7 +64,7 @@ function createStudyService({ db, withTransaction, approvals }) {
   async function create(actor, projectId, body = {}) {
     requireHuman(actor);
     const allowed = ['name', 'objective', 'releaseId', 'datasetIds', 'fixedParameters', 'variations',
-      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds', 'executionTarget'];
+      'maxTrials', 'maxOutstandingRuns', 'maxCpuSeconds', 'executionTarget', 'sourceStudyId'];
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw codedError('INVALID_INPUT', 'A JSON object is required.', 400);
     for (const key of Object.keys(body)) {
       if (!allowed.includes(key)) throw codedError('UNKNOWN_FIELD', `Unknown field: ${key.slice(0, 64)}.`, 400);
@@ -110,14 +112,25 @@ function createStudyService({ db, withTransaction, approvals }) {
       throw codedError('INVALID_PARAMETER', error.message, 400);
     }
 
-    const datasetIds = body.datasetIds;
-    if (!Array.isArray(datasetIds) || datasetIds.length < 1 || datasetIds.length > MAX_INPUTS
+    const inputSpec = release.definition.inputs[0];
+    const composed = inputSpec.kind === 'analysis_object';
+    if (composed && body.datasetIds !== undefined) {
+      throw codedError('INVALID_INPUT', 'This workflow runs on the accepted result of another study; give sourceStudyId, not datasetIds.', 400);
+    }
+    if (!composed && body.sourceStudyId !== undefined) {
+      throw codedError('INVALID_INPUT', 'This workflow takes datasets as input; sourceStudyId is not allowed.', 400);
+    }
+    const datasetIds = composed ? [] : body.datasetIds;
+    if (!composed && (!Array.isArray(datasetIds) || datasetIds.length < 1 || datasetIds.length > MAX_INPUTS
         || !datasetIds.every((id) => typeof id === 'string' && DATASET_ID.test(id))
-        || new Set(datasetIds).size !== datasetIds.length) {
+        || new Set(datasetIds).size !== datasetIds.length)) {
       throw codedError('INVALID_INPUT', `datasetIds must list 1-${MAX_INPUTS} distinct datasets.`, 400);
     }
     const executionTarget = body.executionTarget === undefined ? 'local' : body.executionTarget;
     if (!['local', 'slurm'].includes(executionTarget)) throw codedError('INVALID_INPUT', 'executionTarget must be local or slurm.', 400);
+    if (executionTarget === 'slurm' && !SLURM_JOB_TYPES.includes(release.jobType)) {
+      throw codedError('INVALID_INPUT', 'This workflow cannot run on the Slurm target yet.', 400);
+    }
     if (executionTarget === 'slurm' && !slurmConfig().enabled) {
       throw codedError('TARGET_UNAVAILABLE', 'The Slurm target is not configured for this installation.', 409);
     }
@@ -155,21 +168,79 @@ function createStudyService({ db, withTransaction, approvals }) {
       inputs.push({ datasetId, datasetSha256: dataset.sha256, analysisObjectId: object.id });
     }
 
+    let sourceStudyId = null;
+    if (composed) {
+      const source = await acceptedSource(actor, projectId, body.sourceStudyId, inputSpec, releases);
+      sourceStudyId = source.studyId;
+      inputs.push(source.input);
+    }
+
     return withTransaction(async (client) => {
       const id = `study_${crypto.randomBytes(12).toString('hex')}`;
       const { rows } = await client.query(
         `INSERT INTO study_envelopes
            (id, project_id, created_by_user_id, name, objective, release_id, approval_id, inputs_json, protected_json,
-            variations_json, max_trials, max_outstanding_runs, max_cpu_seconds, execution_target)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14) RETURNING *`,
+            variations_json, max_trials, max_outstanding_runs, max_cpu_seconds, execution_target, source_study_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15) RETURNING *`,
         [id, String(projectId), actor.userId, name, objective, release.id, approvalRows[0].id, JSON.stringify(inputs),
-          canonicalJson(fixed), canonicalJson(variations), maxTrials, maxOutstandingRuns, maxCpuSeconds, executionTarget]
+          canonicalJson(fixed), canonicalJson(variations), maxTrials, maxOutstandingRuns, maxCpuSeconds, executionTarget,
+          sourceStudyId]
       );
       await recordAutomationEvent(client, {
         projectId, actor, action: 'study.created', decision: 'allowed', targetType: 'study', targetId: id,
       });
       return publicStudy(rows[0]);
     });
+  }
+
+  // Composition (spec 8.3): a follow-on study binds the exact result a person
+  // accepted in a source study of the release this one declares as its input.
+  // The binding is fixed at creation; accepting a different result later does
+  // not change what this study runs on.
+  async function acceptedSource(actor, projectId, sourceStudyId, inputSpec, releases) {
+    if (typeof sourceStudyId !== 'string' || !STUDY_ID.test(sourceStudyId)) {
+      throw codedError('INVALID_INPUT', 'sourceStudyId must name a study.', 400);
+    }
+    const { rows } = await db.query(
+      `SELECT se.*, j.result_analysis_object_id, j.dataset_id, ep.canonical_json
+         FROM study_envelopes se
+         LEFT JOIN agent_runs ar ON ar.id = se.accepted_run_id
+         LEFT JOIN jobs j ON j.id = ar.job_id
+         LEFT JOIN execution_plans ep ON ep.id = ar.plan_id
+        WHERE se.id = $1 AND se.project_id = $2`,
+      [sourceStudyId, String(projectId)]
+    );
+    const source = rows[0];
+    if (!source) throw codedError('NOT_FOUND', 'Source study not found.', 404);
+    const { rows: rel } = await db.query('SELECT release_key FROM workflow_releases WHERE id = $1', [source.release_id]);
+    if (rel[0]?.release_key !== inputSpec.fromRelease) {
+      const wanted = releases.find((r) => r.key === inputSpec.fromRelease);
+      throw codedError('INPUT_NOT_APPLICABLE', `The source study must run ${wanted ? wanted.definition.title : inputSpec.fromRelease}.`, 400);
+    }
+    if (!source.accepted_run_id || !source.result_analysis_object_id) {
+      throw codedError('SOURCE_NOT_ACCEPTED', 'Accept a result in the source study first.', 409);
+    }
+    const { rows: objects } = await db.query(
+      'SELECT id, owner_user_id FROM analysis_objects WHERE id = $1 AND project_id = $2',
+      [source.result_analysis_object_id, String(projectId)]
+    );
+    if (!objects[0]) throw codedError('INPUT_CHANGED', 'The accepted result is no longer available.', 409);
+    // Runs execute as the study creator, who must own the result being read.
+    if (String(objects[0].owner_user_id) !== String(actor.userId)) {
+      throw codedError('INPUT_NOT_APPLICABLE', 'You can only build on accepted results of studies you created.', 403);
+    }
+    const plan = JSON.parse(source.canonical_json);
+    return {
+      studyId: source.id,
+      input: {
+        datasetId: plan.inputs.datasetId,
+        datasetSha256: plan.inputs.datasetSha256,
+        analysisObjectId: source.result_analysis_object_id,
+        sourceStudyId: source.id,
+        sourceRunId: source.accepted_run_id,
+        sourceAcceptedVersion: source.accepted_version,
+      },
+    };
   }
 
   async function trialsFor(studyId) {

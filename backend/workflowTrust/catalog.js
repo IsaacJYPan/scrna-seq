@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { SEURAT_PIPELINE_PARAM_SPEC, validateSeuratPipelineParams } = require('../seuratPipeline');
+const { DEG_FIND_MARKERS_PARAM_SPEC, validateDegFindMarkersParams } = require('../degFindMarkers');
 
 const ROOT = path.join(__dirname, '..', '..');
 
@@ -40,7 +41,28 @@ const DEFINITIONS = [
     validation: ['job.completed', 'result.analysis_object.present'],
     validateParameters: (params) => validateSeuratPipelineParams(params).params,
   },
+  {
+    // A follow-on step: it runs on the accepted clustering of a source study
+    // (see studies.js), never on an arbitrary object, and reads it without
+    // changing it. Its output is a marker table plus a bounded summary.
+    key: 'seurat-markers',
+    version: '1',
+    title: 'Cluster marker genes (on an accepted clustering)',
+    jobType: 'deg.find_markers.v1',
+    handlerFiles: ['backend/degFindMarkers.js', 'backend/jobs/analysisHandlers.js', 'r-backend/plumber.R'],
+    inputs: [{ name: 'clustering', kind: 'analysis_object', fromRelease: 'seurat-qc-cluster' }],
+    outputs: [{ name: 'markers', kind: 'artifact', artifactType: 'deg_summary' }],
+    parameterSchema: DEG_FIND_MARKERS_PARAM_SPEC,
+    resources: { cpus: 1, memoryMiB: 8192, maxWallSeconds: 1800 },
+    validation: ['job.completed', 'result.artifact.present'],
+    validateParameters: (params) => validateDegFindMarkersParams(params).params,
+  },
 ];
+
+// Artifact types that count as a release's declared result (spec 13.1).
+const RESULT_ARTIFACT_TYPES = Object.freeze(
+  [...new Set(DEFINITIONS.flatMap((d) => d.outputs.filter((o) => o.kind === 'artifact').map((o) => o.artifactType)))]
+);
 
 // Type/range check for one parameter value against a release schema entry,
 // without defaults. Cross-parameter constraints are checked at planning time.
@@ -125,4 +147,4 @@ function releaseByKey(key) {
   return currentReleases().find((release) => release.key === key) || null;
 }
 
-module.exports = { validateScalar, canonicalJson, sha256, currentReleases, syncReleaseCatalog, releaseByKey, buildRelease };
+module.exports = { RESULT_ARTIFACT_TYPES, validateScalar, canonicalJson, sha256, currentReleases, syncReleaseCatalog, releaseByKey, buildRelease };

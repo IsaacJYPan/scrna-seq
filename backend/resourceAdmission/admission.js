@@ -11,7 +11,7 @@
 const crypto = require('crypto');
 const { WRITE_ROLES, READ_ROLES, codedError } = require('../policy/agentCapabilities');
 const { recordAutomationEvent } = require('../automation/automationAudit');
-const { canonicalJson, sha256 } = require('../workflowTrust/catalog');
+const { canonicalJson, sha256, RESULT_ARTIFACT_TYPES } = require('../workflowTrust/catalog');
 const { assertSupportedSeuratPipelineDataset } = require('../seuratPipeline');
 const { slurmConfig } = require('../executors/slurm');
 
@@ -71,7 +71,7 @@ function runState(row) {
     case 'completed': {
       const late = row.delegation_revoked_at && row.completed_at
         && new Date(row.delegation_revoked_at) < new Date(row.completed_at);
-      if (!row.result_analysis_object_id || cancel || late) return 'quarantined';
+      if (!(row.result_analysis_object_id || row.result_artifact_id) || cancel || late) return 'quarantined';
       return 'candidate_ready';
     }
     case 'failed': return 'failed';
@@ -84,6 +84,8 @@ const RUN_SELECT = `
   SELECT ar.*, j.status AS job_status, j.result_analysis_object_id, j.started_at, j.completed_at, j.canceled_at,
          ep.canonical_json, ad.revoked_at AS delegation_revoked_at, ap.display_name AS agent_display_name,
          se.accepted_run_id, se.name AS study_name,
+         (SELECT a.id FROM job_artifacts a WHERE a.job_id = j.id AND a.artifact_type = ANY('${'{'}${RESULT_ARTIFACT_TYPES.join(',')}${'}'}'::text[])
+           ORDER BY a.created_at, a.id LIMIT 1) AS result_artifact_id,
          EXISTS (SELECT 1 FROM result_acceptances ra WHERE ra.run_id = ar.id) AS ever_accepted
     FROM agent_runs ar
     JOIN jobs j ON j.id = ar.job_id
@@ -117,7 +119,8 @@ function publicRun(row) {
       cpus: row.reserved_cpus, memoryMiB: row.reserved_memory_mib,
       maxWallSeconds: row.max_wall_seconds, cpuSeconds: Number(row.reserved_cpu_seconds),
     },
-    resultAnalysisObjectId: state === 'candidate_ready' ? row.result_analysis_object_id : null,
+    resultAnalysisObjectId: state === 'candidate_ready' ? row.result_analysis_object_id || null : null,
+    resultArtifactId: state === 'candidate_ready' ? row.result_artifact_id || null : null,
     acceptance: row.accepted_run_id === row.id ? 'accepted' : row.ever_accepted ? 'superseded' : 'none',
     cancelRequestedAt: row.cancel_requested_at,
     createdAt: row.created_at,
@@ -125,6 +128,11 @@ function publicRun(row) {
     completedAt: row.completed_at,
     canceledAt: row.canceled_at,
   };
+}
+
+function parseMetadata(text) {
+  if (text && typeof text === 'object') return text;
+  try { return JSON.parse(text || '{}'); } catch { return {}; }
 }
 
 function boundedSummary(metadata) {
@@ -180,6 +188,11 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     const { rows } = await client.query('SELECT * FROM datasets WHERE id = $1 AND project_id = $2', [datasetId, study.project_id]);
     if (!rows[0] || rows[0].sha256 !== input.datasetSha256) {
       throw codedError('INPUT_CHANGED', 'The pinned input version is no longer available.', 409);
+    }
+    if (input.sourceRunId) {
+      const { rows: objects } = await client.query(
+        'SELECT 1 FROM analysis_objects WHERE id = $1 AND project_id = $2', [input.analysisObjectId, study.project_id]);
+      if (!objects[0]) throw codedError('INPUT_CHANGED', 'The pinned source result is no longer available.', 409);
     }
     if (release.jobType === 'seurat.pipeline.v1') {
       try { assertSupportedSeuratPipelineDataset(datasetForHandler(rows[0])); } catch (error) {
@@ -436,13 +449,30 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     if (run.state !== 'candidate_ready') {
       return { run, result: null, reason: `Results are not available while the run is ${run.state}.` };
     }
+    if (run.resultArtifactId) {
+      const { rows } = await db.query(
+        'SELECT id, artifact_type, created_at, metadata_json FROM job_artifacts WHERE id = $1 AND project_id = $2',
+        [run.resultArtifactId, actor.delegation.projectId]
+      );
+      if (!rows[0]) return { run, result: null, reason: 'The result artifact is unavailable.' };
+      return {
+        run,
+        result: {
+          artifactId: rows[0].id,
+          artifactType: rows[0].artifact_type,
+          createdAt: rows[0].created_at,
+          summary: boundedSummary(parseMetadata(rows[0].metadata_json)),
+          technicalValidation: 'passed',
+          scientificAcceptance: run.acceptance,
+        },
+      };
+    }
     const { rows } = await db.query(
       'SELECT id, object_type, created_at, metadata_json FROM analysis_objects WHERE id = $1 AND project_id = $2',
       [run.resultAnalysisObjectId, actor.delegation.projectId]
     );
     if (!rows[0]) return { run, result: null, reason: 'The result object is unavailable.' };
-    let metadata = {};
-    try { metadata = JSON.parse(rows[0].metadata_json || '{}'); } catch { metadata = {}; }
+    const metadata = parseMetadata(rows[0].metadata_json);
     return {
       run,
       result: {
@@ -497,19 +527,22 @@ function createAdmissionService({ db, withTransaction, approvals }) {
     const { rows } = await db.query(
       `${RUN_SELECT} WHERE ar.project_id = $1${filter} ORDER BY ar.created_at DESC, ar.id DESC LIMIT 200`, params);
     const runs = rows.map(publicRun);
-    const resultIds = runs.map((r) => r.resultAnalysisObjectId).filter(Boolean);
+    const objectIds = runs.map((r) => r.resultAnalysisObjectId).filter(Boolean);
+    const artifactIds = runs.map((r) => r.resultArtifactId).filter(Boolean);
     const summaries = new Map();
-    if (resultIds.length) {
+    if (objectIds.length) {
       const { rows: objects } = await db.query(
         'SELECT id, metadata_json FROM analysis_objects WHERE project_id = $1 AND id = ANY($2::text[])',
-        [String(projectId), resultIds]);
-      for (const o of objects) {
-        let metadata = {};
-        try { metadata = JSON.parse(o.metadata_json || '{}'); } catch { metadata = {}; }
-        summaries.set(o.id, boundedSummary(metadata));
-      }
+        [String(projectId), objectIds]);
+      for (const o of objects) summaries.set(o.id, boundedSummary(parseMetadata(o.metadata_json)));
     }
-    for (const r of runs) r.summary = r.resultAnalysisObjectId ? summaries.get(r.resultAnalysisObjectId) || null : null;
+    if (artifactIds.length) {
+      const { rows: artifacts } = await db.query(
+        'SELECT id, metadata_json FROM job_artifacts WHERE project_id = $1 AND id = ANY($2::text[])',
+        [String(projectId), artifactIds]);
+      for (const a of artifacts) summaries.set(a.id, boundedSummary(parseMetadata(a.metadata_json)));
+    }
+    for (const r of runs) r.summary = summaries.get(r.resultAnalysisObjectId || r.resultArtifactId) || null;
     return { schema: 'traceomics.agent-runs.v1', runs };
   }
 
@@ -548,9 +581,10 @@ function createAdmissionService({ db, withTransaction, approvals }) {
         [study.id, runId, version]
       );
       await client.query(
-        `INSERT INTO result_acceptances (id, project_id, study_id, run_id, result_analysis_object_id, accepted_by_user_id,
-           previous_run_id, accepted_version, note) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [`acc_${crypto.randomBytes(12).toString('hex')}`, String(projectId), study.id, runId, row.result_analysis_object_id,
+        `INSERT INTO result_acceptances (id, project_id, study_id, run_id, result_analysis_object_id, result_artifact_id,
+           accepted_by_user_id, previous_run_id, accepted_version, note) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [`acc_${crypto.randomBytes(12).toString('hex')}`, String(projectId), study.id, runId,
+          run.resultAnalysisObjectId, run.resultAnalysisObjectId ? null : run.resultArtifactId,
           actor.userId, study.accepted_run_id, version, note]
       );
       await recordAutomationEvent(client, {

@@ -283,6 +283,6 @@ describe.skipIf(!process.env.DATABASE_URL)('exact captured workflow findings and
     const saved = await preparations.getByRequest(owner.user.id, project.id, analysis.id, input.requestId); expect(saved.state).toBe('ready');
     await db.query("UPDATE project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2", [project.id, owner.user.id]); await fs.unlink(provider.resolveKey(sources.metrics.key));
     expect(await preparations.prepare(owner.user.id, project.id, analysis.id, input)).toMatchObject({ preparationId: saved.preparationId, snapshotSha256: saved.snapshotSha256, canPrepare: false });
-    await db.initSchema(); await db.initSchema(); expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261035);
+    await db.initSchema(); await db.initSchema(); expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261036);
   });
 });

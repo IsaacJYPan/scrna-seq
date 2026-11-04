@@ -262,6 +262,6 @@ describe.skipIf(!process.env.DATABASE_URL)('fixed sampled embedding findings and
     await expect(createAnalysisSnapshotPublicationService(publicationDb).publish(owner.user.id, project.id, analysis.id, action)).rejects.toThrow(/ACK lost/);
     await fs.unlink(provider.resolveKey(item.key)); await db.query("UPDATE project_members SET role='viewer' WHERE project_id=$1 AND user_id=$2", [project.id, owner.user.id]);
     expect((await preparations.prepare(owner.user.id, project.id, analysis.id, input)).snapshotSha256).toBe(saved.snapshotSha256); expect((await publications.publish(owner.user.id, project.id, analysis.id, action)).replayed).toBe(true);
-    await db.initSchema(); await db.initSchema(); expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261035);
+    await db.initSchema(); await db.initSchema(); expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261036);
   });
 });

@@ -8,10 +8,10 @@ describes that is not listed here as implemented is not available.
 | --- | --- |
 | 0. Authority inventory and contracts | Implemented for the routes below |
 | 1. Read-only agents and inert proposals | Implemented |
-| 2. Approved local workflow execution | Implemented for one release (Seurat QC/clustering) |
+| 2. Approved local workflow execution | Implemented for two releases (Seurat QC/clustering; cluster markers) |
 | 3. Qualified HPC target | Slurm target implemented (SSH login node); site qualification pending |
 | 4. Isolated development | Not started |
-| 5. Bounded protocol automation / MCP | MCP server implemented; composition and standing acceptance not started |
+| 5. Bounded protocol automation / MCP | MCP server and two-step composition implemented; standing acceptance not started |
 
 ## What exists
 
@@ -82,6 +82,11 @@ superseded, and it must be approved again. The first release,
 `seurat-qc-cluster` v1, runs the existing `seurat.pipeline.v1` job on an
 uploaded 10x HDF5 dataset.
 
+The second release, `seurat-markers` v1, runs the existing
+`deg.find_markers.v1` job (cluster marker genes). It does not take datasets:
+it runs on a clustering a person accepted (see *Follow-on studies* below). Its
+result is the marker summary artifact; the marker table itself stays internal.
+
 **Approval.** Project owners and admins approve one exact release digest per
 project under *Agent access → Approved workflows*. Agents cannot approve.
 
@@ -138,6 +143,20 @@ pointer; it never copies or overwrites another analysis. *Agent access →
 Approved workflows* shows each study's trials in one table (the varied
 choices, the result's cells and clusters, and any summary field that differs
 between trials) so the candidates can be compared before one is accepted.
+
+**Follow-on studies.** A study of a release whose input is an analysis object
+(today `seurat-markers`) is created with `sourceStudyId` instead of
+`datasetIds`. The source study must run the release the follow-on declares as
+its input (`seurat-qc-cluster`), must have an accepted result, and must have
+been created by the same person (runs execute as the study creator, who must
+own the result). The study pins that exact result object, the run it came from,
+and the acceptance version; accepting a different result in the source study
+later does not change it. Agents plan follow-on trials as usual, passing the
+`datasetId` listed in the study's `inputs`. A follow-on run is
+`candidate_ready` once its job completed and recorded the declared summary
+artifact, and acceptance records that artifact. In the UI, choose the marker
+release under *New study* and pick the source study under *Builds on the
+accepted result of*. Follow-on studies run locally only.
 
 **What is and is not enforced.** Budgets are enforced at admission. The local
 worker runs one job at a time, and physical CPU and memory limits come from the
@@ -356,8 +375,8 @@ cannot obtain human credentials. Before issuing agent credentials:
 ## Not yet implemented
 
 Site qualification of the Slurm target, Slurm for other job types,
-per-run OS isolation, workflow
-composition, sensitivity-study selection rules, standing acceptance rules, and
+per-run OS isolation, composition beyond one follow-on step,
+sensitivity-study selection rules, standing acceptance rules, and
 isolated development. Agent-specific limits do not change what people can do with
 their own sessions.
 

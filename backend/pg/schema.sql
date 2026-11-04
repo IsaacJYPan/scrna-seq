@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS app_schema_contract (
   applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app_schema_contract (schema_key, schema_version, applied_at)
-VALUES ('traceomics.runtime', 20261035, now())
+VALUES ('traceomics.runtime', 20261036, now())
 ON CONFLICT (schema_key) DO UPDATE SET
   schema_version = EXCLUDED.schema_version,
   applied_at = EXCLUDED.applied_at;
@@ -2336,3 +2336,16 @@ CREATE TABLE IF NOT EXISTS hpc_dispatches (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ── Composed studies (docs/spec.md phase 5) ──────────────────────────────────
+-- A follow-on study runs a second approved release on the accepted result of a
+-- source study. The pinned input object is recorded in inputs_json; this column
+-- names the study it came from. Releases whose output is an artifact (marker
+-- tables) are accepted by artifact instead of by result object.
+ALTER TABLE study_envelopes ADD COLUMN IF NOT EXISTS source_study_id TEXT REFERENCES study_envelopes(id);
+ALTER TABLE result_acceptances ALTER COLUMN result_analysis_object_id DROP NOT NULL;
+ALTER TABLE result_acceptances ADD COLUMN IF NOT EXISTS result_artifact_id TEXT REFERENCES job_artifacts(id);
+DO $$ BEGIN
+  ALTER TABLE result_acceptances ADD CONSTRAINT result_acceptances_one_result_check
+    CHECK ((result_analysis_object_id IS NULL) <> (result_artifact_id IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;

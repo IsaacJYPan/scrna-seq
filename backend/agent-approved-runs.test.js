@@ -400,3 +400,91 @@ describe.skipIf(!CONFIGURED)('Slurm target routing', () => {
     expect(res.data.code).toBe('TARGET_UNAVAILABLE');
   });
 });
+
+describe.skipIf(!CONFIGURED)('composed follow-on studies', () => {
+  const markers = () => currentReleases().find((r) => r.key === 'seurat-markers');
+
+  async function acceptedClustering(ctx) {
+    const planned = await plan(ctx, { clusterResolution: 0.8 });
+    const run = await submit(ctx, planned.data, 'run-req-0001');
+    const { rows: [job] } = await db.query('SELECT id FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
+    const resultId = await completeJob(job.id, ctx.project.id, ctx.sponsor.user.id);
+    const accepted = await api(server, `${ctx.base}/agent-runs/${run.data.run.id}/accept`, {
+      method: 'POST', token: ctx.sponsor.token, body: { expectedAcceptedRunId: null } });
+    expect(accepted.status).toBe(200);
+    return { runId: run.data.run.id, resultId };
+  }
+
+  async function approveMarkers(ctx) {
+    const rel = markers();
+    const ok = await api(server, `${ctx.base}/workflow-releases/${rel.id}/approve`, {
+      method: 'POST', token: ctx.sponsor.token, body: { digest: rel.digest } });
+    expect(ok.status).toBe(201);
+    return rel;
+  }
+
+  const createFollowOn = (ctx, body) => api(server, `${ctx.base}/studies`, { method: 'POST', token: ctx.sponsor.token, body });
+
+  it('runs the marker workflow on the accepted clustering and accepts its artifact result', async () => {
+    const ctx = await setup();
+    const rel = await approveMarkers(ctx);
+    const early = await createFollowOn(ctx, { name: 'Markers', releaseId: rel.id, sourceStudyId: ctx.study.id });
+    expect(early.data.code).toBe('SOURCE_NOT_ACCEPTED');
+
+    const { runId: sourceRunId, resultId } = await acceptedClustering(ctx);
+    expect((await createFollowOn(ctx, { name: 'Markers', releaseId: rel.id, datasetIds: [ctx.datasetId] })).status).toBe(400);
+    const created = await createFollowOn(ctx, {
+      name: 'Markers', releaseId: rel.id, sourceStudyId: ctx.study.id,
+      variations: { logfcThreshold: [0.25, 0.5] }, maxTrials: 2,
+    });
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
+    expect(created.data).toMatchObject({ sourceStudyId: ctx.study.id,
+      inputs: [{ analysisObjectId: resultId, sourceRunId, datasetId: ctx.datasetId }] });
+
+    const followOn = { ...ctx, study: created.data };
+    const planned = await plan(followOn, { logfcThreshold: 0.5 });
+    expect(planned.status, JSON.stringify(planned.data)).toBe(201);
+    expect(planned.data.plan.release.key).toBe('seurat-markers');
+    expect(planned.data.plan.parameters).toMatchObject({ logfcThreshold: 0.5, groupBy: 'seurat_clusters' });
+    const run = await submit(followOn, planned.data, 'run-req-0101');
+    expect(run.status, JSON.stringify(run.data)).toBe(201);
+    const { rows: [job] } = await db.query('SELECT * FROM jobs WHERE id = (SELECT job_id FROM agent_runs WHERE id = $1)', [run.data.run.id]);
+    expect(job).toMatchObject({ job_type: 'deg.find_markers.v1', analysis_object_id: resultId });
+
+    // Simulate the worker recording the marker summary artifact.
+    await db.query(`UPDATE jobs SET status = 'completed', completed_at = now() WHERE id = $1`, [job.id]);
+    const results0 = await agent(ctx, `/runs/${run.data.run.id}/results`);
+    expect(results0.data.run.state).toBe('quarantined');
+    await db.query(
+      `INSERT INTO job_artifacts (id, project_id, job_id, created_by_user_id, artifact_type, name, storage_kind, metadata_json)
+       VALUES ('art_markers1', $1, $2, $3, 'deg_summary', 'DEG summary', 'metadata_only', $4)`,
+      [ctx.project.id, job.id, ctx.sponsor.user.id, JSON.stringify({ summary: { n_clusters: 9, n_markers: 90 } })]
+    );
+    const results = await agent(ctx, `/runs/${run.data.run.id}/results`);
+    expect(results.data.result).toMatchObject({ artifactId: 'art_markers1', summary: { n_clusters: 9, n_markers: 90 } });
+    const human = await api(server, `${ctx.base}/agent-runs`, { token: ctx.sponsor.token });
+    expect(human.data.runs.find((r) => r.id === run.data.run.id).summary).toEqual({ n_clusters: 9, n_markers: 90 });
+
+    const accepted = await api(server, `${ctx.base}/agent-runs/${run.data.run.id}/accept`, {
+      method: 'POST', token: ctx.sponsor.token, body: { expectedAcceptedRunId: null } });
+    expect(accepted.status, JSON.stringify(accepted.data)).toBe(200);
+    const { rows: [acc] } = await db.query('SELECT * FROM result_acceptances WHERE run_id = $1', [run.data.run.id]);
+    expect(acc).toMatchObject({ result_artifact_id: 'art_markers1', result_analysis_object_id: null });
+  });
+
+  it('refuses a source study of the wrong workflow and results the creator does not own', async () => {
+    const ctx = await setup();
+    const rel = await approveMarkers(ctx);
+    await acceptedClustering(ctx);
+    // A follow-on of a follow-on is not a clustering.
+    const first = await createFollowOn(ctx, { name: 'Markers', releaseId: rel.id, sourceStudyId: ctx.study.id });
+    const wrong = await createFollowOn(ctx, { name: 'Again', releaseId: rel.id, sourceStudyId: first.data.id });
+    expect(wrong.data.code).toBe('INPUT_NOT_APPLICABLE');
+
+    const other = await createUserWithToken({ email: 'analyst@example.com', displayName: 'Analyst' });
+    await db.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'analyst')", [ctx.project.id, other.user.id]);
+    const notMine = await api(server, `${ctx.base}/studies`, { method: 'POST', token: other.token,
+      body: { name: 'Mine', releaseId: rel.id, sourceStudyId: ctx.study.id } });
+    expect(notMine.status).toBe(403);
+  });
+});

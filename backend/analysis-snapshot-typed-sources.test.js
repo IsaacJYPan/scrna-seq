@@ -243,7 +243,7 @@ describe.skipIf(!process.env.DATABASE_URL)('exact direct typed retained findings
     expect(await preparations.prepare(owner.user.id, project.id, analysis.id, input)).toMatchObject({ preparationId: saved.preparationId, snapshotSha256: saved.snapshotSha256, canPrepare: false });
     await expect(preparations.prepare(owner.user.id, project.id, analysis.id, { ...input, notes: { ...input.notes, summary: 'Changed frozen request' } })).rejects.toMatchObject({ code: 'ANALYSIS_SNAPSHOT_REQUEST_CONFLICT' });
     await db.initSchema(); await db.initSchema(); expect((await preparations.get(owner.user.id, project.id, analysis.id, saved.preparationId)).availability.status).toBe('available');
-    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261035);
+    expect((await db.query("SELECT schema_version FROM app_schema_contract WHERE schema_key='traceomics.runtime'")).rows[0].schema_version).toBe(20261036);
   });
 
   it('fences a held typed builder on private delete and current writer downgrade without quota resurrection', async () => {
