@@ -583,12 +583,12 @@ write_table(summary_table, "object-summary.csv")
       await runWorkflowStep(label, id);
       console.log(`[workflow-browser] PASS ${label}`);
     }
-    await page.getByRole('img', { name: 'UMAP by cluster', exact: true }).waitFor({ state: 'visible' });
+    await page.locator('section', { has: page.getByRole('heading', { name: 'UMAP by cluster', exact: true }) }).getByRole('img').first().waitFor({ state: 'visible' });
     await waitFor(async () => await page.locator('.scatterlayer .point').count() === 80, 15000, 100);
     const screenshotDirectory = path.join(ROOT, 'playwright/report/release-acceptance/workflow');
     fs.mkdirSync(screenshotDirectory, { recursive: true });
     await page.screenshot({ path: path.join(screenshotDirectory, 'workflow-umap.png'), fullPage: true });
-    const figure = page.getByRole('img', { name: 'UMAP by cluster', exact: true });
+    const figure = page.locator('section', { has: page.getByRole('heading', { name: 'UMAP by cluster', exact: true }) }).getByRole('img').first();
     await waitFor(async () => figure.evaluate(image => image.complete && image.naturalWidth > 0), 15000, 100);
     await figure.screenshot({ path: path.join(screenshotDirectory, 'workflow-custom-figure.png') });
     await page.getByLabel('Snapshot name').fill('Completed workflow');
