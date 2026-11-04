@@ -521,7 +521,13 @@ write_table(summary_table, "object-summary.csv")
     await page.getByLabel('Workflow package file').setInputFiles(workflowPath);
     await page.getByRole('button', { name: 'Install Single-cell workflow', exact: true }).click();
     await page.getByRole('button', { name: 'Open Single-cell workflow', exact: true }).click();
-    await page.getByRole('heading', { name: 'Single-cell workflow', exact: true, level: 1 }).waitFor();
+    // Surface the library's error instead of a bare timeout if opening is refused.
+    const workflowHeading = page.getByRole('heading', { name: 'Single-cell workflow', exact: true, level: 1 });
+    const workflowError = page.getByRole('alert');
+    await workflowHeading.or(workflowError).first().waitFor();
+    if (!(await workflowHeading.isVisible())) {
+      throw new Error(`Opening the workflow failed: ${(await workflowError.allInnerTexts()).join(' | ')}`);
+    }
     const pcaNavigation = page.getByRole('button', { name: 'PCA', exact: true });
     assert(await pcaNavigation.getAttribute('aria-disabled') === 'true', 'PCA must start locked');
     await pcaNavigation.focus();
