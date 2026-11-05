@@ -213,7 +213,7 @@ async function runPublicDemoAcceptance({ origin, artifactDirectory, allowLoopbac
     }), 180_000, 'The public demo exploratory job did not reach a terminal state.');
     assert(explorationJob.status === 'completed',
       `The public demo exploratory job ${explorationJob.status}: ${explorationJob.error?.message || 'unknown error'}`);
-    await page.getByText('Cells', { exact: true }).first().waitFor({ state: 'visible', timeout: 30_000 });
+    await page.getByText('Cells', { exact: true }).filter({ visible: true }).first().waitFor({ state: 'visible', timeout: 30_000 });
     await page.locator('.js-plotly-plot').filter({ visible: true }).first()
       .waitFor({ state: 'visible', timeout: 30_000 });
     const explorationPath = path.join(runDirectory, 'public-demo-exploration.png');
