@@ -249,7 +249,16 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
         ||labels[`${LABEL}.kernel`]!==record.kernelId||labels[`${LABEL}.generation`]!==record.generation) {
       throw failure('PRIVATE_KERNEL_OWNERSHIP_INVALID','The private kernel container ownership could not be verified.');
     }
-    await docker(['rm','-f',inspected.id]);
+    try{await docker(['rm','-f',inspected.id]);}
+    catch(error){
+      // Kernels run with --rm, so after a crash Docker may already be removing
+      // the container and rm fails. Treat it as removed once it is gone.
+      for(let attempt=0;attempt<20;attempt+=1){
+        if(!await inspectContainer(record.containerName).catch(()=>inspected)){record.containerRemoved=true;return;}
+        await new Promise(resolve=>setTimeout(resolve,250));
+      }
+      throw error;
+    }
     record.containerRemoved=true;
   }
   async function removeDirectory(record) {
