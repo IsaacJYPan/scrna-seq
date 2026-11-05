@@ -341,6 +341,23 @@ async function main() {
     const discardedPost = commandPost();
     await consoleUi.getByRole('button', { name: 'Run R cell', exact: true }).click();
     await waitForRunning(firstKernelId);
+    const restartTrace = []; const traceStart = Date.now();
+    const traceResponse = async response => {
+      const url = new URL(response.url());
+      if (!/private-r|submission/i.test(url.pathname)) return;
+      let detail = '';
+      try { const body = await response.json(); detail = JSON.stringify({ status: body?.status, code: body?.code, kernel: body?.kernelId || body?.id, session: body?.session?.id, submission: body?.submission?.status }); } catch {}
+      restartTrace.push(`${Date.now() - traceStart}ms ${response.request().method()} ${url.pathname} ${response.status()} ${detail}`);
+    };
+    page.on('response', traceResponse);
+    await page.evaluate(() => {
+      window.__consoleMessages = [];
+      const record = () => document.querySelectorAll('[role="alert"],[role="status"]').forEach(node => {
+        const text = node.textContent.trim().slice(0, 200);
+        if (text && window.__consoleMessages.at(-1) !== text) window.__consoleMessages.push(text);
+      });
+      new MutationObserver(record).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
     await consoleUi.getByRole('button', { name: 'Restart session', exact: true }).click();
     await consoleUi.getByText(/Restart discards unsaved variables and files, reloads the original selected input versions/).waitFor();
     const restartPost = page.waitForResponse(response => response.request().method() === 'POST'
@@ -356,9 +373,12 @@ async function main() {
       await consoleUi.getByText(/Restart created a fresh session from the original selected input versions/).waitFor();
     } catch (error) {
       console.log('[diag] discarded command reply:', discarded.status(), JSON.stringify(await discarded.json().catch(() => null)).slice(0, 600));
-      console.log('[diag] console text after restart:', (await consoleUi.innerText().catch(() => '')).slice(0, 3000));
+      console.log('[diag] console text after restart:', (await consoleUi.innerText().catch(() => '')).slice(0, 600));
+      console.log('[diag] restart network trace:\n' + restartTrace.join('\n'));
+      console.log('[diag] restart UI messages:\n' + (await page.evaluate(() => window.__consoleMessages || []).catch(() => [])).join('\n'));
       throw error;
     }
+    page.off('response', traceResponse);
     await run('stopifnot(!exists("private_value"), !exists("interrupt_mutation"), !exists("restart_volatile")); cat("Fresh restart has no discarded globals")', 1);
     const restartOldRows = (await database.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 ORDER BY execution_order', [firstKernelId])).rows;
     assert(restartOldRows.length === 10 && restartOldRows[7].result_json.interrupted === true
