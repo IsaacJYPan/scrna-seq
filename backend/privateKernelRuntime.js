@@ -382,6 +382,10 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     if(existing){requireRecord(scope,spec.kernelId);if(existing.stopRequested||existing.status==='stopped'||existing.status==='unknown')throw failure('PRIVATE_KERNEL_STOPPED','This kernel generation has ended. Start a new workspace kernel.');if(existing.fingerprint!==fingerprint)throw failure('PRIVATE_KERNEL_CONFLICT','This kernel ID already belongs to another input snapshot.');await existing.creation;return publicRecord(existing);}
     if(!initialized||closed)throw failure('PRIVATE_KERNEL_UNAVAILABLE','The persistent private R runtime is not ready.');
     const ended=await readEnded(spec.kernelId);
+    // A crashed kernel's container is removed asynchronously; until then it
+    // still counts against capacity. Wait for in-flight loss cleanup so an
+    // immediate restart after a crash is not refused as "capacity is full".
+    await Promise.all([...records.values()].filter(record=>record.lossCleanup).map(record=>record.lossCleanup.catch(()=>{})));
     if(ended){if(ended.scope&&['ownerUserId','projectId','workspaceId'].some(key=>ended.scope[key]!==scope[key]))throw failure('PRIVATE_KERNEL_NOT_FOUND','The private kernel is unavailable.');throw failure('PRIVATE_KERNEL_STOPPED','This kernel generation has ended. Start a new workspace kernel.');}
     // Reading the durable tombstone yields to the event loop. A concurrent stop
     // or start may have reserved this ID in that interval; check again before
