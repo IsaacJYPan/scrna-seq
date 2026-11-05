@@ -176,7 +176,7 @@ export default function usePrivateRSession({
         { code: 'PRIVATE_SUBMISSION_UNCONFIRMED' }
       );
   }
-  async function runRequest(action, { publication = false, control = false } = {}) {
+  async function runRequest(action, { publication = false, control = false, acceptKernelChange } = {}) {
     if (blocked) {
       setError(TARGET_DISCONNECTED_MESSAGE);
       return undefined;
@@ -189,11 +189,11 @@ export default function usePrivateRSession({
     setError('');
     const targetEpoch = connection.epoch;
     const authority = recovery.getPrivateRecoverySnapshot();
-    const currentRequest = () => {
+    const currentRequest = (result) => {
       const latest = recovery.getPrivateRecoverySnapshot();
       return (
         epoch === requestEpoch.current &&
-        generationEpoch === kernelEpoch.current &&
+        (generationEpoch === kernelEpoch.current || Boolean(result && acceptKernelChange?.(result))) &&
         scope === currentScope.current &&
         targetEpoch === liveContext.current.epoch &&
         !liveContext.current.blocked &&
@@ -207,7 +207,7 @@ export default function usePrivateRSession({
     };
     try {
       const result = await action();
-      if (currentRequest()) return result;
+      if (currentRequest(result)) return result;
     } catch (failure) {
       if (currentRequest()) {
         setError(failure.message);
@@ -972,7 +972,18 @@ export default function usePrivateRSession({
           throw error;
         }
       },
-      { control: true }
+      {
+        control: true,
+        // A concurrent inspection may already have followed this restart's
+        // receipt to its replacement session. That move must not discard the
+        // restart's own confirmed reply.
+        acceptKernelChange: (result) =>
+          Boolean(
+            result?.session?.id &&
+              result.previousKernelId === request.kernelId &&
+              [request.kernelId, result.session.id].includes(currentSession.current?.id)
+          ),
+      }
     );
     if (!value) {
       if (
