@@ -291,7 +291,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
     record.lossCleanup=(async()=>{try{await writeEnded(record,'unknown');await removeOwned(record);record.transport?.close();
       if(record.pendingPublication)await record.pendingPublication.catch(()=>{});
       for(const entry of record.executions?.values()||[])if(entry.status==='executing')entry.status='unknown';
-      await removeDirectory(record);releaseEnded(record);}catch{/* Retry through explicit stop or lifetime sweep. */}})();
+      await removeDirectory(record);releaseEnded(record);}catch(error){/* Retry through explicit stop or lifetime sweep. */console.warn(`[private-kernel] cleanup after a lost kernel failed (${error?.code||error?.name||'error'}): ${String(error?.message||'').slice(0,200)}; container removed: ${Boolean(record.containerRemoved)}`);}})();
     return record.lossCleanup;
   }
   async function reconcile() {

@@ -121,6 +121,7 @@ async function main(){
   await assert.rejects(runtime.start({...scope,kernelId:id('pk_'),environment,inputs:[{...input,checksumSha256:'0'.repeat(64)}]}),{code:'PRIVATE_KERNEL_START_FAILED'});check('unavailable exact input bytes fail instead of substituting another version');
   const deadId=id('pk_'),dead=await runtime.start({...scope,kernelId:deadId,environment,inputs:[]});
   const killed=await runtime.execute({...scope,generation:dead.generation},deadId,{executionId:id('pex_'),order:1,source:'system(sprintf("kill -KILL %d", Sys.getpid()))'});assert.equal(killed.status,'unknown');assert.equal((await runtime.inspect(scope,deadId)).status,'unknown');await assert.rejects(runtime.start({...scope,kernelId:deadId,environment,inputs:[]}),{code:'PRIVATE_KERNEL_STOPPED'});check('a dead R subprocess loses memory and never silently restarts or reruns its generation');
+  console.log('[diag] crashed kernel after loss:', JSON.stringify(await runtime.inspect(scope,deadId).catch(error=>({error:error.code}))).slice(0,400));
   const slowId=id('pk_'),slow=await runtime.start({...scope,kernelId:slowId,environment,inputs:[]}),slowScope={...scope,generation:slow.generation};
   await runtime.execute(slowScope,slowId,{executionId:id('pex_'),order:1,source:'makeActiveBinding("slow_value", function(value) { Sys.sleep(100); data.frame(count=1L) }, .GlobalEnv)'});
   const interruptedSpec=publication(slowScope,'table','slow_value',2),interruptedSave=runtime.export(slowScope,slowId,interruptedSpec);await sleep(500);
