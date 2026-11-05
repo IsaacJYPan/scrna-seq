@@ -244,6 +244,26 @@ it('keeps the restart reply after an inspection already followed the in-progress
   await screen.findByText(/Restart created a fresh session/);
   expect(screen.queryByText(/Restart completion is unconfirmed/)).not.toBeInTheDocument();
 });
+it('keeps an explicitly opened previous command when a later inspection finishes',async()=>{
+  const replacement={...kernel,id:'pk_two',generation:'2'.repeat(64),restartedFromKernelId:kernel.id};
+  api.restartPrivateRKernel.mockResolvedValue({requestId:'restart',previousKernelId:kernel.id,replacementKernelId:replacement.id,status:'completed',session:replacement,previousSession:{...kernel,status:'stopped',memoryState:'lost'}});
+  render(<RConsole {...controlProps}/>);await start();
+  fireEvent.click(screen.getByRole('button',{name:'Restart session',exact:true}));fireEvent.click(screen.getByRole('button',{name:'Restart and discard unsaved memory',exact:true}));
+  await screen.findByText(/Restart created a fresh session/);
+  const fresh={...entry,id:'pex_two',order:1,source:'fresh <- 1',result:{...entry.result,stdout:'fresh output\n'}};
+  const previousEntry={...entry,id:'pex_old',order:8,status:'completed',source:'old <- 8',result:{...entry.result,stdout:'previous output\n'}};
+  api.getPrivateRKernel.mockImplementation(async(_project,id)=>id===replacement.id?replacement:{...kernel,status:'stopped',memoryState:'lost'});
+  let releaseHistory;api.listPrivateRExecutions.mockImplementation(async(_project,id)=>id===replacement.id?new Promise(resolve=>{releaseHistory=()=>resolve({items:[fresh]});}):{items:[previousEntry]});
+  api.executePrivateRKernel.mockResolvedValueOnce(fresh);api.getPrivateRExecution.mockImplementation(async(_project,id,executionId)=>executionId==='pex_old'?previousEntry:fresh);
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeEnabled());
+  fireEvent.click(screen.getByRole('button',{name:'Run R cell',exact:true}));
+  await waitFor(()=>expect(releaseHistory).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button',{name:'Inspect previous session',exact:true}));
+  fireEvent.click(await screen.findByRole('button',{name:'Previous command 8 · completed',exact:true}));
+  await screen.findByText('Command 8 · completed');
+  await act(async()=>releaseHistory());
+  expect(screen.getByText('Command 8 · completed')).toBeInTheDocument();
+});
 it('keeps a lost restart request identity and explicitly reads its receipt without automatic retries',async()=>{
   api.restartPrivateRKernel.mockRejectedValueOnce(Object.assign(new Error('Restart connection ended.'),{code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'}));render(<RConsole {...controlProps}/>);await start();fireEvent.click(screen.getByRole('button',{name:'Restart session',exact:true}));fireEvent.click(screen.getByRole('button',{name:'Restart and discard unsaved memory',exact:true}));await screen.findByRole('button',{name:'Inspect restart request',exact:true});
   expect(api.restartPrivateRKernel).toHaveBeenCalledTimes(1);expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeDisabled();const original=api.restartPrivateRKernel.mock.calls[0][2];

@@ -115,6 +115,9 @@ export default function usePrivateRSession({
   const liveContext = useRef(null);
   liveContext.current = { scopeKey, epoch: connection.epoch, blocked, enabled };
   const currentSession = useRef(null);
+  // Counts explicit journal selections so an inspection that finishes later
+  // does not replace the command the user just opened.
+  const entrySelection = useRef(0);
   currentSession.current = session;
   const selectedEntry = useRef(null);
   selectedEntry.current = entry;
@@ -250,6 +253,7 @@ export default function usePrivateRSession({
     const controller = new AbortController();
     inspectionController.current = controller;
     const sequence = ++inspectionEpoch.current;
+    const selectionMark = entrySelection.current;
     const epoch = requestEpoch.current;
     const context = liveContext.current;
     let recoveryInspection = null;
@@ -616,7 +620,7 @@ export default function usePrivateRSession({
       setSession(kernel);
       setJournal(history.items.slice(0, journalLimit));
       setJournalCursor(history.nextCursor || null);
-      setEntry(detail);
+      if (entrySelection.current === selectionMark) setEntry(detail);
       setPublications(saved.items);
       setVersions(artifacts.items);
       setPublicationUncertain(
@@ -1077,7 +1081,10 @@ export default function usePrivateRSession({
         await saveRecoveredSelection({ projectId, workspaceId, kernelId, executionId: result.id });
       return result;
     });
-    if (value) setEntry(value);
+    if (value) {
+      entrySelection.current += 1;
+      setEntry(value);
+    }
   };
   const loadOlder = async () => {
     if (!session || !journalCursor || busy || controlBusy || inspecting) return;
