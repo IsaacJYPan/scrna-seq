@@ -453,7 +453,7 @@ write_table(summary_table, "object-summary.csv")
     finally {secondBroker.kill('SIGTERM');await waitForExit(secondBroker).catch(()=>secondBroker.kill('SIGKILL'));}
 
     await page.getByRole('button', { name: /View in Runs & Results/ }).click();
-    await page.getByRole('heading', { name: 'Runs & Results' }).waitFor({ state: 'visible' });
+    await page.getByRole('heading', { name: 'Runs & Results', exact: true }).waitFor({ state: 'visible' });
     await page.getByRole('button', { name: 'Refresh',exact:true }).click();
     await page.getByText('Complete', { exact: true }).first().waitFor({ state: 'visible' });
     await page.getByText('R analysis output', { exact: true }).waitFor({ state: 'visible' });
