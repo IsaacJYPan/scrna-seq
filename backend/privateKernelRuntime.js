@@ -282,7 +282,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
   async function terminate(record,reason='stopped') {
     record.stopRequested=true;
     record.publicationAbort?.abort();
-    if(record.transport){await removeOwned(record);record.transport.close();}
+    if(record.transport){await removeOwned(record);record.transport?.close();}
     if(record.creation)await record.creation.catch(()=>{});
     if(record.pendingPublication)await record.pendingPublication.catch(()=>{});
     for(const entry of record.executions?.values()||[])if(entry.status==='executing')entry.status='unknown';
@@ -663,7 +663,7 @@ function createPrivateKernelRuntime({env=process.env,provider=storage.createLoca
       }
     }
     if(!record.stopRequested||record.creation){requireRecord(scope,kernelId);record.stopRequested=true;
-      if(record.transport){await removeOwned(record);record.transport.close();}
+      if(record.transport){await removeOwned(record);record.transport?.close();}
       if(record.creation)await record.creation.catch(()=>{});await terminate(record);}
     return {ok:true,kernelId,generation:record.generation,status:'stopped',stoppedAt:utc(record.stoppedAt)};
   }

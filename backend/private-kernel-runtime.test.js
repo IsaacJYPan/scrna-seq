@@ -261,6 +261,12 @@ describe('private execution order and transport',()=>{
     const started=await f.start(secondId);
     expect(started.kernelId).toBe(secondId);expect((await f.runtime.inspect(scope,kernelId)).status).toBe('unknown');
   });
+  it('overlapping idle sweeps survive while Docker is still auto-removing the container',async()=>{
+    const f=await fixture({autoRemoveRace:true,env:{PRIVATE_R_KERNEL_IDLE_SECONDS:'10'}});await f.runtime.initialize();await f.start();
+    f.advance(10001);const first=f.runtime.sweep();
+    await new Promise(resolve=>setTimeout(resolve,50));const second=f.runtime.sweep();
+    await Promise.all([first,second]);expect((await f.runtime.inspect(scope,kernelId)).reason).toBe('idle-expired');
+  });
   it('reports in-flight repeats, blocks concurrent source, and marks transport loss unknown without retry',async()=>{
     const pending=deferred();const f=await fixture({result:()=>pending.promise});await f.runtime.initialize();await f.start();
     const command={executionId,order:1,source:'Sys.sleep(2)'};const executing=f.runtime.execute(scope,kernelId,command);
