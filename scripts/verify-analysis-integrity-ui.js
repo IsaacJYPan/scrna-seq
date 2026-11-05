@@ -122,6 +122,10 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
     'The saved history did not retain actual R generation, execution order and result revision.');
     assert(executionDetail.replay.complete === false, 'Live memory was incorrectly presented as a replayable immutable input.');
     await navigate(page, 'Runs & Results');
+    // Execution history mounts only after its Runs & Results toggle is expanded.
+    const historyToggle = page.locator('button[aria-controls="execution-history-panel"]');
+    await historyToggle.waitFor();
+    if ((await historyToggle.getAttribute('aria-expanded')) !== 'true') await historyToggle.click();
     const executionRegion = page.getByRole('region', { name: 'Execution history', exact: true });
     await executionRegion.getByLabel('Execution category', { exact: true }).selectOption('live-r');
     await executionRegion.getByRole('button').filter({ hasText: umapExecution.execution_history.id }).click();
