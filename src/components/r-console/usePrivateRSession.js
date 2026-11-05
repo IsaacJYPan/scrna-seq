@@ -684,7 +684,17 @@ export default function usePrivateRSession({
       inspectionController.current?.abort();
       clearTimeout(inspectionTimer.current);
     };
-  }, [scopeKey, enabled, publicationSupported, connection.epoch, blocked]);
+  }, [scopeKey, enabled, connection.epoch, blocked]);
+  // Runtime status polling can flip publication support at any time, including
+  // while a restart or command is in flight. Recheck readiness without
+  // invalidating those requests, or their confirmed replies would be dropped.
+  const publicationChecked = useRef(publicationSupported);
+  useEffect(() => {
+    if (publicationChecked.current === publicationSupported) return;
+    publicationChecked.current = publicationSupported;
+    setInspection(null);
+    if (enabled && !blocked) void refreshRef.current();
+  }, [publicationSupported, enabled, blocked]);
   useEffect(() => {
     if (
       enabled &&

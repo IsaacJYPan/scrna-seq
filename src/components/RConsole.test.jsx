@@ -206,6 +206,23 @@ it('shows the restart notice when the discarded command returns before the resta
   await act(async()=>finishRestart(receipt));
   await screen.findByText(/Restart created a fresh session/);
 });
+it('keeps a restart reply when runtime publication support changes while it is in flight',async()=>{
+  let finishRestart;const replacement={...kernel,id:'pk_two',generation:'2'.repeat(64),restartedFromKernelId:kernel.id};
+  const stopping={...kernel,status:'stopping',memoryState:'unknown',restart:{requestId:'restart',status:'stopping',replacementKernelId:replacement.id}};
+  const receipt={requestId:'restart',previousKernelId:kernel.id,replacementKernelId:replacement.id,status:'completed',session:replacement,previousSession:{...kernel,status:'stopped',memoryState:'lost'}};
+  api.restartPrivateRKernel.mockImplementationOnce(()=>new Promise(resolve=>{finishRestart=resolve;}));
+  const view=render(<RConsole {...controlProps}/>);await start();
+  fireEvent.click(screen.getByRole('button',{name:'Restart session',exact:true}));fireEvent.click(screen.getByRole('button',{name:'Restart and discard unsaved memory',exact:true}));
+  await waitFor(()=>expect(api.restartPrivateRKernel).toHaveBeenCalled());
+  api.getPrivateRKernel.mockImplementation(async(_project,id)=>id===replacement.id?replacement:stopping);
+  api.getPrivateRRestart.mockResolvedValue({requestId:'restart',previousKernelId:kernel.id,status:'stopping',previousSession:stopping});
+  const unpublished={...controlProps,deploymentPolicy:{...controlProps.deploymentPolicy,persistentKernelPublications:false}};
+  view.rerender(<RConsole {...unpublished}/>);await act(async()=>{await new Promise(resolve=>setTimeout(resolve,0));});
+  await act(async()=>finishRestart(receipt));
+  await screen.findByText(/Restart created a fresh session/);
+  expect(screen.queryByText(/Restart completion is unconfirmed/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Previous kernel pk_one → current kernel pk_two/)).toBeVisible();
+});
 it('keeps a lost restart request identity and explicitly reads its receipt without automatic retries',async()=>{
   api.restartPrivateRKernel.mockRejectedValueOnce(Object.assign(new Error('Restart connection ended.'),{code:'PRIVATE_KERNEL_TRANSPORT_UNKNOWN'}));render(<RConsole {...controlProps}/>);await start();fireEvent.click(screen.getByRole('button',{name:'Restart session',exact:true}));fireEvent.click(screen.getByRole('button',{name:'Restart and discard unsaved memory',exact:true}));await screen.findByRole('button',{name:'Inspect restart request',exact:true});
   expect(api.restartPrivateRKernel).toHaveBeenCalledTimes(1);expect(screen.getByRole('button',{name:'Run R cell',exact:true})).toBeDisabled();const original=api.restartPrivateRKernel.mock.calls[0][2];
