@@ -85,11 +85,11 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
     const mappedValues = await (await mappingResponse).json();
     assert(mappedValues.n_unique === (pbmc ? 1 : 4), 'Unexpected biological sample group count.');
     if (pbmc) {
-      await page.getByText('10x PBMC3k: sample_id = PBMC3k', { exact: true }).waitFor();
+      await page.getByRole('listitem').filter({ hasText: '10x PBMC3k' }).filter({ hasText: 'sample_id = PBMC3k' }).first().waitFor();
       await page.getByText(/This analysis contains one sample_id group/).waitFor();
       checks.push('PBMC3k correctly identifies one biological sample');
     } else {
-      await page.getByText('Control replicate 1: sample_id = C1', { exact: true }).waitFor();
+      await page.getByRole('listitem').filter({ hasText: 'Control replicate 1' }).filter({ hasText: 'sample_id = C1' }).first().waitFor();
       assert(await page.getByText(/This analysis contains one/).count() === 0,
         'The multi-sample cohort displayed a single-sample warning.');
       checks.push('sample_id mappings avoid false orig.ident warning');
