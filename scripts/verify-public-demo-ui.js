@@ -62,6 +62,10 @@ function observePage(page, diagnostics) {
     else if (response.status() >= 400) diagnostics.clientErrors.push(`${response.status()} ${response.url()}`);
   });
   page.on('requestfailed', request => {
+    // The app cancels superseded reads (polls, identity checks) with an
+    // AbortController; a cancelled GET is not a failed request.
+    if (request.method() === 'GET' && request.failure()?.errorText === 'net::ERR_ABORTED'
+      && /^\/api\/(run-monitoring|auth\/installation)([/?]|$)/.test(new URL(request.url()).pathname)) return;
     diagnostics.requestFailures.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || 'failed'}`);
   });
 }
