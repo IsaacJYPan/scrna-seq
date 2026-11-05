@@ -351,8 +351,14 @@ async function main() {
       && restarted.session.id !== firstKernelId && restarted.session.generation !== journal[0].kernel_generation
       && restarted.session.restartedFromKernelId === firstKernelId && restarted.session.status === 'ready',
     'Explicit restart did not create a linked independent ready generation.');
-    await discardedPost;
-    await consoleUi.getByText(/Restart created a fresh session from the original selected input versions/).waitFor();
+    const discarded = await discardedPost;
+    try {
+      await consoleUi.getByText(/Restart created a fresh session from the original selected input versions/).waitFor();
+    } catch (error) {
+      console.log('[diag] discarded command reply:', discarded.status(), JSON.stringify(await discarded.json().catch(() => null)).slice(0, 600));
+      console.log('[diag] console text after restart:', (await consoleUi.innerText().catch(() => '')).slice(0, 3000));
+      throw error;
+    }
     await run('stopifnot(!exists("private_value"), !exists("interrupt_mutation"), !exists("restart_volatile")); cat("Fresh restart has no discarded globals")', 1);
     const restartOldRows = (await database.query('SELECT * FROM private_r_executions WHERE kernel_id=$1 ORDER BY execution_order', [firstKernelId])).rows;
     assert(restartOldRows.length === 10 && restartOldRows[7].result_json.interrupted === true
