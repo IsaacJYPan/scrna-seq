@@ -138,15 +138,24 @@ async function runAnalysisIntegrityAcceptance({ origin, restartInteractiveRuntim
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByText('Unsaved live changes.', { exact: true }).waitFor();
-    const inputNotice = await page.getByRole('status').filter({ hasText: 'Unsaved live changes.' }).innerText();
+    // The status bar names the saved version; the queued-work explanation is in its details popover.
+    const statusBar = page.getByRole('region', { name: 'Analysis status', exact: true });
+    const statusDetails = statusBar.getByRole('button', { name: 'Status details', exact: true });
+    await statusDetails.click();
+    const detailsPanel = page.locator(`[id="${await statusDetails.getAttribute('aria-controls')}"]`);
+    await detailsPanel.waitFor();
+    const inputNotice = `${await statusBar.innerText()}\n${await detailsPanel.innerText()}`;
+    await statusDetails.click();
     assert(inputNotice.includes('Queued analyses use the saved version') && identity.savedName && inputNotice.includes(identity.savedName),
       'The warning did not identify the saved input used by queued analysis.');
     await page.screenshot({ path: path.join(output, 'dirty-after-reload.png') });
     checks.push('unsaved warning survives browser reload');
 
     await page.getByRole('button', { name: 'Save current analysis', exact: true }).click();
-    await page.getByText('Saved and opened as a durable analysis version.', { exact: true })
-      .waitFor({ timeout: 180_000 });
+    await statusBar.getByRole('status').filter({ hasText: 'Analysis saved' }).waitFor({ timeout: 180_000 });
+    await statusDetails.click();
+    await detailsPanel.getByText('Saved and opened as a durable analysis version.', { exact: true }).waitFor();
+    await statusDetails.click();
     const savedId = await page.evaluate(async projectId => {
       const objects = await window.electronAPI.listProjectAnalysisObjects(projectId);
       return objects[0].id;
